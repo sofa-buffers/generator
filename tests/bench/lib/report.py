@@ -45,37 +45,64 @@ OUTLIER_PCT = 5.0
 IR_METHODS = ("toggle", "subtract")
 
 
+# A `## toolchain` line with no rows column at all can only be hand-written --
+# format.py always writes three fields. It is recorded under this sentinel so the
+# committed side can still answer for that tool, and it matches no row, which is what
+# the old set()-valued entry did. A row id is never empty, so it cannot collide.
+NO_ROW = ""
+
+
 def parse(path):
-    """-> (ir, sizes, toolchain, corelib).
+    """-> (ir, sizes, toolchain).
 
     ir: {row: (enc, dec)}; sizes: {(row, arch): (text, data, bss)};
-    toolchain: {tool: version} from the `## toolchain` table.
+    toolchain: {(tool, row): version} from the `## toolchain` table -- ONE entry per
+    row the line names, and row None for a line whose rows column is `all`.
+
+    Keyed by the pair and not by the tool because the table is not a tool->version
+    map: `sofab-engine` gets one line PER python row, deliberately, since the two
+    rows run different corelib-py engines and a single line could only be right for
+    one of them. Keyed by name alone the second line overwrote the first, so a
+    healthy `python` artifact read as engine drift and a `python` row that really had
+    flipped engines read as no drift at all (#492).
+
+    The header's other provenance -- the `# corelib:` SHAs and the `# schema:`
+    digests, both of which move numbers exactly as a compiler version does -- is NOT
+    read here and therefore not compared; #501 tracks that. It used to be parsed and
+    then dropped unread, which implied a check that was never made.
     """
-    ir, sizes, tools, toolrows, core = {}, {}, {}, {}, None
+    ir, sizes, tools = {}, {}, {}
     section = None
     for line in Path(path).read_text().splitlines():
-        if line.startswith("# corelib:"):
-            core = line.split(":", 1)[1].strip()
-            continue
         if line.startswith("## "):
             section = line[3:].strip()
             continue
         if line.startswith("#") or not line.strip() or line.startswith("row"):
             continue
-        f = line.split()
         if section == "toolchain":
+            # Split the padded columns, not the whitespace: format.py writes
+            # "(not found)" as a version when a tool has vanished from the
+            # environment, and that value contains a space. Split on whitespace it
+            # parsed as version "(not" with rows "found)", which names no real row --
+            # so the one drift format.py goes out of its way to record was the one
+            # the report could not read. Columns are ljust()-padded, so two spaces
+            # always separate them. format.py's own reader has the mirror of this
+            # defect and drops such a line entirely (#502).
+            f = re.split(r"\s{2,}", line.strip())
             if len(f) >= 2 and f[0] != "tool":
-                tools[f[0]] = f[1]
                 # "all" is format.py's shorthand for "built every row"; None here
-                # means universal, so the per-row filter below always matches it.
-                toolrows[f[0]] = (None if len(f) > 2 and f[2] == "all"
-                                  else set(f[2].split(",")) if len(f) > 2 else set())
+                # means universal, so the per-row view below always picks it up.
+                where = ([None] if len(f) > 2 and f[2] == "all"
+                         else f[2].split(",") if len(f) > 2 else [NO_ROW])
+                for r in where:
+                    tools[(f[0], r)] = f[1]
             continue
+        f = line.split()
         if len(f) == 5 and f[2] in IR_METHODS:
             ir[f[0]] = (f[3], f[4])
         elif len(f) == 6 and f[2] not in IR_METHODS:
             sizes[(f[0], f[2])] = (f[3], f[4], f[5])
-    return ir, sizes, tools, toolrows, core
+    return ir, sizes, tools
 
 
 def pct(old, new):
@@ -89,16 +116,54 @@ def pct(old, new):
     return (n - o) / o * 100.0
 
 
-def tool_diff(old, new, rows_of):
-    """Differing toolchain entries as (name, committed, measured).
+def tools_for(tools, row):
+    """{tool: version} as a parsed `## toolchain` table states it for ONE row.
 
-    Limited to tools that actually built THIS row. Every measured file carries the
-    full table, so without that filter a go artifact would report the C++ or Zig
-    compiler as drifted — true, and irrelevant to the number being judged.
+    That is also the filter: every measured file carries the full table, so without
+    it a go artifact would report the C++ or Zig compiler as drifted — true, and
+    irrelevant to the number being judged. A line naming the row wins over the `all`
+    wildcard, which is what a per-row `sofab-engine` line is for.
     """
-    return [(k, old.get(k, "(not recorded)"), v)
-            for k, v in sorted(new.items())
-            if k in rows_of and old.get(k) != v]
+    out = {name: v for (name, r), v in tools.items() if r is None}
+    out.update({name: v for (name, r), v in tools.items() if r == row})
+    return out
+
+
+def tool_diff(old, new, row):
+    """Differing toolchain entries as (name, committed, measured), for THIS row.
+
+    When the committed table has no line naming this row for a tool, fall back to the
+    version it records for that tool elsewhere — but only when every line EITHER file
+    carries for that tool agrees. That keeps a row added since results.txt was
+    written from reporting every compiler as "(not recorded)" on an unchanged
+    toolchain, while a tool whose version is known to vary per row never borrows a
+    line that does not name this row.
+
+    Both tables and not just the committed one, because the committed file can hold a
+    single `sofab-engine` line — the state right after a second python row is added
+    to rows.json and before results.txt is regenerated. One line agrees with itself
+    trivially, so keyed on the committed side alone it would answer for the row it
+    does not name, which is the collapse this whole change is about.
+
+    Disagreement is the only signal available here, so the limit is exact: when every
+    line either file carries for a per-row tool happens to record the SAME version,
+    that tool is indistinguishable from a global one and the fallback still answers.
+    It then answers with the version the measured file itself reports for the tool
+    elsewhere, so the comparison says what it would have said anyway.
+    """
+    was, now = tools_for(old, row), tools_for(new, row)
+    out = []
+    for name, v in sorted(now.items()):
+        if name in was:
+            committed = was[name]
+        else:
+            elsewhere = {ver for (t, _), ver in list(old.items()) + list(new.items())
+                         if t == name}
+            committed = (elsewhere.pop() if len(elsewhere) == 1
+                         else "(not recorded)")
+        if committed != v:
+            out.append((name, committed, v))
+    return out
 
 
 def main():
@@ -108,7 +173,7 @@ def main():
                     help="measured result files; the row is taken from the filename")
     args = ap.parse_args()
 
-    base_ir, base_sz, base_tool, _base_trows, base_core = parse(args.committed)
+    base_ir, base_sz, base_tool = parse(args.committed)
 
     failures, outliers, moved, tools_seen = [], [], [], {}
 
@@ -118,14 +183,14 @@ def main():
             continue
         row = m.group(1)
         try:
-            ir, sz, tool, trows, _ = parse(path)
+            ir, sz, tool = parse(path)
         except OSError as e:
             failures.append((row, f"unreadable measured file: {e}"))
             continue
         if tool:
-            # Which tools built THIS row, per the measured file's own table.
-            tools_seen[row] = (tool, {t for t, rs in trows.items()
-                                      if rs is None or row in rs})
+            # The whole table; tool_diff() narrows it to the tools that built THIS
+            # row, per the measured file's own rows column.
+            tools_seen[row] = tool
 
         vals = ir.get(row)
         if not vals:
@@ -168,8 +233,8 @@ def main():
     # repeated per row. Collapse to unique (tool, committed, this run) and name the
     # rows only when a difference does not apply to all of them.
     drift = {}
-    for row, (t, rows_of) in sorted(tools_seen.items()):
-        for name, old, new in tool_diff(base_tool, t, rows_of):
+    for row, t in sorted(tools_seen.items()):
+        for name, old, new in tool_diff(base_tool, t, row):
             drift.setdefault((name, old, new), []).append(row)
     if drift:
         out += [
