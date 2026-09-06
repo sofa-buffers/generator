@@ -154,6 +154,11 @@ def sha256(path):
 # (corelib-java/bench/run_callgrind.sh); the perf changes this tool exists to catch
 # are 1%+ (see docs/perf-patches/, where the wins are tens of percent). 0.3% is an
 # order of magnitude clear of both edges.
+#
+# That ~0.03% is a documented figure, not one measured here. The only row measured
+# directly -- kotlin, six back-to-back runs -- spreads 0.006%, so on that row the band
+# is ~50x the jitter rather than ~10x. The other 23 rows are uncharacterised, which is
+# why this is not narrowed on one row's evidence: see issue #489.
 NOISE_BAND = 0.003
 
 
@@ -177,11 +182,20 @@ def stabilize(new, prev):
 
     * it is order-dependent (the committed value is the reference), which is the
       point: `results.txt` is a baseline, not a fresh reading each time;
-    * a drift smaller than the band per run could accumulate unseen. Acceptable
-      here because the band is ~10x the measured jitter and generator changes move
-      these numbers in steps, not creeps. If that ever stops being true, tighten the
-      band by raising that row's reps (which shrinks its raw jitter), rather than
-      widening it.
+    * a change smaller than the band is held back, and stays invisible until it (or
+      the sum of it and later ones) crosses. This has now happened for real: kotlin
+      decode's cell held at 32655 across four corelib-kotlin-mp bumps, a JDK change
+      and the whole receiver-cap series, then moved +0.3001% in one run -- surfacing
+      a step that had landed weeks earlier, which the crossing PR did not cause and
+      cannot be blamed for (issue #488, ARCHITECTURE 15).
+
+    Raising a row's reps is the answer to JITTER, not to that. It shrinks the raw
+    spread; the band is a fixed 0.3% RELATIVE and does not move with it, so more reps
+    cannot surface a masked step -- measured on kotlin, doubling the delta left the
+    spread at the 1-2 Ir resolution floor for +30% wall clock. The band being ~50x
+    that row's jitter is exactly what gives a real change room to hide. NOISE_BAND is
+    the only lever that acts on masking; sizing it needs the other rows' jitter
+    measured first (#489).
     """
     if prev in (None, "!") or new == "!":
         return new

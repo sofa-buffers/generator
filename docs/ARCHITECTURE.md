@@ -4645,23 +4645,61 @@ and both matter when reading a bench diff.
 *A cell may be older than the run that produced the file.* Provenance is uniform per
 header and per row — every SHA comes from one run, and every row was re-measured —
 but not per cell: a held cell still carries the reading of whichever earlier run last
-crossed the band. The band is one-sided against the committed value, so a drift
-smaller than 0.3% per run accumulates silently, and the PR that finally tips such a
-cell across inherits the whole accumulated step. It must not be blamed for all of it;
-check the raw readings in the run log before attributing. A cell whose *reading*
+crossed the band. The band is one-sided against the committed value, so any change
+smaller than 0.3% is held back silently — one of them, or several summing — and the PR
+that finally tips such a cell across inherits the whole suppressed step. It must not be
+blamed for all of it; check the raw readings in the run log before attributing. A cell whose *reading*
 reproduces off-baseline in the same direction across two independent runs is
 suppressed drift rather than noise, and worth recording even though the file cannot
 show it.
 
-*A cell landing within a hair of 0.3% is a gate artifact, not a signal.* On a
+*A cell landing within a hair of 0.3% is ambiguous until it is re-measured.* On a
 `subtract` row the underlying JIT number is not bit-reproducible at all, so a
-threshold crossing near the edge says only that noise cleared the gate once. The
-instance on record is `kotlin` decode 32655 → 32753 (+0.3001%, i.e. past the gate by
-one part in a million) with corelib-kotlin-mp unmoved and no kotlin backend change
-in the range — its encode half moved −0.023% in the same run. The fix for a row that
-keeps flickering is to raise that row's `reps` in `rows.json`, which shrinks its raw
-jitter, never to widen the band. Footprint sizes bypass `stabilize()` entirely and
-are always direct measurements.
+threshold crossing near the edge has two readings that tell opposite stories: noise
+that cleared the gate once, or an earlier real change that the band held back until it
+tipped. The file cannot tell them apart, so re-run the row before writing either one
+down.
+
+The instance on record is `kotlin` decode 32655 → 32753 (+0.3001%, i.e. past the gate by
+one part in a million) — corelib-kotlin-mp unmoved and no kotlin backend change *between
+that run and the one before it*, and the row's own encode half moving −0.023% in the same
+run. It read as a gate artifact and was not. Three back-to-back re-runs of the row on the
+unchanged tree read decode 32752/32753/32751 and encode 17200/17200/17199: a spread of
+0.006%, fifty times inside the band, and centred on the new value rather than the old. So
+32753 is what this row's decode half costs.
+
+What the crossing does *not* establish is when the row got there. 32655 is the value the
+cell last **changed** to, on 2026-08-18, and six later regenerations re-printed it while
+its inputs moved underneath: corelib-kotlin-mp 892af53 → a7e63ad → 7b67545 → 5f908dd →
+54cbe9c, kotlin-jdk 21.0.12 → 21.0.11, and 820 inserted lines of kotlin codegen — most of
+it the receiver-cap series (#358, #393, #396, #397, #426, #443), against a corelib that
+took the two bounds as arguments and began checking them at the length word. Decode moved
+and encode did not, which is the shape of a decode-path change and not of machine creep.
+So the +98 Ir is a **step that run surfaced, not one it made**; and because `stabilize()`
+re-prints the held value rather than the reading, no intermediate raw number survives to
+date it from the repository. Attribution is open as #488.
+
+The rule that follows: when a long-held cell finally crosses, do not close it as drift.
+Bisect the window between the last time that cell *changed* and the crossing, and start
+from whatever header input moved inside it — a corelib SHA, a toolchain version —
+attributing to that until a measurement says otherwise.
+
+The same mechanism is live on the other half of this row, caught early: those six runs read
+encode 17199–17201 against a committed 17203, so the encode cell is itself a baseline no
+current reading reproduces, sitting ~0.02% above the true cost and held. The first
+consequence above is in force on half of the very row this one documents.
+
+Raising a row's `reps` in `rows.json` shrinks its raw jitter, and is the right answer for a
+row whose *measured* jitter approaches the band; widening the band never is. But reps
+cannot touch masking — the band is a fixed 0.3% relative and does not move with them.
+Measured here, doubling this row to `10000 210000` left the spread where it was
+(0.003–0.012%, the resolution floor of the integer Ir/op the harness reports) and cost ~30%
+wall clock, so the counts stayed. The one lever that acts on masking is `NOISE_BAND`
+itself, and its sizing is unvalidated: `kotlin` is the only row whose jitter has ever been
+measured directly (the band is ~50x it there, not the ~10x the code claims), and the other
+23 rows are uncharacterised — which is why it has not been narrowed on one row's evidence.
+That is #489. Footprint sizes bypass `stabilize()` entirely and are always direct
+measurements.
 
 **`results.txt` is regenerated by hand in the devcontainer**, the same way the
 benchmark arena is driven — never by CI. Ir/op depends on the compiler that produced
