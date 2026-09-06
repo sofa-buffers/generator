@@ -58,10 +58,21 @@ csharp decode  71100 <-> 71200      (raw ~71,150 — sat on a 3-s.f. edge)
 java   encode  16500 <-> 16600      (raw ~16,550 — likewise)
 ```
 
-The 0.3% band sits an order of magnitude above the measured jitter (~0.03%) and an
-order of magnitude below the smallest change worth seeing (1%; the wins in
-`docs/perf-patches/` are tens of percent). If a row ever *does* flip, raise **that
-row's reps** — which tightens its raw jitter — rather than widening the band.
+The 0.3% band sits an order of magnitude above the jitter documented for a subtract row
+(~0.03%, from corelib-java's `bench/run_callgrind.sh`) and an order of magnitude below
+the smallest change worth seeing (1%; the wins in `docs/perf-patches/` are tens of
+percent). If a row ever flips on its own *jitter*, raise **that row's reps** — which
+tightens that jitter — rather than widening the band. One row has since been measured directly, and
+found much quieter than the documented figure: `kotlin` spreads 0.006%, so the band is
+~50x its jitter (#489).
+
+Confirm the flip before spending the reps: re-run the row unchanged a few times and look
+at the spread. A crossing can also be an earlier, *real* change that the band held back
+until it tipped — and more reps cannot see that one. Check whether a corelib SHA or a
+toolchain version in the header moved since that cell last **changed**, and suspect it
+first. `kotlin` decode crossed once at +0.3001% and then re-measured at a 0.006% spread
+around the **new** value across three runs, so its reps were left where they were and the
+step went to an issue (#488) instead — see ARCHITECTURE §15.
 
 ## Reading a diff
 
