@@ -27,6 +27,7 @@ The merge that replaces it has three hard edges, one on each side:
 import importlib.util
 import io
 import json
+import re
 import sys
 import tempfile
 import unittest
@@ -94,10 +95,27 @@ def engine_lines(text):
     return [l.split() for l in text.splitlines() if l.startswith("sofab-engine")]
 
 
+def toolchain_lines(text):
+    """The `## toolchain` table as [(tool, version, rows)].
+
+    Splits the padded columns rather than the whitespace, and only inside that
+    section — a version can be `(not found)`, which is two whitespace fields, and
+    that is precisely the line this reader must not lose (#502).
+    """
+    out, inside = [], False
+    for line in text.splitlines():
+        if line.startswith("## "):
+            inside = line[3:].strip() == "toolchain"
+        elif inside and line.strip() and not line.startswith("tool"):
+            f = re.split(r"\s{2,}", line.strip())
+            if len(f) == 3:
+                out.append(tuple(f))
+    return out
+
+
 def toolchain(text):
     """The `## toolchain` table as {tool: version}, minus the sofab-engine lines."""
-    return {f[0]: f[1] for f in (l.split() for l in text.splitlines())
-            if len(f) == 3 and f[0] not in ("tool", "sofab-engine")}
+    return {t: v for t, v, _ in toolchain_lines(text) if t != "sofab-engine"}
 
 
 def schema_hashes(text):
@@ -411,6 +429,95 @@ class FormatHeaderTest(unittest.TestCase):
         self.assertIn("py ccccccc extra", self.stderr)
         self.assertNotIn("zig", self.stderr)     # "(unknown)" is dropped on purpose
         self.assertNotIn("py", corelib_shas(out))
+
+    # -- the previous reader (#502) ------------------------------------------
+    #
+    # parse_previous() is the whole carry-forward, so what it cannot read is what a
+    # partial run silently rewrites. Two shapes it could not read: a version holding
+    # a space, and a label with more than one line.
+
+    def test_a_tool_recorded_as_not_found_survives_a_partial_run(self):
+        """`(not found)` is a recorded fact about the box the cells were measured
+        on — a compiler that vanished is exactly the kind of thing that moves a
+        number — and the docstring says it is carried. It was not: the value holds a
+        space, so the line split into four whitespace fields, matched neither branch
+        and was dropped, and the next partial run re-probed the tool and wrote
+        whatever the box answered over a row it had only carried. That launders away
+        the one record `(not found)` exists to keep.
+
+        Fails before the fix: `go` reads `1.0` here, the version this run probed for
+        a row it never measured.
+        """
+        self.tools["go"] = None                   # the box that measured beta had no go
+        prev = self.committed()
+        self.assertIn(("go", "(not found)", "beta"), toolchain_lines(prev))
+
+        self.tools.pop("go")                      # ...and this box has one again
+        out = self.render(sizes=ALL_SIZES, corelibs=["corelib-c-cpp"],
+                          previous=prev, partial=True)
+        self.assertEqual(toolchain(out)["go"], "(not found)")
+        self.assertEqual(ir_rows(out)["beta"], ("300", "400"))   # still carried
+        self.assertIn("no row it describes was measured", self.stderr)
+
+    def test_two_lines_under_one_label_do_not_collapse(self):
+        """The table is not a label->version map. `sofab-engine` writes one line per
+        python row, deliberately, because the two rows run different corelib-py
+        engines — so a reader keyed by label alone keeps only the last line. That is
+        #492's defect on the reading side, and the reason `tools` is keyed by the
+        pair the line actually states.
+
+        Fails before the fix: `tools` holds one `sofab-engine` entry, `native`.
+        """
+        prev = self.root / "prev.txt"
+        prev.write_text(self.committed())
+        tools = fmt.parse_previous(prev).tools
+        self.assertEqual(tools[(fmt.ENGINE_LABEL, "python")], "pure")
+        self.assertEqual(tools[(fmt.ENGINE_LABEL, "python-native")], "native")
+        # The ordinary lines are keyed the same way, by the rows column they name.
+        self.assertEqual(tools[("go", "beta")], "1.0")
+        self.assertEqual(tools[("valgrind", "all")], "1.0")
+        # And `engines` is now a view of that table rather than a second parse, so
+        # the two readers cannot disagree about what the file says.
+        self.assertEqual(fmt.parse_previous(prev).engines,
+                         {"python": "pure", "python-native": "native"})
+
+    def test_a_label_with_disagreeing_lines_answers_for_no_other_row(self):
+        """How the writer looks a line up when rows.json has moved under the file.
+        An exact (label, rows) hit answers; otherwise the label answers only when
+        every line it has agrees, because carrying one of two disagreeing lines onto
+        a line naming neither would state a version the file never recorded."""
+        tools = {("sofab-engine", "python"): "pure",
+                 ("sofab-engine", "python-native"): "native",
+                 ("gcc", "alpha"): "15.2.0"}
+        self.assertEqual(fmt.previous_tool(tools, "sofab-engine", "python"), "pure")
+        self.assertIsNone(fmt.previous_tool(tools, "sofab-engine", "python,gamma"))
+        # One agreeing line answers for a rows column it does not name: that is the
+        # row added to rows.json since the file was written, on an unmoved compiler.
+        self.assertEqual(fmt.previous_tool(tools, "gcc", "alpha,gamma"), "15.2.0")
+        self.assertIsNone(fmt.previous_tool(tools, "zig", "zig"))
+
+    def test_a_row_added_to_a_tools_line_keeps_the_committed_version(self):
+        """The same fallback through the writer, on the value that has to survive
+        it: gcc was `(not found)` when alpha was measured, and rows.json has since
+        gained a second row for gcc, so no line in the previous file names this
+        run's rows column. The absence is still what the file records for those
+        cells, and a re-probe of this box is not.
+
+        Fails before the fix: the `(not found)` line was never read back, so this
+        writes `9.9.9` — a version alpha's carried number was never measured with.
+        """
+        self.tools["gcc"] = None
+        prev = self.committed()
+        self.assertIn(("gcc", "(not found)", "alpha"), toolchain_lines(prev))
+
+        spec = json.loads(json.dumps(SPEC))
+        spec["rows"].append({"id": "gamma", "lang": "c", "corelib": "corelib-c-cpp",
+                             "profile": "footprint", "method": "toggle", "archs": []})
+        (self.root / "rows.json").write_text(json.dumps(spec))
+        self.tools["gcc"] = "9.9.9"
+        out = self.render(irs=PY_IRS, corelibs=["corelib-py"],
+                          previous=prev, partial=True)
+        self.assertIn(("gcc", "(not found)", "alpha,gamma"), toolchain_lines(out))
 
     # -- the round trip ------------------------------------------------------
 
