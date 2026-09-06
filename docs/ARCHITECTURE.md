@@ -3055,8 +3055,63 @@ fixed capacity (`Seq.ARRAY_INIT_CAP` / `Seq.ArrayInitCap` = 16,
 `sofab.arrays.ARRAY_INIT_CAP` = 1024) and grew toward the announced count as the
 elements arrived; each now allocates the checked count exactly, and the per-element
 store is a plain indexed write with no growth call, no per-element reference store
-back into the message object, and no per-array growth ceiling to carry. Rust and Go
-were already in this shape. Three things are worth recording about the conversion:
+back into the message object, and no per-array growth ceiling to carry. Go's LEAF
+arm was already in this shape; **Rust's was not, and this sentence is what hid
+that** (generator#505, two weeks after #386 closed). Go's `make([]T, 0, count)`
+reads like the reserve-and-extend the A shape replaced, but it is a single
+allocation in the exact size and `append` never reallocates behind it — judged by
+behaviour rather than by spelling, it satisfies A, as do the statically bounded
+profiles whose capacity is in the container's type. Rust std *was* spelled like A
+and behaved like B: `array_begin` checked the wire count against the schema
+`count` and then discarded it, leaving a `Vec::new()` to grow under the element
+pushes. Its schema-bounded arrays now reserve that checked count exactly,
+`reserve_exact` after the reject and never before it — measured on
+`vehicle_telemetry`, decode −1.50% on `rust-rs` and −0.91% on `rust-rs-no-std-dyn`
+with every encode cell and both fixed-capacity profiles unchanged, and under a
+counting allocator a decode of `u32[4] + u16[8] + u64[32]` falls from 7 allocator
+calls (4 of them a growing realloc, 232 bytes memcpy'd) to 3 and none. The one
+cost is `rust-rs-no-std-dyn`'s `.text`, +284 bytes: `allow_dynamic` under `no_std`
+is the one profile that is both size-sensitive and heap-backed, and it is kept
+because reallocation churn on a firmware heap is the worse of the two.
+
+The **matrix ROW** is Rust-only, and the Go/C# parallel above does not extend to
+it: at a row header the sibling backends install a fresh row and let it grow
+(`corelib-go`'s `UnsignedMatrixSeq.ArrayBegin` clears `s.cur` and places the row
+at `ArrayEnd`, csharp emits `new List<uint>()` with no capacity, zig allocates
+only because its rows are slices). Rust sizes the row from the inner `count`
+`rowGuards` has just checked. It does so **only when the row is empty**: this arm
+does not clear, so a row id repeating inside one message finds the previous
+occurrence's elements still there, and `reserve_exact` is capacity *on top of the
+current length* — reserving there would ask for `len + M` and would do it exactly,
+one precise realloc per header. That the repeat *merges* at all (where Rust's own
+leaf arm clears, and where §7.4 is last-occurrence-wins) is a separate,
+pre-existing divergence, filed as generator#509.
+
+**A schema bound is not a ceiling by itself.** `count > N` establishes only that
+the wire stayed inside the *schema's* `N`, and `schema/sofabuffers-schema-v1.json`
+caps `N` at 2147483647 — so a pre-size taken on `N` alone lets a truncated packet
+buy the field's declared worst case. Measured on `arr: array<u64>, count:
+2000000`: a **four-byte** prefix (the array header and its count word) allocated
+16,000,000 bytes before returning `Incomplete`; the same input costs 0 with no
+pre-size. Rust therefore clamps every reserve at the resolved
+`max_dyn_array_count`, resolved at generate time so a bound at or under the
+ceiling emits a bare `count` and pays nothing. Clamping is free of meaning:
+capacity is a hint, and a `Vec` whose wire really delivers more still grows to
+hold it — nothing is truncated and no verdict moves. The residual is honest and
+worth stating: that same four-byte prefix still costs 524,288 bytes, the ceiling's
+worth, where before generator#505 it cost none. That is the price of the
+pre-size, and it is bounded by the number this project already calls its
+amplification barrier. **Go and C# take no such clamp**, and whether they should
+is the same open question one paragraph down.
+
+**Rust's count-LESS arm is the one place in the family that still grows**: the
+four backends above allocate the cap-checked count there too, and generator#505
+scoped Rust to the schema-bounded arms only. Whether that arm should follow is
+open — the argument against is that `max_dyn_array_count` is a refusal threshold
+and sizing from it lets a small message ask for 65536 elements; the argument for
+is that this section already answers that objection with "checked before the
+allocation", and that the clamp above now makes the bounded arm reserve *at most*
+that same number anyway. Three things are worth recording about the conversion:
 
 - **The A/B split is decided by the wire, not by the schema.** A native array
   *without* a schema `count` still has a wire count **header**, so it is shape A —

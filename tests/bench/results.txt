@@ -34,9 +34,9 @@ java               maxspeed   subtract  17006         30891
 kotlin             maxspeed   subtract  17203         32753
 python             maxspeed   subtract  1081554       2309178
 python-native      maxspeed   subtract  130483        803335
-rust-rs            maxspeed   toggle    8273          23329
+rust-rs            maxspeed   toggle    8273          23013
 rust-rs-no-std     footprint  toggle    8078          29998
-rust-rs-no-std-dyn footprint  toggle    8280          38808
+rust-rs-no-std-dyn footprint  toggle    8280          38452
 rust-rs-static     maxspeed   toggle    8120          16564
 rust-rs-unbounded  maxspeed   toggle    6762          21184
 ts-bigint          maxspeed   subtract  605081        768394
@@ -73,4 +73,4 @@ cpp-c-cpp          footprint  ARMv7-m+fp.dp   6378    0      180
 cpp-c-cpp-dyn      footprint  ARMv6-m         15937   0      300
 cpp-c-cpp-dyn      footprint  ARMv7-m+fp.dp   14331   0      300
 rust-rs-no-std     footprint  thumbv6m        9785    0      0
-rust-rs-no-std-dyn footprint  thumbv6m        11437   0      4
+rust-rs-no-std-dyn footprint  thumbv6m        11721   0      4

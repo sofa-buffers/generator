@@ -385,6 +385,25 @@ func (g *gen) rustSeq(elem string, hasCount bool, count int64) string {
 	return g.dynVec(elem)
 }
 
+// dynSeq reports whether rustSeq lowered a sequence carrying this bound to a
+// DYNAMIC container — Vec, or its alloc:: twin under no_std — rather than to a
+// fixed-capacity heapless::Vec<_, N>.
+//
+// It is rustSeq's own branch condition, negated, and lives beside it so the two
+// cannot drift. Only a dynamic container has a `reserve_exact`, and only a
+// dynamic container needs one: a heapless::Vec carries its capacity in its type
+// and is already the exact allocation the schema bound describes (generator#505).
+// The axis is staticStore, not noStd: `corelib: rs-no-std` with allow_dynamic
+// puts a bounded array in an alloc::vec::Vec that grows exactly like the std one.
+func (g *gen) dynSeq(hasCount bool) bool { return !(g.staticStore && hasCount) }
+
+// boundedSeqIsDynamic is dynSeq for the only case the reserve helpers can ever
+// ask about: a sequence that HAS a schema bound. Both call sites are inside a
+// branch that already established the bound, so passing the flag would assert
+// something the caller cannot vary; this names the predicate instead
+// (generator#505).
+func (g *gen) boundedSeqIsDynamic() bool { return g.dynSeq(true) }
+
 func (g *gen) rustType(f *ir.Field) string {
 	switch f.Kind {
 	case ir.KindU8, ir.KindU16, ir.KindU32, ir.KindU64, ir.KindI8, ir.KindI16, ir.KindI32, ir.KindI64:
