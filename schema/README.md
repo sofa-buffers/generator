@@ -99,7 +99,9 @@ Two generator-side specifics those documents do not cover:
   composite elements (`string`/`blob`/`struct`/`union`/`array`) are emitted as
   sequences, so the generator must route them through the corelib's
   `sequence_begin/end` API and require the `sequence` capability for them (see the
-  generator plan).
+  generator plan). Those same five element kinds are the ones whose array
+  `default` is refused (§8.4) — a wrapper sequence has no default form in any
+  target. The two rules must name the same set; if you change one, change both.
 
 ---
 
@@ -416,6 +418,77 @@ schema *knobs* rather than defaults — `count`, `maxlen`, `decimals`, `pos`,
 `default_id`, enum member values — which are coerced to an integer and never echoed
 into the emitted source, so their spelling cannot reach a compiler.
 
+#### 8.4 An array element that is lowered to a **wrapper sequence** takes no `default` at all
+
+The three sub-sections above all answer *how* an array element default is
+spelled. This one says where there is no such thing to spell.
+
+The set is **not** "composite" in the narrow sense. It is exactly the five
+element kinds the sequence-routing rule near the top of this document already
+names — *"arrays of dynamic or composite elements (`string`/`blob`/`struct`/
+`union`/`array`) are emitted as sequences"* — and exactly the complement of the
+native element kinds (`u8`…`i64`, `fp32`, `fp64`, `boolean`, `enum`, `bitfield`),
+which are the kinds a backend materializes into a real initializer. When
+`items.type` is one of those five, the array field takes **no `default` key**.
+Writing one is an error, whatever it contains, an empty sequence included.
+
+| written | verdict |
+|---|---|
+| `items: { type: string, maxlen: 8 }, default: ["a", "b"]` | `an array of string takes no default` |
+| `items: { type: blob, maxlen: 4 }, default: ["AAE="]` | `an array of blob takes no default` |
+| `items: { type: struct, fields: {...} }, default: [{ x: 7 }]` | `an array of struct takes no default` |
+| `items: { type: union, oneof: {...} }, default: [{ p: 7 }]` | `an array of union takes no default` |
+| `items: { type: array, items: {...} }, default: [[1, 2]]` | `an array of array takes no default` |
+
+This is a **refusal, not a feature removal**. No target has ever emitted such a
+default. Measured on this tree, one generation per target, for all twelve:
+
+- `items: { type: array, items: { type: u64 } }, default: [["nonsense", 1000000.0]]`
+  — all eleven code backends (c, cpp, rust, go, java, kotlin, csharp, typescript,
+  python, zig, dart) generate the member with **no initializer at all**; grepping
+  each output tree for `nonsense` and for `1e+06` finds nothing, while `docs`
+  prints `[["nonsense", 1e+06]]` into `message.html`. `array<struct>` and
+  `array<union>` behave identically.
+- `items: { type: string, count: 2, maxlen: 16 }, default: ["zzmarkerzz"]` and the
+  `blob` twin — same result, and this is the half that looks like it should work,
+  because a string element default *is* a plain scalar literal. It is not
+  emitted either: cpp constructs `std::vector<std::string> strs = {}` (and the
+  same in `reset()`), go declares `Strs []string` and resets it to `m.Strs[:0]`,
+  rust `strs: Vec::new()`, java `new ArrayList<>()`, ts `strs: string[] = []`,
+  zig `&.{}`, dart `<String>[]`, and the C backend emits no defaults struct for
+  the field at all. The marker string appears in exactly one output tree: `docs`.
+  The control in the same message, `items: { type: u32 }, default: [7654321, 1]`,
+  reaches **all twelve**.
+
+The omission test tells the same story: a backend compares a native array against
+its declared default (`!slices.Equal(m.Ctrl, []uint32{7654321, 1})` in go) but
+compares a wrapper-element array against **empty** (`len(m.Strs) == 0`). So the
+declared value is not merely un-materialized at construction — nothing in the
+generated code ever refers to it.
+
+So the value was already being discarded; the only thing the rule changes is that
+the author is told, instead of the generated *documentation* claiming a default
+the generated *code* never produces.
+
+Implementing the shape instead would mean a wrapper-sequence initializer form in
+eleven renderers, plus — for the struct and union members of the set — a spelling
+rule for an element value that the definition language does not have. A
+field-level `struct` or `union` takes no `default` either (the closed key set for
+those two field types does not list one, which is why the defect exists only
+inside `items`).
+
+Unlike §8.1–§8.3, this rule **is** expressible in stock JSON Schema, so it is
+enforced in both halves rather than in the generator alone: the `array` branch of
+the shipped schema carries an
+`if items.type ∈ {string, blob, struct, union, array}` → `then not required
+default`. The `string` and `blob` array-`default` branches that stood beside it
+before generator#497 are gone: they blessed a shape no code backend emits, so the
+two halves of the contract disagreed with each other.
+
+An array *of* such an element is otherwise entirely normal — the corpus generates
+`array<string>`, `array<blob>`, `array<struct>`, `array<union>` and nested rows at
+depth 2 and 3 for every backend. Only the `default` key is refused.
+
 ### 9. Hard-gate semantics
 
 Validation is an all-or-nothing gate: on any violation, the tool emits a clear,
@@ -441,5 +514,6 @@ A validator is only conformant if it does **all** of:
 - [ ] enforce **array-of-`u64`/`i64`** element defaults by the same rule as the field default of that type — an integer or a quoted decimal string, exact-64-bit-range-checked, no fractional or exponent spelling, and no sign for a `u64` (§8, §8.2);
 - [ ] enforce **enum values are signed 32-bit** (`-2147483648 … 2147483647`), values and `default` alike;
 - [ ] refuse a **decimal-point or exponent spelling** for *every* integer default — narrow scalars, enums, their array elements, `u64`/`i64` and bitfield masks alike — and name the integer to write (§8.3);
+- [ ] refuse a **`default` on an array whose `items.type` is `string`, `blob`, `struct`, `union` or `array`** — all five are lowered to a wrapper sequence, and no target has a default form for one; these are the same five kinds the sequence-routing rule names, and the complement of the native element kinds (§8.4);
 - [ ] resolve `$ref` before validating, but keep `$ref` for generation;
 - [ ] fail closed: located error, non-zero exit, no output.

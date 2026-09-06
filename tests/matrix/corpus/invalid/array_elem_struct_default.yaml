@@ -1,0 +1,2 @@
+version: 1
+messages: { M: { payload: { a: { id: 0, type: array, items: { type: struct, count: 2, fields: { x: { id: 0, type: u32 } } }, default: [{ x: 7 }] } } } }

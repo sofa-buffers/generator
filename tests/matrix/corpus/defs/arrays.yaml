@@ -5,8 +5,15 @@ messages:
       nums:  { id: 0, type: array, items: { type: i32, count: 3 }, default: [-1, 0, 2147483647] }
       bytes: { id: 1, type: array, items: { type: u8, count: 2 }, default: [0, 255] }
       fps:   { id: 2, type: array, items: { type: fp64, count: 2 }, default: [1.0, 2.0] }
-      strs:  { id: 3, type: array, items: { type: string, count: 2, maxlen: 8 }, default: ["a", "b"] }
-      blobs: { id: 4, type: array, items: { type: blob, count: 1, maxlen: 4 }, default: ["AAE="] }
+      # No `default` on either of these two. A string or blob element is lowered
+      # to a WRAPPER SEQUENCE, and no code backend materializes a default for one
+      # -- the member is constructed empty whatever the schema says. Carrying a
+      # default here made this file a POSITIVE pin for the exact shape #497 was
+      # filed against: `docs` printed ["a", "b"] in the Default column beside a
+      # cpp header that started the member at {}. The negatives now live in
+      # ../invalid/array_elem_string_default.yaml and array_elem_blob_default.yaml.
+      strs:  { id: 3, type: array, items: { type: string, count: 2, maxlen: 8 } }
+      blobs: { id: 4, type: array, items: { type: blob, count: 1, maxlen: 4 } }
       # The only element default whose value does not fit the SIGNED 64-bit carrier
       # some targets back a u64 with (java `long`, dart `int`), so it is the only one
       # that forces those backends to re-spell rather than copy the schema's decimal.

@@ -319,6 +319,54 @@ func TestNegativeCases(t *testing.T) {
 			expect: "default for u32 must be an integer",
 		},
 		{
+			// generator#497: an array element that is lowered to a WRAPPER
+			// SEQUENCE takes no default at all. Before the fix all five of these
+			// validated and then reached nothing: all eleven code backends
+			// emitted no initializer, and only `docs` printed the written value.
+			name:   "array-of-struct default",
+			src:    "version: 1\nmessages:\n  M:\n    payload:\n      a: {id: 0, type: array, items: {type: struct, count: 2, fields: {x: {id: 0, type: u32}}}, default: [{x: 7}]}\n",
+			expect: "an array of struct takes no default",
+		},
+		{
+			name:   "array-of-union default",
+			src:    "version: 1\nmessages:\n  M:\n    payload:\n      a: {id: 0, type: array, items: {type: union, count: 2, oneof: {p: {id: 0, type: u32}}}, default: [{p: 7}]}\n",
+			expect: "an array of union takes no default",
+		},
+		{
+			// The shape the issue was filed for. Both halves of the element rule
+			// it dodges are enforced one level up: "nonsense" is refused for an
+			// array<u64> element and 1000000.0 for every integer default (#484).
+			name:   "array-of-array default",
+			src:    "version: 1\nmessages:\n  M:\n    payload:\n      a: {id: 0, type: array, items: {type: array, count: 2, items: {type: u64, count: 2}}, default: [[\"nonsense\", 1000000.0]]}\n",
+			expect: "an array of array takes no default",
+		},
+		{
+			// The two leaf-looking members of the same set, and the half the
+			// first draft of #497 missed. A `string`/`blob` element default LOOKS
+			// like a scalar literal and was validated element-by-element, but it
+			// is routed to a wrapper sequence exactly like a struct element, so
+			// no code backend materializes it either: measured on all twelve
+			// targets, `default: ["zzmarkerzz"]` on an array<string> appears only
+			// in the docs HTML -- cpp constructs `std::vector<std::string> = {}`,
+			// go `Strs []string` reset to `m.Strs[:0]`, rust `Vec::new()`.
+			name:   "array-of-string default",
+			src:    "version: 1\nmessages:\n  M:\n    payload:\n      a: {id: 0, type: array, items: {type: string, count: 2, maxlen: 8}, default: [\"a\", \"b\"]}\n",
+			expect: "an array of string takes no default",
+		},
+		{
+			name:   "array-of-blob default",
+			src:    "version: 1\nmessages:\n  M:\n    payload:\n      a: {id: 0, type: array, items: {type: blob, count: 1, maxlen: 4}, default: [\"AAE=\"]}\n",
+			expect: "an array of blob takes no default",
+		},
+		{
+			// An EMPTY default is refused for the same reason as a populated
+			// one: the key has no meaning for these element types, and a rule
+			// that turned on the contents could not be stated in one sentence.
+			name:   "array-of-struct empty default",
+			src:    "version: 1\nmessages:\n  M:\n    payload:\n      a: {id: 0, type: array, items: {type: struct, count: 2, fields: {x: {id: 0, type: u32}}}, default: []}\n",
+			expect: "an array of struct takes no default",
+		},
+		{
 			name:   "struct array element missing fields",
 			src:    "version: 1\nmessages:\n  M:\n    payload:\n      a: {id: 0, type: array, items: {type: struct, count: 2}}\n",
 			expect: "struct array element requires",
@@ -409,6 +457,76 @@ func TestI64ArrayElementSpellingsAccepted(t *testing.T) {
 		"default: [-1, 0, \"-0\", \"-9223372036854775808\", \"9223372036854775807\"]}\n"
 	if errs := validateString(t, src); errs != nil {
 		t.Fatalf("every legal i64 element spelling should validate, got:\n%s", errs.Error())
+	}
+}
+
+// TestWrapperArrayElementsWithoutDefaultStillValidate is the other half of the
+// generator#497 rule, and the thing a too-broad version of it would break: an
+// array whose element type is a string, a blob, a struct, a union or a nested
+// array is a normal, supported shape — the corpus generates all five for every
+// backend. Only the `default` KEY is refused, and only on those element types; a
+// native-element array keeps its default.
+func TestWrapperArrayElementsWithoutDefaultStillValidate(t *testing.T) {
+	src := "version: 1\nmessages:\n  M:\n    payload:\n" +
+		"      st: {id: 0, type: array, items: {type: string, count: 2, maxlen: 8}}\n" +
+		"      bl: {id: 1, type: array, items: {type: blob, count: 2, maxlen: 8}}\n" +
+		"      s: {id: 2, type: array, items: {type: struct, count: 2, fields: {x: {id: 0, type: u32}}}}\n" +
+		"      u: {id: 3, type: array, items: {type: union, count: 2, oneof: {p: {id: 0, type: u32}}}}\n" +
+		"      n: {id: 4, type: array, items: {type: array, count: 2, items: {type: u64, count: 2}}}\n" +
+		"      leaf: {id: 5, type: array, items: {type: u64, count: 2}, default: [1, 2]}\n"
+	if errs := validateString(t, src); errs != nil {
+		t.Fatalf("wrapper array elements without a default should validate, got:\n%s", errs.Error())
+	}
+}
+
+// TestEveryArrayElemKindRejectsABogusDefault pins the partition that IS this bug.
+//
+// Three lists have to stay in sync: `arrayElem` (every legal element kind),
+// `wrapperArrayElem` (the kinds whose `default` is refused outright), and the
+// `switch etyp` arms of checkArrayElem (the kinds whose default is checked
+// element by element). They partition arrayElem today — but a kind added to
+// arrayElem with NEITHER an arm nor a wrapperArrayElem entry falls through both,
+// which is exactly how an `array<array<T>>` default came to be accepted by
+// nothing and emitted by nothing (#497), and how `array<string>` and
+// `array<blob>` were then missed by the first draft of the fix.
+//
+// So: for every kind in arrayElem, hand it a default that is wrong for a native
+// element (a mapping is not an integer, a number, a boolean or a mask) and
+// forbidden outright for a wrapper one, and require an error. A future kind with
+// no arm and no entry accepts the mapping silently and fails here, naming itself.
+// This is the third fix in this family (#477, #484, #497) whose first draft
+// missed a type; nothing but a test over the list itself catches the fourth.
+func TestEveryArrayElemKindRejectsABogusDefault(t *testing.T) {
+	// An otherwise VALID `items` mapping per kind, so the only thing that can be
+	// wrong about each schema below is the default.
+	items := map[string]string{
+		"u8": "{type: u8, count: 2}", "u16": "{type: u16, count: 2}",
+		"u32": "{type: u32, count: 2}", "u64": "{type: u64, count: 2}",
+		"i8": "{type: i8, count: 2}", "i16": "{type: i16, count: 2}",
+		"i32": "{type: i32, count: 2}", "i64": "{type: i64, count: 2}",
+		"fp32": "{type: fp32, count: 2}", "fp64": "{type: fp64, count: 2}",
+		"boolean":  "{type: boolean, count: 2}",
+		"string":   "{type: string, count: 2, maxlen: 8}",
+		"blob":     "{type: blob, count: 2, maxlen: 8}",
+		"enum":     "{type: enum, count: 2, enum: {A: 0, B: 1}}",
+		"bitfield": "{type: bitfield, count: 2, bits: {a: {pos: 0}}}",
+		"struct":   "{type: struct, count: 2, fields: {x: {id: 0, type: u32}}}",
+		"union":    "{type: union, count: 2, oneof: {p: {id: 0, type: u32}}}",
+		"array":    "{type: array, count: 2, items: {type: u64, count: 2}}",
+	}
+	for _, kind := range arrayElem {
+		spec, ok := items[kind]
+		if !ok {
+			t.Fatalf("arrayElem gained %q with no items spelling in this test; add one, "+
+				"and give the kind either a checkArrayElem arm or a wrapperArrayElem entry", kind)
+		}
+		src := "version: 1\nmessages:\n  M:\n    payload:\n" +
+			"      a: {id: 0, type: array, items: " + spec + ", default: [{__bogus__: 1}]}\n"
+		if errs := validateString(t, src); errs == nil {
+			t.Errorf("array<%s> accepted a mapping as its default element: %q is in arrayElem "+
+				"but has neither a checkArrayElem arm nor a wrapperArrayElem entry, so its "+
+				"default is validated by nothing and (per #497) emitted by nothing", kind, kind)
+		}
 	}
 }
 

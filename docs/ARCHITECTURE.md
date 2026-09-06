@@ -234,7 +234,7 @@ validator must reproduce all of `schema/README.md` §Validation. Checklist:
    array is still exactly `count` elements long, §11). All six custom keywords recurse into composite array
    elements (e.g. an array-of-struct element's fields get `uniqueIds`). Array
    `default` elements are additionally validated **per element** (type/range
-   check, base64 decode for blob elements, enum membership, and — for a
+   check, enum membership, and — for a
    `bitfield` element, the only place a bitfield default is written as a *number*
    rather than a set of per-flag booleans — a non-negative integer or quoted
    **decimal** string that fits the bitfield's own backing width, i.e. the
@@ -258,6 +258,19 @@ validator must reproduce all of `schema/README.md` §Validation. Checklist:
    (`integralFloatVerdict`), because the value is carried into the emitted source
    whatever its width and `1e+06` is not a literal a 32-bit member takes either
    (`schema/README.md` §8.3).
+   All of the above applies only to an array whose element is **native**. An array
+   whose `items.type` is lowered to a **wrapper sequence** — `string`, `blob`,
+   `struct`, `union` or a nested `array`, the same five kinds the sequence-routing
+   rule names — takes no `default` **at all**, empty sequence included. No backend
+   emits an initializer for one: the member is constructed empty whatever the
+   schema declares, and the serialize omission test compares it against empty
+   rather than against the declared value, so only `docs` ever printed it. It is
+   refused in `checkArrayField` (`wrapperArrayElem`) *and* in the shipped JSON
+   Schema, which can express this one in stock keywords unlike §8.1–§8.3
+   (`schema/README.md` §8.4). Consequently `checkArrayElem` has an arm for every
+   native kind and none for those five; a parser test walks `arrayElem` and fails
+   on any kind covered by neither, since a kind with no arm and no entry is
+   precisely the hole this rule closed.
 4. **Six custom keywords**:
    - `uniqueIds` — id unique in **every** scope (payload + each struct + each union).
    - `uniquePositions` — bitfield `pos` unique.

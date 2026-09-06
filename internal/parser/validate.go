@@ -698,8 +698,21 @@ func (v *validator) checkArrayField(f map[string]any, loc string) {
 	etyp, enumValues, bitMaxPos := v.checkArrayItems(items, loc+"/items")
 
 	// array default: length <= count (capacity), plus per-element validation.
-	// Only leaf-typed element arrays carry a flat default.
+	// Only NATIVE-element arrays carry a flat default.
 	if d, ok := f["default"]; ok {
+		// An element that is lowered to a WRAPPER SEQUENCE -- string, blob,
+		// struct, union, or a nested array -- has no default form anywhere in
+		// the toolchain (README §8.4; the same five kinds the sequence-routing
+		// rule already names at README line 98). Before generator#497 such a
+		// default was emitted by nothing: all eleven code backends construct the
+		// member EMPTY whatever the schema declares, and their omission test
+		// compares against empty too, while `docs` printed the written value
+		// into the generated reference. Refuse the shape instead of discarding
+		// it.
+		if wrapperArrayElem[etyp] {
+			v.add(loc+"/default", "an array of %s takes no default; an element that is lowered to a wrapper sequence (string, blob, struct, union, nested array) has no default form in any target, so the value would be silently discarded; remove \"default\" and set the elements after construction", etyp)
+			return
+		}
 		arr, ok := d.([]any)
 		if !ok {
 			v.add(loc+"/default", "array default must be a sequence")
@@ -797,6 +810,19 @@ func (v *validator) checkArrayItems(items map[string]any, loc string) (etyp stri
 	return etyp, enumValues, bitMaxPos
 }
 
+// checkArrayElem validates one element of an array field's flat `default`.
+//
+// There is an arm for every NATIVE element type and none for the five kinds that
+// lower to a wrapper sequence -- `string`, `blob`, `struct`, `union`, `array`:
+// checkArrayField refuses a default on those outright (wrapperArrayElem,
+// generator#497), so no wrapper element ever reaches here. Adding an arm here
+// would be the other half of implementing wrapper-element default literals in
+// eleven renderers, not a validation fix.
+//
+// The arms below and wrapperArrayElem must between them cover every kind in
+// arrayElem. TestEveryArrayElemKindRejectsABogusDefault pins that partition, so
+// a kind added to arrayElem with neither an arm nor a wrapperArrayElem entry
+// cannot silently reopen this hole.
 func (v *validator) checkArrayElem(etyp string, el any, enumValues []int64, bitMaxPos int64, loc string) {
 	switch etyp {
 	case "u8", "u16", "u32", "i8", "i16", "i32":
@@ -845,15 +871,6 @@ func (v *validator) checkArrayElem(etyp string, el any, enumValues []int64, bitM
 		}
 		if enumValues != nil && !containsInt(enumValues, n) {
 			v.add(loc, "enum element %d does not match any declared enum value", n)
-		}
-	case "string":
-		if _, ok := el.(string); !ok {
-			v.add(loc, "element must be a string")
-		}
-	case "blob":
-		s, ok := el.(string)
-		if !ok || !base64Re.MatchString(s) {
-			v.add(loc, "element must be a base64 string")
 		}
 	case "bitfield":
 		v.checkMaskElem(el, bitMaxPos, loc)
@@ -1125,6 +1142,23 @@ var (
 		"boolean", "string", "blob", "enum", "bitfield", "struct", "union", "array",
 	}
 )
+
+// wrapperArrayElem are the array element kinds that are lowered to a WRAPPER
+// SEQUENCE rather than to a native scalar slot. It is the exact five-member set
+// the sequence-routing rule already names (schema/README.md: "arrays of dynamic
+// or composite elements (string/blob/struct/union/array) are emitted as
+// sequences"), and the exact complement of every backend's native-element
+// predicate -- e.g. generators/cpp/helpers.go isNativeArrayElem, which lists
+// u8..i64/fp32/fp64/boolean/enum/bitfield and excludes these five.
+//
+// None of the eleven code backends emits a default initializer for one: the
+// member is constructed EMPTY whatever the schema declares, and the serialize
+// omission test compares against empty rather than against the declared value.
+// So an array field with such an element type takes no `default` at all
+// (README §8.4, generator#497).
+var wrapperArrayElem = map[string]bool{
+	"string": true, "blob": true, "struct": true, "union": true, "array": true,
+}
 
 var arrayElemTypes = func() map[string]bool {
 	m := map[string]bool{}

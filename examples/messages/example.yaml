@@ -167,7 +167,12 @@ messages:
           type: string
           count: 5
           maxlen: 16                       # caps the encoded byte length (per element)
-        default: ["one", "two", "three", "four", "five"]
+        # No `default` here, nor on someblobarray below. A string or blob element
+        # is lowered to a WRAPPER SEQUENCE, and no target materializes a default
+        # for one: the member is constructed empty whatever the schema declares.
+        # Until generator#497 this example advertised
+        # `["one", "two", "three", "four", "five"]`, which reached the generated
+        # documentation and no generated code. It is now a validation error.
       someblobarray:
         id: 19
         type: array
@@ -176,7 +181,6 @@ messages:
           type: blob
           count: 3
           maxlen: 8                        # caps the encoded byte length (per element)
-        default: ["AAEC", "//8=", "ZGF0YQ=="]   # base64 of the raw bytes
 
       # --- Struct (nested) -----------------------------------------------------
       # A composite type with its own id scope; structs may nest arbitrarily.
