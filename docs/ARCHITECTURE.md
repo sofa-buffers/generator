@@ -246,13 +246,25 @@ validator must reproduce all of `schema/README.md` §Validation. Checklist:
    generator-side — the width is sibling-dependent, and 2^64−1 is not
    representable as an IEEE-754 double — so the shipped JSON Schema states only
    the non-negative/decimal half; `schema/README.md` §8.1 has the full rule).
+   A `u64`/`i64` element runs the **same** rule as a `u64`/`i64` *field* default,
+   from the same helper (`int64Verdict`), so the two cannot drift: an integer, or
+   a quoted **decimal** string for a value past the double-safe range, exact-range
+   checked with a big integer, and for a `u64` no sign at all — `"-0"` is refused
+   by *spelling*, because its value is zero and a value test would pass it
+   (`schema/README.md` §8.2).
+   The **decimal-point / exponent refusal** below is not a 64-bit rule: it guards
+   every integer default in the schema — a `u8`…`i32` or `enum` field `default`
+   and each of their array elements as well — from one helper
+   (`integralFloatVerdict`), because the value is carried into the emitted source
+   whatever its width and `1e+06` is not a literal a 32-bit member takes either
+   (`schema/README.md` §8.3).
 4. **Six custom keywords**:
    - `uniqueIds` — id unique in **every** scope (payload + each struct + each union).
    - `uniquePositions` — bitfield `pos` unique.
    - `defaultMatchesEnum` — enum `default` ∈ declared values (**presence** test, so `default: 0` is checked).
    - `defaultIdMatchesUnion` — union `default_id` matches an option id (presence test).
    - `blobDefaultLength` — base64-decode the blob `default`, compare **byte** length to `maxlen`.
-   - `int64Range` — exact 64-bit range for `i64`/`u64` `default`, accepting an integer or a quoted string, checked with a big-integer type.
+   - `int64Range` — exact 64-bit range for `i64`/`u64` `default`, accepting an integer or a quoted **decimal** string, checked with a big-integer type. A number spelled with a decimal point or an exponent is refused even when its value is an exact integer: JSON cannot tell `1000000.0` from `1000000`, but YAML can, and the generator renders the float through the shortest decimal form, which becomes `1e+06` — a literal eight of the eleven targets reject (§8 of `schema/README.md`).
 5. **Enum values are signed 32-bit** (−2³¹ … 2³¹−1), values and `default` alike.
 6. **Nesting-depth cap** (`MaxNestingDepth = 256`) and recursive-ref rejection.
    Recursive/dangling refs are rejected fail-fast during `$ref` resolution

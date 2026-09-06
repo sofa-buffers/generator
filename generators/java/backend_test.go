@@ -2203,17 +2203,51 @@ messages:
 	}
 }
 
+// genJavaFromYAMLNoValidate is genJavaFromYAML with parser.Validate SKIPPED.
+// Exactly one test may use it, and only because #484 closed the front door on the
+// shape it needs: a quoted non-decimal u64 array element no longer reaches any
+// backend from a validated definition, and the renderer that must not echo one is
+// still worth pinning -- the same reason generators/java/helpers.go keeps its two
+// boxed arms correct although nothing reaches them either. Any other backend test
+// that skipped validation would be asserting on a definition the tool refuses.
+func genJavaFromYAMLNoValidate(t *testing.T, src string, cfg map[string]any) map[string]string {
+	t.Helper()
+	doc, err := parser.Parse([]byte(src), "dyn.yaml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := doc.Resolve(); err != nil {
+		t.Fatal(err)
+	}
+	s, err := model.Build(doc)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := analysis.Analyze(s); err != nil {
+		t.Fatal(err)
+	}
+	files, err := (&Backend{}).Generate(s, cfg)
+	if err != nil {
+		t.Fatalf("generate: %v", err)
+	}
+	out := map[string]string{}
+	for _, f := range files {
+		out[f.Path] = string(f.Content)
+	}
+	return out
+}
+
 // TestJavaU64LeadingZeroDefaultIsNotOctal: a u64 default is emitted as the value
 // the generator PARSED, never as the schema's raw text, because Java reads a
 // leading-zero integer literal as OCTAL.
 //
-// The reachable spelling is an ARRAY element. internal/parser/validate.go's
-// checkArrayElem accepts any string for a `u64` element with no format check at
-// all, where the scalar path runs checkInt64Range's decIntRe
-// (`^-?(0|[1-9][0-9]*)$`) and rejects a leading zero -- so "010" is schema-legal
-// in exactly the place javaPrimElemLit renders per instance. That the validator
-// lets it through is generator#484, and out of this backend's hands; that the
-// backend must not mis-spell whatever it is handed is this test.
+// The spelling that carries it is an ARRAY element. Until generator#484,
+// internal/parser/validate.go's checkArrayElem accepted ANY string for a `u64`
+// element with no format check at all, so "010" was schema-legal in exactly the
+// place javaPrimElemLit renders per instance. #484 gave that arm the field-level
+// rule, so this definition no longer validates -- which is why the test builds it
+// through genJavaFromYAMLNoValidate. The renderer is kept honest all the same:
+// this is defence in depth behind the validator, not a reachable shape.
 //
 // Echoing the text there would have been a silent value change, and #479 nearly
 // was one: Long.parseUnsignedLong("010") is 10, while `010L` is 8 to javac
@@ -2230,7 +2264,7 @@ messages:
       arr: { id: 0, type: array, items: { type: u64, count: 3 }, default: ["010", "09", 1] }
 `
 	var out string
-	for p, c := range genJavaFromYAML(t, src, map[string]any{"package": "messages"}) {
+	for p, c := range genJavaFromYAMLNoValidate(t, src, map[string]any{"package": "messages"}) {
 		if strings.HasSuffix(p, "Oct.java") {
 			out = c
 		}

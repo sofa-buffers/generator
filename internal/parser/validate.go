@@ -289,6 +289,10 @@ func (v *validator) checkScalarDefault(f map[string]any, loc, typ string) {
 	if !ok {
 		return
 	}
+	if msg, bad := integralFloatVerdict(d, "default"); bad {
+		v.add(loc+"/default", "%s", msg)
+		return
+	}
 	n, ok := asInt(d)
 	if !ok {
 		v.add(loc+"/default", "default for %s must be an integer", typ)
@@ -302,38 +306,162 @@ func (v *validator) checkScalarDefault(f map[string]any, loc, typ string) {
 
 // checkInt64Range ports the int64Range custom keyword (README §8): accept an
 // integer or a decimal string, range-check exactly against the 64-bit bounds.
+// The rule itself lives in int64Verdict, which the array-element arm of
+// checkArrayElem shares so a u64 FIELD default and a u64 array ELEMENT default
+// cannot drift apart (generator#484).
 func (v *validator) checkInt64Range(f map[string]any, loc, kind string) {
 	d, ok := f["default"]
 	if !ok {
 		return
 	}
-	var big *big.Int
+	if msg := int64Verdict(d, kind, "default"); msg != "" {
+		v.add(loc+"/default", "%s", msg)
+	}
+}
+
+// int64Verdict is the one spelling-and-range rule for a u64/i64 default, shared
+// by the field-level checkInt64Range (README §8) and checkArrayElem's u64/i64 arm
+// (README §8.2). noun is the word the message uses for what was checked —
+// "default" or "element". It returns "" when the value is acceptable.
+//
+// It is deliberately the same shape as checkMaskElem, which #482 gave the
+// array-of-bitfield arm: a bitfield mask IS a u64, so a divergence between the
+// two would mean the same literal is legal for one element type and not the
+// other. What differs is only what a bitfield adds on top — its backing width —
+// and the sign, since an i64 default may be negative.
+//
+// One rule here is WIDER than what the code accepted before #484: an unquoted
+// integer past 2^63-1 (9223372036854775808 .. 18446744073709551615) now
+// validates for a u64. yaml.v3 hands such a literal over as a uint64 and the arm
+// below has a uint64 case, where the old element arm read it through asInt —
+// signed — and reported "element must be an integer". The quoted decimal string
+// remains the portable spelling and is what the corpus documents, because JSON
+// (and any other reader of the same definition) has no unsigned 64-bit number.
+//
+// Two rules here are narrower than what the code accepted before #484:
+//
+//   - A float64 is rejected in EVERY spelling, even one whose value is an exact
+//     integer. This is a spelling refusal, not a value one: the backends render a
+//     numeric default through fmt's "%v", which is %g's shortest form and flips to
+//     exponent notation at 1e6, so `default: 100000.0` renders `100000` and
+//     `default: 1000000.0` renders `1e+06` — an invisible threshold. Measured on
+//     `default: 1000000.0` for a u64, one build per target: c (`invalid suffix
+//     'ULL' on floating constant`), cpp (`unable to find numeric literal operator
+//     'operator""ULL'`), rust (`E0308: expected u64, found floating-point
+//     number`), kotlin (`unresolved reference 'uL'`), csharp (`CS1002: ; expected`
+//     — `1e+06UL` does not even lex) and typescript (`1e+06n` is a SyntaxError) do
+//     not compile; java throws NumberFormatException at class-init from
+//     `Long.parseUnsignedLong("1e+06")`; python binds a float to a field declared
+//     `int`. Only go, zig and dart render it correctly. So the shape was never
+//     portably legal, and one rule in the validator beats correcting %v in ten
+//     renderers on two paths each. yaml.v3 routes three different author mistakes
+//     into one float64, so the arm gives three diagnoses. The exact-integer one is
+//     integralFloatVerdict, which the u8..i32 and enum default and element arms
+//     share, so the refusal is the same message wherever an integer is declared.
+//   - A quoted u64 must match udecIntRe, not decIntRe. "-0" parses to a big.Int
+//     whose Sign() is 0, so a value-only check waves it straight through and the
+//     spelling reaches every backend verbatim — measured before this change on
+//     `default: "-0"` for a u64 field: `negzero: -0` into a Rust u64 (E0600:
+//     cannot apply unary operator `-`) and `-0ULL` in C++. A negative u64 is
+//     refused by SPELLING, exactly as #482 learned for a mask. The shipped JSON
+//     Schema already carried the unsigned pattern for a u64 default, so this is
+//     the Go side catching up to the documented contract rather than a new rule.
+func int64Verdict(d any, kind, noun string) string {
+	signed := kind != "u64"
+	var n *big.Int
 	switch x := d.(type) {
 	case string:
-		if !decIntRe.MatchString(x) {
-			v.add(loc+"/default", "default string %q is not a valid integer literal", x)
-			return
+		switch {
+		case udecIntRe.MatchString(x):
+			n = mustBig(x)
+		case signed && decIntRe.MatchString(x):
+			n = mustBig(x)
+		case decIntRe.MatchString(x):
+			// Decimal, but signed, and kind is u64. "-0" lands here too and has to:
+			// its VALUE is zero, so the range check below would never fire for it.
+			return fmt.Sprintf("%s %q must not be negative (%s is unsigned)", noun, x, kind)
+		default:
+			return fmt.Sprintf("%s %q is not a decimal integer literal (%s)",
+				noun, x, quotedIntHint(kind, signed, x))
 		}
-		big = mustBig(x)
 	case int:
-		big = int64ToBig(int64(x))
+		n = int64ToBig(int64(x))
 	case int64:
-		big = int64ToBig(x)
+		n = int64ToBig(x)
 	case uint64:
-		big = uint64ToBig(x)
+		n = uint64ToBig(x)
 	case float64:
-		if x != math.Trunc(x) || !isSafeInteger(x) {
-			v.add(loc+"/default", "default %v is not an exact integer; quote it as a string for exact 64-bit values", x)
-			return
+		switch {
+		case x != math.Trunc(x):
+			return fmt.Sprintf("%s %v must be an integer, not a fractional number", noun, x)
+		case !isSafeInteger(x):
+			// The author DID write an integer (18446744073709551616, say); it is
+			// only past the range a number carries exactly. Quoting is the route
+			// that then reports the real 64-bit verdict, so say that rather than
+			// "write the integer" — they already did.
+			return fmt.Sprintf("%s %v is not an exact integer; quote it as a decimal string for exact 64-bit values", noun, x)
+		default:
+			// An exact integer spelled as a number, e.g. 1000000.0 or 1e6. Refused
+			// for its spelling; the message names the integer to write instead. The
+			// same refusal, from the same helper, guards every other integer default
+			// in the schema — see integralFloatVerdict.
+			msg, _ := integralFloatVerdict(x, noun)
+			return msg
 		}
-		big = int64ToBig(int64(x))
 	default:
-		v.add(loc+"/default", "default for %s must be an integer or a quoted integer string", kind)
-		return
+		return fmt.Sprintf("%s must be an integer or a quoted decimal integer string (%s)", noun, kind)
 	}
-	if !in64Range(big, kind) {
-		v.add(loc+"/default", "default %s out of exact %s range", big.String(), kind)
+	if !signed && n.Sign() < 0 {
+		// Reached only from the NUMBER spellings above: a quoted "-1" was already
+		// refused by udecIntRe. Without this the verdict would be the range one,
+		// and "out of exact u64 range" is the wrong diagnosis for -1 — it is
+		// refused for its sign, not its width, and the author has to be told to
+		// drop the minus. checkMaskElem says the same thing for the same value.
+		return fmt.Sprintf("%s %s must not be negative (%s is unsigned)", noun, n.String(), kind)
 	}
+	if !in64Range(n, kind) {
+		return fmt.Sprintf("%s %s out of exact %s range", noun, n.String(), kind)
+	}
+	return ""
+}
+
+// integralFloatVerdict refuses an integer default that was written as a NUMBER
+// with a decimal point or an exponent — 1000000.0, 1e6 — and names the integer to
+// write instead. It reports false, with no message, for anything that is not such
+// a value: a non-float, a fractional float, or one past the double-safe range,
+// each of which the caller's own arm already has a verdict for.
+//
+// It is a SPELLING refusal, not a value one, and it is why it has to be shared.
+// Every backend renders a numeric default through fmt's "%v", which is %g's
+// shortest form and flips to exponent notation at 1e6, so `default: 100000.0`
+// renders `100000` and works everywhere while `default: 1000000.0` renders
+// `1e+06` and does not — an invisible threshold no schema keyword names. Measured
+// on this tree for `default: 1000000.0` on a u32 and on an array-of-u32 element:
+// c `.a = 1e+06`, rust `a: 1e+06` into a u32 (E0308), java `new int[]{1e+06}`
+// (incompatible types), and the same shape in the other eight. #482 chose this
+// refusal for a bitfield mask and #484 for a u64/i64; the narrow and enum sites
+// are the rest of the family, so that the SAME literal cannot be illegal for one
+// integer type and legal-but-uncompilable for the one declared next to it. Every
+// place an integer default can be written goes through here:
+//
+//   - checkScalarDefault  — a u8..i32 field default
+//   - checkEnumField      — an enum field default
+//   - checkArrayElem      — a u8..i32 array element, and an enum array element
+//   - int64Verdict        — a u64/i64 field default and array element (above)
+//   - checkMaskElem       — an array-of-bitfield element mask (#482)
+//
+// The first three reach the value through asInt, which accepts an integral
+// float64; int64Verdict and checkMaskElem have float arms of their own and call
+// this one for the exact-integer case, so the sentence an author reads is the
+// same at all six and only the noun changes ("default", "element", "enum
+// default", "enum element", "element mask").
+func integralFloatVerdict(d any, noun string) (string, bool) {
+	f, ok := d.(float64)
+	if !ok || f != math.Trunc(f) || !isSafeInteger(f) {
+		return "", false
+	}
+	return fmt.Sprintf("%s %v is spelled as a decimal number; write it as the integer %s",
+		noun, f, strconv.FormatFloat(f, 'f', -1, 64)), true
 }
 
 func (v *validator) checkFloatDefault(f map[string]any, loc, typ string) {
@@ -426,6 +554,10 @@ func (v *validator) checkEnumField(f map[string]any, loc string) {
 	values := v.validateEnumDef(em, loc+"/enum")
 	// defaultMatchesEnum (README §4): presence test, not truthiness.
 	if d, ok := f["default"]; ok {
+		if msg, bad := integralFloatVerdict(d, "enum default"); bad {
+			v.add(loc+"/default", "%s", msg)
+			return
+		}
 		dn, ok := asInt(d)
 		if !ok || dn < -2147483648 || dn > 2147483647 {
 			v.add(loc+"/default", "enum default must be a signed 32-bit integer")
@@ -668,6 +800,13 @@ func (v *validator) checkArrayItems(items map[string]any, loc string) (etyp stri
 func (v *validator) checkArrayElem(etyp string, el any, enumValues []int64, bitMaxPos int64, loc string) {
 	switch etyp {
 	case "u8", "u16", "u32", "i8", "i16", "i32":
+		// The same spelling refusal the u64/i64 arm below gets from int64Verdict:
+		// asInt accepts an integral float64, and 1e+06 in a `uint32_t` initializer
+		// is not a literal any of rust, java, kotlin, csharp or cpp will take.
+		if msg, bad := integralFloatVerdict(el, "element"); bad {
+			v.add(loc, "%s", msg)
+			return
+		}
 		n, ok := asInt(el)
 		if !ok {
 			v.add(loc, "element must be an integer")
@@ -678,10 +817,13 @@ func (v *validator) checkArrayElem(etyp string, el any, enumValues []int64, bitM
 			v.add(loc, "element %d out of range for %s", n, etyp)
 		}
 	case "u64", "i64":
-		if _, ok := asInt(el); !ok {
-			if _, ok := el.(string); !ok {
-				v.add(loc, "element must be an integer")
-			}
+		// The same rule as the u64/i64 FIELD default, from the same helper: an
+		// array element and a field default are the same concept, and before #484
+		// this arm tested only "is it an int, or is it a string" -- so ANY string
+		// at all was carried into all eleven backends verbatim ("nonsense" became
+		// `nonsenseULL` in C, `vec![nonsense]` in Rust, `nonsensen` in TypeScript).
+		if msg := int64Verdict(el, etyp, "element"); msg != "" {
+			v.add(loc, "%s", msg)
 		}
 	case "fp32", "fp64":
 		if _, ok := asFloat(el); !ok {
@@ -692,6 +834,10 @@ func (v *validator) checkArrayElem(etyp string, el any, enumValues []int64, bitM
 			v.add(loc, "element must be a boolean")
 		}
 	case "enum":
+		if msg, bad := integralFloatVerdict(el, "enum element"); bad {
+			v.add(loc, "%s", msg)
+			return
+		}
 		n, ok := asInt(el)
 		if !ok {
 			v.add(loc, "enum element must be an integer")
@@ -755,6 +901,15 @@ func (v *validator) checkArrayElem(etyp string, el any, enumValues []int64, bitM
 // each one only ORs declared positions together when it builds a default — the
 // wire carries the whole unsigned value, and an undeclared bit is exactly how a
 // peer built from a newer schema carries a flag this one does not declare yet.
+//
+// It stays a separate function from int64Verdict, which #484 gave the u64/i64
+// element and field arms, rather than calling it: the two agree line for line on
+// the spelling and the sign, but every message here names an "element mask" and
+// the width bound above has no counterpart there. The parallel is deliberate and
+// both doc comments say so — a change to one belongs in the other. The one line
+// they do share outright is the exact-valued-float sentence, which comes from
+// integralFloatVerdict; that one guards every integer default in the schema, not
+// just the 64-bit ones, so it could not stay duplicated here.
 func (v *validator) checkMaskElem(el any, maxPos int64, loc string) {
 	var n *big.Int
 	switch x := el.(type) {
@@ -797,8 +952,12 @@ func (v *validator) checkMaskElem(el any, maxPos int64, loc string) {
 			// An exact integer spelled as a number, e.g. 1000000.0 or 1e6. Rejected
 			// for its spelling, not its value: every backend renders a numeric
 			// default through fmt's "%v", which puts `1e+06` in a uint64_t
-			// initializer, so the message names the integer to write instead.
-			v.add(loc, "element mask %v is spelled as a decimal number; write it as the integer %s", x, strconv.FormatFloat(x, 'f', -1, 64))
+			// initializer, so the message names the integer to write instead. The
+			// sentence is integralFloatVerdict's, shared with every other integer
+			// default in the schema so the same mistake reads the same way; only the
+			// noun is this arm's.
+			msg, _ := integralFloatVerdict(x, "element mask")
+			v.add(loc, "%s", msg)
 		}
 		return
 	default:
@@ -843,15 +1002,25 @@ func maskWidthBits(maxPos int64) int {
 	}
 }
 
-// maskSpellingHint explains why a quoted mask was refused. A radix spelling and a
-// stray decimal one need different advice: "0x10" should be written unquoted and
-// let YAML convert it, while "0000000005" is already decimal and only has to lose
-// its leading zeros — pointing that author at hex would send them the wrong way.
-func maskSpellingHint(s string) string {
+// maskSpellingHint explains why a quoted mask was refused (#482). A mask is an
+// unsigned value, so it takes quotedIntHint's unsigned wording.
+func maskSpellingHint(s string) string { return quotedIntHint("mask", false, s) }
+
+// quotedIntHint explains why a quoted integer literal was refused. A radix
+// spelling and a stray decimal one need different advice: "0x10" should be
+// written unquoted and let YAML convert it, while "0000000005" is already decimal
+// and only has to lose its leading zeros — pointing that author at hex would send
+// them the wrong way. what names the thing in the author's own words ("mask",
+// "u64", "i64"); signed says whether a leading "-" is part of the accepted
+// spelling, which is the one place a u64 and an i64 differ.
+func quotedIntHint(what string, signed bool, s string) string {
 	if looksRadixSpelled(s) {
-		return "a quoted mask must be decimal; write hex unquoted, e.g. 0x10, and YAML converts it"
+		return "a quoted " + what + " must be decimal; write hex unquoted, e.g. 0x10, and YAML converts it"
 	}
-	return "a quoted mask must be a plain decimal integer: no leading zeros, no sign, no spacing"
+	if signed {
+		return "a quoted " + what + " must be a plain decimal integer: an optional leading \"-\", no leading zeros, no spacing"
+	}
+	return "a quoted " + what + " must be a plain decimal integer: no leading zeros, no sign, no spacing"
 }
 
 // looksRadixSpelled reports whether a rejected quoted mask reads as a non-decimal

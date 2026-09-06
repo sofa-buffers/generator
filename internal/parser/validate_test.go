@@ -187,6 +187,137 @@ func TestNegativeCases(t *testing.T) {
 			src:    "version: 1\nmessages:\n  M:\n    payload:\n      a: {id: 0, type: array, items: {type: bitfield, count: 2, bits: {LOW: {pos: 0}}}, default: [true]}\n",
 			expect: "element must be an integer mask or a quoted decimal integer string",
 		},
+		// generator#484: the u64/i64 arm of checkArrayElem used to accept ANY
+		// string, and checkInt64Range accepted an exact-valued float. Both now
+		// run int64Verdict, so a field default and an array element agree.
+		{
+			name:   "array-of-u64 non-decimal element string",
+			src:    "version: 1\nmessages:\n  M:\n    payload:\n      a: {id: 0, type: array, items: {type: u64, count: 2}, default: [\"nonsense\"]}\n",
+			expect: "element \"nonsense\" is not a decimal integer literal",
+		},
+		{
+			name:   "array-of-u64 empty element string",
+			src:    "version: 1\nmessages:\n  M:\n    payload:\n      a: {id: 0, type: array, items: {type: u64, count: 2}, default: [\"\"]}\n",
+			expect: "no leading zeros, no sign, no spacing",
+		},
+		{
+			name:   "array-of-u64 quoted hex element",
+			src:    "version: 1\nmessages:\n  M:\n    payload:\n      a: {id: 0, type: array, items: {type: u64, count: 2}, default: [\"0x10\"]}\n",
+			expect: "write hex unquoted, e.g. 0x10, and YAML converts it",
+		},
+		{
+			name:   "array-of-u64 quoted element past 64 bits",
+			src:    "version: 1\nmessages:\n  M:\n    payload:\n      a: {id: 0, type: array, items: {type: u64, count: 2}, default: [\"18446744073709551616\"]}\n",
+			expect: "element 18446744073709551616 out of exact u64 range",
+		},
+		{
+			// Refused for its SIGN, not its width: "out of exact u64 range" would
+			// send the author looking for a smaller number instead of telling them
+			// to drop the minus. checkMaskElem says the same for the same -1.
+			name:   "array-of-u64 negative element",
+			src:    "version: 1\nmessages:\n  M:\n    payload:\n      a: {id: 0, type: array, items: {type: u64, count: 2}, default: [-1]}\n",
+			expect: "element -1 must not be negative (u64 is unsigned)",
+		},
+		{
+			name:   "u64 default, unquoted negative",
+			src:    "version: 1\nmessages:\n  M:\n    payload:\n      a: {id: 0, type: u64, default: -1}\n",
+			expect: "default -1 must not be negative (u64 is unsigned)",
+		},
+		{
+			// The shape a sign check on the VALUE misses, as in the bitfield twin.
+			name:   "array-of-u64 negative-zero element",
+			src:    "version: 1\nmessages:\n  M:\n    payload:\n      a: {id: 0, type: array, items: {type: u64, count: 2}, default: [\"-0\"]}\n",
+			expect: "element \"-0\" must not be negative (u64 is unsigned)",
+		},
+		{
+			// Exact as a value, wrong as a spelling: "%v" writes it 1e+06.
+			name:   "array-of-u64 exact-valued float element",
+			src:    "version: 1\nmessages:\n  M:\n    payload:\n      a: {id: 0, type: array, items: {type: u64, count: 2}, default: [1000000.0]}\n",
+			expect: "write it as the integer 1000000",
+		},
+		{
+			name:   "array-of-u64 fractional element",
+			src:    "version: 1\nmessages:\n  M:\n    payload:\n      a: {id: 0, type: array, items: {type: u64, count: 2}, default: [3.5]}\n",
+			expect: "must be an integer, not a fractional number",
+		},
+		{
+			// The one arm that used to drop the declared type from the message.
+			name:   "array-of-u64 boolean element",
+			src:    "version: 1\nmessages:\n  M:\n    payload:\n      a: {id: 0, type: array, items: {type: u64, count: 2}, default: [true]}\n",
+			expect: "element must be an integer or a quoted decimal integer string (u64)",
+		},
+		{
+			name:   "i64 boolean default",
+			src:    "version: 1\nmessages:\n  M:\n    payload:\n      a: {id: 0, type: i64, default: true}\n",
+			expect: "default must be an integer or a quoted decimal integer string (i64)",
+		},
+		{
+			// A leading zero is what javac would have read as octal (#479); the
+			// i64 hint says "-" is allowed, where the u64 one says no sign at all.
+			name:   "array-of-i64 element with leading zeros",
+			src:    "version: 1\nmessages:\n  M:\n    payload:\n      a: {id: 0, type: array, items: {type: i64, count: 2}, default: [\"010\"]}\n",
+			expect: "an optional leading \"-\", no leading zeros, no spacing",
+		},
+		{
+			name:   "array-of-i64 element past 64 bits",
+			src:    "version: 1\nmessages:\n  M:\n    payload:\n      a: {id: 0, type: array, items: {type: i64, count: 2}, default: [\"9223372036854775808\"]}\n",
+			expect: "element 9223372036854775808 out of exact i64 range",
+		},
+		// The same rule, at the FIELD level, where checkInt64Range now shares it.
+		{
+			name:   "u64 default spelled as a float",
+			src:    "version: 1\nmessages:\n  M:\n    payload:\n      a: {id: 0, type: u64, default: 1000000.0}\n",
+			expect: "default 1e+06 is spelled as a decimal number; write it as the integer 1000000",
+		},
+		{
+			name:   "u64 default \"-0\"",
+			src:    "version: 1\nmessages:\n  M:\n    payload:\n      a: {id: 0, type: u64, default: \"-0\"}\n",
+			expect: "default \"-0\" must not be negative (u64 is unsigned)",
+		},
+		{
+			name:   "i64 default with a quoted radix spelling",
+			src:    "version: 1\nmessages:\n  M:\n    payload:\n      a: {id: 0, type: i64, default: \"0xff\"}\n",
+			expect: "write hex unquoted, e.g. 0x10, and YAML converts it",
+		},
+		// The same spelling refusal on every OTHER integer default in the schema.
+		// Before this change these four validated and rendered `1e+06` into a
+		// 32-bit member, which rust, java, kotlin, csharp and cpp all reject;
+		// leaving them out would have made the identical literal illegal for a u64
+		// and legal-but-uncompilable for the u32 declared next to it.
+		{
+			name:   "u32 default spelled as a float",
+			src:    "version: 1\nmessages:\n  M:\n    payload:\n      a: {id: 0, type: u32, default: 1000000.0}\n",
+			expect: "default 1e+06 is spelled as a decimal number; write it as the integer 1000000",
+		},
+		{
+			name:   "array-of-u32 exact-valued float element",
+			src:    "version: 1\nmessages:\n  M:\n    payload:\n      a: {id: 0, type: array, items: {type: u32, count: 2}, default: [1000000.0]}\n",
+			expect: "element 1e+06 is spelled as a decimal number; write it as the integer 1000000",
+		},
+		{
+			name:   "enum default spelled as a float",
+			src:    "version: 1\nmessages:\n  M:\n    payload:\n      a: {id: 0, type: enum, enum: {LOW: 0, HIGH: 1000000}, default: 1000000.0}\n",
+			expect: "enum default 1e+06 is spelled as a decimal number; write it as the integer 1000000",
+		},
+		{
+			name:   "array-of-enum exact-valued float element",
+			src:    "version: 1\nmessages:\n  M:\n    payload:\n      a: {id: 0, type: array, items: {type: enum, count: 2, enum: {LOW: 0, HIGH: 1000000}}, default: [1000000.0]}\n",
+			expect: "enum element 1e+06 is spelled as a decimal number; write it as the integer 1000000",
+		},
+		{
+			// An i32 default BELOW the 1e6 threshold renders correctly today, and
+			// is refused all the same: the threshold is invisible in the schema.
+			name:   "i32 default spelled as a float below the exponent threshold",
+			src:    "version: 1\nmessages:\n  M:\n    payload:\n      a: {id: 0, type: i32, default: 5.0}\n",
+			expect: "default 5 is spelled as a decimal number; write it as the integer 5",
+		},
+		{
+			// Unchanged by this rule: a fractional or oversize float keeps the
+			// verdict it always had, since neither is an integer written wrong.
+			name:   "u32 fractional default",
+			src:    "version: 1\nmessages:\n  M:\n    payload:\n      a: {id: 0, type: u32, default: 3.5}\n",
+			expect: "default for u32 must be an integer",
+		},
 		{
 			name:   "struct array element missing fields",
 			src:    "version: 1\nmessages:\n  M:\n    payload:\n      a: {id: 0, type: array, items: {type: struct, count: 2}}\n",
@@ -243,6 +374,41 @@ func TestNarrowBitfieldArrayElementFillsItsBacking(t *testing.T) {
 		"      a: {id: 0, type: array, items: {type: bitfield, count: 2, bits: {A: {pos: 0}, C: {pos: 2}}}, default: [5, 255]}\n"
 	if errs := validateString(t, src); errs != nil {
 		t.Fatalf("a mask filling the 8-bit backing should validate, got:\n%s", errs.Error())
+	}
+}
+
+// TestU64ArrayElementSpellingsAccepted is the other half of the #484 rule: every
+// way an author reasonably writes a u64 array default still validates. A plain
+// integer, an unquoted YAML hex integer (YAML has converted it to an integer
+// before the validator sees it, which is why no hex STRING is needed), a value at
+// 2^63 that a signed 64-bit type could not hold, and a quoted decimal string for
+// the exact top of the unsigned range — the only spelling any reader of the same
+// definition can carry past 2^63-1, since JSON has no unsigned 64-bit number.
+//
+// The unquoted 9223372036854775808 is the one shape #484 WIDENED rather than
+// narrowed. yaml.v3 hands a literal past 2^63-1 over as a uint64, which
+// int64Verdict reads; the element arm before it went through asInt — signed — and
+// reported "element must be an integer". The FIELD default already accepted it,
+// so this is the element arm catching up rather than a new spelling; the corpus
+// carries it as arrays.yaml's `wide_unquoted` so a backend has to compile it.
+func TestU64ArrayElementSpellingsAccepted(t *testing.T) {
+	src := "version: 1\nmessages:\n  M:\n    payload:\n" +
+		"      a: {id: 0, type: array, items: {type: u64, count: 5}, " +
+		"default: [0, 1, 0x10, 9223372036854775808, \"18446744073709551615\"]}\n"
+	if errs := validateString(t, src); errs != nil {
+		t.Fatalf("every legal u64 element spelling should validate, got:\n%s", errs.Error())
+	}
+}
+
+// The signed twin. An i64 element may be negative in either spelling, and "-0" is
+// a legal signed decimal (decIntRe accepts it, and so does the shipped schema's
+// i64 pattern) — the sign is only refused where the type is unsigned.
+func TestI64ArrayElementSpellingsAccepted(t *testing.T) {
+	src := "version: 1\nmessages:\n  M:\n    payload:\n" +
+		"      a: {id: 0, type: array, items: {type: i64, count: 5}, " +
+		"default: [-1, 0, \"-0\", \"-9223372036854775808\", \"9223372036854775807\"]}\n"
+	if errs := validateString(t, src); errs != nil {
+		t.Fatalf("every legal i64 element spelling should validate, got:\n%s", errs.Error())
 	}
 }
 

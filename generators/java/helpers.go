@@ -529,24 +529,28 @@ func javaMaskLit(bits uint64) string {
 //
 // The decimal is RE-RENDERED from the parsed value (strconv.FormatUint), never
 // echoed as the schema's raw text, and that is load-bearing rather than tidiness:
-// Java reads a leading-zero integer literal as OCTAL. An array element may reach
-// here as "010" -- internal/parser/validate.go's checkArrayElem accepts any string
-// for a u64 element with no format check, unlike the scalar path, where
-// checkInt64Range's decIntRe rejects it -- and `010L` is 8 to javac, while `09L`
-// is not a legal literal at all. Long.parseUnsignedLong("010") was 10, so echoing
-// the text here would be a silent value change at the omission compare, isDefault
-// and reset. FormatUint is free for every other input: `42` is still `42L`.
+// Java reads a leading-zero integer literal as OCTAL, and `010L` is 8 to javac
+// while `09L` is not a legal literal at all; Long.parseUnsignedLong("010") is 10,
+// so echoing the schema's text would be a silent value change at the omission
+// compare, isDefault and reset. FormatUint is free for every other input: `42` is
+// still `42L`.
 //
-// A default that is not a decimal integer at all falls back to the old parse
-// rather than inventing a literal, and it is reachable: the validator ACCEPTS an
-// integral float64 in the double-safe range, so `default: 1e10` on a u64 arrives
-// as "1e+10" (scalarLit's %v) and the emitted
-// `Long.parseUnsignedLong("1e+10")` compiles and then throws
-// NumberFormatException in the constructor. That is pre-existing, family-wide
-// (the same schema gives cpp `std::uint64_t expo = 1e+10ULL;`, which does not
-// compile) and belongs in the parser/IR, not here: it is not this function's
-// business to decide what a valid default is. Both halves -- the unchecked
-// element string and the float spelling -- are generator#484.
+// Nothing VALIDATED can hand this function a non-decimal spelling any more.
+// generator#484 closed both routes: checkArrayElem's u64/i64 arm used to accept
+// any string at all with no format check (that is how "010" reached here, where
+// the scalar path's decIntRe had always rejected it), and the validator used to
+// accept an integral float64, so `default: 1e10` on a u64 arrived as "1e+10" from
+// scalarLit's %v and the emitted `Long.parseUnsignedLong("1e+10")` compiled and
+// then threw NumberFormatException in the constructor. Both are now refused in
+// internal/parser, which is where deciding what a valid default is belongs -- it
+// was never this function's business, and the same schema used to give cpp
+// `std::uint64_t expo = 1e+10ULL;`, which does not compile either.
+//
+// The fallback to `Long.parseUnsignedLong(<raw>)` stays all the same, and the
+// test that pins it now builds its IR through a validation-skipping helper. It is
+// what keeps this function from inventing a literal for text it cannot parse, and
+// it is the guard that made the "010" defect a wrong VALUE rather than a build
+// failure for however long the validator was letting it through.
 func javaU64Lit(dec string) string {
 	lit, _ := javaU64Spelling(dec)
 	return lit

@@ -10,7 +10,8 @@ Corner-case SofaBuffers definitions, exercised hermetically by `tests/matrix`
   array-of-blob) — including a `u64` array whose element defaults run past
   2^63-1, the only element default that does not fit the **signed** 64-bit
   carrier some targets back a `u64` with, and which each backend therefore has
-  to re-spell inside a per-instance array initializer — wrapper-sequence
+  to re-spell inside a per-instance array initializer, in both the quoted
+  spelling and the unquoted one generator#484 made reachable — wrapper-sequence
   **elements** in fixed/dynamic pairs
   (`seq_elements.yaml`), nested wrapper **rows** at depth 2 and 3 with their
   native-row control (`nested_rows.yaml`), enums (shorthand + object form,
@@ -25,7 +26,14 @@ Corner-case SofaBuffers definitions, exercised hermetically by `tests/matrix`
   pos collision, blob/string default over `maxlen`, oversize/negative u64,
   array default-count mismatch, every misspelling of an array-of-bitfield
   element mask — negative, the quoted `-0` whose *value* is zero, fractional,
-  quoted hex, past 64 bits, past the bitfield's own backing width — unknown
+  quoted hex, past 64 bits, past the bitfield's own backing width — the same
+  misspellings of a `u64`/`i64` **array element** and of the `u64` field
+  `default` they share a rule with (a non-decimal or hex string, past 64 bits,
+  negative, the quoted `-0`, an exact-valued float that would render `1e+06`,
+  and a leading zero javac would read as octal), the same
+  exact-valued float on a `u32` and on an `enum` — field `default` and array
+  element alike, the sites that share the spelling refusal without sharing the
+  64-bit range check, unknown
   keys, bad names, `decimals` > 15,
   `items.maxlen` on a numeric array, array-of-struct, recursive `$ref`, a
   cross-file `$ref` to a missing definition, …).
