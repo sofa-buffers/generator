@@ -246,15 +246,14 @@ func (g *gen) header(m *ir.Message) []byte {
 	f.line("#include <cstdint>")
 	f.line("#include <string>")
 	f.line("#include <vector>")
-	f.line("#include <array>")
 	// <span> backs the encodeTo sink lambda emitted for an unbounded schema
 	// (`std::span<const std::uint8_t> chunk`); <cstddef> backs the std::size_t in
-	// every emitted signature. <cstring> is a leftover -- no generated C++ calls
-	// into it -- as is <array> above, since no member is a std::array any more
-	// (`count` is a capacity, §3). Both are tracked as a follow-up rather than
-	// dropped here.
+	// every emitted signature. <array> and <cstring> used to sit here and backed
+	// nothing: no member has been a std::array since `count` became a capacity
+	// (§3), and nothing emitted calls memcpy/memset (generator#504). The c and cpp
+	// suites compile every corpus definition under -Werror (generator#480), so a
+	// header this list stops naming is one the corpus proves is not needed.
 	f.line("#include <span>")
-	f.line("#include <cstring>")
 	f.line("#include <cstddef>")
 	f.line("#include %q", "sofab/sofab.hpp")
 	f.blank()
