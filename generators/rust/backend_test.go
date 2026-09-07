@@ -1700,6 +1700,110 @@ func TestRustDeclaredWidthIsAValidityBound(t *testing.T) {
 	}
 }
 
+// enumBitfieldElemSrc pairs an enum and a bitfield ARRAY element with the plain
+// narrow element that always carried the guard, so the three are read side by
+// side. Both named types are deliberately narrow — an enum over 0..2 backs onto
+// `i8`, a bitfield declaring pos 0 and 2 onto `u8` — because the backing is what
+// the store's `as` cast masks to.
+const enumBitfieldElemSrc = `
+version: 1
+messages:
+  r:
+    payload:
+      es: { id: 0, type: array, items: { type: enum, count: 4, enum: { RED: 0, GREEN: 1, BLUE: 2 } } }
+      bs: { id: 1, type: array, items: { type: bitfield, count: 4, bits: { A: { pos: 0 }, C: { pos: 2 } } } }
+      u1: { id: 3, type: array, items: { type: u8, count: 4 } }
+      nes: { id: 6, type: array, items: { type: array, count: 4, items: { type: enum, count: 4, enum: { RED: 0, GREEN: 1, BLUE: 2 } } } }
+      nbs: { id: 7, type: array, items: { type: array, count: 4, items: { type: bitfield, count: 4, bits: { A: { pos: 0 }, C: { pos: 2 } } } } }
+      w64: { id: 8, type: array, items: { type: bitfield, count: 4, bits: { A: { pos: 0 }, Z: { pos: 63 } } } }
+`
+
+// generator#513: an ARRAY element declared `enum` or `bitfield` got no §7.1
+// width guard at all. ir.NarrowRange keys off the Kind alone and returns !ok for
+// both, so widthCond produced the empty string and the store was emitted bare —
+// a wire element of 1000 was masked by the `as` cast into `es: [-24]` /
+// `bs: [232]` and the message decoded Ok, where the u8 element beside it is
+// InvalidMsg.
+//
+// The bound is the REPR the element is stored in (enumBackingKind /
+// bitfieldBackingKind), not the set of declared names: an undeclared enum
+// constant or an undeclared bit that FITS is a flag a peer built from a newer
+// schema carries and is kept (generator#482 settled that half for the bitfield,
+// and corelib-cpp already enforces this same width on this same element through
+// `ElemBound::of<bitfieldBacking>()`).
+func TestRustEnumAndBitfieldArrayElementsCarryTheWidthGuard(t *testing.T) {
+	// The two corelibs spell the push differently -- heapless returns a Result the
+	// no_std store discards -- so the store half is per-corelib; the guard half,
+	// which is what this test is about, is identical for both.
+	for _, c := range []struct{ corelib, es, bs, u1, w64 string }{
+		{"rs", "self.m.es.push(value as i8);", "self.m.bs.push(value as u8);", "self.m.u1.push(value as u8);", "self.m.w64.push(value as u64);"},
+		{"rs-no-std", "{ let _ = self.m.es.push(value as i8); };", "{ let _ = self.m.bs.push(value as u8); };", "{ let _ = self.m.u1.push(value as u8); };", "{ let _ = self.m.w64.push(value as u64); };"},
+	} {
+		got := moduleFromYAML(t, enumBitfieldElemSrc, map[string]any{"corelib": c.corelib})
+		const fill = "if self.afill == 0 { return; } self.afill -= 1; "
+		const i8Rej = "if value < -128 || value > 127 { self.inv = true; self.afill = 0; return; } "
+		const u8Rej = "if value > 255 { self.inv = true; self.afill = 0; return; } "
+		for _, want := range []string{
+			// The enum element: backed by i8, so both ends of that range bind, and
+			// the reject DISARMS the fill (generator#508) like every other element
+			// reject -- the guard sits behind fillGuard so a bare scalar at an array
+			// id stays a §7.3 skip.
+			fill + i8Rej + c.es,
+			// The bitfield element: unsigned, so only the top binds. Same clause the
+			// u8 element beside it has always had.
+			fill + u8Rej + c.bs,
+			fill + u8Rej + c.u1,
+			// A nested-native ROW element is the same element one level down and
+			// takes the same clause.
+			"self.afill -= 1; " + i8Rej + "if let Some(_r) = self.m.nes.get_mut(self._ix0)",
+			"self.afill -= 1; " + u8Rej + "if let Some(_r) = self.m.nbs.get_mut(self._ix1)",
+		} {
+			if !strings.Contains(got, want) {
+				t.Errorf("[%s] message.rs missing element width guard %q:\n%s", c.corelib, want, got)
+			}
+		}
+		// A bitfield declaring pos 63 backs onto u64, whose range IS the
+		// accumulator the value arrives in -- so it gets no comparison, exactly as
+		// a u64 element gets none. A guard there would be dead code.
+		if !strings.Contains(got, fill+c.w64) {
+			t.Errorf("[%s] a u64-backed bitfield element must store unguarded:\n%s", c.corelib, got)
+		}
+	}
+}
+
+// The width the guard compares against and the width the member is declared with
+// have to be the SAME number: a guard that admitted a value the member cannot
+// hold would leave the `as` cast masking again, one range further out. Both come
+// from enumBackingKind/bitfieldBackingKind, and this pins that they still agree
+// for each backing step the two functions can choose.
+func TestRustElementWidthGuardMatchesTheDeclaredBacking(t *testing.T) {
+	const src = `
+version: 1
+messages:
+  r:
+    payload:
+      e8:  { id: 0, type: array, items: { type: enum, count: 2, enum: { A: 0, B: 127 } } }
+      e16: { id: 1, type: array, items: { type: enum, count: 2, enum: { A: 0, B: 128 } } }
+      e32: { id: 2, type: array, items: { type: enum, count: 2, enum: { A: 0, B: 32768 } } }
+      b8:  { id: 3, type: array, items: { type: bitfield, count: 2, bits: { A: { pos: 7 } } } }
+      b16: { id: 4, type: array, items: { type: bitfield, count: 2, bits: { A: { pos: 8 } } } }
+      b32: { id: 5, type: array, items: { type: bitfield, count: 2, bits: { A: { pos: 16 } } } }
+`
+	got := moduleFromYAML(t, src, map[string]any{"corelib": "rs"})
+	for _, want := range []string{
+		"if value < -128 || value > 127 { self.inv = true; self.afill = 0; return; } self.m.e8.push(value as i8);",
+		"if value < -32768 || value > 32767 { self.inv = true; self.afill = 0; return; } self.m.e16.push(value as i16);",
+		"if value < -2147483648 || value > 2147483647 { self.inv = true; self.afill = 0; return; } self.m.e32.push(value as i32);",
+		"if value > 255 { self.inv = true; self.afill = 0; return; } self.m.b8.push(value as u8);",
+		"if value > 65535 { self.inv = true; self.afill = 0; return; } self.m.b16.push(value as u16);",
+		"if value > 4294967295 { self.inv = true; self.afill = 0; return; } self.m.b32.push(value as u32);",
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("message.rs missing %q:\n%s", want, got)
+		}
+	}
+}
+
 // generator#270 (Crucible F-0045) and generator#271 (F-0046) are one slip seen
 // from two sides: array_begin keyed its arms on the kind FAMILY
 // (`ArrayKind::Unsigned | ArrayKind::Signed` in a single arm) and applied the

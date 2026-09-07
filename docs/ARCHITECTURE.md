@@ -1719,15 +1719,34 @@ beside the `count`, wrapper-element-id and `maxlen` guards already there.
   point and already answers `INVALID`; adding a second guard would only duplicate
   it. This is the one decode verdict where the footprint pair led and the other
   eleven profiles followed.
-- **Enums and bitfields are out of scope.** Their backing width is a property of
-  the named type, not of the field, and an out-of-range *enum* value is a
-  different question (unknown-variant handling) from an over-width integer.
-  Kotlin is the one target where the enum question answers itself and so is
-  covered: it stores an enum as an `Int`, which IS the signed 32-bit range
-  MESSAGE_SPEC §1 binds an enum to, so the bound and the storage are the same
-  fact and letting an out-of-range value through would be the silent truncation
-  §7.1 rules out. Its bitfield is a `ULong`, i.e. the whole unsigned domain, so
-  there is nothing to guard.
+- **Enums and bitfields sit outside `ir.NarrowRange`, and that is not the same as
+  outside the bound.** Their width is a property of the NAMED TYPE, not of the
+  Kind, so `NarrowRange` — which takes a Kind alone — answers `!ok` for both and a
+  backend that asks it and stops emits a bare store. Where the target narrows the
+  storage, that bare store is the mask §7.1 forbids: a rust enum over `0..2` backs
+  onto `i8`, so a wire element of `1000` came back as `-24` with the verdict `Ok`
+  (generator#513). The width is still knowable — it is the backing each backend
+  already derives to declare the member — so the fix is to derive the bound from
+  the same function that picks the storage, and the two then cannot drift.
+  - **The bound is the repr, never the set of declared names.** An enum constant
+    or a bit position this schema does not declare, but the repr holds, is how a
+    peer built from a NEWER schema carries what this one has not got yet, and is
+    KEPT. That is settled for the bitfield — generator#482 accepts an undeclared
+    bit inside the width, and `internal/parser.checkMaskElem` says the same of an
+    authored mask — and §7.1 binds only what does not FIT, so the enum follows it.
+    The value-set test in `checkArrayElem` binds an AUTHOR writing a default into
+    this schema; a value arriving from a peer is a different question.
+  - **Where it is enforced today.** `cpp` has always bounded the bitfield ARRAY
+    element, in the corelib, through `ElemBound::of<bitfieldBacking>()`
+    (`cppElemBound`); `rust` bounds both kinds at the array element, direct and
+    nested-row, through `elemWidthCond` (generator#513). Kotlin covers the enum at
+    every position for free: it stores one as an `Int`, which IS the signed 32-bit
+    range MESSAGE_SPEC §1 binds an enum to, so the bound and the storage are one
+    fact; its bitfield is a `ULong`, the whole unsigned domain, with nothing to
+    guard. The SCALAR position and the remaining eight targets are still bare, and
+    a target that stores both kinds at full width (java `long`, python `int`,
+    typescript/dart `number`/`int`) truncates nothing and so loses no value —
+    it just does not report the verdict.
 - **`cpp` needed a different shape from the rest.** corelib-cpp's typed `read()`
   ends in `value = static_cast<T>(raw)` — the mask itself, applied where
   generated code cannot see the raw value. A narrow destination therefore reads

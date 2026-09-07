@@ -1114,7 +1114,7 @@ func (g *gen) emitVisitor(f *rfile, name string, fields []*ir.Field) {
 			if g.limits.arrayHas && fr.elemDyn {
 				store = g.limArrayStore(store)
 			}
-			f.line("            (_Loc::%s, _) => { %s%s%s; },", fr.loc, fillGuard, arrayWidthGuard(fr.elemKind), store)
+			f.line("            (_Loc::%s, _) => { %s%s%s; },", fr.loc, fillGuard, arrayWidthGuard(fr.elemKind, fr.elemRef), store)
 		}
 	}
 	f.line("            _ => {}")
@@ -1153,7 +1153,7 @@ func (g *gen) emitVisitor(f *rfile, name string, fields []*ir.Field) {
 			if g.limits.arrayHas && fr.elemDyn {
 				store = g.limArrayStore(store)
 			}
-			f.line("            (_Loc::%s, _) => { %s%s%s; },", fr.loc, fillGuard, arrayWidthGuard(fr.elemKind), store)
+			f.line("            (_Loc::%s, _) => { %s%s%s; },", fr.loc, fillGuard, arrayWidthGuard(fr.elemKind, fr.elemRef), store)
 		}
 	}
 	f.line("            _ => {}")
@@ -1804,7 +1804,7 @@ func (g *gen) emitNativeArrayStore(f *rfile, fr frame, fld *ir.Field, rhs string
 	// arrayWidthGuard AFTER fillGuard: an element only breaches the declared width
 	// once it is actually being stored (§7.1). Ahead of the fill check it would
 	// reject a bare scalar at an array id, which §7.3 says to skip.
-	f.line("            (_Loc::%s, %d) => { %s%s%s; },", fr.loc, fld.ID, fillGuard, arrayWidthGuard(fld.Elem), store)
+	f.line("            (_Loc::%s, %d) => { %s%s%s; },", fr.loc, fld.ID, fillGuard, arrayWidthGuard(fld.Elem, fld.ElemRef), store)
 }
 
 // fillGuard fronts every native-array fill arm (generator#188): the fill runs
@@ -1853,6 +1853,49 @@ func widthCond(k ir.Kind) string {
 	return fmt.Sprintf("value > %d", hi)
 }
 
+// elemWidthCond is widthCond over an ARRAY ELEMENT, and it answers for two kinds
+// widthCond cannot: `enum` and `bitfield`, whose declared width lives on the
+// NAMED TYPE rather than on the Kind. ir.NarrowRange takes a Kind alone, so it
+// returns !ok for both and left the element store bare — a wire element of 1000
+// was truncated by the `as` cast into `es: [-24]` / `bs: [232]` and the message
+// decoded Ok, where every other narrow element (u8..i32) is InvalidMsg
+// (generator#513).
+//
+// The bound is the REPR each kind is stored in — enumBackingKind /
+// bitfieldBackingKind, the very widths the cast masks to — not the set of names
+// the schema declares:
+//
+//   - For a bitfield this is settled: generator#482 accepts a bit at a position
+//     no flag declares as long as it fits the width, because that is how a peer
+//     built from a NEWER schema carries a flag this one has not got yet, and
+//     corelib-cpp already enforces exactly this bound on the same element
+//     through `ElemBound::of<bitfieldBacking>()` (cppElemBound). Rust matching it
+//     makes the two agree rather than inventing a second rule.
+//   - For an enum the same forward-compatibility argument applies to an
+//     undeclared constant, and MESSAGE_SPEC §7.1 binds only what does not FIT:
+//     the value-set test that internal/parser.checkArrayElem applies binds an
+//     author writing a default into THIS schema, which is a different question
+//     from a value arriving from a peer. So an in-range value naming no declared
+//     constant is kept, and only one past the repr is INVALID.
+//
+// MESSAGE_SPEC §1 puts a 32-bit signed ceiling over every enum; enumBackingKind
+// never exceeds i32, so this bound sits under that ceiling and never above it.
+func elemWidthCond(k ir.Kind, ref *ir.TypeRef) string {
+	if cond := widthCond(k); cond != "" {
+		return cond
+	}
+	if ref == nil || ref.Target == nil {
+		return ""
+	}
+	switch k {
+	case ir.KindEnum:
+		return widthCond(enumBackingKind(ref.Target))
+	case ir.KindBitfield:
+		return widthCond(bitfieldBackingKind(ref.Target))
+	}
+	return ""
+}
+
 // arrayWidthGuard is widthGuard inside a native-array FILL arm: the same §7.1
 // comparison, but the reject also disarms the fill budget (generator#508).
 //
@@ -1864,8 +1907,8 @@ func widthCond(k ir.Kind) string {
 // the receiver has already accepted — but it is the same defect one level down,
 // and it makes the array collect a tail of elements past a value that invalidated
 // it. Disarming here costs nothing: the branch already exists and already returns.
-func arrayWidthGuard(k ir.Kind) string {
-	cond := widthCond(k)
+func arrayWidthGuard(k ir.Kind, ref *ir.TypeRef) string {
+	cond := elemWidthCond(k, ref)
 	if cond == "" {
 		return ""
 	}
