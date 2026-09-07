@@ -199,40 +199,68 @@ func (g *gen) reserveArg(bound int64) string {
 	return fmt.Sprintf("count.min(%d)", g.reserveCap)
 }
 
-// rowReserve is reserveCount for a NATIVE ROW frame (fkNestedNative): the row a
-// nested array's array_begin just opened at out[id] is itself a bounded native
-// array, and its elements arrive through the same scalar callbacks.
+// rowReset opens a NATIVE ROW frame's row (fkNestedNative) for the occurrence
+// that just announced itself: the row a nested array's array_begin opened at
+// out[id] is itself a native array, and its elements arrive through the same
+// scalar callbacks. It CLEARS the row, and -- where the profile and the bound
+// allow -- pre-sizes it to the count that header carries.
 //
-// It reserves through get_mut rather than indexing because the growth loop it
-// follows can legitimately fail to reach the index -- seqElemGrow breaks out when
-// a fixed-capacity outer container is full -- so a bare [id] would panic on
+// It reaches the row through get_mut rather than indexing because the growth loop
+// it follows can legitimately fail to reach the index -- seqElemGrow breaks out
+// when a fixed-capacity outer container is full -- so a bare [id] would panic on
 // untrusted input where the store one level down already does the Some-guarded
 // thing (rowStore).
 //
-// Emitted only when the row's inner bound is a schema `count` (fr.ecap >= 0). A
-// count-less row's elements are bounded by MAX_DYN_ARRAY_COUNT, which is a refusal
-// threshold and not a size hint; see reserveCount. The count is clamped by the
-// same reserveArg, for the same reason.
+// THE CLEAR IS §7.4, and it is generator#509. seqElemGrow only pushes
+// Default::default() rows up TO the index, so a row id that repeats within one
+// message -- legal on the wire, and something a decoder MUST process
+// deterministically rather than reject -- used to find a row still holding the
+// previous occurrence's elements and push on top of them. MESSAGE_SPEC §7.4 makes
+// an ARRAY WRAPPER the exception to scope-merging: the wrapper *is* the value of
+// its array field, so a later occurrence REPLACES it. A row is an array, so it
+// replaces; only a struct/union element merges, and that one is a different frame
+// (fkStructArr) which correctly does not reset.
 //
-// THE is_empty GUARD is not decoration. Unlike the leaf arm, this arm does not
-// clear the row: seqElemGrow only pushes Default::default() rows up TO the index,
-// so a row id that repeats within one message (legal on the wire — MESSAGE_SPEC
-// §7.4 is last-occurrence-wins, and no shared vector exercises it) finds a row
-// that already holds the previous occurrence's elements. `reserve_exact` is
-// additional capacity on top of the current LENGTH, so reserving there would ask
-// for len + M, and would do it exactly — one precise realloc per repeated header
-// instead of the amortized growth it replaced, i.e. slower than doing nothing.
-// Guarding on empty keeps the pre-size to the one case it was measured for (the
-// row seqElemGrow just created) and leaves the repeat path exactly as it was.
+// Measured on `corelib: rs`, schema `mat: array<array<u32>>` (outer count 2,
+// inner count 3), one message carrying write_array_unsigned(0, ..) twice over --
+// [1,2,3] then [4,5,6]:
 //
-// The merge itself — rust appends where go/csharp/zig install a fresh row, and
-// where rust's own LEAF arm clears — is pre-existing and out of this change's
-// scope; it is filed as generator#509.
-func (g *gen) rowReserve(fr frame) string {
-	if fr.ecap < 0 || !g.boundedSeqIsDynamic() {
-		return ""
+//	before   mat = [[1, 2, 3, 4, 5, 6]]   row 0 len 6
+//	after    mat = [[4, 5, 6]]            row 0 len 3
+//
+// where go (measured the same way), csharp, java and zig all already produced
+// [[4, 5, 6]]. Note the len: the inner `count: 3` is checked per occurrence at the
+// header, so merging also let a row grow past its declared capacity across
+// repeats. Clearing re-arms that bound as well as restoring the value.
+//
+// THE PRE-SIZE FOLLOWS THE CLEAR, unconditionally. It used to be wrapped in an
+// `if _r.is_empty()`, added by generator#505's review precisely BECAUSE the row
+// was never cleared: `reserve_exact` is capacity on top of the current LENGTH, so
+// reserving into a merged row asked for len + M -- one exact realloc per repeated
+// header, slower than doing nothing. With the clear in front, len is 0 whenever
+// this runs, the guard could only ever be true, and the reserve is exactly M
+// again. A guard whose reason has been removed is dead weight, so it is gone.
+//
+// The pre-size itself is still emitted only when the row's inner bound is a schema
+// `count` (fr.ecap >= 0) and the container is dynamic. A count-less row's elements
+// are bounded by MAX_DYN_ARRAY_COUNT, which is a refusal threshold and not a size
+// hint; see reserveCount. A fixed-capacity heapless::Vec has no reserve_exact and
+// needs none. The CLEAR is emitted in every one of those cases regardless -- §7.4
+// is a semantics rule, not an optimization, and a heapless::Vec clears just as
+// well as a Vec does.
+//
+// ORDER IS LOAD-BEARING, in two directions. rowGuards runs BEFORE this and
+// returns, so an over-index or over-count header cannot wipe a valid earlier row
+// -- the §7.3 interaction ARCHITECTURE calls a trap, where a destructive reset in
+// front of the type decision turns a loud failure into silent data loss. And the
+// arm itself is keyed on the row's own ArrayKind, so a mistyped row header lands
+// on no arm at all and the clear never runs for it.
+func (g *gen) rowReset(fr frame) string {
+	body := "_r.clear();"
+	if fr.ecap >= 0 && g.boundedSeqIsDynamic() {
+		body += fmt.Sprintf(" _r.reserve_exact(%s);", g.reserveArg(fr.ecap))
 	}
-	return fmt.Sprintf(" if let Some(_r) = %s.get_mut(id as usize) { if _r.is_empty() { _r.reserve_exact(%s); } }", fr.path, g.reserveArg(fr.ecap))
+	return fmt.Sprintf(" if let Some(_r) = %s.get_mut(id as usize) { %s }", fr.path, body)
 }
 
 // fillReject builds one reject clause for a NATIVE ARRAY — a leaf field's own
@@ -1413,15 +1441,17 @@ func (g *gen) emitVisitor(f *rfile, name string, fields []*ir.Field) {
 				// leaf arms: an fp64 row header at a declared fp32 row is a skipped
 				// field, so neither of these bounds is its bound.
 				//
-				// The row is sized last, once it exists: it is the same field the leaf
-				// arms are, one level down (generator#505). Its inner `count` was just
-				// checked by rowGuards, and the M elements that follow are the row's
-				// whole value -- so a dynamic row that was just grown into as an empty
-				// Default::default() gets that count reserved instead of doubling into
-				// it. rowReserve is silent when the inner bound is a receiver cap
-				// rather than a schema `count`, for the reason reserveCount gives.
+				// The row is RESET last, once it exists (rowReset): cleared, because
+				// §7.4 makes an array wrapper replace rather than merge and a repeated
+				// row id used to push on top of the previous occurrence
+				// (generator#509), then pre-sized to the count rowGuards just checked,
+				// because the M elements that follow are the row's whole value and it
+				// is the same field the leaf arms are, one level down (generator#505).
+				// The clear is emitted for every profile; the pre-size is silent when
+				// the inner bound is a receiver cap rather than a schema `count`, for
+				// the reason reserveCount gives.
 				f.line("            (%s, _Loc::%s, _) => { %s%s self.%s = id as usize;%s },",
-					arrayKindPat(fr.elemKind), fr.loc, g.rowGuards(fr), g.seqElemGrow(fr.path), fr.ixVar, g.rowReserve(fr))
+					arrayKindPat(fr.elemKind), fr.loc, g.rowGuards(fr), g.seqElemGrow(fr.path), fr.ixVar, g.rowReset(fr))
 			}
 		}
 		f.line("            _ => {}")

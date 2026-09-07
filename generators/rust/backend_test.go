@@ -274,8 +274,11 @@ messages:
 		// (the inner-Vec push is skipped, so the store must be lim-gated too).
 		// A count-less matrix: the ROW's id is the outer array's length, so the cap
 		// binds it (generator#387), and the row's own element count is capped
-		// beside it -- two bounds, id first, both LimitExceeded.
-		"(ArrayKind::Unsigned, _Loc::Root_mat, _) => { if id as usize >= MAX_DYN_ARRAY_COUNT { self.lim = true; self.afill = 0; return; } if count > MAX_DYN_ARRAY_COUNT { self.lim = true; self.afill = 0; return; } while self.m.mat.len() <= id as usize { self.m.mat.push(Default::default()); } self._ix0 = id as usize; },",
+		// beside it -- two bounds, id first, both LimitExceeded. The row is still
+		// CLEARED on open even here: §7.4 replacement is a semantics rule, so it does
+		// not depend on the bound being a schema `count` (generator#509). What the
+		// missing bound suppresses is the pre-size, and only that.
+		"(ArrayKind::Unsigned, _Loc::Root_mat, _) => { if id as usize >= MAX_DYN_ARRAY_COUNT { self.lim = true; self.afill = 0; return; } if count > MAX_DYN_ARRAY_COUNT { self.lim = true; self.afill = 0; return; } while self.m.mat.len() <= id as usize { self.m.mat.push(Default::default()); } self._ix0 = id as usize; if let Some(_r) = self.m.mat.get_mut(id as usize) { _r.clear(); } },",
 		"(_Loc::Root_mat, _) => { if self.afill == 0 { return; } self.afill -= 1; if value > 4294967295 { self.inv = true; self.afill = 0; return; } { if !self.lim { if let Some(_r) = self.m.mat.get_mut(self._ix0) { _r.push(value as u32); }; } }; },",
 		// Unbounded string/blob: declared total checked at the top of the callback,
 		// scalar fields and wrapper-sequence string elements alike.
@@ -1410,6 +1413,100 @@ messages:
 	}
 }
 
+// generator#509: a repeated NATIVE ROW id REPLACES the row (MESSAGE_SPEC §7.4).
+//
+// §7.4 makes an array wrapper the exception to scope-merging -- the wrapper IS the
+// value of its array field, so a later occurrence discards the earlier one -- and a
+// matrix row is an array. The row arm was the one position in this backend that
+// did not honour it: seqElemGrow pushes Default::default() rows only UP TO the
+// index, so a repeating row id found the previous occurrence's elements still
+// there and pushed on top of them.
+//
+// Measured on `corelib: rs` before the fix, `mat: array<array<u32>>` carrying row
+// id 0 twice -- [1,2,3] then [4,5,6] -- decoded as [[1, 2, 3, 4, 5, 6]] where go
+// (measured), csharp, java and zig produced [[4, 5, 6]]. The behaviour itself is
+// pinned by tests/conformance/rust/repeated_id.rs, which builds such a message
+// with sofab::OStream; this asserts the emitted SHAPE, on every profile, because
+// the clear is easy to lose again in whichever branch the next sizing change adds.
+//
+// All three shapes are checked, because the clear must NOT follow the pre-size:
+//
+//	bounded + dynamic storage   clear, then reserve_exact(count)
+//	bounded + fixed capacity    clear only (heapless::Vec has no reserve_exact)
+//	count-LESS row              clear only (the count is a refusal threshold, not
+//	                            a size hint -- reserveCount says why)
+//
+// A profile that emitted no clear would leave exactly one merging shape behind,
+// which is how this survived eleven green conformance suites in the first place.
+func TestRustRepeatedRowIdReplaces(t *testing.T) {
+	const src = `
+version: 1
+messages:
+  m:
+    payload:
+      mat:  { id: 0, type: array, items: { type: array, count: 2, items: { type: u32, count: 3 } } }
+      free: { id: 1, type: array, items: { type: array, count: 2, items: { type: u32 } } }
+`
+	for _, tc := range []struct {
+		cfg            map[string]any
+		bounded, unbnd string
+	}{
+		{
+			map[string]any{"corelib": "rs"},
+			"self._ix0 = id as usize; if let Some(_r) = self.m.mat.get_mut(id as usize) { _r.clear(); _r.reserve_exact(count); } },",
+			"self._ix1 = id as usize; if let Some(_r) = self.m.free.get_mut(id as usize) { _r.clear(); } },",
+		},
+		{
+			map[string]any{"corelib": "rs", "allow_dynamic": false},
+			"self._ix0 = id as usize; if let Some(_r) = self.m.mat.get_mut(id as usize) { _r.clear(); } },",
+			"", // a count-less row cannot exist on a fixed-capacity profile
+		},
+		{
+			map[string]any{"corelib": "rs-no-std", "allow_dynamic": true},
+			"self._ix0 = id as usize; if let Some(_r) = self.m.mat.get_mut(id as usize) { _r.clear(); _r.reserve_exact(count); } },",
+			"self._ix1 = id as usize; if let Some(_r) = self.m.free.get_mut(id as usize) { _r.clear(); } },",
+		},
+	} {
+		yaml := src
+		if tc.unbnd == "" {
+			// checkBounded refuses an unbounded field on this profile at all, so the
+			// count-less row is not a shape it can be asked about.
+			yaml = strings.Replace(yaml, "      free: { id: 1, type: array, items: { type: array, count: 2, items: { type: u32 } } }\n", "", 1)
+		}
+		m := moduleFromYAML(t, yaml, tc.cfg)
+		if !strings.Contains(m, tc.bounded) {
+			t.Errorf("(%v) a bounded row must be CLEARED on open, then sized:\n%s", tc.cfg, m)
+		}
+		if tc.unbnd != "" && !strings.Contains(m, tc.unbnd) {
+			t.Errorf("(%v) a count-less row must be CLEARED on open, and left unsized:\n%s", tc.cfg, m)
+		}
+		// The guard #505 put in front of the reserve existed only because this arm
+		// did not clear; with the clear it can only ever be true.
+		if strings.Contains(m, "if _r.is_empty()") {
+			t.Errorf("(%v) the is_empty guard is dead once the row is cleared:\n%s", tc.cfg, m)
+		}
+	}
+
+	// The OTHER half of §7.4, in the same backend: a re-opened SEQUENCE continues
+	// its scope, so a struct ELEMENT must NOT be reset -- children set by an earlier
+	// opening whose ids do not recur are retained. Its sequence_begin arm places by
+	// index and descends, and that is all it may do.
+	o := moduleFromYAML(t, `
+version: 1
+messages:
+  m:
+    payload:
+      objs: { id: 0, type: array, items: { type: struct, count: 2, fields: { x: { id: 0, type: u32 }, y: { id: 1, type: u32 } } } }
+`, map[string]any{"corelib": "rs"})
+	if !strings.Contains(o, "self._ix0 = id as usize; _Loc::Root_objs_e },") {
+		t.Errorf("a struct element must be placed and descended into, nothing more:\n%s", o)
+	}
+	if strings.Contains(o, "self.m.objs.get_mut(id as usize) { _r.clear()") ||
+		strings.Contains(o, "self.m.objs[id as usize] = Default::default()") {
+		t.Errorf("a re-opened struct element MERGES (§7.4) and must not be reset:\n%s", o)
+	}
+}
+
 // generator#247, extended: a wrapper array's element id IS the array index (§5.1),
 // so an element is PLACED at dest[id] after gap-filling -- never appended. Under
 // the af536c4 rule an interior gap is REACHABLE for every element kind (an
@@ -1449,9 +1546,10 @@ messages:
 		// THAT row rather than into the last one appended.
 		if !strings.Contains(got, "(ArrayKind::Unsigned, _Loc::Root_mat, _) => { if id as usize >= 4 { self.inv = true; self.afill = 0; return; } if count > 3 { self.inv = true; self.afill = 0; return; } while self.m.mat.len() <= id as usize {") ||
 			// Pinned to the closing brace: all three configs here have DYNAMIC rows,
-			// so all three size the row from the inner count the guard above just
-			// approved, and nothing else follows (generator#505).
-			!strings.Contains(got, "self._ix1 = id as usize; if let Some(_r) = self.m.mat.get_mut(id as usize) { if _r.is_empty() { _r.reserve_exact(count); } } },") {
+			// so all three CLEAR the row -- a repeated row id replaces rather than
+			// merges (§7.4, generator#509) -- and then size it from the inner count
+			// the guard above just approved (generator#505). Nothing else follows.
+			!strings.Contains(got, "self._ix1 = id as usize; if let Some(_r) = self.m.mat.get_mut(id as usize) { _r.clear(); _r.reserve_exact(count); } },") {
 			t.Errorf("(%v) a matrix row must be opened at out[id], bounded by the outer count:\n%s", cfg, got)
 		}
 		if !strings.Contains(got, "if let Some(_r) = self.m.mat.get_mut(self._ix1) {") {
@@ -2600,13 +2698,15 @@ messages:
 			// claim; csharp emits `new ulong[count]` at the identical shape.
 			"(ArrayKind::Unsigned, _Loc::Root_rows_e, 0) => { if count > 7 { self.inv = true; self.afill = 0; return; } self.m.rows[self._ix1].vs.clear(); self.m.rows[self._ix1].vs.reserve_exact(count) },",
 			// A nested row is the same field one level down: its INNER count is
-			// checked by the row guards, so the row it just opened is sized from it.
-			// Through get_mut, because the growth loop above can legitimately stop
-			// short of the index on a fixed-capacity outer container -- and only when
-			// the row is EMPTY, because this arm does not clear and a repeated row id
-			// would otherwise reserve len + M exactly (see rowReserve).
+			// checked by the row guards, so the row it just opened is CLEARED and then
+			// sized from it. Through get_mut, because the growth loop above can
+			// legitimately stop short of the index on a fixed-capacity outer
+			// container. The reserve is UNCONDITIONAL: it once sat behind an
+			// `is_empty()` guard, which existed only because this arm did not clear
+			// and a repeated row id would otherwise have reserved len + M -- with the
+			// clear in front, len is always 0 here (see rowReset, generator#509).
 			"if count > 6 { self.inv = true; self.afill = 0; return; } while self.m.mat.len() <= id as usize {",
-			"self._ix0 = id as usize; if let Some(_r) = self.m.mat.get_mut(id as usize) { if _r.is_empty() { _r.reserve_exact(count); } } },",
+			"self._ix0 = id as usize; if let Some(_r) = self.m.mat.get_mut(id as usize) { _r.clear(); _r.reserve_exact(count); } },",
 		} {
 			if !strings.Contains(m, want) {
 				t.Errorf("message.rs (%v) missing %q:\n%s", cfg, want, m)
@@ -2648,14 +2748,19 @@ messages:
 		t.Errorf("an unbounded array must never be pre-sized from an untrusted count:\n%s", d)
 	}
 	// The count-less ROW: the outer array is bounded (count: 2) and the INNER one
-	// is not, so the row exists but must not be sized -- a three-byte row header
-	// reserving MAX_DYN_ARRAY_COUNT elements is the same eager allocation one level
-	// down. Pinned to the closing brace, because the whole assertion is that
-	// nothing follows the index store.
-	if !strings.Contains(d, "self._ix0 = id as usize; },") {
-		t.Errorf("a count-less row must be opened and left unsized:\n%s", d)
+	// is not, so the row is opened and CLEARED but must not be SIZED -- a three-byte
+	// row header reserving MAX_DYN_ARRAY_COUNT elements is the same eager allocation
+	// one level down. Pinned to the closing brace, because the whole assertion is
+	// that the clear is all that follows the index store.
+	//
+	// The clear is not optional here. §7.4 replacement does not depend on the row
+	// carrying a schema bound, so dropping it on the count-less arm would leave
+	// exactly one shape in the backend that still merges a repeated row id
+	// (generator#509).
+	if !strings.Contains(d, "self._ix0 = id as usize; if let Some(_r) = self.m.matfree.get_mut(id as usize) { _r.clear(); } },") {
+		t.Errorf("a count-less row must be opened and cleared, and left unsized:\n%s", d)
 	}
-	if strings.Contains(d, "self.m.matfree.get_mut(id as usize)") {
+	if strings.Contains(d, "self.m.matfree.get_mut(id as usize) { _r.clear(); _r.reserve") {
 		t.Errorf("a count-less row must never be pre-sized from an untrusted count:\n%s", d)
 	}
 	// ...while the bounded field in the very same message still is.
