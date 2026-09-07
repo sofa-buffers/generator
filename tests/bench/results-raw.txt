@@ -6,8 +6,8 @@
 #
 # Read results.txt for the verdict and its header for provenance. This file is
 # the record: a cell held back by the noise band shows up here and nowhere else,
-# and jittery rows (go encode above all — #494) move here without meaning
-# anything. See tests/bench/README.md, "Measured jitter, per row".
+# and a jittery row moves here without meaning anything. See
+# tests/bench/README.md, "Measured jitter, per row".
 #
 row                profile    method    encode_ir/op  decode_ir/op
 c                  footprint  toggle    25985         52648
@@ -18,8 +18,8 @@ cpp-cpp-static     maxspeed   toggle    12300         22706
 cpp-cpp-unbounded  maxspeed   toggle    8543          21990
 csharp             maxspeed   subtract  31521         70709
 dart               maxspeed   subtract  25785         57238
-go                 maxspeed   toggle    20468         60100
-go-unbounded       maxspeed   toggle    13335         45088
+go                 maxspeed   toggle    18625         60100
+go-unbounded       maxspeed   toggle    13314         45088
 java               maxspeed   subtract  17009         30899
 kotlin             maxspeed   subtract  17199         32753
 python             maxspeed   subtract  1081889       2309212

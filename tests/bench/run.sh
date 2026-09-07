@@ -332,7 +332,7 @@ python3 "$BENCH/lib/format.py" \
 if [ "$CHECK" = "1" ]; then
     rc=0
     diff -u "$BENCH/results.txt" "$WORK/new.txt" > "$WORK/diff" 2>&1 || rc=1
-    # The sidecar is EXPECTED to move on the jittery rows (#494, #489), so it is
+    # The sidecar is EXPECTED to move on the jittery rows (#489), so it is
     # reported and does not by itself make the check fail: staleness is a property of
     # results.txt, which is the file a reviewer reads.
     if [ -f "$RAW_OUT" ] && [ ! -f "$RAW" ]; then

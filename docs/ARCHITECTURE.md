@@ -4918,11 +4918,13 @@ generator's own runtime.
 **Ir, not wall-clock.** Instructions retired under Callgrind are independent of CPU
 clock and OS scheduling, which is what makes a number stable enough to commit to a
 file at all. Determinism is therefore a hard requirement here, not a nicety: a file
-that wobbles when nothing changed is one nobody regenerates. **One cell does not meet
-it today**: `go` encode is bimodal (18625 or 20468, the low value on ~13% of 53
-readings taken on an unchanged tree), so re-running `run.sh` flips it by −9.15% about
-one run in eight, 30x past any hysteresis. A `go` encode move of ~9% is that defect,
-#494, and not a regression; every other cell is idempotent.
+that wobbles when nothing changed is one nobody regenerates. **One cell did not meet
+it for a while**: `go` encode was bimodal (18625 or 20468, the low value on ~13% of 53
+readings taken on an unchanged tree), so re-running `run.sh` flipped it by −9.15%
+about one run in eight, 30x past any hysteresis. That was a defect in the row, not a
+band that needed widening, and it is fixed (#494): the Go bench harness now pins the
+allocator's span phase before the collected op, so the size-class boundary that
+produced the second mode cannot fall inside it. Every cell is idempotent.
 
 **The corelib is deliberately not pinned.** It is cloned from its default branch, as
 conformance does, because a corelib must match the generated code built against it —
@@ -4994,8 +4996,8 @@ while `results.txt` stays still, and `git log -p` dates it to a run, which is ex
 what #488 could not be given. It carries no header (the provenance is in
 `results.txt`, written by the same run, and two headers could disagree), it carries
 rows forward on a `--rows` run as `results.txt` does, and neither file is written when
-a run is refused a true header. It is deliberately **not** idempotent — the eight rows
-with real jitter move it every run — so `--check` reports its diff and fails only on
+a run is refused a true header. It is deliberately **not** idempotent — the rows with
+real jitter move it every run — so `--check` reports its diff and fails only on
 `results.txt`, which is the file a reviewer reads.
 
 *A cell landing within a hair of 0.3% is ambiguous until it is re-measured.* Some
@@ -5047,8 +5049,10 @@ an unchanged tree, raw readings and the two run shapes in `tests/bench/README.md
 the result sized the band from data rather than from a figure documented in corelib-java
 (#489):
 
-* the reproducible/jittery split is the **runtime**, not the method. Sixteen rows repeat
-  exactly, both halves, including both `python` rows and (to 1–5 Ir) all three `ts` rows,
+* the reproducible/jittery split is the **runtime**, not the method. Fifteen rows repeat
+  exactly, both halves, at the depth each was sampled — three to eight readings for all
+  but the two `go` rows, which is shallow enough that a rare outlier clears it unseen;
+  including both `python` rows and (to 1–5 Ir) all three `ts` rows,
   which are `subtract`. That is reproduction *within one build context*, which is the
   only thing a back-to-back campaign measures; across contexts several of those rows
   move by ~0.1%, which is the point of the last bullet;
@@ -5060,9 +5064,16 @@ the result sized the band from data rather than from a figure documented in core
   `0.001` sits below that excursion, `0.002` clears it by 1.6x. **`NOISE_BAND` was
   therefore kept at 0.003**, and the sidecar above, not a smaller band, is what makes a
   masked step visible;
-* and `go` encode is **bimodal** — 18625 or 20468, 9.1% apart, ~13% of runs — so that cell
-  moves at random whatever the band is. No band can hold it without swallowing every
-  regression this tool exists to catch; it is a defect in the row, filed as #494;
+* `go` encode **was bimodal** — 18625 or 20468, 9.1% apart, ~13% of runs — and no band
+  could have held that without swallowing every regression this tool exists to catch.
+  It was a defect in the row, not in the band (#494): a Go size-class span boundary
+  falling inside the collected op, which the emitted harness now takes out of the
+  measurement. Both `go` **encode** halves now repeat to the instruction over 300
+  readings each. Their decode halves do not and were never claimed to be — the fix
+  does not touch decode — and sampling them 300 deep put a 1.3% outlier rate on both,
+  which is the first jitter in this file measured on a `toggle` row. Both spreads are
+  wider than `NOISE_BAND`, and every other row's spread rests on three to eight
+  readings, so re-sampling the table at depth is filed as #522;
 * committed cells **are** being held off a value that reproduces to the instruction —
   `rust-rs` decode by 0.159%, `cpp-c-cpp-dyn` decode by 0.143%, `zig` encode by 0.121%
   — the #488 disease at file scale, and the reason the sidecar landed. How many, and
@@ -5151,9 +5162,21 @@ Both mirror the corelibs' own `bench/run_callgrind.sh`, which every corelib ship
   generated code converts to interfaces, so adding itabs reads as a per-op
   regression that is not there. The generated harness runs an uncollected
   `warmup_<w>` first, with the body duplicated rather than delegating to `run_<w>`
-  — toggling keys on entering the symbol whoever the caller is. One op suffices:
-  AOT, so no tiers to climb, and each warmed cost is a global first-touch cache.
-  c/cpp/rust/zig have no lazy runtime metadata and need none.
+  — toggling keys on entering the symbol whoever the caller is. One op suffices for
+  the lazy metadata: AOT, so no tiers to climb, and each warmed cost is a global
+  first-touch cache. c/cpp/rust/zig have no lazy runtime metadata and need none.
+
+  **Go warms up a second thing the warmup cannot reach: the allocator's phase.**
+  `Encode()` allocates its output buffer from one Go size class, a span of that class
+  holds a handful of objects, and the allocation that takes the last slot makes the
+  next one refill the span from `mcentral` — ~1843 Ir of slow path, 9.1% of the row.
+  Which slot the *collected* op gets depends on how many objects of that class the Go
+  runtime's own start-up already took, which varies per process, so no number of
+  warmups settles it; it only moves the unlucky phase. The generated harness therefore
+  emits an uncollected `benchAlignSpan`, which allocates that same size until the
+  allocator hands back an object not adjacent to its predecessor — the first of a
+  fresh span — leaving the measured op the second slot of one in every process. That
+  is what makes the `go` row reproduce to the instruction (§15, #494).
 * **`subtract`** (java, kotlin, python, ts, csharp) — no native symbol (JIT'd/interpreted),
   so run at two rep counts and subtract: `Ir/op = (Ir(R2) − Ir(R1)) / (R2 − R1)`,
   cancelling startup, class loading and JIT compilation exactly. Needs a fixed

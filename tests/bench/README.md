@@ -42,14 +42,14 @@ the whole thing worthless. Guarded by `run.sh` being idempotent (run it twice, t
 file must be byte-identical) and by `-ffile-prefix-map`/`--remap-path-prefix` (see
 [Traps](#traps)).
 
-**That guard does not hold today, on exactly one cell.** `go` encode is bimodal —
-18625 or 20468, the low value on ~13% of 53 readings taken on an unchanged tree (see
-[Measured jitter, per row](#measured-jitter-per-row)) — so running `run.sh` twice
-flips that one cell by −9.15% about one run in eight, with nothing changed. It is 30x
-the noise band, so no hysteresis holds it, and the value the file currently commits
-(20501) is neither of the two modes. **A `go` encode move of ~9% is that defect,
-#494, not a regression**; re-run the row before writing anything down. Every other
-cell in the file is idempotent as described.
+**That guard did not hold for a while, on exactly one cell,** and what it took to
+get it back is worth reading before trusting any other cell. `go` encode was bimodal —
+18625 or 20468, the low value on ~13% of 53 readings taken on an unchanged tree — so
+running `run.sh` twice flipped that one cell by −9.15% about one run in eight with
+nothing changed, 30x the noise band and past any hysteresis. It was not a measurement
+that needed a wider band; it was a defect in the harness, and it is fixed (#494). See
+[Measured jitter, per row](#measured-jitter-per-row) for the readings before and after.
+Every cell in the file is now idempotent as described.
 
 Most rows are exactly reproducible; some are not. `lib/format.py` therefore applies
 **hysteresis** — a cell keeps its committed value while a new reading is within 0.3%
@@ -102,9 +102,28 @@ the board. The nine `subtract` rows and `go`/`go-unbounded` were driven one row 
 `run.sh --rows <id>` invocation. The fifteen `toggle` rows were driven by three
 invocations that each passed all fifteen ids — one build of each row per invocation,
 so the three trials are still independent runs, but they share a process and a
-scratch tree with their siblings. `go`'s 53 readings are those three plus 50 further
-single-row runs. The per-invocation stderr logs were kept outside the repository (a
-scratch directory, not committed); what survives here is the readings themselves.
+scratch tree with their siblings. The per-invocation stderr logs were kept outside
+the repository (a scratch directory, not committed); what survives here is the
+readings themselves.
+
+**The two `go` rows are from a later campaign**, run against the tree that fixed #494
+and on corelib-go `d45a5dd`, because their earlier numbers no longer describe the row:
+`go` encode read 18625×7 / 20468×46 over 53 runs before the fix (those 53 were the
+three above plus 50 further single-row runs) and its decode 60051 / 60100×51 / 60118.
+All four halves were re-read directly against the built bench harness, 300 readings
+each, rather than through `run.sh`.
+
+That depth is the reason these two rows are the only ones in the table with a spread
+worth trusting, and it changed the answer. Both **encode** halves are now exact —
+18625 and 13314 on 300 of 300, where 40 readings of the pre-fix binary already give
+18625×4 / 20468×36. Both **decode** halves are *not*: each throws four outliers in
+300 — `go` 60026 / 60100×296 / 60302×2 / 60385, `go-unbounded` 45088×296 / 45281×2 /
+45373×2 — a rate of 1.3%, and the pre-fix binary throws four in 300 as well, because
+the fix does not touch decode (it calls `benchAlignSpan` only in the encode branch).
+An earlier draft of this table read decode 20 times, saw 60100 twenty times and
+recorded 0.000 — but at a 1.3% rate twenty draws miss the outliers 77% of the time,
+so that zero was sampling depth, not a property of the row. The pre-fix decode
+readings above, three distinct values in 53, were right all along.
 
 Read `n×k` as "that value came up k times". The **spread** column is
 `(max − min) / mean` — a property of the readings. It is *not* the quantity
@@ -128,8 +147,8 @@ value; the two are distinguished where the band is sized, below.
 | `cpp-cpp` | toggle | 3 | 12608×3 | 0.000 | 29953×3 | 0.000 |
 | `cpp-cpp-static` | toggle | 3 | 12300×3 | 0.000 | 22706×3 | 0.000 |
 | `cpp-cpp-unbounded` | toggle | 3 | 8543×3 | 0.000 | 21990×3 | 0.000 |
-| `go` | toggle | 53 | **18625×7 20468×46** | **9.113** | 60051 60100×51 60118 | 0.111 |
-| `go-unbounded` | toggle | 8 | 13335×8 | 0.000 | 45088×8 | 0.000 |
+| `go` | toggle | 300 | 18625×300 | 0.000 | 60026 60100×296 60302×2 60385 | **0.597** |
+| `go-unbounded` | toggle | 300 | 13314×300 | 0.000 | 45088×296 45281×2 45373×2 | **0.632** |
 | `rust-rs` | toggle | 3 | 8273×3 | 0.000 | 23366×3 | 0.000 |
 | `rust-rs-no-std` | toggle | 3 | 8079×3 | 0.000 | 29998×3 | 0.000 |
 | `rust-rs-no-std-dyn` | toggle | 3 | 8292×3 | 0.000 | 38808×3 | 0.000 |
@@ -141,9 +160,20 @@ value; the two are distinguished where the band is sized, below.
 Four things follow, and three of them contradict what this file used to claim.
 
 **The split is the runtime, not the method.** Both `python` rows and all three `ts`
-rows are `subtract` and reproduce to within 1–5 Ir; `go` is `toggle` and is the
-noisiest row in the file by two orders of magnitude. Sixteen of the twenty-four rows
-repeat *exactly*, both halves.
+rows are `subtract` and reproduce to within 1–5 Ir, while `go` — the row that was
+noisiest in the file by two orders of magnitude — is `toggle`. Fifteen of the
+twenty-four rows repeat *exactly*, both halves, at the depth each was sampled.
+
+Read that count with its depth attached, because the two `go` rows say it is soft.
+Twenty-two of the rows were sampled 3–8 times; the `go` rows were sampled 300 times,
+and only at that depth does either show the 1.3% outlier rate its decode half
+carries. So "repeats exactly" here means "no outlier in three to eight draws", which
+a rate like that would clear unseen 90–96% of the time. The two `go` rows are also
+the counter-example to what this paragraph used to claim — that every non-exact row
+is a `subtract` row. They are `toggle`, and they jitter on decode. Whether the other
+thirteen would too, sampled as deep, is untested; nothing here says they would not,
+and re-sampling them is #522. Note the size of what depth exposed: 0.597% and 0.632%
+are both wider than `NOISE_BAND` and wider than every masked step tabulated below.
 
 Read that as **within one build context**, which is all a back-to-back campaign can
 measure. It is not the same thing as reproducing across contexts, and for several rows
@@ -168,11 +198,71 @@ excursion by 1.6×, on a tail seen once in those eleven. The band was **kept at 
 for that reason (#489) — the honest answer was that the premise of narrowing it was
 wrong, not that the number was.
 
-**And one row is past any band's reach.** `go` encode is bimodal — 18625 or 20468,
-1843 Ir apart, ~13% of runs — so that cell moves at random whatever the band is set to.
-Widening the band far enough to hold it would swallow every regression this tool exists
-to catch. That is a defect in the row, filed as **#494**; until it is fixed, treat a
-large `go` encode move as unproven until re-run.
+**One row used to be past any band's reach, and the band was never the lever.**
+Before the fix, `go` encode was bimodal — 18625 or 20468, 1843 Ir apart, on ~13% of
+53 runs — so that cell moved at random whatever the band was set to, and widening the
+band far enough to hold it would have swallowed every regression this tool exists to
+catch. It was a defect in the row (#494), and the two `go` lines in the table are its
+post-fix readings. What it was, and why the obvious fix is not one:
+
+The 1843 Ir is, function for function, one Go allocator slow path —
+`mcache.refill` → `mcentral.cacheSpan` → `mheap.allocSpan`/`initSpan` and their
+bookkeeping — and nothing else in the profile moves at all. `Encode()` allocates the
+output buffer (1037 bytes on this schema, so Go's 1152 size class), a span of that
+class holds seven objects, and whichever allocation takes the seventh makes the next
+one refill. Which of the seven the *collected* op gets is decided by how many objects
+of that class the process had already taken before it, and that is not a constant:
+probed with `runtime.MemStats`, 6 on 38 of 40 runs and 8 on the other 2 — the Go
+runtime's own start-up, nothing the harness does. At 6 the single uncollected warmup
+takes the last slot and the op pays the refill; at 8 it does not.
+
+**Adding a warmup does not fix it, it moves it.** The op refills whenever
+`prior + warmups ≡ 0 (mod 7)`, and `prior` takes two values two apart, so no count
+misses both. Measured, by padding that size class before the op to stand in for a
+differently-behaved start-up — at one warmup the slow mode appears at pad 0 and 7
+(`prior` 6) and pad 5 (`prior` 8); at two warmups it reappears at pad 4 and 6:
+
+```
+pad                 0     1     2     3     4     5     6     7     8
+1 warmup (before) high   low   low   low   low  high*  low  high*  low
+2 warmups         low    low   low   low  high*  low  high*  low   low
+after #494        low    low   low   low   low   low   low   low   low
+```
+
+`*` = the slow mode on some but not all of three readings at that pad, which is the
+whole shape of the defect: `prior` is itself two-valued.
+
+The fix removes the phase instead of guessing it. `benchAlignSpan`, emitted next to
+the warmups and likewise uncollected, allocates the op's own buffer size until the
+allocator hands back an object that is **not** adjacent to its predecessor — the first
+of a fresh span — so the measured op always takes the second slot of one. Over that
+same pad sweep the reading is then 18604 on 27 of 27 runs; unpadded it is 18625 on
+**300 of 300**, against 18625×4 / 20468×36 in 40 readings of the pre-fix binary.
+
+**18625 is a chosen phase, not an average.** Pinning the op to the second slot of a
+span is exactly the guarantee that it never pays a refill, and a steady-state encoder
+does: one refill per seven ops on this schema, ~1843/7 ≈ 263 Ir, so the committed cell
+sits ~1.4% below what encoding in a loop actually costs. That is the right trade for
+what `results.txt` is — a diff tool, where a stable baseline beats an accurate one and
+amortising over R ops would fold the allocator's own R-dependence into every row — but
+it means the cell is not the amortised cost of one `Encode()`, and a reader comparing
+it against a throughput benchmark should expect that gap.
+
+If the alignment ever fails to find a span boundary — 4096 allocations without one —
+the harness prints `benchAlignSpan: no span boundary in 4096 allocations; this reading
+is not phase-pinned` to stderr rather than returning quietly, because a silent no-op
+there puts the row back to being bimodal with nothing in `results.txt` to show it. It
+has not fired in any run recorded here; a standalone probe over size classes 8…40960
+terminated in 2–1310 iterations, so the bound has roughly 3x headroom, not 100x.
+
+**`go-unbounded` was never immune, only lucky.** It reads exactly (13314 on 300 of 300
+here) with
+no alignment of its own, because the size class its growing output buffer lands in
+happens to sit far from a boundary in this runtime — pad that class by 12 and the row
+jumps 13.9%, exactly as `go` did. Aligning on `cap(wire)` does not reach it: that
+message's `Encode()` flushes through a scratch buffer in a *different* class from the
+one it returns. Left as it is, measured rather than assumed, and worth a follow-up if
+it ever moves.
 
 Two caveats on reading the table, and both bite the next section.
 
@@ -217,6 +307,14 @@ under a corelib bump as unexplained until the bump is measured.
 *Counts in this section describe the two files as of generator `6315cd1`, 2026-09-06.
 They move on the next full run, and nothing regenerates them — re-derive them from the
 files rather than trusting the prose.*
+
+*One partial run has moved under them since: `--rows go,go-unbounded` after #494. The
+total is unchanged — `go` encode now agrees between the files (18625 in both) and
+`go-unbounded` encode now does not (13335 committed, 13314 read, a −0.16% hold, and
+the alignment described above is what moved it) — but the second sentence below
+becomes thirteen rather than twelve, since `go-unbounded` encode measures at zero
+spread, and the count after the two tables becomes twelve rather than thirteen, since
+`go` encode no longer jitters and is no longer held.*
 
 The same question, asked of the files in the repository rather than of a campaign:
 `results-raw.txt` is what the last full run read, `results.txt` is what it committed,
@@ -269,9 +367,10 @@ The last two are the ones to keep in mind when reading the first table: for
 `python` decode the +0.001% "hold" is the full run agreeing with the file while the
 campaign disagrees with both. Neither is evidence of a masked step.
 
-The remaining thirteen of the 25 sit on the eight rows that do jitter — `go` encode
-−0.161%, `csharp` encode −0.111%, the `ts` rows around ±0.02–0.08% — and there a held
-cell is doing the job it was built for. (The `ts` rows' campaign readings are from a
+The remaining twelve of the 25 sit on jittery rows — `csharp` encode −0.111%, the `ts`
+rows around ±0.02–0.08% — and there a held cell is doing the job it was built for.
+(Before #494 this read thirteen, and `go` encode's −0.161% was the largest of them;
+that is the cell the alignment removed.) (The `ts` rows' campaign readings are from a
 different corelib SHA; see the caveat above.)
 
 Narrowing the band does not fix the first group, and the measurements above say why it
@@ -301,7 +400,7 @@ and 820 lines of codegen owned it (#488). With the sidecar committed, that quest
 
 Two properties to know:
 
-* **It is not idempotent, on purpose.** The eight jittery rows move it run to run. That
+* **It is not idempotent, on purpose.** The jittery rows move it run to run. That
   is the reading changing, not the file being wrong — `run.sh --check` prints its diff
   and does *not* fail on it, because staleness is a property of `results.txt`.
 * **It carries no header.** Every claim about what produced the numbers — corelib SHAs,

@@ -119,9 +119,10 @@ ir_subtract() {
 #
 # Rounding cannot fix this because the underlying value is not bit-reproducible on
 # every row. Which rows those are is measured, and it is NOT "the subtract rows" --
-# both python rows and all three ts rows repeat to within 1-5 Ir, while `go`, a
-# toggle row, is bimodal at 9.1% (#489, #494; table in tests/bench/README.md). So the
-# raw number is passed through and format.py applies hysteresis against the committed
-# value: it keeps the old number while the new one is inside the noise band, and
-# only moves on a change big enough to be real. See format.py's `stabilize`. The
+# both python rows and all three ts rows repeat to within 1-5 Ir, while `go`, a toggle
+# row, was bimodal at 9.1% until its harness stopped letting a Go allocator span
+# boundary fall inside the collected op (#489, #494; table in tests/bench/README.md).
+# So the raw number is passed through and format.py applies hysteresis against the
+# committed value: it keeps the old number while the new one is inside the noise band,
+# and only moves on a change big enough to be real. See format.py's `stabilize`. The
 # reading itself is not thrown away -- it is committed to results-raw.txt.
