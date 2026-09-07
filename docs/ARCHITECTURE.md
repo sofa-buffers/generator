@@ -3391,8 +3391,25 @@ right place. `tests/conformance/rust/run.sh` builds one project with all three
   three budgets is written to sit BETWEEN the two builds rather than merely above
   the fixed one: a budget of twice the legitimate reserve also covers the pre-fix
   reading, and a row written that way passes against the defect it was added for.
+* and, one level past that, **a crossed cap stops a LATER count-less array too**
+  (`post_limit_fill.rs`, generator#511). The bullet above disarms the fill of the
+  field that tripped the cap, which is why the per-element `if !self.lim` at an
+  unbounded array's store looked redundant — it is not, and not marginally.
+  Three arms set the sticky flag and disarm nothing, because no fill is armed at
+  them: a wrapper element's over-cap index, a nested wrapper element's, and an
+  over-cap string/blob length. A well-formed count-less array after any of those
+  arrives with its own fill armed. Two properties turn on the store's test, and
+  no verdict shows either: `decode`, the infallible entry point, hands back the
+  message it filled — `nums: []` with the test, `nums: [1, 2, 3]` without it,
+  behind the same over-cap string — and a message already refused stops
+  materialising containers for the rest of its bytes (2000 legal matrix rows
+  behind an 11-byte breach: 106 bytes/decode against 32,106). `try_decode` and
+  `Decoder` answer `LimitExceeded` either way and neither hands back a partial
+  message, which is precisely why the question needed measuring rather than
+  reasoning. The test costs −0.36% of `rust-rs-unbounded` decode to remove; it
+  stays.
 
-All of it but the last bullet passed unchanged when the exemption was written —
+All of it but the last two bullets passed unchanged when the exemption was written —
 those rows were written against the backend, not for a fix — and the reason is
 structural: every guard is a match arm keyed by `(wire
 callback, location, id)`, so a field the dispatch skips reaches no arm at all. The

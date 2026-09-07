@@ -262,7 +262,12 @@ messages:
 		// Sticky flag on the visitor, sibling of inv.
 		"lim: bool,",
 		// Unbounded array: count checked in array_begin before any elements land,
-		// and the element store is dropped once the flag is set.
+		// and the element store is dropped once the flag is set. The store's test
+		// is NOT redundant with #508's disarm and must not be dropped for the
+		// −0.36% it costs: three arms set the flag with no fill to disarm, so a
+		// later count-less array still arrives armed. See limArrayStore, and
+		// tests/conformance/rust/post_limit_fill.rs, which measures both halves
+		// of what it buys (generator#511).
 		"(ArrayKind::Unsigned, _Loc::Root, 1) => { if count > MAX_DYN_ARRAY_COUNT { self.lim = true; self.afill = 0; return; } self.m.arr.clear() },",
 		"(_Loc::Root, 1) => { if self.afill == 0 { return; } self.afill -= 1; { if !self.lim { self.m.arr.push(value as u64); } }; },",
 		// Unbounded nested native inner array: same guard on its array_begin arm

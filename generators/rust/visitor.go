@@ -1924,12 +1924,33 @@ func arrayWidthGuard(k ir.Kind, ref *ir.TypeRef) string {
 //
 // Since generator#508 the count header this describes ALSO disarms the fill, so
 // for the field that tripped the cap the elements no longer reach this store at
-// all. What is left is the cross-field case — another field's breach dropping this
-// one's well-formed elements — which no `try_decode` caller can observe. Removing
-// the test reads −0.36% of `rust-rs-unbounded` decode, inside sight of that row's
-// own run-to-run spread; it is NOT folded in here because it turns on whether any
-// surface hands back a partially decoded message, which is a separate question
-// with its own answer. Filed as generator#511.
+// all. generator#511 asked whether that made the test redundant, at −0.36% of
+// `rust-rs-unbounded` decode. IT DID NOT, and the redundancy is not even close to
+// total — three arms set the sticky flag and disarm NOTHING, because no fill is
+// armed at them: a wrapper element's over-cap index and a nested wrapper
+// element's (overIndexGuard, which returns rather than rejecting a fill that does
+// not exist) and an over-cap string/blob length. After any of those, a
+// well-formed count-less array LATER in the same message arrives with its own
+// fill armed and the store is all that stands between it and the destination.
+//
+// What the test buys, both halves measured against corelib-rs 7599f9a and pinned
+// by tests/conformance/rust/post_limit_fill.rs:
+//
+//   - `decode` — the infallible, best-effort entry point — hands back the message
+//     it filled whatever the flags say, so this IS observable there: an over-cap
+//     string at id 0 followed by a legal `nums` array returns `nums: []` with the
+//     test and `nums: [1, 2, 3]` without it. `try_decode` and `Decoder` are
+//     indifferent (LimitExceeded either way; `Decoder::m` is private and `finish`
+//     consumes the decoder), which is exactly why the question could not be
+//     settled on a verdict.
+//   - A message ALREADY refused stops materialising its containers. The flags are
+//     surfaced at the end, not an abort channel, so the corelib delivers the whole
+//     message regardless: 2000 legal matrix rows behind an 11-byte breach cost
+//     106 bytes/decode with the test and 32,106 without it.
+//
+// So the branch is not free, and it is not paying for nothing either. Emitted
+// only on the std profile: rs-no-std resolves no limits at all and checkBounded
+// refuses a count-less array there, allow_dynamic or not.
 func (g *gen) limArrayStore(expr string) string {
 	return fmt.Sprintf("{ if !self.lim { %s; } }", expr)
 }

@@ -1125,6 +1125,43 @@ sed '/^\/\/SOFAB_IMPORT$/d' "$ROOT/tests/conformance/rust/overcount_array_alloc.
     || { echo "FAIL: a rejected bounded array must stop collecting (no_std, allow_dynamic)"; exit 1; }
 echo "==> [rs] rejected-array allocation OK (rs and rs-no-std/allow_dynamic)"
 
+# Once a cap has been crossed, a LATER count-less array must stop collecting --
+# the two properties generator#511 turned on, neither of which a verdict can see.
+#
+# #508 covers the field that tripped the cap: its own reject disarms the fill, so
+# its elements never reach the store. Three arms set the sticky flag without
+# disarming anything, because no fill is armed at them (a wrapper element's
+# index, a nested wrapper element's index, an over-cap string/blob length), and
+# after those a well-formed count-less array later in the same message still
+# arrives with its own fill armed. The `if !self.lim` at the store is what stops
+# it, and what it buys is (1) `decode`, the infallible entry point, not handing
+# back fields collected after the refusal, and (2) a message already refused not
+# going on materialising containers for the rest of its bytes. `try_decode` and
+# `Decoder` answer LimitExceeded either way, which is why this needs its own row.
+#
+# Only the `rs` leg: the caps exist only on the std corelib (resolveLimits runs
+# under std() alone), and on rs-no-std checkBounded refuses a count-less array
+# outright, with or without allow_dynamic -- so there is no guard there to test.
+echo "==> [rs] a crossed cap stops a later count-less array (generator#511)"
+cat > "$WORK/postlim.yaml" <<'YAML'
+version: 1
+messages:
+  pl:
+    payload:
+      s:    { id: 0, type: string }
+      nums: { id: 1, type: array, items: { type: u32 } }
+      mat:  { id: 2, type: array, items: { type: array, items: { type: u32 } } }
+YAML
+rm -rf "$WORK/postlim"
+( cd "$ROOT" && go run ./cmd/sofabgen --config "$WORK/cfg-lim.yaml" --lang rust --in "$WORK/postlim.yaml" --out "$WORK/postlim" )
+sed -i "s#\${SOFAB_RS_CORELIB}#$STD#" "$WORK/postlim/Cargo.toml"
+crate_bin_name "$WORK/postlim"
+printf 'mod message;\nuse message::*;\n' > "$WORK/postlim/src/main.rs"
+sed '/^\/\/SOFAB_IMPORT$/d' "$ROOT/tests/conformance/rust/post_limit_fill.rs" \
+    >> "$WORK/postlim/src/main.rs"
+( cd "$WORK/postlim" && cargo run -q ) || { echo "FAIL: a crossed cap must stop a later count-less array"; exit 1; }
+echo "==> [rs] post-limit fill OK"
+
 # CORELIB_PLAN §7.2 item 8 -- the shared file's `sequence_growth` block
 # (generator#449). Not run in corelib-rs, and not out of oversight: under the
 # ARCHITECTURE §8 rule only PayloadAcc moved into that library (corelib-rs#87);
