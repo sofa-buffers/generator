@@ -1020,6 +1020,61 @@ sed '/^\/\/SOFAB_IMPORT$/d' "$ROOT/tests/conformance/rust/truncated_array_alloc.
 ( cd "$WORK/bigalloc" && cargo run -q ) || { echo "FAIL: a truncated bounded array must not allocate its declared count"; exit 1; }
 echo "==> [rs] truncated-array allocation OK"
 
+# A REJECTED bounded array must stop collecting -- the third measurement, and the
+# one nothing in this suite reached before (generator#508).
+#
+# The two rows above ask what an ACCEPTED or a TRUNCATED count costs. This one
+# asks what a REFUSED count costs, and the answer used to be the whole of it:
+# array_begin arms the fill counter from the untrusted wire count before the
+# schema bound is compared, and the sticky `self.inv` it sets on the reject is
+# read at the END of the decode -- the corelib cannot see it and goes on
+# delivering. A forged count of a million on a field whose declared storage is 32
+# bytes peaked at 8 MB of heap, returning the correct InvalidMsg all the while,
+# which is exactly why a verdict-only row cannot see it.
+#
+# Three emitted arms, only one of which the issue measured: the integer count
+# header, the fixlen (fp) count header, and a mid-array element that trips its
+# declared width while the array's own count was legitimate.
+#
+# Run on BOTH profiles whose destination is a growable Vec<T>: `corelib: rs`, and
+# corelib-rs-no-std asked for alloc storage. The second is the correction to the
+# issue's own scope note -- it called rs-no-std safe, which is true of the
+# heapless default and false of allow_dynamic, where the container is
+# alloc::vec::Vec and the measurement was identical.
+echo "==> [rs] a rejected bounded array stops collecting (generator#508)"
+cat > "$WORK/bndarr.yaml" <<'YAML'
+version: 1
+messages:
+  bnd:
+    payload:
+      arr:  { id: 0, type: array, items: { type: u64, count: 4 } }
+      fx:   { id: 1, type: array, items: { type: fp64, count: 4 } }
+      wide: { id: 2, type: array, items: { type: u32, count: 100000 } }
+YAML
+rm -rf "$WORK/overalloc"
+( cd "$ROOT" && go run ./cmd/sofabgen --config "$WORK/cfg-nolim.yaml" --lang rust --in "$WORK/bndarr.yaml" --out "$WORK/overalloc" )
+sed -i "s#\${SOFAB_RS_CORELIB}#$STD#" "$WORK/overalloc/Cargo.toml"
+crate_bin_name "$WORK/overalloc"
+printf 'mod message;\nuse message::*;\n' > "$WORK/overalloc/src/main.rs"
+sed '/^\/\/SOFAB_IMPORT$/d' "$ROOT/tests/conformance/rust/overcount_array_alloc.rs" \
+    >> "$WORK/overalloc/src/main.rs"
+( cd "$WORK/overalloc" && cargo run -q ) || { echo "FAIL: a rejected bounded array must stop collecting"; exit 1; }
+
+# The same file against corelib-rs-no-std with allow_dynamic: the crate is
+# #![no_std] but its bin target is not, so the counting allocator and the harness
+# compile there unchanged -- the same trick skipped_blob_nostd.rs uses.
+printf 'generic: { emit: project }\ntargets: { rust: { corelib: rs-no-std, allow_dynamic: true } }\n' > "$WORK/cfg-nsdyn-alloc.yaml"
+rm -rf "$WORK/overalloc-nsdyn"
+( cd "$ROOT" && go run ./cmd/sofabgen --config "$WORK/cfg-nsdyn-alloc.yaml" --lang rust --in "$WORK/bndarr.yaml" --out "$WORK/overalloc-nsdyn" )
+sed -i "s#\${SOFAB_RS_CORELIB}#$NOSTD#" "$WORK/overalloc-nsdyn/Cargo.toml"
+crate_bin_name "$WORK/overalloc-nsdyn"
+printf 'use sofabuffers_generated::*;\n' > "$WORK/overalloc-nsdyn/src/main.rs"
+sed '/^\/\/SOFAB_IMPORT$/d' "$ROOT/tests/conformance/rust/overcount_array_alloc.rs" \
+    >> "$WORK/overalloc-nsdyn/src/main.rs"
+( cd "$WORK/overalloc-nsdyn" && cargo run -q --features std ) \
+    || { echo "FAIL: a rejected bounded array must stop collecting (no_std, allow_dynamic)"; exit 1; }
+echo "==> [rs] rejected-array allocation OK (rs and rs-no-std/allow_dynamic)"
+
 # CORELIB_PLAN §7.2 item 8 -- the shared file's `sequence_growth` block
 # (generator#449). Not run in corelib-rs, and not out of oversight: under the
 # ARCHITECTURE §8 rule only PayloadAcc moved into that library (corelib-rs#87);

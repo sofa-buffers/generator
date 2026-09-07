@@ -3104,6 +3104,63 @@ pre-size, and it is bounded by the number this project already calls its
 amplification barrier. **Go and C# take no such clamp**, and whether they should
 is the same open question one paragraph down.
 
+**A reject decides the verdict; it does not stop the delivery** (generator#508).
+The A shape's safety rests on "an untrusted count is checked against a finite
+bound before the allocation", and in Rust that sentence was only half true: after
+the check *failed*, the elements it refused went on arriving and went on being
+stored. `self.inv` / `self.lim` are sticky flags read at the END of the decode,
+not an abort channel — the corelib cannot see either, so it delivers every element
+the wire announced — and `array_begin` arms the per-array fill counter from that
+same untrusted count *before* the bound is compared. A reject that only returned
+therefore left a fill budget of `count` behind. Measured on `corelib: rs`, a
+forged `count = 1000000` on a field whose declared storage is 32 bytes peaked at
+**8 MB** of heap while correctly answering `InvalidMsg`: the allocation was
+governed by the wire count, not by the schema bound, which is precisely what the
+bound exists to prevent. Every rejecting branch now zeroes the fill counter
+(`self.afill = 0`, `fillReject`) — the schema-`count` header, the receiver-cap
+header, a native row's id and inner-count bounds, and an element that trips its
+declared width mid-array — which routes the elements that follow into the
+`afill == 0` skip the element store already opens with.
+
+**The disarm is the mechanism, rather than a flag test at the store, because it is
+nearly free.** The store's first statement is already `if self.afill == 0 { return;
+}`, so a reject that zeroes the counter reuses a branch on the path; an
+`if !self.inv` at the store would be a branch on every element of every array on a
+maxspeed target, for a condition false in every honest decode. All five rust Ir
+cells HELD, but not at zero: encode is unchanged everywhere, decode read +3 Ir on
+`rust-rs` (23016 → 23019) and on `rust-rs-no-std-dyn` (38455 → 38458), 0 on
+`rust-rs-no-std` and `rust-rs-static`, and **+45 Ir on `rust-rs-unbounded`
+(21187 → 21232, +0.21%)**. That last one is a real and reproducible cost, not
+run-to-run spread: Callgrind Ir is deterministic for a fixed binary, and
+`results-raw.txt` records what each run actually read — held cells included — which
+is why the raw file carries 21232 while `results.txt` keeps the 21184 it was
+holding. The cell holds because +0.21% is inside the 0.3% hysteresis band, not
+because the reading is noise; the `unbounded_ingest` schema puts the new
+`self.afill = 0` stores into width-guard branches in the hot decode loop and the
+cost shows up as code layout there. In `.text` the change costs +48 bytes on
+`rust-rs-no-std` and +12 on `rust-rs-no-std-dyn`.
+
+Those 48 bytes are a **deliberate purchase on the strictest footprint row**. The
+heapless profiles never had the defect — `heapless::Vec::push` returns `Err` past
+`N`, so no forged count could grow that container — and the disarm buys them only
+that a rejected array is left empty instead of holding the first `N` elements of
+what it refused, which no `try_decode` caller can observe, since an `InvalidMsg`
+hands back no message at all. They are bought anyway so that one sentence describes
+every Rust profile: a reject stops the fill. Gating the disarm on growable storage
+(the same predicate that already suppresses `reserve_exact`) would give the bytes
+back and remains available; it is not taken here because a guard whose shape varies
+per profile is exactly how a defect comes back on one profile only.
+
+Two scope notes, both corrections to what the defect looked like from outside.
+The **fixlen (fp) count header** is a separate emitted arm from the integer one,
+reached through its own subtype, and was exposed identically — 8 MB for the same
+forged count on an `array<fp64>, count: 4`. And **`rs-no-std` is not uniformly
+safe**: with `allow_dynamic: true` its container is `alloc::vec::Vec` and it
+measured exactly like `rs`. The safe profiles are the heapless ones, on either
+corelib. `tests/conformance/rust/overcount_array_alloc.rs` counts the bytes on
+both exposed profiles, because — as with the two rows above it — the verdict was
+right before the fix and after it, and only the byte count tells the builds apart.
+
 **Rust's count-LESS arm is the one place in the family that still grows**: the
 four backends above allocate the cap-checked count there too, and generator#505
 scoped Rust to the schema-bounded arms only. Whether that arm should follow is
@@ -3305,9 +3362,20 @@ right place. `tests/conformance/rust/run.sh` builds one project with all three
   same way. Neither ever answers the cap's category, which is the precision a
   decoder-level cap cannot have (§6.2.1) and the reason §9.5's second family is
   being retired.
+* and a **rejected count stops the fill**, which is the one property in this list
+  that no verdict assertion can reach: over-count and over-cap headers alike
+  return the right answer whether or not the elements behind them are still being
+  collected, so `overcount_array_alloc.rs` counts allocator bytes instead
+  (generator#508). It runs on both heap-backed profiles — `corelib: rs` and
+  `rs-no-std` with `allow_dynamic` — and pins the accept path of all three arms in
+  the same file, so a decoder that disarmed too eagerly fails it too. Each of its
+  three budgets is written to sit BETWEEN the two builds rather than merely above
+  the fixed one: a budget of twice the legitimate reserve also covers the pre-fix
+  reading, and a row written that way passes against the defect it was added for.
 
-All of it passed unchanged when the exemption was written — the rows were written
-against the backend, not for a fix — and the reason is structural: every guard is a match arm keyed by `(wire
+All of it but the last bullet passed unchanged when the exemption was written —
+those rows were written against the backend, not for a fix — and the reason is
+structural: every guard is a match arm keyed by `(wire
 callback, location, id)`, so a field the dispatch skips reaches no arm at all. The
 arms are generated, though, and one widened to `_` would cap a skip silently with
 no unit test able to see it. That is what the rows are for.
