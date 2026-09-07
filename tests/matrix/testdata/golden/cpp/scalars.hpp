@@ -3,9 +3,7 @@
 #include <cstdint>
 #include <string>
 #include <vector>
-#include <array>
 #include <span>
-#include <cstring>
 #include <cstddef>
 #include "sofab/sofab.hpp"
 
