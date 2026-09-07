@@ -26,9 +26,9 @@ python             maxspeed   subtract  1081889       2309212
 python-native      maxspeed   subtract  130661        802289
 rust-rs            maxspeed   toggle    8273          23025
 rust-rs-no-std     footprint  toggle    8067          30014
-rust-rs-no-std-dyn footprint  toggle    8292          38464
+rust-rs-no-std-dyn footprint  toggle    8280          38464
 rust-rs-static     maxspeed   toggle    8120          16580
-rust-rs-unbounded  maxspeed   toggle    6760          21244
+rust-rs-unbounded  maxspeed   toggle    6762          21103
 ts-bigint          maxspeed   subtract  605542        768539
 ts-long            maxspeed   subtract  596936        772117
 ts-number          maxspeed   subtract  614906        767709

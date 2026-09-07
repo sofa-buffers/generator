@@ -38,7 +38,7 @@ rust-rs            maxspeed   toggle    8273          23013
 rust-rs-no-std     footprint  toggle    8078          29998
 rust-rs-no-std-dyn footprint  toggle    8280          38452
 rust-rs-static     maxspeed   toggle    8120          16564
-rust-rs-unbounded  maxspeed   toggle    6762          21184
+rust-rs-unbounded  maxspeed   toggle    6762          21091
 ts-bigint          maxspeed   subtract  605081        768394
 ts-long            maxspeed   subtract  597309        771956
 ts-number          maxspeed   subtract  614802        767552

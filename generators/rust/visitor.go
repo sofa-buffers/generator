@@ -104,14 +104,71 @@ func boundOf(has bool, v int64) int64 {
 //     LimitExceeded, and checkBounded has already refused an unbounded field
 //     there, so the case cannot arise — g.limits is left zero for that profile
 //     and this returns "" for it.
+//
+// Both bounds are followed by limRefuse, which answers the OTHER half of the
+// same question: this element's index is inside the bound, but a cap crossed
+// EARLIER in the same message has already refused it (generator#518).
 func (g *gen) overIndexGuard(cap int64) string {
-	if cap >= 0 {
-		return fmt.Sprintf("if id as usize >= %d { self.inv = true; return; } ", cap)
+	var out string
+	switch {
+	case cap >= 0:
+		out = fmt.Sprintf("if id as usize >= %d { self.inv = true; return; } ", cap)
+	case g.limits.arrayHas:
+		out = "if id as usize >= MAX_DYN_ARRAY_COUNT { self.lim = true; return; } "
 	}
-	if !g.limits.arrayHas {
+	return out + g.limRefuse()
+}
+
+// limRefuse returns the clause that turns an ALREADY-crossed receiver cap into a
+// refusal of the arm that follows it: the wrapper-element arms and the native-row
+// header, every one of which MATERIALISES a container before it stores anything.
+//
+// generator#518. The sticky `lim` flag has stopped a later count-less array's
+// ELEMENTS since generator#102 (limArrayStore), and nothing else: the gap fill in
+// seqElemGrow, a wrapper element's own store, and the container growth those two
+// drive all ran on for the rest of a refused message's bytes. Measured on
+// corelib-rs 7599f9a at max_dyn_array_count 65536, bytes handed out by a counting
+// GlobalAlloc per try_decode, behind an 11-byte over-cap string -- the left column
+// is the refused message, the right the same tail with no breach in front of it:
+//
+//	array<string> element        at 65535   1,572,875 B   1,572,875 B
+//	array<blob> element          at 65535   1,572,875 B   1,572,875 B
+//	array<array<string>> row     at 65535   1,572,970 B   1,572,970 B
+//	native mat row header        at 65535   1,572,872 B   1,572,888 B
+//	array<struct{u32}> element   at 65535     262,152 B     262,152 B
+//
+// A refused decode allocated, to the byte, what an accepted one does. Each of
+// those readings is the generator#512 ceiling -- cap x sizeof(slot), verdict Ok,
+// bounded by the receiver cap -- reached by a message that also happens to be
+// refused, so this is EFFORT and not a new amplification class, and it had to be
+// settled on throughput rather than on safety.
+//
+// THE COST IS PER CONTAINER, NOT PER VALUE, which is the whole reason it is
+// affordable on a maxspeed target where generator#511 had to weigh a single
+// per-element test at -0.36%. These arms fire once per wrapper element and once
+// per array HEADER, never once per scalar; a flag already in a register decides
+// them, and in every non-attack decode the branch is false and predicted.
+//
+// PLACED AFTER the arm's own index/count rejects, never before. Those set
+// `self.inv`, which DOMINATES `self.lim` at finish, so refusing ahead of them
+// would move a doubly-bad message's verdict from InvalidMsg to LimitExceeded.
+// What the refusal does change is the tail it no longer walks into: an element
+// that is never placed is never descended into either, so an over-width field
+// INSIDE such an element no longer sets `inv`. That is the established behaviour
+// of the over-index guard directly above -- which has returned without descending
+// since generator#247 -- and it moves the one-shot verdict TOWARDS the
+// incremental one rather than away from it: `feed` answers LimitExceeded on the
+// very chunk that crosses the cap and never reads the tail, so byte-by-byte
+// feeding of those same messages already answered LimitExceeded where try_decode
+// answered InvalidMsg.
+//
+// Emitted only where a cap can be crossed at all -- the std profile with at least
+// one unbounded field, which is exactly when the `lim` slot exists.
+func (g *gen) limRefuse() string {
+	if !g.limits.any() {
 		return ""
 	}
-	return "if id as usize >= MAX_DYN_ARRAY_COUNT { self.lim = true; return; } "
+	return "if self.lim { return; } "
 }
 
 // reserveCount emits the sizing half of a schema-bounded native array's
@@ -314,6 +371,13 @@ func (g *gen) rowGuards(fr frame) string {
 	case g.limits.arrayHas:
 		out += fillReject("count > MAX_DYN_ARRAY_COUNT", "lim")
 	}
+	// ...and last, the cap that was crossed BEFORE this header: the gap fill and
+	// the row reserve that follow are the largest single allocation a refused
+	// message still paid for (generator#518, see limRefuse). It comes after both
+	// rejects so neither verdict moves, and it does not disarm the fill -- the
+	// row's element store carries limArrayStore, so the elements that keep
+	// arriving are already dropped there.
+	out += g.limRefuse()
 	return out
 }
 
@@ -1991,14 +2055,15 @@ func arrayWidthGuard(k ir.Kind, ref *ir.TypeRef) string {
 //
 // What it does NOT buy, because the two are easy to conflate: this wraps the
 // ELEMENT store and nothing else. Container growth, the gap fill in
-// array_begin/sequence_begin and a wrapper element's own store are ungated, so a
-// refused message materialises those exactly as an accepted one does — behind the
-// same breach, at max_dyn_array_count 65536, a mat row header at index 65535
-// still costs 1,572,872 bytes and an array<string> element there 1,572,873. That
-// is the generator#512 ceiling (cap × sizeof(slot), verdict Ok) reached by a
-// message that also happens to be refused, not a bound this guard was ever
-// holding; extending the test to those arms is a throughput question with its own
-// numbers, filed as generator#518.
+// array_begin/sequence_begin and a wrapper element's own store are a different
+// question, and one it never answered — behind the same breach, at
+// max_dyn_array_count 65536, a mat row header at index 65535 cost 1,572,872 bytes
+// and an array<string> element there 1,572,875, breach or no breach. That is the
+// generator#512 ceiling (cap × sizeof(slot), verdict Ok) reached by a message that
+// also happens to be refused, not a bound this guard was ever holding. It is
+// limRefuse that holds it now (generator#518), at the HEADER rather than per
+// element; the two do not overlap, because a header refusal cannot reach a native
+// array whose own header arrived before the breach.
 //
 // So the branch is not free, and it is not paying for nothing either. Emitted
 // only on the std profile: rs-no-std resolves no limits at all and checkBounded
