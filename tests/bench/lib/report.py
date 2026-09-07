@@ -36,9 +36,10 @@ from format import NOISE_BAND  # noqa: E402  (same directory; its argv work is i
 # compares against would call a move "moved" that results.txt had held.
 #
 # "Noise" is the rule, not a guarantee. Per-row jitter is measured in
-# tests/bench/README.md: sixteen rows repeat exactly and would show nothing under this
-# threshold, while `go` encode swings 9.1% on an unchanged tree (#494) and therefore
-# lands in the outlier bucket for no reason a commit caused.
+# tests/bench/README.md: most rows repeat exactly and would show nothing under this
+# threshold. The one row that did not — `go` encode swung 9.1% on an unchanged tree
+# and landed in the outlier bucket for no reason a commit caused — was fixed in the
+# harness (#494), not by moving a threshold.
 HOLD_PCT = NOISE_BAND * 100
 
 # Above this a row is called out separately. Not a statistical bound — a threshold

@@ -69,16 +69,134 @@ func (g *gen) readme(s *ir.Schema) string {
 // decays — checked at 1/2/3/5/10 warmups, which landed within 95 Ir (0.25%) of each
 // other with no trend, i.e. below the 0.3% at which results.txt calls a value moved.
 //
-// That belief does not survive being measured properly. 53 runs of the `go` row on
-// an unchanged tree read encode as either 18625 or 20468 — 9.1% apart, the low value
-// on ~13% of runs — so something the collected op depends on is still not settled by
-// one warmup, and the 1/2/3/5/10 comparison above was one sample per setting, which
-// cannot see a bimodal reading at all. Do not treat the warmup count as validated
-// until #494 re-measures it; the decode half and every other toggle row reproduce
-// exactly.
+// That belief did not survive being measured properly, and no warmup COUNT fixes
+// what it missed. 53 runs of the `go` row on an unchanged tree read encode as either
+// 18625 or 20468 — 9.1% apart, the low value on ~13% of runs (#494). The 1843 Ir
+// between the two modes is, function for function, one Go allocator slow path:
+// mcache.refill -> mcentral.cacheSpan -> mheap.allocSpan/initSpan and their
+// bookkeeping. Nothing else moves at all.
 //
-// The warmup is a separate symbol so --toggle-collect cannot see it.
+// It is the buffer Encode() allocates. That buffer is one size class (1037 bytes ->
+// class 1152 on the bench schema) and a span of that class holds seven objects, so
+// one allocation in seven exhausts the mcache span and the next one refills it.
+// Which of the seven the COLLECTED op gets is decided by how many objects of that
+// class the process allocated before it, and that is not a constant: probed with
+// runtime.MemStats it was 6 on 38 of 40 runs and 8 on the other 2 — a property of the
+// runtime's own start-up, not of anything the harness does. At 6 the single warmup
+// takes the span's last slot and the op pays the refill; at 8 the op is the third
+// object of a fresh span and does not. The addresses say the same thing: the op's
+// buffer comes back 1152 bytes after the warmup's (fast) or 533760 bytes away (a
+// brand-new span).
+//
+// A warmup count therefore cannot fix it. The op refills whenever prior+warmups is a
+// multiple of seven, and prior takes two values two apart, so whatever the count,
+// one of them is unlucky. Measured, by padding that size class before the op to
+// stand in for a differently-behaved start-up: at one warmup the slow mode appears
+// at pad 0 and 7 (prior 6) and pad 5 (prior 8); at two warmups it does not go away,
+// it moves to pad 4 and 6.
+//
+// benchAlignSpan removes the phase rather than guessing it, and that is the fix: it
+// allocates the same size until the allocator hands back an object that is NOT
+// adjacent to its predecessor — the first object of a fresh span — so the collected
+// op always takes the second slot of one. Over the same pad sweep the reading is
+// then 18604 on 27 of 27 runs, and 300 of 300 unpadded runs agree at 18625.
+//
+// That pins the op to a slot that never pays a refill, so the number is a chosen
+// phase, not an average: a steady-state encoder pays one refill per seven ops
+// (~1843/7 = ~263 Ir), so the row reads ~1.4% under what encoding in a loop costs.
+// Deliberate — results.txt is a diff tool, and a stable baseline is worth more here
+// than an amortised one. Recorded in tests/bench/README.md.
+//
+// Only the encode half is aligned, because only it was measured to need it — and
+// only encode is fixed by it. Sampled 300 deep, BOTH go rows still jitter on decode:
+// four outliers in 300 on each (~1.3%), unchanged by this code, which never runs in
+// the decode branch. An earlier reading of 60100 on 20 of 20 recorded that as zero
+// spread; at a 1.3% rate twenty draws miss it 77% of the time, so that was sampling
+// depth, not a property of the row.
+//
+// The alignment is emitted for every message, so `go-unbounded` gets it too — but it
+// does not make that row safe, only unchanged. A message with an unbounded field has
+// no worst-case size to allocate, so its Encode() grows an output buffer through a
+// separate scratch buffer, in a DIFFERENT size class from the one cap(wire) names:
+// padding that scratch class still flips the row by 13.9%, aligned or not. It reads
+// exactly today (13314 on 300 of 300) because that class happens to sit far from a
+// boundary in this runtime, which is luck, not immunity. Worth a follow-up if it ever
+// moves; not fixed here, because it is not what was measured to be broken.
+//
+// The warmup is a separate symbol so --toggle-collect cannot see it, and so is the
+// alignment.
 func (g *gen) emitBench(f *gofile, s *ir.Schema, pkgAlias string) {
+	f.line("// benchAlignSink holds the buffer benchAlignSpan allocated last, so the")
+	f.line("// compiler cannot decide the allocation is dead and drop it.")
+	f.line("var benchAlignSink []byte")
+	f.blank()
+	f.line("// benchAlignSpan pins the allocator to a known point in the size class the")
+	f.line("// measured op allocates its output from, so that op costs the same in every")
+	f.line("// process. Without it a bench row reading one op is bimodal by ~9%%, at random.")
+	f.line("//")
+	f.line("// Go hands out small objects from a per-P span of one size class, and a span")
+	f.line("// holds a handful of them -- seven, say, in the 1152-byte class a 1037-byte")
+	f.line("// buffer falls in. Whichever allocation lands on the last slot of a span")
+	f.line("// makes the NEXT one refill the span from mcentral -- ~1843 Ir of allocator")
+	f.line("// slow path. Which slot the collected op gets depends on how many objects of")
+	f.line("// that class the runtime's own start-up already took, which varies per")
+	f.line("// process, so a fixed number of warmups cannot settle it: it only moves the")
+	f.line("// unlucky phase somewhere else.")
+	f.line("//")
+	f.line("// So this does not guess the phase, it removes it. Allocating the same size")
+	f.line("// repeatedly walks the span one object at a time -- successive addresses are")
+	f.line("// exactly one size class apart -- until the allocator hands back one that is")
+	f.line("// NOT adjacent, which is the first object of a fresh span. Returning there")
+	f.line("// leaves the collected op holding the second slot of that span, in every")
+	f.line("// process. sample is the warmup's own output, so the size class is the one")
+	f.line("// the op actually uses and no message constant has to be threaded in here.")
+	f.line("//")
+	f.line("// noinline and a separate symbol, like the warmups: --toggle-collect keys on")
+	f.line("// entering a symbol, so anything the measured op must not be charged for has")
+	f.line("// to happen outside run_*.")
+	f.line("//go:noinline")
+	f.line("func benchAlignSpan(sample []byte) {")
+	f.line("\tn := cap(sample)")
+	f.line("\tif n == 0 {")
+	f.line("\t\treturn")
+	f.line("\t}")
+	f.line("\tat := func() uintptr {")
+	f.line("\t\tb := make([]byte, n)")
+	f.line("\t\tbenchAlignSink = b")
+	f.line("\t\treturn reflect.ValueOf(b).Pointer()")
+	f.line("\t}")
+	f.line("\t// The stride is the size class, which is not n and is not exported by the")
+	f.line("\t// runtime -- so learn it: inside a span every step is the stride, so the")
+	f.line("\t// most common step over a short run is it, whatever the class turns out")
+	f.line("\t// to be and whichever probe straddled a span boundary.")
+	f.line("\tconst probes = 32")
+	f.line("\tsteps := make(map[uintptr]int, probes)")
+	f.line("\tprev := at()")
+	f.line("\tstride, seen := uintptr(0), 0")
+	f.line("\tfor i := 0; i < probes; i++ {")
+	f.line("\t\tp := at()")
+	f.line("\t\td := p - prev")
+	f.line("\t\tprev = p")
+	f.line("\t\tsteps[d]++")
+	f.line("\t\tif steps[d] > seen {")
+	f.line("\t\t\tstride, seen = d, steps[d]")
+	f.line("\t\t}")
+	f.line("\t}")
+	f.line("\t// Bounded: a span cannot hold more objects than it has bytes, and a run")
+	f.line("\t// that somehow never sees a boundary must still end.")
+	f.line("\tfor i := 0; i < 1<<12; i++ {")
+	f.line("\t\tp := at()")
+	f.line("\t\tif p-prev != stride {")
+	f.line("\t\t\treturn")
+	f.line("\t\t}")
+	f.line("\t\tprev = p")
+	f.line("\t}")
+	f.line("\t// Falling out means no span boundary was found, so the op runs at an")
+	f.line("\t// arbitrary phase and the row is bimodal again. Say so rather than")
+	f.line("\t// returning quietly: a silent no-op here is invisible in results.txt.")
+	f.line("\tfmt.Fprintln(os.Stderr, \"benchAlignSpan: no span boundary in 4096 allocations; this reading is not phase-pinned\")")
+	f.line("}")
+	f.blank()
 	f.line("// Bench state at package scope: the results outlive the measured call so")
 	f.line("// main can observe them after collection stops, which is what keeps the op")
 	f.line("// from being optimized away. See tests/bench/README.md.")
@@ -145,6 +263,7 @@ func (g *gen) emitBench(f *gofile, s *ir.Schema, pkgAlias string) {
 		f.line("\t\t}")
 		f.line("\t\tif w == \"encode_%s\" {", low)
 		f.line("\t\t\twarmup_encode_%s() // one-time runtime costs (not collected)", low)
+		f.line("\t\t\tbenchAlignSpan(bench%sWire) // known allocator phase (not collected)", typeName)
 		f.line("\t\t\trun_encode_%s()", low)
 		f.line("\t\t} else {")
 		f.line("\t\t\twarmup_encode_%s() // setup: the decode input (not collected)", low)
@@ -178,6 +297,7 @@ func (g *gen) harness(s *ir.Schema, modPath string) []byte {
 	f.imp("fmt")
 	f.imp("io")
 	f.imp("os")
+	f.imp("reflect")
 	f.imp(modPath + "/" + g.pkg)
 
 	pkgAlias := g.pkg

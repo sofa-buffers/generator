@@ -176,9 +176,11 @@ def sha256(path):
 #     claim, nor the ~50x that kotlin's first three runs suggested (#473). There is
 #     no headroom to narrow: 0.001 would sit BELOW that excursion and flip the cell
 #     on roughly one reading in eleven, and 0.002 clears it by only 1.6x.
-#   * and one row is beyond any band's reach: `go` encode is bimodal, 18625 or 20468
-#     over 53 runs (9.1%, 30x this band), so that cell moves at random whatever this
-#     is set to. Sizing the band cannot fix it; that is issue #494, not this one.
+#   * one row USED to be beyond any band's reach: `go` encode was bimodal, 18625 or
+#     20468 over 53 runs (9.1%, 30x this band), so that cell moved at random whatever
+#     this was set to. Sizing the band could not have fixed it and was never the
+#     lever; the row was (#494 — a Go allocator span boundary landing inside the
+#     collected op). It now reads 18625 on 30 of 30 runs.
 #
 # So 0.003 stands, sized from the data rather than from a figure documented in
 # corelib-java. The lever that acts on MASKING is not this constant but the raw
@@ -202,9 +204,10 @@ def stabilize(new, prev):
     "Only CPython and the toggle rows are bit-reproducible" was the reason given for
     holding at all, and it is not the split the measurements found (#489). What
     reproduces exactly is a property of the RUNTIME, not of the method: the two python
-    rows, all three ts rows to within 1-5 Ir, and fourteen of the fifteen toggle rows
-    repeat to the instruction, while `go` — a toggle row — is the noisiest row in the
-    file by two orders of magnitude (#494). Per-row readings: tests/bench/README.md.
+    rows, all three ts rows to within 1-5 Ir, and the toggle rows repeat to the
+    instruction. `go` — a toggle row — was for a while the noisiest row in the file by
+    two orders of magnitude, until the cause was found in the harness rather than in
+    the method (#494). Per-row readings: tests/bench/README.md.
 
     Hysteresis is honest about the rows that do move. Two properties worth knowing —
 
@@ -441,8 +444,8 @@ def render_raw(lines):
         "#",
         "# Read results.txt for the verdict and its header for provenance. This file is",
         "# the record: a cell held back by the noise band shows up here and nowhere else,",
-        "# and jittery rows (go encode above all — #494) move here without meaning",
-        "# anything. See tests/bench/README.md, \"Measured jitter, per row\".",
+        "# and a jittery row moves here without meaning anything. See",
+        "# tests/bench/README.md, \"Measured jitter, per row\".",
         "#",
         "".join(str(v).ljust(w) for v, w in zip(IR_COLS, IR_WIDTHS)).rstrip(),
     ] + lines
