@@ -31,19 +31,19 @@
 //      rather than replacing (generator#509) -- so the tail below goes on
 //      growing a destination the decode has already decided to throw away.
 //
-//      Rows 5 and 6 keep every row at INDEX 0 on purpose. The guard wraps the
-//      element store alone: container growth, the gap fill in array_begin and a
-//      wrapper element's own store stay ungated, so a row at a HIGH index would
-//      allocate its whole gap whether the message was refused or not (measured:
-//      1,572,872 bytes at index 65535 under a 65536 cap, breach or no breach --
-//      generator#518). Asserting a budget there would pin today's amplification
-//      as a requirement, which is what ARCHITECTURE §9.5's generator#512 block
-//      declines to do for the same reason.
+//      Rows 5 and 6 keep every row at INDEX 0, which is all the store guard can
+//      be measured on: it wraps the ELEMENT store alone. What a refused message
+//      spends on the CONTAINERS -- the gap fill in array_begin/sequence_begin, a
+//      wrapper element's own store, and the growth those drive -- is the block at
+//      the bottom of this file (generator#518), measured at the highest index the
+//      cap admits, where the two differ by six orders of magnitude.
 //
 // Both budgets sit BETWEEN the two builds rather than merely above the guarded
-// one: measured on corelib-rs 7599f9a, the refused message allocates 104 bytes
+// one: measured on corelib-rs 7599f9a, the refused message allocates 8 bytes
 // with the guard and 32,104 without it, so the 8 KiB budget separates them and
-// would not be met by a build that dropped the test.
+// would not be met by a build that dropped the test. (It read 104 until
+// generator#518 refused the row HEADER too: the 96 bytes were the first row the
+// gap fill pushed, which the store guard never covered.)
 //SOFAB_IMPORT
 
 use std::alloc::{GlobalAlloc, Layout, System};
@@ -221,4 +221,156 @@ fn main() {
         "post-limit fill: refused {} bytes/decode, unrefused {} bytes/decode over {} rows",
         after_breach, unrefused, K
     );
+    post_limit_containers();
+}
+
+// ---------------------------------------------------------------------------
+// generator#518: the containers the guard above does NOT cover.
+//
+// `if !self.lim` wraps a native array's ELEMENT store. Everything else a refused
+// message materialises -- the gap fill in array_begin/sequence_begin, a wrapper
+// element's own store, and the container growth those two drive -- ran on for the
+// rest of the message's bytes, so a refused decode allocated to the byte what an
+// accepted one does. Measured on corelib-rs 7599f9a at max_dyn_array_count 65536,
+// one element at index 65535 behind the same 11-byte breach, bytes/try_decode:
+//
+//                                       refused    refused    no breach
+//                                        before      after
+//     array<string> element            1,572,875         11    1,572,875
+//     array<blob> element              1,572,875         11    1,572,875
+//     array<array<string>> row         1,572,970          8    1,572,970
+//     native mat row header            1,572,872          8    1,572,888
+//     array<struct{u32}> element         262,152          8      262,152
+//
+// The refused column is a BUDGET, and the only budget these rows assert: it can
+// only ever move down. The unrefused half asserts the VALUE instead -- that the
+// element still arrives at index 65535 -- and deliberately not a byte count. What
+// an ACCEPTED decode spends there is the generator#512 ceiling (cap x sizeof
+// slot, verdict Ok), and a test that required it would pin that ceiling as a
+// requirement, which ARCHITECTURE §9.5's generator#512 block declines to do.
+
+/// The highest index the configured cap admits: the arm's own over-index reject
+/// fires at MAX_DYN_ARRAY_COUNT, so this is the largest gap a WELL-FORMED message
+/// can ask a receiver to fill, and the one the ceiling is measured at.
+const IDX: u64 = 65535;
+
+/// Bytes/decode a refused message is allowed to spend on the tail behind the
+/// breach. Two orders of magnitude under the smallest unguarded reading above and
+/// three above the guarded ones, so it separates the two builds rather than
+/// merely bounding one.
+const TAIL_BUDGET: usize = 4096;
+
+/// `strs` (id 3): one string element at index `ix`.
+fn str_at(ix: u64) -> Vec<u8> {
+    let mut w = Vec::new();
+    put_varint(&mut w, (3u64 << 3) | 6);
+    put_varint(&mut w, (ix << 3) | 2);
+    put_varint(&mut w, (3u64 << 3) | 2);
+    w.extend_from_slice(b"abc");
+    put_varint(&mut w, 7);
+    w
+}
+
+/// `blbs` (id 4): one blob element at index `ix`.
+fn blob_at(ix: u64) -> Vec<u8> {
+    let mut w = Vec::new();
+    put_varint(&mut w, (4u64 << 3) | 6);
+    put_varint(&mut w, (ix << 3) | 2);
+    put_varint(&mut w, (3u64 << 3) | 3);
+    w.extend_from_slice(b"abc");
+    put_varint(&mut w, 7);
+    w
+}
+
+/// `objs` (id 5): one struct element at index `ix`, carrying k = 7.
+fn obj_at(ix: u64) -> Vec<u8> {
+    let mut w = Vec::new();
+    put_varint(&mut w, (5u64 << 3) | 6);
+    put_varint(&mut w, (ix << 3) | 6);
+    put_varint(&mut w, 0);
+    put_varint(&mut w, 7);
+    put_varint(&mut w, 7);
+    put_varint(&mut w, 7);
+    w
+}
+
+/// `rows` (id 6): one wrapper row (an array<string>) at index `ix`, itself
+/// carrying one element -- the two-level shape, where the outer sequence_begin
+/// grows and the inner string element grows again.
+fn row_at(ix: u64) -> Vec<u8> {
+    let mut w = Vec::new();
+    put_varint(&mut w, (6u64 << 3) | 6);
+    put_varint(&mut w, (ix << 3) | 6);
+    put_varint(&mut w, (0u64 << 3) | 2);
+    put_varint(&mut w, (2u64 << 3) | 2);
+    w.extend_from_slice(b"ab");
+    put_varint(&mut w, 7);
+    put_varint(&mut w, 7);
+    w
+}
+
+/// `mat` (id 2): one NATIVE row header at index `ix` with four u32 elements. The
+/// elements are already covered by the store guard; the header's gap fill is not.
+fn mat_row_at(ix: u64) -> Vec<u8> {
+    let mut w = Vec::new();
+    put_varint(&mut w, (2u64 << 3) | 6);
+    put_varint(&mut w, (ix << 3) | 3);
+    put_varint(&mut w, 4);
+    for i in 0..4u64 {
+        put_varint(&mut w, i + 1);
+    }
+    put_varint(&mut w, 7);
+    w
+}
+
+/// One container shape: what the refused message spends on it, that `decode`
+/// hands back nothing for it, and that the same tail alone still decodes to the
+/// element it carries.
+fn shape(name: &str, tail: Vec<u8>, len_of: fn(&Pl) -> usize) {
+    let mut refused = breach();
+    refused.extend_from_slice(&tail);
+    let cost = per_decode(&refused);
+    assert!(
+        cost < TAIL_BUDGET,
+        "a message already refused must not materialise a {}: {} bytes/decode \
+         (budget {}) -- generator#518",
+        name,
+        cost,
+        TAIL_BUDGET
+    );
+    assert!(
+        matches!(
+            Pl::try_decode(&refused),
+            Err(DecodeError::Sofab(sofab::Error::LimitExceeded))
+        ),
+        "the refused {} message must be LimitExceeded",
+        name
+    );
+    let got = Pl::decode(&refused);
+    assert_eq!(
+        len_of(&got),
+        0,
+        "decode() after a crossed cap must hand back no {}",
+        name
+    );
+    // The counterweight, on the VALUE and not on a byte count: without the breach
+    // the very same element is placed at its index, so the budget above measures
+    // the refusal and not a decoder that stopped collecting.
+    let kept = Pl::decode(&tail);
+    assert_eq!(
+        len_of(&kept),
+        IDX as usize + 1,
+        "an unrefused {} must still be placed at its index",
+        name
+    );
+    println!("  {:<30} {:>8} bytes/decode refused", name, cost);
+}
+
+fn post_limit_containers() {
+    println!("post-limit containers (generator#518), one element at index {}:", IDX);
+    shape("array<string> element", str_at(IDX), |m| m.strs.len());
+    shape("array<blob> element", blob_at(IDX), |m| m.blbs.len());
+    shape("array<struct> element", obj_at(IDX), |m| m.objs.len());
+    shape("array<array<string>> row", row_at(IDX), |m| m.rows.len());
+    shape("native row header", mat_row_at(IDX), |m| m.mat.len());
 }

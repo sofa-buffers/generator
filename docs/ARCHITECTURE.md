@@ -3518,31 +3518,55 @@ right place. `tests/conformance/rust/run.sh` builds one project with all three
   message it filled — `nums: []` with the test, `nums: [1, 2, 3]` without it,
   behind the same over-cap string — and a refused message stops COLLECTING
   ELEMENTS into a later count-less native array (2000 legal matrix rows behind an
-  11-byte breach: 104 bytes/decode against 32,104). `try_decode` and `Decoder`
+  11-byte breach: 8 bytes/decode against 32,104 — 104 until the bullet below
+  refused the row HEADER as well). `try_decode` and `Decoder`
   answer `LimitExceeded` either way and neither hands back a partial message,
   which is precisely why the question needed measuring rather than reasoning. The
   test costs −0.36% of `rust-rs-unbounded` decode to remove; it stays.
 
-  **What it does NOT buy, stated because the two are easy to conflate.** The test
-  wraps the native ELEMENT store and nothing else: container growth, the gap fill
-  in `array_begin` / `sequence_begin`, and a wrapper-array element's own store are
-  ungated, so a refused message goes on materialising those exactly as an accepted
-  one does. Measured on this tree at `max_dyn_array_count: 65536`, behind the same
-  11-byte breach, per `try_decode`: a native `mat` row header at index 65535 costs
-  1,572,872 bytes, an `array<string>` element at index 65535 costs 1,572,873, and
-  an `array<struct{u32}>` element at index 65535 costs 262,152 — the same readings
-  as without the breach in front of them. That is not a second amplification
-  class: it is the §9.5 ceiling ("How high the barrier actually is, once it
-  holds" — `cap × sizeof(slot)`, verdict `Ok`, generator#512), reached by a
-  message that happens also to be refused, so
-  the bound the receiver already accepted is unchanged. Extending the test to
-  those arms is a throughput question on a maxspeed row rather than a safety one,
-  and is filed as generator#518 rather than folded in here. `post_limit_fill.rs`
-  puts its rows at index 0 deliberately — a high-index row would pin today's
-  amplification as a requirement, which is the same reason §9.5's #512 block
-  pins no numbers.
+* and, past the ELEMENTS, **a crossed cap refuses every CONTAINER behind it**
+  (generator#518). The test above wraps the native element store and nothing else,
+  so container growth, the gap fill in `array_begin` / `sequence_begin` and a
+  wrapper-array element's own store all ran on for the rest of a refused message's
+  bytes: measured at `max_dyn_array_count: 65536` behind the same 11-byte breach,
+  per `try_decode`, a refused decode allocated to the byte what an accepted one
+  does — an `array<string>` element at index 65535 cost 1,572,875 bytes, an
+  `array<blob>` element the same, an `array<array<string>>` row 1,572,970, a
+  native `mat` row header 1,572,872, and an `array<struct{u32}>` element 262,152.
+  Each of those is the §9.5 ceiling ("How high the barrier actually is, once it
+  holds" — `cap × sizeof(slot)`, verdict `Ok`, generator#512) reached by a message
+  that happens also to be refused, so this was **effort and not a new
+  amplification class**, and it had to be answered on throughput rather than on
+  safety. It is answered by an `if self.lim { return; }` on each of those arms,
+  which — unlike the per-element test above — sits at a wrapper element or an
+  array HEADER, so it is paid once per container and never once per value: the
+  five readings become 11, 11, 8, 8 and 8 bytes, and `decode` hands back an empty
+  container for every one of them. Two rules govern where it goes:
 
-All of it but the last two bullets passed unchanged when the exemption was written —
+  - **After the arm's own index/count rejects, never before.** `self.inv`
+    dominates `self.lim` at `finish`, so refusing ahead of them would move a
+    doubly-bad message from `InvalidMsg` to `LimitExceeded`.
+  - **An element that is not placed is not descended into,** so an over-width
+    field *inside* a refused struct or row element no longer sets `inv`. That is
+    the over-index guard's own established behaviour (generator#247), and it moves
+    the one-shot verdict TOWARDS the incremental one rather than away from it:
+    `feed` answers `LimitExceeded` on the very chunk that crosses the cap and
+    never reads the tail, so byte-by-byte feeding of those messages already
+    answered `LimitExceeded` where `try_decode` answered `InvalidMsg`.
+
+  Two shapes are deliberately **left materialising**, and measured saying so: a
+  schema-`count:` NATIVE array still reserves and collects behind a refusal (32
+  bytes for `count: 8` of `u32`), and so does a scalar field, whose payload the
+  callback has already built before any arm sees it. Both are bounded by the
+  schema rather than by the cap, so neither is the #512 ceiling; and refusing the
+  native array would mean disarming its fill, which is exactly what would stop its
+  elements reaching the width check — trading an `InvalidMsg` for a
+  `LimitExceeded` to save a schema-bounded allocation. `post_limit_fill.rs` asserts
+  a byte BUDGET only on the refused side, which can only ever move down; the
+  unrefused counterweight asserts the VALUE arrived at its index and deliberately
+  not a byte count, so no row of it pins the #512 ceiling as a requirement.
+
+All of it but the last three bullets passed unchanged when the exemption was written —
 those rows were written against the backend, not for a fix — and the reason is
 structural: every guard is a match arm keyed by `(wire
 callback, location, id)`, so a field the dispatch skips reaches no arm at all. The

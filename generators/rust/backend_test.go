@@ -278,7 +278,7 @@ messages:
 		// CLEARED on open even here: §7.4 replacement is a semantics rule, so it does
 		// not depend on the bound being a schema `count` (generator#509). What the
 		// missing bound suppresses is the pre-size, and only that.
-		"(ArrayKind::Unsigned, _Loc::Root_mat, _) => { if id as usize >= MAX_DYN_ARRAY_COUNT { self.lim = true; self.afill = 0; return; } if count > MAX_DYN_ARRAY_COUNT { self.lim = true; self.afill = 0; return; } while self.m.mat.len() <= id as usize { self.m.mat.push(Default::default()); } self._ix0 = id as usize; if let Some(_r) = self.m.mat.get_mut(id as usize) { _r.clear(); } },",
+		"(ArrayKind::Unsigned, _Loc::Root_mat, _) => { if id as usize >= MAX_DYN_ARRAY_COUNT { self.lim = true; self.afill = 0; return; } if count > MAX_DYN_ARRAY_COUNT { self.lim = true; self.afill = 0; return; } if self.lim { return; } while self.m.mat.len() <= id as usize { self.m.mat.push(Default::default()); } self._ix0 = id as usize; if let Some(_r) = self.m.mat.get_mut(id as usize) { _r.clear(); } },",
 		"(_Loc::Root_mat, _) => { if self.afill == 0 { return; } self.afill -= 1; if value > 4294967295 { self.inv = true; self.afill = 0; return; } { if !self.lim { if let Some(_r) = self.m.mat.get_mut(self._ix0) { _r.push(value as u32); }; } }; },",
 		// Unbounded string/blob: declared total checked at the top of the callback,
 		// scalar fields and wrapper-sequence string elements alike.
@@ -585,10 +585,15 @@ messages:
 `
 	// std profile: rejects.
 	m := moduleFromYAML(t, src, map[string]any{})
+	// The count-less `ds` resolves a receiver cap for the module, so every one of
+	// these arms also carries the generator#518 refusal of an ALREADY-crossed cap,
+	// between the schema reject and the gap fill it fronts. Spelled out rather
+	// than elided: the ORDER is the property -- the inv reject first, so a
+	// doubly-bad message keeps answering InvalidMsg.
 	for _, want := range []string{
-		"if id as usize >= 4 { self.inv = true; return; } while self.m.bs.len()", // bounded string
-		"if id as usize >= 3 { self.inv = true; return; } while self.m.bb.len()", // bounded blob
-		"if id as usize >= 2 { self.inv = true; return; } while self.m.bp.len()", // bounded struct
+		"if id as usize >= 4 { self.inv = true; return; } if self.lim { return; } while self.m.bs.len()", // bounded string
+		"if id as usize >= 3 { self.inv = true; return; } if self.lim { return; } while self.m.bb.len()", // bounded blob
+		"if id as usize >= 2 { self.inv = true; return; } if self.lim { return; } while self.m.bp.len()", // bounded struct
 	} {
 		if !strings.Contains(m, want) {
 			t.Errorf("std message.rs missing over-index guard %q", want)
@@ -621,6 +626,103 @@ messages:
 	// so it still carries no over-index guard.
 	if strings.Contains(mn, "self.inv = true; return; } while self.m.ds.len()") {
 		t.Errorf("no_std dynamic string array must not carry an over-index guard:\n%s", mn)
+	}
+}
+
+// TestRustPostLimitMaterialisation: once a receiver cap has been crossed, every
+// arm that MATERIALISES a container refuses before it grows one (generator#518).
+//
+// The sticky `lim` flag has stopped a later count-less array's ELEMENTS since
+// generator#102, and until this it stopped nothing else: the gap fill in
+// array_begin/sequence_begin, a wrapper element's own store and the growth those
+// drive all ran on for the rest of a refused message's bytes, so the refused
+// decode allocated to the byte what an accepted one does -- 1,572,875 bytes for a
+// single array<string> element at index 65535 under a 65536 cap, measured, breach
+// or no breach. tests/conformance/rust/post_limit_fill.rs measures the outcome;
+// this pins the shape and, above all, the ORDER.
+//
+// THE ORDER IS THE PROPERTY. `self.inv` dominates `self.lim` at finish, so the
+// refusal must sit AFTER the arm's own index/count rejects: ahead of them it
+// would move a doubly-bad message's verdict from InvalidMsg to LimitExceeded.
+func TestRustPostLimitMaterialisation(t *testing.T) {
+	const src = `
+version: 1
+messages:
+  m:
+    payload:
+      s:    { id: 0, type: string }
+      nums: { id: 1, type: array, items: { type: u32 } }
+      mat:  { id: 2, type: array, items: { type: array, items: { type: u32 } } }
+      strs: { id: 3, type: array, items: { type: string } }
+      blbs: { id: 4, type: array, items: { type: blob } }
+      objs: { id: 5, type: array, items: { type: struct, fields: { x: { id: 0, type: u32 } } } }
+      rows: { id: 6, type: array, items: { type: array, items: { type: string } } }
+      bstr: { id: 7, type: array, items: { type: string, count: 4 } }
+`
+	m := moduleFromYAML(t, src, map[string]any{})
+	for _, want := range []string{
+		// A wrapper element's own store, string and blob: the refusal sits between
+		// the over-index reject and the gap fill it fronts.
+		"(_Loc::Root_strs, _) => { if id as usize >= MAX_DYN_ARRAY_COUNT { self.lim = true; return; } if self.lim { return; } while self.m.strs.len() <= id as usize",
+		"(_Loc::Root_blbs, _) => { if id as usize >= MAX_DYN_ARRAY_COUNT { self.lim = true; return; } if self.lim { return; } while self.m.blbs.len() <= id as usize",
+		// A struct element and a wrapper ROW are placed by sequence_begin, which
+		// grows the outer container before descending; refusing there is what keeps
+		// the gap fill from running.
+		"(_Loc::Root_objs, _) => { if id as usize >= MAX_DYN_ARRAY_COUNT { self.lim = true; return; } if self.lim { return; } while self.m.objs.len() <= id as usize",
+		"(_Loc::Root_rows, _) => { if id as usize >= MAX_DYN_ARRAY_COUNT { self.lim = true; return; } if self.lim { return; } while self.m.rows.len() <= id as usize",
+		// The inner string element of that row, one level down.
+		"(_Loc::Root_rows_e, _) => { if id as usize >= MAX_DYN_ARRAY_COUNT { self.lim = true; return; } if self.lim { return; } while self.m.rows[self._ix",
+		// A NATIVE row header: both of its own rejects first (each disarming the
+		// fill, generator#508), then the refusal, then the gap fill.
+		"_Loc::Root_mat, _) => { if id as usize >= MAX_DYN_ARRAY_COUNT { self.lim = true; self.afill = 0; return; } if count > MAX_DYN_ARRAY_COUNT { self.lim = true; self.afill = 0; return; } if self.lim { return; } while self.m.mat.len() <= id as usize",
+		// A schema-COUNTED wrapper array keeps its own InvalidMsg bound and takes
+		// the refusal behind it: the gap fill it would run is bounded by the schema,
+		// but it is still work for a message already refused.
+		"(_Loc::Root_bstr, _) => { if id as usize >= 4 { self.inv = true; return; } if self.lim { return; } while self.m.bstr.len() <= id as usize",
+	} {
+		if !strings.Contains(m, want) {
+			t.Errorf("message.rs missing post-limit refusal %q:\n%s", want, m)
+		}
+	}
+	// It never precedes a reject that would have set inv, which is what keeps the
+	// verdict where it was.
+	for _, bad := range []string{
+		"if self.lim { return; } if id as usize >=",
+		"if self.lim { return; } if count >",
+	} {
+		if strings.Contains(m, bad) {
+			t.Errorf("post-limit refusal must follow the arm's own rejects, found %q", bad)
+		}
+	}
+	// The count-less NATIVE leaf array is untouched: its elements have been dropped
+	// at the store since generator#102 and its array_begin arm allocates nothing,
+	// so there is no container there to refuse (generator#511 keeps that test).
+	if !strings.Contains(m, "(ArrayKind::Unsigned, _Loc::Root, 1) => { if count > MAX_DYN_ARRAY_COUNT { self.lim = true; self.afill = 0; return; } self.m.nums.clear() },") {
+		t.Errorf("the count-less native leaf arm must be unchanged:\n%s", m)
+	}
+	if !strings.Contains(m, "{ if !self.lim { self.m.nums.push(value as u32); } }") {
+		t.Errorf("the count-less native element store must keep its lim test (generator#511):\n%s", m)
+	}
+
+	// No cap, no refusal: a schema that leaves nothing unbounded resolves no
+	// limits, has no `lim` slot at all, and must emit none of this.
+	const bounded = `
+version: 1
+messages:
+  m:
+    payload:
+      strs: { id: 0, type: array, items: { type: string, count: 4, maxlen: 8 } }
+      objs: { id: 1, type: array, items: { type: struct, count: 2, fields: { x: { id: 0, type: u32 } } } }
+`
+	b := moduleFromYAML(t, bounded, map[string]any{})
+	if strings.Contains(b, "self.lim") {
+		t.Errorf("a fully bounded schema must carry no lim state at all:\n%s", b)
+	}
+	// And neither does the no_std profile, where checkBounded has already refused
+	// every unbounded field and no cap exists to cross.
+	n := moduleFromYAML(t, bounded, map[string]any{"corelib": "rs-no-std", "no_std": true})
+	if strings.Contains(n, "self.lim") {
+		t.Errorf("no_std must carry no lim refusal:\n%s", n)
 	}
 }
 
@@ -2442,9 +2544,9 @@ messages:
 	}
 
 	for _, want := range []string{
-		"(_Loc::Root_dstrs, _) => { if id as usize >= MAX_DYN_ARRAY_COUNT { self.lim = true; return; } while self.m.dstrs.len() <= id as usize",
-		"(_Loc::Root_dblbs, _) => { if id as usize >= MAX_DYN_ARRAY_COUNT { self.lim = true; return; } while self.m.dblbs.len() <= id as usize",
-		"(_Loc::Root_dobjs, _) => { if id as usize >= MAX_DYN_ARRAY_COUNT { self.lim = true; return; } while self.m.dobjs.len() <= id as usize",
+		"(_Loc::Root_dstrs, _) => { if id as usize >= MAX_DYN_ARRAY_COUNT { self.lim = true; return; } if self.lim { return; } while self.m.dstrs.len() <= id as usize",
+		"(_Loc::Root_dblbs, _) => { if id as usize >= MAX_DYN_ARRAY_COUNT { self.lim = true; return; } if self.lim { return; } while self.m.dblbs.len() <= id as usize",
+		"(_Loc::Root_dobjs, _) => { if id as usize >= MAX_DYN_ARRAY_COUNT { self.lim = true; return; } if self.lim { return; } while self.m.dobjs.len() <= id as usize",
 		// A native matrix ROW takes the index cap too: its id is the outer array's
 		// length. Its own element count is capped beside it, id first.
 		"_Loc::Root_dmat, _) => { if id as usize >= MAX_DYN_ARRAY_COUNT { self.lim = true; self.afill = 0; return; } if count > MAX_DYN_ARRAY_COUNT",
@@ -2457,7 +2559,7 @@ messages:
 	}
 	// The cap governs only what the schema left unbounded (§9.5): a count:N array
 	// keeps its own bound and its own category.
-	if !strings.Contains(m, "(_Loc::Root_bstrs, _) => { if id as usize >= 4 { self.inv = true; return; }") {
+	if !strings.Contains(m, "(_Loc::Root_bstrs, _) => { if id as usize >= 4 { self.inv = true; return; } if self.lim { return; }") {
 		t.Errorf("a count:N wrapper array must keep its InvalidMsg schema bound:\n%s", m)
 	}
 }
