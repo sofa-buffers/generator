@@ -604,6 +604,50 @@ grep -q "INVALID_MSG" "$WORK/eof_maxlen.err" || {
 
 echo "==> decode limits OK"
 
+# The LATCH -- the one thing generator#521 added that is new logic rather than a
+# rename. The corelib's IStream now publishes its outcome exactly once, as feed's
+# return value, and has no status property to ask a second time, so the generated
+# Decoder REMEMBERS what the last feed answered and `status` reads that memory.
+# A refusal never comes back as a status at all: it leaves feed on the exception
+# channel, so the generated feed records what it MEANT before rethrowing. Every
+# reject fixture exits non-zero whatever the latch recorded, so no amount of
+# vector replay can tell a correct mapping from an inverted one, from one that
+# records nothing, or from a catch arm deleted outright. The harness therefore
+# PRINTS the remembered status on its error path and this block reads it:
+# malformed bytes are INVALID, a receiver cap is INCOMPLETE and never INVALID
+# (CORELIB_PLAN S6.3 -- a policy stop is this side's decision, not a verdict on
+# the wire).
+#
+# Each fixture runs through BOTH streaming modes, because one byte per feed
+# cannot prove the arm fired. Feeding `03 05 ...` a byte at a time leaves the
+# stream mid-field, so the feed BEFORE the cap refusal has already written
+# INCOMPLETE into the memory and a DELETED arm would print the expected value
+# anyway. `streamdecode1` hands over the whole buffer in one call: the memory is
+# still at its initial COMPLETE when the refusal fires, so the value read back
+# can only have been put there by the latch. The chunked mode is what catches
+# the opposite mistake -- an arm that overwrites a memory the stream had already
+# moved past.
+echo "==> a refusal latches into the remembered status (generator#521)"
+# A varint past the 64-bit bound: 10 continuation bytes and an eleventh. Refused
+# by the CORELIB (MESSAGE_SPEC S4.1), so it arrives as a bare SofabException.
+printf '\000\377\377\377\377\377\377\377\377\377\377\001' > "$WORK/varint_overflow.bin"
+latch() {   # <mode> <fixture> <want-status> <message> <harness...>
+    lmode=$1 lfx=$2 lwant=$3 lmsg=$4
+    shift 4
+    if "$@" "$lmode" "$lmsg" < "$lfx" >/dev/null 2>"$WORK/latch.err"; then
+        echo "FAIL: $(basename "$lfx") must be refused by $lmode"; exit 1
+    fi
+    grep -q "\[status=$lwant\]" "$WORK/latch.err" || {
+        echo "FAIL: $(basename "$lfx") via $lmode -- the refusal must latch status=$lwant; got:"
+        cat "$WORK/latch.err"; exit 1; }
+}
+for lm in streamdecode streamdecode1; do
+    latch "$lm" "$WORK/varint_overflow.bin" INVALID    myfirstmessage $H
+    latch "$lm" "$WORK/overcount.bin"       INVALID    myfirstmessage $H
+    latch "$lm" "$WORK/overlimit.bin"       INCOMPLETE dyn            $HL
+done
+echo "==> refusal latch OK"
+
 echo "==> shared-vector byte-exact conformance"
 python3 "$ROOT/tests/conformance/kotlin/check_vectors.py" "$CORELIB/assets/test_vectors.json" \
     "$WORK/conf/build/install/harness/bin/harness"

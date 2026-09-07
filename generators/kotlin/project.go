@@ -203,10 +203,57 @@ func (g *gen) mainHarness(s *ir.Schema) []byte {
 		// Only finish() decides on the message as a whole.
 		f.line("                    val one = ByteArray(1)")
 		f.line("                    val back = try {")
-		f.line("                        for (b in input) { one[0] = b; dec.feed(one) }")
+		f.line("                        for (b in input) {")
+		f.line("                            one[0] = b")
+		f.line("                            val fed = dec.feed(one)")
+		// The stream publishes its outcome once, as feed's return value, and has
+		// no accessor to ask again -- so Decoder.status is the wrapper
+		// remembering it. Nothing else in the suite reads that memory, and a
+		// stale one would still let every vector pass, so check it here: it has
+		// to agree with the feed that produced it, on every chunk of every
+		// vector (generator#461/#521). The WIDTH sweep of the same claim is in
+		// tests/conformance/kotlin/OwnershipCheck.kt, which already feeds the
+		// message at six chunk sizes.
+		f.line("                            check(dec.status == fed) {")
+		f.line("                                \"status \" + dec.status + \" disagrees with the feed that set it (\" + fed + \")\"")
+		f.line("                            }")
+		f.line("                        }")
 		f.line("                        dec.finish()")
 		f.line("                    } catch (e: Exception) {")
-		f.line("                        System.err.println(\"decode error: \" + e)")
+		// The remembered status is printed, not just the throwable. A refusal is
+		// terminal and leaves through this catch, so the ONLY way the latch in
+		// the generated feed -- the one arm of #521 that is new logic rather
+		// than a rename -- becomes observable to a suite is by naming what it
+		// recorded. Without it a deleted arm, or an inverted mapping, still
+		// exits 1 and every reject vector still passes.
+		// tests/conformance/kotlin/run.sh greps this for the malformed and the
+		// over-cap fixtures it already builds.
+		f.line("                        System.err.println(\"decode error: \" + e + \" [status=\" + dec.status + \"]\")")
+		f.line("                        kotlin.system.exitProcess(1)")
+		f.line("                    }")
+		f.line("                    val sb = StringBuilder(); Json.to(back, sb)")
+		f.line("                    System.out.write(sb.toString().encodeToByteArray()); System.out.write('\\n'.code)")
+		f.line("                }")
+		// The same replay as `streamdecode`, but the WHOLE buffer in a SINGLE feed.
+		// It exists for the latch: under one byte per feed the memory is already
+		// INCOMPLETE by the time a refusal is raised mid-field, so a deleted catch
+		// arm still leaves the expected value lying there and the suite cannot tell
+		// a recorded status from a leftover one. Fed in one call the memory is
+		// still at its initial COMPLETE when the refusal fires, so the value a
+		// suite reads back can only have come from the latch itself. Both modes run
+		// over every latch fixture in tests/conformance/kotlin/run.sh: this one
+		// catches an arm that was dropped, the chunked one an arm that was applied
+		// to a stream already past a field boundary.
+		f.line("                \"streamdecode1\" -> {")
+		f.line("                    val dec = %s.decoder()", mt)
+		f.line("                    val back = try {")
+		f.line("                        val fed = dec.feed(input)")
+		f.line("                        check(dec.status == fed) {")
+		f.line("                            \"status \" + dec.status + \" disagrees with the feed that set it (\" + fed + \")\"")
+		f.line("                        }")
+		f.line("                        dec.finish()")
+		f.line("                    } catch (e: Exception) {")
+		f.line("                        System.err.println(\"decode error: \" + e + \" [status=\" + dec.status + \"]\")")
 		f.line("                        kotlin.system.exitProcess(1)")
 		f.line("                    }")
 		f.line("                    val sb = StringBuilder(); Json.to(back, sb)")

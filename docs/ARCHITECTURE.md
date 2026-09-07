@@ -1139,10 +1139,14 @@ second decode surface for one fact, and CORELIB_PLAN §5.2.4 allows only one: th
 outcome belongs to the call that produced it. Five corelibs removed the accessor
 in one sweep (2026-09-02) — C#, Java, TypeScript, Zig, Python — leaving `feed` as
 the sole answer; a refusal, which is terminal and therefore not a status at all,
-still travels the error channel with its own code. The two Rust corelibs had no
-accessor to remove and made the same move through the other surface: they took
-INCOMPLETE *off* the error channel, which is the one break in the sweep that
-reaches generated code (last subsection).
+still travels the error channel with its own code. corelib-kotlin-mp was not in
+that wave and kept `IStream.status`, so the Kotlin backend was correctly left
+alone; it caught up on 2026-09-07 (corelib-kotlin-mp#44), which makes six
+corelibs on this contract and Kotlin the last accessor-shaped backend to adopt
+it (generator#521). The two Rust corelibs had no accessor to remove and made
+the same move through the other surface: they took INCOMPLETE *off* the error
+channel, which is the one break in the sweep that reaches generated code (last
+subsection).
 
 **The generated wrapper is the caller, and a caller may remember.** The removal is
 a corelib-side break, but it must not become a break for users of generated code,
@@ -1155,6 +1159,14 @@ back it with a private field holding what the last `feed` returned:
 - **Java** `Msg.Decoder` keeps `public DecodeStatus status()`, now reading `st`,
   with the same funnel and the same `finish()`. The static `tryDecode` needs no
   memory at all — `feed`'s return *is* what it returns.
+- **Kotlin** `Msg.Decoder` keeps `public val status: DecodeStatus`, now reading
+  `st`, with the same funnel — `feed(chunk)` delegates to
+  `feed(chunk, off, len)`, which is the single write site — and the same
+  `finish()`. It needs only ONE catch where Java needs two: Kotlin has no checked
+  exceptions, so a `Visitor` callback raises `SofabException` directly and
+  nothing arrives wrapped. Its one-shots take `feed`'s return the same way as
+  Java's: `tryDecode` returns it, and the strict `decode` checks the value it was
+  handed rather than asking the stream again.
 - **TypeScript** `MsgDecoder` keeps `get status(): DecodeStatus`, now reading a
   private `st`, and `finish()` tests it. corelib-ts expressed the removal by
   *narrowing* `feed`'s return type — `DecodeStatus` → `FeedStatus`, a type that
@@ -1205,30 +1217,53 @@ Two details are load-bearing and neither is caught by simply compiling:
    `SofabException`, and a `catch (SofabException)` alone latches none of them.
    TypeScript tests `SofabError.code` and requires the `instanceof` first, so a
    non-corelib throw falls through; Zig's `errdefer` capture tests the error
-   value the same way. The one visible movement is Zig's, and it is forced: a
-   receiver-cap refusal used to read back as `.refused`, a value that no longer
-   exists, so it now maps to `.incomplete` and a `finish()` after a caught cap
-   refusal fails where it once succeeded. Mapping it to `.invalid` instead would
-   report a policy stop as the wire verdict, which §6.3 forbids.
+   value the same way. Kotlin is the contrast that shows what drives the count:
+   it is the same JVM shape as Java but needs a single
+   `catch (e: SofabException)`, because Kotlin has no checked exceptions and
+   therefore no wrapper for a `Visitor` guard to arrive in. The number of arms
+   follows from the language's carriers, not from the corelib. The one visible
+   movement is Zig's, and it is forced: a receiver-cap refusal used to read
+   back as `.refused`, a value that no longer exists, so it now maps to
+   `.incomplete` and a `finish()` after a caught cap refusal fails where it
+   once succeeded. Mapping it to `.invalid` instead would report a policy stop
+   as the wire verdict, which §6.3 forbids.
 
 The remembered value had no conformance coverage — every suite reads it only
 indirectly, through `Finish()`/`finish()` — so the project harnesses' `streamdecode`
 mode now asserts `status == fed` after each chunk. That puts the memory under the
 shared-vector skip matrix at one byte per feed and under the chunk-invariance
 sweep at every split width, where a stale or mis-wired accessor fails loudly
-instead of passing silently.
+instead of passing silently. Kotlin's suite has no chunk-invariance sweep to
+ride, so its width axis is `tests/conformance/kotlin/OwnershipCheck.kt`, which
+already feeds the same message at six chunk sizes and now checks the agreement on
+every chunk of every one of them.
 
 That covers the *accepting* half only, and the latch is the half that is new
 logic. A reject vector exits non-zero whatever the latch recorded, so replaying
 vectors can never distinguish a correct mapping from an inverted one, from one
 that records nothing, or from a deleted catch arm. The harnesses therefore
 **print the remembered status on their refusal path** — `decode error: … [status=X]`
-— and the four suites read it back for three fixtures each: a corelib-raised
+— and five suites read it back for three fixtures each: a corelib-raised
 malformation (a varint past the 64-bit bound), a generated-guard rejection (an
 over-count array or an over-maxlen length word), and a receiver-cap refusal.
 Malformed → Invalid, capped → Incomplete, on both of Java's carriers. In Zig the
 `catch` that prints it is also what makes the error path compile at all, for the
 same reason the `status()` call is.
+
+**A latch fixture must be read from a memory that could not already hold the
+answer.** Those three fixtures are replayed one byte per feed, and at that width
+the check is weaker than it looks: the cap fixture's first byte is a complete
+field header, so the stream is mid-field and the feed *before* the refusal has
+already written Incomplete into the memory. Deleting the cap arm outright still
+prints `[status=Incomplete]` and the assertion still passes — it discriminates an
+inverted mapping but not an omitted one. (The malformation fixtures do not have
+this problem: Invalid is never what the preceding feed left behind.) Kotlin's
+suite therefore drives every latch fixture through a **second, single-feed
+harness mode** as well, where the memory is still at its initial Complete when
+the refusal fires and the value read back can only have come from the latch. The
+chunked mode still runs, and catches the opposite error — an arm that overwrites
+a memory the stream had already moved past. The other four suites carry the
+one-byte shape only, and mirroring the single-feed mode into them is open work.
 
 In Zig that assertion does more than assert. **Zig only semantically analyses a
 function something calls**, so a generated `pub fn` no harness reaches is never
