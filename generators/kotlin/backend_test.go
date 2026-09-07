@@ -981,10 +981,20 @@ func TestKotlinProjectMode(t *testing.T) {
 	// which is what lets the shared vectors -- carrying skipped fields of every
 	// wire type, bytes no encoder here emits -- be replayed through the chunked
 	// path and compared against the one-shot surface.
+	//
+	// It also reads the generated Decoder's remembered `status` back against the
+	// feed that set it (generator#521). The corelib answers once, as feed's
+	// return value; the wrapper's `status` is a copy, nothing else in the suite
+	// reads that copy, and a stale one would let every vector pass -- so the
+	// harness is where the two are compared, and its error path names what the
+	// refusal latched.
 	for _, want := range []string{
 		"val dec = M.decoder()",
-		"for (b in input) { one[0] = b; dec.feed(one) }",
+		"val fed = dec.feed(one)",
+		"check(dec.status == fed) {",
+		"\"status \" + dec.status + \" disagrees with the feed that set it (\" + fed + \")\"",
 		"dec.finish()",
+		"\"decode error: \" + e + \" [status=\" + dec.status + \"]\"",
 	} {
 		if !strings.Contains(main, want) {
 			t.Errorf("the streamdecode mode is missing %q", want)
@@ -1334,5 +1344,52 @@ func TestKotlinCapGuardsSitBehindTheKindTest(t *testing.T) {
 	// da's cap, ba's schema bound, and the matrix row's own element count.
 	if seen < 3 {
 		t.Fatalf("expected a count guard on each of da, ba and the mat row, found %d:\n%s", seen, m)
+	}
+}
+
+// TestKotlinDecoderRemembersFeedStatus pins the "one fact, one channel" adoption
+// (issue #521, the Kotlin half of #461): the corelib's IStream publishes its
+// outcome exactly once, as feed's return value, and its `status` property is
+// gone. The generated Decoder keeps its own public `status` — so no user of
+// generated code breaks — by REMEMBERING what the last feed returned, and by
+// latching a refusal that never comes back as a status at all.
+func TestKotlinDecoderRemembersFeedStatus(t *testing.T) {
+	m := exampleFile(t)
+	for _, want := range []string{
+		// The one-shots need no memory: feed's return IS the answer. `decode`
+		// checks the value it was handed, `tryDecode` hands it straight back.
+		"            val st = ist.feed(data, MyfirstmessageVisitor(m))",
+		"            check(st == DecodeStatus.COMPLETE) { \"Myfirstmessage: stream ended mid-field (\" + st + \")\" }",
+		"            return ist.feed(data, MyfirstmessageVisitor(out))",
+		// COMPLETE, not INCOMPLETE: an all-default message is zero bytes, so a
+		// Decoder that is never fed must still finish().
+		"        private var st: DecodeStatus = DecodeStatus.COMPLETE",
+		// One place records, so the two overloads cannot drift.
+		"        public fun feed(chunk: ByteArray): DecodeStatus = feed(chunk, 0, chunk.size)",
+		"                st = ist.feed(chunk, off, len, v)",
+		// A refusal leaves feed on the exception channel and is terminal, so the
+		// wrapper records what it MEANT before rethrowing: the wire verdict for
+		// malformed bytes, INCOMPLETE for a receiver limit, and nothing at all
+		// for a fault that is neither -- an ARGUMENT is a mistake in the CALL,
+		// and recording it as a verdict would describe the wire falsely.
+		"            } catch (e: SofabException) {",
+		"                when (e.error) {",
+		"                    SofabError.INVALID_MSG -> st = DecodeStatus.INVALID",
+		"                    SofabError.LIMIT_EXCEEDED -> st = DecodeStatus.INCOMPLETE",
+		"                    else -> Unit",
+		"                throw e",
+		// The public surface is unchanged; only its backing moved.
+		"        public val status: DecodeStatus get() = st",
+		// finish() feeds nothing, so it reads the memory too.
+		"            check(st == DecodeStatus.COMPLETE) { \"Myfirstmessage: stream ended mid-field (\" + st + \")\" }",
+	} {
+		if !strings.Contains(m, want) {
+			t.Errorf("Myfirstmessage.kt missing %q (generator#521):\n%s", want, m)
+		}
+	}
+	// The property is gone from the corelib; asking the stream a second time must
+	// not come back in any form.
+	if strings.Contains(m, "ist.status") {
+		t.Errorf("Myfirstmessage.kt still reads the removed IStream.status (generator#521):\n%s", m)
 	}
 }

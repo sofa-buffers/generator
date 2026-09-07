@@ -604,6 +604,38 @@ grep -q "INVALID_MSG" "$WORK/eof_maxlen.err" || {
 
 echo "==> decode limits OK"
 
+# The LATCH -- the one thing generator#521 added that is new logic rather than a
+# rename. The corelib's IStream now publishes its outcome exactly once, as feed's
+# return value, and has no status property to ask a second time, so the generated
+# Decoder REMEMBERS what the last feed answered and `status` reads that memory.
+# A refusal never comes back as a status at all: it leaves feed on the exception
+# channel, so the generated feed records what it MEANT before rethrowing. Every
+# reject fixture exits non-zero whatever the latch recorded, so no amount of
+# vector replay can tell a correct mapping from an inverted one, from one that
+# records nothing, or from a catch arm deleted outright. The harness therefore
+# PRINTS the remembered status on its error path and this block reads it:
+# malformed bytes are INVALID, a receiver cap is INCOMPLETE and never INVALID
+# (CORELIB_PLAN S6.3 -- a policy stop is this side's decision, not a verdict on
+# the wire).
+echo "==> a refusal latches into the remembered status (generator#521)"
+# A varint past the 64-bit bound: 10 continuation bytes and an eleventh. Refused
+# by the CORELIB (MESSAGE_SPEC S4.1), so it arrives as a bare SofabException.
+printf '\000\377\377\377\377\377\377\377\377\377\377\001' > "$WORK/varint_overflow.bin"
+latch() {   # <fixture> <want-status> <message> <harness...>
+    lfx=$1 lwant=$2 lmsg=$3
+    shift 3
+    if "$@" streamdecode "$lmsg" < "$lfx" >/dev/null 2>"$WORK/latch.err"; then
+        echo "FAIL: $(basename "$lfx") must be refused by the streaming decoder"; exit 1
+    fi
+    grep -q "\[status=$lwant\]" "$WORK/latch.err" || {
+        echo "FAIL: $(basename "$lfx") -- the refusal must latch status=$lwant; got:"
+        cat "$WORK/latch.err"; exit 1; }
+}
+latch "$WORK/varint_overflow.bin" INVALID    myfirstmessage $H
+latch "$WORK/overcount.bin"       INVALID    myfirstmessage $H
+latch "$WORK/overlimit.bin"       INCOMPLETE dyn            $HL
+echo "==> refusal latch OK"
+
 echo "==> shared-vector byte-exact conformance"
 python3 "$ROOT/tests/conformance/kotlin/check_vectors.py" "$CORELIB/assets/test_vectors.json" \
     "$WORK/conf/build/install/harness/bin/harness"

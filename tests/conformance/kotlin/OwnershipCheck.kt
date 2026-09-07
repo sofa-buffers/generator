@@ -21,6 +21,11 @@
 // boundary at every byte offset, which is a different property, and an aliased
 // destination reads back perfectly from a buffer that stays alive.
 //
+// It also carries a SECOND assertion, for the one other property whose axis is
+// the chunk width: the generated Decoder's `status` is a remembered copy of what
+// the last feed returned (generator#521), so every feed below checks that the
+// memory agrees with the value that set it.
+//
 // CHUNK SIZE IS THE AXIS, not the entry point. A payload SPLIT across chunks is
 // reassembled into PayloadAcc's own buffer and copied out of it whether or not
 // the destination wanted a view, so a small-chunk-only feed is structurally
@@ -159,6 +164,19 @@ fun main() {
             val n = minOf(size, want.size - i)
             want.copyInto(scratch, 0, i, i + n)
             last = dec.feed(scratch, 0, n)
+            // The stream publishes its outcome once, as feed's return value, and
+            // has no accessor to ask it again -- so Decoder.status is the
+            // generated wrapper REMEMBERING it (generator#521). A stale memory
+            // would let every vector in the suite pass, and this loop is the one
+            // place that already varies the chunk WIDTH, so the agreement is
+            // asserted here: on every chunk, at every size in CHUNK_SIZES.
+            if (dec.status != last) {
+                println(
+                    "FAIL: streaming feed(chunk=$size): status ${dec.status} disagrees " +
+                        "with the feed that set it ($last)"
+                )
+                failures++
+            }
             scratch.fill(SCRIBBLE)
             i += n
         }

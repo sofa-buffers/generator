@@ -94,25 +94,52 @@ public class Scalars {
         private val m = Scalars()
         private val ist = IStream()
         private val v = ScalarsVisitor(m)
+        // What the last feed answered. The stream publishes its outcome once, as
+        // feed's return value, and offers no accessor to ask a second time, so the
+        // caller is the one that remembers -- and this decoder is the caller.
+        // COMPLETE before the first feed: an all-default message is zero bytes, so
+        // a stream that has been fed nothing ended on a field boundary.
+        private var st: DecodeStatus = DecodeStatus.COMPLETE
 
         /**
          * Feed the next chunk, of any size.
          *
          * @throws SofabException the bytes are malformed (INVALID); terminal.
          */
-        public fun feed(chunk: ByteArray): DecodeStatus {
-            ist.feed(chunk, v)
-            return ist.status
-        }
+        public fun feed(chunk: ByteArray): DecodeStatus = feed(chunk, 0, chunk.size)
 
         /** As [feed], over a slice of [chunk]. */
         public fun feed(chunk: ByteArray, off: Int, len: Int): DecodeStatus {
-            ist.feed(chunk, off, len, v)
-            return ist.status
+            try {
+                st = ist.feed(chunk, off, len, v)
+            } catch (e: SofabException) {
+                // A refusal is terminal and never comes back as a status, so
+                // record what it means for the stream before rethrowing.
+                // Malformed bytes make the message INVALID; a receiver limit is
+                // this side's policy, so it leaves the message unfinished
+                // rather than wrong -- the two are never folded together.
+                //
+                // Anything else leaves the memory alone. ARGUMENT says the mistake
+                // is in the CALL and not in the bytes, and a status is a verdict on
+                // the MESSAGE, so recording one for a caller fault would report
+                // something about the wire that is not true. This is the same
+                // three-way test IStream applies to its own latches.
+                when (e.error) {
+                    SofabError.INVALID_MSG -> st = DecodeStatus.INVALID
+                    SofabError.LIMIT_EXCEEDED -> st = DecodeStatus.INCOMPLETE
+                    else -> Unit
+                }
+                throw e
+            }
+            return st
         }
 
-        /** The outcome for everything fed so far, without feeding more. */
-        public val status: DecodeStatus get() = ist.status
+        /**
+         * The outcome for everything fed so far, without feeding more: what the
+         * last [feed] returned, remembered here. The stream itself answers only
+         * through that return value.
+         */
+        public val status: DecodeStatus get() = st
 
         /** The destination, holding whatever has been decoded so far. */
         public val message: Scalars get() = m
@@ -127,7 +154,7 @@ public class Scalars {
          *   SofabException.
          */
         public fun finish(): Scalars {
-            check(ist.status == DecodeStatus.COMPLETE) { "Scalars: stream ended mid-field (" + ist.status + ")" }
+            check(st == DecodeStatus.COMPLETE) { "Scalars: stream ended mid-field (" + st + ")" }
             return m
         }
     }
@@ -148,8 +175,8 @@ public class Scalars {
         public fun decode(data: ByteArray): Scalars {
             val m = Scalars()
             val ist = IStream()
-            ist.feed(data, ScalarsVisitor(m))
-            check(ist.status == DecodeStatus.COMPLETE) { "Scalars: stream ended mid-field (" + ist.status + ")" }
+            val st = ist.feed(data, ScalarsVisitor(m))
+            check(st == DecodeStatus.COMPLETE) { "Scalars: stream ended mid-field (" + st + ")" }
             return m
         }
 
@@ -166,8 +193,7 @@ public class Scalars {
         public fun tryDecode(data: ByteArray, out: Scalars): DecodeStatus {
             out.reset()
             val ist = IStream()
-            ist.feed(data, ScalarsVisitor(out))
-            return ist.status
+            return ist.feed(data, ScalarsVisitor(out))
         }
 
         /**
