@@ -482,7 +482,17 @@ func numRustType(k ir.Kind) string {
 	return "u8"
 }
 
-func enumBacking(nt *ir.NamedType) string {
+func enumBacking(nt *ir.NamedType) string { return numRustType(enumBackingKind(nt)) }
+
+// enumBackingKind is enumBacking as an ir.Kind rather than a Rust spelling: the
+// smallest signed integer covering every declared constant. It picks the STORAGE
+// and nothing else — no decode guard is derived from it, because MESSAGE_SPEC §1
+// binds an enum by its signed 32-bit range and this width is narrower than that
+// wherever the constants are small (generator#516 decides whether the family
+// widens the member or narrows the bound; elemWidthCond says why rust waits).
+// Until then a store that casts `value as <enumBacking>` masks an out-of-range
+// value, which is generator#513's open half.
+func enumBackingKind(nt *ir.NamedType) ir.Kind {
 	var lo, hi int64
 	for _, c := range nt.Consts {
 		if c.Value < lo {
@@ -494,15 +504,26 @@ func enumBacking(nt *ir.NamedType) string {
 	}
 	switch {
 	case lo >= -128 && hi <= 127:
-		return "i8"
+		return ir.KindI8
 	case lo >= -32768 && hi <= 32767:
-		return "i16"
+		return ir.KindI16
 	default:
-		return "i32"
+		return ir.KindI32
 	}
 }
 
-func bitfieldBacking(nt *ir.NamedType) string {
+func bitfieldBacking(nt *ir.NamedType) string { return numRustType(bitfieldBackingKind(nt)) }
+
+// bitfieldBackingKind is bitfieldBacking as an ir.Kind: the smallest unsigned
+// integer covering the highest declared `pos`. It is the same number said twice —
+// the member the struct declares, and the range a decoded array element has to
+// fit (elemWidthCond) — so the two come from one function and cannot drift
+// (generator#513). The bound is that WIDTH, never the set of declared positions:
+// an undeclared bit inside the width is a flag a peer built from a newer schema
+// carries, and is accepted (generator#482, and internal/parser.checkMaskElem says
+// the same of an authored mask). A `u64` backing yields no guard at all: its
+// range is the accumulator's own.
+func bitfieldBackingKind(nt *ir.NamedType) ir.Kind {
 	var max int64
 	for _, fl := range nt.Flags {
 		if fl.Pos > max {
@@ -511,13 +532,13 @@ func bitfieldBacking(nt *ir.NamedType) string {
 	}
 	switch {
 	case max <= 7:
-		return "u8"
+		return ir.KindU8
 	case max <= 15:
-		return "u16"
+		return ir.KindU16
 	case max <= 31:
-		return "u32"
+		return ir.KindU32
 	default:
-		return "u64"
+		return ir.KindU64
 	}
 }
 

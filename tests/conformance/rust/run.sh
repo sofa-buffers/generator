@@ -664,6 +664,72 @@ YAML
     echo "$OUT" | tr -d ' ' | grep -q '"someu8":255' || { echo "FAIL: [$label] control must keep 255; got: $OUT"; exit 1; }
     echo "==> [$label] declared-width reject OK"
 
+    # The same §7.1-shaped bound over an ARRAY ELEMENT declared `bitfield`
+    # (generator#513). ir.NarrowRange keys off the Kind alone and returns !ok for
+    # it, so until now the element store was emitted BARE and the `as` cast was
+    # the mask: a wire element of 1000 came back as `bs: [232]` with the verdict
+    # Ok, beside a `u8` element that has rejected the same 1000 since
+    # generator#266. The example schema has no bitfield array, so this brings its
+    # own.
+    #
+    # The bound is the REPR the element is stored in, never the set of declared
+    # positions -- which is why the CONTROLS below matter as much as the rejects.
+    # An undeclared bit that FITS the repr is how a peer built from a newer schema
+    # carries a flag this one has not got yet, and MUST decode (generator#482
+    # settled that; corelib-cpp enforces this same width on this same element
+    # through ElemBound::of<>, and corelib-c-cpp off its descriptor element_size).
+    #
+    # The ENUM element, #513's other half, is deliberately NOT here: bounding it
+    # at its i8/i16/i32 repr is NARROWER than the signed 32-bit range MESSAGE_SPEC
+    # §1 binds an enum to, and would refuse an element of 1000 that java, python,
+    # typescript, dart and kotlin all keep. generator#516 decides the family
+    # bound; nothing is asserted about the enum here in either direction, because
+    # the answer that ships today (the mask) is the defect and the answer that
+    # would replace it is not settled.
+    #
+    # bs is id 1 (header 0x0b = 1<<3 | array-unsigned), u1 id 2 (0x13), nbs id 3
+    # (0x1e = 3<<3 | wrapper-array; a row is <index<<3|3> count elems... 0x07).
+    #   0b 01 e8 07  = [1000]     into a u8-backed bitfield  -- INVALID
+    #   0b 01 80 02  = [256]      one past the backing width -- INVALID
+    #   13 01 e8 07  = [1000]     into the u8 control        -- INVALID
+    #   0b 01 ff 01  = [255]      the last value that fits   -- KEPT
+    #   0b 01 08     = [8]        bit 3, undeclared, fits u8 -- KEPT
+    #   1e 03 01 80 02 07 = nested row 0 = [256]             -- INVALID
+    #   1e 03 01 ff 01 07 = nested row 0 = [255]             -- KEPT
+    echo "==> [$label] over-width bitfield ARRAY element must be INVALID (S7.1, generator#513)"
+    cat > "$WORK/elemwidth.yaml" <<'YAML'
+version: 1
+messages:
+  ew:
+    payload:
+      bs: { id: 1, type: array, items: { type: bitfield, count: 4, bits: { A: { pos: 0 }, C: { pos: 2 } } } }
+      u1: { id: 2, type: array, items: { type: u8, count: 4 } }
+      nbs: { id: 3, type: array, items: { type: array, count: 2, items: { type: bitfield, count: 4, bits: { A: { pos: 0 }, C: { pos: 2 } } } } }
+YAML
+    rust_build "$WORK/elemwidth.yaml" "$WORK/elemwidth-$label"
+    printf '\013\001\350\007'         > "$WORK/ew_bits_1000.bin"
+    printf '\013\001\200\002'         > "$WORK/ew_bits_256.bin"
+    printf '\023\001\350\007'         > "$WORK/ew_u8_1000.bin"
+    printf '\036\003\001\200\002\007' > "$WORK/ew_nested_256.bin"
+    printf '\013\001\377\001'         > "$WORK/ew_bits_255_ctl.bin"
+    printf '\013\001\010'              > "$WORK/ew_bits_8_ctl.bin"
+    printf '\036\003\001\377\001\007' > "$WORK/ew_nested_255_ctl.bin"
+    for v in ew_bits_1000 ew_bits_256 ew_u8_1000 ew_nested_256; do
+        if (cd "$WORK/elemwidth-$label" && cargo run -q -- decode ew < "$WORK/$v.bin" >/dev/null 2>&1); then
+            echo "FAIL: [$label] $v must be INVALID (S7.1) -- neither masked nor kept"; exit 1
+        fi
+    done
+    OUT=$(cd "$WORK/elemwidth-$label" && cargo run -q -- decode ew < "$WORK/ew_bits_255_ctl.bin") \
+        || { echo "FAIL: [$label] the last value inside the backing width must decode"; exit 1; }
+    echo "$OUT" | tr -d ' ' | grep -q '"bs":\[255\]' || { echo "FAIL: [$label] control must keep the bitfield element 255; got: $OUT"; exit 1; }
+    OUT=$(cd "$WORK/elemwidth-$label" && cargo run -q -- decode ew < "$WORK/ew_bits_8_ctl.bin") \
+        || { echo "FAIL: [$label] an undeclared bit inside the backing width must decode"; exit 1; }
+    echo "$OUT" | tr -d ' ' | grep -q '"bs":\[8\]' || { echo "FAIL: [$label] control must keep the undeclared bit 8; got: $OUT"; exit 1; }
+    OUT=$(cd "$WORK/elemwidth-$label" && cargo run -q -- decode ew < "$WORK/ew_nested_255_ctl.bin") \
+        || { echo "FAIL: [$label] a nested-row bitfield element inside the width must decode"; exit 1; }
+    echo "$OUT" | tr -d ' ' | grep -q '"nbs":\[\[255\]\]' || { echo "FAIL: [$label] control must keep the nested element 255; got: $OUT"; exit 1; }
+    echo "==> [$label] bitfield element-width reject OK"
+
 
     # §7.3 / §5.2 skip family (generator#268 #270 #271 #272 #273 -- Crucible F-0044
     # F-0045 F-0046 F-0047 F-0048). Each of these is a construct the decoder must
@@ -1074,6 +1140,43 @@ sed '/^\/\/SOFAB_IMPORT$/d' "$ROOT/tests/conformance/rust/overcount_array_alloc.
 ( cd "$WORK/overalloc-nsdyn" && cargo run -q --features std ) \
     || { echo "FAIL: a rejected bounded array must stop collecting (no_std, allow_dynamic)"; exit 1; }
 echo "==> [rs] rejected-array allocation OK (rs and rs-no-std/allow_dynamic)"
+
+# Once a cap has been crossed, a LATER count-less array must stop collecting --
+# the two properties generator#511 turned on, neither of which a verdict can see.
+#
+# #508 covers the field that tripped the cap: its own reject disarms the fill, so
+# its elements never reach the store. Three arms set the sticky flag without
+# disarming anything, because no fill is armed at them (a wrapper element's
+# index, a nested wrapper element's index, an over-cap string/blob length), and
+# after those a well-formed count-less array later in the same message still
+# arrives with its own fill armed. The `if !self.lim` at the store is what stops
+# it, and what it buys is (1) `decode`, the infallible entry point, not handing
+# back fields collected after the refusal, and (2) a message already refused not
+# going on materialising containers for the rest of its bytes. `try_decode` and
+# `Decoder` answer LimitExceeded either way, which is why this needs its own row.
+#
+# Only the `rs` leg: the caps exist only on the std corelib (resolveLimits runs
+# under std() alone), and on rs-no-std checkBounded refuses a count-less array
+# outright, with or without allow_dynamic -- so there is no guard there to test.
+echo "==> [rs] a crossed cap stops a later count-less array (generator#511)"
+cat > "$WORK/postlim.yaml" <<'YAML'
+version: 1
+messages:
+  pl:
+    payload:
+      s:    { id: 0, type: string }
+      nums: { id: 1, type: array, items: { type: u32 } }
+      mat:  { id: 2, type: array, items: { type: array, items: { type: u32 } } }
+YAML
+rm -rf "$WORK/postlim"
+( cd "$ROOT" && go run ./cmd/sofabgen --config "$WORK/cfg-lim.yaml" --lang rust --in "$WORK/postlim.yaml" --out "$WORK/postlim" )
+sed -i "s#\${SOFAB_RS_CORELIB}#$STD#" "$WORK/postlim/Cargo.toml"
+crate_bin_name "$WORK/postlim"
+printf 'mod message;\nuse message::*;\n' > "$WORK/postlim/src/main.rs"
+sed '/^\/\/SOFAB_IMPORT$/d' "$ROOT/tests/conformance/rust/post_limit_fill.rs" \
+    >> "$WORK/postlim/src/main.rs"
+( cd "$WORK/postlim" && cargo run -q ) || { echo "FAIL: a crossed cap must stop a later count-less array"; exit 1; }
+echo "==> [rs] post-limit fill OK"
 
 # CORELIB_PLAN §7.2 item 8 -- the shared file's `sequence_growth` block
 # (generator#449). Not run in corelib-rs, and not out of oversight: under the

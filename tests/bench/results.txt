@@ -72,5 +72,5 @@ cpp-c-cpp          footprint  ARMv6-m         6794    0      180
 cpp-c-cpp          footprint  ARMv7-m+fp.dp   6378    0      180
 cpp-c-cpp-dyn      footprint  ARMv6-m         15937   0      300
 cpp-c-cpp-dyn      footprint  ARMv7-m+fp.dp   14331   0      300
-rust-rs-no-std     footprint  thumbv6m        9833    0      0
-rust-rs-no-std-dyn footprint  thumbv6m        11733   0      4
+rust-rs-no-std     footprint  thumbv6m        9865    0      0
+rust-rs-no-std-dyn footprint  thumbv6m        11753   0      4

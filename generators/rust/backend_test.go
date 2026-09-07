@@ -262,7 +262,12 @@ messages:
 		// Sticky flag on the visitor, sibling of inv.
 		"lim: bool,",
 		// Unbounded array: count checked in array_begin before any elements land,
-		// and the element store is dropped once the flag is set.
+		// and the element store is dropped once the flag is set. The store's test
+		// is NOT redundant with #508's disarm and must not be dropped for the
+		// −0.36% it costs: three arms set the flag with no fill to disarm, so a
+		// later count-less array still arrives armed. See limArrayStore, and
+		// tests/conformance/rust/post_limit_fill.rs, which measures both halves
+		// of what it buys (generator#511).
 		"(ArrayKind::Unsigned, _Loc::Root, 1) => { if count > MAX_DYN_ARRAY_COUNT { self.lim = true; self.afill = 0; return; } self.m.arr.clear() },",
 		"(_Loc::Root, 1) => { if self.afill == 0 { return; } self.afill -= 1; { if !self.lim { self.m.arr.push(value as u64); } }; },",
 		// Unbounded nested native inner array: same guard on its array_begin arm
@@ -1696,6 +1701,114 @@ func TestRustDeclaredWidthIsAValidityBound(t *testing.T) {
 			if !strings.Contains(got, want) {
 				t.Errorf("[%s] a 64-bit destination must store unguarded (%q):\n%s", corelib, want, got)
 			}
+		}
+	}
+}
+
+// enumBitfieldElemSrc pairs an enum and a bitfield ARRAY element with the plain
+// narrow element that always carried the guard, so the three are read side by
+// side. Both named types are deliberately narrow — an enum over 0..2 backs onto
+// `i8`, a bitfield declaring pos 0 and 2 onto `u8` — because the backing is what
+// the store's `as` cast masks to.
+const enumBitfieldElemSrc = `
+version: 1
+messages:
+  r:
+    payload:
+      es: { id: 0, type: array, items: { type: enum, count: 4, enum: { RED: 0, GREEN: 1, BLUE: 2 } } }
+      bs: { id: 1, type: array, items: { type: bitfield, count: 4, bits: { A: { pos: 0 }, C: { pos: 2 } } } }
+      u1: { id: 3, type: array, items: { type: u8, count: 4 } }
+      nes: { id: 6, type: array, items: { type: array, count: 4, items: { type: enum, count: 4, enum: { RED: 0, GREEN: 1, BLUE: 2 } } } }
+      nbs: { id: 7, type: array, items: { type: array, count: 4, items: { type: bitfield, count: 4, bits: { A: { pos: 0 }, C: { pos: 2 } } } } }
+      w64: { id: 8, type: array, items: { type: bitfield, count: 4, bits: { A: { pos: 0 }, Z: { pos: 63 } } } }
+`
+
+// generator#513: an ARRAY element declared `bitfield` got no §7.1 width guard at
+// all. ir.NarrowRange keys off the Kind alone and returns !ok for it, so
+// widthCond produced the empty string and the store was emitted bare — a wire
+// element of 1000 was masked by the `as` cast into `bs: [232]` and the message
+// decoded Ok, where the u8 element beside it is InvalidMsg.
+//
+// The bound is the REPR the element is stored in (bitfieldBackingKind), not the
+// set of declared positions: an undeclared bit that FITS is a flag a peer built
+// from a newer schema carries and is kept (generator#482 settled that half, and
+// corelib-cpp already enforces this same width on this same element through
+// `ElemBound::of<bitfieldBacking>()`).
+//
+// The ENUM element is the other half of #513 and is deliberately still bare:
+// bounding it at its i8/i16/i32 repr is narrower than the signed 32-bit range
+// MESSAGE_SPEC §1 binds an enum to, and would refuse messages java, python,
+// typescript, dart and kotlin all keep. generator#516 decides the family bound;
+// elemWidthCond carries the argument. This test pins the enum store as UNGUARDED
+// so that when #516 lands, whichever way it lands, it has to come back here and
+// say so.
+func TestRustBitfieldArrayElementsCarryTheWidthGuard(t *testing.T) {
+	// The two corelibs spell the push differently -- heapless returns a Result the
+	// no_std store discards -- so the store half is per-corelib; the guard half,
+	// which is what this test is about, is identical for both.
+	for _, c := range []struct{ corelib, es, bs, u1, w64 string }{
+		{"rs", "self.m.es.push(value as i8);", "self.m.bs.push(value as u8);", "self.m.u1.push(value as u8);", "self.m.w64.push(value as u64);"},
+		{"rs-no-std", "{ let _ = self.m.es.push(value as i8); };", "{ let _ = self.m.bs.push(value as u8); };", "{ let _ = self.m.u1.push(value as u8); };", "{ let _ = self.m.w64.push(value as u64); };"},
+	} {
+		got := moduleFromYAML(t, enumBitfieldElemSrc, map[string]any{"corelib": c.corelib})
+		const fill = "if self.afill == 0 { return; } self.afill -= 1; "
+		const u8Rej = "if value > 255 { self.inv = true; self.afill = 0; return; } "
+		for _, want := range []string{
+			// The bitfield element: unsigned, so only the top binds, and the reject
+			// DISARMS the fill (generator#508) like every other element reject. The
+			// guard sits behind fillGuard so a bare scalar at an array id stays a
+			// §7.3 skip.
+			fill + u8Rej + c.bs,
+			fill + u8Rej + c.u1,
+			// A nested-native ROW element is the same element one level down and
+			// takes the same clause.
+			"self.afill -= 1; " + u8Rej + "if let Some(_r) = self.m.nbs.get_mut(self._ix1)",
+		} {
+			if !strings.Contains(got, want) {
+				t.Errorf("[%s] message.rs missing element width guard %q:\n%s", c.corelib, want, got)
+			}
+		}
+		// A bitfield declaring pos 63 backs onto u64, whose range IS the
+		// accumulator the value arrives in -- so it gets no comparison, exactly as
+		// a u64 element gets none. A guard there would be dead code.
+		if !strings.Contains(got, fill+c.w64) {
+			t.Errorf("[%s] a u64-backed bitfield element must store unguarded:\n%s", c.corelib, got)
+		}
+		// The enum half of #513, held back for generator#516: still bare, at both
+		// positions, and pinned here so the state is a decision rather than a
+		// forgotten arm.
+		if !strings.Contains(got, fill+c.es) {
+			t.Errorf("[%s] the enum element store must stay unguarded until generator#516 (see elemWidthCond):\n%s", c.corelib, got)
+		}
+		if !strings.Contains(got, "self.afill -= 1; if let Some(_r) = self.m.nes.get_mut(self._ix0)") {
+			t.Errorf("[%s] the nested enum element store must stay unguarded until generator#516:\n%s", c.corelib, got)
+		}
+	}
+}
+
+// The width the guard compares against and the width the member is declared with
+// have to be the SAME number: a guard that admitted a value the member cannot
+// hold would leave the `as` cast masking again, one range further out. Both come
+// from bitfieldBackingKind, and this pins that they still agree for each backing
+// step that function can choose.
+func TestRustElementWidthGuardMatchesTheDeclaredBacking(t *testing.T) {
+	const src = `
+version: 1
+messages:
+  r:
+    payload:
+      b8:  { id: 3, type: array, items: { type: bitfield, count: 2, bits: { A: { pos: 7 } } } }
+      b16: { id: 4, type: array, items: { type: bitfield, count: 2, bits: { A: { pos: 8 } } } }
+      b32: { id: 5, type: array, items: { type: bitfield, count: 2, bits: { A: { pos: 16 } } } }
+`
+	got := moduleFromYAML(t, src, map[string]any{"corelib": "rs"})
+	for _, want := range []string{
+		"if value > 255 { self.inv = true; self.afill = 0; return; } self.m.b8.push(value as u8);",
+		"if value > 65535 { self.inv = true; self.afill = 0; return; } self.m.b16.push(value as u16);",
+		"if value > 4294967295 { self.inv = true; self.afill = 0; return; } self.m.b32.push(value as u32);",
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("message.rs missing %q:\n%s", want, got)
 		}
 	}
 }

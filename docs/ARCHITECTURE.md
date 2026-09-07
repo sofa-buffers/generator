@@ -1719,15 +1719,53 @@ beside the `count`, wrapper-element-id and `maxlen` guards already there.
   point and already answers `INVALID`; adding a second guard would only duplicate
   it. This is the one decode verdict where the footprint pair led and the other
   eleven profiles followed.
-- **Enums and bitfields are out of scope.** Their backing width is a property of
-  the named type, not of the field, and an out-of-range *enum* value is a
-  different question (unknown-variant handling) from an over-width integer.
-  Kotlin is the one target where the enum question answers itself and so is
-  covered: it stores an enum as an `Int`, which IS the signed 32-bit range
-  MESSAGE_SPEC §1 binds an enum to, so the bound and the storage are the same
-  fact and letting an out-of-range value through would be the silent truncation
-  §7.1 rules out. Its bitfield is a `ULong`, i.e. the whole unsigned domain, so
-  there is nothing to guard.
+- **Enums and bitfields sit outside `ir.NarrowRange`, and that is not the same as
+  outside the bound.** Their width is a property of the NAMED TYPE, not of the
+  Kind, so `NarrowRange` — which takes a Kind alone — answers `!ok` for both and a
+  backend that asks it and stops emits a bare store. Where the target narrows the
+  storage, that bare store is the mask §7.1 forbids: a rust bitfield over
+  `pos 0, 2` backs onto `u8`, so a wire element of `1000` came back as `232` with
+  the verdict `Ok` (generator#513). The width is knowable — it is the backing each
+  backend already derives to declare the member — so the guard is derived from the
+  same function that picks the storage and the two cannot drift.
+  - **For a BITFIELD the bound is the repr, never the set of declared
+    positions.** A bit this schema does not declare, but the repr holds, is how a
+    peer built from a NEWER schema carries a flag this one has not got yet, and is
+    KEPT (generator#482, and `internal/parser.checkMaskElem` says the same of an
+    authored mask). MESSAGE_SPEC gives a bitfield the unsigned-integer wire type
+    and no width bound of its own (§1), so this rule is the family's rather than
+    the spec's — and it is the rule three targets already had: corelib-cpp bounds
+    the bitfield array element through `ElemBound::of<bitfieldBacking>()`
+    (`cppElemBound`), corelib-c-cpp off its descriptor's `element_size`, and
+    `rust` joined them at the array element, direct and nested-row, through
+    `elemWidthCond` (generator#513).
+  - **For an ENUM the family does NOT agree, and the disagreement is unresolved.**
+    Three bounds are in the tree at once: the **repr** (`c`, `cpp` with
+    `corelib: c-cpp`), a flat **signed 32 bits** (`kotlin`, which stores an enum as
+    an `Int`, so for it the bound and the storage are one fact), and **none at
+    all** (the other eight, `rust` included — its element store masks `1000` to
+    `-24` with the verdict `Ok`). MESSAGE_SPEC §1 and CORELIB_PLAN §4.5 are
+    explicit that the bound is the **signed 32-bit range**, so the repr rule is
+    NARROWER than the spec: it refuses an element of `1000` that java, python,
+    typescript, dart and kotlin all keep, on one schema and one byte string —
+    exactly the divergence §7.1's own rationale forbids. Honouring §1 instead
+    means WIDENING the member to 32 bits on every target that narrows it today
+    (`c` `int8_t`, `csharp` `sbyte`, `go` `int8`, `zig` `i8`, `rust` `i8`/`i16`),
+    which is a footprint cost on the two profiles that exist to avoid one. The
+    decision is **generator#516**; until it lands, `rust` deliberately keeps the
+    mask rather than trading one §7.1 violation for another, `elemWidthCond`
+    carries the argument in code, and any enum rule quoted from this document is
+    PROVISIONAL. generator#513 stays open on that half; generator#515 is the same
+    hole one position over (the SCALAR store, both kinds, which still routes
+    through the Kind-only `widthGuard` and so disagrees with the array element
+    beside it until #516 settles the bound).
+  - **The `n` in that survey covers three severities.** Silent truncation where
+    the member is narrower than the accumulator (csharp, go, `cpp` with
+    `corelib: cpp`, rust's scalar); safety-checked Illegal Behaviour on zig, whose
+    `@intCast` panics under ReleaseSafe rather than masking; and a missing verdict
+    only, where storage is at least as wide as the wire value and nothing is lost
+    (java `long`, python `int`, typescript/dart `number`/`int`, kotlin's
+    `ULong` bitfield). generator#516 carries the table.
 - **`cpp` needed a different shape from the rest.** corelib-cpp's typed `read()`
   ends in `value = static_cast<T>(raw)` — the mask itself, applied where
   generated code cannot see the raw value. A narrow destination therefore reads
@@ -2641,6 +2679,57 @@ backend:
     cannot, so the same cap is compared there — before the grow, in the policy
     category — rather than a second time in the corelib.
 
+**How high the barrier actually is, once it holds (generator#512).** Everything
+above is about the cap *firing*. The number worth stating beside it is what a
+message that stays **under** the cap can still buy, because that is the barrier's
+real height and it is not one-to-one. A wrapper array's length is its highest
+present id, so an element at index `cap - 1` legitimately describes a `cap`-slot
+array: the gap below it is materialised in full, the verdict is **`Ok`**, and the
+ceiling is `cap × sizeof(slot)` per unbounded field, per message, however few bytes
+named it. Measured on this tree at `max_dyn_array_count: 65536` — bytes the
+allocator handed out per decode, growth included, which is why the Go column runs
+above the container's final size:
+
+| shape (element at index 65535)          | wire bytes | Rust (`corelib: rs`) | Go |
+|---|---:|---:|---:|
+| native matrix row header                | 6 | 1,572,872 | 8,056,384 |
+| count-less `array<struct{u32}>` element | 6 |   262,152 | 1,173,560 |
+| count-less `array<string>` element, 1-byte payload | 7 | 1,572,873 | 5,543,052 |
+| the same at index **65536** (one past the cap) | 7 | 18 | 192 |
+| count-less `array<u32>`, count header of 65536, no element | 4 | 2 | 262,240 |
+
+That is ~10⁵× — and it is the same ceiling the section opened with, reached from
+the other side. `count = 2^31` is refused at the header and buys nothing; `cap - 1`
+as an *index* is accepted and buys `cap × sizeof(slot)`, which is precisely the
+residue the five-orders-of-magnitude claim above leaves standing. The cap bounds
+both paths to one number, so the accept path is no worse than the reject path, and
+what remains is the arithmetic of the design rather than a hole in it.
+
+**It is a family property, not one port's.**
+Every backend that admits an unbounded array grows the container to `id + 1` under
+the same cap, in generated code (Rust, C#, Java, Kotlin, Python, TypeScript) or in
+the corelib (`for len(*s.out) <= int(id)` in corelib-go, `rcap`-bounded collectors
+in corelib-dart, `growCapped`/`setElemCapped` in corelib-zig, `MessageSeq`/
+`StringSeq` in corelib-cpp); the statically bounded profiles (`c`, `cpp` with
+`corelib: c-cpp`, `rust` with `rs-no-std`) reject the field at schema validation and
+never reach it. Go was measured as well as read, and amplifies *more* than Rust on
+every shape. Rust is if anything the least amplifying of the family — the last row
+above is a count-**less** array's header, which Rust leaves lazy (`reserveCount`)
+where Go, C#, Java, Kotlin and Zig size the container from the untrusted count on
+the spot, still under the cap but five orders up from Rust's two bytes.
+
+**Lowering it is a schema decision, not a new knob.** The two levers that exist are
+the ones already in this section: a schema `count: N`, which is wire-visible to both
+peers and answers `INVALID` in every port, or a lower `max_dyn_array_count` for a
+deployment that wants less headroom. A third bound — materialising a gap lazily, or
+charging a container against the bytes actually seen — would change what
+`count`-is-capacity means for every target at once and belongs in MESSAGE_SPEC
+before it belongs in a backend. Nothing here is pinned by a conformance row on
+purpose: the numbers are a consequence, and a row asserting them would fix as a
+requirement the very thing such a change would move. What IS pinned is the cap
+itself firing with nothing materialised behind it (the C++ measurement two
+paragraphs up, and Rust's over-index rows).
+
 **Where the comparison runs (normative).** §6.2.1 separates two questions that had
 been treated as one, and the answers are not the same:
 
@@ -3372,8 +3461,43 @@ right place. `tests/conformance/rust/run.sh` builds one project with all three
   three budgets is written to sit BETWEEN the two builds rather than merely above
   the fixed one: a budget of twice the legitimate reserve also covers the pre-fix
   reading, and a row written that way passes against the defect it was added for.
+* and, one level past that, **a crossed cap stops a LATER count-less array too**
+  (`post_limit_fill.rs`, generator#511). The bullet above disarms the fill of the
+  field that tripped the cap, which is why the per-element `if !self.lim` at an
+  unbounded array's store looked redundant — it is not, and not marginally.
+  Three arms set the sticky flag and disarm nothing, because no fill is armed at
+  them: a wrapper element's over-cap index, a nested wrapper element's, and an
+  over-cap string/blob length. A well-formed count-less array after any of those
+  arrives with its own fill armed. Two properties turn on the store's test, and
+  no verdict shows either: `decode`, the infallible entry point, hands back the
+  message it filled — `nums: []` with the test, `nums: [1, 2, 3]` without it,
+  behind the same over-cap string — and a refused message stops COLLECTING
+  ELEMENTS into a later count-less native array (2000 legal matrix rows behind an
+  11-byte breach: 104 bytes/decode against 32,104). `try_decode` and `Decoder`
+  answer `LimitExceeded` either way and neither hands back a partial message,
+  which is precisely why the question needed measuring rather than reasoning. The
+  test costs −0.36% of `rust-rs-unbounded` decode to remove; it stays.
 
-All of it but the last bullet passed unchanged when the exemption was written —
+  **What it does NOT buy, stated because the two are easy to conflate.** The test
+  wraps the native ELEMENT store and nothing else: container growth, the gap fill
+  in `array_begin` / `sequence_begin`, and a wrapper-array element's own store are
+  ungated, so a refused message goes on materialising those exactly as an accepted
+  one does. Measured on this tree at `max_dyn_array_count: 65536`, behind the same
+  11-byte breach, per `try_decode`: a native `mat` row header at index 65535 costs
+  1,572,872 bytes, an `array<string>` element at index 65535 costs 1,572,873, and
+  an `array<struct{u32}>` element at index 65535 costs 262,152 — the same readings
+  as without the breach in front of them. That is not a second amplification
+  class: it is the §9.5 ceiling ("How high the barrier actually is, once it
+  holds" — `cap × sizeof(slot)`, verdict `Ok`, generator#512), reached by a
+  message that happens also to be refused, so
+  the bound the receiver already accepted is unchanged. Extending the test to
+  those arms is a throughput question on a maxspeed row rather than a safety one,
+  and is filed as generator#518 rather than folded in here. `post_limit_fill.rs`
+  puts its rows at index 0 deliberately — a high-index row would pin today's
+  amplification as a requirement, which is the same reason §9.5's #512 block
+  pins no numbers.
+
+All of it but the last two bullets passed unchanged when the exemption was written —
 those rows were written against the backend, not for a fix — and the reason is
 structural: every guard is a match arm keyed by `(wire
 callback, location, id)`, so a field the dispatch skips reaches no arm at all. The
