@@ -235,20 +235,31 @@ func (g *gen) rowReserve(fr frame) string {
 	return fmt.Sprintf(" if let Some(_r) = %s.get_mut(id as usize) { if _r.is_empty() { _r.reserve_exact(%s); } }", fr.path, g.reserveArg(fr.ecap))
 }
 
-// rowReject builds one reject clause for a NATIVE ROW frame (fkNestedNative) in
-// array_begin: it sets the sticky verdict flag, DISARMS the fill counter and
-// returns before the row is opened or grown.
+// fillReject builds one reject clause for a NATIVE ARRAY — a leaf field's own
+// array_begin arm, a native ROW frame's (fkNestedNative), or an element store
+// that breaches its declared width: it sets the sticky verdict flag, DISARMS the
+// fill counter and returns before anything is stored.
 //
-// The disarm is what makes the clause a reject. array_begin arms afill with the
-// announced element count BEFORE this arm runs (emitArrayFillArm), and the row's
-// elements arrive afterwards through the plain unsigned()/signed()/fp callbacks,
-// which store while afill > 0 into whatever row the index slot still names. A
-// clause that only returned would therefore reject the header and then let the
-// very elements it rejected stream into the previously opened row, unbounded —
-// the fill the reject exists to stop. Zeroing afill routes them into the
-// fillGuard's `afill == 0` skip instead, so they are discarded like a bare
-// scalar at an array id.
-func rowReject(cond, flag string) string {
+// The disarm is what makes the clause a reject, and it is the whole of
+// generator#508. `self.inv` / `self.lim` are STICKY FLAGS SURFACED AT THE END of
+// the decode, not an abort channel: the corelib cannot see either one, so it goes
+// on delivering every element the wire announced. array_begin arms afill with
+// that announced count BEFORE these arms run (emitArrayFillArm), and the elements
+// arrive afterwards through the plain unsigned()/signed()/fp callbacks, which
+// store while afill > 0. A clause that only returned would therefore reject the
+// header and then let the very elements it rejected stream into the destination —
+// the fill the reject exists to stop. Measured on `corelib: rs`, a forged
+// `count=1000000` at a field whose declared storage is 32 bytes peaked at 8 MB of
+// heap while returning the correct InvalidMsg. Zeroing afill routes those
+// elements into the fillGuard's `afill == 0` skip instead, so they are discarded
+// like a bare scalar at an array id.
+//
+// This is the SHAPE the guard wants, rather than an `if !self.inv` at the store:
+// the store already opens with `afill == 0`, so a disarm reuses a branch that is
+// ALREADY THERE and costs nothing per element. A flag test at the store would be
+// a branch on every element of every array on a maxspeed target, for a condition
+// false in every non-attack decode.
+func fillReject(cond, flag string) string {
 	return fmt.Sprintf("if %s { self.%s = true; self.afill = 0; return; } ", cond, flag)
 }
 
@@ -262,18 +273,18 @@ func (g *gen) rowGuards(fr frame) string {
 	var out string
 	switch {
 	case fr.cap >= 0:
-		out += rowReject(fmt.Sprintf("id as usize >= %d", fr.cap), "inv")
+		out += fillReject(fmt.Sprintf("id as usize >= %d", fr.cap), "inv")
 	case g.limits.arrayHas:
 		// A row of a count-less matrix: its ID is the outer array's length, so
 		// the receiver cap binds it exactly as it binds a leaf wrapper element
 		// (issue #387, see overIndexGuard).
-		out += rowReject("id as usize >= MAX_DYN_ARRAY_COUNT", "lim")
+		out += fillReject("id as usize >= MAX_DYN_ARRAY_COUNT", "lim")
 	}
 	switch {
 	case fr.ecap >= 0:
-		out += rowReject(fmt.Sprintf("count > %d", fr.ecap), "inv")
+		out += fillReject(fmt.Sprintf("count > %d", fr.ecap), "inv")
 	case g.limits.arrayHas:
-		out += rowReject("count > MAX_DYN_ARRAY_COUNT", "lim")
+		out += fillReject("count > MAX_DYN_ARRAY_COUNT", "lim")
 	}
 	return out
 }
@@ -1103,7 +1114,7 @@ func (g *gen) emitVisitor(f *rfile, name string, fields []*ir.Field) {
 			if g.limits.arrayHas && fr.elemDyn {
 				store = g.limArrayStore(store)
 			}
-			f.line("            (_Loc::%s, _) => { %s%s%s; },", fr.loc, fillGuard, widthGuard(fr.elemKind), store)
+			f.line("            (_Loc::%s, _) => { %s%s%s; },", fr.loc, fillGuard, arrayWidthGuard(fr.elemKind), store)
 		}
 	}
 	f.line("            _ => {}")
@@ -1142,7 +1153,7 @@ func (g *gen) emitVisitor(f *rfile, name string, fields []*ir.Field) {
 			if g.limits.arrayHas && fr.elemDyn {
 				store = g.limArrayStore(store)
 			}
-			f.line("            (_Loc::%s, _) => { %s%s%s; },", fr.loc, fillGuard, widthGuard(fr.elemKind), store)
+			f.line("            (_Loc::%s, _) => { %s%s%s; },", fr.loc, fillGuard, arrayWidthGuard(fr.elemKind), store)
 		}
 	}
 	f.line("            _ => {}")
@@ -1354,14 +1365,27 @@ func (g *gen) emitVisitor(f *rfile, name string, fields []*ir.Field) {
 							// count word is read before the fixlen_word, so a bound applied on
 							// the strength of the count alone would reject a header that turns
 							// out to belong to no declared field at all.
-							f.line("            (%s, _Loc::%s, %d) => { if count > %d { self.inv = true; return; } %s%s },", kp, fr.loc, fld.ID, fld.Count, clear, g.reserveCount(fmt.Sprintf("%s.%s", fr.path, rustIdent(fld.Name)), fld.Count))
+							//
+							// And it DISARMS THE FILL (fillReject, generator#508). "Before the
+							// elements are read" describes when the decision is taken, not what
+							// the decision does to them: the flag it sets is read at the end of
+							// the decode, so the corelib delivers all `count` of them anyway.
+							// Without the disarm they were pushed into a container the schema
+							// bounds at N -- 8 MB for a forged count of a million, on a field
+							// whose declared storage is 32 bytes.
+							f.line("            (%s, _Loc::%s, %d) => { %s%s%s },", kp, fr.loc, fld.ID, fillReject(fmt.Sprintf("count > %d", fld.Count), "inv"), clear, g.reserveCount(fmt.Sprintf("%s.%s", fr.path, rustIdent(fld.Name)), fld.Count))
 							continue
 						}
 						// Unbounded array under an active receiver cap (generator#102):
 						// reject an over-cap wire count at the header, before any
-						// elements accumulate.
+						// elements accumulate -- and disarm the fill, so "before any
+						// elements accumulate" stays true of the elements that arrive
+						// AFTER it (generator#508). This arm's store also carries the
+						// `if !self.lim` drop, which has covered the same field since
+						// #102; the disarm is what makes the two arms agree on the
+						// mechanism rather than only on the outcome.
 						if g.limits.arrayHas {
-							f.line("            (%s, _Loc::%s, %d) => { if count > MAX_DYN_ARRAY_COUNT { self.lim = true; return; } %s },", kp, fr.loc, fld.ID, clear)
+							f.line("            (%s, _Loc::%s, %d) => { %s%s },", kp, fr.loc, fld.ID, fillReject("count > MAX_DYN_ARRAY_COUNT", "lim"), clear)
 							continue
 						}
 						f.line("            (%s, _Loc::%s, %d) => %s,", kp, fr.loc, fld.ID, clear)
@@ -1768,16 +1792,19 @@ func (g *gen) emitMaxlenGuard(f *rfile, fs []frame, kind ir.Kind) {
 // collected, and the container's capacity (a schema-sized heapless::Vec under
 // no_std) is N. An over-count array was already rejected at its count header
 // (INVALID per §3+§7, never clamped -- generator#100/#216), which is also what
-// keeps the push inside a fixed capacity.
+// DISARMS THE FILL, so no element of a rejected array reaches this push at all
+// (fillReject, generator#508). Before that disarm the sentence above was true of
+// a heapless Vec<_, N> only -- its push drops what does not fit -- and false of
+// the std Vec<T> this same arm serves, which grew to the whole announced count.
 func (g *gen) emitNativeArrayStore(f *rfile, fr frame, fld *ir.Field, rhs string) {
 	store := g.pushExpr(fr.path+"."+rustIdent(fld.Name), rhs)
 	if g.limits.arrayHas && !fld.HasCount {
 		store = g.limArrayStore(store)
 	}
-	// widthGuard AFTER fillGuard: an element only breaches the declared width once
-	// it is actually being stored (§7.1). Ahead of the fill check it would reject a
-	// bare scalar at an array id, which §7.3 says to skip.
-	f.line("            (_Loc::%s, %d) => { %s%s%s; },", fr.loc, fld.ID, fillGuard, widthGuard(fld.Elem), store)
+	// arrayWidthGuard AFTER fillGuard: an element only breaches the declared width
+	// once it is actually being stored (§7.1). Ahead of the fill check it would
+	// reject a bare scalar at an array id, which §7.3 says to skip.
+	f.line("            (_Loc::%s, %d) => { %s%s%s; },", fr.loc, fld.ID, fillGuard, arrayWidthGuard(fld.Elem), store)
 }
 
 // fillGuard fronts every native-array fill arm (generator#188): the fill runs
@@ -1807,14 +1834,42 @@ const fillGuard = "if self.afill == 0 { return; } self.afill -= 1; "
 // reachable, while an i* destination arrives through signed() as an i64 and
 // needs both ends.
 func widthGuard(k ir.Kind) string {
+	cond := widthCond(k)
+	if cond == "" {
+		return ""
+	}
+	return fmt.Sprintf("if %s { self.inv = true; return; } ", cond)
+}
+
+// widthCond is widthGuard's comparison alone, shared with arrayWidthGuard.
+func widthCond(k ir.Kind) string {
 	lo, hi, ok := ir.NarrowRange(k)
 	if !ok {
 		return ""
 	}
 	if lo < 0 {
-		return fmt.Sprintf("if value < %d || value > %d { self.inv = true; return; } ", lo, hi)
+		return fmt.Sprintf("value < %d || value > %d", lo, hi)
 	}
-	return fmt.Sprintf("if value > %d { self.inv = true; return; } ", hi)
+	return fmt.Sprintf("value > %d", hi)
+}
+
+// arrayWidthGuard is widthGuard inside a native-array FILL arm: the same §7.1
+// comparison, but the reject also disarms the fill budget (generator#508).
+//
+// A scalar field's width reject can simply return — there is nothing left to
+// deliver for it. An array element's cannot: the flag it sets is sticky and read
+// at the end, so every REMAINING element of that array still arrives, still finds
+// afill > 0, and still stores. The array's own count header was already checked,
+// so this is not a second amplification class — the total stays inside the bound
+// the receiver has already accepted — but it is the same defect one level down,
+// and it makes the array collect a tail of elements past a value that invalidated
+// it. Disarming here costs nothing: the branch already exists and already returns.
+func arrayWidthGuard(k ir.Kind) string {
+	cond := widthCond(k)
+	if cond == "" {
+		return ""
+	}
+	return fillReject(cond, "inv")
 }
 
 // limArrayStore wraps an unbounded-array element store so it is dropped once
@@ -1823,6 +1878,15 @@ func widthGuard(k ir.Kind) string {
 // nested-native array this also keeps the elements out of whatever row the index
 // slot still names, after the tripped array_begin returned without opening a new
 // one (rowStore's get_mut is what makes that a no-op rather than a panic).
+//
+// Since generator#508 the count header this describes ALSO disarms the fill, so
+// for the field that tripped the cap the elements no longer reach this store at
+// all. What is left is the cross-field case — another field's breach dropping this
+// one's well-formed elements — which no `try_decode` caller can observe. Removing
+// the test reads −0.36% of `rust-rs-unbounded` decode, inside sight of that row's
+// own run-to-run spread; it is NOT folded in here because it turns on whether any
+// surface hands back a partially decoded message, which is a separate question
+// with its own answer. Filed as generator#511.
 func (g *gen) limArrayStore(expr string) string {
 	return fmt.Sprintf("{ if !self.lim { %s; } }", expr)
 }

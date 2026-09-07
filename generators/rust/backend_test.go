@@ -111,7 +111,7 @@ func TestRustStructural(t *testing.T) {
 		// Over-count rejects (generator#100/#216), then the container is sized to the
 		// count the reject just approved and the wire's M elements are collected into
 		// it (generator#505).
-		"if count > 4 { self.inv = true; return; } self.m.someuintarray.clear(); self.m.someuintarray.reserve_exact(count) ",
+		"if count > 4 { self.inv = true; self.afill = 0; return; } self.m.someuintarray.clear(); self.m.someuintarray.reserve_exact(count) ",
 		"acc: sofab::PayloadAcc,", // the corelib owns chunk reassembly (generator#345)
 		"let _p = match self.acc.feed(total, offset, chunk) { Some(_v) => _v, None => return };",                   // ...and generated code only calls it
 		"match core::str::from_utf8(_p) { Ok(_v) => _v.to_owned(), Err(_) => { self.inv = true; String::new() } }", // strict UTF-8 on the ASSEMBLED payload: invalid -> INVALID (issue #85, subsumes #80)
@@ -263,7 +263,7 @@ messages:
 		"lim: bool,",
 		// Unbounded array: count checked in array_begin before any elements land,
 		// and the element store is dropped once the flag is set.
-		"(ArrayKind::Unsigned, _Loc::Root, 1) => { if count > MAX_DYN_ARRAY_COUNT { self.lim = true; return; } self.m.arr.clear() },",
+		"(ArrayKind::Unsigned, _Loc::Root, 1) => { if count > MAX_DYN_ARRAY_COUNT { self.lim = true; self.afill = 0; return; } self.m.arr.clear() },",
 		"(_Loc::Root, 1) => { if self.afill == 0 { return; } self.afill -= 1; { if !self.lim { self.m.arr.push(value as u64); } }; },",
 		// Unbounded nested native inner array: same guard on its array_begin arm
 		// (the inner-Vec push is skipped, so the store must be lim-gated too).
@@ -271,7 +271,7 @@ messages:
 		// binds it (generator#387), and the row's own element count is capped
 		// beside it -- two bounds, id first, both LimitExceeded.
 		"(ArrayKind::Unsigned, _Loc::Root_mat, _) => { if id as usize >= MAX_DYN_ARRAY_COUNT { self.lim = true; self.afill = 0; return; } if count > MAX_DYN_ARRAY_COUNT { self.lim = true; self.afill = 0; return; } while self.m.mat.len() <= id as usize { self.m.mat.push(Default::default()); } self._ix0 = id as usize; },",
-		"(_Loc::Root_mat, _) => { if self.afill == 0 { return; } self.afill -= 1; if value > 4294967295 { self.inv = true; return; } { if !self.lim { if let Some(_r) = self.m.mat.get_mut(self._ix0) { _r.push(value as u32); }; } }; },",
+		"(_Loc::Root_mat, _) => { if self.afill == 0 { return; } self.afill -= 1; if value > 4294967295 { self.inv = true; self.afill = 0; return; } { if !self.lim { if let Some(_r) = self.m.mat.get_mut(self._ix0) { _r.push(value as u32); }; } }; },",
 		// Unbounded string/blob: declared total checked at the top of the callback,
 		// scalar fields and wrapper-sequence string elements alike.
 		"(_Loc::Root, 0) => if total > MAX_DYN_STRING_LEN { self.lim = true; return; },",
@@ -907,11 +907,11 @@ messages:
 		cfg := tc.cfg
 		m := moduleFromYAML(t, src, cfg)
 		for _, want := range []string{
-			"(ArrayKind::Unsigned, _Loc::Root, 0) => { if count > 5 { self.inv = true; return; } self.m.defd.clear()" + tc.size("defd") + " },",
-			"(ArrayKind::Unsigned, _Loc::Root, 2) => { if count > 3 { self.inv = true; return; } self.m.nodef.clear()" + tc.size("nodef") + " },",
+			"(ArrayKind::Unsigned, _Loc::Root, 0) => { if count > 5 { self.inv = true; self.afill = 0; return; } self.m.defd.clear()" + tc.size("defd") + " },",
+			"(ArrayKind::Unsigned, _Loc::Root, 2) => { if count > 3 { self.inv = true; self.afill = 0; return; } self.m.nodef.clear()" + tc.size("nodef") + " },",
 			// The fp32 array's arm is keyed to its own subtype, so an fp64 header
 			// at id 3 never reaches this bound (generator#259).
-			"(ArrayKind::Fp32, _Loc::Root, 3) => { if count > 3 { self.inv = true; return; } self.m.fdef.clear()" + tc.size("fdef") + " },",
+			"(ArrayKind::Fp32, _Loc::Root, 3) => { if count > 3 { self.inv = true; self.afill = 0; return; } self.m.fdef.clear()" + tc.size("fdef") + " },",
 		} {
 			if !strings.Contains(m, want) {
 				t.Errorf("message.rs (%v) missing %q:\n%s", cfg, want, m)
@@ -1120,11 +1120,11 @@ messages:
 			// Target match: keyed by (kind, loc, id), with the schema `count` bound
 			// and the clear both INSIDE the kind-matched arm.
 			"match (kind, self.cur, id) {",
-			"(ArrayKind::Fp32, _Loc::Root, 1) => { if count > 4 { self.inv = true; return; } self.m.f32s.clear()" + tc.size("f32s") + " },",
-			"(ArrayKind::Fp64, _Loc::Root, 2) => { if count > 6 { self.inv = true; return; } self.m.f64s.clear()" + tc.size("f64s") + " },",
+			"(ArrayKind::Fp32, _Loc::Root, 1) => { if count > 4 { self.inv = true; self.afill = 0; return; } self.m.f32s.clear()" + tc.size("f32s") + " },",
+			"(ArrayKind::Fp64, _Loc::Root, 2) => { if count > 6 { self.inv = true; self.afill = 0; return; } self.m.f64s.clear()" + tc.size("f64s") + " },",
 			// Integer arrays are unaffected: no second header word, so no subtype to
 			// contradict.
-			"(ArrayKind::Unsigned, _Loc::Root, 3) => { if count > 8 { self.inv = true; return; } self.m.ints.clear()" + tc.size("ints") + " },",
+			"(ArrayKind::Unsigned, _Loc::Root, 3) => { if count > 8 { self.inv = true; self.afill = 0; return; } self.m.ints.clear()" + tc.size("ints") + " },",
 		} {
 			if !strings.Contains(m, want) {
 				t.Errorf("message.rs (%v) missing subtype-keyed fixlen arm %q:\n%s", cfg, want, m)
@@ -1680,7 +1680,7 @@ func TestRustDeclaredWidthIsAValidityBound(t *testing.T) {
 			// An ARRAY element carries the same bound, and the guard follows the fill
 			// guard: an over-width scalar at an array id with no array_begin is a
 			// §7.3 skip, which must not become an INVALID.
-			"if self.afill == 0 { return; } self.afill -= 1; if value > 255 { self.inv = true; return; }",
+			"if self.afill == 0 { return; } self.afill -= 1; if value > 255 { self.inv = true; self.afill = 0; return; }",
 		} {
 			if !strings.Contains(got, want) {
 				t.Errorf("[%s] message.rs missing width guard %q:\n%s", corelib, want, got)
@@ -1752,8 +1752,8 @@ messages:
 			"            ArrayKind::Unsigned => match (self.cur, id) {\n                (_Loc::Root_arrays, 0) => count,\n                _ => 0,\n            },",
 			// The schema `count` bound names the declared kind, so a fixlen header
 			// at an integer id matches no arm and is never measured (#271).
-			"(ArrayKind::Unsigned, _Loc::Root_arrays, 0) => { if count > 5 { self.inv = true; return; } self.m.arrays.u8s.clear()" + tc.size("u8s") + " },",
-			"(ArrayKind::Signed, _Loc::Root_arrays, 1) => { if count > 5 { self.inv = true; return; } self.m.arrays.i8s.clear()" + tc.size("i8s") + " },",
+			"(ArrayKind::Unsigned, _Loc::Root_arrays, 0) => { if count > 5 { self.inv = true; self.afill = 0; return; } self.m.arrays.u8s.clear()" + tc.size("u8s") + " },",
+			"(ArrayKind::Signed, _Loc::Root_arrays, 1) => { if count > 5 { self.inv = true; self.afill = 0; return; } self.m.arrays.i8s.clear()" + tc.size("i8s") + " },",
 		} {
 			if !strings.Contains(got, want) {
 				t.Errorf("(%v) array_begin must key on the wire kind, missing %q:\n%s", cfg, want, got)
@@ -2474,18 +2474,18 @@ messages:
 			// Whole arms, so the ORDER is pinned too: the reserve can only ever
 			// follow the over-count reject. Reserving first would hand an
 			// attacker-controlled count straight to the allocator.
-			"(ArrayKind::Unsigned, _Loc::Root, 0) => { if count > 4 { self.inv = true; return; } self.m.nums.clear(); self.m.nums.reserve_exact(count) },",
+			"(ArrayKind::Unsigned, _Loc::Root, 0) => { if count > 4 { self.inv = true; self.afill = 0; return; } self.m.nums.clear(); self.m.nums.reserve_exact(count) },",
 			// A fixlen (fp) array is the same arm, reached through its own subtype.
-			"(ArrayKind::Fp32, _Loc::Root, 1) => { if count > 3 { self.inv = true; return; } self.m.fps.clear(); self.m.fps.reserve_exact(count) },",
+			"(ArrayKind::Fp32, _Loc::Root, 1) => { if count > 3 { self.inv = true; self.afill = 0; return; } self.m.fps.clear(); self.m.fps.reserve_exact(count) },",
 			// Under a struct, addressed through the frame's path -- the bound is not
 			// a property of being at Root.
-			"(ArrayKind::Unsigned, _Loc::Root_s, 0) => { if count > 5 { self.inv = true; return; } self.m.s.vals.clear(); self.m.s.vals.reserve_exact(count) },",
+			"(ArrayKind::Unsigned, _Loc::Root_s, 0) => { if count > 5 { self.inv = true; self.afill = 0; return; } self.m.s.vals.clear(); self.m.s.vals.reserve_exact(count) },",
 			// ...and inside a struct that is the ELEMENT of a wrapper sequence, where
 			// the arm is addressed through the element index and fires once per
 			// element rather than once per message. That is the fourth reach of the
 			// leaf arm, and the first cut of #505 left it out of its own surface
 			// claim; csharp emits `new ulong[count]` at the identical shape.
-			"(ArrayKind::Unsigned, _Loc::Root_rows_e, 0) => { if count > 7 { self.inv = true; return; } self.m.rows[self._ix1].vs.clear(); self.m.rows[self._ix1].vs.reserve_exact(count) },",
+			"(ArrayKind::Unsigned, _Loc::Root_rows_e, 0) => { if count > 7 { self.inv = true; self.afill = 0; return; } self.m.rows[self._ix1].vs.clear(); self.m.rows[self._ix1].vs.reserve_exact(count) },",
 			// A nested row is the same field one level down: its INNER count is
 			// checked by the row guards, so the row it just opened is sized from it.
 			// Through get_mut, because the growth loop above can legitimately stop
@@ -2528,7 +2528,7 @@ messages:
             vs: { id: 0, type: array, items: { type: u64, count: 7 } }
 `
 	d := moduleFromYAML(t, unbounded, map[string]any{})
-	if !strings.Contains(d, "(ArrayKind::Unsigned, _Loc::Root, 1) => { if count > MAX_DYN_ARRAY_COUNT { self.lim = true; return; } self.m.free.clear() },") {
+	if !strings.Contains(d, "(ArrayKind::Unsigned, _Loc::Root, 1) => { if count > MAX_DYN_ARRAY_COUNT { self.lim = true; self.afill = 0; return; } self.m.free.clear() },") {
 		t.Errorf("the count-less arm must stay lazy -- clear and nothing else:\n%s", d)
 	}
 	if strings.Contains(d, "self.m.free.reserve") {
@@ -2553,13 +2553,13 @@ messages:
 	// -- capacity is a hint, so the Vec still grows to hold a wire that really
 	// delivers more, but a truncated prefix can no longer buy the schema's whole
 	// declared worst case.
-	if !strings.Contains(d, "if count > 2000000 { self.inv = true; return; } self.m.huge.clear(); self.m.huge.reserve_exact(count.min(65536)) },") {
+	if !strings.Contains(d, "if count > 2000000 { self.inv = true; self.afill = 0; return; } self.m.huge.clear(); self.m.huge.reserve_exact(count.min(65536)) },") {
 		t.Errorf("a schema count past the ceiling must be pre-sized to the ceiling:\n%s", d)
 	}
 	// The wrapper-sequence element arm is the one that fires up to
 	// MAX_DYN_ARRAY_COUNT times per message; it is bounded per firing by its own
 	// schema count, and now by the ceiling as well.
-	if !strings.Contains(d, "(ArrayKind::Unsigned, _Loc::Root_wrapped_e, 0) => { if count > 7 { self.inv = true; return; } self.m.wrapped[self._ix1].vs.clear(); self.m.wrapped[self._ix1].vs.reserve_exact(count) },") {
+	if !strings.Contains(d, "(ArrayKind::Unsigned, _Loc::Root_wrapped_e, 0) => { if count > 7 { self.inv = true; self.afill = 0; return; } self.m.wrapped[self._ix1].vs.clear(); self.m.wrapped[self._ix1].vs.reserve_exact(count) },") {
 		t.Errorf("a bounded array under an unbounded wrapper sequence must be sized:\n%s", d)
 	}
 
@@ -2592,8 +2592,150 @@ messages:
 		if strings.Contains(m, "reserve_exact") {
 			t.Errorf("message.rs (%v) must not reserve into fixed-capacity storage:\n%s", cfg, m)
 		}
-		if !strings.Contains(m, "(ArrayKind::Unsigned, _Loc::Root, 0) => { if count > 4 { self.inv = true; return; } self.m.nums.clear() },") {
+		if !strings.Contains(m, "(ArrayKind::Unsigned, _Loc::Root, 0) => { if count > 4 { self.inv = true; self.afill = 0; return; } self.m.nums.clear() },") {
 			t.Errorf("message.rs (%v) fixed-capacity arm must be clear-only:\n%s", cfg, m)
 		}
+	}
+}
+
+// generator#508: EVERY branch that rejects a native array must disarm the fill
+// budget, not merely set the sticky flag and return.
+//
+// `self.inv` / `self.lim` are read at the END of the decode; the corelib cannot
+// see either, so it goes on delivering every element the wire announced. The
+// element store runs while `afill > 0`, so a reject that only returned left the
+// rejected elements streaming into the destination — measured at 8 MB of heap for
+// a forged `count=1000000` on a `corelib: rs` field whose declared storage is 32
+// bytes, with the verdict correctly InvalidMsg throughout.
+//
+// The disarm reuses the `afill == 0` test the store ALREADY opens with, so it
+// costs nothing per element. That is why it is the mechanism rather than an
+// `if !self.inv` at the store, which would be a branch on every element of every
+// array on a maxspeed target for a condition false in every honest decode.
+func TestRustRejectDisarmsTheFill(t *testing.T) {
+	const src = `
+version: 1
+messages:
+  m:
+    payload:
+      bigs:   { id: 0, type: array, items: { type: u64, count: 4 } }
+      fx:     { id: 2, type: array, items: { type: fp64, count: 4 } }
+      narrow: { id: 3, type: array, items: { type: u32, count: 8 } }
+      signed: { id: 4, type: array, items: { type: i16, count: 8 } }
+      scalar: { id: 5, type: u8 }
+      mat:    { id: 6, type: array, items: { type: array, count: 2, items: { type: u32, count: 4 } } }
+`
+	// Both std profiles whose destination is a growable Vec<T>: `corelib: rs` and
+	// the no_std crate asked for alloc storage. The heapless profiles were never
+	// exposed — `heapless::Vec::push` returns Err past N and the store discards it
+	// — but they emit the same arms, and the disarm is free there too.
+	var mods []string
+	for _, cfg := range []map[string]any{
+		{"corelib": "rs"},
+		{"corelib": "rs-no-std", "allow_dynamic": true},
+		{"corelib": "rs-no-std"},
+	} {
+		m := moduleFromYAML(t, src, cfg)
+		mods = append(mods, m)
+		for _, want := range []string{
+			// The schema-bounded count header — the shape the issue measured. The
+			// disarm precedes #505's reserve, which is untouched and still only ever
+			// reached by a count the reject has already approved.
+			"(ArrayKind::Unsigned, _Loc::Root, 0) => { if count > 4 { self.inv = true; self.afill = 0; return; } self.m.bigs.clear()",
+			// The fixlen (fp) twin, reached through its own subtype: the issue never
+			// measured it and it was exposed identically.
+			"(ArrayKind::Fp64, _Loc::Root, 2) => { if count > 4 { self.inv = true; self.afill = 0; return; } self.m.fx.clear()",
+			// A native ROW's two bounds — the row id against the outer count, and the
+			// row's own element count against the inner one. These already disarmed;
+			// pinned so they stay that way.
+			"(ArrayKind::Unsigned, _Loc::Root_mat, _) => { if id as usize >= 2 { self.inv = true; self.afill = 0; return; } if count > 4 { self.inv = true; self.afill = 0; return; }",
+			// The MID-ARRAY width trip: an element that breaches its declared width
+			// invalidates the message, and every later element of that same array
+			// still arrives. Unsigned and signed forms both; the push that follows is
+			// spelled differently per profile, so the assertion stops at the reject.
+			"self.afill -= 1; if value > 4294967295 { self.inv = true; self.afill = 0; return; }",
+			"self.afill -= 1; if value < -32768 || value > 32767 { self.inv = true; self.afill = 0; return; }",
+		} {
+			if !strings.Contains(m, want) {
+				t.Errorf("message.rs (%v) missing %q:\n%s", cfg, want, m)
+			}
+		}
+		// A SCALAR field's width reject keeps the plain form: there is no fill to
+		// disarm, nothing further is delivered for it, and writing afill there would
+		// claim a relationship that does not exist.
+		if !strings.Contains(m, "(_Loc::Root, 5) => { if value > 255 { self.inv = true; return; } self.m.scalar = value as u8 },") {
+			t.Errorf("message.rs (%v) a scalar width reject must not touch afill:\n%s", cfg, m)
+		}
+	}
+
+	// The receiver-cap reject on a count-LESS array, which only the std profile
+	// configures. It was already safe by a different mechanism (`if !self.lim` at
+	// the store, generator#102) and stays so; the disarm is what makes the two
+	// arms agree on the mechanism and not merely on the outcome.
+	// A count-LESS field cannot appear in the schema above: no_std refuses one in
+	// either storage mode, so it needs its own std-only schema. It also carries a
+	// STRING array and an array of STRUCTS, which the scan below has to be narrow
+	// enough not to trip over — see there.
+	d := moduleFromYAML(t, `
+version: 1
+messages:
+  m:
+    payload:
+      bigs:   { id: 0, type: array, items: { type: u64, count: 4 } }
+      free:   { id: 1, type: array, items: { type: u32 } }
+      narrow: { id: 3, type: array, items: { type: u32, count: 8 } }
+      strs:   { id: 4, type: array, items: { type: string, maxlen: 8, count: 3 } }
+      objs:   { id: 5, type: array, items: { type: struct, count: 2, fields: { x: { id: 0, type: u32 } } } }
+      mat:    { id: 6, type: array, items: { type: array, count: 2, items: { type: u32, count: 4 } } }
+`, map[string]any{"corelib": "rs", "max_dyn_array_count": 64})
+	if !strings.Contains(d, "(ArrayKind::Unsigned, _Loc::Root, 1) => { if count > MAX_DYN_ARRAY_COUNT { self.lim = true; self.afill = 0; return; } self.m.free.clear() },") {
+		t.Errorf("the over-cap count header must disarm the fill too:\n%s", d)
+	}
+	for _, m := range append(mods, d) {
+		scanForArmedRejects(t, m)
+	}
+}
+
+// scanForArmedRejects fails if any line of an emitted visitor latches a verdict
+// flag and returns while a NATIVE-ARRAY FILL BUDGET IS STILL ARMED — the whole of
+// generator#508, stated as a scan rather than as a list of arms, so a reject added
+// later has to answer the question rather than inherit silence.
+//
+// The scan is keyed on `self.afill`, and that narrowness is the point rather than
+// an accident. A reject only owes a disarm where a fill exists to disarm, and
+// exactly the lines that carry one mention afill: the element stores (`self.afill
+// -= 1`) and the array_begin count/index arms (`self.afill = 0` once they reject).
+// Keying on "mentions a bound and latches a flag" instead would flag two arms that
+// are correct as written and have no fill to switch off — a string-array element
+// store, `(_Loc::Root_strs, _) => { if id as usize >= 3 { self.inv = true; return; }
+// ... }`, and the wrapper `sequence_begin` over-index arm an array of structs emits.
+// Both are in the scanned schema above for that reason. Flagging them would push
+// the next author into writing a meaningless `self.afill = 0` onto a payload path.
+//
+// A rejecting arm that HAS disarmed reads `self.inv = true; self.afill = 0; return;`
+// and so does not contain `= true; return;`; one that has not reads
+// `self.inv = true; return;` on a line that also mentions afill, and is caught.
+func scanForArmedRejects(t *testing.T, module string) {
+	t.Helper()
+	disarms := 0
+	for _, arm := range strings.Split(module, "\n") {
+		if !strings.Contains(arm, "self.afill") {
+			continue
+		}
+		if strings.Contains(arm, "self.afill = 0;") {
+			disarms++
+		}
+		if !strings.Contains(arm, "self.inv = true;") && !strings.Contains(arm, "self.lim = true;") {
+			continue
+		}
+		if strings.Contains(arm, "= true; return;") {
+			t.Errorf("a native-array reject returns with the fill still armed:\n  %s", strings.TrimSpace(arm))
+		}
+	}
+	// A scan that matched nothing proves nothing: if the emitted spelling of the
+	// disarm ever changes, this test must fail rather than quietly pass over a
+	// module it no longer understands.
+	if disarms == 0 {
+		t.Errorf("no disarming reject found at all — the scan is keyed on a spelling the backend no longer emits:\n%s", module)
 	}
 }
