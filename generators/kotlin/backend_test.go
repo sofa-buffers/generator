@@ -1000,6 +1000,22 @@ func TestKotlinProjectMode(t *testing.T) {
 			t.Errorf("the streamdecode mode is missing %q", want)
 		}
 	}
+	// `streamdecode1` is the same replay in ONE feed, and it exists so the
+	// conformance latch can discriminate. Fed a byte at a time, a stream is
+	// already mid-field when a receiver cap refuses, so the memory holds
+	// INCOMPLETE before the catch arm runs and a DELETED arm still prints the
+	// expected value. In one feed the memory is untouched at COMPLETE, so what a
+	// suite reads back can only have come from the latch.
+	for _, want := range []string{
+		"\"streamdecode1\" -> {",
+		"val fed = dec.feed(input)",
+		"check(dec.status == fed) {",
+		"\"decode error: \" + e + \" [status=\" + dec.status + \"]\"",
+	} {
+		if !strings.Contains(main, want) {
+			t.Errorf("the streamdecode1 mode is missing %q", want)
+		}
+	}
 	// A u64 must survive the JSON round trip exactly, which a double-based
 	// parser cannot do -- so the reader keeps the literal text and parses it at
 	// the field's declared width.

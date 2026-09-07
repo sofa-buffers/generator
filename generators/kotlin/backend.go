@@ -489,7 +489,8 @@ func (g *gen) emitMessageAPI(f *kfile, name string, fields []*ir.Field) {
 	// absent field fires no callback at all, so the destination is re-armed HERE
 	// -- the last point at which absence is still observable.
 	f.line("        /**")
-	f.line("         * Decode into [out] and return the corelib's terminal status.")
+	f.line("         * Decode into [out] and return what the feed answered: COMPLETE, or")
+	f.line("         * INCOMPLETE if the bytes ran out mid-field.")
 	f.line("         *")
 	f.line("         * [out] is reset first: absence IS the encoding of an all-default field")
 	f.line("         * and fires no callback, so a reused destination has to be re-armed")
@@ -533,11 +534,8 @@ func (g *gen) emitDecoder(f *kfile, name string) {
 	f.line("        private val m = %s()", name)
 	f.line("        private val ist = IStream()")
 	f.line("        private val v = %sVisitor(m)", name)
-	// What the last feed answered. CORELIB_PLAN §5.2 gives the stream ONE channel
-	// for its outcome -- feed's return value -- and no accessor to ask a second
-	// time, so whoever wants to look again is the one that has to remember. This
-	// decoder is that caller, which is what keeps [status] on the generated
-	// surface after the corelib dropped its own.
+	// CORELIB_PLAN §5.2: one channel for the outcome, so the caller remembers.
+	// The emitted comment below states this for the generated reader.
 	f.line("        // What the last feed answered. The stream publishes its outcome once, as")
 	f.line("        // feed's return value, and offers no accessor to ask a second time, so the")
 	f.line("        // caller is the one that remembers -- and this decoder is the caller.")

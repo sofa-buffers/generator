@@ -234,6 +234,31 @@ func (g *gen) mainHarness(s *ir.Schema) []byte {
 		f.line("                    val sb = StringBuilder(); Json.to(back, sb)")
 		f.line("                    System.out.write(sb.toString().encodeToByteArray()); System.out.write('\\n'.code)")
 		f.line("                }")
+		// The same replay as `streamdecode`, but the WHOLE buffer in a SINGLE feed.
+		// It exists for the latch: under one byte per feed the memory is already
+		// INCOMPLETE by the time a refusal is raised mid-field, so a deleted catch
+		// arm still leaves the expected value lying there and the suite cannot tell
+		// a recorded status from a leftover one. Fed in one call the memory is
+		// still at its initial COMPLETE when the refusal fires, so the value a
+		// suite reads back can only have come from the latch itself. Both modes run
+		// over every latch fixture in tests/conformance/kotlin/run.sh: this one
+		// catches an arm that was dropped, the chunked one an arm that was applied
+		// to a stream already past a field boundary.
+		f.line("                \"streamdecode1\" -> {")
+		f.line("                    val dec = %s.decoder()", mt)
+		f.line("                    val back = try {")
+		f.line("                        val fed = dec.feed(input)")
+		f.line("                        check(dec.status == fed) {")
+		f.line("                            \"status \" + dec.status + \" disagrees with the feed that set it (\" + fed + \")\"")
+		f.line("                        }")
+		f.line("                        dec.finish()")
+		f.line("                    } catch (e: Exception) {")
+		f.line("                        System.err.println(\"decode error: \" + e + \" [status=\" + dec.status + \"]\")")
+		f.line("                        kotlin.system.exitProcess(1)")
+		f.line("                    }")
+		f.line("                    val sb = StringBuilder(); Json.to(back, sb)")
+		f.line("                    System.out.write(sb.toString().encodeToByteArray()); System.out.write('\\n'.code)")
+		f.line("                }")
 		f.line("                \"stream\" -> {")
 		f.line("                    // Both streaming halves, against the one-shot pair as the oracle.")
 		f.line("                    //")

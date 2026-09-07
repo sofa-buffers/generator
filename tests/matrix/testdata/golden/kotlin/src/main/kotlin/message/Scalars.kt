@@ -181,7 +181,8 @@ public class Scalars {
         }
 
         /**
-         * Decode into [out] and return the corelib's terminal status.
+         * Decode into [out] and return what the feed answered: COMPLETE, or
+         * INCOMPLETE if the bytes ran out mid-field.
          *
          * [out] is reset first: absence IS the encoding of an all-default field
          * and fires no callback, so a reused destination has to be re-armed

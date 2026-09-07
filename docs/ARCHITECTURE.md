@@ -1143,9 +1143,10 @@ still travels the error channel with its own code. corelib-kotlin-mp was not in
 that wave and kept `IStream.status`, so the Kotlin backend was correctly left
 alone; it caught up on 2026-09-07 (corelib-kotlin-mp#44), which makes six
 corelibs on this contract and Kotlin the last accessor-shaped backend to adopt
-it (generator#521). The two Rust corelibs had no accessor to remove and made the same move through the other surface: they took
-INCOMPLETE *off* the error channel, which is the one break in the sweep that
-reaches generated code (last subsection).
+it (generator#521). The two Rust corelibs had no accessor to remove and made
+the same move through the other surface: they took INCOMPLETE *off* the error
+channel, which is the one break in the sweep that reaches generated code (last
+subsection).
 
 **The generated wrapper is the caller, and a caller may remember.** The removal is
 a corelib-side break, but it must not become a break for users of generated code,
@@ -1217,14 +1218,15 @@ Two details are load-bearing and neither is caught by simply compiling:
    TypeScript tests `SofabError.code` and requires the `instanceof` first, so a
    non-corelib throw falls through; Zig's `errdefer` capture tests the error
    value the same way. Kotlin is the contrast that shows what drives the count:
-   it is the same JVM shape as Java but needs a single `catch (e:
-   SofabException)`, because Kotlin has no checked exceptions and therefore no
-   wrapper for a `Visitor` guard to arrive in. The number of arms follows from
-   the language's carriers, not from the corelib. The one visible movement is
-   Zig's, and it is forced: a receiver-cap refusal used to read back as
-   `.refused`, a value that no longer exists, so it now maps to `.incomplete` and a `finish()` after a caught cap
-   refusal fails where it once succeeded. Mapping it to `.invalid` instead would
-   report a policy stop as the wire verdict, which §6.3 forbids.
+   it is the same JVM shape as Java but needs a single
+   `catch (e: SofabException)`, because Kotlin has no checked exceptions and
+   therefore no wrapper for a `Visitor` guard to arrive in. The number of arms
+   follows from the language's carriers, not from the corelib. The one visible
+   movement is Zig's, and it is forced: a receiver-cap refusal used to read
+   back as `.refused`, a value that no longer exists, so it now maps to
+   `.incomplete` and a `finish()` after a caught cap refusal fails where it
+   once succeeded. Mapping it to `.invalid` instead would report a policy stop
+   as the wire verdict, which §6.3 forbids.
 
 The remembered value had no conformance coverage — every suite reads it only
 indirectly, through `Finish()`/`finish()` — so the project harnesses' `streamdecode`
@@ -1247,6 +1249,21 @@ over-count array or an over-maxlen length word), and a receiver-cap refusal.
 Malformed → Invalid, capped → Incomplete, on both of Java's carriers. In Zig the
 `catch` that prints it is also what makes the error path compile at all, for the
 same reason the `status()` call is.
+
+**A latch fixture must be read from a memory that could not already hold the
+answer.** Those three fixtures are replayed one byte per feed, and at that width
+the check is weaker than it looks: the cap fixture's first byte is a complete
+field header, so the stream is mid-field and the feed *before* the refusal has
+already written Incomplete into the memory. Deleting the cap arm outright still
+prints `[status=Incomplete]` and the assertion still passes — it discriminates an
+inverted mapping but not an omitted one. (The malformation fixtures do not have
+this problem: Invalid is never what the preceding feed left behind.) Kotlin's
+suite therefore drives every latch fixture through a **second, single-feed
+harness mode** as well, where the memory is still at its initial Complete when
+the refusal fires and the value read back can only have come from the latch. The
+chunked mode still runs, and catches the opposite error — an arm that overwrites
+a memory the stream had already moved past. The other four suites carry the
+one-byte shape only, and mirroring the single-feed mode into them is open work.
 
 In Zig that assertion does more than assert. **Zig only semantically analyses a
 function something calls**, so a generated `pub fn` no harness reaches is never

@@ -617,23 +617,35 @@ echo "==> decode limits OK"
 # malformed bytes are INVALID, a receiver cap is INCOMPLETE and never INVALID
 # (CORELIB_PLAN S6.3 -- a policy stop is this side's decision, not a verdict on
 # the wire).
+#
+# Each fixture runs through BOTH streaming modes, because one byte per feed
+# cannot prove the arm fired. Feeding `03 05 ...` a byte at a time leaves the
+# stream mid-field, so the feed BEFORE the cap refusal has already written
+# INCOMPLETE into the memory and a DELETED arm would print the expected value
+# anyway. `streamdecode1` hands over the whole buffer in one call: the memory is
+# still at its initial COMPLETE when the refusal fires, so the value read back
+# can only have been put there by the latch. The chunked mode is what catches
+# the opposite mistake -- an arm that overwrites a memory the stream had already
+# moved past.
 echo "==> a refusal latches into the remembered status (generator#521)"
 # A varint past the 64-bit bound: 10 continuation bytes and an eleventh. Refused
 # by the CORELIB (MESSAGE_SPEC S4.1), so it arrives as a bare SofabException.
 printf '\000\377\377\377\377\377\377\377\377\377\377\001' > "$WORK/varint_overflow.bin"
-latch() {   # <fixture> <want-status> <message> <harness...>
-    lfx=$1 lwant=$2 lmsg=$3
-    shift 3
-    if "$@" streamdecode "$lmsg" < "$lfx" >/dev/null 2>"$WORK/latch.err"; then
-        echo "FAIL: $(basename "$lfx") must be refused by the streaming decoder"; exit 1
+latch() {   # <mode> <fixture> <want-status> <message> <harness...>
+    lmode=$1 lfx=$2 lwant=$3 lmsg=$4
+    shift 4
+    if "$@" "$lmode" "$lmsg" < "$lfx" >/dev/null 2>"$WORK/latch.err"; then
+        echo "FAIL: $(basename "$lfx") must be refused by $lmode"; exit 1
     fi
     grep -q "\[status=$lwant\]" "$WORK/latch.err" || {
-        echo "FAIL: $(basename "$lfx") -- the refusal must latch status=$lwant; got:"
+        echo "FAIL: $(basename "$lfx") via $lmode -- the refusal must latch status=$lwant; got:"
         cat "$WORK/latch.err"; exit 1; }
 }
-latch "$WORK/varint_overflow.bin" INVALID    myfirstmessage $H
-latch "$WORK/overcount.bin"       INVALID    myfirstmessage $H
-latch "$WORK/overlimit.bin"       INCOMPLETE dyn            $HL
+for lm in streamdecode streamdecode1; do
+    latch "$lm" "$WORK/varint_overflow.bin" INVALID    myfirstmessage $H
+    latch "$lm" "$WORK/overcount.bin"       INVALID    myfirstmessage $H
+    latch "$lm" "$WORK/overlimit.bin"       INCOMPLETE dyn            $HL
+done
 echo "==> refusal latch OK"
 
 echo "==> shared-vector byte-exact conformance"
