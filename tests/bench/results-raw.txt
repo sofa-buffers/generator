@@ -24,10 +24,10 @@ java               maxspeed   subtract  17009         30899
 kotlin             maxspeed   subtract  17199         32753
 python             maxspeed   subtract  1081889       2309212
 python-native      maxspeed   subtract  130661        802289
-rust-rs            maxspeed   toggle    8273          23051
-rust-rs-no-std     footprint  toggle    8067          30030
-rust-rs-no-std-dyn footprint  toggle    8292          38490
-rust-rs-static     maxspeed   toggle    8120          16596
+rust-rs            maxspeed   toggle    8273          23027
+rust-rs-no-std     footprint  toggle    8079          30006
+rust-rs-no-std-dyn footprint  toggle    8280          38466
+rust-rs-static     maxspeed   toggle    8120          16572
 rust-rs-unbounded  maxspeed   toggle    6762          21232
 ts-bigint          maxspeed   subtract  605542        768539
 ts-long            maxspeed   subtract  596936        772117

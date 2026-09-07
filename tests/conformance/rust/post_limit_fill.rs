@@ -23,13 +23,22 @@
 //      pin that they stay indifferent -- both refuse with LimitExceeded and
 //      neither hands back a message (`Decoder`'s is private and `finish`
 //      consumes it), which is what makes this a question about `decode` alone.
-//   2. A message that has ALREADY been refused goes on materialising its
-//      containers for the rest of its bytes. The flags are sticky and surfaced
-//      at the end, not an abort channel: the corelib cannot see them and keeps
-//      delivering. A repeated matrix row id is the shape where that accumulates
-//      inside one message -- a row that repeats APPENDS rather than replacing
-//      (generator#509) -- so the tail below goes on growing a destination the
-//      decode has already decided to throw away.
+//   2. A message that has ALREADY been refused goes on COLLECTING ELEMENTS into
+//      a later count-less native array for the rest of its bytes. The flags are
+//      sticky and surfaced at the end, not an abort channel: the corelib cannot
+//      see them and keeps delivering. A repeated matrix row id is the shape
+//      where that accumulates inside one message -- a row that repeats APPENDS
+//      rather than replacing (generator#509) -- so the tail below goes on
+//      growing a destination the decode has already decided to throw away.
+//
+//      Rows 5 and 6 keep every row at INDEX 0 on purpose. The guard wraps the
+//      element store alone: container growth, the gap fill in array_begin and a
+//      wrapper element's own store stay ungated, so a row at a HIGH index would
+//      allocate its whole gap whether the message was refused or not (measured:
+//      1,572,872 bytes at index 65535 under a 65536 cap, breach or no breach --
+//      generator#518). Asserting a budget there would pin today's amplification
+//      as a requirement, which is what ARCHITECTURE §9.5's generator#512 block
+//      declines to do for the same reason.
 //
 // Both budgets sit BETWEEN the two builds rather than merely above the guarded
 // one: measured on corelib-rs 7599f9a, the refused message allocates 106 bytes

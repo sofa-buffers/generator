@@ -1723,20 +1723,26 @@ messages:
       w64: { id: 8, type: array, items: { type: bitfield, count: 4, bits: { A: { pos: 0 }, Z: { pos: 63 } } } }
 `
 
-// generator#513: an ARRAY element declared `enum` or `bitfield` got no §7.1
-// width guard at all. ir.NarrowRange keys off the Kind alone and returns !ok for
-// both, so widthCond produced the empty string and the store was emitted bare —
-// a wire element of 1000 was masked by the `as` cast into `es: [-24]` /
-// `bs: [232]` and the message decoded Ok, where the u8 element beside it is
-// InvalidMsg.
+// generator#513: an ARRAY element declared `bitfield` got no §7.1 width guard at
+// all. ir.NarrowRange keys off the Kind alone and returns !ok for it, so
+// widthCond produced the empty string and the store was emitted bare — a wire
+// element of 1000 was masked by the `as` cast into `bs: [232]` and the message
+// decoded Ok, where the u8 element beside it is InvalidMsg.
 //
-// The bound is the REPR the element is stored in (enumBackingKind /
-// bitfieldBackingKind), not the set of declared names: an undeclared enum
-// constant or an undeclared bit that FITS is a flag a peer built from a newer
-// schema carries and is kept (generator#482 settled that half for the bitfield,
-// and corelib-cpp already enforces this same width on this same element through
+// The bound is the REPR the element is stored in (bitfieldBackingKind), not the
+// set of declared positions: an undeclared bit that FITS is a flag a peer built
+// from a newer schema carries and is kept (generator#482 settled that half, and
+// corelib-cpp already enforces this same width on this same element through
 // `ElemBound::of<bitfieldBacking>()`).
-func TestRustEnumAndBitfieldArrayElementsCarryTheWidthGuard(t *testing.T) {
+//
+// The ENUM element is the other half of #513 and is deliberately still bare:
+// bounding it at its i8/i16/i32 repr is narrower than the signed 32-bit range
+// MESSAGE_SPEC §1 binds an enum to, and would refuse messages java, python,
+// typescript, dart and kotlin all keep. generator#516 decides the family bound;
+// elemWidthCond carries the argument. This test pins the enum store as UNGUARDED
+// so that when #516 lands, whichever way it lands, it has to come back here and
+// say so.
+func TestRustBitfieldArrayElementsCarryTheWidthGuard(t *testing.T) {
 	// The two corelibs spell the push differently -- heapless returns a Result the
 	// no_std store discards -- so the store half is per-corelib; the guard half,
 	// which is what this test is about, is identical for both.
@@ -1746,21 +1752,16 @@ func TestRustEnumAndBitfieldArrayElementsCarryTheWidthGuard(t *testing.T) {
 	} {
 		got := moduleFromYAML(t, enumBitfieldElemSrc, map[string]any{"corelib": c.corelib})
 		const fill = "if self.afill == 0 { return; } self.afill -= 1; "
-		const i8Rej = "if value < -128 || value > 127 { self.inv = true; self.afill = 0; return; } "
 		const u8Rej = "if value > 255 { self.inv = true; self.afill = 0; return; } "
 		for _, want := range []string{
-			// The enum element: backed by i8, so both ends of that range bind, and
-			// the reject DISARMS the fill (generator#508) like every other element
-			// reject -- the guard sits behind fillGuard so a bare scalar at an array
-			// id stays a §7.3 skip.
-			fill + i8Rej + c.es,
-			// The bitfield element: unsigned, so only the top binds. Same clause the
-			// u8 element beside it has always had.
+			// The bitfield element: unsigned, so only the top binds, and the reject
+			// DISARMS the fill (generator#508) like every other element reject. The
+			// guard sits behind fillGuard so a bare scalar at an array id stays a
+			// §7.3 skip.
 			fill + u8Rej + c.bs,
 			fill + u8Rej + c.u1,
 			// A nested-native ROW element is the same element one level down and
 			// takes the same clause.
-			"self.afill -= 1; " + i8Rej + "if let Some(_r) = self.m.nes.get_mut(self._ix0)",
 			"self.afill -= 1; " + u8Rej + "if let Some(_r) = self.m.nbs.get_mut(self._ix1)",
 		} {
 			if !strings.Contains(got, want) {
@@ -1773,32 +1774,35 @@ func TestRustEnumAndBitfieldArrayElementsCarryTheWidthGuard(t *testing.T) {
 		if !strings.Contains(got, fill+c.w64) {
 			t.Errorf("[%s] a u64-backed bitfield element must store unguarded:\n%s", c.corelib, got)
 		}
+		// The enum half of #513, held back for generator#516: still bare, at both
+		// positions, and pinned here so the state is a decision rather than a
+		// forgotten arm.
+		if !strings.Contains(got, fill+c.es) {
+			t.Errorf("[%s] the enum element store must stay unguarded until generator#516 (see elemWidthCond):\n%s", c.corelib, got)
+		}
+		if !strings.Contains(got, "self.afill -= 1; if let Some(_r) = self.m.nes.get_mut(self._ix0)") {
+			t.Errorf("[%s] the nested enum element store must stay unguarded until generator#516:\n%s", c.corelib, got)
+		}
 	}
 }
 
 // The width the guard compares against and the width the member is declared with
 // have to be the SAME number: a guard that admitted a value the member cannot
 // hold would leave the `as` cast masking again, one range further out. Both come
-// from enumBackingKind/bitfieldBackingKind, and this pins that they still agree
-// for each backing step the two functions can choose.
+// from bitfieldBackingKind, and this pins that they still agree for each backing
+// step that function can choose.
 func TestRustElementWidthGuardMatchesTheDeclaredBacking(t *testing.T) {
 	const src = `
 version: 1
 messages:
   r:
     payload:
-      e8:  { id: 0, type: array, items: { type: enum, count: 2, enum: { A: 0, B: 127 } } }
-      e16: { id: 1, type: array, items: { type: enum, count: 2, enum: { A: 0, B: 128 } } }
-      e32: { id: 2, type: array, items: { type: enum, count: 2, enum: { A: 0, B: 32768 } } }
       b8:  { id: 3, type: array, items: { type: bitfield, count: 2, bits: { A: { pos: 7 } } } }
       b16: { id: 4, type: array, items: { type: bitfield, count: 2, bits: { A: { pos: 8 } } } }
       b32: { id: 5, type: array, items: { type: bitfield, count: 2, bits: { A: { pos: 16 } } } }
 `
 	got := moduleFromYAML(t, src, map[string]any{"corelib": "rs"})
 	for _, want := range []string{
-		"if value < -128 || value > 127 { self.inv = true; self.afill = 0; return; } self.m.e8.push(value as i8);",
-		"if value < -32768 || value > 32767 { self.inv = true; self.afill = 0; return; } self.m.e16.push(value as i16);",
-		"if value < -2147483648 || value > 2147483647 { self.inv = true; self.afill = 0; return; } self.m.e32.push(value as i32);",
 		"if value > 255 { self.inv = true; self.afill = 0; return; } self.m.b8.push(value as u8);",
 		"if value > 65535 { self.inv = true; self.afill = 0; return; } self.m.b16.push(value as u16);",
 		"if value > 4294967295 { self.inv = true; self.afill = 0; return; } self.m.b32.push(value as u32);",

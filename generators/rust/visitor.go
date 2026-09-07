@@ -1833,6 +1833,16 @@ const fillGuard = "if self.afill == 0 { return; } self.afill -= 1; "
 // delivered through unsigned() as a u64, where only the upper bound is
 // reachable, while an i* destination arrives through signed() as an i64 and
 // needs both ends.
+//
+// The SCALAR position takes the Kind alone, so a scalar `bitfield` is still
+// stored bare where the array element beside it now rejects (a scalar 1000 into
+// a u8-backed bitfield is 232, verdict Ok). That is a real incoherence inside one
+// generated decoder and it is deliberate for exactly one release: the scalar arms
+// route through this helper for BOTH kinds, and folding the bitfield in alone
+// would leave the enum scalar and the enum element disagreeing instead. Both
+// positions are fixed together once generator#516 settles the enum bound —
+// widthGuard then takes the field's *ir.TypeRef and routes through elemWidthCond,
+// like arrayWidthGuard. Filed as generator#515.
 func widthGuard(k ir.Kind) string {
 	cond := widthCond(k)
 	if cond == "" {
@@ -1853,47 +1863,47 @@ func widthCond(k ir.Kind) string {
 	return fmt.Sprintf("value > %d", hi)
 }
 
-// elemWidthCond is widthCond over an ARRAY ELEMENT, and it answers for two kinds
-// widthCond cannot: `enum` and `bitfield`, whose declared width lives on the
-// NAMED TYPE rather than on the Kind. ir.NarrowRange takes a Kind alone, so it
-// returns !ok for both and left the element store bare — a wire element of 1000
-// was truncated by the `as` cast into `es: [-24]` / `bs: [232]` and the message
-// decoded Ok, where every other narrow element (u8..i32) is InvalidMsg
-// (generator#513).
+// elemWidthCond is widthCond over an ARRAY ELEMENT, and it answers for one kind
+// widthCond cannot: `bitfield`, whose declared width lives on the NAMED TYPE
+// rather than on the Kind. ir.NarrowRange takes a Kind alone, so it returns !ok
+// for it and the element store was emitted bare — a wire element of 1000 was
+// truncated by the `as` cast into `bs: [232]` and the message decoded Ok, where
+// every other narrow element (u8..i32) is InvalidMsg (generator#513).
 //
-// The bound is the REPR each kind is stored in — enumBackingKind /
-// bitfieldBackingKind, the very widths the cast masks to — not the set of names
-// the schema declares:
+// The bound is the REPR the element is stored in — bitfieldBackingKind, the very
+// width the cast masks to — never the set of positions the schema declares.
+// generator#482 accepts a bit at a position no flag declares as long as it FITS
+// the width, because that is how a peer built from a newer schema carries a flag
+// this one has not got yet, and `internal/parser.checkMaskElem` says the same of
+// an authored mask. corelib-cpp already enforces exactly this bound on exactly
+// this element through `ElemBound::of<bitfieldBacking>()` (cppElemBound), and
+// corelib-c-cpp off its descriptor's `element_size`, so rust matching them makes
+// four targets agree rather than inventing a second rule. MESSAGE_SPEC gives a
+// bitfield the unsigned-integer wire type and no width bound of its own (§1), so
+// the repr rule here is the family's, not the spec's.
 //
-//   - For a bitfield this is settled: generator#482 accepts a bit at a position
-//     no flag declares as long as it fits the width, because that is how a peer
-//     built from a NEWER schema carries a flag this one has not got yet, and
-//     corelib-cpp already enforces exactly this bound on the same element
-//     through `ElemBound::of<bitfieldBacking>()` (cppElemBound). Rust matching it
-//     makes the two agree rather than inventing a second rule.
-//   - For an enum the same forward-compatibility argument applies to an
-//     undeclared constant, and MESSAGE_SPEC §7.1 binds only what does not FIT:
-//     the value-set test that internal/parser.checkArrayElem applies binds an
-//     author writing a default into THIS schema, which is a different question
-//     from a value arriving from a peer. So an in-range value naming no declared
-//     constant is kept, and only one past the repr is INVALID.
-//
-// MESSAGE_SPEC §1 puts a 32-bit signed ceiling over every enum; enumBackingKind
-// never exceeds i32, so this bound sits under that ceiling and never above it.
+// THE ENUM IS DELIBERATELY NOT HERE, and its element store stays bare — the mask
+// generator#513 measured (1000 into an i8-backed enum is -24, verdict Ok) is
+// still there. The symmetric fix, bounding at enumBackingKind, is NARROWER than
+// MESSAGE_SPEC §1, which is explicit and normative: "An `enum` is bound the same
+// way by its signed 32-bit range". A receiver bounding at the repr refuses an
+// element of 1000 that java, python, typescript, dart and kotlin all keep — one
+// schema, one byte string, opposite verdicts, which is precisely what §7.1's
+// rationale forbids ("two conformant implementations of the same schema MUST
+// agree on which messages are valid"). Honouring §1 instead means WIDENING the
+// member to i32 on every profile, footprint included, and settling the same
+// question for c / cpp-c-cpp / cpp, which bound at the repr today. That is a
+// family decision with a real cost and it is taken in generator#516; until it
+// lands rust keeps the mask it has always had rather than trading one §7.1
+// violation for another. generator#513 stays open on the enum half.
 func elemWidthCond(k ir.Kind, ref *ir.TypeRef) string {
 	if cond := widthCond(k); cond != "" {
 		return cond
 	}
-	if ref == nil || ref.Target == nil {
+	if k != ir.KindBitfield || ref == nil || ref.Target == nil {
 		return ""
 	}
-	switch k {
-	case ir.KindEnum:
-		return widthCond(enumBackingKind(ref.Target))
-	case ir.KindBitfield:
-		return widthCond(bitfieldBackingKind(ref.Target))
-	}
-	return ""
+	return widthCond(bitfieldBackingKind(ref.Target))
 }
 
 // arrayWidthGuard is widthGuard inside a native-array FILL arm: the same §7.1
@@ -1943,10 +1953,22 @@ func arrayWidthGuard(k ir.Kind, ref *ir.TypeRef) string {
 //     indifferent (LimitExceeded either way; `Decoder::m` is private and `finish`
 //     consumes the decoder), which is exactly why the question could not be
 //     settled on a verdict.
-//   - A message ALREADY refused stops materialising its containers. The flags are
-//     surfaced at the end, not an abort channel, so the corelib delivers the whole
-//     message regardless: 2000 legal matrix rows behind an 11-byte breach cost
-//     106 bytes/decode with the test and 32,106 without it.
+//   - A message ALREADY refused stops COLLECTING ELEMENTS into a later count-less
+//     native array. The flags are surfaced at the end, not an abort channel, so
+//     the corelib delivers the whole message regardless: 2000 legal matrix rows
+//     behind an 11-byte breach cost 106 bytes/decode with the test and 32,106
+//     without it.
+//
+// What it does NOT buy, because the two are easy to conflate: this wraps the
+// ELEMENT store and nothing else. Container growth, the gap fill in
+// array_begin/sequence_begin and a wrapper element's own store are ungated, so a
+// refused message materialises those exactly as an accepted one does — behind the
+// same breach, at max_dyn_array_count 65536, a mat row header at index 65535
+// still costs 1,572,872 bytes and an array<string> element there 1,572,873. That
+// is the generator#512 ceiling (cap × sizeof(slot), verdict Ok) reached by a
+// message that also happens to be refused, not a bound this guard was ever
+// holding; extending the test to those arms is a throughput question with its own
+// numbers, filed as generator#518.
 //
 // So the branch is not free, and it is not paying for nothing either. Emitted
 // only on the std profile: rs-no-std resolves no limits at all and checkBounded
