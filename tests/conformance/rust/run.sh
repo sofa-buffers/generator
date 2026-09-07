@@ -349,6 +349,33 @@ run_variant() {
     echo "$ERR" | grep -q 'InvalidMsg' || { echo "FAIL: [$label] over-count(6>4)+truncated row must be INVALID (InvalidMsg); got: $ERR"; exit 1; }
     echo "==> [$label] nested-row bounds OK"
 
+    # A repeated field id (MESSAGE_SPEC S7.4), at every array position example.yaml
+    # offers. No shared vector reaches this and none can -- S7.4 opens by saying a
+    # repeated id is not well formed and producers MUST NOT emit it, so the case
+    # exists only for a DECODER and the message has to be built here. That is why
+    # eleven green suites never saw generator#509, where a repeated nested-NATIVE-ROW
+    # id merged into the previous occurrence instead of replacing it (measured
+    # pre-fix: somematrix = [[1, 2, 3, 4, 5]] for two occurrences of row 0, against
+    # [[4, 5]] from go, csharp, java and zig).
+    #
+    # It gets its own crate rather than riding $WORK/ex-$label, for the reason the
+    # streaming check does: main.rs is the check, and ex-$label's main.rs is the
+    # JSON harness the encode/decode steps above need.
+    echo "==> [$label] repeated id: wrappers replace, scopes merge (MESSAGE_SPEC S7.4)"
+    rm -rf "$WORK/rep-$label"
+    rust_build "$EXAMPLE" "$WORK/rep-$label"
+    case "$label" in
+        no-std-*) printf 'use sofabuffers_generated::*;\n' > "$WORK/rep-$label/src/main.rs" ;;
+        *)        printf 'mod message;\nuse message::*;\n' > "$WORK/rep-$label/src/main.rs" ;;
+    esac
+    sed '/^\/\/SOFAB_IMPORT$/d' "$ROOT/tests/conformance/rust/repeated_id.rs" \
+        >> "$WORK/rep-$label/src/main.rs"
+    case "$label" in
+        # The lib is #![no_std] without this; the check itself uses Vec/format!.
+        no-std-*) ( cd "$WORK/rep-$label" && cargo run -q --features std ) ;;
+        *)        ( cd "$WORK/rep-$label" && cargo run -q ) ;;
+    esac
+
     # Over-maxlen scalar blob (Option B / MESSAGE_SPEC S7.1): someblob (id 12)
     # declares maxlen: 16; a 17-byte blob exceeds it -> INVALID, never truncated.
     # Wire: 62 (blob id12) 8b 01 (fixlen word len 17, blob subtype 3) + 17 bytes;

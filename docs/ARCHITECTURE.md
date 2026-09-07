@@ -2196,6 +2196,47 @@ them (generator#175, Crucible F-0019):
   open while structs and unions keep merging (corelib-c-cpp#101) — so this target
   needed **no generator change**, only the descriptor kind it already emits. This
   supersedes the "C needs a new descriptor kind" reading in generator#175.
+- **A MATRIX ROW is an array too, and rust was replacing everywhere but there**
+  (generator#509). The row a nested array's `array_begin` opens at `out[id]` is
+  itself an array field, so §7.4 replaces it; rust's `fkNestedNative` arm grew the
+  outer container to the row id and recorded the index but never reset the row, so
+  the elements that followed pushed on top of the previous occurrence's. Measured
+  on `corelib: rs`, `somematrix` (outer `count: 2`, inner `count: 4`) carrying row
+  id 0 twice — `[1,2,3]` then `[4,5]` — decoded as `[[1, 2, 3, 4, 5]]` where go
+  (measured), csharp, java and zig all produced `[[4, 5]]`. Two further
+  consequences made it more than a value bug: the inner `count` is checked *per
+  occurrence* at the header, so a merge carried a row past its own declared
+  capacity (two legal occurrences of 3 and 4 summing to 7), and on the
+  fixed-capacity profiles the surplus was silently dropped at the heapless
+  capacity and the message **accepted** — `[[1, 2, 3, 4]]`, the cross-profile
+  divergence §7.1 forbids. The arm now clears the row on open (`rowReset`), which
+  restores the value, re-arms the bound and makes the `is_empty()` guard that
+  generator#505 had put in front of the pre-size dead — with the clear ahead of it
+  the length is always zero, so the reserve is unconditional and exactly `M` again.
+  The clear is emitted on **every** profile, including the count-less arm that
+  emits no pre-size at all: replacement is a semantics rule, not a sizing one.
+  Pinned by `tests/conformance/rust/repeated_id.rs`, which builds the message with
+  `sofab::OStream` — no shared vector can carry a repeated id, because §7.4 opens
+  by forbidding producers to emit one.
+- **An array element that is ITSELF a wrapper array still merges in three
+  backends, and that is a separate, family-wide gap.** Measured at the same time
+  on `array<array<string>>` and `array<array<array<u32>>>`: **rust, go and zig**
+  merge a repeated row id (rust and go measured, zig read from the emitted arm),
+  while **csharp** installs a fresh `List<T>` and **java**'s `Seq.reserveRow`
+  clears (`Seq.java:166`). Unlike the matrix-row case above, the majority here —
+  three merge to two — is on the **spec-wrong** side, so there is nothing to
+  converge rust onto; and go's half lives in `corelib-go`'s `NestedSeq`, not in
+  the generator at all. It is therefore not a rust outlier to fix in passing: it
+  wants one decision taken once across every backend, the way generator#175 was
+  run. Filed as **generator#523**, which also carries the coverage half
+  generator#509 asked for and this section still owes — a shared
+  `tests/conformance/lib/check_repeated_id.py` on the `check_growth.py` pattern,
+  forging the repeated-id bytes itself and driving every backend's harness, so
+  the native row, the wrapper row and the scope merge are checked family-wide
+  instead of only in rust. Until it lands, `tests/conformance/rust/repeated_id.rs`
+  is the family's only §7.4 repeated-id regression guard. Note that #509 leaves
+  rust internally inconsistent in the meantime — `array<array<u32>>` replaces its
+  row, `array<array<string>>` merges its row — which generator#523 resolves.
 
 **§7.4 interacts with §7.3, and the ordering is load-bearing.** The spec closes
 the clause with:
@@ -3167,14 +3208,18 @@ The **matrix ROW** is Rust-only, and the Go/C# parallel above does not extend to
 it: at a row header the sibling backends install a fresh row and let it grow
 (`corelib-go`'s `UnsignedMatrixSeq.ArrayBegin` clears `s.cur` and places the row
 at `ArrayEnd`, csharp emits `new List<uint>()` with no capacity, zig allocates
-only because its rows are slices). Rust sizes the row from the inner `count`
-`rowGuards` has just checked. It does so **only when the row is empty**: this arm
-does not clear, so a row id repeating inside one message finds the previous
-occurrence's elements still there, and `reserve_exact` is capacity *on top of the
-current length* — reserving there would ask for `len + M` and would do it exactly,
-one precise realloc per header. That the repeat *merges* at all (where Rust's own
-leaf arm clears, and where §7.4 is last-occurrence-wins) is a separate,
-pre-existing divergence, filed as generator#509.
+only because its rows are slices). Rust CLEARS the row and then sizes it from
+the inner `count` `rowGuards` has just checked.
+
+The clear is generator#509 and is a §7.4 obligation rather than a sizing one — a
+row is an array, so a repeated row id replaces it — and it is what makes the
+pre-size unconditional. It briefly was not: the reserve landed first, behind an
+`if _r.is_empty()`, because with no clear a repeating row id found the previous
+occurrence's elements still there and `reserve_exact` is capacity *on top of the
+current length*, so reserving would have asked for `len + M` and done it exactly —
+one precise realloc per repeated header, slower than doing nothing. With the clear
+ahead of it the length is always zero, the guard could only ever be true, and it
+is gone.
 
 **A schema bound is not a ceiling by itself.** `count > N` establishes only that
 the wire stayed inside the *schema's* `N`, and `schema/sofabuffers-schema-v1.json`
