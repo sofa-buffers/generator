@@ -3473,7 +3473,7 @@ right place. `tests/conformance/rust/run.sh` builds one project with all three
   message it filled — `nums: []` with the test, `nums: [1, 2, 3]` without it,
   behind the same over-cap string — and a refused message stops COLLECTING
   ELEMENTS into a later count-less native array (2000 legal matrix rows behind an
-  11-byte breach: 106 bytes/decode against 32,106). `try_decode` and `Decoder`
+  11-byte breach: 104 bytes/decode against 32,104). `try_decode` and `Decoder`
   answer `LimitExceeded` either way and neither hands back a partial message,
   which is precisely why the question needed measuring rather than reasoning. The
   test costs −0.36% of `rust-rs-unbounded` decode to remove; it stays.

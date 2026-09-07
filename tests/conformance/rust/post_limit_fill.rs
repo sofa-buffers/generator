@@ -41,8 +41,8 @@
 //      declines to do for the same reason.
 //
 // Both budgets sit BETWEEN the two builds rather than merely above the guarded
-// one: measured on corelib-rs 7599f9a, the refused message allocates 106 bytes
-// with the guard and 32,106 without it, so the 8 KiB budget separates them and
+// one: measured on corelib-rs 7599f9a, the refused message allocates 104 bytes
+// with the guard and 32,104 without it, so the 8 KiB budget separates them and
 // would not be met by a build that dropped the test.
 //SOFAB_IMPORT
 

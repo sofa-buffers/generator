@@ -1956,7 +1956,7 @@ func arrayWidthGuard(k ir.Kind, ref *ir.TypeRef) string {
 //   - A message ALREADY refused stops COLLECTING ELEMENTS into a later count-less
 //     native array. The flags are surfaced at the end, not an abort channel, so
 //     the corelib delivers the whole message regardless: 2000 legal matrix rows
-//     behind an 11-byte breach cost 106 bytes/decode with the test and 32,106
+//     behind an 11-byte breach cost 104 bytes/decode with the test and 32,104
 //     without it.
 //
 // What it does NOT buy, because the two are easy to conflate: this wraps the
