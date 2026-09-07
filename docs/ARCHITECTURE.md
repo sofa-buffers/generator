@@ -2660,6 +2660,57 @@ backend:
     cannot, so the same cap is compared there — before the grow, in the policy
     category — rather than a second time in the corelib.
 
+**How high the barrier actually is, once it holds (generator#512).** Everything
+above is about the cap *firing*. The number worth stating beside it is what a
+message that stays **under** the cap can still buy, because that is the barrier's
+real height and it is not one-to-one. A wrapper array's length is its highest
+present id, so an element at index `cap - 1` legitimately describes a `cap`-slot
+array: the gap below it is materialised in full, the verdict is **`Ok`**, and the
+ceiling is `cap × sizeof(slot)` per unbounded field, per message, however few bytes
+named it. Measured on this tree at `max_dyn_array_count: 65536` — bytes the
+allocator handed out per decode, growth included, which is why the Go column runs
+above the container's final size:
+
+| shape (element at index 65535)          | wire bytes | Rust (`corelib: rs`) | Go |
+|---|---:|---:|---:|
+| native matrix row header                | 6 | 1,572,872 | 8,056,384 |
+| count-less `array<struct{u32}>` element | 6 |   262,152 | 1,173,560 |
+| count-less `array<string>` element, 1-byte payload | 7 | 1,572,873 | 5,543,052 |
+| the same at index **65536** (one past the cap) | 7 | 18 | 192 |
+| count-less `array<u32>`, count header of 65536, no element | 4 | 2 | 262,240 |
+
+That is ~10⁵× — and it is the same ceiling the section opened with, reached from
+the other side. `count = 2^31` is refused at the header and buys nothing; `cap - 1`
+as an *index* is accepted and buys `cap × sizeof(slot)`, which is precisely the
+residue the five-orders-of-magnitude claim above leaves standing. The cap bounds
+both paths to one number, so the accept path is no worse than the reject path, and
+what remains is the arithmetic of the design rather than a hole in it.
+
+**It is a family property, not one port's.**
+Every backend that admits an unbounded array grows the container to `id + 1` under
+the same cap, in generated code (Rust, C#, Java, Kotlin, Python, TypeScript) or in
+the corelib (`for len(*s.out) <= int(id)` in corelib-go, `rcap`-bounded collectors
+in corelib-dart, `growCapped`/`setElemCapped` in corelib-zig, `MessageSeq`/
+`StringSeq` in corelib-cpp); the statically bounded profiles (`c`, `cpp` with
+`corelib: c-cpp`, `rust` with `rs-no-std`) reject the field at schema validation and
+never reach it. Go was measured as well as read, and amplifies *more* than Rust on
+every shape. Rust is if anything the least amplifying of the family — the last row
+above is a count-**less** array's header, which Rust leaves lazy (`reserveCount`)
+where Go, C#, Java, Kotlin and Zig size the container from the untrusted count on
+the spot, still under the cap but five orders up from Rust's two bytes.
+
+**Lowering it is a schema decision, not a new knob.** The two levers that exist are
+the ones already in this section: a schema `count: N`, which is wire-visible to both
+peers and answers `INVALID` in every port, or a lower `max_dyn_array_count` for a
+deployment that wants less headroom. A third bound — materialising a gap lazily, or
+charging a container against the bytes actually seen — would change what
+`count`-is-capacity means for every target at once and belongs in MESSAGE_SPEC
+before it belongs in a backend. Nothing here is pinned by a conformance row on
+purpose: the numbers are a consequence, and a row asserting them would fix as a
+requirement the very thing such a change would move. What IS pinned is the cap
+itself firing with nothing materialised behind it (the C++ measurement two
+paragraphs up, and Rust's over-index rows).
+
 **Where the comparison runs (normative).** §6.2.1 separates two questions that had
 been treated as one, and the answers are not the same:
 
