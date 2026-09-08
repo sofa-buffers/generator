@@ -752,7 +752,11 @@ route by `(scope, id)` and are forward-compatible (skip unknown ids).
    chunk boundary anywhere inside the array is invisible. **`count` is untrusted**
    (the wire's claim, bounded only by the format ceiling), so the offer is made
    only for arrays the schema already bounds with a `count: N`; an unbounded one
-   keeps the capped-reservation, grow-as-you-go fill (#96).
+   keeps the capped-reservation, grow-as-you-go fill (#96). The offer is also
+   **not made for an `enum` or `bitfield` element**: the only bound it can carry
+   is the destination array's width, and a closed kind's bound is a declared set,
+   so those elements go back through the per-element arm that states it
+   (generator#516; see "Decode verdict").
 
    **The destination's width is a bound**, which is why the return type is
    `Object` rather than four overloads: handing back a narrower array than
@@ -1852,12 +1856,39 @@ beside the `count`, wrapper-element-id and `maxlen` guards already there.
     is generated. One wrapper type per closed named type used as a row element,
     emitted into `types.go` beside the type itself, because the package admits one
     declaration however many messages share it.
-  - **Rollout.** `rust` (all four config combos), `zig`, `go` and `cpp` with
-    `corelib: cpp` (both storage modes) implement the rule today; the remaining
-    six code backends are landing under the same issue and this list is the
-    contract they are held to. `c` is out of scope by the owner's decision — it
-    emits no decode code at all, only a descriptor table plus
-    `sofab_object_field_cb`, so there is nowhere in generated C to put the check.
+  - **A bulk element offer is DECLINED for both closed kinds** (`java`,
+    `kotlin`). Those two corelibs let a visitor hand back a primitive array and
+    have the decoder write the elements straight into it, skipping the element
+    callback entirely. The only bound that path can carry is the destination
+    array's **WIDTH** — handing back a `short[]` says "these elements are
+    declared 16 bits wide" — and a closed kind's bound is not a width, so the
+    offer has nothing to state it with. Both targets hold an enum/bitfield array
+    at 64 bits anyway, i.e. with no bound at all, and in `kotlin` the fill arm's
+    guard was measurably **dead code** because of it: the only rejection an enum
+    array ever produced there came from corelib-kotlin-mp's own "array element
+    wider than its destination". Declining the offer for these two element kinds
+    puts the elements back through the callback that carries the real bound, one
+    at a time, so an undeclared value is refused where it arrives — including
+    when the array is cut short behind it, which a scan in `arrayBulkEnd` (the
+    alternative) could not report at all. Nothing else changes: the destination
+    is still allocated at the wire count, and every other integer array keeps the
+    fast path.
+  - **Rollout.** `rust` (all four config combos), `zig`, `go`, `csharp`, `java`,
+    `kotlin` and `cpp` with `corelib: cpp` (both storage modes) implement the
+    rule today; the remaining three code backends (`dart`, `typescript`,
+    `python`) are landing under the same issue and this list is the contract they
+    are held to. `c` is out of scope by the owner's decision — it emits no decode
+    code at all, only a descriptor table plus `sofab_object_field_cb`, so there
+    is nowhere in generated C to put the check. Of the seven that have it,
+    `csharp`, `java` and `kotlin` owe nothing to their corelibs: all twelve
+    stores are generated code, and all twelve carry the clause.
+  - **`kotlin` is the one target that had a bound already, and it was the wrong
+    one.** It checked an enum against the signed 32-bit range — the *wire type's*
+    ceiling, which happens to coincide with the `Int` the member is held in, so
+    the bound and the storage looked like one fact. That is exactly the confusion
+    §1 settles. Under it the same field rejects `5` against `{0, 1, 2, 10}` and
+    still accepts every declared constant, and the bitfield beside it, which had
+    no check at all, is bounded by its mask.
 - **The zig half closes generator#517 with the same guard.** Before it, all
   twelve enum/bitfield stores reached a bare `@intCast` and the two build modes
   disagreed about the same bytes: a Debug/ReleaseSafe harness **aborted** with
@@ -3440,7 +3471,9 @@ that same number anyway. Three things are worth recording about the conversion:
   schema-bounded arrays: theirs was the only count that had been checked. Every
   native integer array is now sized that way, so the offer reaches the unbounded
   ones too — the untrusted-count objection is answered by the check rather than by
-  the reservation.
+  the reservation. (It later narrowed again on a different axis: an `enum` or
+  `bitfield` element declines it, its bound being a set the offer cannot state —
+  generator#516.)
 
 One call site survives the conversion as a no-op: Zig's dynamic slices still store
 through `sofab.arrays.putGrowing`, whose growth branch is now unreachable (the
@@ -4130,10 +4163,12 @@ generated encode/decode still touches a deprecated field, C/C++/C#/Rust/Kotlin l
 warning so generated code stays warning-clean. **C and Java lower enum/bitfield
 fields to a raw integer** and emit no named constants, so they carry only the
 field-level metadata above. **Kotlin lowers them to a raw integer too and still
-carries the constants**: the field stays an `Int`/`ULong` so an undeclared wire
-value survives a decode, while the declared members are emitted as documented
-`const val`s in an `object` beside it — a closed `enum class` could not represent
-the first and would have been the only reason to give up the second. The `docs`
+carries the constants**: the field stays an `Int`/`ULong`, while the declared
+members are emitted as documented `const val`s in an `object` beside it. A closed
+`enum class` cannot hold a bitfield's flag COMBINATIONS at all, and the raw
+integer costs nothing in what the field can express, because a decoded value is
+always a declared one — §1's closed-set guard is what bounds the field, not its
+Kotlin type (see "Decode verdict", generator#516). The `docs`
 target renders the same metadata as HTML page content
 (dedicated Unit column, `deprecated` badge). Both corelib variants of C++
 (`cpp`/`c-cpp`) and Rust (`rs`/`rs-no-std`) render metadata identically.
@@ -4699,10 +4734,10 @@ A reimplementation is **conformant** when it reproduces these gates:
    check written as "zero or one declared flag" passes a single-flag probe. Every
    payload is complete, so truncation explains no rejection.
 
-   It is wired in `rust` (all four config combos), `zig`, `go` (all six
-   positions, no declension) and the two `corelib: cpp` legs, replacing the
-   narrower generator#513 block that pinned the bitfield array element at its
-   storage repr. The `corelib: c-cpp` legs are out entirely: nothing there is
+   It is wired in `rust` (all four config combos), `zig`, `go`, `csharp`,
+   `java` and `kotlin` (all six positions, no declension in any of the six) and
+   the two `corelib: cpp` legs, replacing the narrower generator#513 block that
+   pinned the bitfield array element at its storage repr. The `corelib: c-cpp` legs are out entirely: nothing there is
    enforceable generator-side. On `zig` it must run in the `--release=fast`
    harness the suite ships: before the guard existed the same bytes ABORTED a
    Debug build and were silently truncated by the release one (generator#517), so

@@ -2,6 +2,7 @@ package csharp
 
 import (
 	"fmt"
+	"strings"
 
 	"github.com/sofa-buffers/generator/internal/ir"
 )
@@ -142,24 +143,112 @@ func (g *gen) frames(m *ir.Message) []frame {
 	return out
 }
 
-// widthThrow renders the declared-width rejection (MESSAGE_SPEC §7.1,
-// documentation#32): a `u8`/`u16`/`u32`/`i8`/`i16`/`i32` destination receiving a
-// value outside its declared range is malformed input and fails the decode with
-// InvalidMessage — never masked to the width by the `(byte)value` cast that
-// follows, never kept. "" for the 64-bit kinds, whose range IS the accumulator.
+// widthThrow renders the §7.1 rejection for a store into a destination the
+// schema declares with Kind k — and, for a composite kind, `ref` carries the
+// rest of that declaration. "" when nothing reachable can breach the bound: the
+// 64-bit kinds, whose range IS the accumulator, and a bitfield declaring all 64
+// positions.
+//
+// What the schema declares is what binds, and the declaration takes two shapes.
+// For an integer it is a WIDTH (MESSAGE_SPEC §7.1, documentation#32): a
+// `u8`/`u16`/`u32`/`i8`/`i16`/`i32` destination receiving a value outside its
+// declared range is malformed input and fails the decode with InvalidMessage —
+// never masked to the width by the `(byte)value` cast that follows, never kept.
+// For an `enum` or a `bitfield` it is a SET — the declared constants, the mask
+// of declared `pos` bits (§1) — and closedCond answers for those.
+//
+// One clause serves every position. The scalar, struct-member, struct-array
+// member and union-member stores are ONE arm per kind serving four positions
+// (walkObj visits each scope, the arm text does not change), and the native
+// array element and matrix row element carry the same clause, so a value the
+// schema does not declare gets one verdict wherever it lands (generator#516).
 //
 // C# needs no negative-value term on the unsigned side: Unsigned delivers a
 // `ulong`, so the comparison is already unsigned (unlike Java's `long`).
-func widthThrow(k ir.Kind, name string) string {
+func widthThrow(k ir.Kind, ref *ir.TypeRef, name string) string {
+	cond, what := widthCond(k), "width "+k.String()
+	if cond == "" {
+		cond, what = closedCond(k, ref), closedWhat(k)
+	}
+	if cond == "" {
+		return ""
+	}
+	return fmt.Sprintf("if (%s) throw new SofabException(SofabError.InvalidMessage, \"%s: value outside declared %s\"); ", cond, name, what)
+}
+
+// widthCond is the declared-integer-width half of widthThrow's comparison.
+func widthCond(k ir.Kind) string {
 	lo, hi, ok := ir.NarrowRange(k)
 	if !ok {
 		return ""
 	}
-	cond := fmt.Sprintf("value > %d", hi)
 	if lo < 0 {
-		cond = fmt.Sprintf("value < %d || value > %d", lo, hi)
+		return fmt.Sprintf("value < %d || value > %d", lo, hi)
 	}
-	return fmt.Sprintf("if (%s) throw new SofabException(SofabError.InvalidMessage, \"%s: value outside declared width %s\"); ", cond, name, k)
+	return fmt.Sprintf("value > %d", hi)
+}
+
+// closedCond is the reject comparison for the two CLOSED kinds, MESSAGE_SPEC §1:
+// an `enum` is bound by the set of constants the schema declares, a `bitfield`
+// by the mask of the positions it declares, so `value` is valid exactly when
+// `value & ~mask == 0`. It returns "" for every other kind (widthCond owns
+// those) and for a bitfield whose declared positions cover all 64 bits, where
+// the test is a tautology and the clause would be dead code.
+//
+// Neither bound is a width, and storage is never the bound. The member stays the
+// smallest integer that holds the declared constants/positions — §1 grants that
+// as a MAY — but a field whose declared positions are 0..3 does not become
+// 0..255 valid because C# holds it in a `byte`. Both comparisons therefore run
+// on the RAW accumulator, ahead of the narrowing cast, which is also why one
+// clause covers both halves of the old reading at once: a mask test on the full
+// `ulong` rejects an undeclared bit inside the storage width and everything
+// above it in the same expression, and a membership test does the same for an
+// enum.
+//
+// This reverses generator#482, which kept an undeclared bit that fit the backing
+// width on the argument that it is how a peer built from a newer schema carries
+// a flag this one has not got yet. §1 answers that directly: adding a flag — or
+// a constant — is a BREAKING schema change, and a receiver rejects the value
+// rather than storing something its declared type cannot represent.
+//
+// The mask literal is suffixed `UL`: `value` is a `ulong`, and an unsuffixed
+// hexadecimal above int.MaxValue would take a signed type C# then refuses to
+// combine with it.
+func closedCond(k ir.Kind, ref *ir.TypeRef) string {
+	switch k {
+	case ir.KindEnum:
+		vals, ok := ir.EnumValues(ref)
+		if !ok || len(vals) == 0 {
+			return ""
+		}
+		if ir.EnumContiguous(ref) {
+			return fmt.Sprintf("value < %d || value > %d", vals[0], vals[len(vals)-1])
+		}
+		terms := make([]string, len(vals))
+		for i, v := range vals {
+			terms[i] = fmt.Sprintf("value != %d", v)
+		}
+		return strings.Join(terms, " && ")
+	case ir.KindBitfield:
+		mask, ok := ir.BitfieldMask(ref)
+		if !ok || mask == ^uint64(0) {
+			return ""
+		}
+		if mask == 0 {
+			return "value != 0"
+		}
+		return fmt.Sprintf("(value & ~0x%xUL) != 0", mask)
+	}
+	return ""
+}
+
+// closedWhat names the breached declaration in the exception message, so the
+// two closed kinds read as what they are rather than as a width.
+func closedWhat(k ir.Kind) string {
+	if k == ir.KindEnum {
+		return "enum constants"
+	}
+	return "bitfield flags"
 }
 
 // primFill is the statement filling the next slot of the primitive array field
@@ -764,22 +853,22 @@ func (g *gen) emitVisitor(f *cfile, name string, fields []*ir.Field) {
 	for _, fr := range fs {
 		if fr.isArr {
 			if fr.elem == ir.KindArray && unsignedArrayElem(fr.items.Elem) {
-				f.line("            case (%s, _): %s%s%s.Add(%s); break;", fr.loc, fillGuard, widthThrow(fr.items.Elem, fr.loc+" element"), elemAt(fr.path, fr.loc), g.arrayElemAddRHS(fr.items.Elem, fr.items.ElemRef, "value"))
+				f.line("            case (%s, _): %s%s%s.Add(%s); break;", fr.loc, fillGuard, widthThrow(fr.items.Elem, fr.items.ElemRef, fr.loc+" element"), elemAt(fr.path, fr.loc), g.arrayElemAddRHS(fr.items.Elem, fr.items.ElemRef, "value"))
 			}
 			continue
 		}
 		for _, fld := range fr.fields {
 			switch {
 			case fld.Kind == ir.KindU8 || fld.Kind == ir.KindU16 || fld.Kind == ir.KindU32 || fld.Kind == ir.KindU64:
-				f.line("            case (%s, %d): %s%s.%s = (%s)value; break;", fr.loc, fld.ID, widthThrow(fld.Kind, fld.Name), fr.path, csIdent(fld.Name), g.csType(fld))
+				f.line("            case (%s, %d): %s%s.%s = (%s)value; break;", fr.loc, fld.ID, widthThrow(fld.Kind, fld.Ref, fld.Name), fr.path, csIdent(fld.Name), g.csType(fld))
 			case fld.Kind == ir.KindBitfield:
-				f.line("            case (%s, %d): %s.%s = (%s)value; break;", fr.loc, fld.ID, fr.path, csIdent(fld.Name), g.typeName(fld.Ref.Key))
+				f.line("            case (%s, %d): %s%s.%s = (%s)value; break;", fr.loc, fld.ID, widthThrow(fld.Kind, fld.Ref, fld.Name), fr.path, csIdent(fld.Name), g.typeName(fld.Ref.Key))
 			case fld.Kind == ir.KindBool:
 				f.line("            case (%s, %d): %s.%s = value != 0; break;", fr.loc, fld.ID, fr.path, csIdent(fld.Name))
 			case fld.Kind == ir.KindArray && primArrayElem(fld.Elem) && unsignedArrayElem(fld.Elem):
-				f.line("            case (%s, %d): %s break;", fr.loc, fld.ID, primFill(fr.path+"."+csIdent(fld.Name), fld, widthThrow(fld.Elem, fld.Name+" element"), g.arrayElemAddRHS(fld.Elem, fld.ElemRef, "value")))
+				f.line("            case (%s, %d): %s break;", fr.loc, fld.ID, primFill(fr.path+"."+csIdent(fld.Name), fld, widthThrow(fld.Elem, fld.ElemRef, fld.Name+" element"), g.arrayElemAddRHS(fld.Elem, fld.ElemRef, "value")))
 			case fld.Kind == ir.KindArray && unsignedArrayElem(fld.Elem):
-				f.line("            case (%s, %d): %s break;", fr.loc, fld.ID, nativeListFill(fr.path+"."+csIdent(fld.Name), widthThrow(fld.Elem, fld.Name+" element"), g.arrayElemAddRHS(fld.Elem, fld.ElemRef, "value")))
+				f.line("            case (%s, %d): %s break;", fr.loc, fld.ID, nativeListFill(fr.path+"."+csIdent(fld.Name), widthThrow(fld.Elem, fld.ElemRef, fld.Name+" element"), g.arrayElemAddRHS(fld.Elem, fld.ElemRef, "value")))
 			}
 		}
 	}
@@ -794,20 +883,20 @@ func (g *gen) emitVisitor(f *cfile, name string, fields []*ir.Field) {
 	for _, fr := range fs {
 		if fr.isArr {
 			if fr.elem == ir.KindArray && signedArrayElem(fr.items.Elem) {
-				f.line("            case (%s, _): %s%s%s.Add(%s); break;", fr.loc, fillGuard, widthThrow(fr.items.Elem, fr.loc+" element"), elemAt(fr.path, fr.loc), g.arrayElemAddRHS(fr.items.Elem, fr.items.ElemRef, "value"))
+				f.line("            case (%s, _): %s%s%s.Add(%s); break;", fr.loc, fillGuard, widthThrow(fr.items.Elem, fr.items.ElemRef, fr.loc+" element"), elemAt(fr.path, fr.loc), g.arrayElemAddRHS(fr.items.Elem, fr.items.ElemRef, "value"))
 			}
 			continue
 		}
 		for _, fld := range fr.fields {
 			switch {
 			case fld.Kind == ir.KindI8 || fld.Kind == ir.KindI16 || fld.Kind == ir.KindI32 || fld.Kind == ir.KindI64:
-				f.line("            case (%s, %d): %s%s.%s = (%s)value; break;", fr.loc, fld.ID, widthThrow(fld.Kind, fld.Name), fr.path, csIdent(fld.Name), g.csType(fld))
+				f.line("            case (%s, %d): %s%s.%s = (%s)value; break;", fr.loc, fld.ID, widthThrow(fld.Kind, fld.Ref, fld.Name), fr.path, csIdent(fld.Name), g.csType(fld))
 			case fld.Kind == ir.KindEnum:
-				f.line("            case (%s, %d): %s.%s = (%s)value; break;", fr.loc, fld.ID, fr.path, csIdent(fld.Name), g.typeName(fld.Ref.Key))
+				f.line("            case (%s, %d): %s%s.%s = (%s)value; break;", fr.loc, fld.ID, widthThrow(fld.Kind, fld.Ref, fld.Name), fr.path, csIdent(fld.Name), g.typeName(fld.Ref.Key))
 			case fld.Kind == ir.KindArray && primArrayElem(fld.Elem) && signedArrayElem(fld.Elem):
-				f.line("            case (%s, %d): %s break;", fr.loc, fld.ID, primFill(fr.path+"."+csIdent(fld.Name), fld, widthThrow(fld.Elem, fld.Name+" element"), g.arrayElemAddRHS(fld.Elem, fld.ElemRef, "value")))
+				f.line("            case (%s, %d): %s break;", fr.loc, fld.ID, primFill(fr.path+"."+csIdent(fld.Name), fld, widthThrow(fld.Elem, fld.ElemRef, fld.Name+" element"), g.arrayElemAddRHS(fld.Elem, fld.ElemRef, "value")))
 			case fld.Kind == ir.KindArray && signedArrayElem(fld.Elem):
-				f.line("            case (%s, %d): %s break;", fr.loc, fld.ID, nativeListFill(fr.path+"."+csIdent(fld.Name), widthThrow(fld.Elem, fld.Name+" element"), g.arrayElemAddRHS(fld.Elem, fld.ElemRef, "value")))
+				f.line("            case (%s, %d): %s break;", fr.loc, fld.ID, nativeListFill(fr.path+"."+csIdent(fld.Name), widthThrow(fld.Elem, fld.ElemRef, fld.Name+" element"), g.arrayElemAddRHS(fld.Elem, fld.ElemRef, "value")))
 			}
 		}
 	}

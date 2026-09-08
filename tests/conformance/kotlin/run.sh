@@ -720,6 +720,25 @@ echo "$OUT" | tr -d ' ' | grep -q '"someuintarray":\[1,4294967295\]' \
     || { echo "FAIL: control must keep the array exactly; got: $OUT"; exit 1; }
 echo "==> declared-width reject OK (scalar and array element)"
 
+# An `enum` and a `bitfield` are CLOSED (MESSAGE_SPEC S1, generator#516): what
+# binds is the SET of constants / the MASK of declared positions, never a width
+# and never the integer the target stores the field in. The shared driver prints
+# its own schema and forges its own bytes, and probes ALL SIX positions with
+# GAPPED definitions, so an interval bound cannot pass.
+#
+# Kotlin is the target that had a bound already, and it was the wrong one: an
+# enum was checked against the signed 32-bit range -- the WIRE TYPE's ceiling,
+# which happens to coincide with the `Int` the member is held in -- so 5 into an
+# enum declaring {0,1,2,10} decoded and was kept, and a bitfield had no check at
+# all. Its enum ARRAY guard was dead code besides: the corelib bulk offer
+# bypassed the callback, and the offer is declined for both closed kinds now.
+echo "==> closed enum/bitfield: only what the schema declares is valid (S1, generator#516)"
+{ echo "version: 1"; echo "messages:"; } > "$WORK/closed.yaml"
+python3 "$ROOT/tests/conformance/lib/check_closed_kinds.py" --emit-schema >> "$WORK/closed.yaml"
+build "$WORK/closed.yaml" "$WORK/closed"
+python3 "$ROOT/tests/conformance/lib/check_closed_kinds.py" "kotlin" \
+    -- "$WORK/closed/build/install/harness/bin/harness"
+
 # Invalid UTF-8 in a MATERIALIZED string is INVALID (MESSAGE_SPEC S8): a Kotlin
 # String is a S6.4.1 Unicode type, so the strict path is the only non-mutating
 # one and U+FFFD substitution is forbidden in every mode. A string a decoder

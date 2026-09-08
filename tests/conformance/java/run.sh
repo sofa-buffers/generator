@@ -834,6 +834,25 @@ echo "$OUT" | tr -d ' ' | grep -q '"someuintarray":\[1,4294967295\]' \
     || { echo "FAIL: control must keep the array exactly; got: $OUT"; exit 1; }
 echo "==> declared-width reject OK (scalar and array element)"
 
+# An `enum` and a `bitfield` are CLOSED (MESSAGE_SPEC S1, generator#516): what
+# binds is the SET of constants / the MASK of declared positions, never a width
+# and never the integer the target stores the field in. The shared driver prints
+# its own schema and forges its own bytes, and probes ALL SIX positions with
+# GAPPED definitions, so an interval bound cannot pass.
+#
+# Java keeps both kinds in a `long` and accepted ANYTHING at all twelve stores:
+# 5 into an enum declaring {0,1,2,10}, 4 into a bitfield declaring bits 0, 1 and
+# 3, and 2^40 into that same bitfield all decoded and were kept verbatim. The two
+# array positions additionally rode the corelib bulk offer, whose only bound is
+# the destination array's WIDTH; the offer is declined for these two kinds now,
+# so the elements come back through the callback that carries the real bound.
+echo "==> closed enum/bitfield: only what the schema declares is valid (S1, generator#516)"
+{ echo "version: 1"; echo "messages:"; } > "$WORK/closed.yaml"
+python3 "$ROOT/tests/conformance/lib/check_closed_kinds.py" --emit-schema >> "$WORK/closed.yaml"
+build "$WORK/closed.yaml" "$WORK/closed"
+python3 "$ROOT/tests/conformance/lib/check_closed_kinds.py" "java" \
+    -- java -jar "$WORK/closed/target/harness.jar"
+
 # CORELIB_PLAN S7.2 item 8 -- the shared file's `sequence_growth` block
 # (generator#449). A wrapper array carries no element count: its length is
 # highest present id + 1, so it GROWS as elements arrive, and the element INDEX

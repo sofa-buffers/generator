@@ -1,6 +1,7 @@
 package java
 
 import (
+	"fmt"
 	"math"
 	"os"
 	"regexp"
@@ -450,8 +451,12 @@ messages:
 		// A boolean array is a List: clearing it is decoding into it too, so the
 		// kind test fronts the clear as well. boolean maps to the UNSIGNED kind.
 		`case 3: if (kind != ArrayKind.UNSIGNED) break; if (count > 2) throw Sofab.invalid("ba: array count above schema capacity 2"); askip = 0; afill = count; atgt = 2; m.ba.clear(); break;`,
-		// enum elements ride the SIGNED wire type.
-		`case 4: if (kind != ArrayKind.SIGNED) break; if (count > 2) throw Sofab.invalid("ea: array count above schema capacity 2"); askip = 0; afill = count; atgt = 2; abulk = m.ea = new long[count]; break;`,
+		// enum elements ride the SIGNED wire type -- and NOT the bulk offer: a
+		// closed kind's bound is the declared set, which the offer's only bound
+		// (the destination array's width) cannot state, so the elements come back
+		// through the element callback that carries it (§1, generator#516). The
+		// destination is still allocated at the wire count; only `abulk =` is gone.
+		`case 4: if (kind != ArrayKind.SIGNED) break; if (count > 2) throw Sofab.invalid("ea: array count above schema capacity 2"); askip = 0; afill = count; atgt = 2; m.ea = new long[count]; break;`,
 		// A count-less array has no schema bound, so the target's finite default
 		// cap governs it (§9.5, generator#385) -- checked, like a schema bound,
 		// BEHIND the kind test, and it is that check which lets the destination be
@@ -2306,5 +2311,151 @@ messages:
 	}
 	if strings.Contains(out, "010L") || strings.Contains(out, "09L") {
 		t.Errorf("an octal-looking literal survived into the generated class:\n%s", out)
+	}
+}
+
+// closedSixSrc declares an `enum` and a `bitfield` at all SIX positions a value
+// can land in, and both definitions are GAPPED on purpose: the enum declares
+// {0, 1, 2, 10}, so 5 sits inside the hull and is not a constant, and the
+// bitfield declares positions 0, 1 and 3 (mask 0b1011), so 4 sets a bit no flag
+// declares. A contiguous definition makes a closed set look like an interval and
+// would pass under the width bound this replaces.
+const closedSixSrc = `
+version: 1
+messages:
+  Closed:
+    payload:
+      en:  { id: 0, type: enum, enum: { A: 0, B: 1, C: 2, Z: 10 } }
+      bf:  { id: 1, type: bitfield, bits: { A: { pos: 0 }, B: { pos: 1 }, D: { pos: 3 } } }
+      ea:  { id: 2, type: array, items: { type: enum, count: 4, enum: { A: 0, B: 1, C: 2, Z: 10 } } }
+      bfa: { id: 3, type: array, items: { type: bitfield, count: 4, bits: { A: { pos: 0 }, B: { pos: 1 }, D: { pos: 3 } } } }
+      st:
+        id: 4
+        type: struct
+        fields:
+          se:  { id: 0, type: enum, enum: { A: 0, B: 1, C: 2, Z: 10 } }
+          sbf: { id: 1, type: bitfield, bits: { A: { pos: 0 }, B: { pos: 1 }, D: { pos: 3 } } }
+      sa:
+        id: 5
+        type: array
+        items:
+          type: struct
+          count: 2
+          fields:
+            se:  { id: 0, type: enum, enum: { A: 0, B: 1, C: 2, Z: 10 } }
+            sbf: { id: 1, type: bitfield, bits: { A: { pos: 0 }, B: { pos: 1 }, D: { pos: 3 } } }
+      un:
+        id: 6
+        type: union
+        default_id: 0
+        oneof:
+          ue:  { id: 0, type: enum, enum: { A: 0, B: 1, C: 2, Z: 10 } }
+          ubf: { id: 1, type: bitfield, bits: { A: { pos: 0 }, B: { pos: 1 }, D: { pos: 3 } } }
+      mat: { id: 7, type: array, items: { type: array, count: 2, items: { type: enum, count: 3, enum: { A: 0, B: 1, C: 2, Z: 10 } } } }
+      mbf: { id: 8, type: array, items: { type: array, count: 2, items: { type: bitfield, count: 3, bits: { A: { pos: 0 }, B: { pos: 1 }, D: { pos: 3 } } } } }
+`
+
+// MESSAGE_SPEC §1 closes an `enum` by the SET of constants the schema declares
+// and a `bitfield` by the MASK of the positions it declares. Neither bound is a
+// width, and neither is the integer the target stores the field in: Java keeps
+// both in a `long` and accepted ANYTHING at all twelve stores — 5 into a gapped
+// enum, 4 into a three-flag bitfield and 2^40 into the same field all decoded
+// and were kept verbatim (generator#516).
+//
+// All six positions are pinned by name — scalar, native array element, struct
+// member, struct-array element member, union member, matrix row element — for
+// both kinds. Four of them share one emitted arm per kind, which is exactly why
+// "the arm is shared" is not worth trusting after the next refactor.
+func TestJavaClosedEnumAndBitfieldRejectAtEverySixPositions(t *testing.T) {
+	m := genJavaFromYAML(t, closedSixSrc, map[string]any{})["src/main/java/message/Closed.java"]
+	const enRej = `if (value != 0L && value != 1L && value != 2L && value != 10L) throw Sofab.invalid(`
+	const bfRej = `if ((value & ~0xbL) != 0) throw Sofab.invalid(`
+	for _, want := range []string{
+		// 1. scalar
+		`case 0: ` + enRej + `"en: value outside declared enum constants"); m.en = value; break;`,
+		`case 1: ` + bfRej + `"bf: value outside declared bitfield flags"); m.bf = value; break;`,
+		// 2. native array element — in the armed-fill arm, which is only reached
+		// while arrayBegin has this array armed, so a bare scalar at an array id
+		// stays a §7.3 skip rather than becoming a spurious INVALID.
+		enRej + `"ea element: value outside declared enum constants"); m.ea[ai++] = value;`,
+		bfRej + `"bfa element: value outside declared bitfield flags"); m.bfa[ai++] = value;`,
+		// 3. struct member
+		`case 0: ` + enRej + `"se: value outside declared enum constants"); m.st.se = value; break;`,
+		`case 1: ` + bfRej + `"sbf: value outside declared bitfield flags"); m.st.sbf = value; break;`,
+		// 4. struct-array element member
+		`case 0: ` + enRej + `"se: value outside declared enum constants"); m.sa.get(_ex_Root_sa).se = value; break;`,
+		`case 1: ` + bfRej + `"sbf: value outside declared bitfield flags"); m.sa.get(_ex_Root_sa).sbf = value; break;`,
+		// 5. union member
+		`case 0: ` + enRej + `"ue: value outside declared enum constants"); m.un.ue = value; break;`,
+		`case 1: ` + bfRej + `"ubf: value outside declared bitfield flags"); m.un.ubf = value; break;`,
+		// 6. matrix row element — the row cursor, not a field.
+		enRej + `"Root_mat element: value outside declared enum constants"); _arowLong[ai++] = value;`,
+		bfRej + `"Root_mbf element: value outside declared bitfield flags"); _arowLong[ai++] = value;`,
+	} {
+		if !strings.Contains(m, want) {
+			t.Errorf("Closed.java: a closed-kind position stores without its §1 bound, missing %q:\n%s", want, m)
+		}
+	}
+	// The bulk offer is declined for both closed kinds: its only bound is the
+	// destination array's WIDTH, which cannot state a set or a mask, and taking it
+	// would route the elements past the callback that carries the real bound. The
+	// destination is still allocated at the wire count.
+	if strings.Contains(m, "abulk") {
+		t.Errorf("a message whose only arrays are closed-kind arrays must make no bulk offer:\n%s", m)
+	}
+	if !strings.Contains(m, "m.ea = new long[count]; break;") {
+		t.Errorf("declining the offer must not change how the destination is sized:\n%s", m)
+	}
+	// No bare store may remain on any of the twelve paths.
+	for _, bad := range []string{
+		"case 0: m.en = value; break;",
+		"case 1: m.bf = value; break;",
+		"case 0: m.st.se = value; break;",
+		"case 1: m.un.ubf = value; break;",
+	} {
+		if strings.Contains(m, bad) {
+			t.Errorf("Closed.java still stores a closed kind unguarded (%q):\n%s", bad, m)
+		}
+	}
+}
+
+// The two elisions, both of which keep "no guard" right under the closed rule.
+// A CONTIGUOUS enum is its own hull, so the cheaper two-sided comparison is the
+// set; a bitfield declaring all 64 positions has a mask of every bit, so the mask
+// test is a tautology and emitting it would be dead code.
+func TestJavaClosedBoundElisions(t *testing.T) {
+	var bits []string
+	for i := 0; i < 64; i++ {
+		bits = append(bits, fmt.Sprintf("F%d: { pos: %d }", i, i))
+	}
+	m := genJavaFromYAML(t, "version: 1\nmessages:\n  W:\n    payload:\n"+
+		"      f: { id: 0, type: bitfield, bits: { "+strings.Join(bits, ", ")+" } }\n"+
+		"      e: { id: 1, type: enum, enum: { R: 0, G: 1, B: 2 }, default: 0 }\n",
+		map[string]any{})["src/main/java/message/W.java"]
+	if !strings.Contains(m, "case 0: m.f = value; break;") {
+		t.Errorf("an all-bits-declared bitfield must store unguarded:\n%s", m)
+	}
+	if strings.Contains(m, "0xffffffffffffffff") {
+		t.Errorf("a tautological mask guard was emitted:\n%s", m)
+	}
+	if !strings.Contains(m, `case 1: if (value < 0L || value > 2L) throw Sofab.invalid("e: value outside declared enum constants"); m.e = value; break;`) {
+		t.Errorf("a contiguous enum must take the two-sided comparison:\n%s", m)
+	}
+}
+
+// A mask that declares position 63 is the literal-rendering trap generator#470
+// already hit once. Java has no unsigned long, but a hexadecimal literal carries
+// the full 64-bit pattern, and the mask test is on raw bits, so the value that
+// arrives negative is accepted by exactly the same expression.
+func TestJavaClosedMaskSpansBit63(t *testing.T) {
+	m := genJavaFromYAML(t, "version: 1\nmessages:\n  W:\n    payload:\n"+
+		"      g: { id: 0, type: bitfield, bits: { LOW: { pos: 0 }, HIGH: { pos: 63 } } }\n",
+		map[string]any{})["src/main/java/message/W.java"]
+	if !strings.Contains(m, `if ((value & ~0x8000000000000001L) != 0) throw Sofab.invalid("g: value outside declared bitfield flags");`) {
+		t.Errorf("a bit-63 mask must be rendered as a full-width long literal:\n%s", m)
+	}
+	// No `value < 0` term: it would refuse the very value bit 63 IS.
+	if strings.Contains(m, `value < 0 || value > `) && strings.Contains(m, `"g: `) {
+		t.Errorf("a bitfield must not carry the unsigned-width negative term:\n%s", m)
 	}
 }
