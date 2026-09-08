@@ -168,14 +168,15 @@ ajv.addKeyword({
 ### 4. Custom keyword: `defaultMatchesEnum`
 
 Applied to an `enum`-typed field; asserts the field's `default` is one of the
-enum's declared values. Reference implementation:
+enum's declared values — **and, when the field declares no `default` at all, that
+the enum declares a constant with the value `0`.** Reference implementation:
 
 ```js
 ajv.addKeyword({
   keyword: "defaultMatchesEnum", type: "object", schemaType: "boolean", errors: true,
   validate(schema, data) {
-    if (!schema || data.default === undefined) return true;   // presence test, not truthiness
     const values = Object.values(data.enum).map(e => (typeof e === "object" ? e.value : e));
+    if (data.default === undefined) return values.includes(0);   // presence test, not truthiness
     return values.includes(data.default);
   },
 });
@@ -186,6 +187,18 @@ ajv.addKeyword({
 > still checked rather than skipped. This keyword reads `data.enum`, so it must run
 > **after** `$ref` resolution (a `{ $ref }` enum is only a map of values once
 > dereferenced).
+
+> **Why the absent-`default` half.** An `enum` is a **closed** type: only the
+> constants it declares are valid values, on the wire and off it. A field with no
+> `default` initializes to its type's zero value, and a sparse encoder omits the
+> field at exactly that value — so an enum `{RED: 1, GREEN: 2}` whose field
+> declares no `default` would initialize to `0`, a value the enum itself rejects,
+> and absence would reconstruct it on every receiver. Give the field a `default`
+> naming one of the constants, or give the enum a `0` constant. The rule binds a
+> **field**: an `array` of enum needs no counterpart, because `count` is a
+> capacity and nothing is padded to it — an array with no `default` initializes
+> empty, never to a run of zeros. A `bitfield` needs none either: its zero is the
+> "no flags set" combination and is always valid.
 
 ### 5. Custom keyword: `blobDefaultLength`
 
@@ -328,10 +341,19 @@ before the validator ever sees it — and so is a number with a decimal point or
 exponent, because a bit pattern has no fractional spelling and the generator would
 render `1000000.0` into the emitted source as `1e+06`.
 
-A bit set at a position no flag declares is **accepted**: nothing masks a bitfield
-down to its declared positions, the wire carries the whole unsigned value, and an
-undeclared bit is how a peer built from a newer schema carries a flag this one does
-not declare yet.
+A bit set at a position no flag declares is, today, **accepted** by this keyword:
+it checks the spelling, the sign and the backing width, and nothing more.
+
+> **Known inconsistency.** MESSAGE_SPEC §1 closes a `bitfield` by the mask of the
+> positions it declares — a *wire* value carrying any other bit is `INVALID` — and
+> the generated decoders enforce that. An authored `default` outside the mask is
+> therefore a value a conformant peer would refuse, and the rationale this
+> paragraph used to give for allowing it ("an undeclared bit is how a peer built
+> from a newer schema carries a flag this one does not declare yet") is the one §1
+> rejects outright: adding a flag is a **breaking schema change**. Whether the
+> closed mask also binds authored defaults is a separate decision that has not
+> been taken; until it is, this keyword's behaviour is unchanged and
+> `tests/matrix/corpus/defs/bitfields.yaml` still exercises the permissive form.
 
 What a stock JSON Schema validator can check here is the **spelling and the sign**:
 the shipped branch carries `"type": ["integer", "string"]`, `"minimum": 0` (the

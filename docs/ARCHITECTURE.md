@@ -213,7 +213,10 @@ dynamic elements* (`string`/`blob`/`struct`/`union`/nested `array`) become
 form); `enum` becomes a **signed (zig-zag) varint** with a backing
 width = smallest signed int covering its value range; `bitfield` becomes an
 **unsigned varint** with a backing width = smallest unsigned int covering its
-highest `pos`. `sequence` is a wire type only — there is no `sequence` keyword in
+highest `pos`. Both backings are **storage**: the validity bound is the set of
+constants / the mask of declared positions, and a wire value outside it is
+INVALID however comfortably the backing would have held it (§1, and the "Decode
+verdict" subsection in this document). `sequence` is a wire type only — there is no `sequence` keyword in
 the definition language.
 
 ---
@@ -1754,53 +1757,77 @@ beside the `count`, wrapper-element-id and `maxlen` guards already there.
   point and already answers `INVALID`; adding a second guard would only duplicate
   it. This is the one decode verdict where the footprint pair led and the other
   eleven profiles followed.
-- **Enums and bitfields sit outside `ir.NarrowRange`, and that is not the same as
-  outside the bound.** Their width is a property of the NAMED TYPE, not of the
-  Kind, so `NarrowRange` — which takes a Kind alone — answers `!ok` for both and a
-  backend that asks it and stops emits a bare store. Where the target narrows the
-  storage, that bare store is the mask §7.1 forbids: a rust bitfield over
-  `pos 0, 2` backs onto `u8`, so a wire element of `1000` came back as `232` with
-  the verdict `Ok` (generator#513). The width is knowable — it is the backing each
-  backend already derives to declare the member — so the guard is derived from the
-  same function that picks the storage and the two cannot drift.
-  - **For a BITFIELD the bound is the repr, never the set of declared
-    positions.** A bit this schema does not declare, but the repr holds, is how a
-    peer built from a NEWER schema carries a flag this one has not got yet, and is
-    KEPT (generator#482, and `internal/parser.checkMaskElem` says the same of an
-    authored mask). MESSAGE_SPEC gives a bitfield the unsigned-integer wire type
-    and no width bound of its own (§1), so this rule is the family's rather than
-    the spec's — and it is the rule three targets already had: corelib-cpp bounds
-    the bitfield array element through `ElemBound::of<bitfieldBacking>()`
-    (`cppElemBound`), corelib-c-cpp off its descriptor's `element_size`, and
-    `rust` joined them at the array element, direct and nested-row, through
-    `elemWidthCond` (generator#513).
-  - **For an ENUM the family does NOT agree, and the disagreement is unresolved.**
-    Three bounds are in the tree at once: the **repr** (`c`, `cpp` with
-    `corelib: c-cpp`), a flat **signed 32 bits** (`kotlin`, which stores an enum as
-    an `Int`, so for it the bound and the storage are one fact), and **none at
-    all** (the other eight, `rust` included — its element store masks `1000` to
-    `-24` with the verdict `Ok`). MESSAGE_SPEC §1 and CORELIB_PLAN §4.5 are
-    explicit that the bound is the **signed 32-bit range**, so the repr rule is
-    NARROWER than the spec: it refuses an element of `1000` that java, python,
-    typescript, dart and kotlin all keep, on one schema and one byte string —
-    exactly the divergence §7.1's own rationale forbids. Honouring §1 instead
-    means WIDENING the member to 32 bits on every target that narrows it today
-    (`c` `int8_t`, `csharp` `sbyte`, `go` `int8`, `zig` `i8`, `rust` `i8`/`i16`),
-    which is a footprint cost on the two profiles that exist to avoid one. The
-    decision is **generator#516**; until it lands, `rust` deliberately keeps the
-    mask rather than trading one §7.1 violation for another, `elemWidthCond`
-    carries the argument in code, and any enum rule quoted from this document is
-    PROVISIONAL. generator#513 stays open on that half; generator#515 is the same
-    hole one position over (the SCALAR store, both kinds, which still routes
-    through the Kind-only `widthGuard` and so disagrees with the array element
-    beside it until #516 settles the bound).
-  - **The `n` in that survey covers three severities.** Silent truncation where
-    the member is narrower than the accumulator (csharp, go, `cpp` with
-    `corelib: cpp`, rust's scalar); safety-checked Illegal Behaviour on zig, whose
-    `@intCast` panics under ReleaseSafe rather than masking; and a missing verdict
-    only, where storage is at least as wide as the wire value and nothing is lost
-    (java `long`, python `int`, typescript/dart `number`/`int`, kotlin's
-    `ULong` bitfield). generator#516 carries the table.
+- **`enum` and `bitfield` are bounded by a SET, not by a width, and they sit
+  outside `ir.NarrowRange` for that reason.** MESSAGE_SPEC §1 (doc `a50db95`)
+  closes both: an `enum`'s bound is the **set of constants the schema declares**,
+  a `bitfield`'s is the **mask of the positions it declares** — `v` is valid
+  exactly when `v & ~mask == 0`. A wire value outside that set is malformed input
+  and **MUST** be reported INVALID (§7.1), exactly as an over-width integer is.
+  The signed 32-bit range of an enum's wire type and the unsigned range of a
+  bitfield's are the *wire type's* ceiling, not the *field's* bound.
+  - **The mask is not "every bit up to the highest declared one".** Positions
+    0, 1 and 3 give `mask = 0b1011`, so bit 2 is undeclared and `4` is INVALID —
+    the same way an enum declaring `{0, 1, 2, 10}` rejects `5`. Gaps are the whole
+    point, and a contiguous definition hides every bug in this area, so every
+    fixture that pins the rule is deliberately gapped.
+  - **Storage is never the bound.** A target **MAY** hold the field in the
+    smallest integer covering the declared constants/positions (§1, a MAY, and the
+    footprint profiles take it — §10's common mapping is unchanged by this rule).
+    A field whose declared positions are `0..3` does not become `0..255` valid
+    because rust or zig holds it in a `u8`. The two numbers used to come from one
+    function precisely so they could not drift; they are now deliberately two, and
+    the storage one no longer appears in a guard at all.
+  - **Two facts, one source.** `ir.EnumValues` (sorted, de-duplicated constants,
+    with `ir.EnumHull`/`ir.EnumContiguous` beside it) and `ir.BitfieldMask` are in
+    `internal/ir/closed.go`, next to `ir.NarrowRange` and for the same reason:
+    backends import `ir` and nothing else, so the bound cannot diverge between
+    targets the way the three pre-#516 readings did.
+  - **The check runs on the RAW accumulator, ahead of the narrowing cast.** One
+    clause therefore covers both halves of the old reading at once: a mask test on
+    the 64-bit carrier rejects an undeclared bit *inside* the storage width and
+    everything *above* it in the same expression, and a membership test does the
+    same for an enum. The only elision left is a bitfield declaring all 64
+    positions, where `v & ~mask != 0` is a tautology.
+  - **All six positions, both kinds.** A value can land as a scalar field, a
+    native array element, a struct member, a member of a struct-array element, a
+    union member, or a matrix row element. Several of those share one emitted arm
+    per kind, which is exactly why each is pinned by name in the backend tests: a
+    fix covering only the scalar is a third of the job.
+  - **This reverses generator#482 for wire values.** That issue kept an
+    undeclared bit that fit the backing width, on the argument that it is how a
+    peer built from a newer schema carries a flag this one has not got yet. §1
+    answers that directly: adding a flag — or a constant — is a **breaking schema
+    change**, and a receiver rejects the value rather than storing something its
+    declared type cannot represent, there being no unknown-field store by design
+    (CORELIB_PLAN §6.6). What §1 settles is the **wire** value; whether an
+    *authored* `default` outside the mask stays legal is a separate question that
+    `internal/parser.checkMaskElem` still answers "yes" to, and
+    `tests/matrix/corpus/defs/bitfields.yaml` still exercises.
+  - **Rollout.** `rust` (all four config combos) and `zig` implement the rule
+    today; the remaining eight code backends are landing under the same issue and
+    this list is the contract they are held to. `c` is out of scope by the owner's
+    decision — it emits no decode code at all, only a descriptor table plus
+    `sofab_object_field_cb`, so there is nowhere in generated C to put the check.
+- **The zig half closes generator#517 with the same guard.** Before it, all
+  twelve enum/bitfield stores reached a bare `@intCast` and the two build modes
+  disagreed about the same bytes: a Debug/ReleaseSafe harness **aborted** with
+  "integer does not fit in destination type" while the `--release=fast` build the
+  conformance suite ships stored the truncated value and reported `Ok`. Neither
+  outcome is a verdict. One missing guard, two defects, one fix — and the reason
+  a conformance case for it has to run in the ReleaseFast harness, where the
+  verdict is observable, rather than in Debug, where it would report a crash.
+- **The schema-validity consequence is a parser rule, not a decode check.**
+  §2 initializes a field with no `default` to its type's zero value and a sparse
+  encoder omits the field at exactly that value, so absence must reconstruct
+  something the type admits. Closing the enum makes that a schema question: an
+  `enum` field **MUST** either declare a `default` naming one of its constants, or
+  belong to an enum declaring a constant with the value `0`. `checkEnumField` in
+  `internal/parser/validate.go` enforces it for every id scope, and
+  `schema/README.md` §4 carries it as the absent-`default` half of
+  `defaultMatchesEnum`. It binds a **field**: an array of enum needs no
+  counterpart, because `count` is a capacity and nothing is padded to it (§11), so
+  an array with no `default` initializes empty rather than to a run of zeros. A
+  `bitfield` needs none either — its zero is "no flags set" and is always valid.
 - **`cpp` needed a different shape from the rest.** corelib-cpp's typed `read()`
   ends in `value = static_cast<T>(raw)` — the mask itself, applied where
   generated code cannot see the raw value. A narrow destination therefore reads
@@ -4023,7 +4050,11 @@ build.
 | **docs** | — (non-code) | — | single self-contained HTML reference page (`message.html`): message field tables + cross-linked named types; `format: html` (only format); no conformance harness — nothing executes. |
 
 **Common type mapping:** enum → smallest *signed* backing; bitfield → smallest
-*unsigned* backing; a counted numeric array → the target's length-carrying
+*unsigned* backing — a **storage** choice, granted as a MAY by MESSAGE_SPEC §1
+and never the validity bound (both kinds are bounded by the SET the schema
+declares; see "Decode verdict" above, and note the targets that carry an enum or
+a bitfield at full width are making the same MAY the other way); a counted
+numeric array → the target's length-carrying
 container, sized from the schema *capacity* (a growable container, or inline
 slots plus a logical length — §11, "`count` is a capacity"); string/blob array &
 struct/union → sequence framing.
@@ -4573,6 +4604,41 @@ A reimplementation is **conformant** when it reproduces these gates:
    table is what it exists for. Each suite owns the generate-and-build either
    way: the cap is a generate-time config key, so what the driver is handed is a
    capped project's harness argv.
+   *Closed enum / bitfield* (`tests/conformance/lib/check_closed_kinds.py`):
+   MESSAGE_SPEC §1 closes both leaf types by what the schema **declares** — an
+   enum by its set of constants, a bitfield by the mask of its declared `pos`
+   bits — so a wire value outside that set is `INVALID` (§7.1) however
+   comfortably the target's storage would have held it (generator#516).
+
+   The driver prints its own schema (`--emit-schema`) and forges its own bytes,
+   and both definitions in it are **GAPPED**: the enum declares `{0, 1, 2, 10}`
+   and the bitfield positions `0, 1, 3` (mask `0b1011`). That is the whole
+   design. A contiguous definition makes a closed set look like an interval, so a
+   decoder bounding at `min..max`, or at the width of the integer it stores the
+   field in, passes every row a contiguous fixture can produce; with the gaps, `5`
+   is inside the enum's hull and not a constant and `4` fits the bitfield's byte
+   and sets a bit no flag declares, and neither is expressible as an interval.
+
+   Each kind is probed with three classes of value — a **declared** one
+   (accepted, and its value read back), an **undeclared one that fits the likely
+   storage** (rejected), and one **past that storage** (rejected) — at all **six
+   positions** a value can land in: scalar field, native array element, struct
+   member, member of a struct-array element, union member, matrix row element.
+   The six matter because most backends emit one store arm per kind serving the
+   four scalar-family positions and a second pair for the two array positions, so
+   a suite that probes only the scalar cannot see a fix that covered a third of
+   the job. `--skip-positions` declines one **by name** rather than by silence.
+   The accepted rows include the zero value of both kinds and every declared
+   bitfield combination — §1 is explicit that all of them are valid, and a mask
+   check written as "zero or one declared flag" passes a single-flag probe. Every
+   payload is complete, so truncation explains no rejection.
+
+   It is wired in `rust` (all four config combos) and `zig`, replacing the
+   narrower generator#513 block that pinned the bitfield array element at its
+   storage repr. On `zig` it must run in the `--release=fast` harness the suite
+   ships: before the guard existed the same bytes ABORTED a Debug build and were
+   silently truncated by the release one (generator#517), so a Debug-only case
+   would have reported a crash rather than a verdict.
 2. **Round-trip harness** — `emit: project` builds the generated code against the
    real corelib and round-trips canonical JSON through encode→decode for every
    field kind (`tests/conformance/<lang>/run.sh`). Each harness also feeds one

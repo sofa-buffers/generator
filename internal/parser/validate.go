@@ -566,7 +566,44 @@ func (v *validator) checkEnumField(f map[string]any, loc string) {
 		if !containsInt(values, dn) {
 			v.add(loc+"/default", "enum default %d does not match any declared enum value", dn)
 		}
+		return
 	}
+	v.checkEnumInitialisable(values, loc)
+}
+
+// checkEnumInitialisable enforces the third consequence of the closed enum
+// (MESSAGE_SPEC §1): an `enum` field MUST either declare a `default` naming one
+// of the enum's constants, or belong to an enum that declares a constant with
+// the value 0.
+//
+// It is a schema-validity rule, not a decode check, and it follows from §2
+// rather than from §7.1. §2 initialises a field with no `default` to its type's
+// zero value and a sparse encoder omits the field at exactly that value, so
+// absence has to reconstruct something the type admits. An enum {RED = 1,
+// GREEN = 2} whose field declares no default would initialise to 0 — a value the
+// enum itself rejects — and no receiver could hold it legally. Such a value
+// never reaches the wire, precisely because the field is omitted at its default,
+// which is why this is caught at generate time and not by a decoder.
+//
+// It binds a FIELD, and only a scalar one. An array of enum needs no
+// counterpart: `count` is a capacity and nothing is padded to it (§3), so an
+// array with no `default` initialises EMPTY rather than to a run of zeros, and
+// no element is ever conjured at a value the enum does not declare. A bitfield
+// needs no counterpart either — its zero is the "no flags set" combination and
+// is always valid.
+//
+// values may be empty when the enum definition itself failed to validate; that
+// error is already reported and this one is suppressed rather than piled on.
+func (v *validator) checkEnumInitialisable(values []int64, loc string) {
+	if len(values) == 0 {
+		return
+	}
+	if containsInt(values, 0) {
+		return
+	}
+	v.add(loc, "enum field declares no \"default\" and its enum declares no constant with the value 0, "+
+		"so the field would initialize to 0 — a value the enum rejects; "+
+		"give the field a default naming one of the constants, or give the enum a 0 constant")
 }
 
 // validateEnumDef validates an enum value map and returns the declared values.
@@ -914,10 +951,17 @@ func (v *validator) checkArrayElem(etyp string, el any, enumValues []int64, bitM
 //     pos 63 gets the full 64).
 //
 // A bit set at a position no flag declares is ACCEPTED as long as it fits that
-// width. No backend masks a bitfield value down to its declared positions —
-// each one only ORs declared positions together when it builds a default — the
-// wire carries the whole unsigned value, and an undeclared bit is exactly how a
-// peer built from a newer schema carries a flag this one does not declare yet.
+// width. That is UNRESOLVED rather than settled. MESSAGE_SPEC §1 closes a
+// bitfield by the mask of the positions it declares — a WIRE value carrying any
+// other bit is INVALID, and generated decoders now enforce exactly that
+// (generator#516) — so an authored default outside the mask is a value a
+// conformant peer refuses. The rationale this comment used to give for allowing
+// it ("an undeclared bit is how a peer built from a newer schema carries a flag
+// this one does not declare yet", generator#482) is the one §1 rejects outright:
+// adding a flag is a breaking schema change. Whether the closed mask also binds
+// an AUTHORED default is a separate decision, not taken here; taking it changes
+// this function, tests/matrix/corpus/defs/bitfields.yaml and schema/README.md
+// §8.1 together. Until then the width bound above is what this keyword enforces.
 //
 // It stays a separate function from int64Verdict, which #484 gave the u64/i64
 // element and field arms, rather than calling it: the two agree line for line on

@@ -397,14 +397,93 @@ func TestNegativeCases(t *testing.T) {
 	}
 }
 
+// An `enum` is CLOSED: only the constants it declares are valid values
+// (MESSAGE_SPEC §1). That has a consequence the wire never sees, because §2
+// initializes a field with no `default` to its type's zero value and a sparse
+// encoder omits the field at exactly that value — absence has to reconstruct
+// something the type admits. So an `enum` field MUST either declare a `default`
+// naming one of the constants, or belong to an enum that declares a constant
+// with the value 0; otherwise the field initializes to 0, which the enum itself
+// rejects, on every receiver in the family.
+//
+// It is a schema-validity rule, not a decode check. Nothing catches it at decode
+// time precisely because no such value ever reaches the wire.
+func TestEnumFieldMustBeInitialisable(t *testing.T) {
+	const want = "declares no constant with the value 0"
+	for _, tc := range []struct {
+		name string
+		src  string
+		bad  bool
+	}{
+		{"no default, no zero constant", "version: 1\nmessages:\n  M:\n    payload:\n" +
+			"      e: {id: 0, type: enum, enum: {A: 1, B: 2, Z: 10}}\n", true},
+		{"a default naming a constant", "version: 1\nmessages:\n  M:\n    payload:\n" +
+			"      e: {id: 0, type: enum, default: 2, enum: {A: 1, B: 2, Z: 10}}\n", false},
+		{"a zero constant, no default", "version: 1\nmessages:\n  M:\n    payload:\n" +
+			"      e: {id: 0, type: enum, enum: {A: 0, B: 2, Z: 10}}\n", false},
+		// A negative default is still a presence test, not a truthiness one, and a
+		// negative constant set is legal — the enum is signed.
+		{"a negative default naming a constant", "version: 1\nmessages:\n  M:\n    payload:\n" +
+			"      e: {id: 0, type: enum, default: -100, enum: {R: -100, G: 2, Y: 33}}\n", false},
+		// The rule binds a field wherever a field lives: a struct member and a
+		// union option are fields with their own initial value.
+		{"struct member", "version: 1\nmessages:\n  M:\n    payload:\n" +
+			"      s: {id: 0, type: struct, fields: {e: {id: 0, type: enum, enum: {A: 1, B: 2}}}}\n", true},
+		{"union option", "version: 1\nmessages:\n  M:\n    payload:\n" +
+			"      u: {id: 0, type: union, default_id: 0, oneof: {e: {id: 0, type: enum, enum: {A: 1, B: 2}}}}\n", true},
+		// An ARRAY of enum needs no counterpart: `count` is a capacity and nothing
+		// is padded to it (§3), so an array with no `default` initializes EMPTY
+		// rather than to a run of zeros, and no element is ever conjured at a value
+		// the enum does not declare.
+		{"array of enum without a default", "version: 1\nmessages:\n  M:\n    payload:\n" +
+			"      a: {id: 0, type: array, items: {type: enum, count: 4, enum: {A: 1, B: 2, Z: 10}}}\n", false},
+		// A bitfield needs none either: its zero is the "no flags set" combination
+		// and is always valid.
+		{"bitfield without a zero flag", "version: 1\nmessages:\n  M:\n    payload:\n" +
+			"      f: {id: 0, type: bitfield, bits: {A: {pos: 3}, B: {pos: 5}}}\n", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			errs := validateString(t, tc.src)
+			got := errs != nil && strings.Contains(errs.Error(), want)
+			if tc.bad && !got {
+				t.Fatalf("expected an error containing %q, got: %v", want, errs)
+			}
+			if !tc.bad && got {
+				t.Fatalf("this schema is initialisable and must validate, got:\n%s", errs.Error())
+			}
+			if !tc.bad && errs != nil {
+				t.Fatalf("unexpected error:\n%s", errs.Error())
+			}
+		})
+	}
+}
+
+// An enum whose own definition is broken must report THAT, once. The
+// initialisability rule is suppressed when the constant set failed to validate,
+// so a single mistake does not produce two errors pointing at different things.
+func TestBrokenEnumDefinitionDoesNotAlsoReportInitialisability(t *testing.T) {
+	src := "version: 1\nmessages:\n  M:\n    payload:\n" +
+		"      e: {id: 0, type: enum, enum: {A: \"not an integer\"}}\n"
+	errs := validateString(t, src)
+	if errs == nil {
+		t.Fatalf("a non-integer enum constant must be rejected")
+	}
+	if strings.Contains(errs.Error(), "declares no constant with the value 0") {
+		t.Fatalf("a broken enum definition must not also report initialisability:\n%s", errs.Error())
+	}
+}
+
 // TestBitfieldArrayElementSpellingsAccepted pins the other half of the rule the
 // negative cases above cover: an array-of-bitfield default written the way an
 // author reasonably would still validates. A plain integer, an unquoted YAML hex
 // integer (YAML has already turned it into an integer by the time the validator
 // sees it, which is why no hex STRING is needed), a mask with bit 63 set, and a
 // quoted decimal string for the top of the unsigned range. The last element sets
-// bits at positions no flag declares: legal, because nothing masks a bitfield down
-// to its declared positions and the wire carries the whole unsigned value.
+// bits at positions no flag declares, which this keyword still accepts — it bounds
+// an authored mask at the backing width and nothing narrower. MESSAGE_SPEC §1
+// closes a bitfield by its declared mask on the WIRE (generator#516), so such a
+// value is one a conformant decoder refuses; whether an AUTHORED default is bound
+// the same way is an open decision, and this test records the current answer.
 func TestBitfieldArrayElementSpellingsAccepted(t *testing.T) {
 	src := "version: 1\nmessages:\n  M:\n    payload:\n" +
 		"      a: {id: 0, type: array, items: {type: bitfield, count: 5, bits: {LOW: {pos: 0}, HIGH: {pos: 63}}}, " +
@@ -415,8 +494,11 @@ func TestBitfieldArrayElementSpellingsAccepted(t *testing.T) {
 }
 
 // A narrow bitfield is backed by the smallest unsigned type holding its highest
-// declared pos, so 255 is the widest mask a two-flag bitfield can carry — and it
-// must be accepted, undeclared bits and all.
+// declared pos, so 255 is the widest mask a two-flag bitfield can carry — and
+// this keyword accepts it, undeclared bits and all. See the note above: the
+// closed-mask rule of MESSAGE_SPEC §1 binds the wire and is enforced by the
+// generated decoders; extending it to authored defaults would change this test,
+// checkMaskElem and tests/matrix/corpus/defs/bitfields.yaml together.
 func TestNarrowBitfieldArrayElementFillsItsBacking(t *testing.T) {
 	src := "version: 1\nmessages:\n  M:\n    payload:\n" +
 		"      a: {id: 0, type: array, items: {type: bitfield, count: 2, bits: {A: {pos: 0}, C: {pos: 2}}}, default: [5, 255]}\n"

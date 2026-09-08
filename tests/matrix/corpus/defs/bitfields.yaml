@@ -11,7 +11,9 @@ messages:
       masks: { id: 1, type: array, items: { type: bitfield, count: 4, bits: { LOW: { pos: 0 }, HIGH: { pos: 63 } } }, default: [1, 0x10, 9223372036854775808, "18446744073709551615"] }
       # The highest declared pos is 2, so every backend backs this bitfield with a
       # single byte and a mask default has to fit one. 255 also sets bits no flag
-      # declares, which is legal: nothing masks a bitfield down to its declared
-      # positions, the wire carries the whole unsigned value, and that is how a peer
-      # built from a newer schema carries a flag this one does not declare yet.
+      # declares. The schema validator still accepts that (checkMaskElem bounds an
+      # authored mask at the backing width and nothing narrower), but MESSAGE_SPEC
+      # §1 closes a bitfield by its declared mask on the WIRE, so a decoder refuses
+      # such a value: whether an authored default is bound the same way is an open
+      # decision, and this line is what it would change.
       narrow: { id: 2, type: array, items: { type: bitfield, count: 2, bits: { A: { pos: 0 }, C: { pos: 2 } } }, default: [5, 255] }

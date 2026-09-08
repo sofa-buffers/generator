@@ -486,12 +486,11 @@ func enumBacking(nt *ir.NamedType) string { return numRustType(enumBackingKind(n
 
 // enumBackingKind is enumBacking as an ir.Kind rather than a Rust spelling: the
 // smallest signed integer covering every declared constant. It picks the STORAGE
-// and nothing else — no decode guard is derived from it, because MESSAGE_SPEC §1
-// binds an enum by its signed 32-bit range and this width is narrower than that
-// wherever the constants are small (generator#516 decides whether the family
-// widens the member or narrows the bound; elemWidthCond says why rust waits).
-// Until then a store that casts `value as <enumBacking>` masks an out-of-range
-// value, which is generator#513's open half.
+// and nothing else, and no decode guard is derived from it — the bound is the
+// SET of declared constants (MESSAGE_SPEC §1), which closedCond states directly
+// on the raw carrier ahead of the `value as <enumBacking>` cast. Storage is never
+// the bound: §1 grants the narrow member as a MAY precisely because every valid
+// value is a declared one, so nothing wider ever has to be held.
 func enumBackingKind(nt *ir.NamedType) ir.Kind {
 	var lo, hi int64
 	for _, c := range nt.Consts {
@@ -515,14 +514,13 @@ func enumBackingKind(nt *ir.NamedType) ir.Kind {
 func bitfieldBacking(nt *ir.NamedType) string { return numRustType(bitfieldBackingKind(nt)) }
 
 // bitfieldBackingKind is bitfieldBacking as an ir.Kind: the smallest unsigned
-// integer covering the highest declared `pos`. It is the same number said twice —
-// the member the struct declares, and the range a decoded array element has to
-// fit (elemWidthCond) — so the two come from one function and cannot drift
-// (generator#513). The bound is that WIDTH, never the set of declared positions:
-// an undeclared bit inside the width is a flag a peer built from a newer schema
-// carries, and is accepted (generator#482, and internal/parser.checkMaskElem says
-// the same of an authored mask). A `u64` backing yields no guard at all: its
-// range is the accumulator's own.
+// integer covering the highest declared `pos`. It picks the STORAGE alone. The
+// bound is the MASK of declared positions, never this width (MESSAGE_SPEC §1):
+// a bitfield declaring 0, 1 and 3 is held in a u8 and still rejects 4, because
+// which integer the receiver picks is a footprint decision and not a validity
+// one. closedCond states that mask on the raw carrier, so it also covers
+// everything above this backing — the two used to be one number and are now
+// deliberately two, the wider of which no longer appears in a guard at all.
 func bitfieldBackingKind(nt *ir.NamedType) ir.Kind {
 	var max int64
 	for _, fl := range nt.Flags {

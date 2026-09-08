@@ -1,6 +1,7 @@
 package zig
 
 import (
+	"fmt"
 	"os"
 	"strings"
 	"testing"
@@ -1327,6 +1328,136 @@ messages:
 	// The masking cast is gone: nothing may @truncate a decoded scalar any more.
 	if strings.Contains(m, "@truncate(value)") {
 		t.Errorf("a decoded value must never be masked to the declared width (§7.1):\n%s", m)
+	}
+}
+
+// generator#516 + #517 are one missing guard seen from two sides. MESSAGE_SPEC
+// §1 closes an `enum` by the SET of constants the schema declares and a
+// `bitfield` by the MASK of the positions it declares — neither bound is a width
+// and neither is the backing integer — and until this landed all twelve
+// enum/bitfield stores reached a bare `@intCast` with no comparison in front of
+// them. The two build modes then disagreed about the same bytes: a Debug harness
+// aborted with "integer does not fit in destination type" (#517) while the
+// --release=fast build the conformance suite ships stored the truncated value
+// and reported Ok. The guard makes it one verdict, INVALID, in both.
+//
+// All six positions are pinned by name — scalar, native array element, struct
+// member, struct-array element member, union member, matrix row element — for
+// both kinds. Four of them share one match arm per kind, which is exactly why
+// "the arm is shared" is not worth trusting after the next refactor. The enum is
+// GAPPED ({0,1,2,10}, so 5 must be refused although the hull holds it) and so is
+// the bitfield (pos 0, 1 and 3, mask 0b1011, so 4 must be refused although the
+// u8 member holds it).
+func TestZigClosedEnumAndBitfieldRejectAtEverySixPositions(t *testing.T) {
+	s := buildSchema(t, `
+version: 1
+messages:
+  Closed:
+    payload:
+      en:  { id: 0, type: enum, enum: { A: 0, B: 1, C: 2, Z: 10 } }
+      bf:  { id: 1, type: bitfield, bits: { A: { pos: 0 }, B: { pos: 1 }, D: { pos: 3 } } }
+      ea:  { id: 2, type: array, items: { type: enum, count: 4, enum: { A: 0, B: 1, C: 2, Z: 10 } } }
+      bfa: { id: 3, type: array, items: { type: bitfield, count: 4, bits: { A: { pos: 0 }, B: { pos: 1 }, D: { pos: 3 } } } }
+      st:
+        id: 4
+        type: struct
+        fields:
+          se:  { id: 0, type: enum, enum: { A: 0, B: 1, C: 2, Z: 10 } }
+          sbf: { id: 1, type: bitfield, bits: { A: { pos: 0 }, B: { pos: 1 }, D: { pos: 3 } } }
+      sa:
+        id: 5
+        type: array
+        items:
+          type: struct
+          count: 2
+          fields:
+            se:  { id: 0, type: enum, enum: { A: 0, B: 1, C: 2, Z: 10 } }
+            sbf: { id: 1, type: bitfield, bits: { A: { pos: 0 }, B: { pos: 1 }, D: { pos: 3 } } }
+      un:
+        id: 6
+        type: union
+        default_id: 0
+        oneof:
+          ue:  { id: 0, type: enum, enum: { A: 0, B: 1, C: 2, Z: 10 } }
+          ubf: { id: 1, type: bitfield, bits: { A: { pos: 0 }, B: { pos: 1 }, D: { pos: 3 } } }
+      mat: { id: 7, type: array, items: { type: array, count: 2, items: { type: enum, count: 3, enum: { A: 0, B: 1, C: 2, Z: 10 } } } }
+      mbf: { id: 8, type: array, items: { type: array, count: 2, items: { type: bitfield, count: 3, bits: { A: { pos: 0 }, B: { pos: 1 }, D: { pos: 3 } } } } }
+`)
+	files, err := (&Backend{}).Generate(s, map[string]any{})
+	if err != nil {
+		t.Fatalf("generate: %v", err)
+	}
+	m := string(files[0].Content)
+	const enRej = "switch (value) { 0, 1, 2, 10 => {}, else => { self.inv = true; return; } } "
+	const bfRej = "if ((value & ~@as(u64, 0xb)) != 0) { self.inv = true; return; } "
+	const fill = "if (self.afill != 0) { self.afill -= 1; "
+	for _, want := range []string{
+		// 1. scalar
+		"0 => { " + enRej + "self.m.en = @intCast(value); },",
+		"1 => { " + bfRej + "self.m.bf = @intCast(value); },",
+		// 2. native array element -- guard INSIDE the fill guard, so a bare scalar
+		// at an array id stays a §7.3 skip.
+		"2 => { " + fill + enRej + "self.m.ea.push(@intCast(value), &self.inv); } },",
+		"3 => { " + fill + bfRej + "self.m.bfa.push(@intCast(value), &self.inv); } },",
+		// 3. struct member
+		"0 => { " + enRej + "self.m.st.se = @intCast(value); },",
+		"1 => { " + bfRej + "self.m.st.sbf = @intCast(value); },",
+		// 4. struct-array element member
+		"0 => { " + enRej + "sofab.arrays.at(self.m.sa, self.ei_root_sa).se = @intCast(value); },",
+		"1 => { " + bfRej + "sofab.arrays.at(self.m.sa, self.ei_root_sa).sbf = @intCast(value); },",
+		// 5. union member
+		"0 => { " + enRej + "self.m.un.ue = @intCast(value); },",
+		"1 => { " + bfRej + "self.m.un.ubf = @intCast(value); },",
+		// 6. matrix row element
+		".root_mat => { " + fill + enRej,
+		".root_mbf => { " + fill + bfRej,
+	} {
+		if !strings.Contains(m, want) {
+			t.Errorf("message.zig: a closed-kind position stores without its guard, missing %q:\n%s", want, m)
+		}
+	}
+	// Storage did not widen with the bound: §1 grants the narrow member as a MAY
+	// precisely because every valid value is a declared one.
+	for _, want := range []string{"en: i8 = 0,", "bf: u8 = 0,"} {
+		if !strings.Contains(m, want) {
+			t.Errorf("message.zig: the closed bound must not widen storage, missing %q:\n%s", want, m)
+		}
+	}
+	// No bare @intCast may remain on these paths: every one of the twelve is now
+	// preceded by its comparison. Counted rather than spelled, so an arm added
+	// later without a guard fails here even if it is not in the list above.
+	for _, bad := range []string{
+		"0 => self.m.en = @intCast(value),",
+		"1 => self.m.bf = @intCast(value),",
+		"0 => self.m.st.se = @intCast(value),",
+		"1 => self.m.un.ubf = @intCast(value),",
+	} {
+		if strings.Contains(m, bad) {
+			t.Errorf("message.zig still stores a closed kind through a bare @intCast (%q):\n%s", bad, m)
+		}
+	}
+}
+
+// A bitfield declaring all 64 positions has mask u64::MAX, so the mask test is a
+// tautology and is elided — the one case where "no guard" stays right under the
+// closed rule, and the reason closedGuard answers "" rather than always emitting.
+func TestZigAllBitsDeclaredBitfieldNeedsNoGuard(t *testing.T) {
+	var bits []string
+	for i := 0; i < 64; i++ {
+		bits = append(bits, fmt.Sprintf("F%d: { pos: %d }", i, i))
+	}
+	s := buildSchema(t, "version: 1\nmessages:\n  W:\n    payload:\n"+
+		"      f: { id: 0, type: bitfield, bits: { "+strings.Join(bits, ", ")+" } }\n")
+	files, err := (&Backend{}).Generate(s, map[string]any{})
+	if err != nil {
+		t.Fatalf("generate: %v", err)
+	}
+	m := string(files[0].Content)
+	if !strings.Contains(m, "0 => self.m.f = value,") {
+		t.Errorf("an all-bits-declared bitfield must store unguarded:\n%s", m)
+	}
+	if strings.Contains(m, "0xffffffffffffffff") {
+		t.Errorf("a tautological mask guard was emitted:\n%s", m)
 	}
 }
 
