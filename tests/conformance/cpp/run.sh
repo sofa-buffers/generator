@@ -641,6 +641,57 @@ run_variant() {
         || { echo "FAIL: [$label] the in-range element must survive exactly; got: $OUT"; exit 1; }
     echo "==> [$label] element-width reject OK"
 
+    # An `enum` and a `bitfield` are CLOSED (MESSAGE_SPEC S1, generator#516): what
+    # binds is the SET of constants / the MASK of declared positions, never a
+    # width and never the integer the target stores the field in. The shared
+    # driver prints its own schema and forges its own bytes, and probes the
+    # positions with GAPPED definitions, so an interval bound cannot pass.
+    #
+    # Before this, every scalar-family store read a 64-bit temporary and cast it
+    # into the member with no comparison at all: 5 into an enum declaring
+    # {0,1,2,10} was kept, and 1000 was masked to -24 and kept. The four
+    # scalar-family positions now take the same shape the narrow-integer arm
+    # takes -- temporary, comparison, cast.
+    #
+    # TWO DECLENSIONS, both of them corelib limits and neither of them a relaxed
+    # rule:
+    #
+    #   --hull-only array. A native array element is bounded by the corelib,
+    #   because sofab::readArray converts the elements itself; the only bound it
+    #   takes is a sofab::ElemBound, which is an INTERVAL. The enum's hull and the
+    #   bitfield's mask-as-a-ceiling are what fits, so 1000 and 256 are refused
+    #   and the GAP values (enum 3..9, bitfield 4..7) are still kept. Closing that
+    #   needs a per-element predicate in corelib-cpp.
+    #
+    #   --skip-positions matrix. sofab::MessageSeq carries cap/rowCap and no
+    #   element bound of any kind, so nothing at all is enforceable at a matrix
+    #   row -- not even the storage width -- and unlike corelib-go's collector it
+    #   cannot be wrapped, since the corelib dispatches sofab::read into the
+    #   concrete MessageSeq. The enum half additionally does not COMPILE today:
+    #   array<array<enum>> reaches sofab::readArray with a row of the scoped enum
+    #   and hits "Unsupported span element type", a pre-existing defect unrelated
+    #   to this rule. So the position is not declared here either.
+    #
+    # The c-cpp legs are out entirely: their read binds the destination by ADDRESS
+    # and the C runtime fills it after the callback returns, so generated code
+    # never holds the value, and sofab_istream_read_field carries only sizeof(the
+    # destination) -- SOFAB_ISTREAM_OPT_* is wire type, fixlen subtype and string
+    # termination. Measured on that leg: 1000/256 are refused at every position
+    # (the width) and 5/4 are kept at every position (the set). Closing it needs a
+    # set/mask parameter on that C entry point.
+    if [ -z "$corelib" ]; then
+        echo "==> [$label] closed enum/bitfield: only what the schema declares is valid (S1, generator#516)"
+        { echo "version: 1"; echo "messages:"; } > "$WORK/closed-$label.yaml"
+        python3 "$ROOT/tests/conformance/lib/check_closed_kinds.py" --emit-schema \
+            --skip-positions matrix >> "$WORK/closed-$label.yaml"
+        ( cd "$ROOT" && go run ./cmd/sofabgen --config "$WORK/cfg-$label.yaml" --lang cpp \
+            --in "$WORK/closed-$label.yaml" --out "$WORK/closed-$label" )
+        make -C "$WORK/closed-$label" "$@" >/dev/null
+        python3 "$ROOT/tests/conformance/lib/check_closed_kinds.py" "$label" \
+            --skip-positions matrix --hull-only array \
+            -- "$WORK/closed-$label/harness/harness"
+    fi
+
     echo "==> [$label] shared-vector byte-exact conformance"
     ( cd "$ROOT" && go run ./cmd/sofabgen --config "$WORK/cfg-$label.yaml" --lang cpp --in "$WORK/conf.yaml" --out "$WORK/conf-$label" )
     make -C "$WORK/conf-$label" "$@" >/dev/null

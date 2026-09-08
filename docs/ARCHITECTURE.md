@@ -1803,10 +1803,60 @@ beside the `count`, wrapper-element-id and `maxlen` guards already there.
     *authored* `default` outside the mask stays legal is a separate question that
     `internal/parser.checkMaskElem` still answers "yes" to, and
     `tests/matrix/corpus/defs/bitfields.yaml` still exercises.
-  - **Rollout.** `rust` (all four config combos) and `zig` implement the rule
-    today; the remaining eight code backends are landing under the same issue and
-    this list is the contract they are held to. `c` is out of scope by the owner's
-    decision — it emits no decode code at all, only a descriptor table plus
+  - **Where generated code cannot make the check, it passes what the hook
+    carries and the rest is REPORTED, never widened away.** Three positions in the
+    family are like that, and all three are corelib limits rather than choices:
+    - `cpp` with `corelib: cpp`, **native array element**. The elements are
+      converted inside `sofab::readArray`, so the bound rides in as a
+      `sofab::ElemBound` — an INTERVAL. What fits is the enum's HULL
+      (`ir.EnumHull`) and the bitfield's mask as a ceiling (`{0, mask}`), which
+      refuses everything above the declared range; the GAP values (enum `3..9`,
+      bitfield `4..7` for the fixtures above) are still kept. A generated-side
+      scan after the call cannot substitute: `readArray` resizes a growable
+      destination and is re-entered once per feed chunk, so the not-yet-landed
+      tail is value-initialized and a gapped enum would false-reject a split
+      message. Closing it needs a per-element predicate in corelib-cpp. A mask
+      with bit 63 declared cannot be stated at all — `ElemBound::hi` is an
+      `int64_t` and clamping it would refuse the very value that bit is — so
+      that element is left unbounded rather than made wrong.
+    - `cpp` with `corelib: cpp`, **matrix row element**. `sofab::MessageSeq`
+      carries `cap`/`rowCap` and no element bound of any kind, so nothing is
+      enforceable there — not even the storage width. It cannot be wrapped the
+      way corelib-go's collector can, because the corelib dispatches
+      `sofab::read` into the concrete `MessageSeq`, and reimplementing it in
+      generated code would duplicate the row placing the §8 rule keeps in the
+      corelib. Separately, `array<array<enum>>` does not COMPILE on either C++
+      corelib today (the row reaches `sofab::readArray` as a container of the
+      scoped enum and hits "Unsupported span element type"); that is a
+      pre-existing defect independent of this rule, and it is why no C++
+      conformance leg has ever carried an enum matrix.
+    - `cpp` with `corelib: c-cpp`, **every position**. Its `read` binds the
+      destination by ADDRESS and the C runtime fills it after the field callback
+      returns, so generated code never holds the value — a wide local temporary
+      is the dangling-destination trap this backend already documents — and
+      `sofab_istream_read_field` carries only `sizeof(destination)`: its option
+      word is wire type, fixlen subtype and string termination, and nothing else.
+      Measured: that leg refuses every value past the storage WIDTH at all six
+      positions and keeps every undeclared value inside it. Closing it needs a
+      set/mask parameter on that C entry point. This is a different case from `c`,
+      which emits no decode code at all.
+  - **`go`'s matrix rows are NOT in that list, and the reason generalizes.**
+    `sofab.*MatrixSeq` gathers a row's elements itself and its own element bound
+    is an interval armed by a sentinel (`lo != 0` / `hi != 0`), which can state
+    neither a gapped set nor a mask — and which a contiguous enum starting at `0`
+    would disarm. But generated code does not have to use it: every collector
+    method is exported and corelib-go dispatches through the `sofab.Visitor`
+    interface, so a generated wrapper embedding the collector overrides the one
+    element callback, closes the set on the way in and delegates the placing. The
+    row id, the row count and the placing stay the corelib's; only the value test
+    is generated. One wrapper type per closed named type used as a row element,
+    emitted into `types.go` beside the type itself, because the package admits one
+    declaration however many messages share it.
+  - **Rollout.** `rust` (all four config combos), `zig`, `go` and `cpp` with
+    `corelib: cpp` (both storage modes) implement the rule today; the remaining
+    six code backends are landing under the same issue and this list is the
+    contract they are held to. `c` is out of scope by the owner's decision — it
+    emits no decode code at all, only a descriptor table plus
     `sofab_object_field_cb`, so there is nowhere in generated C to put the check.
 - **The zig half closes generator#517 with the same guard.** Before it, all
   twelve enum/bitfield stores reached a bare `@intCast` and the two build modes
@@ -1834,6 +1884,9 @@ beside the `count`, wrapper-element-id and `maxlen` guards already there.
   through a 64-bit temporary and range-checks before the store. §7.3 is
   unaffected: `read()` derives its expected wire type from signedness alone, so
   `u64` and `u8` frame identically and a contradicting tag still stores nothing.
+  A scalar `enum` and `bitfield` take that same shape for their closed-set check
+  (generator#516) — including the `if (is.read(_v))`, which those two used to
+  skip, writing the zero-initialized temporary into the member on a §7.3 skip.
 
 **`cpp` array elements are covered by arming the corelib, not by inlining.**
 `IStream::readArray` converts elements *inside* corelib-cpp
@@ -1843,7 +1896,11 @@ temporary would defeat the bulk/zero-copy path the maxspeed profile exists for.
 corelib-cpp therefore takes the bound as an argument and the generator hands it
 in (`ElemBound::of<E>()`), so the check runs at the point of conversion. Left at
 its default the argument is unarmed and the unbounded decode runs — the defect
-this closed. Floating-point elements are excluded by construction: instantiating
+this closed. An `enum` and a `bitfield` element hand in an explicit
+`ElemBound{lo, hi}` instead of the type-derived one — the hull of the declared
+constants, or `{0, mask}` — because their bound is a SET and an interval is the
+most of it the argument can carry (generator#516); what that leaves through is
+listed above. Floating-point elements are excluded by construction: instantiating
 the helper for a `float` would cast `numeric_limits<float>::max()` to `int64_t`
 in a constexpr context, and the corelib ignores the argument for a non-integral
 element in any case.
@@ -4627,18 +4684,29 @@ A reimplementation is **conformant** when it reproduces these gates:
    The six matter because most backends emit one store arm per kind serving the
    four scalar-family positions and a second pair for the two array positions, so
    a suite that probes only the scalar cannot see a fix that covered a third of
-   the job. `--skip-positions` declines one **by name** rather than by silence.
+   the job. Two declensions exist, both **by name** rather than by silence, and
+   both stating a corelib limit rather than relaxing the rule: `--skip-positions`
+   drops a position the target cannot express at all, and leaves it out of
+   `--emit-schema` too, since a harness for a shape that does not build cannot be
+   built; `--hull-only` keeps every row at a position except the
+   undeclared-inside-the-hull one, for a bound that has to travel through a hook
+   carrying an INTERVAL and nothing else. `cpp` uses both — `--hull-only array`
+   for `sofab::ElemBound`, `--skip-positions matrix` for a `sofab::MessageSeq`
+   that carries no element bound — and what each leaves open is listed under
+   "Decode verdict" above.
    The accepted rows include the zero value of both kinds and every declared
    bitfield combination — §1 is explicit that all of them are valid, and a mask
    check written as "zero or one declared flag" passes a single-flag probe. Every
    payload is complete, so truncation explains no rejection.
 
-   It is wired in `rust` (all four config combos) and `zig`, replacing the
+   It is wired in `rust` (all four config combos), `zig`, `go` (all six
+   positions, no declension) and the two `corelib: cpp` legs, replacing the
    narrower generator#513 block that pinned the bitfield array element at its
-   storage repr. On `zig` it must run in the `--release=fast` harness the suite
-   ships: before the guard existed the same bytes ABORTED a Debug build and were
-   silently truncated by the release one (generator#517), so a Debug-only case
-   would have reported a crash rather than a verdict.
+   storage repr. The `corelib: c-cpp` legs are out entirely: nothing there is
+   enforceable generator-side. On `zig` it must run in the `--release=fast`
+   harness the suite ships: before the guard existed the same bytes ABORTED a
+   Debug build and were silently truncated by the release one (generator#517), so
+   a Debug-only case would have reported a crash rather than a verdict.
 2. **Round-trip harness** — `emit: project` builds the generated code against the
    real corelib and round-trips canonical JSON through encode→decode for every
    field kind (`tests/conformance/<lang>/run.sh`). Each harness also feeds one

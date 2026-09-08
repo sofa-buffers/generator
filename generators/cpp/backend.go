@@ -1363,23 +1363,45 @@ func (g *gen) emitDeserialize(f *hfile, fld *ir.Field) {
 			fn, args := cppLenCall("readBlob", fld.HasMaxlen, fld.Maxlen, g.limBlobHas, "SOFAB_MAX_DYN_BLOB_LEN")
 			f.line("            sofab::%s(is, %s%s);", fn, acc, args)
 		}
-	case ir.KindEnum:
-		// corelib-c-cpp's read binds a target by address and fills it after the
-		// callback, so a local temp would dangle; read straight into the enum's
-		// underlying-typed storage instead. corelib-cpp copies in place, so the
-		// temp is safe there.
+	case ir.KindEnum, ir.KindBitfield:
+		// An `enum` and a `bitfield` are CLOSED (MESSAGE_SPEC §1): what binds is
+		// the SET of constants / the MASK of declared positions, and a wire value
+		// outside it is INVALID (§7.1) exactly as an over-width integer is. So
+		// these two take the very shape the narrow-integer arm above takes — a
+		// 64-bit temporary, the comparison, then the narrowing cast — and for the
+		// same reason: the cast IS the mask the rule forbids, so the check has to
+		// precede it, and it has to see the raw value to make it.
+		//
+		// corelib-c-cpp cannot: its read binds a target by ADDRESS and the C
+		// runtime fills it after the callback returns, so a local temporary would
+		// dangle and the value is never visible to generated code. The only bound
+		// that hook carries is sizeof(destination) — SOFAB_ISTREAM_OPT_* is wire
+		// type, fixlen subtype and string termination, and nothing else — so that
+		// leg keeps binding the member directly and the set half stays unenforced
+		// there; closing it needs a set/mask parameter on
+		// sofab_istream_read_field. An enum binds the enum's underlying-typed
+		// storage, a bitfield's member is already an integral type.
 		if g.clib {
-			f.line("            is.read(reinterpret_cast<%s &>(%s));", enumBacking(fld.Ref.Target), acc)
-		} else {
-			f.line("            { std::int64_t _v = 0; is.read(_v); %s = static_cast<%s>(_v); }", acc, g.typeName(fld.Ref.Key))
+			if fld.Kind == ir.KindEnum {
+				f.line("            is.read(reinterpret_cast<%s &>(%s));", enumBacking(fld.Ref.Target), acc)
+			} else {
+				f.line("            is.read(%s);", acc)
+			}
+			break
 		}
-	case ir.KindBitfield:
-		// The bitfield member is an integral type, so corelib-c-cpp can fill it
-		// directly (no dangling temp).
-		if g.clib {
-			f.line("            is.read(%s);", acc)
+		tmp, dst := "std::uint64_t", g.cppType(fld)
+		if fld.Kind == ir.KindEnum {
+			tmp, dst = "std::int64_t", g.typeName(fld.Ref.Key)
+		}
+		// `if (is.read(_v))`, not a bare read: a contradicting tag is a §7.3 skip,
+		// and the arm must then store nothing. The unconditional store this
+		// replaced wrote the zero-initialized temporary into the member instead.
+		if cond := cppClosedCond(fld.Kind, fld.Ref, "_v"); cond != "" {
+			f.line("            { %s _v; if (is.read(_v)) { if (%s) { is.invalidate(); return; } %s = static_cast<%s>(_v); } }", tmp, cond, acc, dst)
 		} else {
-			f.line("            { std::uint64_t _v = 0; is.read(_v); %s = static_cast<%s>(_v); }", acc, g.cppType(fld))
+			// A bitfield declaring all 64 positions: every value is a declared
+			// combination, so the comparison would be a tautology.
+			f.line("            { %s _v; if (is.read(_v)) { %s = static_cast<%s>(_v); } }", tmp, acc, dst)
 		}
 	case ir.KindArray:
 		// A wire element count above the schema `count` capacity is INVALID per

@@ -3,6 +3,7 @@ package cpp
 import (
 	"encoding/base64"
 	"fmt"
+	"math"
 	"strconv"
 	"strings"
 
@@ -708,10 +709,68 @@ func (g *gen) cppElemBound(elem ir.Kind, ref *ir.TypeRef) string {
 	case ir.KindU8, ir.KindU16, ir.KindU32, ir.KindU64,
 		ir.KindI8, ir.KindI16, ir.KindI32, ir.KindI64:
 		return fmt.Sprintf("sofab::ElemBound::of<%s>()", numCppType(elem))
-	case ir.KindBitfield:
-		if ref != nil && ref.Target != nil {
-			return fmt.Sprintf("sofab::ElemBound::of<%s>()", bitfieldBacking(ref.Target))
+	case ir.KindEnum:
+		if lo, hi, ok := ir.EnumHull(ref); ok {
+			return fmt.Sprintf("sofab::ElemBound{%d, %d}", lo, hi)
 		}
+	case ir.KindBitfield:
+		// ElemBound's `hi` is an int64_t, so a mask with bit 63 declared cannot be
+		// stated at all: clamping it to INT64_MAX would REFUSE the very value that
+		// bit is, and every narrower ceiling refuses more. The bound is left off
+		// there — exactly as ElemBound::of<std::uint64_t>() came back unarmed
+		// before — and that element position stays unenforced.
+		if mask, ok := ir.BitfieldMask(ref); ok && mask != ^uint64(0) && mask <= uint64(math.MaxInt64) {
+			return fmt.Sprintf("sofab::ElemBound{0, %d}", mask)
+		}
+	}
+	return ""
+}
+
+// cppClosedCond is the reject comparison for the two CLOSED kinds over the value
+// named v, MESSAGE_SPEC §1: an `enum` is bound by the set of constants the schema
+// declares, a `bitfield` by the mask of the positions it declares, so v is valid
+// exactly when v & ~mask == 0. It returns "" for every other kind, and for a
+// bitfield whose declared positions cover all 64 bits, where the test is a
+// tautology.
+//
+// Neither bound is a width, and storage is never the bound: the member stays the
+// smallest integer holding the declared constants/positions (§1 grants that as a
+// MAY, and the footprint profile takes it), but a field whose declared positions
+// are 0..3 does not become 0..255 valid because C++ holds it in a std::uint8_t.
+// Both comparisons therefore run on the 64-bit temporary the value is read into,
+// ahead of the narrowing static_cast, which is what lets one clause answer both
+// halves at once: a mask test on the full accumulator rejects an undeclared bit
+// inside the storage width and everything above it in the same expression.
+//
+// This reverses generator#482, which kept an undeclared bit that fit the backing
+// width on the argument that it is how a peer built from a newer schema carries a
+// flag this one has not got yet. §1 answers that directly: adding a flag — or a
+// constant — is a BREAKING schema change, and a receiver rejects the value rather
+// than storing something its declared type cannot represent.
+func cppClosedCond(k ir.Kind, ref *ir.TypeRef, v string) string {
+	switch k {
+	case ir.KindEnum:
+		vals, ok := ir.EnumValues(ref)
+		if !ok || len(vals) == 0 {
+			return ""
+		}
+		if ir.EnumContiguous(ref) {
+			return fmt.Sprintf("%s < %d || %s > %d", v, vals[0], v, vals[len(vals)-1])
+		}
+		terms := make([]string, len(vals))
+		for i, x := range vals {
+			terms[i] = fmt.Sprintf("%s != %d", v, x)
+		}
+		return strings.Join(terms, " && ")
+	case ir.KindBitfield:
+		mask, ok := ir.BitfieldMask(ref)
+		if !ok || mask == ^uint64(0) {
+			return ""
+		}
+		if mask == 0 {
+			return v + " != 0"
+		}
+		return fmt.Sprintf("(%s & ~%s) != 0", v, cppMaskLit(mask))
 	}
 	return ""
 }

@@ -6,7 +6,8 @@ Usage:
   check_closed_kinds.py <label> [--message NAME] [--cwd DIR] [--verb VERB]
                         [--status-verb VERB] [--status-invalid NAME]
                         [--status-complete NAME] [--no-values]
-                        [--skip-positions LIST] -- <harness argv...>
+                        [--skip-positions LIST] [--hull-only LIST]
+                        -- <harness argv...>
 
 MESSAGE_SPEC §1 (doc `a50db95`) closes both leaf types by what the schema
 declares rather than by a width:
@@ -53,7 +54,12 @@ positions and a second pair for the two array positions, so a fix that covers
 only the scalar is a third of the job and a suite that probes only the scalar
 cannot see the difference. `--skip-positions` lets a suite decline a position its
 harness genuinely cannot express, by name, so the omission is a decision rather
-than a silence.
+than a silence; the declined position is left out of `--emit-schema` too, since a
+target that cannot express the shape cannot build a harness that declares it.
+`--hull-only` is the weaker declension, for a position whose bound has to travel
+through a corelib hook that carries an INTERVAL and nothing else: the accepting
+rows and the beyond-the-hull reject still run, and only the gap row -- the one no
+interval can express -- is dropped.
 
 ## Verdicts
 
@@ -70,6 +76,7 @@ single-flag probe.
 """
 
 import argparse
+import base64
 import json
 import re
 import subprocess
@@ -140,8 +147,14 @@ def bits_yaml():
     return "{ " + ", ".join("%s: { pos: %d }" % kv for kv in BIT_POS.items()) + " }"
 
 
-def emit_schema() -> int:
-    """Print the `closed` message, for appending to a conformance schema."""
+def emit_schema(positions) -> int:
+    """Print the `closed` message, for appending to a conformance schema.
+
+    A position a suite declined with --skip-positions is not DECLARED either: a
+    target that cannot express the shape at all -- corelib-cpp's row collector
+    carries no element bound, and `array<array<enum>>` does not compile there --
+    could not build a harness for a schema that names it.
+    """
     e, b = enum_yaml(), bits_yaml()
     print("# closed -- the closed-enum / closed-bitfield message (MESSAGE_SPEC §1,")
     print("# generator#516), printed by tests/conformance/lib/check_closed_kinds.py so")
@@ -150,34 +163,40 @@ def emit_schema() -> int:
     print("# interval bound passes every row a contiguous definition can produce.")
     print("  %s:" % MESSAGE)
     print("    payload:")
-    print("      cen:  { id: %d, type: enum, enum: %s }" % (CEN, e))
-    print("      cbf:  { id: %d, type: bitfield, bits: %s }" % (CBF, b))
-    print("      cena: { id: %d, type: array, items: { type: enum, count: 4, enum: %s } }" % (CENA, e))
-    print("      cbfa: { id: %d, type: array, items: { type: bitfield, count: 4, bits: %s } }" % (CBFA, b))
-    print("      cst:")
-    print("        id: %d" % CST)
-    print("        type: struct")
-    print("        fields:")
-    print("          st_en: { id: 0, type: enum, enum: %s }" % e)
-    print("          st_bf: { id: 1, type: bitfield, bits: %s }" % b)
-    print("      csa:")
-    print("        id: %d" % CSA)
-    print("        type: array")
-    print("        items:")
-    print("          type: struct")
-    print("          count: 2")
-    print("          fields:")
-    print("            sa_en: { id: 0, type: enum, enum: %s }" % e)
-    print("            sa_bf: { id: 1, type: bitfield, bits: %s }" % b)
-    print("      cun:")
-    print("        id: %d" % CUN)
-    print("        type: union")
-    print("        default_id: 0")
-    print("        oneof:")
-    print("          un_en: { id: 0, type: enum, enum: %s }" % e)
-    print("          un_bf: { id: 1, type: bitfield, bits: %s }" % b)
-    print("      cmat: { id: %d, type: array, items: { type: array, count: 2, items: { type: enum, count: 3, enum: %s } } }" % (CMAT, e))
-    print("      cmbf: { id: %d, type: array, items: { type: array, count: 2, items: { type: bitfield, count: 3, bits: %s } } }" % (CMBF, b))
+    if "scalar" in positions:
+        print("      cen:  { id: %d, type: enum, enum: %s }" % (CEN, e))
+        print("      cbf:  { id: %d, type: bitfield, bits: %s }" % (CBF, b))
+    if "array" in positions:
+        print("      cena: { id: %d, type: array, items: { type: enum, count: 4, enum: %s } }" % (CENA, e))
+        print("      cbfa: { id: %d, type: array, items: { type: bitfield, count: 4, bits: %s } }" % (CBFA, b))
+    if "struct" in positions:
+        print("      cst:")
+        print("        id: %d" % CST)
+        print("        type: struct")
+        print("        fields:")
+        print("          st_en: { id: 0, type: enum, enum: %s }" % e)
+        print("          st_bf: { id: 1, type: bitfield, bits: %s }" % b)
+    if "structarray" in positions:
+        print("      csa:")
+        print("        id: %d" % CSA)
+        print("        type: array")
+        print("        items:")
+        print("          type: struct")
+        print("          count: 2")
+        print("          fields:")
+        print("            sa_en: { id: 0, type: enum, enum: %s }" % e)
+        print("            sa_bf: { id: 1, type: bitfield, bits: %s }" % b)
+    if "union" in positions:
+        print("      cun:")
+        print("        id: %d" % CUN)
+        print("        type: union")
+        print("        default_id: 0")
+        print("        oneof:")
+        print("          un_en: { id: 0, type: enum, enum: %s }" % e)
+        print("          un_bf: { id: 1, type: bitfield, bits: %s }" % b)
+    if "matrix" in positions:
+        print("      cmat: { id: %d, type: array, items: { type: array, count: 2, items: { type: enum, count: 3, enum: %s } } }" % (CMAT, e))
+        print("      cmbf: { id: %d, type: array, items: { type: array, count: 2, items: { type: bitfield, count: 3, bits: %s } } }" % (CMBF, b))
     return 0
 
 
@@ -262,7 +281,18 @@ WHY = {
 }
 
 
-def build_table(positions):
+def build_table(positions, hull=()):
+    """The rows to run, one per (position, kind, value).
+
+    A position named in `hull` keeps every row except the undeclared-inside-the-
+    hull one. That is not a relaxation of the rule -- it is the statement that at
+    THIS position the bound travels through a corelib hook carrying an INTERVAL
+    and nothing else (corelib-cpp's sofab::ElemBound, corelib-py's
+    on_array_begin), so the hull is the most of the declared set that fits and
+    the gap stays unenforced. The suite that passes it says so out loud, and the
+    beyond-the-hull reject and every accepting row still run: a target that
+    stopped bounding the position at all still fails here.
+    """
     rows = []
     for pos in positions:
         for kind, oks, gap, wide, gapwhy, widewhy in (
@@ -282,8 +312,9 @@ def build_table(positions):
                 rows.append(("%s_%s_ok_%d" % (pos, kind, v), build(v), "accept",
                              (leaf, v, depth),
                              "%s carrying the DECLARED %s value %d" % (WHY[pos], kind, v)))
-            rows.append(("%s_%s_undeclared" % (pos, kind), build(gap), "invalid",
-                         None, "%s carrying %d: %s" % (WHY[pos], gap, gapwhy)))
+            if pos not in hull:
+                rows.append(("%s_%s_undeclared" % (pos, kind), build(gap), "invalid",
+                             None, "%s carrying %d: %s" % (WHY[pos], gap, gapwhy)))
             rows.append(("%s_%s_beyond_storage" % (pos, kind), build(wide), "invalid",
                          None, "%s carrying %d: %s" % (WHY[pos], wide, widewhy)))
     return rows
@@ -339,9 +370,28 @@ def decoded_json(out):
     return None
 
 
+def as_container(got):
+    """A byte container some languages render as base64, back to element values.
+
+    Nothing to do with the closed rule: an array whose element is stored in an
+    unsigned byte is a byte sequence to Go's encoding/json and to Java's Jackson,
+    and both spell it base64 rather than as a list. The elements are still the
+    values the decoder kept, so the row's assertion is made against them rather
+    than dropped -- a harness that renders them differently must not cost the
+    check its accepting half.
+    """
+    if not isinstance(got, str):
+        return got
+    try:
+        return list(base64.b64decode(got, validate=True))
+    except Exception:
+        return got
+
+
 def unwrap(got, depth, name):
     """Peel `depth` list levels off a decoded value, checking each is length 1."""
     for _ in range(depth):
+        got = as_container(got)
         if not isinstance(got, list) or len(got) != 1:
             die("%s -- expected a 1-element container, got %r" % (name, got))
         got = got[0]
@@ -360,6 +410,7 @@ def main():
     ap.add_argument("--status-complete", default="COMPLETE")
     ap.add_argument("--no-values", action="store_true")
     ap.add_argument("--skip-positions", default="")
+    ap.add_argument("--hull-only", default="")
 
     argv = sys.argv[1:]
     if "--" in argv:
@@ -369,17 +420,27 @@ def main():
         head, harness = argv, []
     args = ap.parse_args(head)
 
-    if args.emit_schema:
-        return emit_schema()
+    def named(flag, raw):
+        got = [x.strip() for x in raw.split(",") if x.strip()]
+        unknown = [x for x in got if x not in POSITIONS]
+        if unknown:
+            die("%s: %s is not one of %s"
+                % (flag, ", ".join(unknown), ", ".join(POSITIONS)))
+        return got
 
-    skip = [s.strip() for s in args.skip_positions.split(",") if s.strip()]
-    unknown = [s for s in skip if s not in POSITIONS]
-    if unknown:
-        die("--skip-positions: %s is not one of %s"
-            % (", ".join(unknown), ", ".join(POSITIONS)))
+    skip = named("--skip-positions", args.skip_positions)
     positions = [p for p in POSITIONS if p not in skip]
+
+    if args.emit_schema:
+        return emit_schema(positions)
+
     if not positions:
         die("--skip-positions declined every position; there is nothing left to check")
+    hull = named("--hull-only", args.hull_only)
+    both = [p for p in hull if p in skip]
+    if both:
+        die("--hull-only names %s, which --skip-positions already declined"
+            % ", ".join(both))
 
     if not args.label:
         die("no label given (the suite name this run is reported under)")
@@ -387,7 +448,7 @@ def main():
         die("no harness argv given (put it after `--`)")
 
     msg = [args.message] if args.message else []
-    table = build_table(positions)
+    table = build_table(positions, hull)
 
     for name, wire, expect, value, why in table:
         rc, out, err = run(harness + [args.verb] + msg, args.cwd, wire)
@@ -439,8 +500,13 @@ def main():
             die("[%s] %s decoded, but %s is %r -- want %d (%s); bytes: %s"
                 % (args.label, name, leaf, got, want, why, wire.hex()))
 
-    print("==> [%s] closed enum/bitfield: %d rows over %d position(s) OK"
-          % (args.label, len(table), len(positions)))
+    note = ""
+    if skip:
+        note += "; declined: " + ", ".join(skip)
+    if hull:
+        note += "; hull-only (the gap stays unenforced): " + ", ".join(hull)
+    print("==> [%s] closed enum/bitfield: %d rows over %d position(s) OK%s"
+          % (args.label, len(table), len(positions), note))
     return 0
 
 
