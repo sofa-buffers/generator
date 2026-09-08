@@ -780,6 +780,24 @@ OUT=$($H decode myfirstmessage < "$WORK/w_u8_255_ctl.bin") || { echo "FAIL: in-r
 echo "$OUT" | tr -d ' ' | grep -q '"someu8":255' || { echo "FAIL: control must keep 255 exactly; got: $OUT"; exit 1; }
 echo "==> declared-width reject OK"
 
+# An `enum` and a `bitfield` are CLOSED (MESSAGE_SPEC S1, generator#516): what
+# binds is the SET of constants / the MASK of declared positions, never a width
+# and never the integer the target stores the field in. The shared driver prints
+# its own schema and forges its own bytes, and probes ALL SIX positions with
+# GAPPED definitions, so an interval bound cannot pass.
+#
+# C# held both kinds through a narrowing cast with no comparison at all, at
+# every one of the twelve stores: 5 into an enum declaring {0,1,2,10} was KEPT,
+# 4 into a bitfield declaring bits 0, 1 and 3 was KEPT, and 256 into that same
+# bitfield came back 0 -- the decode reporting success in every case.
+echo "==> closed enum/bitfield: only what the schema declares is valid (S1, generator#516)"
+{ echo "version: 1"; echo "messages:"; } > "$WORK/closed.yaml"
+python3 "$ROOT/tests/conformance/lib/check_closed_kinds.py" --emit-schema >> "$WORK/closed.yaml"
+( cd "$ROOT" && go run ./cmd/sofabgen --config "$WORK/cfg.yaml" --lang csharp --in "$WORK/closed.yaml" --out "$WORK/closed" )
+( cd "$WORK/closed" && dotnet build -v q >/dev/null )
+python3 "$ROOT/tests/conformance/lib/check_closed_kinds.py" "csharp" \
+    --invalid-pattern 'InvalidMessage' -- dotnet "$WORK/closed/bin/Debug/net9.0/harness.dll"
+
 # CORELIB_PLAN S7.2 item 8 -- the shared file's `sequence_growth` block
 # (generator#449). A wrapper array carries no element count: its length is
 # highest present id + 1, so it GROWS as elements arrive, and the element INDEX

@@ -1907,42 +1907,40 @@ func TestRustDeclaredWidthIsAValidityBound(t *testing.T) {
 
 // enumBitfieldElemSrc pairs an enum and a bitfield ARRAY element with the plain
 // narrow element that always carried the guard, so the three are read side by
-// side. Both named types are deliberately narrow — an enum over 0..2 backs onto
-// `i8`, a bitfield declaring pos 0 and 2 onto `u8` — because the backing is what
-// the store's `as` cast masks to.
+// side. Both named types are deliberately GAPPED — the enum declares 0, 1, 2 and
+// 10, so 5 is inside its hull and still not a constant; the bitfield declares
+// pos 0 and 2, so mask 0b101 leaves bit 1 undeclared and 2 is not a legal value
+// — because a contiguous definition makes a closed set look like an interval and
+// hides exactly the bug this pins. Both are narrow (`i8`, `u8`) as well, so the
+// assertions also show that the bound and the storage are two different numbers.
 const enumBitfieldElemSrc = `
 version: 1
 messages:
   r:
     payload:
-      es: { id: 0, type: array, items: { type: enum, count: 4, enum: { RED: 0, GREEN: 1, BLUE: 2 } } }
+      es: { id: 0, type: array, items: { type: enum, count: 4, enum: { RED: 0, GREEN: 1, BLUE: 2, Z: 10 } } }
       bs: { id: 1, type: array, items: { type: bitfield, count: 4, bits: { A: { pos: 0 }, C: { pos: 2 } } } }
       u1: { id: 3, type: array, items: { type: u8, count: 4 } }
-      nes: { id: 6, type: array, items: { type: array, count: 4, items: { type: enum, count: 4, enum: { RED: 0, GREEN: 1, BLUE: 2 } } } }
+      nes: { id: 6, type: array, items: { type: array, count: 4, items: { type: enum, count: 4, enum: { RED: 0, GREEN: 1, BLUE: 2, Z: 10 } } } }
       nbs: { id: 7, type: array, items: { type: array, count: 4, items: { type: bitfield, count: 4, bits: { A: { pos: 0 }, C: { pos: 2 } } } } }
       w64: { id: 8, type: array, items: { type: bitfield, count: 4, bits: { A: { pos: 0 }, Z: { pos: 63 } } } }
 `
 
-// generator#513: an ARRAY element declared `bitfield` got no §7.1 width guard at
-// all. ir.NarrowRange keys off the Kind alone and returns !ok for it, so
-// widthCond produced the empty string and the store was emitted bare — a wire
-// element of 1000 was masked by the `as` cast into `bs: [232]` and the message
-// decoded Ok, where the u8 element beside it is InvalidMsg.
+// generator#516 closes both kinds by what the schema DECLARES: an `enum` by its
+// set of constants, a `bitfield` by the mask of its declared `pos` bits
+// (MESSAGE_SPEC §1). Before it, an ARRAY element of either kind was bounded at
+// the wrong thing or not at all — the enum store was emitted bare, so a wire
+// element of 1000 was masked by the `as` cast into `es: [-24]` and the message
+// decoded Ok, and the bitfield store was bounded at its REPR (generator#513), so
+// a 4 into a bitfield declaring only pos 0 and 2 was kept because a u8 holds it.
 //
-// The bound is the REPR the element is stored in (bitfieldBackingKind), not the
-// set of declared positions: an undeclared bit that FITS is a flag a peer built
-// from a newer schema carries and is kept (generator#482 settled that half, and
-// corelib-cpp already enforces this same width on this same element through
-// `ElemBound::of<bitfieldBacking>()`).
-//
-// The ENUM element is the other half of #513 and is deliberately still bare:
-// bounding it at its i8/i16/i32 repr is narrower than the signed 32-bit range
-// MESSAGE_SPEC §1 binds an enum to, and would refuse messages java, python,
-// typescript, dart and kotlin all keep. generator#516 decides the family bound;
-// elemWidthCond carries the argument. This test pins the enum store as UNGUARDED
-// so that when #516 lands, whichever way it lands, it has to come back here and
-// say so.
-func TestRustBitfieldArrayElementsCarryTheWidthGuard(t *testing.T) {
+// The fixture is gapped on purpose (see enumBitfieldElemSrc). The clause is a
+// membership test for the enum and a mask test for the bitfield, both on the raw
+// accumulator ahead of the narrowing cast, so one comparison rejects an
+// undeclared value inside the storage width and everything above it at once.
+// Placement is unchanged: behind fillGuard, so a bare scalar at an array id
+// stays a §7.3 skip, and the reject still DISARMS the fill (generator#508).
+func TestRustClosedArrayElementsCarryTheirDeclaredSet(t *testing.T) {
 	// The two corelibs spell the push differently -- heapless returns a Result the
 	// no_std store discards -- so the store half is per-corelib; the guard half,
 	// which is what this test is about, is identical for both.
@@ -1953,45 +1951,76 @@ func TestRustBitfieldArrayElementsCarryTheWidthGuard(t *testing.T) {
 		got := moduleFromYAML(t, enumBitfieldElemSrc, map[string]any{"corelib": c.corelib})
 		const fill = "if self.afill == 0 { return; } self.afill -= 1; "
 		const u8Rej = "if value > 255 { self.inv = true; self.afill = 0; return; } "
+		const bfRej = "if value & !0x5 != 0 { self.inv = true; self.afill = 0; return; } "
+		const enRej = "if !matches!(value, 0 | 1 | 2 | 10) { self.inv = true; self.afill = 0; return; } "
 		for _, want := range []string{
-			// The bitfield element: unsigned, so only the top binds, and the reject
-			// DISARMS the fill (generator#508) like every other element reject. The
-			// guard sits behind fillGuard so a bare scalar at an array id stays a
-			// §7.3 skip.
-			fill + u8Rej + c.bs,
+			// The bitfield element: its bound is the mask 0b101, NOT the u8 the
+			// member is stored in, so 2 and 4 are refused alongside 256.
+			fill + bfRej + c.bs,
+			// The enum element: its bound is the set, so 5 is refused although the
+			// hull 0..10 contains it and the i8 member holds it.
+			fill + enRej + c.es,
+			// The plain narrow element is unchanged: a WIDTH is still a width.
 			fill + u8Rej + c.u1,
 			// A nested-native ROW element is the same element one level down and
-			// takes the same clause.
-			"self.afill -= 1; " + u8Rej + "if let Some(_r) = self.m.nbs.get_mut(self._ix1)",
+			// takes the same clause, for both kinds.
+			"self.afill -= 1; " + bfRej + "if let Some(_r) = self.m.nbs.get_mut(self._ix1)",
+			"self.afill -= 1; " + enRej + "if let Some(_r) = self.m.nes.get_mut(self._ix0)",
 		} {
 			if !strings.Contains(got, want) {
-				t.Errorf("[%s] message.rs missing element width guard %q:\n%s", c.corelib, want, got)
+				t.Errorf("[%s] message.rs missing element closed-set guard %q:\n%s", c.corelib, want, got)
 			}
 		}
-		// A bitfield declaring pos 63 backs onto u64, whose range IS the
-		// accumulator the value arrives in -- so it gets no comparison, exactly as
-		// a u64 element gets none. A guard there would be dead code.
-		if !strings.Contains(got, fill+c.w64) {
-			t.Errorf("[%s] a u64-backed bitfield element must store unguarded:\n%s", c.corelib, got)
-		}
-		// The enum half of #513, held back for generator#516: still bare, at both
-		// positions, and pinned here so the state is a decision rather than a
-		// forgotten arm.
-		if !strings.Contains(got, fill+c.es) {
-			t.Errorf("[%s] the enum element store must stay unguarded until generator#516 (see elemWidthCond):\n%s", c.corelib, got)
-		}
-		if !strings.Contains(got, "self.afill -= 1; if let Some(_r) = self.m.nes.get_mut(self._ix0)") {
-			t.Errorf("[%s] the nested enum element store must stay unguarded until generator#516:\n%s", c.corelib, got)
+		// A bitfield declaring pos 0 and pos 63 backs onto u64, and under the old
+		// REPR rule that meant no guard at all: its range was the accumulator's.
+		// Under the mask rule its bound is 0x8000000000000001, so the 62 bits in
+		// between are undeclared and the element IS guarded — the assertion that
+		// most directly inverts with generator#516. The mask does not fit an
+		// unsuffixed literal on a 32-bit `value32` no_std build, so it is widened
+		// explicitly.
+		const w64Rej = "if (value as u64) & !0x8000000000000001_u64 != 0 { self.inv = true; self.afill = 0; return; } "
+		if !strings.Contains(got, fill+w64Rej+c.w64) {
+			t.Errorf("[%s] a u64-backed bitfield element must be bounded by its declared mask:\n%s", c.corelib, got)
 		}
 	}
 }
 
-// The width the guard compares against and the width the member is declared with
-// have to be the SAME number: a guard that admitted a value the member cannot
-// hold would leave the `as` cast masking again, one range further out. Both come
-// from bitfieldBackingKind, and this pins that they still agree for each backing
-// step that function can choose.
-func TestRustElementWidthGuardMatchesTheDeclaredBacking(t *testing.T) {
+// A bitfield that declares every one of the 64 positions has mask u64::MAX, so
+// `value & !mask != 0` is a tautology. It is elided rather than emitted: dead
+// code in every generated crate, and the one case where "no guard" is still the
+// right answer under the closed rule.
+func TestRustAllBitsDeclaredBitfieldNeedsNoGuard(t *testing.T) {
+	var bits []string
+	for i := 0; i < 64; i++ {
+		bits = append(bits, fmt.Sprintf("F%d: { pos: %d }", i, i))
+	}
+	src := "version: 1\nmessages:\n  r:\n    payload:\n" +
+		"      f: { id: 0, type: bitfield, bits: { " + strings.Join(bits, ", ") + " } }\n" +
+		"      fa: { id: 1, type: array, items: { type: bitfield, count: 2, bits: { " + strings.Join(bits, ", ") + " } } }\n"
+	got := moduleFromYAML(t, src, map[string]any{"corelib": "rs"})
+	for _, want := range []string{
+		"(_Loc::Root, 0) => { self.m.f = value as u64 },",
+		"if self.afill == 0 { return; } self.afill -= 1; self.m.fa.push(value as u64);",
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("an all-bits-declared bitfield must store unguarded (%q):\n%s", want, got)
+		}
+	}
+	if strings.Contains(got, "!0xffffffffffffffff") {
+		t.Errorf("a tautological mask guard was emitted:\n%s", got)
+	}
+}
+
+// The guard and the member are deliberately DIFFERENT numbers. Storage follows
+// the highest declared position (bitfieldBackingKind, a MAY under MESSAGE_SPEC
+// §1 and a footprint decision); the bound follows the declared positions
+// themselves. A bitfield declaring only pos 7 is held in a `u8` and admits
+// exactly two values, 0 and 128 — the width the member happens to have never
+// enters the comparison, which is the whole content of the closed rule.
+//
+// This is the inverse of what the test asserted before generator#516, when the
+// two came from one function precisely so they could not drift.
+func TestRustElementClosedGuardIsTheMaskNotTheBacking(t *testing.T) {
 	const src = `
 version: 1
 messages:
@@ -2003,12 +2032,101 @@ messages:
 `
 	got := moduleFromYAML(t, src, map[string]any{"corelib": "rs"})
 	for _, want := range []string{
-		"if value > 255 { self.inv = true; self.afill = 0; return; } self.m.b8.push(value as u8);",
-		"if value > 65535 { self.inv = true; self.afill = 0; return; } self.m.b16.push(value as u16);",
-		"if value > 4294967295 { self.inv = true; self.afill = 0; return; } self.m.b32.push(value as u32);",
+		"if value & !0x80 != 0 { self.inv = true; self.afill = 0; return; } self.m.b8.push(value as u8);",
+		"if value & !0x100 != 0 { self.inv = true; self.afill = 0; return; } self.m.b16.push(value as u16);",
+		"if value & !0x10000 != 0 { self.inv = true; self.afill = 0; return; } self.m.b32.push(value as u32);",
 	} {
 		if !strings.Contains(got, want) {
 			t.Errorf("message.rs missing %q:\n%s", want, got)
+		}
+	}
+	// The old repr bound must be gone: it admitted every undeclared bit the
+	// backing held (255 into a bitfield declaring one position).
+	for _, gone := range []string{"if value > 255 { self.inv = true; self.afill = 0; return; } self.m.b8.push"} {
+		if strings.Contains(got, gone) {
+			t.Errorf("the superseded repr bound is still emitted (%q):\n%s", gone, got)
+		}
+	}
+}
+
+// The closed check reaches ALL SIX positions a value can land in, for both
+// kinds: a scalar field, a native array element, a struct member, a member of a
+// struct-array element, a union member, and a matrix row element. The first four
+// scalar-family positions are one match arm per kind serving four frames, and
+// the two array positions route the same condition through arrayWidthGuard —
+// but "the arm is shared" is exactly the kind of claim that stops being true
+// after a refactor, so each frame is pinned by name.
+func TestRustClosedKindsRejectAtEverySixPositions(t *testing.T) {
+	const src = `
+version: 1
+messages:
+  Closed:
+    payload:
+      en:  { id: 0, type: enum, enum: { A: 0, B: 1, C: 2, Z: 10 } }
+      bf:  { id: 1, type: bitfield, bits: { A: { pos: 0 }, B: { pos: 1 }, D: { pos: 3 } } }
+      ea:  { id: 2, type: array, items: { type: enum, count: 4, enum: { A: 0, B: 1, C: 2, Z: 10 } } }
+      bfa: { id: 3, type: array, items: { type: bitfield, count: 4, bits: { A: { pos: 0 }, B: { pos: 1 }, D: { pos: 3 } } } }
+      st:
+        id: 4
+        type: struct
+        fields:
+          se:  { id: 0, type: enum, enum: { A: 0, B: 1, C: 2, Z: 10 } }
+          sbf: { id: 1, type: bitfield, bits: { A: { pos: 0 }, B: { pos: 1 }, D: { pos: 3 } } }
+      sa:
+        id: 5
+        type: array
+        items:
+          type: struct
+          count: 2
+          fields:
+            se:  { id: 0, type: enum, enum: { A: 0, B: 1, C: 2, Z: 10 } }
+            sbf: { id: 1, type: bitfield, bits: { A: { pos: 0 }, B: { pos: 1 }, D: { pos: 3 } } }
+      un:
+        id: 6
+        type: union
+        default_id: 0
+        oneof:
+          ue:  { id: 0, type: enum, enum: { A: 0, B: 1, C: 2, Z: 10 } }
+          ubf: { id: 1, type: bitfield, bits: { A: { pos: 0 }, B: { pos: 1 }, D: { pos: 3 } } }
+      mat: { id: 7, type: array, items: { type: array, count: 2, items: { type: enum, count: 3, enum: { A: 0, B: 1, C: 2, Z: 10 } } } }
+      mbf: { id: 8, type: array, items: { type: array, count: 2, items: { type: bitfield, count: 3, bits: { A: { pos: 0 }, B: { pos: 1 }, D: { pos: 3 } } } } }
+`
+	const enRej = "if !matches!(value, 0 | 1 | 2 | 10) { self.inv = true; return; } "
+	const bfRej = "if value & !0xb != 0 { self.inv = true; return; } "
+	const enFill = "if !matches!(value, 0 | 1 | 2 | 10) { self.inv = true; self.afill = 0; return; } "
+	const bfFill = "if value & !0xb != 0 { self.inv = true; self.afill = 0; return; } "
+	const fill = "if self.afill == 0 { return; } self.afill -= 1; "
+	for _, corelib := range []string{"rs", "rs-no-std"} {
+		got := moduleFromYAML(t, src, map[string]any{"corelib": corelib})
+		for _, want := range []string{
+			// 1. scalar
+			"(_Loc::Root, 0) => { " + enRej,
+			"(_Loc::Root, 1) => { " + bfRej,
+			// 2. native array element
+			"(_Loc::Root, 2) => { " + fill + enFill,
+			"(_Loc::Root, 3) => { " + fill + bfFill,
+			// 3. struct member
+			"(_Loc::Root_st, 0) => { " + enRej,
+			"(_Loc::Root_st, 1) => { " + bfRej,
+			// 4. struct-array element member
+			"(_Loc::Root_sa_e, 0) => { " + enRej,
+			"(_Loc::Root_sa_e, 1) => { " + bfRej,
+			// 5. union member
+			"(_Loc::Root_un, 0) => { " + enRej,
+			"(_Loc::Root_un, 1) => { " + bfRej,
+			// 6. matrix row element
+			"(_Loc::Root_mat, _) => { " + fill + enFill,
+			"(_Loc::Root_mbf, _) => { " + fill + bfFill,
+		} {
+			if !strings.Contains(got, want) {
+				t.Errorf("[%s] a closed-kind position stores without its guard, missing %q:\n%s", corelib, want, got)
+			}
+		}
+		// Storage stays narrow: the bound moved, the member did not.
+		for _, want := range []string{"pub en: i8", "pub bf: u8"} {
+			if !strings.Contains(got, want) {
+				t.Errorf("[%s] the closed bound must not widen storage, missing %q:\n%s", corelib, want, got)
+			}
 		}
 	}
 }

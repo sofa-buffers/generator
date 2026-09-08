@@ -820,6 +820,25 @@ OUT=$("$WORK/ex/zig-out/bin/harness" decode myfirstmessage < "$WORK/w_u8_255_ctl
 echo "$OUT" | tr -d ' ' | grep -q '"someu8":255' || { echo "FAIL: control must keep 255 exactly; got: $OUT"; exit 1; }
 echo "==> declared-width reject OK"
 
+# An `enum` and a `bitfield` are CLOSED (MESSAGE_SPEC S1, generator#516): what
+# binds is the SET of constants / the MASK of declared positions, never a width
+# and never the integer the target stores the field in. The shared driver prints
+# its own schema and forges its own bytes, and probes ALL SIX positions with
+# GAPPED definitions, so an interval bound cannot pass.
+#
+# On this backend the same missing guard was also generator#517, and the two
+# build modes disagreed about it: every one of the twelve stores reached a bare
+# @intCast, so a Debug harness ABORTED ("integer does not fit in destination
+# type") where the --release=fast build this suite ships truncated the value and
+# reported Ok. Neither is a verdict. zig_build uses --release=fast on purpose --
+# a Debug-only case would report a crash rather than a decode outcome.
+echo "==> closed enum/bitfield: only what the schema declares is valid (S1, generator#516)"
+{ echo "version: 1"; echo "messages:"; } > "$WORK/closed.yaml"
+python3 "$ROOT/tests/conformance/lib/check_closed_kinds.py" --emit-schema >> "$WORK/closed.yaml"
+zig_build "$WORK/closed.yaml" "$WORK/closed"
+python3 "$ROOT/tests/conformance/lib/check_closed_kinds.py" "zig" \
+    --invalid-pattern 'InvalidMessage' -- "$WORK/closed/zig-out/bin/harness"
+
 # CORELIB_PLAN S7.2 item 8 -- the shared file's `sequence_growth` block
 # (generator#449). A wrapper array carries no element count: its length is
 # highest present id + 1, so it GROWS as elements arrive, and the element INDEX

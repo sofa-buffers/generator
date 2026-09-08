@@ -168,14 +168,16 @@ ajv.addKeyword({
 ### 4. Custom keyword: `defaultMatchesEnum`
 
 Applied to an `enum`-typed field; asserts the field's `default` is one of the
-enum's declared values. Reference implementation:
+enum's declared values — **and, when the field declares no `default` at all, that
+the enum declares a constant with the value `0`.** Reference implementation:
 
 ```js
 ajv.addKeyword({
   keyword: "defaultMatchesEnum", type: "object", schemaType: "boolean", errors: true,
   validate(schema, data) {
-    if (!schema || data.default === undefined) return true;   // presence test, not truthiness
+    if (!schema) return true;                                    // the keyword's own on/off switch
     const values = Object.values(data.enum).map(e => (typeof e === "object" ? e.value : e));
+    if (data.default === undefined) return values.includes(0);   // presence test, not truthiness
     return values.includes(data.default);
   },
 });
@@ -186,6 +188,18 @@ ajv.addKeyword({
 > still checked rather than skipped. This keyword reads `data.enum`, so it must run
 > **after** `$ref` resolution (a `{ $ref }` enum is only a map of values once
 > dereferenced).
+
+> **Why the absent-`default` half.** An `enum` is a **closed** type: only the
+> constants it declares are valid values, on the wire and off it. A field with no
+> `default` initializes to its type's zero value, and a sparse encoder omits the
+> field at exactly that value — so an enum `{RED: 1, GREEN: 2}` whose field
+> declares no `default` would initialize to `0`, a value the enum itself rejects,
+> and absence would reconstruct it on every receiver. Give the field a `default`
+> naming one of the constants, or give the enum a `0` constant. The rule binds a
+> **field**: an `array` of enum needs no counterpart, because `count` is a
+> capacity and nothing is padded to it — an array with no `default` initializes
+> empty, never to a run of zeros. A `bitfield` needs none either: its zero is the
+> "no flags set" combination and is always valid.
 
 ### 5. Custom keyword: `blobDefaultLength`
 
@@ -328,10 +342,21 @@ before the validator ever sees it — and so is a number with a decimal point or
 exponent, because a bit pattern has no fractional spelling and the generator would
 render `1000000.0` into the emitted source as `1e+06`.
 
-A bit set at a position no flag declares is **accepted**: nothing masks a bitfield
-down to its declared positions, the wire carries the whole unsigned value, and an
-undeclared bit is how a peer built from a newer schema carries a flag this one does
-not declare yet.
+The value bound is the **declared mask**: one bit per declared `pos`, and an
+element setting any other bit is rejected. A `bitfield` is **closed** by that mask
+(MESSAGE_SPEC §1) — `v & ~mask == 0` — and a `default` is what absence
+reconstructs (§2), so a default outside the mask would be a field value no
+conformant peer accepts on the wire while this schema's own encoder still writes
+it. Every combination of the declared flags is valid, the zero value included; the
+mask is **not** every bit up to the highest declared one, so `bits: {A: {pos: 0},
+C: {pos: 2}}` admits `0`, `1`, `4` and `5` and nothing else.
+
+**Storage is never the bound.** The same bitfield is held in one byte by six of
+the eleven targets, and `default: [255]` is still rejected: which integer a
+receiver picks is a footprint decision (§1, a `MAY`) and says nothing about
+validity. The mask is strictly narrower than the backing width it replaced — the
+declared positions all fit that type by construction — so it also subsumes the
+64-bit ceiling: `18446744073709551616` sets bit 64, which no flag declares.
 
 What a stock JSON Schema validator can check here is the **spelling and the sign**:
 the shipped branch carries `"type": ["integer", "string"]`, `"minimum": 0` (the
@@ -342,13 +367,9 @@ are **generator-side only**:
   not representable as an IEEE-754 double, so a `maximum` written at that magnitude
   rounds up to 2^64 and admits a value the generator rejects; and the `pattern`
   constrains only the string form anyway;
-- the **backing width**. Six of the eleven targets back a bitfield with the
-  smallest unsigned type that holds its highest declared `pos` (c, cpp, rust, go,
-  zig, csharp; the other five carry it at full width), so a two-flag bitfield is one
-  byte wide there and `default: [1000]` does not fit the member they emit. One
-  definition has to generate for all eleven, so the schema takes the narrowest
-  target's bound. It depends on the sibling `bits` map, which is not something a
-  keyword-free branch can reach.
+- the **declared mask** itself, which depends on the sibling `bits` map — not
+  something a keyword-free branch can reach, and not expressible as a `maximum`
+  either, because the admitted values are a set with gaps rather than an interval.
 
 #### 8.2 Array-of-`u64` / `i64` element defaults
 

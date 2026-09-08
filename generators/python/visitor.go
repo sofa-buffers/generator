@@ -414,45 +414,75 @@ func (g *gen) objValueArm(sc *pyScope, hook string) []string {
 	return out
 }
 
-// storeValue renders the assignment (and its §7.1 declared-width rejection) for
-// one destination.
+// storeValue renders the assignment, and the §7.1 rejection of a value the
+// destination's declaration does not admit, for one destination.
+//
+// What the schema declares is what binds, and the declaration takes two shapes.
+// For an integer it is a WIDTH (documentation#32); for an `enum` or a
+// `bitfield` it is a SET -- the declared constants, the mask of declared `pos`
+// bits (MESSAGE_SPEC §1) -- and closedCond answers for those. One clause serves
+// four of the six positions a value lands in: objValueArm renders this store for
+// a message field, a struct member, a struct-array element's member and a union
+// member alike, so a value the schema does not declare gets one verdict wherever
+// it lands (generator#516).
 func (g *gen) storeValue(acc, loc string, fld *ir.Field) []string {
 	if fld.Kind == ir.KindArray {
-		return g.storeNativeArray(acc, loc, fld.Elem)
+		return g.storeNativeArray(acc, loc, fld.Elem, fld.ElemRef)
 	}
 	var out []string
 	if fld.Kind == ir.KindBool {
 		return append(out, fmt.Sprintf("%s = bool(value)", acc))
 	}
-	// The declared width is checked on the value the corelib handed over.
-	// Python's int is unbounded, so nothing masks an out-of-range value -- the
-	// whole defect this guards was that such a value was simply KEPT -- and the
-	// raise aborts the decode before the object is handed back.
-	if cond := widthCond("value", fld.Kind); cond != "" {
+	// The bound is checked on the value the corelib handed over. Python's int is
+	// unbounded, so nothing masks an out-of-range value -- the whole defect this
+	// guards was that such a value was simply KEPT -- and the raise aborts the
+	// decode before the object is handed back.
+	cond, what := widthCond("value", fld.Kind), "width "+fld.Kind.String()
+	if cond == "" {
+		cond, what = closedCond("value", fld.Kind, fld.Ref), closedWhat(fld.Kind)
+	}
+	if cond != "" {
 		out = append(out,
 			fmt.Sprintf("if %s:", cond),
 			fmt.Sprintf("    raise SofaDecodeError(%q)",
-				fmt.Sprintf("%s: value outside declared width %s", loc, fld.Kind)))
+				fmt.Sprintf("%s: value outside declared %s", loc, what)))
 	}
 	return append(out, fmt.Sprintf("%s = value", acc))
 }
 
-// storeNativeArray renders a native array's store.
+// storeNativeArray renders a native array's store — the array-element and
+// matrix-row-element positions, which arrValueArm renders from here too.
 //
-// It carries NO element-width scan. The §7.1 element bound is stated once, in
+// For a declared WIDTH it carries no scan. That bound is stated once, in
 // on_array_begin, as the (elem_min, elem_max) pair the decoder applies AT each
-// element -- which is where the bound has to be taken anyway, since a scan of
-// the finished list cannot reject an element a truncation prevents the array
-// from ever completing (§5.2's INVALID over INCOMPLETE). Repeating it here was a
+// element -- which is where it has to be taken anyway, since a scan of the
+// finished list cannot reject an element a truncation prevents the array from
+// ever completing (§5.2's INVALID over INCOMPLETE). Repeating it here was a
 // second, weaker verdict on a list the decoder had already vetted: a pure-Python
 // pass over every element of every integer array, per message, for nothing.
 //
-// The two stay in lockstep by construction: widthCond is non-empty exactly for
-// the narrow kinds ir.NarrowRange answers for, and arrayBeginBody emits the pair
-// for exactly those (see isIntArrayElem).
-func (g *gen) storeNativeArray(acc, loc string, elem ir.Kind) []string {
+// For the two CLOSED kinds the scan is the only exact verdict there is, so it is
+// emitted. corelib-py's element channel carries an INTERVAL and nothing else,
+// and a declared set is not an interval: the constants are gapped in general and
+// a mask is not a range at all. on_array_begin therefore states the HULL — the
+// most of the bound that hook can carry, which refuses every value outside the
+// declared range whether the array completes or not — and this scan closes the
+// rest for an array that arrives. What is left is exactly one case, and it is
+// reported rather than papered over: a value INSIDE the hull that the set does
+// not declare, in an array a truncation cuts short behind it, stays INCOMPLETE
+// where §5.2 wants INVALID. Closing it needs a set/mask parameter on
+// corelib-py's on_array_begin.
+func (g *gen) storeNativeArray(acc, loc string, elem ir.Kind, ref *ir.TypeRef) []string {
 	if elem == ir.KindBool {
 		return []string{fmt.Sprintf("%s = [bool(_v) for _v in value]", acc)}
+	}
+	if cond := closedCond("_v", elem, ref); cond != "" {
+		return []string{
+			fmt.Sprintf("if any(%s for _v in value):", cond),
+			fmt.Sprintf("    raise SofaDecodeError(%q)",
+				fmt.Sprintf("%s element: value outside declared %s", loc, closedWhat(elem))),
+			fmt.Sprintf("%s = value", acc),
+		}
 	}
 	return []string{fmt.Sprintf("%s = value", acc)}
 }
@@ -470,6 +500,62 @@ func widthCond(v string, k ir.Kind) string {
 	return fmt.Sprintf("%s > %d", v, hi)
 }
 
+// closedCond is the reject comparison for the two CLOSED kinds, MESSAGE_SPEC §1:
+// an `enum` is bound by the set of constants the schema declares, a `bitfield`
+// by the mask of the positions it declares, so `v` is valid exactly when
+// `v & ~mask == 0`. It returns "" for every other kind (widthCond owns those)
+// and for a bitfield whose declared positions cover all 64 bits, where the test
+// is a tautology.
+//
+// Neither bound is a width, and storage is never the bound: Python holds both
+// kinds in its own unbounded `int`, and a field whose declared positions are
+// 0..3 does not become anything-that-fits valid because of it. The mask test
+// needs no width term for the same reason it needs none anywhere else -- `~mask`
+// is an infinite-precision negative, so `value & ~mask` carries every bit above
+// the highest declared position as well as every undeclared one below it.
+//
+// This reverses generator#482, which kept an undeclared bit that fit the backing
+// width on the argument that it is how a peer built from a newer schema carries
+// a flag this one has not got yet. §1 answers that directly: adding a flag -- or
+// a constant -- is a BREAKING schema change, and a receiver rejects the value
+// rather than storing something its declared type cannot represent.
+func closedCond(v string, k ir.Kind, ref *ir.TypeRef) string {
+	switch k {
+	case ir.KindEnum:
+		vals, ok := ir.EnumValues(ref)
+		if !ok || len(vals) == 0 {
+			return ""
+		}
+		if ir.EnumContiguous(ref) {
+			return fmt.Sprintf("%s < %d or %s > %d", v, vals[0], v, vals[len(vals)-1])
+		}
+		terms := make([]string, len(vals))
+		for i, x := range vals {
+			terms[i] = fmt.Sprintf("%d", x)
+		}
+		return fmt.Sprintf("%s not in (%s)", v, strings.Join(terms, ", "))
+	case ir.KindBitfield:
+		mask, ok := ir.BitfieldMask(ref)
+		if !ok || mask == ^uint64(0) {
+			return ""
+		}
+		if mask == 0 {
+			return fmt.Sprintf("%s != 0", v)
+		}
+		return fmt.Sprintf("(%s & ~0x%x) != 0", v, mask)
+	}
+	return ""
+}
+
+// closedWhat names the breached declaration in the SofaDecodeError text, so the
+// two closed kinds read as what they are rather than as a width.
+func closedWhat(k ir.Kind) string {
+	if k == ir.KindEnum {
+		return "enum constants"
+	}
+	return "bitfield flags"
+}
+
 // arrValueArm renders an array scope's arm for one hook: a value element
 // (string/blob) or a native row, both keyed by index.
 func (g *gen) arrValueArm(sc *pyScope, hook string) []string {
@@ -484,7 +570,7 @@ func (g *gen) arrValueArm(sc *pyScope, hook string) []string {
 			return nil
 		}
 		want = pyArrayHook(sc.elemItems.Elem)
-		body = g.storeNativeArray("_t[fid]", sc.loc+" row", sc.elemItems.Elem)
+		body = g.storeNativeArray("_t[fid]", sc.loc+" row", sc.elemItems.Elem, sc.elemItems.ElemRef)
 	default:
 		return nil // struct/union elements arrive through on_sequence_begin
 	}
@@ -984,10 +1070,14 @@ func (g *gen) emitOnArrayBegin(f *pyfile, scopes []*pyScope) {
 	f.line("    def on_array_begin(self, fid: int, wtype: WireType, count: int):")
 	f.line("        \"\"\"An integer array's header, before any element is decoded.")
 	f.line("")
-	f.line("        Returns the declared element width for the decoder to apply AT each")
-	f.line("        element, so a value outside it is rejected whether the array completes")
-	f.line("        or is cut short behind it. The schema capacity is not checked here:")
-	f.line("        ``on_schema_bound`` declares it one hook earlier.")
+	f.line("        Returns the element bound as the INTERVAL this hook carries, for the")
+	f.line("        decoder to apply AT each element, so a value outside it is rejected")
+	f.line("        whether the array completes or is cut short behind it. For an integer")
+	f.line("        element that interval is the declared width exactly; for an ``enum`` or")
+	f.line("        a ``bitfield`` it is the HULL of the declared set, whose gaps the")
+	f.line("        typed hook's own scan closes for an array that arrives. The schema")
+	f.line("        capacity is not checked here: ``on_schema_bound`` declares it one hook")
+	f.line("        earlier.")
 	f.line("        \"\"\"")
 	f.line("        c = self._c")
 	first := true
@@ -1009,7 +1099,7 @@ func (g *gen) objArrayBeginArm(sc *pyScope) []string {
 		if fld.Kind != ir.KindArray || !isIntArrayElem(fld.Elem) {
 			continue
 		}
-		body := arrayBeginBody(fld.Elem)
+		body := arrayBeginBody(fld.Elem, fld.ElemRef)
 		if len(body) == 0 {
 			continue
 		}
@@ -1024,22 +1114,55 @@ func (g *gen) arrArrayBeginArm(sc *pyScope) []string {
 	if sc.elem != ir.KindArray || !isIntArrayElem(sc.elemItems.Elem) {
 		return nil
 	}
-	return arrayBeginBody(sc.elemItems.Elem)
+	return arrayBeginBody(sc.elemItems.Elem, sc.elemItems.ElemRef)
 }
 
-// arrayBeginBody is the shared body: state the declared element width.
+// arrayBeginBody is the shared body: state the bound the decoder applies AT each
+// element, as the (elem_min, elem_max) INTERVAL that hook can carry.
 //
-// Empty for u64/i64 (and enum/bitfield), whose declared width IS the value
-// domain -- there is nothing to narrow, so the base class's default answer will
-// do and no arm is worth a dispatch.
-func arrayBeginBody(elem ir.Kind) []string {
-	lo, hi, ok := ir.NarrowRange(elem)
-	switch {
-	case !ok:
-		return nil
-	case lo < 0:
-		return []string{fmt.Sprintf("return (None, %d, %d)", lo, hi)}
-	default:
+// For an integer element that interval IS the declared width, exactly. For the
+// two CLOSED kinds it is the HULL of the declaration and no more — the range the
+// declared constants span, `0..mask` for a bitfield — because a set with gaps
+// and a mask are not intervals and this hook has no way to state either. That is
+// the most of the bound that fits, and it is worth stating: it refuses every
+// value outside the declared range whether the array completes or is cut short
+// behind the offending element, which is where §5.2 requires INVALID to dominate
+// INCOMPLETE and where a scan of the assembled list cannot reach. The gap the
+// hull admits is closed for a completed array by storeNativeArray's scan and
+// stays open under truncation; see there.
+//
+// Empty for u64/i64, whose declared width IS the value domain, and for a
+// bitfield declaring all 64 positions, for the same reason -- there is nothing
+// to narrow, so the base class's default answer will do and no arm is worth a
+// dispatch.
+func arrayBeginBody(elem ir.Kind, ref *ir.TypeRef) []string {
+	if lo, hi, ok := ir.NarrowRange(elem); ok {
+		if lo < 0 {
+			return []string{fmt.Sprintf("return (None, %d, %d)", lo, hi)}
+		}
 		return []string{fmt.Sprintf("return (None, None, %d)", hi)}
 	}
+	switch elem {
+	case ir.KindEnum:
+		// BOTH sides, always -- including a hull whose floor is 0. An enum array
+		// travels as WT_ARRAY_SIGNED, so a negative element is expressible on the
+		// wire, and an enum declaring only non-negative constants must refuse one.
+		// Leaving elem_min at None handed the hook a one-sided interval and let
+		// -1 through, which the completed-array scan then caught but a truncation
+		// behind the element did not -- the very INCOMPLETE-instead-of-INVALID
+		// hole this hook exists to close (§5.2, §7.1).
+		if lo, hi, ok := ir.EnumHull(ref); ok {
+			return []string{fmt.Sprintf("return (None, %d, %d)", lo, hi)}
+		}
+	case ir.KindBitfield:
+		// A Python int is unbounded, so the mask states its own top however high
+		// the declared position sits -- there is no int64 to clamp it to and no
+		// bit-63 corner. A mask of 0 leaves only the zero value, which the scan
+		// states exactly and an interval could not; an all-bits mask is the value
+		// domain and states nothing.
+		if mask, ok := ir.BitfieldMask(ref); ok && mask != 0 && mask != ^uint64(0) {
+			return []string{fmt.Sprintf("return (None, None, %d)", mask)}
+		}
+	}
+	return nil
 }

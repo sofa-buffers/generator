@@ -2,6 +2,7 @@ package zig
 
 import (
 	"fmt"
+	"strconv"
 	"strings"
 
 	"github.com/sofa-buffers/generator/internal/ir"
@@ -312,13 +313,22 @@ func (g *gen) putCall(fr frame, fld *ir.Field, guard, val string) string {
 // storeCast renders the visitor value expression for a numeric destination
 // type: u64/i64 pass through, narrower integers are cast down.
 //
-// The cast is only ever reached for a value that FITS. The declared width is a
-// normative validity bound, not a storage hint (MESSAGE_SPEC §1/§7.1,
-// documentation#32), so widthGuard rejects an out-of-range value as INVALID
-// before the store — `@truncate` here would otherwise be exactly the masking §7.1
-// forbids. `@intCast` rather than `@truncate` makes that contract explicit: it
-// is checked in safe build modes, so a guard that ever failed to precede a store
-// is a panic in Debug/ReleaseSafe rather than a silently masked value.
+// The cast is only ever reached for a value that FITS, because widthGuard runs
+// first at every store it can be reached from. What the schema declares is what
+// binds — a WIDTH for an integer, the SET of constants or the MASK of declared
+// positions for an enum or a bitfield (MESSAGE_SPEC §1/§7.1, documentation#32) —
+// and an out-of-range value is rejected as INVALID before the store, because
+// `@truncate` here would be exactly the masking §7.1 forbids.
+//
+// `@intCast` rather than `@truncate` makes that contract explicit: it is checked
+// in safe build modes, so a guard that ever failed to precede a store is a panic
+// in Debug/ReleaseSafe rather than a silently masked value. That is not a
+// theoretical property. Until generator#516 the enum and bitfield stores reached
+// this cast with no guard at all, and the two build modes disagreed about what
+// an out-of-set value did: a Debug harness aborted with "integer does not fit in
+// destination type" while the --release=fast build the conformance suite ships
+// stored the truncated value and reported Ok (generator#517). One missing guard,
+// two defects; the guard is the fix for both.
 func storeCast(dest string, value string) string {
 	if dest == "u64" || dest == "i64" {
 		return value
@@ -326,13 +336,21 @@ func storeCast(dest string, value string) string {
 	return "@intCast(" + value + ")"
 }
 
-// widthGuard renders the §7.1 declared-width rejection for a store into a
-// destination of Kind k, or "" for the 64-bit kinds (whose range IS the
-// accumulator the value arrives in). `self.inv` is the same sticky INVALID flag
-// the over-count and over-index guards set, surfaced by decode() as
+// widthGuard renders the §7.1 rejection for a store into a destination the
+// schema declares as Kind k — with ref carrying the named type when k is a
+// composite one — or "" when nothing reachable can breach the bound: the 64-bit
+// kinds, whose range IS the accumulator the value arrives in, and a bitfield
+// declaring all 64 positions. `self.inv` is the same sticky INVALID flag the
+// over-count and over-index guards set, surfaced by decode() as
 // error.InvalidMessage.
 //
 // The unsigned side needs no negative term: sofab.Unsigned is a u64.
+//
+// For an `enum` and a `bitfield` the declaration is a SET, not a width, and
+// closedGuard states it — see there. Both run on the raw accumulator, ahead of
+// the narrowing @intCast, which is what makes one clause enough: a value the
+// schema does not declare is rejected whether it would have fitted the backing
+// integer or not.
 //
 // guardedStore wraps a scalar store arm in the block a guard needs. Zig prong
 // bodies are expressions, so a guarded store becomes `{ if (...) {...} store; }`
@@ -344,15 +362,64 @@ func guardedStore(guard, stmt string) string {
 	return "{ " + guard + stmt + "; }"
 }
 
-func widthGuard(k ir.Kind) string {
+func widthGuard(k ir.Kind, ref *ir.TypeRef) string {
 	lo, hi, ok := ir.NarrowRange(k)
 	if !ok {
-		return ""
+		return closedGuard(k, ref)
 	}
 	if lo < 0 {
 		return fmt.Sprintf("if (value < %d or value > %d) { self.inv = true; return; } ", lo, hi)
 	}
 	return fmt.Sprintf("if (value > %d) { self.inv = true; return; } ", hi)
+}
+
+// closedGuard renders the rejection for the two CLOSED kinds, MESSAGE_SPEC §1:
+// an `enum` is bound by the set of constants the schema declares, a `bitfield`
+// by the mask of the positions it declares. A wire value outside that set is
+// malformed input, exactly as an over-width integer is, and gets the same sticky
+// self.inv.
+//
+// Storage is never the bound. enumBacking / bitfieldBacking still pick the
+// smallest integer that holds the declared constants/positions — §1 grants that
+// as a MAY and a footprint target takes it — but a bitfield whose declared
+// positions are 0, 1 and 3 rejects 4 even though its u8 member would hold it,
+// and an enum declaring {0, 1, 2, 10} rejects 5. The mask is not "every bit up
+// to the highest declared one".
+//
+// The forms: a contiguous constant set is a two-sided comparison, a gapped one a
+// switch whose else prong rejects (cheaper to read and to compile than a chain
+// of `and`s once the set grows), and a bitfield one `&`-test against the
+// complement of its mask. That last one runs on the u64 accumulator, so it also
+// rejects everything above the backing width — no separate width term is needed,
+// and it is the reason a bitfield declaring all 64 positions gets no guard at
+// all rather than a tautology.
+func closedGuard(k ir.Kind, ref *ir.TypeRef) string {
+	const reject = "{ self.inv = true; return; } "
+	switch k {
+	case ir.KindEnum:
+		vals, ok := ir.EnumValues(ref)
+		if !ok || len(vals) == 0 {
+			return ""
+		}
+		if ir.EnumContiguous(ref) {
+			return fmt.Sprintf("if (value < %d or value > %d) %s", vals[0], vals[len(vals)-1], reject)
+		}
+		pats := make([]string, len(vals))
+		for i, v := range vals {
+			pats[i] = strconv.FormatInt(v, 10)
+		}
+		return fmt.Sprintf("switch (value) { %s => {}, else => %s} ", strings.Join(pats, ", "), reject)
+	case ir.KindBitfield:
+		mask, ok := ir.BitfieldMask(ref)
+		if !ok || mask == ^uint64(0) {
+			return ""
+		}
+		if mask == 0 {
+			return fmt.Sprintf("if (value != 0) %s", reject)
+		}
+		return fmt.Sprintf("if ((value & ~@as(u64, 0x%x)) != 0) %s", mask, reject)
+	}
+	return ""
 }
 
 func (g *gen) emitDecoder(f *zfile, name string, fields []*ir.Field) {
@@ -473,29 +540,29 @@ func (g *gen) intArm(fr frame, fld *ir.Field, signed bool) string {
 	if signed {
 		switch {
 		case isSignedElem(fld.Kind):
-			return guardedStore(widthGuard(fld.Kind), fmt.Sprintf("%s = %s", acc, storeCast(numZigType(fld.Kind), "value")))
+			return guardedStore(widthGuard(fld.Kind, fld.Ref), fmt.Sprintf("%s = %s", acc, storeCast(numZigType(fld.Kind), "value")))
 		case fld.Kind == ir.KindEnum:
-			return fmt.Sprintf("%s = %s", acc, storeCast(enumBacking(fld.Ref.Target), "value"))
+			return guardedStore(widthGuard(fld.Kind, fld.Ref), fmt.Sprintf("%s = %s", acc, storeCast(enumBacking(fld.Ref.Target), "value")))
 		case fld.Kind == ir.KindArray && isSignedElem(fld.Elem):
-			return g.putCall(fr, fld, widthGuard(fld.Elem), storeCast(numZigType(fld.Elem), "value"))
+			return g.putCall(fr, fld, widthGuard(fld.Elem, fld.ElemRef), storeCast(numZigType(fld.Elem), "value"))
 		case fld.Kind == ir.KindArray && fld.Elem == ir.KindEnum:
-			return g.putCall(fr, fld, "", storeCast(enumBacking(fld.ElemRef.Target), "value"))
+			return g.putCall(fr, fld, widthGuard(fld.Elem, fld.ElemRef), storeCast(enumBacking(fld.ElemRef.Target), "value"))
 		}
 		return ""
 	}
 	switch {
 	case isUnsignedElem(fld.Kind):
-		return guardedStore(widthGuard(fld.Kind), fmt.Sprintf("%s = %s", acc, storeCast(numZigType(fld.Kind), "value")))
+		return guardedStore(widthGuard(fld.Kind, fld.Ref), fmt.Sprintf("%s = %s", acc, storeCast(numZigType(fld.Kind), "value")))
 	case fld.Kind == ir.KindBool:
 		return fmt.Sprintf("%s = value != 0", acc)
 	case fld.Kind == ir.KindBitfield:
-		return fmt.Sprintf("%s = %s", acc, storeCast(bitfieldBacking(fld.Ref.Target), "value"))
+		return guardedStore(widthGuard(fld.Kind, fld.Ref), fmt.Sprintf("%s = %s", acc, storeCast(bitfieldBacking(fld.Ref.Target), "value")))
 	case fld.Kind == ir.KindArray && isUnsignedElem(fld.Elem):
-		return g.putCall(fr, fld, widthGuard(fld.Elem), storeCast(numZigType(fld.Elem), "value"))
+		return g.putCall(fr, fld, widthGuard(fld.Elem, fld.ElemRef), storeCast(numZigType(fld.Elem), "value"))
 	case fld.Kind == ir.KindArray && fld.Elem == ir.KindBool:
 		return g.putCall(fr, fld, "", "value != 0")
 	case fld.Kind == ir.KindArray && fld.Elem == ir.KindBitfield:
-		return g.putCall(fr, fld, "", storeCast(bitfieldBacking(fld.ElemRef.Target), "value"))
+		return g.putCall(fr, fld, widthGuard(fld.Elem, fld.ElemRef), storeCast(bitfieldBacking(fld.ElemRef.Target), "value"))
 	}
 	return ""
 }
@@ -529,7 +596,7 @@ func (g *gen) nestedNativeArm(fr frame, signed bool) string {
 	// the index arrayBegin recorded, not at the end of the outer slice, and that
 	// index is only addressable if the row's allocation succeeded. The §7.1 width
 	// guard sits inside the fill guard for the same reason it does in putCall.
-	return fmt.Sprintf("{ if (self.afill != 0) { self.afill -= 1; %sif (self.%s < %s.len) sofab.arrays.putGrowing(sofab.arrays.at(%s, self.%s), self.alloc, &self.ai, self.an, %s); } }", widthGuard(fr.elemKind), fr.idx, fr.path, fr.path, fr.idx, cast)
+	return fmt.Sprintf("{ if (self.afill != 0) { self.afill -= 1; %sif (self.%s < %s.len) sofab.arrays.putGrowing(sofab.arrays.at(%s, self.%s), self.alloc, &self.ai, self.an, %s); } }", widthGuard(fr.elemKind, fr.elemRef), fr.idx, fr.path, fr.path, fr.idx, cast)
 }
 
 // emitArraySkipArm arms the §7.3 discard counter in arrayBegin (generator#183,

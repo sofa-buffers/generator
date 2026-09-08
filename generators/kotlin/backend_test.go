@@ -1,6 +1,7 @@
 package kotlin
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -1407,5 +1408,151 @@ func TestKotlinDecoderRemembersFeedStatus(t *testing.T) {
 	// not come back in any form.
 	if strings.Contains(m, "ist.status") {
 		t.Errorf("Myfirstmessage.kt still reads the removed IStream.status (generator#521):\n%s", m)
+	}
+}
+
+// closedSixSrc declares an `enum` and a `bitfield` at all SIX positions a value
+// can land in, and both definitions are GAPPED on purpose: the enum declares
+// {0, 1, 2, 10}, so 5 sits inside the hull and is not a constant, and the
+// bitfield declares positions 0, 1 and 3 (mask 0b1011), so 4 sets a bit no flag
+// declares. A contiguous definition makes a closed set look like an interval and
+// would pass under the width bound this replaces.
+const closedSixSrc = `
+version: 1
+messages:
+  Closed:
+    payload:
+      en:  { id: 0, type: enum, enum: { A: 0, B: 1, C: 2, Z: 10 } }
+      bf:  { id: 1, type: bitfield, bits: { A: { pos: 0 }, B: { pos: 1 }, D: { pos: 3 } } }
+      ea:  { id: 2, type: array, items: { type: enum, count: 4, enum: { A: 0, B: 1, C: 2, Z: 10 } } }
+      bfa: { id: 3, type: array, items: { type: bitfield, count: 4, bits: { A: { pos: 0 }, B: { pos: 1 }, D: { pos: 3 } } } }
+      st:
+        id: 4
+        type: struct
+        fields:
+          se:  { id: 0, type: enum, enum: { A: 0, B: 1, C: 2, Z: 10 } }
+          sbf: { id: 1, type: bitfield, bits: { A: { pos: 0 }, B: { pos: 1 }, D: { pos: 3 } } }
+      sa:
+        id: 5
+        type: array
+        items:
+          type: struct
+          count: 2
+          fields:
+            se:  { id: 0, type: enum, enum: { A: 0, B: 1, C: 2, Z: 10 } }
+            sbf: { id: 1, type: bitfield, bits: { A: { pos: 0 }, B: { pos: 1 }, D: { pos: 3 } } }
+      un:
+        id: 6
+        type: union
+        default_id: 0
+        oneof:
+          ue:  { id: 0, type: enum, enum: { A: 0, B: 1, C: 2, Z: 10 } }
+          ubf: { id: 1, type: bitfield, bits: { A: { pos: 0 }, B: { pos: 1 }, D: { pos: 3 } } }
+      mat: { id: 7, type: array, items: { type: array, count: 2, items: { type: enum, count: 3, enum: { A: 0, B: 1, C: 2, Z: 10 } } } }
+      mbf: { id: 8, type: array, items: { type: array, count: 2, items: { type: bitfield, count: 3, bits: { A: { pos: 0 }, B: { pos: 1 }, D: { pos: 3 } } } } }
+`
+
+// MESSAGE_SPEC §1 closes an `enum` by the SET of constants the schema declares
+// and a `bitfield` by the MASK of the positions it declares (generator#516).
+//
+// This backend is the one that had a bound already, and it was the wrong one: an
+// enum was checked against the signed 32-bit range — the WIRE TYPE's ceiling,
+// which happened to coincide with the `Int` the member is held in — so 5 into a
+// gapped enum decoded and was kept, and a bitfield had no check at all, so 4 into
+// a three-flag field and 2^40 into the same field both decoded. Storage is never
+// the bound; the declared set is.
+//
+// All six positions are pinned by name — scalar, native array element, struct
+// member, struct-array element member, union member, matrix row element — for
+// both kinds. Four of them share one emitted arm per kind, which is exactly why
+// "the arm is shared" is not worth trusting after the next refactor.
+func TestKotlinClosedEnumAndBitfieldRejectAtEverySixPositions(t *testing.T) {
+	m := genFromYAML(t, closedSixSrc, map[string]any{})["src/main/kotlin/message/Closed.kt"]
+	const enRej = `if (value != 0L && value != 1L && value != 2L && value != 10L) throw SofabException(SofabError.INVALID_MSG, `
+	const bfRej = `if ((value.toULong() and 0xbuL.inv()) != 0uL) throw SofabException(SofabError.INVALID_MSG, `
+	for _, want := range []string{
+		// 1. scalar
+		`0 -> { ` + enRej + `"en: value outside declared enum constants"); m.en = value.toInt() }`,
+		`1 -> { ` + bfRej + `"bf: value outside declared bitfield flags"); m.bf = value.toULong() }`,
+		// 2. native array element — in the armed-fill arm, only reached while
+		// arrayBegin has this array armed, so a bare scalar at an array id stays a
+		// §7.3 skip rather than becoming a spurious INVALID.
+		enRej + `"ea element: value outside declared enum constants"); m.ea[ai] = value.toInt(); ai++ }`,
+		bfRej + `"bfa element: value outside declared bitfield flags"); m.bfa[ai] = value.toULong(); ai++ }`,
+		// 3. struct member
+		`0 -> { ` + enRej + `"se: value outside declared enum constants"); m.st.se = value.toInt() }`,
+		`1 -> { ` + bfRej + `"sbf: value outside declared bitfield flags"); m.st.sbf = value.toULong() }`,
+		// 4. struct-array element member
+		`0 -> { ` + enRej + `"se: value outside declared enum constants"); m.sa[_ex_Root_sa].se = value.toInt() }`,
+		`1 -> { ` + bfRej + `"sbf: value outside declared bitfield flags"); m.sa[_ex_Root_sa].sbf = value.toULong() }`,
+		// 5. union member
+		`0 -> { ` + enRej + `"ue: value outside declared enum constants"); m.un.ue = value.toInt() }`,
+		`1 -> { ` + bfRej + `"ubf: value outside declared bitfield flags"); m.un.ubf = value.toULong() }`,
+		// 6. matrix row element — the row cursor, not a field.
+		enRej + `"mat element: value outside declared enum constants"); _arowInt[ai] = value.toInt(); ai++ }`,
+		bfRej + `"mbf element: value outside declared bitfield flags"); _arowULong[ai] = value.toULong(); ai++ }`,
+	} {
+		if !strings.Contains(m, want) {
+			t.Errorf("Closed.kt: a closed-kind position stores without its §1 bound, missing %q:\n%s", want, m)
+		}
+	}
+	// The bulk offer is declined for both closed kinds. Its only bound is the
+	// destination array's WIDTH, which states neither a set nor a mask, and taking
+	// it bypassed the element callback entirely: the guard emitted in the fill arm
+	// for an enum array was DEAD CODE, and the only rejection that position ever
+	// produced came from the corelib's "array element wider than its destination".
+	if strings.Contains(m, "abulk") {
+		t.Errorf("a message whose only arrays are closed-kind arrays must make no bulk offer:\n%s", m)
+	}
+	// The superseded bound must be gone: it was the wire type's ceiling read as
+	// the field's, and it accepted every gap value.
+	if strings.Contains(m, "value outside declared width enum") || strings.Contains(m, "2147483647") {
+		t.Errorf("Closed.kt still bounds an enum at the signed 32-bit range:\n%s", m)
+	}
+	for _, bad := range []string{
+		"0 -> { m.en = value.toInt() }",
+		"1 -> { m.bf = value.toULong() }",
+		"1 -> { m.un.ubf = value.toULong() }",
+	} {
+		if strings.Contains(m, bad) {
+			t.Errorf("Closed.kt still stores a closed kind unguarded (%q):\n%s", bad, m)
+		}
+	}
+}
+
+// The two elisions, both of which keep "no guard" right under the closed rule.
+// A CONTIGUOUS enum is its own hull, so the cheaper two-sided comparison is the
+// set; a bitfield declaring all 64 positions has a mask of every bit, so the mask
+// test is a tautology and emitting it would be dead code.
+func TestKotlinClosedBoundElisions(t *testing.T) {
+	var bits []string
+	for i := 0; i < 64; i++ {
+		bits = append(bits, fmt.Sprintf("F%d: { pos: %d }", i, i))
+	}
+	m := genFromYAML(t, "version: 1\nmessages:\n  W:\n    payload:\n"+
+		"      f: { id: 0, type: bitfield, bits: { "+strings.Join(bits, ", ")+" } }\n"+
+		"      e: { id: 1, type: enum, enum: { R: 0, G: 1, B: 2 }, default: 0 }\n",
+		map[string]any{})["src/main/kotlin/message/W.kt"]
+	if !strings.Contains(m, "0 -> { m.f = value.toULong() }") {
+		t.Errorf("an all-bits-declared bitfield must store unguarded:\n%s", m)
+	}
+	if strings.Contains(m, "0xffffffffffffffff") {
+		t.Errorf("a tautological mask guard was emitted:\n%s", m)
+	}
+	if !strings.Contains(m, `1 -> { if (value < 0L || value > 2L) throw SofabException(SofabError.INVALID_MSG, "e: value outside declared enum constants"); m.e = value.toInt() }`) {
+		t.Errorf("a contiguous enum must take the two-sided comparison:\n%s", m)
+	}
+}
+
+// A mask that declares position 63 is the literal-rendering trap generator#470
+// already hit once, and Kotlin has no `Long` hex literal for it at all. The test
+// is taken on the unsigned view of the same carrier, which reinterprets the bits
+// for free and lets every mask be spelled as itself.
+func TestKotlinClosedMaskSpansBit63(t *testing.T) {
+	m := genFromYAML(t, "version: 1\nmessages:\n  W:\n    payload:\n"+
+		"      g: { id: 0, type: bitfield, bits: { LOW: { pos: 0 }, HIGH: { pos: 63 } } }\n",
+		map[string]any{})["src/main/kotlin/message/W.kt"]
+	if !strings.Contains(m, `if ((value.toULong() and 0x8000000000000001uL.inv()) != 0uL) throw SofabException(SofabError.INVALID_MSG, "g: value outside declared bitfield flags");`) {
+		t.Errorf("a bit-63 mask must be tested on the unsigned view of the carrier:\n%s", m)
 	}
 }

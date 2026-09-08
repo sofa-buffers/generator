@@ -3,6 +3,7 @@ package cpp
 import (
 	"encoding/base64"
 	"fmt"
+	"math"
 	"strconv"
 	"strings"
 
@@ -708,10 +709,68 @@ func (g *gen) cppElemBound(elem ir.Kind, ref *ir.TypeRef) string {
 	case ir.KindU8, ir.KindU16, ir.KindU32, ir.KindU64,
 		ir.KindI8, ir.KindI16, ir.KindI32, ir.KindI64:
 		return fmt.Sprintf("sofab::ElemBound::of<%s>()", numCppType(elem))
-	case ir.KindBitfield:
-		if ref != nil && ref.Target != nil {
-			return fmt.Sprintf("sofab::ElemBound::of<%s>()", bitfieldBacking(ref.Target))
+	case ir.KindEnum:
+		if lo, hi, ok := ir.EnumHull(ref); ok {
+			return fmt.Sprintf("sofab::ElemBound{%d, %d}", lo, hi)
 		}
+	case ir.KindBitfield:
+		// ElemBound's `hi` is an int64_t, so a mask with bit 63 declared cannot be
+		// stated at all: clamping it to INT64_MAX would REFUSE the very value that
+		// bit is, and every narrower ceiling refuses more. The bound is left off
+		// there — exactly as ElemBound::of<std::uint64_t>() came back unarmed
+		// before — and that element position stays unenforced.
+		if mask, ok := ir.BitfieldMask(ref); ok && mask != ^uint64(0) && mask <= uint64(math.MaxInt64) {
+			return fmt.Sprintf("sofab::ElemBound{0, %d}", mask)
+		}
+	}
+	return ""
+}
+
+// cppClosedCond is the reject comparison for the two CLOSED kinds over the value
+// named v, MESSAGE_SPEC §1: an `enum` is bound by the set of constants the schema
+// declares, a `bitfield` by the mask of the positions it declares, so v is valid
+// exactly when v & ~mask == 0. It returns "" for every other kind, and for a
+// bitfield whose declared positions cover all 64 bits, where the test is a
+// tautology.
+//
+// Neither bound is a width, and storage is never the bound: the member stays the
+// smallest integer holding the declared constants/positions (§1 grants that as a
+// MAY, and the footprint profile takes it), but a field whose declared positions
+// are 0..3 does not become 0..255 valid because C++ holds it in a std::uint8_t.
+// Both comparisons therefore run on the 64-bit temporary the value is read into,
+// ahead of the narrowing static_cast, which is what lets one clause answer both
+// halves at once: a mask test on the full accumulator rejects an undeclared bit
+// inside the storage width and everything above it in the same expression.
+//
+// This reverses generator#482, which kept an undeclared bit that fit the backing
+// width on the argument that it is how a peer built from a newer schema carries a
+// flag this one has not got yet. §1 answers that directly: adding a flag — or a
+// constant — is a BREAKING schema change, and a receiver rejects the value rather
+// than storing something its declared type cannot represent.
+func cppClosedCond(k ir.Kind, ref *ir.TypeRef, v string) string {
+	switch k {
+	case ir.KindEnum:
+		vals, ok := ir.EnumValues(ref)
+		if !ok || len(vals) == 0 {
+			return ""
+		}
+		if ir.EnumContiguous(ref) {
+			return fmt.Sprintf("%s < %d || %s > %d", v, vals[0], v, vals[len(vals)-1])
+		}
+		terms := make([]string, len(vals))
+		for i, x := range vals {
+			terms[i] = fmt.Sprintf("%s != %d", v, x)
+		}
+		return strings.Join(terms, " && ")
+	case ir.KindBitfield:
+		mask, ok := ir.BitfieldMask(ref)
+		if !ok || mask == ^uint64(0) {
+			return ""
+		}
+		if mask == 0 {
+			return v + " != 0"
+		}
+		return fmt.Sprintf("(%s & ~%s) != 0", v, cppMaskLit(mask))
 	}
 	return ""
 }
@@ -863,4 +922,62 @@ func (g *gen) rowIndexCap(cap int64) string {
 		return "-1"
 	}
 	return "SOFAB_MAX_DYN_ARRAY_COUNT"
+}
+
+// cppElemScan renders the per-element re-check a bounded array read needs when
+// the CLOSED bound it carries cannot be stated as an interval, or "" when the
+// interval already IS the bound.
+//
+// corelib-cpp's sofab::ElemBound is a two-sided range, so an array element gets
+// the hull of the declared constants / `0..mask` and no more (cppElemBound). For
+// a CONTIGUOUS enum, and for a bitfield whose declared positions are the low bits
+// 0..k, that interval is exactly the declared set and nothing is left over. For a
+// GAPPED one it is not: {0,1,2,10} admits 5 and mask 0b1011 admits 4, and
+// MESSAGE_SPEC §1 names that second case in terms -- "the mask is not every bit
+// up to the highest declared one ... 4 is INVALID".
+//
+// What closes the gap is a scan of the MEMBER, gated on the read's own return.
+// That gate is the whole reason this works on a resumable decoder:
+// sofab::readArray is re-entered once per fed chunk that carries part of the
+// array and returns TRUE only when the last element has landed (readArrayGated →
+// readIntElements, which reports `incomplete_` and returns false while the run is
+// cut short). So the scan never sees a half-filled destination, and a message
+// split byte-by-byte still decodes COMPLETE. A scan written without the gate
+// would read the not-yet-arrived tail at its value-initialized 0 and false-reject
+// every split message whose enum does not declare 0.
+//
+// The interval still rides along on the call and is not redundant: it rejects an
+// out-of-hull element the moment it is read, which is what keeps a value that is
+// followed by a truncation INVALID rather than INCOMPLETE (§5.2). The scan adds
+// the gap rows for an array that completes. What the pair still cannot do is
+// report a GAP value INVALID under a truncation behind it -- that needs a
+// per-element predicate corelib-cpp does not carry.
+func (g *gen) cppElemScan(ind, target string, elem ir.Kind, ref *ir.TypeRef, depth int) string {
+	cond := cppClosedCond(elem, ref, fmt.Sprintf("_sv%d", depth))
+	if cond == "" {
+		return ""
+	}
+	if g.cppElemBound(elem, ref) != "" {
+		switch elem {
+		case ir.KindEnum:
+			if ir.EnumContiguous(ref) {
+				return ""
+			}
+		case ir.KindBitfield:
+			// mask & (mask+1) == 0 is "the declared positions are 0..k", the one
+			// shape whose set and whose 0..mask interval coincide.
+			if mask, ok := ir.BitfieldMask(ref); ok && mask&(mask+1) == 0 {
+				return ""
+			}
+		}
+	}
+	carrier := "std::uint64_t"
+	if elem == ir.KindEnum {
+		carrier = "std::int64_t"
+	}
+	// The element is read back through the same 64-bit carrier the scalar arm
+	// uses, so one comparison serves both halves: an undeclared value inside the
+	// member's storage and anything above it.
+	return fmt.Sprintf("%sfor (auto _se%d : %s) { const %s _sv%d = static_cast<%s>(_se%d); if (%s) { is.invalidate(); return; } }",
+		ind, depth, target, carrier, depth, carrier, depth, cond)
 }

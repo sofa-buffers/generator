@@ -1036,4 +1036,24 @@ python3 "$ROOT/tests/conformance/lib/check_growth.py" \
     "$CORELIB/assets/test_vectors.json" "TypeScript" --cap 4 \
     --cwd "$WORK/growth" -- npx tsx harness.ts
 
+# An `enum` and a `bitfield` are CLOSED (MESSAGE_SPEC S1, generator#516): what
+# binds is the SET of constants / the MASK of declared positions, never a width
+# and never the integer the target stores the field in. The shared driver prints
+# its own schema and forges its own bytes, and probes ALL SIX positions with
+# GAPPED definitions, so an interval bound cannot pass.
+#
+# TypeScript kept a wide member and accepted anything, at every one of the twelve
+# stores: 5 into an enum declaring {0,1,2,10} was KEPT, 4 into a bitfield
+# declaring bits 0, 1 and 3 was KEPT, and so were 1000 and 256 -- the decode
+# reporting success in every case. Nothing here is corelib-blocked: every element
+# arrives through a per-element callback, and the bulk hand-off (whose only bound
+# is an INTERVAL) is declined for both closed kinds and must stay declined.
+echo "==> closed enum/bitfield: only what the schema declares is valid (S1, generator#516)"
+{ echo "version: 1"; echo "messages:"; } > "$WORK/closed.yaml"
+python3 "$ROOT/tests/conformance/lib/check_closed_kinds.py" --emit-schema >> "$WORK/closed.yaml"
+gen "$WORK/closed.yaml" "$WORK/closed"
+ln -s "$WORK/ex/node_modules" "$WORK/closed/node_modules"
+python3 "$ROOT/tests/conformance/lib/check_closed_kinds.py" "typescript" \
+    --cwd "$WORK/closed" --status-verb status -- npx tsx harness.ts
+
 echo "PASS"

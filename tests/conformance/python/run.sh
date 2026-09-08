@@ -928,4 +928,27 @@ require_engine python
 chunk_invariance "Python (pure)"
 unset SOFAB_PUREPYTHON || true
 
+# An `enum` and a `bitfield` are CLOSED (MESSAGE_SPEC S1, generator#516): what
+# binds is the SET of constants / the MASK of declared positions, never a width
+# and never the integer the target stores the field in. The shared driver prints
+# its own schema and forges its own bytes, and probes ALL SIX positions with
+# GAPPED definitions, so an interval bound cannot pass.
+#
+# Python kept a wide member and accepted anything -- its int is unbounded, so
+# nothing was even truncated: 5 into an enum declaring {0,1,2,10}, 4 into a
+# bitfield declaring bits 0, 1 and 3 and 2^40 into that same bitfield all decoded
+# and were kept verbatim, at every one of the twelve stores. Both engines run it:
+# the element bound the accelerator applies is C code and the pure one is not.
+echo "==> closed enum/bitfield: only what the schema declares is valid (S1, generator#516)"
+printf 'version: 1\nmessages:\n' > "$WORK/closed.yaml"
+python3 "$ROOT/tests/conformance/lib/check_closed_kinds.py" --emit-schema >> "$WORK/closed.yaml"
+( cd "$ROOT" && go run ./cmd/sofabgen --config "$WORK/cfg.yaml" --lang python --in "$WORK/closed.yaml" --out "$WORK/closedproj" )
+for ENGINE in $ENGINES; do
+    if [ "$ENGINE" = python ]; then export SOFAB_PUREPYTHON=1; else unset SOFAB_PUREPYTHON || true; fi
+    require_engine "$ENGINE"
+    python3 "$ROOT/tests/conformance/lib/check_closed_kinds.py" "python/$ENGINE" \
+        --cwd "$WORK/closedproj" --invalid-pattern 'SofaDecodeError' -- python3 harness.py
+done
+unset SOFAB_PUREPYTHON || true
+
 echo "PASS"

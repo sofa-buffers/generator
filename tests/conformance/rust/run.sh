@@ -691,71 +691,48 @@ YAML
     echo "$OUT" | tr -d ' ' | grep -q '"someu8":255' || { echo "FAIL: [$label] control must keep 255; got: $OUT"; exit 1; }
     echo "==> [$label] declared-width reject OK"
 
-    # The same §7.1-shaped bound over an ARRAY ELEMENT declared `bitfield`
-    # (generator#513). ir.NarrowRange keys off the Kind alone and returns !ok for
-    # it, so until now the element store was emitted BARE and the `as` cast was
-    # the mask: a wire element of 1000 came back as `bs: [232]` with the verdict
-    # Ok, beside a `u8` element that has rejected the same 1000 since
-    # generator#266. The example schema has no bitfield array, so this brings its
-    # own.
+    # An `enum` and a `bitfield` are CLOSED (MESSAGE_SPEC §1, generator#516):
+    # what binds is the SET of constants / the MASK of declared positions, not a
+    # width and not the integer the target stores the field in. The shared driver
+    # prints its own schema and forges its own bytes, so the declared sets and the
+    # values that breach them have one definition for the whole family; it probes
+    # ALL SIX positions a value can land in, with GAPPED definitions so an
+    # interval bound cannot pass.
     #
-    # The bound is the REPR the element is stored in, never the set of declared
-    # positions -- which is why the CONTROLS below matter as much as the rejects.
-    # An undeclared bit that FITS the repr is how a peer built from a newer schema
-    # carries a flag this one has not got yet, and MUST decode (generator#482
-    # settled that; corelib-cpp enforces this same width on this same element
-    # through ElemBound::of<>, and corelib-c-cpp off its descriptor element_size).
-    #
-    # The ENUM element, #513's other half, is deliberately NOT here: bounding it
-    # at its i8/i16/i32 repr is NARROWER than the signed 32-bit range MESSAGE_SPEC
-    # §1 binds an enum to, and would refuse an element of 1000 that java, python,
-    # typescript, dart and kotlin all keep. generator#516 decides the family
-    # bound; nothing is asserted about the enum here in either direction, because
-    # the answer that ships today (the mask) is the defect and the answer that
-    # would replace it is not settled.
-    #
-    # bs is id 1 (header 0x0b = 1<<3 | array-unsigned), u1 id 2 (0x13), nbs id 3
-    # (0x1e = 3<<3 | wrapper-array; a row is <index<<3|3> count elems... 0x07).
-    #   0b 01 e8 07  = [1000]     into a u8-backed bitfield  -- INVALID
-    #   0b 01 80 02  = [256]      one past the backing width -- INVALID
-    #   13 01 e8 07  = [1000]     into the u8 control        -- INVALID
-    #   0b 01 ff 01  = [255]      the last value that fits   -- KEPT
-    #   0b 01 08     = [8]        bit 3, undeclared, fits u8 -- KEPT
-    #   1e 03 01 80 02 07 = nested row 0 = [256]             -- INVALID
-    #   1e 03 01 ff 01 07 = nested row 0 = [255]             -- KEPT
-    echo "==> [$label] over-width bitfield ARRAY element must be INVALID (S7.1, generator#513)"
+    # This replaces the narrower generator#513 block that stood here, which pinned
+    # the bitfield ARRAY element at its storage REPR and asserted an undeclared bit
+    # inside that width was KEPT. §1 reverses exactly that: the mask is not every
+    # bit up to the highest declared one, and storage is never the bound. The
+    # enum half, which #513 left open pending this decision, is covered by the same
+    # driver at the same six positions.
+    echo "==> [$label] closed enum/bitfield: only what the schema declares is valid (S1, generator#516)"
+    { echo "version: 1"; echo "messages:"; } > "$WORK/closed.yaml"
+    python3 "$ROOT/tests/conformance/lib/check_closed_kinds.py" --emit-schema >> "$WORK/closed.yaml"
+    rust_build "$WORK/closed.yaml" "$WORK/closed-$label"
+    python3 "$ROOT/tests/conformance/lib/check_closed_kinds.py" "$label" \
+        --cwd "$WORK/closed-$label" --invalid-pattern 'InvalidMsg' -- cargo run -q --
+
+    # The declared WIDTH of a plain integer element is a separate bound and still
+    # its own: a u8 array element rejects 1000 (generator#266/#513). Kept beside
+    # the closed rows so a change that folded the two together shows up here.
+    echo "==> [$label] over-width integer ARRAY element must be INVALID (S7.1, generator#513)"
     cat > "$WORK/elemwidth.yaml" <<'YAML'
 version: 1
 messages:
   ew:
     payload:
-      bs: { id: 1, type: array, items: { type: bitfield, count: 4, bits: { A: { pos: 0 }, C: { pos: 2 } } } }
       u1: { id: 2, type: array, items: { type: u8, count: 4 } }
-      nbs: { id: 3, type: array, items: { type: array, count: 2, items: { type: bitfield, count: 4, bits: { A: { pos: 0 }, C: { pos: 2 } } } } }
 YAML
     rust_build "$WORK/elemwidth.yaml" "$WORK/elemwidth-$label"
-    printf '\013\001\350\007'         > "$WORK/ew_bits_1000.bin"
-    printf '\013\001\200\002'         > "$WORK/ew_bits_256.bin"
-    printf '\023\001\350\007'         > "$WORK/ew_u8_1000.bin"
-    printf '\036\003\001\200\002\007' > "$WORK/ew_nested_256.bin"
-    printf '\013\001\377\001'         > "$WORK/ew_bits_255_ctl.bin"
-    printf '\013\001\010'              > "$WORK/ew_bits_8_ctl.bin"
-    printf '\036\003\001\377\001\007' > "$WORK/ew_nested_255_ctl.bin"
-    for v in ew_bits_1000 ew_bits_256 ew_u8_1000 ew_nested_256; do
-        if (cd "$WORK/elemwidth-$label" && cargo run -q -- decode ew < "$WORK/$v.bin" >/dev/null 2>&1); then
-            echo "FAIL: [$label] $v must be INVALID (S7.1) -- neither masked nor kept"; exit 1
-        fi
-    done
-    OUT=$(cd "$WORK/elemwidth-$label" && cargo run -q -- decode ew < "$WORK/ew_bits_255_ctl.bin") \
-        || { echo "FAIL: [$label] the last value inside the backing width must decode"; exit 1; }
-    echo "$OUT" | tr -d ' ' | grep -q '"bs":\[255\]' || { echo "FAIL: [$label] control must keep the bitfield element 255; got: $OUT"; exit 1; }
-    OUT=$(cd "$WORK/elemwidth-$label" && cargo run -q -- decode ew < "$WORK/ew_bits_8_ctl.bin") \
-        || { echo "FAIL: [$label] an undeclared bit inside the backing width must decode"; exit 1; }
-    echo "$OUT" | tr -d ' ' | grep -q '"bs":\[8\]' || { echo "FAIL: [$label] control must keep the undeclared bit 8; got: $OUT"; exit 1; }
-    OUT=$(cd "$WORK/elemwidth-$label" && cargo run -q -- decode ew < "$WORK/ew_nested_255_ctl.bin") \
-        || { echo "FAIL: [$label] a nested-row bitfield element inside the width must decode"; exit 1; }
-    echo "$OUT" | tr -d ' ' | grep -q '"nbs":\[\[255\]\]' || { echo "FAIL: [$label] control must keep the nested element 255; got: $OUT"; exit 1; }
-    echo "==> [$label] bitfield element-width reject OK"
+    printf '\023\001\350\007' > "$WORK/ew_u8_1000.bin"
+    printf '\023\001\377\001' > "$WORK/ew_u8_255_ctl.bin"
+    if (cd "$WORK/elemwidth-$label" && cargo run -q -- decode ew < "$WORK/ew_u8_1000.bin" >/dev/null 2>&1); then
+        echo "FAIL: [$label] ew_u8_1000 must be INVALID (S7.1) -- neither masked nor kept"; exit 1
+    fi
+    OUT=$(cd "$WORK/elemwidth-$label" && cargo run -q -- decode ew < "$WORK/ew_u8_255_ctl.bin") \
+        || { echo "FAIL: [$label] the last value inside the declared width must decode"; exit 1; }
+    echo "$OUT" | tr -d ' ' | grep -q '"u1":\[255\]' || { echo "FAIL: [$label] control must keep the u8 element 255; got: $OUT"; exit 1; }
+    echo "==> [$label] integer element-width reject OK"
 
 
     # §7.3 / §5.2 skip family (generator#268 #270 #271 #272 #273 -- Crucible F-0044

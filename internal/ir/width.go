@@ -17,10 +17,11 @@ package ir
 // 64-bit kinds return ok == false: their range IS the delivery type's, so no
 // reachable value can breach it and a backend must emit no guard for them.
 //
-// Enum and bitfield kinds are deliberately not covered. Their backing width is a
-// property of the named type rather than of the field, and an out-of-range enum
-// value is a different question (unknown-variant handling) from an over-width
-// integer; both stay with the existing per-backend treatment.
+// Enum and bitfield kinds are deliberately not covered, because a width is the
+// wrong question for them: MESSAGE_SPEC §1 binds both to the SET the schema
+// declares, not to the range of whatever integer a target stores them in. Their
+// bound lives in closed.go — EnumValues and BitfieldMask — and a backend emits
+// that check in the same store arm, ahead of the same narrowing cast.
 func NarrowRange(k Kind) (lo, hi int64, ok bool) {
 	switch k {
 	case KindU8:

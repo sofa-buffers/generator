@@ -31,7 +31,7 @@ type frame struct {
 	childLoc  string      // fkSeqObj: element loc; fkSeqMat: inner-row loc
 	elemType  string      // fkSeqObj: java class for `new X()`
 	innerElem ir.Kind     // fkNativeMat: inner element kind
-	innerRef  *ir.TypeRef // fkNativeMat: inner element ref (unused; kept for symmetry)
+	innerRef  *ir.TypeRef // fkNativeMat: inner element ref (the closed kinds' declared set)
 	// schema bounds, for the receiver-side decode limits (generator#102):
 	elemMaxHas    bool // fkSeqLeaf: the string/blob element declares a maxlen
 	innerHasCount bool // fkNativeMat: the inner array declares a count
@@ -342,34 +342,119 @@ func maxlenThrow(name, noun string, max int64) string {
 	return fmt.Sprintf("throw Sofab.invalid(\"%s: %s above schema maxlen %d\");", name, noun, max)
 }
 
-// widthThrow renders the declared-width rejection (MESSAGE_SPEC §7.1,
-// documentation#32): a `u8`/`u16`/`u32`/`i8`/`i16`/`i32` destination receiving a
-// value outside its declared range is malformed input, rejected through the same
-// unchecked INVALID_MSG channel as maxlenThrow — never masked to the width, never
-// kept. Returns "" for the 64-bit kinds, whose range IS the accumulator the value
-// arrives in.
+// widthThrow renders the §7.1 rejection for a store into a destination the schema
+// declares with Kind k — and, for a composite kind, `ref` carries the rest of
+// that declaration. Rejected through the same unchecked INVALID_MSG channel as
+// maxlenThrow. "" when nothing reachable can breach the bound: the 64-bit kinds,
+// whose range IS the accumulator the value arrives in, and a bitfield declaring
+// all 64 positions.
 //
-// The `value < 0` term is not redundant on the unsigned side. The corelib
-// delivers an unsigned wire value as a Java `long`, which has no unsigned type: a
-// u64 at or above 2^63 arrives with its sign bit set, so `value > 255` alone
-// would read it as negative and let precisely the largest values through the
-// guard. Treating negative as out-of-range is correct for every narrow kind,
-// since all of their maxima are below 2^63.
-func widthThrow(k ir.Kind, name string) string {
+// What the schema declares is what binds, and the declaration takes two shapes.
+// For an integer it is a WIDTH (MESSAGE_SPEC §7.1, documentation#32): a
+// `u8`/`u16`/`u32`/`i8`/`i16`/`i32` destination receiving a value outside its
+// declared range is malformed input — never masked to the width, never kept. For
+// an `enum` or a `bitfield` it is a SET — the declared constants, the mask of
+// declared `pos` bits (§1) — and closedCond answers for those.
+//
+// One clause serves every position. The scalar, struct-member, struct-array
+// member and union-member stores are ONE arm per kind serving four positions
+// (emitScalarCb walks each scope, the arm text does not change), and the native
+// array element and matrix row element carry the same clause, so a value the
+// schema does not declare gets one verdict wherever it lands (generator#516).
+//
+// The `value < 0` term is not redundant on the unsigned side of a WIDTH. The
+// corelib delivers an unsigned wire value as a Java `long`, which has no unsigned
+// type: a u64 at or above 2^63 arrives with its sign bit set, so `value > 255`
+// alone would read it as negative and let precisely the largest values through
+// the guard. Treating negative as out-of-range is correct for every narrow kind,
+// since all of their maxima are below 2^63. A bitfield needs no such term at all:
+// its test is a mask on the raw bits, and a value with bit 63 set is refused by
+// exactly the same expression unless position 63 is declared.
+func widthThrow(k ir.Kind, ref *ir.TypeRef, name string) string {
+	cond, what := widthCond(k), "width "+k.String()
+	if cond == "" {
+		cond, what = closedCond(k, ref), closedWhat(k)
+	}
+	if cond == "" {
+		return ""
+	}
+	return fmt.Sprintf("if (%s) throw Sofab.invalid(\"%s: value outside declared %s\"); ", cond, name, what)
+}
+
+// widthCond is the declared-integer-width half of widthThrow's comparison.
+//
+// Spelled as the pair of comparisons the declared width IS, not as the
+// equivalent one-operation forms ((value & ~255L) != 0 for an unsigned width,
+// (byte) value != value for a signed one). Those were tried: worth 42 Ir on
+// the arena's fifty elements and −40 on vehicle_telemetry, i.e. nothing, and
+// generated code is read by people who have the schema and nothing else.
+func widthCond(k ir.Kind) string {
 	lo, hi, ok := ir.NarrowRange(k)
 	if !ok {
 		return ""
 	}
-	// Spelled as the pair of comparisons the declared width IS, not as the
-	// equivalent one-operation forms ((value & ~255L) != 0 for an unsigned width,
-	// (byte) value != value for a signed one). Those were tried: worth 42 Ir on
-	// the arena's fifty elements and −40 on vehicle_telemetry, i.e. nothing, and
-	// generated code is read by people who have the schema and nothing else.
-	cond := fmt.Sprintf("value < 0 || value > %dL", hi)
 	if lo < 0 {
-		cond = fmt.Sprintf("value < %dL || value > %dL", lo, hi)
+		return fmt.Sprintf("value < %dL || value > %dL", lo, hi)
 	}
-	return fmt.Sprintf("if (%s) throw Sofab.invalid(\"%s: value outside declared width %s\"); ", cond, name, k)
+	return fmt.Sprintf("value < 0 || value > %dL", hi)
+}
+
+// closedCond is the reject comparison for the two CLOSED kinds, MESSAGE_SPEC §1:
+// an `enum` is bound by the set of constants the schema declares, a `bitfield`
+// by the mask of the positions it declares, so `value` is valid exactly when
+// `value & ~mask == 0`. It returns "" for every other kind (widthCond owns
+// those) and for a bitfield whose declared positions cover all 64 bits, where the
+// test is a tautology and the clause would be dead code.
+//
+// Neither bound is a width, and storage is never the bound. Java holds both kinds
+// in a `long` — §1 leaves the integer to the target as a MAY — but a field whose
+// declared positions are 0..3 does not become 0..2^63 valid because of it. Both
+// comparisons run on the RAW accumulator, ahead of any narrowing, which is also
+// why one clause covers both halves of the old reading at once: a mask test on
+// the full `long` rejects an undeclared bit inside the storage width and
+// everything above it in the same expression, and a membership test does the same
+// for an enum.
+//
+// This reverses generator#482, which kept an undeclared bit that fit the backing
+// width on the argument that it is how a peer built from a newer schema carries a
+// flag this one has not got yet. §1 answers that directly: adding a flag — or a
+// constant — is a BREAKING schema change, and a receiver rejects the value rather
+// than storing something its declared type cannot represent.
+func closedCond(k ir.Kind, ref *ir.TypeRef) string {
+	switch k {
+	case ir.KindEnum:
+		vals, ok := ir.EnumValues(ref)
+		if !ok || len(vals) == 0 {
+			return ""
+		}
+		if ir.EnumContiguous(ref) {
+			return fmt.Sprintf("value < %dL || value > %dL", vals[0], vals[len(vals)-1])
+		}
+		terms := make([]string, len(vals))
+		for i, v := range vals {
+			terms[i] = fmt.Sprintf("value != %dL", v)
+		}
+		return strings.Join(terms, " && ")
+	case ir.KindBitfield:
+		mask, ok := ir.BitfieldMask(ref)
+		if !ok || mask == ^uint64(0) {
+			return ""
+		}
+		if mask == 0 {
+			return "value != 0"
+		}
+		return fmt.Sprintf("(value & ~0x%xL) != 0", mask)
+	}
+	return ""
+}
+
+// closedWhat names the breached declaration in the INVALID_MSG text, so the two
+// closed kinds read as what they are rather than as a width.
+func closedWhat(k ir.Kind) string {
+	if k == ir.KindEnum {
+		return "enum constants"
+	}
+	return "bitfield flags"
 }
 
 // emitStringCb writes the string() visitor callback: the destination gate, the
@@ -1511,8 +1596,9 @@ func fillTargetsFor(fs []frame, cb string) map[*frame]map[int64]int {
 // schema bound or the cap before it is allocated from, so the untrusted-count
 // objection that once restricted this to SCHEMA-BOUNDED arrays (#96) is answered
 // by the check rather than by the reservation (ARCHITECTURE §9.5, shape A). That
-// leaves out boolean arrays (a List), fp arrays (the offer is integer-only) and
-// matrix rows (whose destination is a row cursor, not a field).
+// leaves out boolean arrays (a List), fp arrays (the offer is integer-only),
+// matrix rows (whose destination is a row cursor, not a field) and the two CLOSED
+// kinds (bulkCapable says why).
 func hasBulk(fs []frame) bool {
 	for i := range fs {
 		fr := &fs[i]
@@ -1529,8 +1615,33 @@ func hasBulk(fs []frame) bool {
 }
 
 // bulkCapable reports whether a field is one of those arrays.
+//
+// An `enum` or `bitfield` element is NOT, however wide the array it lands in.
+// The only bound the offer can carry is the destination array's WIDTH -- handing
+// back a short[] says "the elements are declared 16 bits wide" -- and the bound
+// of a closed kind is not a width at all but the set of declared constants / the
+// mask of declared positions (MESSAGE_SPEC §1). Java holds both in a long[], so
+// taking the offer would hand the decoder an array with no bound to state and
+// bypass the element callback that carries the real one: the elements would land
+// unchecked, and the guard in the fill arm would be dead code (measured -- the
+// arm existed and never ran). Declining the offer routes them back through
+// widthThrow, one element at a time, so an undeclared value is refused where it
+// arrives rather than after the whole array has landed. Validating in
+// arrayBulkEnd instead was the alternative and is weaker: it cannot report the
+// value at all when the array is cut short behind it (generator#516).
+//
+// It is a correctness-over-throughput trade, and it was MEASURED rather than
+// asserted: tests/bench's vehicletelemetry row declares two such arrays
+// (gear_history, array<enum> count 8, and wheel_faults, array<bitfield> count 4)
+// and both are populated by the bench payload, so the row prices exactly this
+// decision. Same corelib checkout, origin/main vs this rule: decode 30891 ->
+// 32187 Ir/op, +1296 (+4.2%); encode 17006 -> 17012, i.e. held. Kotlin, which
+// declines the same offer for the same reason, pays +2.8%.
 func bulkCapable(fld *ir.Field) bool {
 	if fld.Kind != ir.KindArray || !primitiveArrayElem(fld.Elem) {
+		return false
+	}
+	if fld.Elem == ir.KindEnum || fld.Elem == ir.KindBitfield {
 		return false
 	}
 	switch primArrayBase(fld.Elem) {
@@ -1619,7 +1730,7 @@ func (g *gen) emitScalarCb(f *jfile, fs []frame, cb, vtype string, action func(*
 				continue
 			}
 			target := fr.path + "." + javaIdent(fld.Name)
-			arms = append(arms, jcase(fld.ID, widthThrow(fld.Kind, fld.Name)+target+" "+act))
+			arms = append(arms, jcase(fld.ID, widthThrow(fld.Kind, fld.Ref, fld.Name)+target+" "+act))
 		}
 		if len(arms) > 0 {
 			g.frameSwitch(f, fr.idx, arms)
@@ -1661,7 +1772,7 @@ func (g *gen) emitArrayFillArm(f *jfile, fs []frame, cb string) {
 				// reference to write back into the List (§9.5, shape A).
 				cur := rowCursor(primArrayBase(fr.innerElem))
 				arms = append(arms, arm{ids[-1], fmt.Sprintf("%s%s[ai++] = %svalue",
-					widthThrow(fr.innerElem, fr.loc+" element"), cur, primArrayCast(fr.innerElem))})
+					widthThrow(fr.innerElem, fr.innerRef, fr.loc+" element"), cur, primArrayCast(fr.innerElem))})
 				continue
 			}
 			// A boxed row (boolean): the row arrayBegin PLACED at the element id, not
@@ -1669,7 +1780,7 @@ func (g *gen) emitArrayFillArm(f *jfile, fs []frame, cb string) {
 			// shift the values into the wrong row.
 			row := fr.listExpr + ".get(" + elemIdxVar(fr.loc) + ")"
 			arms = append(arms, arm{ids[-1], fmt.Sprintf("%s%s.add(%s)",
-				widthThrow(fr.innerElem, fr.loc+" element"), row, matConv(fr.innerElem))})
+				widthThrow(fr.innerElem, fr.innerRef, fr.loc+" element"), row, matConv(fr.innerElem))})
 			continue
 		}
 		for _, fld := range fr.fields {
@@ -1690,7 +1801,7 @@ func (g *gen) emitArrayFillArm(f *jfile, fs []frame, cb string) {
 			// capacity or the configured cap (§9.5, shape A), so nothing here can
 			// run past the end and nothing has to grow: no doubling, no copies, and
 			// no reference store into the message object per element.
-			arms = append(arms, arm{code, widthThrow(fld.Elem, fld.Name+" element") +
+			arms = append(arms, arm{code, widthThrow(fld.Elem, fld.ElemRef, fld.Name+" element") +
 				target + "[ai++] = " + primArrayCast(fld.Elem) + "value"})
 		}
 	}

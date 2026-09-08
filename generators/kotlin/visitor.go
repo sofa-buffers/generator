@@ -25,11 +25,12 @@ type frame struct {
 	path   string      // fkNormal: object path
 	fields []*ir.Field // fkNormal
 	// array (fkSeqLeaf/fkSeqObj/fkNativeMat/fkSeqMat):
-	listExpr  string  // the MutableList this frame collects into
-	elemKind  ir.Kind // fkSeqLeaf: KindString / KindBlob
-	childLoc  string  // fkSeqObj: element loc; fkSeqMat: inner-row loc
-	elemType  string  // fkSeqObj: Kotlin class for the gap fill
-	innerElem ir.Kind // fkNativeMat: inner element kind
+	listExpr  string      // the MutableList this frame collects into
+	elemKind  ir.Kind     // fkSeqLeaf: KindString / KindBlob
+	childLoc  string      // fkSeqObj: element loc; fkSeqMat: inner-row loc
+	elemType  string      // fkSeqObj: Kotlin class for the gap fill
+	innerElem ir.Kind     // fkNativeMat: inner element kind
+	innerRef  *ir.TypeRef // fkNativeMat: inner element ref (the closed kinds' declared set)
 	// schema bounds, for the receiver-side decode limits (generator#102):
 	innerHasCount bool // fkNativeMat: the inner array declares a count
 	// innerCap is the inner array's own schema count N (-1 == none) -- the bound on
@@ -104,7 +105,7 @@ func (g *gen) frames(m *ir.Message) []frame {
 			// later row down by one across an interior id gap -- which an omitted
 			// all-default row makes reachable (§2).
 			if nativeArrayElem(items.Elem) {
-				out = append(out, frame{kind: fkNativeMat, loc: loc, listExpr: listExpr, innerElem: items.Elem, innerHasCount: items.HasCount, innerCap: capOf(items.HasCount, items.Count), cap: cap})
+				out = append(out, frame{kind: fkNativeMat, loc: loc, listExpr: listExpr, innerElem: items.Elem, innerRef: items.ElemRef, innerHasCount: items.HasCount, innerCap: capOf(items.HasCount, items.Count), cap: cap})
 			} else {
 				innerLoc := loc + "_e"
 				out = append(out, frame{kind: fkSeqMat, loc: loc, listExpr: listExpr, childLoc: innerLoc, cap: cap})
@@ -206,35 +207,122 @@ func (g *gen) overIndexGuard(cap int64, name string) string {
 		invalidThrow(fmt.Sprintf("%s element: array index above schema capacity %d", locName(name), cap)))
 }
 
-// widthThrow renders the declared-width rejection (MESSAGE_SPEC §7.1): a
-// narrow-width destination receiving a value outside its declared range is
-// malformed input, rejected as INVALID -- never masked to the width, never kept.
-// Returns "" for the 64-bit kinds, whose range IS the accumulator the value
-// arrives in.
+// widthThrow renders the §7.1 rejection for a store into a destination the schema
+// declares with Kind k -- and, for a composite kind, `ref` carries the rest of
+// that declaration. "" when nothing reachable can breach the bound: the 64-bit
+// kinds, whose range IS the accumulator the value arrives in, and a bitfield
+// declaring all 64 positions.
 //
-// The `value < 0` term is not redundant on the unsigned side: the corelib
-// delivers an unsigned wire value as a `Long`, so a u64 at or above 2^63 arrives
-// with its sign bit set and `value > 255` alone would read it as negative,
-// letting precisely the largest values through.
+// What the schema declares is what binds, and the declaration takes two shapes.
+// For an integer it is a WIDTH (MESSAGE_SPEC §7.1): a narrow-width destination
+// receiving a value outside its declared range is malformed input -- never
+// masked to the width, never kept. For an `enum` or a `bitfield` it is a SET --
+// the declared constants, the mask of declared `pos` bits (§1) -- and closedCond
+// answers for those.
 //
-// `enum` is covered too, at the signed 32-bit range MESSAGE_SPEC §1 binds it to
-// -- this target stores an enum as an `Int`, so the bound and the storage are
-// the same fact, and letting an out-of-range value through would be the silent
-// truncation §7.1 rules out.
-func widthThrow(k ir.Kind, name string) string {
-	lo, hi, ok := ir.NarrowRange(k)
-	if !ok {
-		if k != ir.KindEnum {
-			return ""
-		}
-		lo, hi = -2147483648, 2147483647
+// One clause serves every position. The scalar, struct-member, struct-array
+// member and union-member stores are ONE arm per kind serving four positions
+// (emitScalarCb walks each scope, the arm text does not change), and the native
+// array element and matrix row element carry the same clause, so a value the
+// schema does not declare gets one verdict wherever it lands (generator#516).
+//
+// The `value < 0` term is not redundant on the unsigned side of a WIDTH: the
+// corelib delivers an unsigned wire value as a `Long`, so a u64 at or above 2^63
+// arrives with its sign bit set and `value > 255` alone would read it as
+// negative, letting precisely the largest values through. A bitfield needs no
+// such term -- its test is a mask on the raw bits, taken on the unsigned view of
+// the same carrier, and a value with bit 63 set is refused by exactly that
+// expression unless position 63 is declared.
+func widthThrow(k ir.Kind, ref *ir.TypeRef, name string) string {
+	cond, what := widthCond(k), "width "+k.String()
+	if cond == "" {
+		cond, what = closedCond(k, ref), closedWhat(k)
 	}
-	cond := fmt.Sprintf("value < 0L || value > %dL", hi)
-	if lo < 0 {
-		cond = fmt.Sprintf("value < %dL || value > %dL", lo, hi)
+	if cond == "" {
+		return ""
 	}
 	return fmt.Sprintf("if (%s) %s; ", cond,
-		invalidThrow(fmt.Sprintf("%s: value outside declared width %s", name, k)))
+		invalidThrow(fmt.Sprintf("%s: value outside declared %s", name, what)))
+}
+
+// widthCond is the declared-integer-width half of widthThrow's comparison.
+func widthCond(k ir.Kind) string {
+	lo, hi, ok := ir.NarrowRange(k)
+	if !ok {
+		return ""
+	}
+	if lo < 0 {
+		return fmt.Sprintf("value < %dL || value > %dL", lo, hi)
+	}
+	return fmt.Sprintf("value < 0L || value > %dL", hi)
+}
+
+// closedCond is the reject comparison for the two CLOSED kinds, MESSAGE_SPEC §1:
+// an `enum` is bound by the set of constants the schema declares, a `bitfield`
+// by the mask of the positions it declares, so a value is valid exactly when
+// `value & ~mask == 0`. It returns "" for every other kind (widthCond owns
+// those) and for a bitfield whose declared positions cover all 64 bits, where the
+// test is a tautology and the clause would be dead code.
+//
+// This REPLACES the signed-32-bit enum bound this backend carried alone. That
+// bound was the wire type's ceiling read as the field's, and it happened to
+// coincide with the `Int` the target stores an enum in -- which is exactly the
+// confusion §1 settles: storage is never the bound. The member stays the
+// narrowest integer that holds the declared constants/positions (§1 grants that
+// as a MAY), but a field whose declared positions are 0..3 does not become
+// 0..2^64 valid because Kotlin holds it in a `ULong`.
+//
+// Both comparisons run on the RAW carrier, ahead of `fromWire`'s narrowing, which
+// is also why one clause covers both halves of the old reading at once: a mask
+// test on the full 64 bits rejects an undeclared bit inside the storage width and
+// everything above it in the same expression, and a membership test does the same
+// for an enum.
+//
+// The mask is taken on the UNSIGNED view of the carrier. `value` is a `Long`, and
+// a mask that declares position 63 has no `Long` hex literal below
+// `Long.MAX_VALUE` to be written as; `value.toULong()` reinterprets the same bits
+// for free and lets every mask be spelled as itself.
+//
+// This reverses generator#482, which kept an undeclared bit that fit the backing
+// width on the argument that it is how a peer built from a newer schema carries a
+// flag this one has not got yet. §1 answers that directly: adding a flag -- or a
+// constant -- is a BREAKING schema change, and a receiver rejects the value
+// rather than storing something its declared type cannot represent.
+func closedCond(k ir.Kind, ref *ir.TypeRef) string {
+	switch k {
+	case ir.KindEnum:
+		vals, ok := ir.EnumValues(ref)
+		if !ok || len(vals) == 0 {
+			return ""
+		}
+		if ir.EnumContiguous(ref) {
+			return fmt.Sprintf("value < %dL || value > %dL", vals[0], vals[len(vals)-1])
+		}
+		terms := make([]string, len(vals))
+		for i, v := range vals {
+			terms[i] = fmt.Sprintf("value != %dL", v)
+		}
+		return strings.Join(terms, " && ")
+	case ir.KindBitfield:
+		mask, ok := ir.BitfieldMask(ref)
+		if !ok || mask == ^uint64(0) {
+			return ""
+		}
+		if mask == 0 {
+			return "value != 0L"
+		}
+		return fmt.Sprintf("(value.toULong() and 0x%xuL.inv()) != 0uL", mask)
+	}
+	return ""
+}
+
+// closedWhat names the breached declaration in the INVALID_MSG text, so the two
+// closed kinds read as what they are rather than as a width.
+func closedWhat(k ir.Kind) string {
+	if k == ir.KindEnum {
+		return "enum constants"
+	}
+	return "bitfield flags"
 }
 
 // ---------------------------------------------------------------------------
@@ -1037,14 +1125,30 @@ func hasBulk(fs []frame) bool {
 }
 
 // bulkCapable reports whether a field is one of those arrays.
+//
+// An `enum` or `bitfield` element is NOT. The only bound the offer can carry is
+// the destination array's WIDTH -- handing back a `ShortArray` says "the elements
+// are declared 16 bits wide" -- and the bound of a closed kind is not a width at
+// all but the set of declared constants / the mask of declared positions
+// (MESSAGE_SPEC §1). Taking the offer bypasses the element callback that carries
+// the real one, and it did: the guard emitted in the fill arm for an enum array
+// was dead code, and the only rejection at that position came from the corelib's
+// "array element wider than its destination". Declining routes the elements back
+// through widthThrow, one at a time, so an undeclared value is refused where it
+// arrives rather than after the whole array has landed (generator#516).
+//
+// MEASURED on tests/bench's vehicletelemetry row, which declares and populates
+// both shapes (gear_history, array<enum> count 8; wheel_faults, array<bitfield>
+// count 4). Same corelib checkout, origin/main vs this rule: decode 32743 ->
+// 33674 Ir/op, +931 (+2.8%); encode 17200 -> 17199, i.e. held. Java's twin of
+// this decision costs +4.2% on the same row.
 func bulkCapable(fld *ir.Field) bool {
 	if fld.Kind != ir.KindArray {
 		return false
 	}
 	switch fld.Elem {
 	case ir.KindU8, ir.KindU16, ir.KindU32, ir.KindU64,
-		ir.KindI8, ir.KindI16, ir.KindI32, ir.KindI64,
-		ir.KindEnum, ir.KindBitfield:
+		ir.KindI8, ir.KindI16, ir.KindI32, ir.KindI64:
 		return true
 	}
 	return false
@@ -1187,7 +1291,7 @@ func (g *gen) emitScalarCb(f *kfile, fs []frame, cb, vtype string, want func(*ir
 			target := fr.path + "." + ktIdent(fld.Name)
 			guard := ""
 			if cb == "unsigned" || cb == "signed" {
-				guard = widthThrow(fld.Kind, fld.Name)
+				guard = widthThrow(fld.Kind, fld.Ref, fld.Name)
 			}
 			rhs := "value"
 			if cb == "unsigned" || cb == "signed" {
@@ -1295,7 +1399,7 @@ func (g *gen) emitArrayFillArm(f *kfile, fs []frame, cb string) {
 			cur := rowCursor(primArrayType(fr.innerElem))
 			guard := ""
 			if cb == "unsigned" || cb == "signed" {
-				guard = widthThrow(fr.innerElem, locName(fr.loc)+" element")
+				guard = widthThrow(fr.innerElem, fr.innerRef, locName(fr.loc)+" element")
 			}
 			arms = append(arms, arm{ids[-1], fmt.Sprintf("%s%s[ai] = %s; ai++",
 				guard, cur, elemStore(fr.innerElem, cb))})
@@ -1309,7 +1413,7 @@ func (g *gen) emitArrayFillArm(f *kfile, fs []frame, cb string) {
 			target := fr.path + "." + ktIdent(fld.Name)
 			guard := ""
 			if cb == "unsigned" || cb == "signed" {
-				guard = widthThrow(fld.Elem, fld.Name+" element")
+				guard = widthThrow(fld.Elem, fld.ElemRef, fld.Name+" element")
 			}
 			// A plain indexed store. arrayBegin allocated the destination at
 			// exactly the announced count, having first bounded that count against

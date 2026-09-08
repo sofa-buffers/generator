@@ -566,7 +566,44 @@ func (v *validator) checkEnumField(f map[string]any, loc string) {
 		if !containsInt(values, dn) {
 			v.add(loc+"/default", "enum default %d does not match any declared enum value", dn)
 		}
+		return
 	}
+	v.checkEnumInitialisable(values, loc)
+}
+
+// checkEnumInitialisable enforces the third consequence of the closed enum
+// (MESSAGE_SPEC §1): an `enum` field MUST either declare a `default` naming one
+// of the enum's constants, or belong to an enum that declares a constant with
+// the value 0.
+//
+// It is a schema-validity rule, not a decode check, and it follows from §2
+// rather than from §7.1. §2 initialises a field with no `default` to its type's
+// zero value and a sparse encoder omits the field at exactly that value, so
+// absence has to reconstruct something the type admits. An enum {RED = 1,
+// GREEN = 2} whose field declares no default would initialise to 0 — a value the
+// enum itself rejects — and no receiver could hold it legally. Such a value
+// never reaches the wire, precisely because the field is omitted at its default,
+// which is why this is caught at generate time and not by a decoder.
+//
+// It binds a FIELD, and only a scalar one. An array of enum needs no
+// counterpart: `count` is a capacity and nothing is padded to it (§3), so an
+// array with no `default` initialises EMPTY rather than to a run of zeros, and
+// no element is ever conjured at a value the enum does not declare. A bitfield
+// needs no counterpart either — its zero is the "no flags set" combination and
+// is always valid.
+//
+// values may be empty when the enum definition itself failed to validate; that
+// error is already reported and this one is suppressed rather than piled on.
+func (v *validator) checkEnumInitialisable(values []int64, loc string) {
+	if len(values) == 0 {
+		return
+	}
+	if containsInt(values, 0) {
+		return
+	}
+	v.add(loc, "enum field declares no \"default\" and its enum declares no constant with the value 0, "+
+		"so the field would initialize to 0 — a value the enum rejects; "+
+		"give the field a default naming one of the constants, or give the enum a 0 constant")
 }
 
 // validateEnumDef validates an enum value map and returns the declared values.
@@ -614,6 +651,26 @@ func (v *validator) validateEnumDef(node any, loc string) []int64 {
 		}
 		values = append(values, n)
 	}
+	// An enum with no constants at all. MESSAGE_SPEC §1 makes the declared SET
+	// the bound, so an empty set admits NO value — the field could not be given
+	// one, and no wire value could ever be stored in it. That is not a usable
+	// declaration, and it is not merely useless: every backend's closed-set
+	// comparison is built from the constants, so an empty set renders no
+	// comparison and the field silently accepts EVERY value — the exact opposite
+	// of what it declares (measured on all ten: `case 0: m.A = EA(v)` with no
+	// test). checkEnumInitialisable suppresses itself here too, so the field also
+	// initialises to 0, which the enum rejects. Refusing the definition is what
+	// makes those two suppressions the "already reported upstream" they document
+	// themselves as. The bitfield twin needs no counterpart: an empty `bits` map
+	// is mask 0, whose one valid value — no flags set — every backend does state.
+	//
+	// Keyed on the MAP being empty rather than on `values`, which is also empty
+	// when every constant in a non-empty map failed above; those errors are
+	// reported already and this one would only pile on.
+	if len(m) == 0 {
+		v.add(loc, "enum declares no constants; an enum is closed by the set it declares, "+
+			"so an empty set admits no value at all")
+	}
 	return values
 }
 
@@ -628,18 +685,19 @@ func (v *validator) checkBitfieldField(f map[string]any, loc string) {
 
 // validateBitfieldDef validates a bitfield and enforces uniquePositions (§6).
 //
-// It returns the highest VALID declared flag position, or -1 when the definition
-// declares none. Only the array-element default check uses that: every backend
-// gives a bitfield the smallest unsigned backing type that holds its highest
-// position (ARCHITECTURE §10, mirrored by ir.bitfieldAlign), so the highest
-// position is what bounds a mask written as a number. Every other caller ignores
-// it.
-func (v *validator) validateBitfieldDef(node any, loc string) int64 {
-	maxPos := int64(-1)
+// It returns the DECLARED MASK — one bit set per valid declared `pos`, 0 when the
+// definition declares none. Only the array-element default check uses it, and it
+// is the mask rather than the highest position because MESSAGE_SPEC §1 bounds a
+// bitfield by the mask and not by an interval: positions 0, 1 and 3 give
+// 0b1011, so bit 2 is undeclared and 4 is not a value of this type. It mirrors
+// ir.BitfieldMask, which is what the backends emit the decode comparison from.
+// Every other caller ignores the result.
+func (v *validator) validateBitfieldDef(node any, loc string) uint64 {
+	var mask uint64
 	m, ok := node.(map[string]any)
 	if !ok {
 		v.add(loc, "bitfield must be a mapping of FLAG -> {pos, default?}")
-		return maxPos
+		return mask
 	}
 	positions := map[int64]string{}
 	for name, val := range m {
@@ -677,11 +735,9 @@ func (v *validator) validateBitfieldDef(node any, loc string) int64 {
 		} else {
 			positions[pos] = name
 		}
-		if pos > maxPos {
-			maxPos = pos
-		}
+		mask |= uint64(1) << uint(pos)
 	}
-	return maxPos
+	return mask
 }
 
 func (v *validator) checkArrayField(f map[string]any, loc string) {
@@ -695,7 +751,7 @@ func (v *validator) checkArrayField(f map[string]any, loc string) {
 		v.add(loc+"/items", "items must be a mapping {type, count?, ...}")
 		return
 	}
-	etyp, enumValues, bitMaxPos := v.checkArrayItems(items, loc+"/items")
+	etyp, enumValues, bitMask := v.checkArrayItems(items, loc+"/items")
 
 	// array default: length <= count (capacity), plus per-element validation.
 	// Only NATIVE-element arrays carry a flat default.
@@ -722,7 +778,7 @@ func (v *validator) checkArrayField(f map[string]any, loc string) {
 			v.add(loc+"/default", "array default has %d elements, exceeds count %d", len(arr), c)
 		}
 		for i, el := range arr {
-			v.checkArrayElem(etyp, el, enumValues, bitMaxPos, fmt.Sprintf("%s/default/%d", loc, i))
+			v.checkArrayElem(etyp, el, enumValues, bitMask, fmt.Sprintf("%s/default/%d", loc, i))
 		}
 	}
 }
@@ -733,12 +789,11 @@ func (v *validator) checkArrayField(f map[string]any, loc string) {
 // declared flag position (-1 when it has none). It recurses into composite/nested
 // element types, enforcing the full contract (uniqueIds / uniquePositions /
 // defaultMatchesEnum / defaultIdMatchesUnion) exactly as field-level composites do.
-func (v *validator) checkArrayItems(items map[string]any, loc string) (etyp string, enumValues []int64, bitMaxPos int64) {
-	bitMaxPos = -1
+func (v *validator) checkArrayItems(items map[string]any, loc string) (etyp string, enumValues []int64, bitMask uint64) {
 	etyp, ok := items["type"].(string)
 	if !ok || !arrayElemTypes[etyp] {
 		v.add(loc+"/type", "array element type must be one of u8..u64,i8..i64,fp32,fp64,boolean,string,blob,enum,bitfield,struct,union,array")
-		return etyp, nil, bitMaxPos
+		return etyp, nil, bitMask
 	}
 	// per-element-type allowed keys (additionalProperties:false)
 	allowed := []string{"type", "count"}
@@ -782,7 +837,7 @@ func (v *validator) checkArrayItems(items map[string]any, loc string) (etyp stri
 		}
 	case "bitfield":
 		if b, ok := items["bits"]; ok {
-			bitMaxPos = v.validateBitfieldDef(b, loc+"/bits")
+			bitMask = v.validateBitfieldDef(b, loc+"/bits")
 		} else {
 			v.add(loc, "bitfield array element requires a \"bits\" map")
 		}
@@ -807,7 +862,7 @@ func (v *validator) checkArrayItems(items map[string]any, loc string) (etyp stri
 			v.add(loc, "array array element requires \"items\"")
 		}
 	}
-	return etyp, enumValues, bitMaxPos
+	return etyp, enumValues, bitMask
 }
 
 // checkArrayElem validates one element of an array field's flat `default`.
@@ -823,7 +878,7 @@ func (v *validator) checkArrayItems(items map[string]any, loc string) (etyp stri
 // arrayElem. TestEveryArrayElemKindRejectsABogusDefault pins that partition, so
 // a kind added to arrayElem with neither an arm nor a wrapperArrayElem entry
 // cannot silently reopen this hole.
-func (v *validator) checkArrayElem(etyp string, el any, enumValues []int64, bitMaxPos int64, loc string) {
+func (v *validator) checkArrayElem(etyp string, el any, enumValues []int64, bitMask uint64, loc string) {
 	switch etyp {
 	case "u8", "u16", "u32", "i8", "i16", "i32":
 		// The same spelling refusal the u64/i64 arm below gets from int64Verdict:
@@ -873,7 +928,7 @@ func (v *validator) checkArrayElem(etyp string, el any, enumValues []int64, bitM
 			v.add(loc, "enum element %d does not match any declared enum value", n)
 		}
 	case "bitfield":
-		v.checkMaskElem(el, bitMaxPos, loc)
+		v.checkMaskElem(el, bitMask, loc)
 	}
 }
 
@@ -895,29 +950,27 @@ func (v *validator) checkArrayElem(etyp string, el any, enumValues []int64, bitM
 //     form, which then reports the real 64-bit verdict). YAML's own 0x10/0b101/0o17
 //     arrive here as integers and are fine; it is only the QUOTED form that must be
 //     decimal, which is what checkInt64Range requires of a u64 too.
-//   - The bound is the bitfield's own backing width, not a flat 64 bits. That is
-//     an INTERSECTION across the eleven targets, not something they all do. SIX
-//     narrow the storage to the smallest unsigned type holding the highest
-//     declared pos — bitfieldC (generators/c/backend.go), bitfieldBacking
-//     (generators/{cpp,rust,zig,csharp}/helpers.go) and bitfieldGoType
-//     (generators/golang/helpers.go) — and a wider mask does not fit the member
-//     they emit. The member each of the six emits for a two-flag bitfield (pos 0,
-//     pos 2) was measured: `uint8_t narrow[2]` in C, `std::vector<std::uint8_t>`
-//     in C++, `Vec<u8>` in Rust, `[]BfNarrowElem` over a `uint8` in Go,
-//     `FixedArray(u8, 2)` in Zig, a `byte`-backed enum in C#. The other FIVE carry
-//     every bitfield at full width whatever it declares — measured as `long[]`
-//     (java), `ULongArray` (kotlin), `number[]` (typescript), `list[int]` (python)
-//     and `List<int>` (dart) — so a mask of 1000 was legal and correct there
-//     before this check. One
-//     definition has to generate for all eleven, so the schema takes the
-//     narrowest target's bound. It subsumes the 64-bit one (a bitfield declaring
-//     pos 63 gets the full 64).
 //
-// A bit set at a position no flag declares is ACCEPTED as long as it fits that
-// width. No backend masks a bitfield value down to its declared positions —
-// each one only ORs declared positions together when it builds a default — the
-// wire carries the whole unsigned value, and an undeclared bit is exactly how a
-// peer built from a newer schema carries a flag this one does not declare yet.
+//   - The bound is the bitfield's DECLARED MASK: one bit per declared `pos`, and
+//     a bit set anywhere else is refused. MESSAGE_SPEC §1 closes a bitfield by
+//     that mask — `v & ~mask == 0` — and §2 makes a `default` the value absence
+//     reconstructs, so a default outside the mask would declare a field value no
+//     conformant peer can send: every generated decoder in the family refuses it
+//     on the wire (generator#516), and the encoder would still write it, because
+//     the last element of an array is always written. The two halves of one
+//     closed rule cannot disagree, and the enum twin above already binds the
+//     authored element to the declared SET.
+//
+//     It replaces a bound at the backing WIDTH, which #482 chose on the argument
+//     that "an undeclared bit is how a peer built from a newer schema carries a
+//     flag this one does not declare yet". §1 rejects that outright: adding a
+//     flag is a BREAKING schema change. The mask is strictly narrower than the
+//     width it replaces — the declared positions all fit the backing type by
+//     construction — so nothing the width bound refused is admitted now.
+//
+//     The mask also subsumes the 64-bit ceiling: a value past 2^64 sets bits no
+//     flag declares, so it is refused by the same comparison, and the message
+//     names the highest declared position rather than a width.
 //
 // It stays a separate function from int64Verdict, which #484 gave the u64/i64
 // element and field arms, rather than calling it: the two agree line for line on
@@ -927,7 +980,7 @@ func (v *validator) checkArrayElem(etyp string, el any, enumValues []int64, bitM
 // they do share outright is the exact-valued-float sentence, which comes from
 // integralFloatVerdict; that one guards every integer default in the schema, not
 // just the 64-bit ones, so it could not stay duplicated here.
-func (v *validator) checkMaskElem(el any, maxPos int64, loc string) {
+func (v *validator) checkMaskElem(el any, mask uint64, loc string) {
 	var n *big.Int
 	switch x := el.(type) {
 	case string:
@@ -985,37 +1038,36 @@ func (v *validator) checkMaskElem(el any, maxPos int64, loc string) {
 		v.add(loc, "element mask %s must not be negative (a bitfield is unsigned)", n.String())
 		return
 	}
-	width := maskWidthBits(maxPos)
-	if n.BitLen() > width {
-		if maxPos < 0 {
+	// The closed comparison, on the value itself: v &^ mask, exactly what every
+	// generated decoder emits for a wire value at this element (ir.BitfieldMask).
+	// big.Int rather than uint64 because a spelling past 2^64 has already been
+	// accepted as a number by this point, and AndNot answers it without a second
+	// range test — every bit above 63 is undeclared by construction.
+	if surplus := new(big.Int).AndNot(n, maskBig(mask)); surplus.Sign() != 0 {
+		if mask == 0 {
 			// No flag was declared (an empty or malformed `bits` map, which has an
-			// error of its own): one byte is what the six narrowing backends give
-			// it, so it is what maskWidthBits gives it too.
-			v.add(loc, "element mask %s does not fit the %d-bit backing of a bitfield that declares no flags", n.String(), width)
+			// error of its own). Its mask is 0 and only the zero value is a
+			// combination of no flags.
+			v.add(loc, "element mask %s sets bits, but the bitfield declares no flags, so only 0 is a valid value", n.String())
 			return
 		}
-		v.add(loc, "element mask %s does not fit the %d-bit backing of a bitfield whose highest declared pos is %d", n.String(), width, maxPos)
+		v.add(loc, "element mask %s sets bit %d, which no flag declares (the declared mask is %#x); "+
+			"a bitfield is closed by the positions it declares (MESSAGE_SPEC §1), so a value outside the mask "+
+			"is one every conformant decoder refuses", n.String(), lowestSetBit(surplus), mask)
 	}
 }
 
-// maskWidthBits is the width of the unsigned type the six narrowing backends back
-// a bitfield with: the smallest that holds its highest declared flag position. The
-// choosers it has to agree with are bitfieldC (generators/c/backend.go),
-// bitfieldBacking (generators/{cpp,rust,zig,csharp}/helpers.go) and bitfieldGoType
-// (generators/golang/helpers.go). It happens to agree numerically with
-// ir.bitfieldAlign, but that one's job is member-declaration ORDERING, not storage
-// selection, so it is not the reference. A bitfield with no declared flag is one
-// byte wide in all of them and here.
-func maskWidthBits(maxPos int64) int {
-	switch {
-	case maxPos <= 7:
-		return 8
-	case maxPos <= 15:
-		return 16
-	case maxPos <= 31:
-		return 32
-	default:
-		return 64
+// maskBig is the declared mask as a big.Int, for the AndNot above.
+func maskBig(mask uint64) *big.Int { return new(big.Int).SetUint64(mask) }
+
+// lowestSetBit names ONE undeclared position for the diagnosis — the lowest, so
+// the message points at a bit the author can find rather than restating the whole
+// surplus. surplus is non-zero at every call site.
+func lowestSetBit(surplus *big.Int) int {
+	for i := 0; ; i++ {
+		if surplus.Bit(i) == 1 {
+			return i
+		}
 	}
 }
 
