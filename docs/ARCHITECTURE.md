@@ -1040,8 +1040,9 @@ points worth recording:
   emits no hook when nothing in the schema qualifies. An arm is offered only where
   a **declared narrow width** exists, which is exactly where the elements are plain
   JS numbers *and* there are bounds to state: `u64`/`i64` (bigint/Long), `boolean`,
-  `enum` and `bitfield` (no declared width — inventing one would reject legal
-  values) and the floats all keep the element callbacks. Those arms stay emitted
+  `enum` and `bitfield` (whose bound is a declared SET, and an `ArrayTarget`'s
+  `min`/`max` is an interval — MESSAGE_SPEC §1, generator#516) and the floats all
+  keep the element callbacks. Those arms stay emitted
   regardless: they are what runs for a declined array and against a corelib that
   predates the hook, which is what makes taking it additive.
 - **Only the leaf wrapper-array collectors come from the corelib.** `StringSeq` and
@@ -1856,8 +1857,38 @@ beside the `count`, wrapper-element-id and `maxlen` guards already there.
     is generated. One wrapper type per closed named type used as a row element,
     emitted into `types.go` beside the type itself, because the package admits one
     declaration however many messages share it.
+  - **`dart`'s matrix rows are wrapped the same way, by SUBCLASSING.**
+    `sofab.IntMatrixSeq` owns the row: it gathers the elements and places the
+    finished list, so no generated store sees a row value, and the `lo`/`hi` pair
+    it carries is an interval. It is a plain class with public callbacks, so a
+    generated subclass overrides the one callback its declared wire kind arrives
+    on, scans the row against the declared set and delegates — the corelib keeps
+    the row id, the row count and the placing. One subclass per closed named type
+    used as a row element, emitted beside the type in the single generated Dart
+    library. `lo`/`hi` stay `0, 0` (which the collector reads as "no bound"):
+    arming the hull beside the exact test would put a second, weaker interval on
+    the same values that disagrees with it on exactly the gap.
+  - **Where an interval hook sits IN FRONT of an exact generated check, it is
+    armed with the HULL and the two are complementary** (`dart`, `python`
+    native-array elements; `python` matrix rows too). Both corelibs deliver a
+    native array to generated code as an assembled list, so the exact scan
+    against the declared set is emitted there and decides every array that
+    ARRIVES. It cannot decide one that does not: §5.2 makes INVALID dominate
+    INCOMPLETE, and an array cut short behind an out-of-set element never reaches
+    the whole-array callback. The element-level hook that could — corelib-dart's
+    `onArrayElemBound` (`sofab.ElemRange`) and corelib-py's `on_array_begin`
+    `(elem_min, elem_max)` — carries an INTERVAL, so it is handed the hull:
+    `ir.EnumHull`, or `{0, mask}` for a bitfield. Everything outside the declared
+    range is then refused whether the array completes or not, and exactly one row
+    stays open and is REPORTED rather than widened away: a value INSIDE the hull
+    that the set does not admit, in an array a truncation cuts short behind it,
+    reports INCOMPLETE where §1+§5.2 want INVALID. Closing it needs a set/mask
+    channel on those two hooks. `dart` additionally declines the hull for a
+    bitfield declaring position 63 — both hooks compare an unsigned element as
+    `v < 0 || v > max`, and a maximum with the top bit set would refuse the very
+    value that bit is — where `python`, whose int is unbounded, states it whole.
   - **A bulk element offer is DECLINED for both closed kinds** (`java`,
-    `kotlin`). Those two corelibs let a visitor hand back a primitive array and
+    `kotlin`, and `typescript` by the predicate it already had). Those two corelibs let a visitor hand back a primitive array and
     have the decoder write the elements straight into it, skipping the element
     callback entirely. The only bound that path can carry is the destination
     array's **WIDTH** — handing back a `short[]` says "these elements are
@@ -1872,16 +1903,19 @@ beside the `count`, wrapper-element-id and `maxlen` guards already there.
     when the array is cut short behind it, which a scan in `arrayBulkEnd` (the
     alternative) could not report at all. Nothing else changes: the destination
     is still allocated at the wire count, and every other integer array keeps the
-    fast path.
-  - **Rollout.** `rust` (all four config combos), `zig`, `go`, `csharp`, `java`,
-    `kotlin` and `cpp` with `corelib: cpp` (both storage modes) implement the
-    rule today; the remaining three code backends (`dart`, `typescript`,
-    `python`) are landing under the same issue and this list is the contract they
-    are held to. `c` is out of scope by the owner's decision — it emits no decode
-    code at all, only a descriptor table plus `sofab_object_field_cb`, so there
-    is nowhere in generated C to put the check. Of the seven that have it,
-    `csharp`, `java` and `kotlin` owe nothing to their corelibs: all twelve
-    stores are generated code, and all twelve carry the clause.
+    fast path. `typescript` reaches the same place without a change:
+    `bulkEligible` already gated on `ir.NarrowRange`, so a closed kind never
+    qualified — and it must keep not qualifying, because corelib-ts's
+    `ArrayTarget` carries `min`/`max` and nothing else.
+  - **Rollout.** All ten code backends implement the rule: `rust` (all four
+    config combos), `zig`, `go`, `cpp` with `corelib: cpp` (both storage modes),
+    `csharp`, `java`, `kotlin`, `dart`, `typescript` and `python`. `c` is out of
+    scope by the owner's decision — it emits no decode code at all, only a
+    descriptor table plus `sofab_object_field_cb`, so there is nowhere in
+    generated C to put the check. Seven of the ten owe nothing to their corelibs
+    and enforce all twelve stores exactly: `go`, `csharp`, `java`, `kotlin`,
+    `dart`, `typescript` and `python` for a message that ARRIVES whole. What the
+    remaining hooks cannot carry is listed above and below, position by position.
   - **`kotlin` is the one target that had a bound already, and it was the wrong
     one.** It checked an enum against the signed 32-bit range — the *wire type's*
     ceiling, which happens to coincide with the `Int` the member is held in, so
@@ -4136,7 +4170,7 @@ build.
 | **Java** | `corelib-java` (Maven) | flat-visitor location-stack | one public class per file (`<Message>.java`, one `<Type>.java` per struct/union) — schema types are public like every other target's, and a type reached from two messages is emitted once (#305); no support file beside them: `Seq`, `PayloadAcc`, `Utf8.decode`, `Sofab.invalid`, `Bound` and `OStream.overScratch` are corelib API (corelib-java#97 / #345 / #105); classes + `serialize`/`encodeTo`; nested `Msg.Decoder` via `decoder()` → `feed`/`finish` for chunked decode (`finish` throws `IllegalStateException`, not `SofabException`: `SofabError` has no INCOMPLETE, and an incomplete message is not a malformed one); ints → `long` (u64 **and bitfield** via `toUnsignedString` / `parseUnsignedLong` in the JSON harness — both are unsigned 64-bit values in a signed carrier, so the sign of the carrier must not reach the interchange format, #475); `tryDecode(data, out)` returns the §7 `DecodeStatus` (#105); Gson harness. |
 | **Kotlin** | `corelib-kotlin-mp` (Gradle/Maven Central) | flat-visitor location-stack | Kotlin Multiplatform: the emitted message sources are plain `commonMain` (stdlib + `sofab`, no JVM API), so one source set compiles for the JVM, Node/browser and native, and only the `emit: project` scaffolding is JVM-specific. One file per declaration (`<Message>.kt` + the internal `<Message>Visitor`, one `<Type>.kt` per struct/union) and no support file of its own -- element placement, array growth, payload reassembly and UTF-8 materialisation are the corelib's `Seq`/`PayloadAcc`/`Utf8` (#345); classes + `serialize`/`encodeTo`/`encode()`; nested `Msg.Decoder` via `decoder()` -> `feed`/`finish`. Integers map to their EXACT declared width, unsigned included (`u8` is a `UByte`, `u8[]` a `UByteArray`) -- the C# position, not Java's widen-to-`long`, since Java's reason for widening does not apply. What is Kotlin-specific is that this costs nothing at the corelib boundary: the unsigned arrays are inline classes over their signed peers, so `asIntArray()` is a reinterpretation and the field's own backing array reaches `writeArrayUnsigned`, while the `arrayBulk` offer hands that same view over as the destination, whose element width IS the declared width (§7.1 checked in the pass that decodes). `enum` -> `Int` and `bitfield` -> `ULong`, the widths that cannot lose a legal value, with the declared members emitted as documented named constants in an `object` beside the field -- so per-constant metadata is rendered where C and Java have no symbol for it. `boolean[]` is a `BooleanArray` (no native array boxes). Keyword field names are BACKTICK-escaped, never mangled; a name colliding with a generated member is mangled instead. `tryDecode(data, out)` returns the §7 `DecodeStatus` and `decode(bytes)` is STRICT about both non-COMPLETE outcomes (`IllegalStateException` on a terminal INCOMPLETE, deliberately not `SofabException`). Guards throw the corelib's `SofabException` unwrapped -- Kotlin has no checked exceptions. The receiver caps are split by field kind (§9.5.4): a payload length and a wrapper row index travel as arguments into `PayloadAcc.string`/`.blob` and `Seq.reserveRow*`, beside the schema bound they are exclusive with, so the check lands at the length/index header inside a call the visitor already makes; a native array's count keeps its generated guard in `arrayBegin`, there being no such call to carry it. Hand-written JSON harness (exact u64 from the literal text). |
 | **Zig** | `corelib-zig` | flat-visitor location-stack (comptime duck-typed) | structs with schema defaults in the declaration + `serialize`; `decoder(out, alloc)` → `feed`/`finish` (the destination is the CALLER's: Zig moves structs by value, so a decoder owning its message would dangle its own visitor pointer); a decoded message OWNS its bytes on BOTH paths (strings, blobs and array storage all from the caller's allocator, so the input may be reused the moment the call returns): `feed` has to copy, because a payload stitched across a chunk boundary completes inside the corelib's reused carry buffer and is delivered as a slice into the decoder itself, indistinguishable in the callback from one into the caller's chunk (generator#295); `decode()` copies for the same reason §6.7.1 gives — it borrowed until generator#412, which is what `tests/conformance/zig/ownership_check.zig` now pins; `sofab.FixedArray(T, N)` (inline slots plus a logical length) for counted native arrays; hand-rolled JSON harness (exact u64). |
-| **Dart** | `corelib-dart` | push child-visitor (`MessageVisitor`) | classes with per-field defaults + `serialize`/`encodeTo`/`encode()` — generated code owns every encode buffer (§5.1): `encode()` allocates one exactly-sized `maxSize` `Uint8List` (`Encoder.overBuffer(buf)`, returning the `written` view over it) for a bounded schema and drains a fixed 512-byte scratch into a caller `BytesBuilder(copy: true)` (`Encoder(sink, buffer: scratch)`) for an unbounded one; the corelib's `Encoder.encodeToBytes` — the one place that package allocates output storage — is emitted nowhere; `decoder(out)` → `feed`/`finish` for chunked decode (`finish` returns `null` rather than throwing — this backend's decode path is deliberately exception-free; the corelib reassembles split payloads into storage of its own, so nothing is borrowed from a fed chunk); `onSequenceStart(id)` returns a child visitor (nested object / array collector), native arrays arrive whole via `on*Array` (S7.3/S7.4 structural, like Go); `int` is 64-bit so a u64 >= 2^63 is emitted as its signed/hex bit pattern; a `double` is 64-bit so an fp32 NaN routes through the corelib raw-bits API (`onFp32Bits`/`writeFp32Bits` with a companion `int?` slot for a scalar, a bit-exact `Float32List` copy for an array) to preserve a signaling NaN bit-for-bit (§4.6, #226), exercised through the `recode` harness mode by the shared `tests/conformance/lib/check_fp32_nan.py` (#468); `tryDecode` -> `DecodeStatus` (INVALID rides a sticky flag; `decode` is the best-effort convenience); a decoded message owns its bytes on BOTH paths, twice over: the corelib takes the destination `onBytesDest` supplies and COPIES the payload into it (its one-shot blob arm cites §6.7.1 by name -- it used to hand out a view into the decode buffer, which is what the older text here described), and every generated destination copies again (`Uint8List.fromList`, `sofab.decodeUtf8Strict`); it allocates the container itself for an array on either path, and reassembles a split payload while streaming; the schema-free half of the emitted prelude is the corelib's (`sofab.VisitorBase`, `sofab.elementsEqual`, `sofab.decodeUtf8Strict`, `sofab.utf8Length` — §8, #345); the receiver-side `max_dyn_*` caps are applied per field, at that field's own count/length header (§9.5): as the *else* of the schema bound in the generated `onFixlenHeader`/`onArrayBegin` for a scalar and a native array (`limitExceeded()`), and inside the collector for a wrapper array's element index, element length and matrix-row count, which take them as its `rcap`/`relemMax`/`rowCap` **required** arguments; every visitor also overrides `onBytesDest`/`onArrayDest` to return `null` for every id it does not bind, so a §7.3-skipped field gets no destination at all; JSON harness carries u64 as a string. |
+| **Dart** | `corelib-dart` | push child-visitor (`MessageVisitor`) | classes with per-field defaults + `serialize`/`encodeTo`/`encode()` — generated code owns every encode buffer (§5.1): `encode()` allocates one exactly-sized `maxSize` `Uint8List` (`Encoder.overBuffer(buf)`, returning the `written` view over it) for a bounded schema and drains a fixed 512-byte scratch into a caller `BytesBuilder(copy: true)` (`Encoder(sink, buffer: scratch)`) for an unbounded one; the corelib's `Encoder.encodeToBytes` — the one place that package allocates output storage — is emitted nowhere; `decoder(out)` → `feed`/`finish` for chunked decode (`finish` returns `null` rather than throwing — this backend's decode path is deliberately exception-free; the corelib reassembles split payloads into storage of its own, so nothing is borrowed from a fed chunk); `onSequenceStart(id)` returns a child visitor (nested object / array collector), native arrays arrive whole via `on*Array` (S7.3/S7.4 structural, like Go); `int` is 64-bit so a u64 >= 2^63 is emitted as its signed/hex bit pattern; a `double` is 64-bit so an fp32 NaN routes through the corelib raw-bits API (`onFp32Bits`/`writeFp32Bits` with a companion `int?` slot for a scalar, a bit-exact `Float32List` copy for an array) to preserve a signaling NaN bit-for-bit (§4.6, #226), exercised through the `recode` harness mode by the shared `tests/conformance/lib/check_fp32_nan.py` (#468); `tryDecode` -> `DecodeStatus` (INVALID rides a sticky flag; `decode` is the best-effort convenience); a decoded message owns its bytes on BOTH paths, twice over: the corelib takes the destination `onBytesDest` supplies and COPIES the payload into it (its one-shot blob arm cites §6.7.1 by name -- it used to hand out a view into the decode buffer, which is what the older text here described), and every generated destination copies again (`Uint8List.fromList`, `sofab.decodeUtf8Strict`); it allocates the container itself for an array on either path, and reassembles a split payload while streaming; the schema-free half of the emitted prelude is the corelib's (`sofab.VisitorBase`, `sofab.elementsEqual`, `sofab.decodeUtf8Strict`, `sofab.utf8Length` — §8, #345); the receiver-side `max_dyn_*` caps are applied per field, at that field's own count/length header (§9.5): as the *else* of the schema bound in the generated `onFixlenHeader`/`onArrayBegin` for a scalar and a native array (`limitExceeded()`), and inside the collector for a wrapper array's element index, element length and matrix-row count, which take them as its `rcap`/`relemMax`/`rowCap` **required** arguments; every visitor also overrides `onBytesDest`/`onArrayDest` to return `null` for every id it does not bind, so a §7.3-skipped field gets no destination at all; a matrix row whose element is an `enum` or a `bitfield` is gathered by a generated library-private SUBCLASS of `sofab.IntMatrixSeq` that closes the declared set on the row and delegates the placing, this being the one position whose values never reach a generated store (§1, #516); JSON harness carries u64 as a string. |
 | **docs** | — (non-code) | — | single self-contained HTML reference page (`message.html`): message field tables + cross-linked named types; `format: html` (only format); no conformance harness — nothing executes. |
 
 **Common type mapping:** enum → smallest *signed* backing; bitfield → smallest
@@ -4735,13 +4769,23 @@ A reimplementation is **conformant** when it reproduces these gates:
    payload is complete, so truncation explains no rejection.
 
    It is wired in `rust` (all four config combos), `zig`, `go`, `csharp`,
-   `java` and `kotlin` (all six positions, no declension in any of the six) and
-   the two `corelib: cpp` legs, replacing the narrower generator#513 block that
-   pinned the bitfield array element at its storage repr. The `corelib: c-cpp` legs are out entirely: nothing there is
-   enforceable generator-side. On `zig` it must run in the `--release=fast`
-   harness the suite ships: before the guard existed the same bytes ABORTED a
-   Debug build and were silently truncated by the release one (generator#517), so
-   a Debug-only case would have reported a crash rather than a verdict.
+   `java`, `kotlin`, `dart`, `typescript` and `python` (all six positions, no
+   declension in any of the nine) and the two `corelib: cpp` legs, replacing the
+   narrower generator#513 block that pinned the bitfield array element at its
+   storage repr. `cpp` is the only target that declines a position. The
+   `corelib: c-cpp` legs are out entirely: nothing there is enforceable
+   generator-side. On `zig` it must run in the `--release=fast` harness the suite
+   ships: before the guard existed the same bytes ABORTED a Debug build and were
+   silently truncated by the release one (generator#517), so a Debug-only case
+   would have reported a crash rather than a verdict. `python` runs it on BOTH
+   engines: the element bound the accelerator applies is C code and the pure
+   one's is not, so a single-engine run proves the rule for one of them.
+
+   What the driver does NOT reach, at any target, is the truncated case: every
+   payload it forges is complete, deliberately, so that a rejection can only be
+   the closed rule. The interval hooks `dart` and `python` arm in front of their
+   scans are what covers the truncated half, as far as an interval can — see
+   "Decode verdict" for the one row that stays open there.
 2. **Round-trip harness** — `emit: project` builds the generated code against the
    real corelib and round-trips canonical JSON through encode→decode for every
    field kind (`tests/conformance/<lang>/run.sh`). Each harness also feeds one

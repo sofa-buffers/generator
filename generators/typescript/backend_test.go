@@ -1,6 +1,7 @@
 package typescript
 
 import (
+	"fmt"
 	"os"
 	"regexp"
 	"strings"
@@ -712,8 +713,11 @@ messages:
 		}
 	}
 	// No arm for: an array declared too short to pay; a destination that is not a
-	// plain JS number (u64 -> bigint, boolean); or a kind with no declared width to
-	// state (enum, bitfield) — inventing bounds there would reject legal values.
+	// plain JS number (u64 -> bigint, boolean); or a CLOSED kind (enum, bitfield),
+	// whose bound is the set the schema declares and not an interval — an
+	// ArrayTarget carries `min`/`max` and could state neither a gapped constant set
+	// nor a mask, so taking the offer would move the element verdict into a channel
+	// that cannot carry it (MESSAGE_SPEC §1, generator#516).
 	// fp32/fp64 are never offered one by the corelib at all.
 	for _, id := range []string{"case 2: { if (kind", "case 3: { if (kind", "case 4: { if (kind", "case 5: { if (kind", "case 6: { if (kind"} {
 		if strings.Contains(mod, id+" !== ArrayKind.Unsigned) break; const _t") ||
@@ -978,7 +982,16 @@ func TestTSCompactArrayKeepsItsTail(t *testing.T) {
 		// made arrayBegin skip every enum array as a §7.3 contradiction, losing the
 		// count bound and the §7.4 replace while the elements still arrived.
 		`case 8: { if (kind !== ArrayKind.Signed) break; if (count > 2) throw new SofabError(SofabErrorCode.InvalidMsg, "fenum: array count above schema capacity 2"); const _d: EnumMode[] = []; this.o.fenum = _d; this._a0Fenum = _d; break; }`,
-		`case 8: this._a0Fenum[i] = Number(v) as EnumMode; break;`,
+		// The element store carries the closed-set verdict (§1, generator#516): an
+		// `enum` is bound by the constants the schema declares, so a value that is
+		// not one of them is INVALID before the cast that would have kept it. Mode
+		// declares {0, 1} contiguously, so the clause is the two-sided comparison.
+		`case 8: { const _e = Number(v); if (_e < 0 || _e > 1) throw new SofabError(SofabErrorCode.InvalidMsg, "fenum: value outside declared enum constants"); this._a0Fenum[i] = _e as EnumMode; break; }`,
+		// ...and the bitfield element is bound by the MASK of the positions it
+		// declares. Flags declares only `ready` at position 0, so anything but 0
+		// and 1 is INVALID -- the `_e > 1` term first, because JavaScript's `&`
+		// coerces through ToInt32 and a mask test alone would accept 2^40.
+		`case 9: { const _e = v as number; if (_e > 1 || (_e & ~0x1) !== 0) throw new SofabError(SofabErrorCode.InvalidMsg, "fbits: value outside declared bitfield flags"); this._a0Fbits[i] = _e; break; }`,
 	} {
 		if !strings.Contains(mod, want) {
 			t.Errorf("fixed-count message.ts missing %q", want)
@@ -2472,7 +2485,12 @@ func TestTSWideBitfieldIsBigint(t *testing.T) {
 		"  A: 1073741824n,",
 		"  B: 2147483648n,",
 		"e: bigint = 0n;",
-		"case 4: this.o.e = BigInt(v); break;",
+		// The store carries the closed-MASK verdict (§1, generator#516) and the
+		// bigint carrier is what lets the mask be spelled at all: bigint bitwise
+		// arithmetic is arbitrary-precision, so one clause rejects an undeclared
+		// bit and everything above the highest declared position alike, with no
+		// width term and no ToInt32 corner.
+		`case 4: { const _v = BigInt(v); if ((_v & ~0xc0000000n) !== 0n) throw new SofabError(SofabErrorCode.InvalidMsg, "e: value outside declared bitfield flags"); this.o.e = _v; break; }`,
 		// Storage, default and the default comparison that reads it.
 		"w: bigint = 9223372036854775808n;",
 		"n: number = 0;",
@@ -2489,8 +2507,11 @@ func TestTSWideBitfieldIsBigint(t *testing.T) {
 		`o.na = d["na"] as number[];`,
 		// Decode: the unsigned callback delivers a number below 2^53 and a bigint
 		// above, so the wide store normalises instead of rounding through Number().
-		"case 0: this.o.w = BigInt(v); break;",
-		"case 1: this.o.n = Number(v); break;",
+		// Bit 63 declared: the mask is 0x8000000000000001, which no `number` could
+		// hold and no Long-free `&` could apply. The narrow sibling keeps the
+		// number carrier and pays the extra `>` term for it.
+		`case 0: { const _v = BigInt(v); if ((_v & ~0x8000000000000001n) !== 0n) throw new SofabError(SofabErrorCode.InvalidMsg, "w: value outside declared bitfield flags"); this.o.w = _v; break; }`,
+		`case 1: { const _v = v as number; if (_v > 1073741825 || (_v & ~0x40000001) !== 0) throw new SofabError(SofabErrorCode.InvalidMsg, "n: value outside declared bitfield flags"); this.o.n = _v; break; }`,
 	} {
 		if !strings.Contains(mod, want) {
 			t.Errorf("missing %q", want)
@@ -2507,5 +2528,141 @@ func TestTSWideBitfieldIsBigint(t *testing.T) {
 		if strings.Contains(mod, bad) {
 			t.Errorf("a 64-bit-backed bitfield must not be carried as a number: found %q", bad)
 		}
+	}
+}
+
+// closedSixSrc declares an `enum` and a `bitfield` at all SIX positions a value
+// can land in, and both definitions are GAPPED on purpose: the enum declares
+// {0, 1, 2, 10}, so 5 sits inside the hull and is not a constant, and the
+// bitfield declares positions 0, 1 and 3 (mask 0b1011), so 4 sets a bit no flag
+// declares. A contiguous definition makes a closed set look like an interval and
+// would pass under any bound that is one.
+const closedSixSrc = `
+version: 1
+messages:
+  Closed:
+    payload:
+      en:  { id: 0, type: enum, enum: { A: 0, B: 1, C: 2, Z: 10 } }
+      bf:  { id: 1, type: bitfield, bits: { A: { pos: 0 }, B: { pos: 1 }, D: { pos: 3 } } }
+      ea:  { id: 2, type: array, items: { type: enum, count: 4, enum: { A: 0, B: 1, C: 2, Z: 10 } } }
+      bfa: { id: 3, type: array, items: { type: bitfield, count: 4, bits: { A: { pos: 0 }, B: { pos: 1 }, D: { pos: 3 } } } }
+      st:
+        id: 4
+        type: struct
+        fields:
+          se:  { id: 0, type: enum, enum: { A: 0, B: 1, C: 2, Z: 10 } }
+          sbf: { id: 1, type: bitfield, bits: { A: { pos: 0 }, B: { pos: 1 }, D: { pos: 3 } } }
+      sa:
+        id: 5
+        type: array
+        items:
+          type: struct
+          count: 2
+          fields:
+            se:  { id: 0, type: enum, enum: { A: 0, B: 1, C: 2, Z: 10 } }
+            sbf: { id: 1, type: bitfield, bits: { A: { pos: 0 }, B: { pos: 1 }, D: { pos: 3 } } }
+      un:
+        id: 6
+        type: union
+        default_id: 0
+        oneof:
+          ue:  { id: 0, type: enum, enum: { A: 0, B: 1, C: 2, Z: 10 } }
+          ubf: { id: 1, type: bitfield, bits: { A: { pos: 0 }, B: { pos: 1 }, D: { pos: 3 } } }
+      mat: { id: 7, type: array, items: { type: array, count: 2, items: { type: enum, count: 3, enum: { A: 0, B: 1, C: 2, Z: 10 } } } }
+      mbf: { id: 8, type: array, items: { type: array, count: 2, items: { type: bitfield, count: 3, bits: { A: { pos: 0 }, B: { pos: 1 }, D: { pos: 3 } } } } }
+`
+
+// MESSAGE_SPEC §1 closes an `enum` by the SET of constants the schema declares
+// and a `bitfield` by the MASK of the positions it declares (generator#516).
+//
+// This backend kept a wide member and accepted anything: 5 into a gapped enum,
+// 4 into a three-flag bitfield and 2^40 into that same bitfield all decoded and
+// were kept, at every one of the twelve stores. Storage is never the bound; the
+// declared set is.
+//
+// All six positions are pinned by name — scalar, native array element, struct
+// member, struct-array element member, union member, matrix row element — for
+// both kinds, and each appears TWICE in this target: once in the standalone
+// per-class visitor and once in the flat root visitor. Four of the six share one
+// emitted arm per kind, which is exactly why "the arm is shared" is not worth
+// trusting after the next refactor.
+func TestTSClosedEnumAndBitfieldRejectAtEverySixPositions(t *testing.T) {
+	mod := genTSWith(t, closedSixSrc, map[string]any{})
+	// The enum's comparison runs on a plain `number` and only the STORE carries
+	// the enum type: TypeScript refuses `_v !== 5` outright when `_v` is typed as
+	// an enum 5 is not a member of, which is every value this clause rejects.
+	const enRej = `const _v = Number(v); if (_v !== 0 && _v !== 1 && _v !== 2 && _v !== 10) throw new SofabError(SofabErrorCode.InvalidMsg, `
+	// The `_v > 11` term is not redundant beside the mask: JavaScript's `&`
+	// coerces through ToInt32, so `(2**40) & ~0b1011` is 0 and a mask test alone
+	// would ACCEPT 2^40. It also answers the bigint the hook delivers above 2^53,
+	// which is what keeps `v as number` safe as the read.
+	const bfRej = `const _v = v as number; if (_v > 11 || (_v & ~0xb) !== 0) throw new SofabError(SofabErrorCode.InvalidMsg, `
+	for _, want := range []string{
+		// 1. scalar, in the flat root visitor.
+		`case 0: { ` + enRej + `"en: value outside declared enum constants"); this.o.en = _v as ClosedEn; break; }`,
+		`case 1: { ` + bfRej + `"bf: value outside declared bitfield flags"); this.o.bf = _v; break; }`,
+		// 2. native array element. `_e`, and behind the destination register
+		// arrayBegin set, so a bare scalar at an array id stays a §7.3 skip.
+		`case 2: { const _e = Number(v); if (_e !== 0 && _e !== 1 && _e !== 2 && _e !== 10) throw new SofabError(SofabErrorCode.InvalidMsg, "ea: value outside declared enum constants"); this._a0Ea[i] = _e as ClosedEaElem; break; }`,
+		`case 3: { const _e = v as number; if (_e > 11 || (_e & ~0xb) !== 0) throw new SofabError(SofabErrorCode.InvalidMsg, "bfa: value outside declared bitfield flags"); this._a0Bfa[i] = _e; break; }`,
+		// 3. struct member — both surfaces: the standalone class visitor...
+		`case 0: { ` + enRej + `"se: value outside declared enum constants"); this.o.se = _v as ClosedStSe; break; }`,
+		`case 1: { ` + bfRej + `"sbf: value outside declared bitfield flags"); this.o.sbf = _v; break; }`,
+		// ...and the flat root visitor's frame for the same member.
+		`case 0: { ` + enRej + `"se: value outside declared enum constants"); this.o.st.se = _v as ClosedStSe; break; }`,
+		`case 1: { ` + bfRej + `"sbf: value outside declared bitfield flags"); this.o.st.sbf = _v; break; }`,
+		// 4. struct-array element member.
+		`case 0: { ` + enRej + `"se: value outside declared enum constants"); this.o.sa[this._ix2]!.se = _v as ClosedSaElemSe; break; }`,
+		`case 1: { ` + bfRej + `"sbf: value outside declared bitfield flags"); this.o.sa[this._ix2]!.sbf = _v; break; }`,
+		// 5. union member.
+		`case 0: { ` + enRej + `"ue: value outside declared enum constants"); this.o.un.ue = _v as ClosedUnUe; break; }`,
+		`case 1: { ` + bfRej + `"ubf: value outside declared bitfield flags"); this.o.un.ubf = _v; break; }`,
+		// 6. matrix row element — the row register, not a field id.
+		`const _e = Number(v); if (_e !== 0 && _e !== 1 && _e !== 2 && _e !== 10) throw new SofabError(SofabErrorCode.InvalidMsg, "mat element: value outside declared enum constants");`,
+		`const _e = v as number; if (_e > 11 || (_e & ~0xb) !== 0) throw new SofabError(SofabErrorCode.InvalidMsg, "mbf element: value outside declared bitfield flags");`,
+	} {
+		if !strings.Contains(mod, want) {
+			t.Errorf("Closed message.ts: a closed-kind position stores without its §1 bound, missing %q", want)
+		}
+	}
+	// The bulk hand-off must stay declined for both closed kinds: an ArrayTarget
+	// carries min/max, an INTERVAL, which states neither a gapped set nor a mask.
+	// Taking the offer would move the element verdict into a channel that cannot
+	// carry it.
+	if strings.Contains(mod, "arrayBulk") {
+		t.Errorf("a message whose only arrays are closed-kind arrays must make no bulk offer:\n%s", mod)
+	}
+	for _, bad := range []string{
+		"this.o.en = Number(v) as ClosedEn;",
+		"this.o.bf = Number(v);",
+		"this._a0Bfa[i] = Number(v);",
+	} {
+		if strings.Contains(mod, bad) {
+			t.Errorf("Closed message.ts still stores a closed kind unguarded (%q)", bad)
+		}
+	}
+}
+
+// The two elisions, both of which keep "no guard" right under the closed rule.
+// A CONTIGUOUS enum is its own hull, so the cheaper two-sided comparison IS the
+// set; a bitfield declaring all 64 positions has a mask of every bit, so the mask
+// test is a tautology and emitting it would be dead code.
+func TestTSClosedBoundElisions(t *testing.T) {
+	var bits []string
+	for i := 0; i < 64; i++ {
+		bits = append(bits, fmt.Sprintf("F%d: { pos: %d }", i, i))
+	}
+	mod := genTSWith(t, "version: 1\nmessages:\n  W:\n    payload:\n"+
+		"      f: { id: 0, type: bitfield, bits: { "+strings.Join(bits, ", ")+" } }\n"+
+		"      e: { id: 1, type: enum, enum: { R: 0, G: 1, B: 2 }, default: 0 }\n",
+		map[string]any{})
+	if !strings.Contains(mod, "case 0: this.o.f = BigInt(v); break;") {
+		t.Errorf("an all-bits-declared bitfield must store unguarded:\n%s", mod)
+	}
+	if strings.Contains(mod, "0xffffffffffffffffn") {
+		t.Errorf("a tautological mask guard was emitted:\n%s", mod)
+	}
+	if !strings.Contains(mod, `case 1: { const _v = Number(v); if (_v < 0 || _v > 2) throw new SofabError(SofabErrorCode.InvalidMsg, "e: value outside declared enum constants"); this.o.e = _v as WE; break; }`) {
+		t.Errorf("a contiguous enum must take the two-sided comparison:\n%s", mod)
 	}
 }
