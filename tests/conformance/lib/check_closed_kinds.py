@@ -5,8 +5,9 @@ Usage:
   check_closed_kinds.py --emit-schema
   check_closed_kinds.py <label> [--message NAME] [--cwd DIR] [--verb VERB]
                         [--status-verb VERB] [--status-invalid NAME]
-                        [--status-complete NAME] [--no-values]
-                        [--skip-positions LIST] [--hull-only LIST]
+                        [--status-complete NAME] [--invalid-pattern REGEX]
+                        [--no-values] [--skip-positions LIST]
+                        [--hull-only LIST] [--storage-masked LIST]
                         -- <harness argv...>
 
 MESSAGE_SPEC §1 (doc `a50db95`) closes both leaf types by what the schema
@@ -52,22 +53,45 @@ middle row that separates the closed rule from a width check.
 Several backends emit ONE store arm per kind serving the four scalar-family
 positions and a second pair for the two array positions, so a fix that covers
 only the scalar is a third of the job and a suite that probes only the scalar
-cannot see the difference. `--skip-positions` lets a suite decline a position its
-harness genuinely cannot express, by name, so the omission is a decision rather
-than a silence; the declined position is left out of `--emit-schema` too, since a
-target that cannot express the shape cannot build a harness that declares it.
-`--hull-only` is the weaker declension, for a position whose bound has to travel
-through a corelib hook that carries an INTERVAL and nothing else: the accepting
-rows and the beyond-the-hull reject still run, and only the gap row -- the one no
-interval can express -- is dropped.
+cannot see the difference.
+
+## The three declensions, weakest last
+
+Each is spelled as a comma-separated list whose items are a POSITION (both kinds)
+or a `position:kind` pair, so a suite declines exactly the cell it cannot reach
+and no more. Every one of them prints itself in the final line: a declined cell is
+a decision on the record, never a silence.
+
+  * `--skip-positions` -- the harness cannot express the shape at all. The cell is
+    left out of `--emit-schema` too, since a target that cannot build a harness
+    for the shape cannot declare it either (`array<array<enum>>` does not compile
+    on either C++ corelib: the row reaches sofab::readArray as a span of scoped
+    enums and hits its "Unsupported span element type" static_assert).
+  * `--hull-only` -- the bound has to travel through a corelib hook that carries
+    an INTERVAL and nothing else, so the hull of the declaration is the most of
+    the set that fits. Only the GAP row is dropped; the below-hull and
+    beyond-storage rejects and every accepting row still run.
+  * `--storage-masked` -- the corelib narrows the element to the receiver's
+    storage BEFORE generated code can see it, so a value past that storage has
+    already become a declared one by the time anything may test it (corelib-cpp's
+    sofab::MessageSeq reads a matrix row with an unbounded static_cast, and 256
+    into a one-byte bitfield row is 0). Only the beyond-storage row is dropped;
+    the gap row -- which is what tells a real check from a width check -- still
+    runs.
 
 ## Verdicts
 
 Every payload is COMPLETE, so truncation can never explain a rejection. A
-rejected row is asserted by exit status (and by `--status-verb`, when the
-harness has one); an accepted row additionally asserts the decoded VALUE, so a
-decoder that passes by refusing everything fails the accepting half and one that
-passes by keeping everything fails the refusing half.
+rejected row is asserted by exit status AND by a category channel -- either
+`--status-verb`, where the harness has a verdict verb, or `--invalid-pattern`,
+a regex the harness's own output must match. One of the two is REQUIRED: a bare
+"exit status is not zero" scores a panic, an assertion failure or a
+safety-checked process abort as a correct rejection, and that is precisely the
+failure mode the zig half of this rule existed to remove (generator#517: an
+out-of-range `@intCast` aborting the process with rc=134 rather than answering
+INVALID). An accepted row additionally asserts the decoded VALUE, so a decoder
+that passes by refusing everything fails the accepting half and one that passes
+by keeping everything fails the refusing half.
 
 The accepted rows include the ZERO value of both kinds and, for the bitfield,
 every declared combination -- §1 is explicit that all of them are valid, and a
@@ -92,6 +116,7 @@ MASK = 0b1011
 # Values probed at every position.
 ENUM_OK = (0, 2, 10)          # declared
 ENUM_GAP = 5                  # inside the hull 0..10, not a constant
+ENUM_LOW = -1                 # BELOW the hull; an enum array is signed on the wire
 ENUM_WIDE = 1000              # past the i8 a narrow target stores it in
 BIT_OK = (0, 3, 8, 11)        # every declared combination, zero included
 BIT_GAP = 4                   # bit 2, undeclared, fits the u8 storage
@@ -109,6 +134,31 @@ WT_SEQ_BEGIN = 6
 WT_SEQ_END = 7
 
 POSITIONS = ("scalar", "array", "struct", "structarray", "union", "matrix")
+KINDS = ("enum", "bitfield")
+
+# The rejecting probes, as (row suffix, value, the declension that may drop it,
+# why it MUST be refused). A row whose declension is None is never declined:
+# every target must refuse it however its bound is carried.
+ENUM_REJECTS = (
+    ("undeclared", ENUM_GAP, "hull",
+     "inside the declared hull 0..10 and not one of the constants -- an interval "
+     "bound keeps it, and MUST NOT"),
+    ("below_hull", ENUM_LOW, None,
+     "BELOW every declared constant, and expressible because an enum array travels "
+     "as a SIGNED array -- a bound that lost its lower half, or a hook handed only "
+     "an elem_max, keeps it while every other row here still passes"),
+    ("beyond_storage", ENUM_WIDE, "masked",
+     "past the narrow signed integer a footprint target stores the enum in; keeping "
+     "it masked is the older defect, keeping it at all is this one"),
+)
+BIT_REJECTS = (
+    ("undeclared", BIT_GAP, "hull",
+     "bit 2, which no flag declares, inside the byte the field is stored in -- the "
+     "mask is NOT every bit up to the highest declared one"),
+    ("beyond_storage", BIT_WIDE, "masked",
+     "past that byte; a mask test on the raw carrier refuses it with the same "
+     "clause, so no separate width term is needed"),
+)
 
 
 def die(msg):
@@ -147,15 +197,21 @@ def bits_yaml():
     return "{ " + ", ".join("%s: { pos: %d }" % kv for kv in BIT_POS.items()) + " }"
 
 
-def emit_schema(positions) -> int:
+def emit_schema(live) -> int:
     """Print the `closed` message, for appending to a conformance schema.
 
-    A position a suite declined with --skip-positions is not DECLARED either: a
-    target that cannot express the shape at all -- corelib-cpp's row collector
-    carries no element bound, and `array<array<enum>>` does not compile there --
-    could not build a harness for a schema that names it.
+    A cell a suite declined with --skip-positions is not DECLARED either: a
+    target that cannot express the shape at all -- `array<array<enum>>` does not
+    compile on either C++ corelib -- could not build a harness for a schema that
+    names it. The declension is per (position, kind), so a target that can carry
+    a bitfield matrix but not an enum one declares the half it can build.
+
+    `live` is the set of (position, kind) pairs still in play.
     """
     e, b = enum_yaml(), bits_yaml()
+
+    def on(pos, kind):
+        return (pos, kind) in live
     print("# closed -- the closed-enum / closed-bitfield message (MESSAGE_SPEC §1,")
     print("# generator#516), printed by tests/conformance/lib/check_closed_kinds.py so")
     print("# the ids, the declared constants and the declared positions the fixtures")
@@ -163,20 +219,24 @@ def emit_schema(positions) -> int:
     print("# interval bound passes every row a contiguous definition can produce.")
     print("  %s:" % MESSAGE)
     print("    payload:")
-    if "scalar" in positions:
+    if on("scalar", "enum"):
         print("      cen:  { id: %d, type: enum, enum: %s }" % (CEN, e))
+    if on("scalar", "bitfield"):
         print("      cbf:  { id: %d, type: bitfield, bits: %s }" % (CBF, b))
-    if "array" in positions:
+    if on("array", "enum"):
         print("      cena: { id: %d, type: array, items: { type: enum, count: 4, enum: %s } }" % (CENA, e))
+    if on("array", "bitfield"):
         print("      cbfa: { id: %d, type: array, items: { type: bitfield, count: 4, bits: %s } }" % (CBFA, b))
-    if "struct" in positions:
+    if on("struct", "enum") or on("struct", "bitfield"):
         print("      cst:")
         print("        id: %d" % CST)
         print("        type: struct")
         print("        fields:")
-        print("          st_en: { id: 0, type: enum, enum: %s }" % e)
-        print("          st_bf: { id: 1, type: bitfield, bits: %s }" % b)
-    if "structarray" in positions:
+        if on("struct", "enum"):
+            print("          st_en: { id: 0, type: enum, enum: %s }" % e)
+        if on("struct", "bitfield"):
+            print("          st_bf: { id: 1, type: bitfield, bits: %s }" % b)
+    if on("structarray", "enum") or on("structarray", "bitfield"):
         print("      csa:")
         print("        id: %d" % CSA)
         print("        type: array")
@@ -184,18 +244,23 @@ def emit_schema(positions) -> int:
         print("          type: struct")
         print("          count: 2")
         print("          fields:")
-        print("            sa_en: { id: 0, type: enum, enum: %s }" % e)
-        print("            sa_bf: { id: 1, type: bitfield, bits: %s }" % b)
-    if "union" in positions:
+        if on("structarray", "enum"):
+            print("            sa_en: { id: 0, type: enum, enum: %s }" % e)
+        if on("structarray", "bitfield"):
+            print("            sa_bf: { id: 1, type: bitfield, bits: %s }" % b)
+    if on("union", "enum") or on("union", "bitfield"):
         print("      cun:")
         print("        id: %d" % CUN)
         print("        type: union")
         print("        default_id: 0")
         print("        oneof:")
-        print("          un_en: { id: 0, type: enum, enum: %s }" % e)
-        print("          un_bf: { id: 1, type: bitfield, bits: %s }" % b)
-    if "matrix" in positions:
+        if on("union", "enum"):
+            print("          un_en: { id: 0, type: enum, enum: %s }" % e)
+        if on("union", "bitfield"):
+            print("          un_bf: { id: 1, type: bitfield, bits: %s }" % b)
+    if on("matrix", "enum"):
         print("      cmat: { id: %d, type: array, items: { type: array, count: 2, items: { type: enum, count: 3, enum: %s } } }" % (CMAT, e))
+    if on("matrix", "bitfield"):
         print("      cmbf: { id: %d, type: array, items: { type: array, count: 2, items: { type: bitfield, count: 3, bits: %s } } }" % (CMBF, b))
     return 0
 
@@ -281,42 +346,32 @@ WHY = {
 }
 
 
-def build_table(positions, hull=()):
+def build_table(live, hull=frozenset(), masked=frozenset()):
     """The rows to run, one per (position, kind, value).
 
-    A position named in `hull` keeps every row except the undeclared-inside-the-
-    hull one. That is not a relaxation of the rule -- it is the statement that at
-    THIS position the bound travels through a corelib hook carrying an INTERVAL
-    and nothing else (corelib-cpp's sofab::ElemBound, corelib-py's
-    on_array_begin), so the hull is the most of the declared set that fits and
-    the gap stays unenforced. The suite that passes it says so out loud, and the
-    beyond-the-hull reject and every accepting row still run: a target that
-    stopped bounding the position at all still fails here.
+    `live` is the set of (position, kind) cells still in play; `hull` and
+    `masked` are the two weaker declensions, and each drops exactly ONE rejecting
+    row from the cell it names -- see the module docstring for what each one
+    means and why the rest of the cell still runs.
     """
     rows = []
-    for pos in positions:
-        for kind, oks, gap, wide, gapwhy, widewhy in (
-            ("enum", ENUM_OK, ENUM_GAP, ENUM_WIDE,
-             "inside the declared hull 0..10 and not one of the constants -- an "
-             "interval bound keeps it, and MUST NOT",
-             "past the narrow signed integer a footprint target stores the enum in; "
-             "keeping it masked is the older defect, keeping it at all is this one"),
-            ("bitfield", BIT_OK, BIT_GAP, BIT_WIDE,
-             "bit 2, which no flag declares, inside the byte the field is stored in "
-             "-- the mask is NOT every bit up to the highest declared one",
-             "past that byte; a mask test on the raw carrier refuses it with the "
-             "same clause, so no separate width term is needed"),
-        ):
+    for pos in POSITIONS:
+        for kind, oks, rejects in (("enum", ENUM_OK, ENUM_REJECTS),
+                                   ("bitfield", BIT_OK, BIT_REJECTS)):
+            if (pos, kind) not in live:
+                continue
             build, leaf, depth = SHAPES[(pos, kind)]
             for v in oks:
                 rows.append(("%s_%s_ok_%d" % (pos, kind, v), build(v), "accept",
                              (leaf, v, depth),
                              "%s carrying the DECLARED %s value %d" % (WHY[pos], kind, v)))
-            if pos not in hull:
-                rows.append(("%s_%s_undeclared" % (pos, kind), build(gap), "invalid",
-                             None, "%s carrying %d: %s" % (WHY[pos], gap, gapwhy)))
-            rows.append(("%s_%s_beyond_storage" % (pos, kind), build(wide), "invalid",
-                         None, "%s carrying %d: %s" % (WHY[pos], wide, widewhy)))
+            for name, v, declension, why in rejects:
+                if declension == "hull" and (pos, kind) in hull:
+                    continue
+                if declension == "masked" and (pos, kind) in masked:
+                    continue
+                rows.append(("%s_%s_%s" % (pos, kind, name), build(v), "invalid",
+                             None, "%s carrying %d: %s" % (WHY[pos], v, why)))
     return rows
 
 
@@ -408,9 +463,11 @@ def main():
     ap.add_argument("--status-verb", default=None)
     ap.add_argument("--status-invalid", default="INVALID")
     ap.add_argument("--status-complete", default="COMPLETE")
+    ap.add_argument("--invalid-pattern", default=None)
     ap.add_argument("--no-values", action="store_true")
     ap.add_argument("--skip-positions", default="")
     ap.add_argument("--hull-only", default="")
+    ap.add_argument("--storage-masked", default="")
 
     argv = sys.argv[1:]
     if "--" in argv:
@@ -421,26 +478,52 @@ def main():
     args = ap.parse_args(head)
 
     def named(flag, raw):
-        got = [x.strip() for x in raw.split(",") if x.strip()]
-        unknown = [x for x in got if x not in POSITIONS]
-        if unknown:
-            die("%s: %s is not one of %s"
-                % (flag, ", ".join(unknown), ", ".join(POSITIONS)))
-        return got
+        """Parse a declension list into a set of (position, kind) CELLS.
+
+        An item is a position (both kinds) or `position:kind` (one of them), so a
+        suite declines exactly the cell its corelib cannot reach -- corelib-cpp
+        can carry a bitfield matrix row and cannot compile an enum one, and
+        before this granularity existed that cost the whole position.
+        """
+        cells = set()
+        for item in (x.strip() for x in raw.split(",")):
+            if not item:
+                continue
+            pos, sep, kind = item.partition(":")
+            if pos not in POSITIONS:
+                die("%s: %r is not one of %s" % (flag, pos, ", ".join(POSITIONS)))
+            if sep and kind not in KINDS:
+                die("%s: %r is not one of %s" % (flag, kind, ", ".join(KINDS)))
+            for k in ((kind,) if sep else KINDS):
+                cells.add((pos, k))
+        return cells
+
+    def spell(cells):
+        return ", ".join("%s:%s" % c for c in sorted(cells))
 
     skip = named("--skip-positions", args.skip_positions)
-    positions = [p for p in POSITIONS if p not in skip]
+    live = {(p, k) for p in POSITIONS for k in KINDS} - skip
 
     if args.emit_schema:
-        return emit_schema(positions)
+        return emit_schema(live)
 
-    if not positions:
+    if not live:
         die("--skip-positions declined every position; there is nothing left to check")
     hull = named("--hull-only", args.hull_only)
-    both = [p for p in hull if p in skip]
-    if both:
-        die("--hull-only names %s, which --skip-positions already declined"
-            % ", ".join(both))
+    masked = named("--storage-masked", args.storage_masked)
+    for flag, cells in (("--hull-only", hull), ("--storage-masked", masked)):
+        both = cells & skip
+        if both:
+            die("%s names %s, which --skip-positions already declined"
+                % (flag, spell(both)))
+    # One of the two category channels is REQUIRED on a rejecting row: exit
+    # status alone scores a panic or a process abort as a correct INVALID, which
+    # is the failure this rule's zig half existed to remove (generator#517).
+    if not args.status_verb and not args.invalid_pattern:
+        die("neither --status-verb nor --invalid-pattern was given; a rejecting row "
+            "would then be asserted by exit status alone, and a panic or a "
+            "safety-checked abort would score as a correct INVALID")
+    invalid_re = re.compile(args.invalid_pattern) if args.invalid_pattern else None
 
     if not args.label:
         die("no label given (the suite name this run is reported under)")
@@ -448,7 +531,7 @@ def main():
         die("no harness argv given (put it after `--`)")
 
     msg = [args.message] if args.message else []
-    table = build_table(positions, hull)
+    table = build_table(live, hull, masked)
 
     for name, wire, expect, value, why in table:
         rc, out, err = run(harness + [args.verb] + msg, args.cwd, wire)
@@ -459,6 +542,11 @@ def main():
                 die("[%s] %s must be INVALID (MESSAGE_SPEC §1/§7.1) -- %s; the "
                     "decode succeeded instead:\n%s"
                     % (args.label, name, why, text))
+            if invalid_re and not invalid_re.search(text):
+                die("[%s] %s was refused, but not as INVALID: nothing in the "
+                    "harness's output matches %r, so a panic, an assertion failure "
+                    "or a safety-checked abort would read the same. rc=%d, output:\n%s"
+                    % (args.label, name, args.invalid_pattern, rc, text))
             if args.status_verb:
                 _, sout, serr = run(harness + [args.status_verb] + msg,
                                     args.cwd, wire)
@@ -502,11 +590,14 @@ def main():
 
     note = ""
     if skip:
-        note += "; declined: " + ", ".join(skip)
+        note += "; declined: " + spell(skip)
     if hull:
-        note += "; hull-only (the gap stays unenforced): " + ", ".join(hull)
-    print("==> [%s] closed enum/bitfield: %d rows over %d position(s) OK%s"
-          % (args.label, len(table), len(positions), note))
+        note += "; hull-only (the gap stays unenforced): " + spell(hull)
+    if masked:
+        note += "; storage-masked (the beyond-storage value never reaches "
+        note += "generated code): " + spell(masked)
+    print("==> [%s] closed enum/bitfield: %d rows over %d cell(s) OK%s"
+          % (args.label, len(table), len(live), note))
     return 0
 
 

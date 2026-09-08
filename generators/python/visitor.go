@@ -1144,11 +1144,15 @@ func arrayBeginBody(elem ir.Kind, ref *ir.TypeRef) []string {
 	}
 	switch elem {
 	case ir.KindEnum:
+		// BOTH sides, always -- including a hull whose floor is 0. An enum array
+		// travels as WT_ARRAY_SIGNED, so a negative element is expressible on the
+		// wire, and an enum declaring only non-negative constants must refuse one.
+		// Leaving elem_min at None handed the hook a one-sided interval and let
+		// -1 through, which the completed-array scan then caught but a truncation
+		// behind the element did not -- the very INCOMPLETE-instead-of-INVALID
+		// hole this hook exists to close (§5.2, §7.1).
 		if lo, hi, ok := ir.EnumHull(ref); ok {
-			if lo < 0 {
-				return []string{fmt.Sprintf("return (None, %d, %d)", lo, hi)}
-			}
-			return []string{fmt.Sprintf("return (None, None, %d)", hi)}
+			return []string{fmt.Sprintf("return (None, %d, %d)", lo, hi)}
 		}
 	case ir.KindBitfield:
 		// A Python int is unbounded, so the mask states its own top however high

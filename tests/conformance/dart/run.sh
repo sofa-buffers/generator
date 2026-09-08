@@ -899,6 +899,7 @@ printf 'version: 1\nmessages:\n' > "$WORK/closed.yaml"
 python3 "$ROOT/tests/conformance/lib/check_closed_kinds.py" --emit-schema >> "$WORK/closed.yaml"
 build "$WORK/closed.yaml" "$WORK/closed"
 python3 "$ROOT/tests/conformance/lib/check_closed_kinds.py" "dart" \
-    --status-verb trydecode -- "$WORK/closed/harness"
+    --status-verb trydecode --invalid-pattern 'decode failed: invalid' \
+    -- "$WORK/closed/harness"
 
 echo "PASS"

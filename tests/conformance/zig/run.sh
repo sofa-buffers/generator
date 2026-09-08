@@ -837,7 +837,7 @@ echo "==> closed enum/bitfield: only what the schema declares is valid (S1, gene
 python3 "$ROOT/tests/conformance/lib/check_closed_kinds.py" --emit-schema >> "$WORK/closed.yaml"
 zig_build "$WORK/closed.yaml" "$WORK/closed"
 python3 "$ROOT/tests/conformance/lib/check_closed_kinds.py" "zig" \
-    -- "$WORK/closed/zig-out/bin/harness"
+    --invalid-pattern 'InvalidMessage' -- "$WORK/closed/zig-out/bin/harness"
 
 # CORELIB_PLAN S7.2 item 8 -- the shared file's `sequence_growth` block
 # (generator#449). A wrapper array carries no element count: its length is

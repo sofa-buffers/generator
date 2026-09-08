@@ -175,6 +175,7 @@ the enum declares a constant with the value `0`.** Reference implementation:
 ajv.addKeyword({
   keyword: "defaultMatchesEnum", type: "object", schemaType: "boolean", errors: true,
   validate(schema, data) {
+    if (!schema) return true;                                    // the keyword's own on/off switch
     const values = Object.values(data.enum).map(e => (typeof e === "object" ? e.value : e));
     if (data.default === undefined) return values.includes(0);   // presence test, not truthiness
     return values.includes(data.default);
@@ -341,19 +342,21 @@ before the validator ever sees it — and so is a number with a decimal point or
 exponent, because a bit pattern has no fractional spelling and the generator would
 render `1000000.0` into the emitted source as `1e+06`.
 
-A bit set at a position no flag declares is, today, **accepted** by this keyword:
-it checks the spelling, the sign and the backing width, and nothing more.
+The value bound is the **declared mask**: one bit per declared `pos`, and an
+element setting any other bit is rejected. A `bitfield` is **closed** by that mask
+(MESSAGE_SPEC §1) — `v & ~mask == 0` — and a `default` is what absence
+reconstructs (§2), so a default outside the mask would be a field value no
+conformant peer accepts on the wire while this schema's own encoder still writes
+it. Every combination of the declared flags is valid, the zero value included; the
+mask is **not** every bit up to the highest declared one, so `bits: {A: {pos: 0},
+C: {pos: 2}}` admits `0`, `1`, `4` and `5` and nothing else.
 
-> **Known inconsistency.** MESSAGE_SPEC §1 closes a `bitfield` by the mask of the
-> positions it declares — a *wire* value carrying any other bit is `INVALID` — and
-> the generated decoders enforce that. An authored `default` outside the mask is
-> therefore a value a conformant peer would refuse, and the rationale this
-> paragraph used to give for allowing it ("an undeclared bit is how a peer built
-> from a newer schema carries a flag this one does not declare yet") is the one §1
-> rejects outright: adding a flag is a **breaking schema change**. Whether the
-> closed mask also binds authored defaults is a separate decision that has not
-> been taken; until it is, this keyword's behaviour is unchanged and
-> `tests/matrix/corpus/defs/bitfields.yaml` still exercises the permissive form.
+**Storage is never the bound.** The same bitfield is held in one byte by six of
+the eleven targets, and `default: [255]` is still rejected: which integer a
+receiver picks is a footprint decision (§1, a `MAY`) and says nothing about
+validity. The mask is strictly narrower than the backing width it replaced — the
+declared positions all fit that type by construction — so it also subsumes the
+64-bit ceiling: `18446744073709551616` sets bit 64, which no flag declares.
 
 What a stock JSON Schema validator can check here is the **spelling and the sign**:
 the shipped branch carries `"type": ["integer", "string"]`, `"minimum": 0` (the
@@ -364,13 +367,9 @@ are **generator-side only**:
   not representable as an IEEE-754 double, so a `maximum` written at that magnitude
   rounds up to 2^64 and admits a value the generator rejects; and the `pattern`
   constrains only the string form anyway;
-- the **backing width**. Six of the eleven targets back a bitfield with the
-  smallest unsigned type that holds its highest declared `pos` (c, cpp, rust, go,
-  zig, csharp; the other five carry it at full width), so a two-flag bitfield is one
-  byte wide there and `default: [1000]` does not fit the member they emit. One
-  definition has to generate for all eleven, so the schema takes the narrowest
-  target's bound. It depends on the sibling `bits` map, which is not something a
-  keyword-free branch can reach.
+- the **declared mask** itself, which depends on the sibling `bits` map — not
+  something a keyword-free branch can reach, and not expressible as a `maximum`
+  either, because the admitted values are a set with gaps rather than an interval.
 
 #### 8.2 Array-of-`u64` / `i64` element defaults
 

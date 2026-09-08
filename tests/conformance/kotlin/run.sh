@@ -737,7 +737,7 @@ echo "==> closed enum/bitfield: only what the schema declares is valid (S1, gene
 python3 "$ROOT/tests/conformance/lib/check_closed_kinds.py" --emit-schema >> "$WORK/closed.yaml"
 build "$WORK/closed.yaml" "$WORK/closed"
 python3 "$ROOT/tests/conformance/lib/check_closed_kinds.py" "kotlin" \
-    -- "$WORK/closed/build/install/harness/bin/harness"
+    --invalid-pattern 'INVALID_MSG' -- "$WORK/closed/build/install/harness/bin/harness"
 
 # Invalid UTF-8 in a MATERIALIZED string is INVALID (MESSAGE_SPEC S8): a Kotlin
 # String is a S6.4.1 Unicode type, so the strict path is the only non-mutating

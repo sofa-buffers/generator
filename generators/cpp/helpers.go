@@ -923,3 +923,61 @@ func (g *gen) rowIndexCap(cap int64) string {
 	}
 	return "SOFAB_MAX_DYN_ARRAY_COUNT"
 }
+
+// cppElemScan renders the per-element re-check a bounded array read needs when
+// the CLOSED bound it carries cannot be stated as an interval, or "" when the
+// interval already IS the bound.
+//
+// corelib-cpp's sofab::ElemBound is a two-sided range, so an array element gets
+// the hull of the declared constants / `0..mask` and no more (cppElemBound). For
+// a CONTIGUOUS enum, and for a bitfield whose declared positions are the low bits
+// 0..k, that interval is exactly the declared set and nothing is left over. For a
+// GAPPED one it is not: {0,1,2,10} admits 5 and mask 0b1011 admits 4, and
+// MESSAGE_SPEC §1 names that second case in terms -- "the mask is not every bit
+// up to the highest declared one ... 4 is INVALID".
+//
+// What closes the gap is a scan of the MEMBER, gated on the read's own return.
+// That gate is the whole reason this works on a resumable decoder:
+// sofab::readArray is re-entered once per fed chunk that carries part of the
+// array and returns TRUE only when the last element has landed (readArrayGated →
+// readIntElements, which reports `incomplete_` and returns false while the run is
+// cut short). So the scan never sees a half-filled destination, and a message
+// split byte-by-byte still decodes COMPLETE. A scan written without the gate
+// would read the not-yet-arrived tail at its value-initialized 0 and false-reject
+// every split message whose enum does not declare 0.
+//
+// The interval still rides along on the call and is not redundant: it rejects an
+// out-of-hull element the moment it is read, which is what keeps a value that is
+// followed by a truncation INVALID rather than INCOMPLETE (§5.2). The scan adds
+// the gap rows for an array that completes. What the pair still cannot do is
+// report a GAP value INVALID under a truncation behind it -- that needs a
+// per-element predicate corelib-cpp does not carry.
+func (g *gen) cppElemScan(ind, target string, elem ir.Kind, ref *ir.TypeRef, depth int) string {
+	cond := cppClosedCond(elem, ref, fmt.Sprintf("_sv%d", depth))
+	if cond == "" {
+		return ""
+	}
+	if g.cppElemBound(elem, ref) != "" {
+		switch elem {
+		case ir.KindEnum:
+			if ir.EnumContiguous(ref) {
+				return ""
+			}
+		case ir.KindBitfield:
+			// mask & (mask+1) == 0 is "the declared positions are 0..k", the one
+			// shape whose set and whose 0..mask interval coincide.
+			if mask, ok := ir.BitfieldMask(ref); ok && mask&(mask+1) == 0 {
+				return ""
+			}
+		}
+	}
+	carrier := "std::uint64_t"
+	if elem == ir.KindEnum {
+		carrier = "std::int64_t"
+	}
+	// The element is read back through the same 64-bit carrier the scalar arm
+	// uses, so one comparison serves both halves: an undeclared value inside the
+	// member's storage and anything above it.
+	return fmt.Sprintf("%sfor (auto _se%d : %s) { const %s _sv%d = static_cast<%s>(_se%d); if (%s) { is.invalidate(); return; } }",
+		ind, depth, target, carrier, depth, carrier, depth, cond)
+}

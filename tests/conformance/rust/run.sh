@@ -710,7 +710,7 @@ YAML
     python3 "$ROOT/tests/conformance/lib/check_closed_kinds.py" --emit-schema >> "$WORK/closed.yaml"
     rust_build "$WORK/closed.yaml" "$WORK/closed-$label"
     python3 "$ROOT/tests/conformance/lib/check_closed_kinds.py" "$label" \
-        --cwd "$WORK/closed-$label" -- cargo run -q --
+        --cwd "$WORK/closed-$label" --invalid-pattern 'InvalidMsg' -- cargo run -q --
 
     # The declared WIDTH of a plain integer element is a separate bound and still
     # its own: a u8 array element rejects 1000 (generator#266/#513). Kept beside

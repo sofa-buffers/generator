@@ -947,7 +947,7 @@ for ENGINE in $ENGINES; do
     if [ "$ENGINE" = python ]; then export SOFAB_PUREPYTHON=1; else unset SOFAB_PUREPYTHON || true; fi
     require_engine "$ENGINE"
     python3 "$ROOT/tests/conformance/lib/check_closed_kinds.py" "python/$ENGINE" \
-        --cwd "$WORK/closedproj" -- python3 harness.py
+        --cwd "$WORK/closedproj" --invalid-pattern 'SofaDecodeError' -- python3 harness.py
 done
 unset SOFAB_PUREPYTHON || true
 

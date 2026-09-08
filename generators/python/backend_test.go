@@ -1991,8 +1991,16 @@ func TestPythonClosedEnumAndBitfieldRejectAtEverySixPositions(t *testing.T) {
 		// the corelib applies AT each element, so a value outside the declared
 		// RANGE is refused even when the array is cut short behind it (§5.2) --
 		// which the scan above, running on the assembled list, cannot reach.
-		"            if fid == 2:\n                return (None, None, 10)\n            elif fid == 3:\n                return (None, None, 11)\n",
-		"        elif c == _L_Closed_mat:\n            return (None, None, 10)\n",
+		//
+		// BOTH sides of the enum hull, including a floor of 0. An enum array is
+		// WT_ARRAY_SIGNED on the wire, so a negative element is expressible, and an
+		// enum declaring only non-negative constants must refuse one; handing the
+		// hook `elem_min=None` dropped the lower half of a bound ir.EnumHull
+		// already knew, and -1 under a truncation then reported INCOMPLETE where
+		// §5.2/§7.1 require INVALID. A bitfield array is WT_ARRAY_UNSIGNED, whose
+		// own floor is 0, so its interval states the ceiling alone.
+		"            if fid == 2:\n                return (None, 0, 10)\n            elif fid == 3:\n                return (None, None, 11)\n",
+		"        elif c == _L_Closed_mat:\n            return (None, 0, 10)\n",
 		"        elif c == _L_Closed_mbf:\n            return (None, None, 11)\n",
 	} {
 		if !strings.Contains(mod, want) {

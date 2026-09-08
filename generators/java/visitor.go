@@ -1629,6 +1629,14 @@ func hasBulk(fs []frame) bool {
 // arrives rather than after the whole array has landed. Validating in
 // arrayBulkEnd instead was the alternative and is weaker: it cannot report the
 // value at all when the array is cut short behind it (generator#516).
+//
+// It is a correctness-over-throughput trade, and it was MEASURED rather than
+// asserted: tests/bench's vehicletelemetry row declares two such arrays
+// (gear_history, array<enum> count 8, and wheel_faults, array<bitfield> count 4)
+// and both are populated by the bench payload, so the row prices exactly this
+// decision. Same corelib checkout, origin/main vs this rule: decode 30891 ->
+// 32187 Ir/op, +1296 (+4.2%); encode 17006 -> 17012, i.e. held. Kotlin, which
+// declines the same offer for the same reason, pays +2.8%.
 func bulkCapable(fld *ir.Field) bool {
 	if fld.Kind != ir.KindArray || !primitiveArrayElem(fld.Elem) {
 		return false

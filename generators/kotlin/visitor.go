@@ -1136,6 +1136,12 @@ func hasBulk(fs []frame) bool {
 // "array element wider than its destination". Declining routes the elements back
 // through widthThrow, one at a time, so an undeclared value is refused where it
 // arrives rather than after the whole array has landed (generator#516).
+//
+// MEASURED on tests/bench's vehicletelemetry row, which declares and populates
+// both shapes (gear_history, array<enum> count 8; wheel_faults, array<bitfield>
+// count 4). Same corelib checkout, origin/main vs this rule: decode 32743 ->
+// 33674 Ir/op, +931 (+2.8%); encode 17200 -> 17199, i.e. held. Java's twin of
+// this decision costs +4.2% on the same row.
 func bulkCapable(fld *ir.Field) bool {
 	if fld.Kind != ir.KindArray {
 		return false
