@@ -88,7 +88,7 @@ YAML
 python3 "$ROOT/tests/conformance/lib/check_vectors_decode.py" --emit-schema \
     >> "$WORK/conf.yaml"
 
-IN='{"somei8":-5,"somebool":true,"somestring":"hi","someintarray":[1,2,3,4,5],"someuintarray":[1,2,3,4],"somefloatarray":[1.5,2.5,3.5],"someenum":33,"somebitfield":2,"somestruct":{"nestedint":7,"nestedstring":"deep","nestedstruct":{"deepint":-99}},"someunion":{"option1":4242},"somefp32":2.5,"someblob":[10,20,30],"someu64":18446744073709551615,"somestringarray":["a","b","c"]}'
+IN='{"someu8":200,"someu16":4242,"someu32":3000000,"someu64":1234567890123456,"somei8":-42,"somei16":31000,"somei32":123456789,"somei64":-1234567890123456,"somefp32":1.5,"somefp64":-2.5,"somebool":false,"somestring":"round trip","someblob":[1,2,3,4],"someenum":33,"somebitfield":1,"someuintarray":[9,8,7,6],"someintarray":[-1,-2,-3,-4,-5],"somefloatarray":[0.5,0.25,-0.75],"somestringarray":["a","bb","ccc"],"someblobarray":[[1],[2,3]],"somestruct":{"nestedint":12,"nestedstring":"deep","nestedstruct":{"deepint":99}},"someunion":{"option1":4242},"somestructwitharray":{"label":"lbl","values":[9,9,9,9]},"somestructarray":[{"x":1,"y":2},{"x":-3,"y":-4}],"somematrix":[[1,2,3,4],[5,6,7,8]],"someunionarray":[{"asint":7},{"asint":-8}],"someenumarray":[1,0,2,1],"someboolarray":[false,false,true],"somebitfieldarray":[1,2,3],"somemap":[{"key":"k","value":5}]}'
 
 # run_variant LABEL CFGBODY CORELIB_PATH
 #   CFGBODY - the targets.rust config block contents (e.g. "" or "corelib: rs").
@@ -183,9 +183,9 @@ run_variant() {
 
     echo "==> [$label] JSON encode -> decode round-trip"
     OUT=$(cd "$WORK/ex-$label" && printf '%s' "$IN" | cargo run -q -- encode myfirstmessage | cargo run -q -- decode myfirstmessage)
-    echo "$OUT" | grep -q '"someu64":18446744073709551615' || { echo "FAIL: [$label] u64 round-trip"; exit 1; }
-    echo "$OUT" | grep -q '"deepint":-99' || { echo "FAIL: [$label] nested struct round-trip"; exit 1; }
-    echo "$OUT" | grep -q '"someblob":\[10,20,30\]' || { echo "FAIL: [$label] blob round-trip"; exit 1; }
+    echo "$OUT" | grep -q '"someu64":1234567890123456' || { echo "FAIL: [$label] u64 round-trip"; exit 1; }
+    echo "$OUT" | grep -q '"deepint":99' || { echo "FAIL: [$label] nested struct round-trip"; exit 1; }
+    echo "$OUT" | grep -q '"someblob":\[1,2,3,4\]' || { echo "FAIL: [$label] blob round-trip"; exit 1; }
     echo "==> [$label] round-trip OK"
 
     # The whole message must round-trip to ITSELF, compared as DATA rather than as
@@ -202,6 +202,14 @@ run_variant() {
     python3 "$ROOT/tests/conformance/lib/json_equal.py" "$FULL" "$OUT2" \
         --label "Rust [$label]: the whole message round-trips to itself" || exit 1
     echo "==> full-message round-trip OK ($(python3 -c "import json,sys;print(len(json.loads(sys.argv[1])))" "$FULL") fields compared as data)"
+    # Every field must sit OFF its schema default, or the round trip above compares
+    # a default with itself and cannot tell a working decode from a broken one.
+    # The union arms beside the selected one are excepted: a union carries exactly
+    # one, so the others reading as their default is the rule, not a hole.
+    BASE=$(cd "$WORK/ex-$label" && printf '%s' '{}' | cargo run -q -- encode myfirstmessage | cargo run -q -- decode myfirstmessage)
+    python3 "$ROOT/tests/conformance/lib/check_nondefault.py" "$BASE" "$FULL" \
+        --except '$.someunion.option2,$.someunion.option3,$.someunion.option3.unionstructint,$.someunion.option3.unionstructbool' --label "rust: round-trip fixture" || exit 1
+    echo "==> round-trip fixture OK (no field sits on its schema default)"
 
     # Over-count scalar array (generator#100): someuintarray declares count: 4
     # (id 15 -> header 0x7b = 15<<3 | unsigned-array). 5 wire elements MUST be

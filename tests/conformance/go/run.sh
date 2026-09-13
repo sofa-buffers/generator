@@ -36,10 +36,10 @@ sed -i "s#\${SOFAB_GO_CORELIB}#$CORELIB#" "$WORK/proj/go.mod"
 ( cd "$WORK/proj" && GOFLAGS=-mod=mod go mod tidy >/dev/null 2>&1 && go build ./... )
 
 echo "==> JSON encode -> decode round-trip"
-IN='{"somei8":-5,"somebool":true,"somestring":"hi","someintarray":[1,2,3,4,5],"someuintarray":[1,2,3,4],"somefloatarray":[1.5,2.5,3.5],"someenum":33,"somebitfield":2,"somestruct":{"nestedint":7,"nestedstring":"deep","nestedstruct":{"deepint":-99}},"someunion":{"option1":4242},"somefp32":2.5,"someu64":18446744073709551615,"somestringarray":["a","b","c"]}'
+IN='{"someu8":200,"someu16":4242,"someu32":3000000,"someu64":1234567890123456,"somei8":-42,"somei16":31000,"somei32":123456789,"somei64":-1234567890123456,"somefp32":1.5,"somefp64":-2.5,"somebool":false,"somestring":"round trip","someblob":[1,2,3,4],"someenum":33,"somebitfield":1,"someuintarray":[9,8,7,6],"someintarray":[-1,-2,-3,-4,-5],"somefloatarray":[0.5,0.25,-0.75],"somestringarray":["a","bb","ccc"],"someblobarray":[[1],[2,3]],"somestruct":{"nestedint":12,"nestedstring":"deep","nestedstruct":{"deepint":99}},"someunion":{"option1":4242},"somestructwitharray":{"label":"lbl","values":[9,9,9,9]},"somestructarray":[{"x":1,"y":2},{"x":-3,"y":-4}],"somematrix":[[1,2,3,4],[5,6,7,8]],"someunionarray":[{"asint":7},{"asint":-8}],"someenumarray":[1,0,2,1],"someboolarray":[false,false,true],"somebitfieldarray":[1,2,3],"somemap":[{"key":"k","value":5}]}'
 OUT=$(cd "$WORK/proj" && printf '%s' "$IN" | GOFLAGS=-mod=mod go run ./harness encode myfirstmessage | GOFLAGS=-mod=mod go run ./harness decode myfirstmessage)
-echo "$OUT" | grep -q '"someu64":18446744073709551615' || { echo "FAIL: u64 round-trip"; exit 1; }
-echo "$OUT" | grep -q '"deepint":-99' || { echo "FAIL: nested struct round-trip"; exit 1; }
+echo "$OUT" | grep -q '"someu64":1234567890123456' || { echo "FAIL: u64 round-trip"; exit 1; }
+echo "$OUT" | grep -q '"deepint":99' || { echo "FAIL: nested struct round-trip"; exit 1; }
 echo "==> round-trip OK"
 
 # The whole message must round-trip to ITSELF, compared as DATA rather than as
@@ -56,6 +56,14 @@ OUT2=$(cd "$WORK/proj" && printf '%s' "$FULL" | GOFLAGS=-mod=mod go run ./harnes
 python3 "$ROOT/tests/conformance/lib/json_equal.py" "$FULL" "$OUT2" \
     --label "Go: the whole message round-trips to itself" || exit 1
 echo "==> full-message round-trip OK ($(python3 -c "import json,sys;print(len(json.loads(sys.argv[1])))" "$FULL") fields compared as data)"
+# Every field must sit OFF its schema default, or the round trip above compares
+# a default with itself and cannot tell a working decode from a broken one.
+# The union arms beside the selected one are excepted: a union carries exactly
+# one, so the others reading as their default is the rule, not a hole.
+BASE=$(cd "$WORK/proj" && printf '%s' '{}' | GOFLAGS=-mod=mod go run ./harness encode myfirstmessage | GOFLAGS=-mod=mod go run ./harness decode myfirstmessage)
+python3 "$ROOT/tests/conformance/lib/check_nondefault.py" "$BASE" "$FULL" \
+    --except '$.someunion.option2,$.someunion.option3,$.someunion.option3.unionstructint,$.someunion.option3.unionstructbool' --label "go: round-trip fixture" || exit 1
+echo "==> round-trip fixture OK (no field sits on its schema default)"
 
 # Streaming decode: the same bytes through the io.Reader-driven entry point
 # (CORELIB_PLAN S5.6, generator#312 / corelib-go#130). DecodeXFrom drives

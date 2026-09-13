@@ -80,7 +80,7 @@ python3 "$ROOT/tests/conformance/lib/check_vectors_decode.py" --emit-schema \
 # ran. It could not decode at all: a native row whose OUTER array is
 # schema-bounded reached sofab::MessageSeq with no bound for the row and every
 # row was refused (corelib-cpp#124). The declaration was not the coverage.
-IN='{"somei8":-5,"somebool":true,"somestring":"hi","someintarray":[1,2,3,4,5],"someuintarray":[1,2,3,4],"somefloatarray":[1.5,2.5,3.5],"someenum":33,"somebitfield":2,"somestruct":{"nestedint":7,"nestedstring":"deep","nestedstruct":{"deepint":-99}},"someunion":{"option1":4242},"somefp32":2.5,"someblob":[10,20,30],"someblobarray":[[1],[2],[3]],"somematrix":[[1,2,3,4],[5,6,7,8]],"someu64":18446744073709551615,"somestringarray":["a","b","c","d","e"],"someenumarray":[2,1,2,0],"someboolarray":[true,false,true,true,false,true,true,false],"somebitfieldarray":[1,2,3]}'
+IN='{"someu8":200,"someu16":4242,"someu32":3000000,"someu64":1234567890123456,"somei8":-42,"somei16":31000,"somei32":123456789,"somei64":-1234567890123456,"somefp32":1.5,"somefp64":-2.5,"somebool":false,"somestring":"round trip","someblob":[1,2,3,4],"someenum":33,"somebitfield":1,"someuintarray":[9,8,7,6],"someintarray":[-1,-2,-3,-4,-5],"somefloatarray":[0.5,0.25,-0.75],"somestringarray":["a","bb","ccc"],"someblobarray":[[1],[2,3]],"somestruct":{"nestedint":12,"nestedstring":"deep","nestedstruct":{"deepint":99}},"someunion":{"option1":4242},"somestructwitharray":{"label":"lbl","values":[9,9,9,9]},"somestructarray":[{"x":1,"y":2},{"x":-3,"y":-4}],"somematrix":[[1,2,3,4],[5,6,7,8]],"someunionarray":[{"asint":7},{"asint":-8}],"someenumarray":[1,0,2,1],"someboolarray":[false,false,true],"somebitfieldarray":[1,2,3],"somemap":[{"key":"k","value":5}]}'
 
 # run_variant LABEL CORELIB DYNAMIC INCLUDE MAKEVARS...
 #   CORELIB  - "" for pure corelib-cpp, "c-cpp" for the corelib-c-cpp wrapper.
@@ -223,19 +223,19 @@ run_variant() {
     echo "==> [$label] JSON encode -> decode round-trip"
     OUT=$(printf '%s' "$IN" | "$WORK/ex-$label/harness/harness" encode myfirstmessage | "$WORK/ex-$label/harness/harness" decode myfirstmessage)
     for chk in \
-        '"someu64":18446744073709551615' \
-        '"somei8":-5' \
+        '"someu64":1234567890123456' \
+        '"somei8":-42' \
         '"someenum":33' \
-        '"somebitfield":2' \
-        '"someintarray":\[1,2,3,4,5\]' \
-        '"someblob":\[10,20,30\]' \
-        '"somestringarray":\["a","b","c","d","e"\]' \
-        '"someblobarray":\[\[1\],\[2\],\[3\]\]' \
-        '"someenumarray":\[2,1,2,0\]' \
-        '"someboolarray":\[true,false,true,true,false,true,true,false\]' \
+        '"somebitfield":1' \
+        '"someintarray":\[-1,-2,-3,-4,-5\]' \
+        '"someblob":\[1,2,3,4\]' \
+        '"somestringarray":\["a","bb","ccc"\]' \
+        '"someblobarray":\[\[1\],\[2,3\]\]' \
+        '"someenumarray":\[1,0,2,1\]' \
+        '"someboolarray":\[false,false,true\]' \
         '"somebitfieldarray":\[1,2,3\]' \
         '"somematrix":\[\[1,2,3,4\],\[5,6,7,8\]\]' \
-        '"deepint":-99' \
+        '"deepint":99' \
         '"option1":4242'; do
         echo "$OUT" | grep -q "$chk" || { echo "FAIL: [$label] round-trip missing $chk"; echo "  got: $OUT"; exit 1; }
     done
@@ -255,6 +255,14 @@ run_variant() {
     python3 "$ROOT/tests/conformance/lib/json_equal.py" "$FULL" "$OUT2" \
         --label "C++ [$label]: the whole message round-trips to itself" || exit 1
     echo "==> full-message round-trip OK ($(python3 -c "import json,sys;print(len(json.loads(sys.argv[1])))" "$FULL") fields compared as data)"
+    # Every field must sit OFF its schema default, or the round trip above compares
+    # a default with itself and cannot tell a working decode from a broken one.
+    # The union arms beside the selected one are excepted: a union carries exactly
+    # one, so the others reading as their default is the rule, not a hole.
+    BASE=$(printf '%s' '{}' | "$WORK/ex-$label/harness/harness" encode myfirstmessage | "$WORK/ex-$label/harness/harness" decode myfirstmessage)
+    python3 "$ROOT/tests/conformance/lib/check_nondefault.py" "$BASE" "$FULL" \
+        --except '$.someunion.option2,$.someunion.option3,$.someunion.option3.unionstructint,$.someunion.option3.unionstructbool' --label "cpp: round-trip fixture" || exit 1
+    echo "==> round-trip fixture OK (no field sits on its schema default)"
 
     # Over-count scalar array (generator#100): someuintarray declares count: 4
     # (id 15 -> header 0x7b = 15<<3 | unsigned-array). 5 wire elements MUST be
