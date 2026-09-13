@@ -47,16 +47,28 @@ func (g *gen) harness(s *ir.Schema) []byte {
 	f.line("import 'package:sofa_buffers_corelib/sofa_buffers_corelib.dart' as sofab;")
 	f.blank()
 
+	// Per-object JSON codecs (message + named struct/union). They are built into a
+	// BUFFER first, so the _exact64 helper below can be emitted only where the
+	// codecs actually call it: `dart analyze --fatal-infos` is this backend's
+	// build gate and rejects an unreferenced declaration, so a schema without a
+	// 64-bit field must not carry it (the same reason python builds its import
+	// line off the emitted decode section rather than off a second walk).
+	codecs := &dfile{}
 	// Per-object JSON codecs (message + named struct/union).
 	for _, key := range s.NamedOrder {
 		nt := s.Named[key]
 		if nt.Category == ir.CatStruct || nt.Category == ir.CatUnion {
-			g.emitJSONCodec(f, g.typeName(key), nt.Fields)
+			g.emitJSONCodec(codecs, g.typeName(key), nt.Fields)
 		}
 	}
 	for _, m := range s.Messages {
-		g.emitJSONCodec(f, exported(m.Name), m.Fields)
+		g.emitJSONCodec(codecs, exported(m.Name), m.Fields)
 	}
+
+	if strings.Contains(codecs.b.String(), "_exact64(") {
+		g.emitExact64(f)
+	}
+	f.b.WriteString(codecs.b.String())
 
 	g.emitBench(f, s)
 
@@ -343,7 +355,7 @@ func u64FromJSON(jx string, promotable bool) string {
 	if promotable {
 		parse = fmt.Sprintf("BigInt.parse(%s)", jx)
 	}
-	return fmt.Sprintf("(%s is String ? %s : BigInt.from((%s as num).toInt())).toSigned(64).toInt()", jx, parse, jx)
+	return fmt.Sprintf("(%s is String ? %s : BigInt.from(_exact64(%s))).toSigned(64).toInt()", jx, parse, jx)
 }
 
 // emitBench emits the `bench <workload> <reps>` entry point (tests/bench,
@@ -409,4 +421,30 @@ func defaultMessage(s *ir.Schema) string {
 		return s.Messages[0].Name
 	}
 	return ""
+}
+
+// emitExact64 writes the harness helper that reads a 64-bit field from JSON
+// exactly or refuses it.
+//
+// `jsonDecode` hands back an `int` while the literal fits one, and a `double`
+// the moment it does not -- so a u64 above 2^63-1 has ALREADY been rounded
+// before the harness sees it, and `(v as num).toInt()` then saturates at
+// 9223372036854775807. That turned a value the wire carries perfectly into a
+// different one, silently, with a successful round trip on top.
+//
+// An int is exact and passes through. A double is accepted only where it is
+// still exactly an integer within +-2^53 -- `1e3` and the bench payload's
+// plain timestamps stay readable -- and anything beyond that THROWS, naming
+// the string spelling that carries the value whole.
+func (g *gen) emitExact64(f *dfile) {
+	f.line("int _exact64(Object? v) {")
+	f.line("  if (v is int) return v;")
+	f.line("  if (v is double && v == v.roundToDouble() && v.abs() <= 9007199254740992.0) {")
+	f.line("    return v.toInt();")
+	f.line("  }")
+	f.line("  throw FormatException(")
+	f.line("      'a 64-bit field arrived as the JSON number $v, which jsonDecode has already '")
+	f.line("      'rounded -- spell a value above 2^53 as a string so it survives');")
+	f.line("}")
+	f.blank()
 }
