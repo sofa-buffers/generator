@@ -184,7 +184,7 @@ func (g *gen) module(s *ir.Schema) []byte {
 	}
 	f.line("from __future__ import annotations")
 	f.line("from dataclasses import dataclass, field")
-	f.line("from enum import IntEnum")
+	f.line("from enum import IntEnum, IntFlag")
 	// The decode section is emitted FIRST, into a buffer, so the import line can
 	// be read off what it actually references (visitorNeeds) instead of a second
 	// walk over the schema that has to agree with the emitter by hand.
@@ -531,8 +531,20 @@ func (g *gen) emitEnum(f *pyfile, nt *ir.NamedType) {
 	f.blank()
 }
 
+// emitBitfieldConsts writes the flag constants as an IntFlag, not an IntEnum.
+//
+// A bitfield's VALUE is a combination -- any subset of the declared flags -- and
+// IntEnum admits only the members themselves: `Flags(A | B)` raises ValueError
+// for two flags a schema declares side by side, which is the ordinary case
+// rather than an edge one. IntFlag composes, so every declared combination and
+// the zero value construct. An enum is the opposite shape (one value out of a
+// set) and keeps IntEnum, where refusing an undeclared value is correct.
+//
+// No `boundary=` argument: it arrives in 3.11 and the generated project declares
+// requires-python >= 3.9. Rejecting an UNDECLARED bit is the decoder's job in any
+// case (MESSAGE_SPEC S1, enforced in on_field), not the type's.
 func (g *gen) emitBitfieldConsts(f *pyfile, nt *ir.NamedType) {
-	f.line("class %s(IntEnum):", g.typeName(nt.Key))
+	f.line("class %s(IntFlag):", g.typeName(nt.Key))
 	for _, fl := range nt.Flags {
 		// Sphinx attribute comment(s): the flag description, with the schema
 		// default appended as "(default: true/false)" when the flag has one.
