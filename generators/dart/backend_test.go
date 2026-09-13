@@ -318,6 +318,34 @@ func TestProjectFiles(t *testing.T) {
 // §5.2). The example's someuintarray (count 4), somestring (maxlen 50) and someblob
 // (maxlen 16) exercise both hooks; the sticky e.inv the guard sets is read by
 // tryDecode before the incomplete status, so the flag alone makes INVALID dominate.
+// TestDartHarnessRejectsARoundedJSONNumber pins the harness against the silent
+// clamp generator#535 measured: `jsonDecode` hands back a double the moment a
+// literal no longer fits an int, so a u64 above 2^63-1 is ALREADY rounded when
+// the harness sees it, and `(v as num).toInt()` then saturates at
+// 9223372036854775807 -- a different value, reported as success.
+//
+// The fix is not to recover the value, which is gone, but to say so: an int
+// passes, a double passes only where it is exactly an integer within +-2^53
+// (`1e3` and the bench payload's timestamps stay readable), and anything beyond
+// throws while naming the string spelling that survives.
+func TestDartHarnessRejectsARoundedJSONNumber(t *testing.T) {
+	h := genFor(t, exampleDef, map[string]any{"emit": "project"})
+	for _, want := range []string{
+		"int _exact64(Object? v) {",
+		"if (v is int) return v;",
+		"v == v.roundToDouble() && v.abs() <= 9007199254740992.0",
+		"throw FormatException(",
+		"BigInt.from(_exact64(",
+	} {
+		if !strings.Contains(h, want) {
+			t.Errorf("harness.dart is missing %q", want)
+		}
+	}
+	if strings.Contains(h, "BigInt.from((") && strings.Contains(h, "as num).toInt())") {
+		t.Error("the harness parses a 64-bit field through (v as num).toInt() again: a JSON number above 2^63-1 saturates there, silently")
+	}
+}
+
 func TestDartHeaderVisitorReject(t *testing.T) {
 	out := genFor(t, exampleDef, map[string]any{})
 	for _, want := range []string{
