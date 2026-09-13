@@ -87,6 +87,21 @@ echo "$OUT" | grep -q '"someu64":18446744073709551615' || { echo "FAIL: u64 roun
 echo "$OUT" | grep -q '"deepint":-99' || { echo "FAIL: nested struct round-trip"; exit 1; }
 echo "==> round-trip OK"
 
+# The whole message must round-trip to ITSELF, compared as DATA rather than as
+# text (tests/conformance/lib/json_equal.py). The greps above pin a handful of
+# fields; this covers every one the message has, and it needs no fixture to
+# maintain -- OUT already carries the defaults the input left out, so feeding it
+# back is a full-coverage pass that grows with the schema by itself.
+#
+# A string comparison cannot do this job: member order is the backend's choice
+# (cpp orders by schema id, go alphabetically), a union renders every arm, and a
+# blob is base64 here and a byte array there -- all rendering, no wire fact.
+FULL="$OUT"
+OUT2=$(printf '%s' "$FULL" | $H encode myfirstmessage | $H decode myfirstmessage)
+python3 "$ROOT/tests/conformance/lib/json_equal.py" "$FULL" "$OUT2" \
+    --label "Kotlin: the whole message round-trips to itself" || exit 1
+echo "==> full-message round-trip OK ($(python3 -c "import json,sys;print(len(json.loads(sys.argv[1])))" "$FULL") fields compared as data)"
+
 # Both streaming halves, against the one-shot pair as the oracle (PLAN S5.6).
 # The `stream` harness mode encodes through a ONE-BYTE output window with a flush
 # sink and asserts the bytes are identical to encode()'s -- the corelib splits
