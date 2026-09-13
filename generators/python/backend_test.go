@@ -1949,6 +1949,31 @@ messages:
 // both kinds. Four of the six share one emitted arm per kind and appear twice
 // besides (the standalone per-class visitor and the flat root visitor), which is
 // exactly why "the arm is shared" is not worth trusting after the next refactor.
+// TestPythonBitfieldIsIntFlagAndEnumIsIntEnum pins the two named kinds to the two
+// enum bases, which are NOT interchangeable here.
+//
+// A bitfield's value is a COMBINATION -- any subset of its declared flags -- and
+// IntEnum admits only the members themselves, so `Flags(A | B)` raised ValueError
+// for two flags declared side by side. Nothing crashed, because the decoder stores
+// a plain int and the annotation was simply untrue; it broke for the first caller
+// who wrote the obvious `Flags(msg.f)`. An enum is the other shape -- one value
+// out of a set -- and IntEnum refusing an undeclared value is exactly right there.
+func TestPythonBitfieldIsIntFlagAndEnumIsIntEnum(t *testing.T) {
+	mod := string(genPy(t, schemaFile(t, "../../examples/messages/example.yaml"), map[string]any{})["message.py"])
+	for _, want := range []string{
+		"from enum import IntEnum, IntFlag",
+		"class MyfirstmessageSomeenum(IntEnum):",
+		"class MyfirstmessageSomebitfield(IntFlag):",
+	} {
+		if !strings.Contains(mod, want) {
+			t.Errorf("message.py is missing %q", want)
+		}
+	}
+	if strings.Contains(mod, "class MyfirstmessageSomebitfield(IntEnum):") {
+		t.Error("the bitfield is emitted as an IntEnum again: a declared combination of two flags cannot be constructed")
+	}
+}
+
 func TestPythonClosedEnumAndBitfieldRejectAtEverySixPositions(t *testing.T) {
 	mod := string(genPy(t, schema(t, closedSixSrc), map[string]any{})["message.py"])
 	// A Python int is unbounded and ``~mask`` is an infinite-precision negative,
