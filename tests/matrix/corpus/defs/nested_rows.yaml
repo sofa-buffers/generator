@@ -15,6 +15,10 @@ $defs:
     Point:
       x: { id: 0, type: i32 }
       y: { id: 1, type: i32 }
+  enum:
+    Grade: { LOW: 0, MID: 1, HIGH: 2 }
+  bitfield:
+    Marks: { A: { pos: 0 }, B: { pos: 1 } }
 messages:
   NestedRows:
     payload:
@@ -42,3 +46,11 @@ messages:
       # native rows: the control that already worked
       numrows: { id: 4, type: array, items: { type: array, count: 2, items: { type: u32, count: 3 } } }
       fprows:  { id: 5, type: array, items: { type: array, count: 2, items: { type: fp32, count: 2 } } }
+      # native rows whose element is a NAMED type. They ride the same scalar array
+      # wire forms as numrows (enum -> signed, bitfield -> unsigned, MESSAGE_SPEC
+      # S1), but a backend that names the row by its generated type rather than by
+      # the wire element type hands the corelib something it cannot read: cpp
+      # emitted MessageSeq<vector<vector<EnumGrade>>> and failed the same
+      # static_assert generator#250 names above, in every cpp configuration.
+      enumrows: { id: 6, type: array, items: { type: array, count: 2, items: { type: enum,     count: 3, enum: { $ref: '#/$defs/enum/Grade' } } } }
+      bfrows:   { id: 7, type: array, items: { type: array, count: 2, items: { type: bitfield, count: 3, bits: { $ref: '#/$defs/bitfield/Marks' } } } }

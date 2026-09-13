@@ -324,9 +324,22 @@ func (g *gen) header(m *ir.Message) []byte {
 // wire element is its backing integer. Every other native array's member element
 // already IS the wire element type.
 func (g *gen) needsRawArray(m *ir.Message) bool {
+	// A nested row counts too: array<array<enum>> binds its ROW through the same
+	// view, one level down, so a header that carries only the nested shape still
+	// needs the helper emitted.
+	var elemNeeds func(e *ir.ArrayElem) bool
+	elemNeeds = func(e *ir.ArrayElem) bool {
+		if e == nil {
+			return false
+		}
+		return e.Elem == ir.KindEnum || elemNeeds(e.ElemItems)
+	}
 	has := func(fields []*ir.Field) bool {
 		for _, fld := range fields {
-			if fld.Kind == ir.KindArray && fld.Elem == ir.KindEnum {
+			if fld.Kind != ir.KindArray {
+				continue
+			}
+			if fld.Elem == ir.KindEnum || elemNeeds(fld.ElemItems) {
 				return true
 			}
 		}
@@ -1632,7 +1645,15 @@ func (g *gen) deserializeArray(f *hfile, ind, target string, elem ir.Kind, ref *
 		// IStreamMessage either -- handing it to is.read() is the static_assert
 		// "Unsupported span element type" (generator#250). Such a row needs its
 		// own collector, one level down.
-		if isNativeArrayElem(items.Elem) {
+		//
+		// An ENUM row is the exception among the native kinds. Its member element
+		// is the scoped enum, and sofab::MessageSeq derives the row's wire type
+		// from `Elem::value_type` -- integral for every other native kind, and not
+		// for a scoped enum -- so the row reaches is.read() as an unsupported span
+		// and fails the same static_assert. It takes the collector path below,
+		// where the row read is the flat enum-array emission one level down and
+		// binds through sofabgen::RawArray, exactly as a flat enum array does.
+		if isNativeArrayElem(items.Elem) && items.Elem != ir.KindEnum {
 			inner := g.cppArrayContainer(items.Elem, items.ElemRef, items.ElemItems, items.Count, items.ElemMaxHas, items.ElemMax)
 			// The ROW's own schema `count:`, or -1 where the schema left the row
 			// unbounded -- which is a different fact from "these elements are not
@@ -1708,7 +1729,15 @@ func (g *gen) deserializeRowSeq(f *hfile, ind, target string, items *ir.ArrayEle
 		// replace-whole reset; readSequence() on the c-cpp leg clears for us.
 		f.line("%svoid prepare() noexcept { if (out) out->clear(); }", in3)
 	}
-	f.line("%svoid deserialize(sofab::IStreamImpl &is, sofab::id _id, std::size_t, std::size_t) noexcept override {", in3)
+	// The c-cpp leg's readArray takes the field's announced element count, so a
+	// row whose read is a native array emission -- today an enum row, which binds
+	// through sofabgen::RawArray -- needs that parameter NAMED here, exactly as
+	// the message-level deserialize names it.
+	rowCountParam := "std::size_t"
+	if g.clib && items != nil && isNativeArrayElem(items.Elem) {
+		rowCountParam = "std::size_t _count"
+	}
+	f.line("%svoid deserialize(sofab::IStreamImpl &is, sofab::id _id, std::size_t, %s) noexcept override {", in3, rowCountParam)
 	if inlineRows {
 		f.line("%sif (static_cast<std::size_t>(_id) >= out->capacity()) { is.invalidate(); return; }", in4)
 	} else {
