@@ -973,5 +973,34 @@ for ENGINE in $ENGINES; do
         --cwd "$WORK/closedproj" --invalid-pattern 'SofaDecodeError' -- python3 harness.py
 done
 unset SOFAB_PUREPYTHON || true
+# MESSAGE_SPEC §7.4 -- a field id REPEATED inside one scope (generator#523). The
+# rule has two halves and this checks BOTH on one message: a re-opened SEQUENCE
+# continues its scope, so struct/union members MERGE and unrecurring children are
+# retained, while an ARRAY WRAPPER *is* the value of its field and a later
+# occurrence REPLACES it whole -- at every array position the shape offers,
+# including a wrapper row (array<array<string>>) and one level deeper.
+#
+# A shared DRIVER rather than a shared vector, because §7.4 opens by forbidding
+# producers to emit a repeated id: no encoder in the family will ever produce
+# these bytes, so the driver forges them itself. Until it existed the only guard
+# was rust's, and the family had drifted -- rust, go, zig, dart and python all
+# merged a wrapper row where c, cpp, cs, java, kotlin and ts replaced it.
+echo "==> §7.4 repeated id: wrappers replace, scopes merge (generator#523)"
+printf 'version: 1\nmessages:\n' > "$WORK/repeated.yaml"
+python3 "$ROOT/tests/conformance/lib/check_repeated_id.py" --emit-schema >> "$WORK/repeated.yaml"
+( cd "$ROOT" && go run ./cmd/sofabgen --config "$WORK/cfg.yaml" --lang python --in "$WORK/repeated.yaml" --out "$WORK/repeated" >/dev/null )
+# BOTH engines, for the reason every decode block here runs on both: the
+# accelerator reimplements the visitor dispatch, so a pure-only run leaves the
+# half that actually ships unmeasured. The wrapper-row reset is generated code and
+# therefore engine-independent by construction -- which is a claim, and this is
+# what turns it into a measurement.
+for ENGINE in $ENGINES; do
+    if [ "$ENGINE" = python ]; then export SOFAB_PUREPYTHON=1; else unset SOFAB_PUREPYTHON || true; fi
+    require_engine "$ENGINE"
+    python3 "$ROOT/tests/conformance/lib/check_repeated_id.py" "python/$ENGINE" \
+        --cwd "$WORK/repeated" -- python3 harness.py
+done
+unset SOFAB_PUREPYTHON || true
+if [ "$NATIVE" = yes ]; then require_engine native; else require_engine python; fi
 
 echo "PASS"

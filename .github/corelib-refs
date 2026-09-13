@@ -1,0 +1,11 @@
+# Corelib branches this branch is developed against (docs/CI.md).
+# Delete before merging: every entry pins a corelib to unmerged code.
+#
+# generator#523: the wrapper-row half of §7.4 lives in the collector for these
+# two targets, not in the generator -- a row's index only exists where the row is
+# placed, which is corelib-go's NestedSeq.BeginSequence and corelib-dart's
+# NestedSeq.onSequenceStart. lang-go and lang-dart therefore stay red against
+# corelib main until those two merge; the new conformance check is what makes
+# them red, which is the point of it.
+SOFAB_CORELIB_GO_REF=fix/523-wrapper-row-replaces
+SOFAB_CORELIB_DART_REF=fix/523-wrapper-row-replaces

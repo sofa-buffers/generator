@@ -2496,25 +2496,72 @@ them (generator#175, Crucible F-0019):
   Pinned by `tests/conformance/rust/repeated_id.rs`, which builds the message with
   `sofab::OStream` — no shared vector can carry a repeated id, because §7.4 opens
   by forbidding producers to emit one.
-- **An array element that is ITSELF a wrapper array still merges in three
-  backends, and that is a separate, family-wide gap.** Measured at the same time
-  on `array<array<string>>` and `array<array<array<u32>>>`: **rust, go and zig**
-  merge a repeated row id (rust and go measured, zig read from the emitted arm),
-  while **csharp** installs a fresh `List<T>` and **java**'s `Seq.reserveRow`
-  clears (`Seq.java:166`). Unlike the matrix-row case above, the majority here —
-  three merge to two — is on the **spec-wrong** side, so there is nothing to
-  converge rust onto; and go's half lives in `corelib-go`'s `NestedSeq`, not in
-  the generator at all. It is therefore not a rust outlier to fix in passing: it
-  wants one decision taken once across every backend, the way generator#175 was
-  run. Filed as **generator#523**, which also carries the coverage half
-  generator#509 asked for and this section still owes — a shared
-  `tests/conformance/lib/check_repeated_id.py` on the `check_growth.py` pattern,
-  forging the repeated-id bytes itself and driving every backend's harness, so
-  the native row, the wrapper row and the scope merge are checked family-wide
-  instead of only in rust. Until it lands, `tests/conformance/rust/repeated_id.rs`
-  is the family's only §7.4 repeated-id regression guard. Note that #509 leaves
-  rust internally inconsistent in the meantime — `array<array<u32>>` replaces its
-  row, `array<array<string>>` merges its row — which generator#523 resolves.
+- **AN ARRAY ELEMENT THAT IS ITSELF A WRAPPER ARRAY replaces too, and settling
+  that took a family-wide pass** (generator#523). §7.4 does not distinguish the
+  two row shapes — a row is an array field whether its elements arrive through the
+  array callbacks or through a scope of their own — but every backend implements
+  them in different code, and only the native row had been fixed. Re-measured on
+  **all eleven** backends, on `matstr: array<array<string>>` carrying element id 0
+  twice (`["a","z"]` then `["y"]`) and on `deep: array<array<array<u32>>>`
+  re-opening element 0:
+
+  | | wrapper row, before #523 |
+  | --- | --- |
+  | c, cpp, csharp, java, kotlin, typescript | **replace** (§7.4) |
+  | rust, go, zig, dart, python | **merge** — `[["y", "z"]]` for `[["y"]]`, `[[[9], [3, 4]]]` for `[[[9]]]` |
+
+  That corrects the tally #523 was filed with (three merge to two, "the majority
+  is on the spec-wrong side"): **dart and python merged as well**, and cpp, c,
+  typescript and kotlin were already right, so it was five to six the other way.
+  Either way the spec decides and not the count — the interest of the tally is
+  that four of the five were found only because the check runs everywhere rather
+  than where the last bug was.
+
+  Five fixes, in two layers, because the row index only exists where the row is
+  placed:
+
+  - **rust** grew a `wrapperRowReset` beside #509's `rowReset` — the `fkArrArr`
+    arm now clears the row after the growth and behind the over-index reject. It
+    has no pre-size to pair with the clear, and must not: a wrapper row announces
+    no count anywhere on the wire, its length being highest present element id + 1
+    (§5.1). This also ends the internal inconsistency #509 left, where
+    `array<array<u32>>` replaced its row and `array<array<string>>` merged it.
+  - **zig** resets the row slice (`sofab.arrays.at(path, id).* = &.{}`) in the arm
+    `fkArrArr` shares with `fkStructArr` — one line keyed on the kind, because
+    placement-at-id is what the two have in common and the reset is what they do
+    not. No free: this backend decodes into an arena (§6.7.1), exactly as the
+    field-level wrapper reset beside it already relies on.
+  - **python** rebinds the slot (`_t[fid] = []`) in `arrSeqArm`, which serves both
+    element kinds that open a scope; the child scope re-resolves its path through
+    the index register, so it cannot be holding the old list.
+  - **go** and **dart** needed no generator change at all: their row is placed by
+    `corelib-go`'s `NestedSeq.BeginSequence` and `corelib-dart`'s
+    `NestedSeq.onSequenceStart`, so the reset is the corelib's
+    (`(*s.out)[id] = (*s.out)[id][:0]`, `out[id].clear()`). Go's truncation keeps
+    the backing array, matching the `m.Field = m.Field[:0]` reset generated code
+    already emits for a wrapper array's own field id.
+
+  In every one of the five the reset sits **behind** the index decision and the
+  growth, for the §7.3 reason below, and `MessageSeq`/`fkStructArr`/the struct arm
+  beside it deliberately does **not** get one — that is the merging half, and the
+  failure mode of each of these fixes is breaking it.
+
+- **The coverage half, which generator#509 asked for and this section owed:**
+  `tests/conformance/lib/check_repeated_id.py`, wired into all eleven suites
+  (generator#523). It forges the repeated-id bytes itself — §7.4 opens by
+  forbidding producers to emit one, so this is a decoder obligation no shared
+  vector can carry — and drives each backend's `decode` and `streamdecode` verbs
+  over one schema covering every array position at once: leaf native array, leaf
+  value element, native row, wrapper row, a wrapper row one level down, and the
+  struct element that must merge. Both halves in one run is the point: a backend
+  that "fixed" replacement by resetting every re-opened element id passes the
+  wrapper-row case and fails the merge. It runs on **every profile** of the
+  multi-profile targets (four rust legs, four cpp legs, both python engines),
+  because replacement is semantics and not storage — a heapless or inline-capacity
+  row must clear exactly as a growing one does, and a profile-dependent §7.4
+  answer is the cross-profile divergence §7.1 forbids. `tests/conformance/rust/repeated_id.rs`
+  stays beside it, owning what the driver cannot reach: rust's typed
+  `sofab::OStream`/`feed`/`finish` API against example.yaml's own field shapes.
 
 **§7.4 interacts with §7.3, and the ordering is load-bearing.** The spec closes
 the clause with:
@@ -2537,9 +2584,13 @@ behind the type decision, though by different means:
   variant.
 - **typescript** collects into a fresh local and only publishes it (`o.f = arr`)
   after the loop, so a skipped occurrence never touches the member.
-- **go, rust, zig, cs, java, kotlin** put the reset *inside* the sequence-begin
-  callback, which the corelib only invokes for an actual sequence header — so the
-  wire-type dispatch shields it structurally.
+- **go, rust, zig, cs, java, kotlin, dart, python** put the reset *inside* the
+  sequence-begin callback, which the corelib only invokes for an actual sequence
+  header — so the wire-type dispatch shields it structurally. The same holds for
+  the WRAPPER-ROW resets generator#523 added: each one sits behind its arm's
+  over-index decision as well, which is the other direction the order is
+  load-bearing in — a reset in front of a refused element id would wipe a valid
+  earlier row on exactly the input that was supposed to be rejected loudly.
 - **c** resets in `object.c`'s `FIELDTYPE_SEQUENCE` case, which sits after the
   descriptor wire-type check.
 
@@ -4546,6 +4597,32 @@ A reimplementation is **conformant** when it reproduces these gates:
    `max_length` asks how far a container grew **before** a rejection, and a
    fallible decode returns an error rather than a partial container, so the JSON
    harness has no surface on which it is observable.
+
+   *Repeated field id* (`tests/conformance/lib/check_repeated_id.py`):
+   MESSAGE_SPEC §7.4 — the last occurrence wins per field id, and what that means
+   depends on what the field is: a re-opened **sequence** continues its scope, so
+   struct/union members merge and unrecurring children are retained, while an
+   **array wrapper** *is* the value of its field and a later occurrence replaces it
+   whole (generator#523). Like `check_growth.py` this builds its own message, and
+   for a stronger reason than "no vector carries it": §7.4 opens by saying such an
+   encoding is not well formed and that producers MUST NOT emit it, so **no encoder
+   in the family will ever produce these bytes** and the case exists only for a
+   decoder. The driver forges them out of varint headers (§4.3/§4.6/§4.7/§4.9) and
+   drives `decode` plus `streamdecode` at several splits — the chunked path
+   because every fix here is a destructive reset whose safety rests on the header
+   hook firing exactly once per occurrence, which no shared-vector driver can
+   probe.
+
+   One schema covers every array position a repeated id means something different
+   at — leaf native array, leaf value element, native row, wrapper row,
+   `array<array<array<u32>>>`, and the struct element that must merge — and both
+   halves run together deliberately: the failure mode of fixing replacement is
+   breaking the merge. Every array is schema-bounded, so this is **not** gated on
+   `dynamic_arrays` the way `sequence_growth` is; replacement is semantics rather
+   than storage, and it runs on all four rust legs, all four cpp legs and both
+   python engines for exactly that reason. Before it existed the family's only
+   §7.4 guard was rust's own, and the family had drifted behind it: five of eleven
+   backends merged a wrapper row, four of them found by this driver's first run.
 
    *Chunk invariance* (`tests/conformance/lib/check_chunk_invariance.py`):
    CORELIB_PLAN §5.2 makes the decode outcome computable at *any* byte boundary,

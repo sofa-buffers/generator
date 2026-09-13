@@ -321,6 +321,55 @@ func (g *gen) rowReset(fr frame) string {
 	return fmt.Sprintf(" if let Some(_r) = %s.get_mut(id as usize) { %s }", fr.path, body)
 }
 
+// wrapperRowReset opens a WRAPPER ROW frame's row (fkArrArr) for the element
+// sequence that just announced itself: a row whose own elements are
+// string/blob/struct or a further nested array, delivered through a scope of
+// their own rather than through the scalar array callbacks.
+//
+// It is rowReset's twin, and it is generator#523. The row a wrapper array's
+// per-element sequence_begin descends into is ITSELF an array field, so
+// MESSAGE_SPEC §7.4 makes it the replacing kind and not the merging one: the
+// wrapper *is* the value of its field, and a later occurrence of the element id
+// replaces it whole. seqElemGrow only pushes Default::default() rows up TO the
+// index, so a repeated element id used to find the previous occurrence's
+// elements still in place and write on top of them. Measured on `corelib: rs`,
+// `matstr: array<array<string>>` carrying element id 0 twice -- ["a","z"] then
+// ["y"]:
+//
+//	before   matstr = [["y", "z"]]   row 0 len 2
+//	after    matstr = [["y"]]        row 0 len 1
+//
+// and the same one level down, `deep: array<array<array<u32>>>` re-opening
+// element 0 with a different row id: [[[9], [3, 4]]] before, [[[9]]] after.
+// generator#509 fixed exactly this rule for a NATIVE row (fkNestedNative) and
+// left rust internally inconsistent in the meantime -- array<array<u32>>
+// replaced its row while array<array<string>> merged it, which is one field
+// shape apart. The two arms now agree.
+//
+// There is NO pre-size here, which is the one way it differs from rowReset. A
+// native row announces its element count in a real array header, so rowReset can
+// reserve exactly that; a wrapper row carries no count anywhere on the wire --
+// its length is highest present element id + 1 (§5.1) -- so there is no number
+// to reserve at the moment the row opens.
+//
+// Reached through get_mut for rowReset's reason: seqElemGrow breaks out when a
+// fixed-capacity outer container is full, so the index it grew towards may not
+// exist and a bare [id] would panic on untrusted input.
+//
+// ORDER IS LOAD-BEARING, the same two ways. overIndexGuard runs BEFORE this and
+// returns, so an over-index element id cannot wipe a valid earlier row -- the
+// §7.3 interaction where a destructive reset in front of the decision turns a
+// loud failure into silent data loss. And the reset sits in sequence_begin,
+// which the corelib invokes only for an actual sequence header, so an element
+// arriving as some other wire type never reaches it (ARCHITECTURE §7.4).
+//
+// The STRUCT-element frame (fkStructArr) deliberately does NOT get this: a
+// re-opened struct continues its scope and merges, which is the other half of
+// §7.4 and the reason the two frames keep separate arms.
+func (g *gen) wrapperRowReset(path string) string {
+	return fmt.Sprintf(" if let Some(_r) = %s.get_mut(id as usize) { _r.clear(); }", path)
+}
+
 // fillReject builds one reject clause for a NATIVE ARRAY — a leaf field's own
 // array_begin arm, a native ROW frame's (fkNestedNative), or an element store
 // that breaches its declared width: it sets the sticky verdict flag, DISARMS the
@@ -1562,8 +1611,15 @@ func (g *gen) emitVisitor(f *rfile, name string, fields []*ir.Field) {
 				// (§5.1), so the row is placed at out[id] rather than appended -- an
 				// interior all-default row is omitted (§2) and leaves an id gap that
 				// an appending collector would close, shifting every later row down.
-				add("            (_Loc::%s, _) => { %s%s self.%s = id as usize; _Loc::%s },",
-					fr.loc, g.overIndexGuard(fr.cap), g.seqElemGrow(fr.path), fr.ixVar, fr.elemLoc)
+				//
+				// And then, unlike fkStructArr, the row is RESET (wrapperRowReset,
+				// generator#523): this frame's element is itself an ARRAY, so §7.4
+				// makes a repeated element id REPLACE it whole, where the struct
+				// element one arm up continues its scope and merges. The reset runs
+				// after the growth, so the row exists, and after overIndexGuard's
+				// return, so a rejected element id cannot wipe a valid earlier row.
+				add("            (_Loc::%s, _) => { %s%s self.%s = id as usize;%s _Loc::%s },",
+					fr.loc, g.overIndexGuard(fr.cap), g.seqElemGrow(fr.path), fr.ixVar, g.wrapperRowReset(fr.path), fr.elemLoc)
 			}
 		}
 		// The default arm is a SKIP, not "stay where you are". An id the schema does

@@ -924,5 +924,25 @@ build "$WORK/closed.yaml" "$WORK/closed"
 python3 "$ROOT/tests/conformance/lib/check_closed_kinds.py" "dart" \
     --status-verb trydecode --invalid-pattern 'decode failed: invalid' \
     -- "$WORK/closed/harness"
+# MESSAGE_SPEC §7.4 -- a field id REPEATED inside one scope (generator#523). The
+# rule has two halves and this checks BOTH on one message: a re-opened SEQUENCE
+# continues its scope, so struct/union members MERGE and unrecurring children are
+# retained, while an ARRAY WRAPPER *is* the value of its field and a later
+# occurrence REPLACES it whole -- at every array position the shape offers,
+# including a wrapper row (array<array<string>>) and one level deeper.
+#
+# A shared DRIVER rather than a shared vector, because §7.4 opens by forbidding
+# producers to emit a repeated id: no encoder in the family will ever produce
+# these bytes, so the driver forges them itself. Until it existed the only guard
+# was rust's, and the family had drifted -- rust, go, zig, dart and python all
+# merged a wrapper row where c, cpp, cs, java, kotlin and ts replaced it.
+echo "==> §7.4 repeated id: wrappers replace, scopes merge (generator#523)"
+printf 'version: 1\nmessages:\n' > "$WORK/repeated.yaml"
+python3 "$ROOT/tests/conformance/lib/check_repeated_id.py" --emit-schema >> "$WORK/repeated.yaml"
+( cd "$ROOT" && go run ./cmd/sofabgen --config "$WORK/cfg.yaml" --lang dart --in "$WORK/repeated.yaml" --out "$WORK/repeated" )
+sed -i "s#\${SOFAB_DART_CORELIB}#$CORELIB#" "$WORK/repeated/pubspec.yaml"
+( cd "$WORK/repeated" && dart pub get >/dev/null 2>&1 && dart compile exe bin/harness.dart -o harness >/dev/null )
+python3 "$ROOT/tests/conformance/lib/check_repeated_id.py" "Dart" \
+    -- "$WORK/repeated/harness"
 
 echo "PASS"

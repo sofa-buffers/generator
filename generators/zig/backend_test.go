@@ -1101,6 +1101,63 @@ messages:
 // Nothing is filled in on the way out: the highest present id + 1 IS the decoded
 // length (§5.1), and a declared `count: N` is a capacity that bounds the ids and
 // adds no elements (§3).
+// generator#523: a repeated WRAPPER ROW id REPLACES the row (MESSAGE_SPEC §7.4).
+//
+// §7.4 has two halves and this backend emits ONE arm for both kinds of element
+// that open a scope, because placement-at-id is what they have in common. The
+// reset is what they do not: an element that is itself an ARRAY is the replacing
+// kind -- the wrapper *is* the value of its field, so a later occurrence of the
+// element id discards the earlier one -- while a re-opened STRUCT element
+// continues its scope and merges, retaining children whose ids do not recur.
+//
+// `grow` default-fills only UP TO the index, so before the fix a re-opened row
+// found the previous occurrence's elements still in place and wrote on top of
+// them. Measured on `matstr: array<array<string>>` carrying element id 0 twice --
+// ["a","z"] then ["y"] -- as [["y", "z"]] where §7.4 wants [["y"]], and one level
+// down on array<array<array<u32>>> as [[[9], [3, 4]]] where it wants [[[9]]].
+//
+// The whole arm is asserted, so the ORDER is pinned with it: the reset may only
+// follow the over-index reject's `break` (in front of it, a refused element id
+// would wipe a valid earlier row -- the §7.3 interaction that turns a loud
+// failure into silent data loss) and the grow (in front of that, it would write
+// to a slot that does not exist yet).
+func TestZigRepeatedWrapperRowIdReplaces(t *testing.T) {
+	s := buildSchema(t, `
+version: 1
+messages:
+  vec:
+    payload:
+      matstr: { id: 0, type: array, items: { type: array, count: 2, items: { type: string, count: 3, maxlen: 8 } } }
+      objs:   { id: 1, type: array, items: { type: struct, count: 2, fields: { k: { id: 0, type: u32 } } } }
+`)
+	files, err := (&Backend{}).Generate(s, map[string]any{})
+	if err != nil {
+		t.Fatalf("generate: %v", err)
+	}
+	m := string(files[0].Content)
+
+	// The WRAPPER row: reject, grow, record the index, then clear the row.
+	want := "                if (id >= 2) { self.inv = true; break :blk .dead; }\n" +
+		"                if (!sofab.arrays.grow([]const []const u8, self.alloc, &(self.m.matstr), @as(usize, id) + 1, &.{})) break :blk .dead;\n" +
+		"                self.ei_root_matstr = id;\n" +
+		"                sofab.arrays.at(self.m.matstr, @as(usize, id)).* = &.{};\n" +
+		"                break :blk .root_matstr_e;"
+	if !strings.Contains(m, want) {
+		t.Errorf("a wrapper row must be RESET on open, after the reject and the grow:\n%s", m)
+	}
+
+	// The MERGING half, from the same arm one field over: a struct element is
+	// placed and descended into, and nothing else. A backend that reset every
+	// re-opened element id would zero the fields the second opening does not
+	// mention, which is the other half of §7.4 broken.
+	if !strings.Contains(m, "                self.ei_root_objs = id;\n                break :blk .root_objs_e;") {
+		t.Errorf("a struct element must be placed and descended into, nothing more:\n%s", m)
+	}
+	if strings.Contains(m, "sofab.arrays.at(self.m.objs, @as(usize, id)).* =") {
+		t.Errorf("a re-opened struct element MERGES (§7.4) and must not be reset:\n%s", m)
+	}
+}
+
 func TestZigWrapperElementsArePlacedByID(t *testing.T) {
 	s := buildSchema(t, `
 version: 1

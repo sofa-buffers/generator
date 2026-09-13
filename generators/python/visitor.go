@@ -315,6 +315,35 @@ func (g *gen) arrSeqArm(sc *pyScope, child *pyScope) []string {
 	out = append(out, fmt.Sprintf("_t = %s", sc.arrPath))
 	out = append(out, "while len(_t) <= fid:")
 	out = append(out, fmt.Sprintf("    _t.append(%s)", g.elemDefault(sc)))
+	// A WRAPPER ROW is RESET, a struct/union element is not (generator#523).
+	// This arm serves both kinds of element that open a scope of their own, and
+	// MESSAGE_SPEC §7.4 splits them: an element that is itself an ARRAY is the
+	// replacing kind -- the wrapper *is* the value of its field, so a repeated
+	// element id replaces it whole -- while a re-opened struct/union CONTINUES
+	// its scope, so children of an earlier opening whose ids do not recur must
+	// be retained. The gap fill above only extends the list UP TO the index, so
+	// a re-opened row used to find the previous occurrence's elements still in
+	// place and write on top of them: measured on `matstr: array<array<string>>`
+	// carrying element id 0 twice (["a","z"] then ["y"]) as [["y", "z"]] where
+	// §7.4 wants [["y"]], and on array<array<array<u32>>> one level down as
+	// [[[9], [3, 4]]] where it wants [[[9]]].
+	//
+	// A NATIVE row needs nothing here and gets nothing: it carries a real count
+	// header, arrives whole through one on_*_array call at this same scope, and
+	// that store already replaces (it never opens a scope, so sc.child is -1 and
+	// this arm is not even emitted for it).
+	//
+	// Rebinding the slot rather than clearing the list in place is deliberate:
+	// the child scope re-resolves its path through `_t[self._ixN]` on every
+	// delivery, so it cannot be holding the old list object.
+	//
+	// Order: after the gap fill, so the slot exists, and after indexBound, which
+	// RAISES -- so a refused element index cannot wipe a valid earlier row, the
+	// §7.3 interaction where a destructive reset in front of the decision turns
+	// a loud failure into silent data loss.
+	if sc.elem == ir.KindArray {
+		out = append(out, "_t[fid] = []")
+	}
 	out = append(out,
 		fmt.Sprintf("self.%s = fid", sc.ix),
 		"self._s.append(c)",
