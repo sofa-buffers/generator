@@ -1,0 +1,59 @@
+# Named LEAF types inside composites: an `enum` and a `bitfield` as a struct
+# member, as a union arm, as a struct-array element's member, and one level
+# deeper still.
+#
+# The corpus had every named-type shape EXCEPT these. Both kinds appeared only
+# as a top-level field and as an array element -- in all twenty definitions and
+# in the realworld example alike -- so four of the six positions a backend has
+# to bind them at were compiled by nothing. That gap is what let
+# `array<array<enum>>` reach main without compiling on any cpp configuration
+# (generator#531): the shape was covered by a conformance driver's own schema,
+# never by a file every suite builds.
+#
+# The two kinds are here together because they diverge in exactly one place --
+# an enum is bound by its declared constants, a bitfield by the mask of its
+# declared bits (MESSAGE_SPEC S1) -- and a backend that binds one at a position
+# and forgets the other is the shape this corpus is for.
+#
+# Both enums declare a 0 constant, so a field of either may omit `default`
+# (MESSAGE_SPEC S1: an enum field must declare a default naming a constant, or
+# belong to an enum that declares 0). Gaps are deliberate in both: Grade skips
+# 3..9 and Marks leaves bit 2 undeclared, so a backend bounding at the storage
+# width rather than at the declaration still decodes what it must reject.
+#
+# Flat arrays of both live in enums.yaml / bitfields.yaml; nested rows of both
+# live in nested_rows.yaml.
+version: 1
+$defs:
+  enum:
+    Grade: { LOW: 0, MID: 1, HIGH: 2, TOP: 10 }
+  bitfield:
+    Marks: { A: { pos: 0 }, B: { pos: 1 }, D: { pos: 3 } }
+  struct:
+    Rated:
+      grade: { id: 0, type: enum,     enum: { $ref: '#/$defs/enum/Grade' } }
+      marks: { id: 1, type: bitfield, bits: { $ref: '#/$defs/bitfield/Marks' } }
+      note:  { id: 2, type: string, maxlen: 8 }
+    Outer:
+      inner: { id: 0, type: struct, fields: { $ref: '#/$defs/struct/Rated' } }
+      tag:   { id: 1, type: enum, enum: { $ref: '#/$defs/enum/Grade' } }
+  union:
+    Pick:
+      by_grade: { id: 0, type: enum,     enum: { $ref: '#/$defs/enum/Grade' } }
+      by_marks: { id: 1, type: bitfield, bits: { $ref: '#/$defs/bitfield/Marks' } }
+      by_text:  { id: 2, type: string, maxlen: 8 }
+messages:
+  NamedMembers:
+    payload:
+      # struct member, and one level deeper (struct > struct > enum)
+      rated:    { id: 0, type: struct, fields: { $ref: '#/$defs/struct/Rated' } }
+      deep:     { id: 1, type: struct, fields: { $ref: '#/$defs/struct/Outer' } }
+      # union arm
+      pick:     { id: 2, type: union, default_id: 0, oneof: { $ref: '#/$defs/union/Pick' } }
+      # struct-ARRAY element member: the position an element id indexes into
+      rows:     { id: 3, type: array, items: { type: struct, count: 3, fields: { $ref: '#/$defs/struct/Rated' } } }
+      # a struct inside a matrix row -- array<array<struct>>, which the corpus
+      # carried for no element type at all
+      grid:     { id: 4, type: array, items: { type: array, count: 2, items: { type: struct, count: 2, fields: { $ref: '#/$defs/struct/Rated' } } } }
+      # union as an array element, carrying the named kinds through the arm
+      picks:    { id: 5, type: array, items: { type: union, count: 2, default_id: 0, oneof: { $ref: '#/$defs/union/Pick' } } }
