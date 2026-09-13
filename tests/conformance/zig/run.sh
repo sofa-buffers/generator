@@ -111,6 +111,21 @@ echo "$OUT" | grep -q '"somestringarray":\["a","b","c"\]' || { echo "FAIL: strin
 echo "$OUT" | grep -q '"somefp32":2.5' || { echo "FAIL: fp32 round-trip"; exit 1; }
 echo "==> round-trip OK"
 
+# The whole message must round-trip to ITSELF, compared as DATA rather than as
+# text (tests/conformance/lib/json_equal.py). The greps above pin a handful of
+# fields; this covers every one the message has, and it needs no fixture to
+# maintain -- OUT already carries the defaults the input left out, so feeding it
+# back is a full-coverage pass that grows with the schema by itself.
+#
+# A string comparison cannot do this job: member order is the backend's choice
+# (cpp orders by schema id, go alphabetically), a union renders every arm, and a
+# blob is base64 here and a byte array there -- all rendering, no wire fact.
+FULL="$OUT"
+OUT2=$(printf '%s' "$FULL" | "$WORK/ex/zig-out/bin/harness" encode myfirstmessage | "$WORK/ex/zig-out/bin/harness" decode myfirstmessage)
+python3 "$ROOT/tests/conformance/lib/json_equal.py" "$FULL" "$OUT2" \
+    --label "Zig: the whole message round-trips to itself" || exit 1
+echo "==> full-message round-trip OK ($(python3 -c "import json,sys;print(len(json.loads(sys.argv[1])))" "$FULL") fields compared as data)"
+
 # `count` is a CAPACITY, never a length (MESSAGE_SPEC S3, documentation af536c4).
 # someuintarray declares count: 4 (id 15 -> header 0x7b). Two things follow, and
 # both are asserted here because each was the opposite before:

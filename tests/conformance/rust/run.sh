@@ -188,6 +188,21 @@ run_variant() {
     echo "$OUT" | grep -q '"someblob":\[10,20,30\]' || { echo "FAIL: [$label] blob round-trip"; exit 1; }
     echo "==> [$label] round-trip OK"
 
+    # The whole message must round-trip to ITSELF, compared as DATA rather than as
+    # text (tests/conformance/lib/json_equal.py). The greps above pin a handful of
+    # fields; this covers every one the message has, and it needs no fixture to
+    # maintain -- OUT already carries the defaults the input left out, so feeding it
+    # back is a full-coverage pass that grows with the schema by itself.
+    #
+    # A string comparison cannot do this job: member order is the backend's choice
+    # (cpp orders by schema id, go alphabetically), a union renders every arm, and a
+    # blob is base64 here and a byte array there -- all rendering, no wire fact.
+    FULL="$OUT"
+    OUT2=$(cd "$WORK/ex-$label" && printf '%s' "$FULL" | cargo run -q -- encode myfirstmessage | cargo run -q -- decode myfirstmessage)
+    python3 "$ROOT/tests/conformance/lib/json_equal.py" "$FULL" "$OUT2" \
+        --label "Rust [$label]: the whole message round-trips to itself" || exit 1
+    echo "==> full-message round-trip OK ($(python3 -c "import json,sys;print(len(json.loads(sys.argv[1])))" "$FULL") fields compared as data)"
+
     # Over-count scalar array (generator#100): someuintarray declares count: 4
     # (id 15 -> header 0x7b = 15<<3 | unsigned-array). 5 wire elements MUST be
     # INVALID per MESSAGE_SPEC 3+7 (try_decode rejects, harness exits non-zero);

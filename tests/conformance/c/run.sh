@@ -150,6 +150,21 @@ echo "$OUT" | grep -q '"someblob":\[10,20,30\]' || { echo "FAIL: blob round-trip
 echo "$OUT" | grep -q '"someblobarray":\[\[1\],\[2\],\[3\]\]' || { echo "FAIL: blob-array element padded/dropped (issue #130)"; exit 1; }
 echo "==> project harness round-trip OK"
 
+# The whole message must round-trip to ITSELF, compared as DATA rather than as
+# text (tests/conformance/lib/json_equal.py). The greps above pin a handful of
+# fields; this covers every one the message has, and it needs no fixture to
+# maintain -- OUT already carries the defaults the input left out, so feeding it
+# back is a full-coverage pass that grows with the schema by itself.
+#
+# A string comparison cannot do this job: member order is the backend's choice
+# (cpp orders by schema id, go alphabetically), a union renders every arm, and a
+# blob is base64 here and a byte array there -- all rendering, no wire fact.
+FULL="$OUT"
+OUT2=$(printf '%s' "$FULL" | "$WORK/proj/harness/harness" encode | "$WORK/proj/harness/harness" decode)
+python3 "$ROOT/tests/conformance/lib/json_equal.py" "$FULL" "$OUT2" \
+    --label "C: the whole message round-trips to itself" || exit 1
+echo "==> full-message round-trip OK ($(python3 -c "import json,sys;print(len(json.loads(sys.argv[1])))" "$FULL") fields compared as data)"
+
 # Over-index wrapper array (generator#149 / F-0013): somestringarray (id 18)
 # declares count: 5, lowering to a fixed-count sequence holder (element slots
 # 0..4). A well-formed string element at wire index 5 (>= N) is INVALID per
