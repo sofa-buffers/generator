@@ -794,7 +794,7 @@ func (g *gen) emitRowGuard(f *dfile, nt *ir.NamedType, ref *ir.TypeRef) {
 		kind, cb = ir.KindEnum, "onSignedArray"
 	}
 	name := g.rowGuardName(kind, ref)
-	f.line("/// Closes [%s] at a matrix row element (MESSAGE_SPEC §1). The row's", g.typeName(nt.Key))
+	f.line("/// Closes [%s] at a matrix row element. The row's", g.typeName(nt.Key))
 	f.line("/// values never reach the generated visitor -- the collector gathers them and")
 	f.line("/// places the finished row -- and the only bound it carries of its own is an")
 	f.line("/// interval, which states neither a gapped constant set nor a bitfield mask.")

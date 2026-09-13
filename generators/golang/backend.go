@@ -387,7 +387,7 @@ func (g *gen) emitRowGuard(f *gofile, nt *ir.NamedType, ref *ir.TypeRef) {
 		cb, param, seq = "ArraySigned", "int64", "SignedMatrixSeq"
 	}
 	f.line("// %s closes %s at a matrix row element", name, tn)
-	f.line("// (MESSAGE_SPEC §1). The row's values never reach the generated visitor --")
+	f.line("// The row's values never reach the generated visitor --")
 	f.line("// the collector gathers them and places the finished row -- and the only")
 	f.line("// bound it carries of its own is an interval armed by a sentinel, which")
 	f.line("// states neither a gapped constant set nor a bitfield mask. So the value")
