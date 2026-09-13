@@ -791,7 +791,7 @@ run_variant() {
     ( cd "$ROOT" && go run ./cmd/sofabgen --config "$WORK/cfg-$label.yaml" --lang cpp \
         --in "$ROOT/tests/matrix/corpus/defs/nested_rows.yaml" --out "$WORK/rows-$label" )
     make -C "$WORK/rows-$label" "$@" >/dev/null
-    ROWS_IN='{"strrows":[["a","b","c"],["d"]],"blobrows":[[[1,2],[3]],[[4]]],"structrows":[[{"x":1,"y":2},{"x":3,"y":4}],[{"x":5,"y":6}]],"strcube":[[["a","b"],["c"]],[["d"]]],"numrows":[[1,2,3],[4,5,6]],"fprows":[[1.5,2.5],[3.5]]}'
+    ROWS_IN='{"strrows":[["a","b","c"],["d"]],"blobrows":[[[1,2],[3]],[[4]]],"structrows":[[{"x":1,"y":2},{"x":3,"y":4}],[{"x":5,"y":6}]],"strcube":[[["a","b"],["c"]],[["d"]]],"numrows":[[1,2,3],[4,5,6]],"fprows":[[1.5,2.5],[3.5]],"enumrows":[[0,1,2],[2]],"bfrows":[[1,2,3],[0]]}'
     ROWS_BIN="$WORK/rows-$label.bin"
     printf '%s' "$ROWS_IN" | "$WORK/rows-$label/harness/harness" encode NestedRows > "$ROWS_BIN"
     if [ -z "$corelib" ]; then
@@ -805,6 +805,8 @@ run_variant() {
     for chk in \
         '"numrows":\[\[1,2,3\],\[4,5,6\]\]' \
         '"fprows":\[\[1.5,2.5\],\[3.5\]\]' \
+        '"enumrows":\[\[0,1,2\],\[2\]\]' \
+        '"bfrows":\[\[1,2,3\],\[0\]\]' \
         '"strrows":\[\["a","b","c"\],\["d"\]\]' \
         '"blobrows":\[\[\[1,2\],\[3\]\],\[\[4\]\]\]' \
         '"strcube":\[\[\["a","b"\],\["c"\]\],\[\["d"\]\]\]' \
