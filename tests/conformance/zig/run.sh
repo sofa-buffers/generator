@@ -107,7 +107,7 @@ echo "$OUT" | grep -q '"someblob":\[1,2,3,4\]' || { echo "FAIL: blob round-trip"
 # the wire count IS the length. Three strings in, three strings back -- nothing
 # is filled in at [M, N). The five-element form asserted here before pinned the
 # superseded fixed-length reading of `count`.
-echo "$OUT" | grep -q '"somestringarray":\["a","b","c"\]' || { echo "FAIL: string array round-trip (count:5 is a capacity, not a length)"; exit 1; }
+echo "$OUT" | grep -q '"somestringarray":\["a","bb","ccc"\]' || { echo "FAIL: string array round-trip (count:5 is a capacity, not a length)"; exit 1; }
 echo "$OUT" | grep -q '"somefp32":1.5' || { echo "FAIL: fp32 round-trip"; exit 1; }
 echo "==> round-trip OK"
 

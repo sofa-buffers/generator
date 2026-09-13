@@ -227,12 +227,12 @@ run_variant() {
         '"somei8":-42' \
         '"someenum":33' \
         '"somebitfield":1' \
-        '"someintarray":\[1,2,3,4,5\]' \
+        '"someintarray":\[-1,-2,-3,-4,-5\]' \
         '"someblob":\[1,2,3,4\]' \
-        '"somestringarray":\["a","b","c","d","e"\]' \
+        '"somestringarray":\["a","bb","ccc"\]' \
         '"someblobarray":\[\[1\],\[2,3\]\]' \
-        '"someenumarray":\[2,1,2,0\]' \
-        '"someboolarray":\[true,false,true,true,false,true,true,false\]' \
+        '"someenumarray":\[1,0,2,1\]' \
+        '"someboolarray":\[false,false,true\]' \
         '"somebitfieldarray":\[1,2,3\]' \
         '"somematrix":\[\[1,2,3,4\],\[5,6,7,8\]\]' \
         '"deepint":99' \
