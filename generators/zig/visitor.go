@@ -1557,6 +1557,35 @@ func (g *gen) emitSequence(f *zfile, fs []frame, name string) {
 					fr.elemType, fr.path, fr.elemFill)
 			}
 			fmt.Fprintf(&b, "                self.%s = id;\n", fr.idx)
+			// A WRAPPER ROW is RESET here, and a struct element is not
+			// (generator#523). The element this frame descends into is itself an
+			// ARRAY field for fkArrArr, so MESSAGE_SPEC §7.4 makes it the replacing
+			// kind: the wrapper *is* the value, and a repeated element id replaces
+			// it whole. `grow` only default-fills up TO the index, so a re-opened row
+			// used to find the previous occurrence's elements still in place and
+			// write on top of them -- measured on `matstr: array<array<string>>`
+			// carrying element id 0 twice (["a","z"] then ["y"]) as [["y", "z"]]
+			// where §7.4 wants [["y"]], and on array<array<array<u32>>> one level
+			// down as [[[9], [3, 4]]] where it wants [[[9]]].
+			//
+			// fkStructArr keeps merging, which is the OTHER half of §7.4: a
+			// re-opened sequence continues its scope, so children of an earlier
+			// opening whose ids do not recur are retained. The two kinds share this
+			// arm precisely because placement-at-id is what they have in common; the
+			// reset is what they do not, so it is the one line keyed on the kind.
+			//
+			// `&.{}` rather than a free: this backend decodes into an arena
+			// (CORELIB_PLAN §6.7.1, ARCHITECTURE §10) and the whole message is
+			// released at once, which is exactly what the field-level wrapper reset
+			// in the struct arm above already relies on.
+			//
+			// Order: after the grow, so the slot exists, and after the over-index
+			// reject's `break`, so a refused element id cannot wipe a valid earlier
+			// row -- the §7.3 interaction where a destructive reset placed in front
+			// of the decision turns a loud failure into silent data loss.
+			if fr.kind == fkArrArr {
+				fmt.Fprintf(&b, "                sofab.arrays.at(%s, @as(usize, id)).* = &.{};\n", fr.path)
+			}
 			fmt.Fprintf(&b, "                break :blk .%s;\n", fr.elemLoc)
 			b.WriteString("            }")
 			all = append(all, frameArms{fr: fr, body: b.String()})

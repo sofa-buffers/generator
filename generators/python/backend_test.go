@@ -1211,6 +1211,76 @@ messages:
 	}
 }
 
+// generator#523: a repeated WRAPPER ROW id REPLACES the row (MESSAGE_SPEC §7.4).
+//
+// on_sequence_begin serves the two element kinds that open a scope of their own,
+// and §7.4 splits them: an element that is itself an ARRAY is the replacing kind
+// -- the wrapper *is* the value of its field, so a later occurrence of the element
+// id discards the earlier one -- while a re-opened STRUCT/UNION element continues
+// its scope, so children set by an earlier opening whose ids do not recur must be
+// RETAINED.
+//
+// The gap fill extends the list only UP TO the index, so before the fix a
+// re-opened row found the previous occurrence's elements still in place and wrote
+// on top of them. Measured on `matstr: array<array<string>>` carrying element id 0
+// twice -- ["a","z"] then ["y"] -- as [["y", "z"]] where §7.4 wants [["y"]], and
+// one level down on array<array<array<u32>>> as [[[9], [3, 4]]] where it wants
+// [[[9]]]. It is engine-independent by construction, being generated code, which
+// tests/conformance/python/run.sh measures on both engines rather than assuming.
+//
+// Whole arms are asserted, so the ORDER is pinned with them: the reset may only
+// follow the index bound (which RAISES -- in front of it, a refused element index
+// would wipe a valid earlier row, the §7.3 interaction that turns a loud failure
+// into silent data loss) and the gap fill (in front of that, it would index a slot
+// that does not exist yet).
+//
+// A NATIVE row is absent from this test on purpose: it carries a real count header,
+// arrives whole through one on_*_array call, opens no scope at all, and its store
+// already replaces -- TestPythonWrapperElementsArePlacedByID pins that arm.
+func TestPythonRepeatedWrapperRowIdReplaces(t *testing.T) {
+	const src = `
+version: 1
+messages:
+  vec:
+    payload:
+      matstr: { id: 0, type: array, items: { type: array, count: 2, items: { type: string, count: 3, maxlen: 8 } } }
+      deep:   { id: 1, type: array, items: { type: array, count: 2, items: { type: array, count: 2, items: { type: u32, count: 3 } } } }
+      objs:   { id: 2, type: array, items: { type: struct, count: 2, fields: { k: { id: 0, type: u32 } } } }
+`
+	mod := string(genPy(t, schema(t, src), map[string]any{})["message.py"])
+
+	for _, want := range []string{
+		// The string row: bound the index, gap-fill, RESET the row, then descend.
+		"            if fid >= 2:\n" +
+			"                raise SofaDecodeError(\"matstr: array index above schema capacity 2\")\n" +
+			"            _t = self._o.matstr\n" +
+			"            while len(_t) <= fid:\n" +
+			"                _t.append([])\n" +
+			"            _t[fid] = []\n",
+		// ...and one level down, where the row's own elements are native rows: the
+		// middle wrapper element is replaced whole, so a native row it held at some
+		// other id goes with it.
+		"            _t = self._o.deep\n" +
+			"            while len(_t) <= fid:\n" +
+			"                _t.append([])\n" +
+			"            _t[fid] = []\n",
+	} {
+		if !strings.Contains(mod, want) {
+			t.Errorf("message.py missing %q:\n%s", want, mod)
+		}
+	}
+
+	// The MERGING half: a struct element is gap-filled and descended into, and
+	// nothing else. A backend that reset every re-opened element id would zero the
+	// fields the second opening does not mention.
+	if !strings.Contains(mod, "                _t.append(VecObjsElem())\n            self._ix") {
+		t.Errorf("a struct element must be gap-filled and descended into, nothing more:\n%s", mod)
+	}
+	if strings.Contains(mod, "_t.append(VecObjsElem())\n            _t[fid] =") {
+		t.Errorf("a re-opened struct element MERGES (§7.4) and must not be reset:\n%s", mod)
+	}
+}
+
 // TestPythonWireArraySparsity is the byte-level statement of the whole change,
 // executed against corelib-py. Every hex below is a regenerated shared test vector
 // (the serialized_sparse form), so these are cross-language byte targets, not this

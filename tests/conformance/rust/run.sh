@@ -399,6 +399,26 @@ run_variant() {
         *)        ( cd "$WORK/rep-$label" && cargo run -q ) ;;
     esac
 
+    # ...and the FAMILY-WIDE half of the same rule, through the shared driver
+    # (generator#523). The two are not redundant, and the split is deliberate:
+    # the check above asserts rust's TYPED api against example.yaml's own field
+    # shapes, which is where sofab::OStream and the chunked feed/finish pair are
+    # reachable; this one asserts the JSON-visible decoded VALUE on a message
+    # every backend builds, which is what makes a rust answer comparable to the
+    # other ten. example.yaml carries no array<array<string>> at all, so the
+    # WRAPPER ROW -- the half generator#523 fixed here -- is only reachable
+    # through the driver's own schema.
+    #
+    # On every profile, because the fix is a clear() on the row and a
+    # fixed-capacity heapless::Vec must clear exactly as a Vec does: a
+    # profile-dependent §7.4 answer is the cross-profile divergence §7.1 forbids.
+    echo "==> [$label] §7.4 repeated id, shared driver (generator#523)"
+    printf 'version: 1\nmessages:\n' > "$WORK/repeated.yaml"
+    python3 "$ROOT/tests/conformance/lib/check_repeated_id.py" --emit-schema >> "$WORK/repeated.yaml"
+    rust_build "$WORK/repeated.yaml" "$WORK/repeated-$label"
+    python3 "$ROOT/tests/conformance/lib/check_repeated_id.py" "Rust [$label]" \
+        --cwd "$WORK/repeated-$label" -- cargo run -q --
+
     # Over-maxlen scalar blob (Option B / MESSAGE_SPEC S7.1): someblob (id 12)
     # declares maxlen: 16; a 17-byte blob exceeds it -> INVALID, never truncated.
     # Wire: 62 (blob id12) 8b 01 (fixlen word len 17, blob subtype 3) + 17 bytes;

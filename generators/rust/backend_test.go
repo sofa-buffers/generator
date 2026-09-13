@@ -1609,6 +1609,74 @@ messages:
 	}
 }
 
+// generator#523: a repeated WRAPPER ROW id REPLACES the row too (MESSAGE_SPEC §7.4).
+//
+// The twin of TestRustRepeatedRowIdReplaces above, at the array position #509
+// deliberately left on the table: a row whose own elements are string/blob/struct
+// or a further nested array, which arrives through a SCOPE of its own rather than
+// through the scalar array callbacks. §7.4 does not distinguish -- a row is an
+// array field either way, so it is the replacing kind -- but the two shapes are
+// different arms in this backend (fkNestedNative vs fkArrArr), and only the first
+// was fixed. That left rust internally inconsistent, replacing an
+// array<array<u32>> row while merging an array<array<string>> one.
+//
+// Measured on `corelib: rs` before the fix, `matstr: array<array<string>>` carrying
+// element id 0 twice -- ["a","z"] then ["y"] -- decoded as [["y", "z"]] where §7.4
+// wants [["y"]], and `deep: array<array<array<u32>>>` re-opening element 0 as
+// [[[9], [3, 4]]] where it wants [[[9]]]. go, dart, zig and python merged the same
+// way; c, cpp, csharp, java, kotlin and typescript did not.
+//
+// What is asserted is the whole arm, so the ORDER is pinned with it: the clear may
+// only ever follow the over-index reject and the growth. In front of the reject it
+// would wipe a valid earlier row on a refused element id -- the §7.3 interaction
+// that turns a loud failure into silent data loss -- and in front of the growth it
+// would index a slot that does not exist yet.
+//
+// Every profile, because the clear is semantics and not sizing: a fixed-capacity
+// heapless::Vec row must clear exactly as a Vec row does, or the two profiles
+// disagree about a decoded value, which is what §7.1 forbids.
+func TestRustRepeatedWrapperRowIdReplaces(t *testing.T) {
+	const src = `
+version: 1
+messages:
+  m:
+    payload:
+      matstr: { id: 0, type: array, items: { type: array, count: 2, items: { type: string, count: 3, maxlen: 8 } } }
+      deep:   { id: 1, type: array, items: { type: array, count: 2, items: { type: array, count: 2, items: { type: u32, count: 3 } } } }
+`
+	for _, cfg := range []map[string]any{
+		{"corelib": "rs"},
+		{"corelib": "rs", "allow_dynamic": false},
+		{"corelib": "rs-no-std", "allow_dynamic": true},
+		{"corelib": "rs-no-std"},
+	} {
+		m := moduleFromYAML(t, src, cfg)
+		for _, want := range []string{
+			// The string row: reject an over-index element FIRST, grow to it, record
+			// the index, THEN clear the row that id names.
+			"(_Loc::Root_matstr, _) => { if id as usize >= 2 { self.inv = true; return; } " +
+				"while self.m.matstr.len() <= id as usize { ",
+			"self._ix0 = id as usize; if let Some(_r) = self.m.matstr.get_mut(id as usize) { _r.clear(); } _Loc::Root_matstr_e },",
+			// ...and one level down, where the row's own elements are native rows:
+			// re-opening the MIDDLE wrapper element replaces it whole, so the native
+			// row it held at some other id goes with it.
+			"self._ix1 = id as usize; if let Some(_r) = self.m.deep.get_mut(id as usize) { _r.clear(); } _Loc::Root_deep_e },",
+		} {
+			if !strings.Contains(m, want) {
+				t.Errorf("(%v) a wrapper row must be CLEARED on open, after the reject and the growth; missing %q:\n%s", cfg, want, m)
+			}
+		}
+		// There is no pre-size to pair with the clear here, and there must not be: a
+		// wrapper row carries no count anywhere on the wire -- its length is highest
+		// present element id + 1 (§5.1) -- so at the moment the row opens there is no
+		// number to reserve. A reserve_exact on this arm would be reserving the OUTER
+		// array's count for the inner one.
+		if strings.Contains(m, "self.m.matstr.get_mut(id as usize) { _r.clear(); _r.reserve_exact") {
+			t.Errorf("(%v) a wrapper row has no count to pre-size from:\n%s", cfg, m)
+		}
+	}
+}
+
 // generator#247, extended: a wrapper array's element id IS the array index (§5.1),
 // so an element is PLACED at dest[id] after gap-filling -- never appended. Under
 // the af536c4 rule an interior gap is REACHABLE for every element kind (an
@@ -1657,10 +1725,16 @@ messages:
 		if !strings.Contains(got, "if let Some(_r) = self.m.mat.get_mut(self._ix1) {") {
 			t.Errorf("(%v) matrix elements must land in the row the id named:\n%s", cfg, got)
 		}
-		// Wrapper rows: same, through the row's own sequence_begin.
+		// Wrapper rows: same, through the row's own sequence_begin -- and pinned to
+		// the closing brace, because the row is also CLEARED there. A wrapper row is
+		// an array field, so a repeated element id REPLACES it rather than merging
+		// into it (§7.4, generator#523); the clear sits after the growth, so the row
+		// exists, and after the over-index reject's `return`, so a refused element id
+		// cannot wipe a valid earlier row. There is no pre-size to pair with it: a
+		// wrapper row announces no count anywhere on the wire (§5.1).
 		if !strings.Contains(got, "(_Loc::Root_rows, _) => { if id as usize >= 4 { self.inv = true; return; } while self.m.rows.len() <= id as usize {") ||
-			!strings.Contains(got, "self._ix2 = id as usize; _Loc::Root_rows_e },") {
-			t.Errorf("(%v) a wrapper row must be placed at out[id]:\n%s", cfg, got)
+			!strings.Contains(got, "self._ix2 = id as usize; if let Some(_r) = self.m.rows.get_mut(id as usize) { _r.clear(); } _Loc::Root_rows_e },") {
+			t.Errorf("(%v) a wrapper row must be placed at out[id] and cleared there:\n%s", cfg, got)
 		}
 		if !strings.Contains(got, "self.m.rows[self._ix2]") {
 			t.Errorf("(%v) wrapper-row elements must address the row by index:\n%s", cfg, got)

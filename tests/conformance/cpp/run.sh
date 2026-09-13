@@ -862,6 +862,33 @@ run_variant() {
             || { echo "FAIL: [$label] a row past its schema count is $ROWS_OVER, not INVALID"; exit 1; }
     fi
     echo "==> [$label] nested rows OK"
+
+    # MESSAGE_SPEC §7.4 -- a field id REPEATED inside one scope (generator#523),
+    # both halves on one message: a re-opened SEQUENCE continues its scope, so
+    # struct/union members MERGE and unrecurring children are retained, while an
+    # ARRAY WRAPPER *is* the value of its field and a later occurrence REPLACES
+    # it whole -- at every array position the shape offers, including a wrapper
+    # row (array<array<string>>) and one level deeper.
+    #
+    # A shared DRIVER rather than a shared vector, because §7.4 opens by
+    # forbidding producers to emit a repeated id: no encoder in the family will
+    # ever produce these bytes, so the driver forges them itself. Until it
+    # existed the only guard was rust's, and the family had drifted -- rust, go,
+    # zig, dart and python all merged a wrapper row where this backend replaced.
+    #
+    # Inside the variant loop, so all four cpp profiles answer it. That is the
+    # point for this target: replacement is SEMANTICS and not storage, so the
+    # inline-container profiles (corelib: c-cpp, allow_dynamic: false) must clear
+    # a fixed-capacity row exactly as the growing ones clear a vector -- and a
+    # profile-dependent §7.4 answer is the cross-profile divergence §7.1 forbids.
+    echo "==> [$label] §7.4 repeated id: wrappers replace, scopes merge (generator#523)"
+    printf 'version: 1\nmessages:\n' > "$WORK/repeated.yaml"
+    python3 "$ROOT/tests/conformance/lib/check_repeated_id.py" --emit-schema >> "$WORK/repeated.yaml"
+    ( cd "$ROOT" && go run ./cmd/sofabgen --config "$WORK/cfg-$label.yaml" --lang cpp \
+        --in "$WORK/repeated.yaml" --out "$WORK/repeated-$label" )
+    make -C "$WORK/repeated-$label" "$@" >/dev/null
+    python3 "$ROOT/tests/conformance/lib/check_repeated_id.py" "C++ [$label]" \
+        -- "$WORK/repeated-$label/harness/harness"
 }
 
 # Pure C++20 corelib-cpp (default).

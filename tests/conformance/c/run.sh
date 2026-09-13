@@ -638,4 +638,32 @@ for surface in decode streamdecode; do
         -- "$WORK/vecskip/harness/harness"
 done
 
+# MESSAGE_SPEC §7.4 -- a field id REPEATED inside one scope (generator#523). The
+# rule has two halves and this checks BOTH on one message: a re-opened SEQUENCE
+# continues its scope, so struct/union members MERGE and unrecurring children are
+# retained, while an ARRAY WRAPPER *is* the value of its field and a later
+# occurrence REPLACES it whole -- at every array position the shape offers,
+# including a wrapper row (array<array<string>>) and one level deeper.
+#
+# A shared DRIVER rather than a shared vector, because §7.4 opens by forbidding
+# producers to emit a repeated id: no encoder in the family will ever produce
+# these bytes, so the driver forges them itself. Until it existed the only guard
+# was rust's, and the family had drifted -- rust, go, zig, dart and python all
+# merged a wrapper row where this target replaced it.
+#
+# This target needed no generator change for §7.4 and still needs none: the
+# `fixed_seq` flag the generator already emits for every wrapper array is what
+# lets object.c reset a wrapper's slots on open while structs and unions keep
+# merging (corelib-c-cpp#101). What was missing was the CHECK -- the behaviour was
+# asserted in ARCHITECTURE and measured nowhere, on the one target whose §7.4
+# answer lives entirely in a descriptor kind and a library switch.
+echo "==> §7.4 repeated id: wrappers replace, scopes merge (generator#523)"
+printf 'version: 1\nmessages:\n' > "$WORK/repeated.yaml"
+python3 "$ROOT/tests/conformance/lib/check_repeated_id.py" --emit-schema >> "$WORK/repeated.yaml"
+( cd "$ROOT" && go run ./cmd/sofabgen --config "$WORK/proj.yaml" --lang c \
+    --in "$WORK/repeated.yaml" --out "$WORK/repeated" )
+make -C "$WORK/repeated" SOFAB_C_CORELIB="$CORELIB" >/dev/null
+python3 "$ROOT/tests/conformance/lib/check_repeated_id.py" "C" \
+    -- "$WORK/repeated/harness/harness"
+
 echo "PASS"
