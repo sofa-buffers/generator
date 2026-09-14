@@ -880,3 +880,51 @@ func TestCBitfieldArrayDefaultAtBit63IsUnsignedConstant(t *testing.T) {
 		t.Errorf("array default not rendered through the mask literal:\n%s", all)
 	}
 }
+
+// TestValueWidthIdGuard: CORELIB_PLAN §6.2 lets a profile build the value type
+// 32 bits wide (SOFAB_DISABLE_INT64_SUPPORT), and the field header (id<<3)|type
+// is accumulated in it — so SOFAB_ID_MAX drops to UINT32_MAX>>3 and a larger id
+// is refused at run time, per field, with InvalidArgument. The descriptor guard
+// beside it does not catch that: on the BIG profile SOFAB_OBJECT_DESCR_ID_MAX is
+// UINT32_MAX, four times the narrowed ceiling, so the build stays silent
+// (generator#529). The guard is width-aware for free, because SOFAB_ID_MAX is.
+func TestValueWidthIdGuard(t *testing.T) {
+	files := genCFromYAML(t, `
+version: 1
+messages:
+  m:
+    payload:
+      a: { id: 1, type: u32 }
+      b: { id: 536870912, type: u32 }
+`)
+	h := files["m.h"]
+	if !strings.Contains(h, "#if 536870912 > SOFAB_ID_MAX") {
+		t.Errorf("m.h missing the value-width id guard:\n%s", h)
+	}
+	if !strings.Contains(h, "#if 536870912 > SOFAB_OBJECT_DESCR_ID_MAX") {
+		t.Errorf("m.h lost the descriptor width guard:\n%s", h)
+	}
+}
+
+// TestValueWidthIdGuardCoversNestedIds: a nested object's fields ride the same
+// (id<<3)|type header as the top message's, so the ceiling caps them too. The
+// top message's own ids are small here — only the nested struct carries the id
+// that would fail at run time.
+func TestValueWidthIdGuardCoversNestedIds(t *testing.T) {
+	files := genCFromYAML(t, `
+version: 1
+messages:
+  m:
+    payload:
+      a: { id: 1, type: u32 }
+      nested:
+        id: 2
+        type: struct
+        fields:
+          deep: { id: 536870912, type: u32 }
+`)
+	h := files["m.h"]
+	if !strings.Contains(h, "#if 536870912 > SOFAB_ID_MAX") {
+		t.Errorf("m.h: the guard must take the max over nested objects too:\n%s", h)
+	}
+}

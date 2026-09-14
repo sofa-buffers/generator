@@ -34,6 +34,11 @@
 # error "SofaBuffers: field ids in Scalars exceed the configured SOFAB_OBJECT_DESCR_PROFILE id width."
 #endif
 
+/* --- value-width guard: field ids must fit the corelib's id ceiling --- */
+#if 7 > SOFAB_ID_MAX
+# error "SofaBuffers: field ids in Scalars exceed SOFAB_ID_MAX for this value width (see SOFAB_DISABLE_INT64_SUPPORT)."
+#endif
+
 typedef struct {
     uint64_t u64max;
     int64_t i64min;

@@ -184,7 +184,17 @@ func (g *gen) message(m *ir.Message) (hdr, src []byte, err error) {
 	caps := g.capabilities(m)
 	guardName := strings.ToUpper(g.prefix + m.Name + "_H")
 	msgType := g.cType(msgKey, m.Name)
-	maxField := plans[msgKey].maxField
+	// Both id-width guards bound EVERY id this header puts on the wire, not just
+	// the top object's: a nested object has a descriptor of its own, and its
+	// fields ride the same (id<<3)|type header, accumulated in the same
+	// sofab_unsigned_t. Taking only plans[msgKey] left a nested id unguarded on
+	// both bounds.
+	maxField := int64(0)
+	for _, k := range order {
+		if plans[k].maxField > maxField {
+			maxField = plans[k].maxField
+		}
+	}
 
 	h := &cfile{}
 	h.banner(g.banner, g.license, strings.ToLower(m.Name)+".h", m.Name)
@@ -872,7 +882,8 @@ func (g *gen) emitFuncs(c *cfile, m *ir.Message, msgType string, root *objectPla
 }
 
 // emitGuards writes the §5.4 capability guards + the API-version guard + the
-// descriptor id-width guard.
+// two id-width guards (descriptor storage, and the value width the wire header
+// is accumulated in).
 func (g *gen) emitGuards(h *cfile, m *ir.Message, caps capset, maxField int64, msgType string) {
 	h.line("/* --- API-version guard: this code was generated against C API v1 --- */")
 	h.line("#if SOFAB_API_VERSION != 1")
@@ -903,6 +914,21 @@ func (g *gen) emitGuards(h *cfile, m *ir.Message, caps capset, maxField int64, m
 	h.line("/* --- descriptor width guard: field ids must fit the configured profile --- */")
 	h.line("#if %d > SOFAB_OBJECT_DESCR_ID_MAX", maxField)
 	h.line(`# error "SofaBuffers: field ids in %s exceed the configured SOFAB_OBJECT_DESCR_PROFILE id width."`, m.Name)
+	h.line("#endif")
+	h.blank()
+	// CORELIB_PLAN §6.2: a profile may build the value type 32 bits wide
+	// (SOFAB_DISABLE_INT64_SUPPORT), and the field header (id<<3)|type is
+	// accumulated in that type -- so SOFAB_ID_MAX drops to UINT32_MAX>>3 and the
+	// corelib refuses a larger id at run time, per field, with InvalidArgument.
+	// This guard is width-aware for free because SOFAB_ID_MAX is. It cannot be a
+	// generate-time check: the generator does not know which switches the
+	// consuming build sets, which is why the descriptor bound above is enforced
+	// at compile time too. Nor does that one stand in for it: on the BIG profile
+	// SOFAB_OBJECT_DESCR_ID_MAX is UINT32_MAX, four times the narrowed ceiling,
+	// so it passes and says nothing (generator#529).
+	h.line("/* --- value-width guard: field ids must fit the corelib's id ceiling --- */")
+	h.line("#if %d > SOFAB_ID_MAX", maxField)
+	h.line(`# error "SofaBuffers: field ids in %s exceed SOFAB_ID_MAX for this value width (see SOFAB_DISABLE_INT64_SUPPORT)."`, m.Name)
 	h.line("#endif")
 }
 
