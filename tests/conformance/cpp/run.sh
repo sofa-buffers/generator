@@ -1491,4 +1491,49 @@ python3 "$ROOT/tests/conformance/lib/check_growth.py" \
     "$CC/assets/test_vectors.json" "C++" --cap 4 \
     -- "$WORK/growth/harness/harness"
 
+# CORELIB_PLAN S6.2 / generator#529: corelib-c-cpp may be built with a 32-bit
+# value type (SOFAB_DISABLE_INT64_SUPPORT), and the (id<<3)|type field header is
+# accumulated in it -- so SOFAB_ID_MAX drops to UINT32_MAX>>3 = 536,870,911 and a
+# larger id is refused at RUN time with InvalidArgument. A C++ header includes no
+# generated C header, so the wrapper carries its own compile-time guard; this is
+# the c-cpp leg of the same check tests/conformance/c/run.sh runs. All three
+# builds use the BIG descriptor profile, four times the narrowed ceiling, so
+# nothing but the value-width guard can reject anything.
+echo "==> [c-cpp] the value-width id guard fires on a 32-bit value build"
+cat > "$WORK/wideid.yaml" <<'YAML'
+version: 1
+messages:
+  wideid:
+    payload:
+      small: { id: 1, type: u32 }
+      wide: { id: 536870912, type: u32 }
+YAML
+sed -e 's/wideid/narrowid/' -e 's/536870912/536870911/' "$WORK/wideid.yaml" > "$WORK/narrowid.yaml"
+printf 'targets: { cpp: { namespace: sofabuffers, corelib: c-cpp } }\n' > "$WORK/cfg-idmax.yaml"
+( cd "$ROOT" && go run ./cmd/sofabgen --config "$WORK/cfg-idmax.yaml" --lang cpp --in "$WORK/wideid.yaml" --out "$WORK/wideid" >/dev/null )
+( cd "$ROOT" && go run ./cmd/sofabgen --config "$WORK/cfg-idmax.yaml" --lang cpp --in "$WORK/narrowid.yaml" --out "$WORK/narrowid" >/dev/null )
+BIG="-DSOFAB_OBJECT_DESCR_PROFILE=SOFAB_OBJECT_DESCR_BIG"
+printf '#include "wideid.hpp"\n' > "$WORK/idmax_wide.cpp"
+printf '#include "narrowid.hpp"\n' > "$WORK/idmax_narrow.cpp"
+if g++ -std=c++20 -DSOFAB_DISABLE_INT64_SUPPORT $BIG -I"$CC/src/include" -I"$WORK/wideid" \
+        -fsyntax-only "$WORK/idmax_wide.cpp" 2>/dev/null; then
+    echo "FAIL: an id above SOFAB_ID_MAX must not compile on a SOFAB_DISABLE_INT64_SUPPORT"
+    echo "      build -- every write of that field would return InvalidArgument (generator#529)"
+    exit 1
+fi
+# Control 1: one id lower and the same build succeeds -- a ceiling, not a blanket refusal.
+g++ -std=c++20 -DSOFAB_DISABLE_INT64_SUPPORT $BIG -I"$CC/src/include" -I"$WORK/narrowid" \
+    -fsyntax-only "$WORK/idmax_narrow.cpp" 2>/dev/null || {
+    echo "FAIL: an id AT SOFAB_ID_MAX must still compile on a 32-bit value build"
+    exit 1
+}
+# Control 2: the rejected schema builds on the full 64-bit value build, so the
+# value width is what rejected it and not the descriptor profile.
+g++ -std=c++20 $BIG -I"$CC/src/include" -I"$WORK/wideid" \
+    -fsyntax-only "$WORK/idmax_wide.cpp" 2>/dev/null || {
+    echo "FAIL: the 64-bit value build has no narrowed id ceiling and must accept the schema"
+    exit 1
+}
+echo "==> [c-cpp] value-width id guard fired as expected (both controls built)"
+
 echo "PASS"

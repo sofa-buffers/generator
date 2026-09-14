@@ -130,6 +130,48 @@ if gcc -std=c99 -DSOFAB_DISABLE_SEQUENCE_SUPPORT -I"$INC" -I"$WORK/gen" \
 fi
 echo "==> guard fired as expected"
 
+# CORELIB_PLAN S6.2 / generator#529: a SOFAB_DISABLE_INT64_SUPPORT build
+# accumulates the (id<<3)|type field header in a 32-bit value, so SOFAB_ID_MAX
+# drops to UINT32_MAX>>3 = 536,870,911 and a larger id is refused at RUN time,
+# per field, with InvalidArgument. All three builds below use the BIG descriptor
+# profile, where SOFAB_OBJECT_DESCR_ID_MAX is UINT32_MAX -- four times the
+# narrowed ceiling -- so the descriptor guard beside it stays silent and only
+# the value-width guard can reject anything.
+echo "==> verifying the value-width id guard fires on a 32-bit value build"
+cat > "$WORK/wideid.yaml" <<'YAML'
+version: 1
+messages:
+  wideid:
+    payload:
+      small: { id: 1, type: u32 }
+      wide: { id: 536870912, type: u32 }
+YAML
+sed -e 's/wideid/narrowid/' -e 's/536870912/536870911/' "$WORK/wideid.yaml" > "$WORK/narrowid.yaml"
+( cd "$ROOT" && go run ./cmd/sofabgen --lang c --in "$WORK/wideid.yaml" --out "$WORK/wideid" >/dev/null )
+( cd "$ROOT" && go run ./cmd/sofabgen --lang c --in "$WORK/narrowid.yaml" --out "$WORK/narrowid" >/dev/null )
+BIG="-DSOFAB_OBJECT_DESCR_PROFILE=SOFAB_OBJECT_DESCR_BIG"
+if gcc -std=c99 -DSOFAB_DISABLE_INT64_SUPPORT $BIG -I"$INC" -I"$WORK/wideid" \
+        -c "$WORK"/wideid/wideid.c -o /dev/null 2>/dev/null; then
+    echo "FAIL: an id above SOFAB_ID_MAX must not compile on a SOFAB_DISABLE_INT64_SUPPORT"
+    echo "      build -- every encode of that field would return InvalidArgument (generator#529)"
+    exit 1
+fi
+# Control 1: one id lower and the same build succeeds, so the guard is a ceiling
+# and not a blanket refusal of large ids.
+gcc -std=c99 -DSOFAB_DISABLE_INT64_SUPPORT $BIG -I"$INC" -I"$WORK/narrowid" \
+    -c "$WORK"/narrowid/narrowid.c -o /dev/null 2>/dev/null || {
+    echo "FAIL: an id AT SOFAB_ID_MAX must still compile on a 32-bit value build"
+    exit 1
+}
+# Control 2: the rejected schema builds on the full 64-bit value build, so what
+# rejected it above is the value width and not the descriptor profile.
+gcc -std=c99 $BIG -I"$INC" -I"$WORK/wideid" \
+    -c "$WORK"/wideid/wideid.c -o /dev/null 2>/dev/null || {
+    echo "FAIL: the 64-bit value build has no narrowed id ceiling and must accept the schema"
+    exit 1
+}
+echo "==> value-width id guard fired as expected (both controls built)"
+
 echo "==> M3: emit:project -> build harness -> JSON encode/decode round-trip"
 cat > "$WORK/proj.yaml" <<YAML
 generic: { emit: project }

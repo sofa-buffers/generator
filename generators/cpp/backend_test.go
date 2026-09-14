@@ -2926,3 +2926,42 @@ func TestCppClosedElementScanOnlyWhereTheIntervalIsNotTheSet(t *testing.T) {
 		t.Errorf("no element scan belongs on a contiguous set or a low-bits mask:\n%s", h)
 	}
 }
+
+// TestValueWidthIdGuard: corelib-c-cpp may be built with a 32-bit value type
+// (SOFAB_DISABLE_INT64_SUPPORT), and the field header (id<<3)|type is
+// accumulated in it, so SOFAB_ID_MAX drops to UINT32_MAX>>3 (CORELIB_PLAN §6.2,
+// generator#529). A C++ header includes no generated C header, so the wrapper
+// carries its own guard — and only there: corelib-cpp is 64-bit-only and spells
+// its ceiling sofab::ID_MAX, with no SOFAB_ID_MAX macro for #if to read. An
+// undefined macro evaluates to 0, so emitting the guard on the pure leg would
+// reject every id, including 0.
+func TestValueWidthIdGuard(t *testing.T) {
+	src := `
+version: 1
+messages:
+  m:
+    payload:
+      a: { id: 1, type: u32 }
+      nested:
+        id: 2
+        type: struct
+        fields:
+          deep: { id: 536870912, type: u32 }
+`
+	h, err := genHeader(t, src, "m.hpp", map[string]any{"corelib": "c-cpp"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Nested ids count: they ride the same header as the top message's.
+	if !strings.Contains(h, "#if 536870912 > SOFAB_ID_MAX") {
+		t.Errorf("corelib: c-cpp must carry the value-width id guard:\n%s", h)
+	}
+
+	pure, err := genHeader(t, src, "m.hpp", map[string]any{"corelib": "cpp"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(pure, "SOFAB_ID_MAX") {
+		t.Errorf("corelib: cpp defines no SOFAB_ID_MAX macro; the guard must not be emitted:\n%s", pure)
+	}
+}

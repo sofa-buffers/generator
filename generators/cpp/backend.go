@@ -260,6 +260,22 @@ func (g *gen) header(m *ir.Message) []byte {
 	f.line("static_assert(sofab::API_VERSION == 1,")
 	f.line("    \"SofaBuffers: generated against C++ API v1, but the linked corelib differs.\");")
 	f.blank()
+	// CORELIB_PLAN §6.2: corelib-c-cpp may be built with a 32-bit value type
+	// (SOFAB_DISABLE_INT64_SUPPORT), and the field header (id<<3)|type is
+	// accumulated in it -- so SOFAB_ID_MAX drops to UINT32_MAX>>3 and every write
+	// of a larger id fails at run time with InvalidArgument. The wrapper does not
+	// inherit the C backend's guard (a C++ header includes no generated C header),
+	// so it carries its own. Only on the c-cpp leg: corelib-cpp is 64-bit-only and
+	// spells its ceiling sofab::ID_MAX, with no SOFAB_ID_MAX macro for #if to read
+	// -- an undefined macro evaluates to 0 there and would reject every id
+	// (generator#529).
+	if g.clib {
+		f.line("/* --- value-width guard: field ids must fit the corelib's id ceiling --- */")
+		f.line("#if %d > SOFAB_ID_MAX", g.maxFieldID(m))
+		f.line(`# error "SofaBuffers: field ids in %s exceed SOFAB_ID_MAX for this value width (see SOFAB_DISABLE_INT64_SUPPORT)."`, m.Name)
+		f.line("#endif")
+		f.blank()
+	}
 	// Every wrapper-array collector lives in the corelib on BOTH C++ paths --
 	// sofab::StringSeq / BlobSeq / MessageSeq in corelib-cpp, sofab::FixedStringSeq /
 	// FixedBlobSeq / FixedMessageSeq / MessageSeq in corelib-c-cpp. The schema
@@ -316,6 +332,28 @@ func (g *gen) header(m *ir.Message) []byte {
 	g.emitStruct(f, exported(m.Name), m.Summary, m.Fields, true)
 	f.line("} // namespace %s", g.ns)
 	return f.bytes()
+}
+
+// maxFieldID returns the largest field id this header puts on the wire. Nested
+// objects count: their fields ride the same (id<<3)|type header, so a value-width
+// ceiling caps them alongside the top message's.
+func (g *gen) maxFieldID(m *ir.Message) int64 {
+	max := int64(0)
+	fold := func(fields []*ir.Field) {
+		for _, fld := range fields {
+			if fld.ID > max {
+				max = fld.ID
+			}
+		}
+	}
+	fold(m.Fields)
+	for _, key := range g.reachable(m) {
+		nt := g.schema.Named[key]
+		if nt.Category == ir.CatStruct || nt.Category == ir.CatUnion {
+			fold(nt.Fields)
+		}
+	}
+	return max
 }
 
 // needsRawArray reports whether this header decodes an ENUM array, the one case

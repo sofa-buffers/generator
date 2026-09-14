@@ -2811,6 +2811,21 @@ only needs to mirror their *names* and gate on the schema's used features:
   C++ wrapper hard-requires FIXLEN+SEQUENCE and gates ARRAY/FP64/INT64.
 - **Value width** — disabling 64-bit integers narrows the value type to 32-bit;
   a schema with no `u64`/`i64` field then builds against the smaller corelib.
+- **Field ids narrow with the value width** — the field header is `(id << 3) | type`
+  (MESSAGE_SPEC §4.3) and is accumulated in that same value type, so a 32-bit build
+  caps the id at `UINT32_MAX >> 3` = **536,870,911** instead of the format's
+  2,147,483,647 (CORELIB_PLAN §6.2). The corelib lowers the constant it exposes
+  (`SOFAB_ID_MAX`) and refuses a larger id at run time, per field, with
+  `InvalidArgument`. Generated C and generated C++ on `corelib: c-cpp` therefore
+  carry a `#if <max id> > SOFAB_ID_MAX` guard beside the descriptor-width one, so
+  the mismatch is a compile error rather than a runtime failure. This *cannot* be a
+  generate-time check — the generator does not know which switches the consuming
+  build sets — and the two guards are not interchangeable: on the `BIG` descriptor
+  profile `SOFAB_OBJECT_DESCR_ID_MAX` is `UINT32_MAX`, four times the narrowed
+  ceiling, so the descriptor guard passes and says nothing (generator#529). In
+  generated C both guards take the maximum over **every** object in the header,
+  nested ones included: a nested object has a descriptor of its own, and its field
+  ids ride the same wire header.
 
 > **§7.3 skip caveat (generator#215 / Crucible F-0027).** Point (a) — "gate on
 > the schema's used features" — holds only where a feature gates *field storage /
