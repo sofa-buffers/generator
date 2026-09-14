@@ -928,3 +928,66 @@ messages:
 		t.Errorf("m.h: the guard must take the max over nested objects too:\n%s", h)
 	}
 }
+
+const int64Guard = "#if defined(SOFAB_DISABLE_INT64_SUPPORT)"
+
+// TestWideBitfieldNeedsValue64: a bitfield whose highest declared bit is >= 32 is
+// backed by uint64_t, so its descriptor entry carries element_size 8 — the arm
+// object.c compiles out under SOFAB_DISABLE_INT64_SUPPORT (both _load_uint's
+// 8-byte case and the 8 in _SOFAB_WIDTH_SET). Without the capability guard such a
+// schema built cleanly and then returned SOFAB_RET_E_ARGUMENT from every encode
+// of that field, at run time (generator#539). The capability is derived from the
+// STORAGE width, so a kind list cannot drift away from it again.
+func TestWideBitfieldNeedsValue64(t *testing.T) {
+	bf := func(pos int) string {
+		return fmt.Sprintf(`
+version: 1
+messages:
+  m:
+    payload:
+      flags:
+        id: 1
+        type: bitfield
+        bits:
+          low: { pos: 0 }
+          high: { pos: %d }
+`, pos)
+	}
+
+	h := genCFromYAML(t, bf(40))["m.h"]
+	if !strings.Contains(h, "uint64_t flags;") {
+		t.Fatalf("a bit at 40 must be backed by uint64_t:\n%s", h)
+	}
+	if !strings.Contains(h, int64Guard) {
+		t.Errorf("a uint64_t-backed bitfield needs the INT64 capability guard:\n%s", h)
+	}
+
+	// Control: one bit lower fits uint32_t, which the narrow corelib reads fine —
+	// the guard is a property of the storage width, not of "is a bitfield".
+	ctl := genCFromYAML(t, bf(31))["m.h"]
+	if !strings.Contains(ctl, "uint32_t flags;") {
+		t.Fatalf("a bit at 31 must fit uint32_t:\n%s", ctl)
+	}
+	if strings.Contains(ctl, int64Guard) {
+		t.Errorf("a uint32_t-backed bitfield must not demand INT64:\n%s", ctl)
+	}
+}
+
+// TestScalarFP64DoesNotNeedValue64: `double` is 8 bytes too, but its descriptor
+// type is FP64 — it never reaches _load_uint and has SOFAB_DISABLE_FP64_SUPPORT
+// of its own. Deriving value64 from the storage width must not swallow it.
+func TestScalarFP64DoesNotNeedValue64(t *testing.T) {
+	h := genCFromYAML(t, `
+version: 1
+messages:
+  m:
+    payload:
+      d: { id: 1, type: fp64 }
+`)["m.h"]
+	if !strings.Contains(h, "#if defined(SOFAB_DISABLE_FP64_SUPPORT)") {
+		t.Errorf("m.h must still guard FP64:\n%s", h)
+	}
+	if strings.Contains(h, int64Guard) {
+		t.Errorf("a scalar fp64 field must not demand INT64:\n%s", h)
+	}
+}

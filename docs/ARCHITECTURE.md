@@ -2809,6 +2809,16 @@ only needs to mirror their *names* and gate on the schema's used features:
   `FP64`, `INT64`); see its [README](https://github.com/sofa-buffers/corelib-c-cpp).
   Generated C emits per-feature `#error` guards (only for features it uses); the
   C++ wrapper hard-requires FIXLEN+SEQUENCE and gates ARRAY/FP64/INT64.
+  "Which features it uses" is read off the **lowered storage**, not off the schema
+  kind, wherever the corelib gates on storage: `INT64` is needed by any
+  `UNSIGNED`/`SIGNED` descriptor entry whose C member is 8 bytes wide, because
+  that is what `element_size` carries and what `_load_uint` can no longer read.
+  A kind list drifts away from that — `u64`/`i64` were on it while a bitfield
+  backed by `uint64_t` (highest declared bit ≥ 32) was not, so such a schema built
+  silently and failed per field at run time (generator#539). `fp64` is not part of
+  it: a `double` is 8 bytes but its descriptor type is `FP64`, with a capability of
+  its own. On the C++ leg the corelib carries this itself — `write<T>` static-asserts
+  on any 64-bit `T` — so no generated guard is needed there.
 - **Value width** — disabling 64-bit integers narrows the value type to 32-bit;
   a schema with no `u64`/`i64` field then builds against the smaller corelib.
 - **Field ids narrow with the value width** — the field header is `(id << 3) | type`
