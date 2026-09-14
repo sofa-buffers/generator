@@ -47,3 +47,82 @@ func IsNarrow(k Kind) bool {
 	_, _, ok := NarrowRange(k)
 	return ok
 }
+
+// An `enum` and a `bitfield` are bound by the WIDTH their declaration implies
+// (MESSAGE_SPEC §1, documentation PR #95, doc `382159e`) — for an enum the
+// smallest SIGNED type that holds every declared constant, for a bitfield the
+// smallest UNSIGNED type that holds its highest declared `pos`. A wire value
+// inside that width is valid even when the schema names no constant for it and
+// even when it carries an undeclared bit; a value outside it is malformed input
+// and MUST be reported INVALID (§7.1), exactly as an over-width `i8` is.
+//
+// This REPLACES the set/mask bound of closed.go, which implemented the reading
+// MESSAGE_SPEC carried for six days (PR #89, doc `a50db95`) and PR #95 withdrew.
+// Both bounds are now ordinary intervals, which is what §1 gives as the reason
+// for the change: an array's elements are consumed inside the corelib loop, so a
+// bound must cross that channel as an interval, and a width fits where a set
+// does not.
+//
+// ok is false where no reachable value can breach the bound — an enum needing
+// the full i64 and a bitfield needing the full u64 — because the value arrives
+// in a 64-bit accumulator (CORELIB_PLAN §4.1) and the guard would be dead code.
+
+// EnumWidthRange returns the inclusive range of the smallest signed integer type
+// holding every constant the enum behind ref declares, and whether that range is
+// narrower than the 64-bit accumulator the value is delivered in.
+//
+// The width is SIGNED whatever the constants are, because the wire type is
+// (CORELIB_PLAN §4.5): deriving it from their sign would make an enum's wire type
+// a function of its constants, so adding a negative constant later would change
+// the encoding rather than only the range.
+//
+// An enum declaring no constant at all yields the narrowest signed width: there
+// is no constant to widen it, and i8 is what the declaration implies.
+func EnumWidthRange(ref *TypeRef) (lo, hi int64, ok bool) {
+	vals, isEnum := EnumValues(ref)
+	if !isEnum {
+		return 0, 0, false
+	}
+	var min, max int64
+	if len(vals) > 0 {
+		min, max = vals[0], vals[len(vals)-1] // EnumValues sorts ascending
+	}
+	for _, k := range []Kind{KindI8, KindI16, KindI32} {
+		wlo, whi, _ := NarrowRange(k)
+		if min >= wlo && max <= whi {
+			return wlo, whi, true
+		}
+	}
+	return 0, 0, false // i64: the accumulator's own range
+}
+
+// BitfieldWidthMax returns the maximum value of the smallest unsigned integer
+// type holding the highest `pos` the bitfield behind ref declares, and whether
+// that width is narrower than the 64-bit accumulator.
+//
+// A bitfield declaring positions 0, 1 and 3 is bounded as a u8: 0..255. Every
+// value inside that range is valid whichever bits it carries, undeclared ones
+// included — masking them away would turn malformed-looking input into a
+// DECLARED combination and report it Ok (§1). A bitfield declaring no flag
+// yields u8 by the same reasoning EnumWidthRange gives for an enum with no
+// constant.
+func BitfieldWidthMax(ref *TypeRef) (hi uint64, ok bool) {
+	if ref == nil || ref.Target == nil || ref.Target.Category != CatBitfield {
+		return 0, false
+	}
+	maxPos := int64(-1)
+	for _, fl := range ref.Target.Flags {
+		if fl.Pos > maxPos {
+			maxPos = fl.Pos
+		}
+	}
+	switch {
+	case maxPos < 8:
+		return 0xFF, true
+	case maxPos < 16:
+		return 0xFFFF, true
+	case maxPos < 32:
+		return 0xFFFFFFFF, true
+	}
+	return 0, false // u64: the accumulator's own range
+}

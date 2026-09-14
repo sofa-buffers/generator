@@ -874,7 +874,7 @@ python3 "$ROOT/tests/conformance/lib/check_closed_kinds.py" --emit-schema >> "$W
 ( cd "$ROOT" && go run ./cmd/sofabgen --config "$WORK/cfg.yaml" --lang go --in "$WORK/closed.yaml" --out "$WORK/closed" )
 sed -i "s#\${SOFAB_GO_CORELIB}#$CORELIB#" "$WORK/closed/go.mod"
 ( cd "$WORK/closed" && GOFLAGS=-mod=mod go mod tidy >/dev/null 2>&1 && go build ./... )
-python3 "$ROOT/tests/conformance/lib/check_closed_kinds.py" "go" \
+python3 "$ROOT/tests/conformance/lib/check_closed_kinds.py" "go" --legacy-closed-set \
     --cwd "$WORK/closed" --invalid-pattern 'invalid message' -- go run ./harness
 
 # The verdict must not depend on the chunking either (CORELIB_PLAN S6.4 / S7.2

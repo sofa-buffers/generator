@@ -873,7 +873,7 @@ echo "==> declared-width reject OK (scalar and array element)"
 # array positions additionally rode the corelib bulk offer, whose only bound is
 # the destination array's WIDTH; the offer is declined for these two kinds now,
 # so the elements come back through the callback that carries the real bound.
-echo "==> closed enum/bitfield: only what the schema declares is valid (S1, generator#516)"
+echo "==> enum/bitfield: bounded by the width the declaration implies (S1, generator#516)"
 { echo "version: 1"; echo "messages:"; } > "$WORK/closed.yaml"
 python3 "$ROOT/tests/conformance/lib/check_closed_kinds.py" --emit-schema >> "$WORK/closed.yaml"
 build "$WORK/closed.yaml" "$WORK/closed"

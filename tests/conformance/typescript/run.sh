@@ -1079,7 +1079,7 @@ echo "==> closed enum/bitfield: only what the schema declares is valid (S1, gene
 python3 "$ROOT/tests/conformance/lib/check_closed_kinds.py" --emit-schema >> "$WORK/closed.yaml"
 gen "$WORK/closed.yaml" "$WORK/closed"
 ln -s "$WORK/ex/node_modules" "$WORK/closed/node_modules"
-python3 "$ROOT/tests/conformance/lib/check_closed_kinds.py" "typescript" \
+python3 "$ROOT/tests/conformance/lib/check_closed_kinds.py" "typescript" --legacy-closed-set \
     --cwd "$WORK/closed" --status-verb status -- npx tsx harness.ts
 # MESSAGE_SPEC §7.4 -- a field id REPEATED inside one scope (generator#523). The
 # rule has two halves and this checks BOTH on one message: a re-opened SEQUENCE

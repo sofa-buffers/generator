@@ -921,7 +921,7 @@ echo "==> closed enum/bitfield: only what the schema declares is valid (S1, gene
 printf 'version: 1\nmessages:\n' > "$WORK/closed.yaml"
 python3 "$ROOT/tests/conformance/lib/check_closed_kinds.py" --emit-schema >> "$WORK/closed.yaml"
 build "$WORK/closed.yaml" "$WORK/closed"
-python3 "$ROOT/tests/conformance/lib/check_closed_kinds.py" "dart" \
+python3 "$ROOT/tests/conformance/lib/check_closed_kinds.py" "dart" --legacy-closed-set \
     --status-verb trydecode --invalid-pattern 'decode failed: invalid' \
     -- "$WORK/closed/harness"
 # MESSAGE_SPEC §7.4 -- a field id REPEATED inside one scope (generator#523). The
