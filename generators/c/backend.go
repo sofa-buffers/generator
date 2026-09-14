@@ -976,11 +976,15 @@ func (g *gen) capabilities(m *ir.Message) capset {
 		case ir.KindFP32:
 			caps.array = true
 			caps.fixlen = true
-		case ir.KindU64, ir.KindI64:
-			caps.array = true
-			caps.value64 = true
 		default: // unsigned/signed numeric, enum, boolean, bitfield
 			caps.array = true
+			// One test for u64/i64 and for a 64-bit-backed enum/bitfield element:
+			// they all reach the same 8-byte load. cAlignArray catches the wide
+			// ones already (an 8-byte element forces an 8-byte length member), but
+			// that is the LENGTH implying the element -- say it about the element.
+			if needsValue64(g.arrayElemCType(spec.elem, spec.ref)) {
+				caps.value64 = true
+			}
 		}
 	}
 	walk = func(fields []*ir.Field) {
@@ -991,8 +995,10 @@ func (g *gen) capabilities(m *ir.Message) capset {
 				if f.Kind == ir.KindFP64 {
 					caps.fp64 = true
 				}
-			case ir.KindU64, ir.KindI64:
-				caps.value64 = true
+			case ir.KindU64, ir.KindI64, ir.KindEnum, ir.KindBitfield:
+				if needsValue64(scalarCType(f)) {
+					caps.value64 = true
+				}
 			case ir.KindStruct, ir.KindUnion:
 				caps.sequence = true
 				if !seen[f.Ref.Key] {
@@ -1096,6 +1102,23 @@ func arrayFieldType(k ir.Kind) string {
 		return "SOFAB_OBJECT_FIELDTYPE_ARRAY_UNSIGNED"
 	}
 }
+
+// needsValue64 reports whether a C storage type is the 8-byte case, the one a
+// SOFAB_DISABLE_INT64_SUPPORT corelib can no longer read: object.c drops the
+// 8-byte arm of _load_uint and the 8 from _SOFAB_WIDTH_SET, so encode refuses
+// such an UNSIGNED/SIGNED field at RUN time with SOFAB_RET_E_ARGUMENT. The
+// capability guard turns that into a compile error instead.
+//
+// It asks the STORAGE rather than the schema kind, because the storage is what
+// the descriptor's element_size carries. A kind list drifts away from that: u64
+// and i64 were on it, but a bitfield whose highest declared bit is >= 32 is
+// backed by uint64_t just the same and was not, so such a schema built silently
+// and failed per field at run time (generator#539).
+//
+// Both call sites restrict the kinds first, which is what keeps fp64 out: a
+// `double` is 8 bytes too, but its descriptor type is FP64, it never reaches
+// _load_uint, and it has a capability of its own.
+func needsValue64(cType string) bool { return cScalarWidth(cType) == 8 }
 
 // arrayElemCType is the C storage type of a native array element: enum/bitfield
 // take their smallest backing width, boolean is a byte, everything else follows

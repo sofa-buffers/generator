@@ -130,6 +130,42 @@ if gcc -std=c99 -DSOFAB_DISABLE_SEQUENCE_SUPPORT -I"$INC" -I"$WORK/gen" \
 fi
 echo "==> guard fired as expected"
 
+# generator#539: a bitfield whose highest declared bit is >= 32 is backed by
+# uint64_t, so its descriptor entry carries element_size 8 -- the arm object.c
+# compiles out under SOFAB_DISABLE_INT64_SUPPORT. Without the capability guard
+# the header built cleanly and every encode of that field then returned
+# SOFAB_RET_E_ARGUMENT at run time. The control one bit lower fits uint32_t,
+# which the narrow corelib reads fine, so what fires is the storage width and not
+# "the schema has a bitfield".
+echo "==> verifying a 64-bit-backed bitfield demands INT64"
+cat > "$WORK/widebf.yaml" <<'YAML'
+version: 1
+messages:
+  widebf:
+    payload:
+      flags:
+        id: 1
+        type: bitfield
+        bits:
+          low: { pos: 0 }
+          high: { pos: 40 }
+YAML
+sed -e 's/widebf/narrowbf/' -e 's/pos: 40/pos: 31/' "$WORK/widebf.yaml" > "$WORK/narrowbf.yaml"
+( cd "$ROOT" && go run ./cmd/sofabgen --lang c --in "$WORK/widebf.yaml" --out "$WORK/widebf" >/dev/null )
+( cd "$ROOT" && go run ./cmd/sofabgen --lang c --in "$WORK/narrowbf.yaml" --out "$WORK/narrowbf" >/dev/null )
+if gcc -std=c99 -DSOFAB_DISABLE_INT64_SUPPORT -I"$INC" -I"$WORK/widebf" \
+        -c "$WORK"/widebf/widebf.c -o /dev/null 2>/dev/null; then
+    echo "FAIL: a uint64_t-backed bitfield must not compile against a corelib built with"
+    echo "      SOFAB_DISABLE_INT64_SUPPORT -- encode would return E_ARGUMENT (generator#539)"
+    exit 1
+fi
+gcc -std=c99 -Wall -Wextra -DSOFAB_DISABLE_INT64_SUPPORT -I"$INC" -I"$WORK/narrowbf" \
+    -c "$WORK"/narrowbf/narrowbf.c -o /dev/null 2>/dev/null || {
+    echo "FAIL: a uint32_t-backed bitfield must still build on a 32-bit value corelib"
+    exit 1
+}
+echo "==> bitfield INT64 guard fired as expected (control built)"
+
 # CORELIB_PLAN S6.2 / generator#529: a SOFAB_DISABLE_INT64_SUPPORT build
 # accumulates the (id<<3)|type field header in a 32-bit value, so SOFAB_ID_MAX
 # drops to UINT32_MAX>>3 = 536,870,911 and a larger id is refused at RUN time,
