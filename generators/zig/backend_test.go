@@ -550,38 +550,47 @@ messages:
 	}
 }
 
-// corelib-zig#84 removed IStream.status(): `feed` already returned the outcome,
-// and §5.3.1 allows one surface per fact. The generated Decoder is the CALLER,
-// and a caller may remember -- so its public surface is unchanged and backed by
-// a field holding what the last feed returned (generator#461).
+// TestZigDecoderAsksTheStreamForItsVerdict pins issue #541: the generated Decoder
+// remembers no STATUS. A refusal raised inside the corelib is terminal and the
+// stream latches it (CORELIB_PLAN §5.2, §6.3), re-throwing the code it was refused
+// with from every later call — so #461's copy in `st`, and the errdefer that
+// mapped a refusal onto it, could only restate what the stream already held.
 //
-// Nothing pinned the Decoder body before this, which is why it needs pinning:
-// Zig never even compiles a `pub fn` nothing calls, so the emitted accessor has
-// no compiler behind it either.
-func TestZigDecoderRemembersWhatFeedAnswered(t *testing.T) {
+// The two generated guards are the documented exception: `v.inv` and `v.lim` are
+// read AFTER `is.feed` returns, so the stream never sees those errors and cannot
+// latch them. Those sticky flags are the generated latch, and finish re-tests them
+// in the same order feed does — which is also what makes the whole path compile:
+// Zig only semantically analyses a function something calls.
+func TestZigDecoderAsksTheStreamForItsVerdict(t *testing.T) {
 	m := exampleFiles(t, map[string]any{})["src/message.zig"]
 	for _, want := range []string{
-		// A stream fed nothing ended on a field boundary: an all-default message
-		// is zero bytes, so a Decoder can legitimately finish() without a feed.
-		"st: sofab.Status = .complete,",
-		// A refusal is terminal and never comes back as a status, so it is latched
-		// on every error exit -- the corelib's own raise and the generated guards
-		// after it. §6.3 pairs INVALID with error.InvalidMessage; a receiver cap is
-		// this side's stop, leaving the message unfinished rather than wrong; and
-		// anything else (OutOfMemory) is neither, so it leaves the memory alone.
-		"            errdefer |e| {\n                if (e == error.InvalidMessage) {\n" +
-			"                    self.st = .invalid;\n                } else if (e == error.LimitExceeded) {\n" +
-			"                    self.st = .incomplete;\n                }\n            }",
-		"            self.st = st;\n            return st;",
-		"        pub fn status(self: *const Decoder) sofab.Status {\n            return self.st;\n        }",
-		"if (self.st == .incomplete) return error.IncompleteMessage;",
+		// feed forwards, then reads the generated flags. No errdefer, no write.
+		"            const st = try self.is.feed(chunk, &self.v);\n" +
+			"            if (self.v.inv) return error.InvalidMessage;",
+		"            return st;",
+		// finish tests the same flags first, then asks the stream.
+		"        pub fn finish(self: *Decoder) DecodeError!void {\n" +
+			"            if (self.v.inv) return error.InvalidMessage;",
+		"            const st = try self.is.feed(&.{}, &self.v);\n" +
+			"            if (st == .incomplete) return error.IncompleteMessage;",
 	} {
 		if !strings.Contains(m, want) {
-			t.Errorf("message.zig missing remembered-status shape %q", want)
+			t.Errorf("message.zig missing terminal-refusal shape %q", want)
+		}
+	}
+	// Nothing remembers a status, and nothing maps a refusal onto one.
+	for _, gone := range []string{
+		"st: sofab.Status = .complete,",
+		"self.st = .invalid;",
+		"self.st = .incomplete;",
+		"pub fn status(self: *const Decoder) sofab.Status {",
+	} {
+		if strings.Contains(m, gone) {
+			t.Errorf("message.zig still carries the removed status latch %q (generator#541)", gone)
 		}
 	}
 	// The removed accessor must not come back: asking the stream a second time no
-	// longer compiles, and (worse) would not be compiled at all inside `status`.
+	// longer compiles (corelib-zig#84).
 	if strings.Contains(m, "self.is.status()") {
 		t.Error("IStream.status() is gone (corelib-zig#84); feed's return is the only answer")
 	}
@@ -677,23 +686,29 @@ func TestZigProjectMode(t *testing.T) {
 		// through both and compares.
 		"std.mem.eql(u8, mode, \"streamdecode\")",
 		"var dec = message.Myfirstmessage.decoder(&obj, alloc);",
-		"const fed = dec.feed(&[_]u8{b}) catch |e| {",
-		// Zig only analyses a function something calls, so a generated
-		// `pub fn status` no harness reaches is never compiled -- a broken body
-		// would take the whole suite green. This call compiles it AND asserts the
-		// decoder's memory agrees with the feed that set it (generator#461).
-		"if (dec.status() != fed) return error.StatusDisagreesWithFeed;",
+		"_ = dec.feed(&[_]u8{b}) catch |e| {",
 		// The refusal path is the half a passing suite cannot otherwise see: a
-		// reject vector exits non-zero whatever the latch recorded, so the
-		// harness NAMES what it recorded and run.sh greps for it. `catch` here
-		// also forces semantic analysis of the errdefer, which `try` would have
-		// left to a caller that never reads it.
-		"                    std.debug.print(\"decode error: {s} [status={s}]\\n\",",
-		"                                    .{ @errorName(e), @tagName(dec.status()) });",
+		// reject vector exits non-zero either way, so the harness names what
+		// FINISH answered after the refusal and run.sh greps for it
+		// (generator#541). `catch` here also forces semantic analysis of that
+		// path, which Zig performs only for code something reaches -- and `try`
+		// would have left it to a caller that never reads it.
+		"                    var fin: []const u8 = \"RETURNED\";",
+		"                    dec.finish() catch |fe| { fin = @errorName(fe); };",
+		"                    std.debug.print(\"decode error: {s} [finish={s}]\\n\",",
 		"            dec.finish() catch |e| {",
 	} {
 		if !strings.Contains(h, want) {
 			t.Errorf("main.zig missing %q", want)
+		}
+	}
+	// The remembered status and its per-byte agreement check are gone with it.
+	for _, gone := range []string{
+		"if (dec.status() != fed) return error.StatusDisagreesWithFeed;",
+		"[status=",
+	} {
+		if strings.Contains(h, gone) {
+			t.Errorf("main.zig still carries the retired status-latch shape %q (generator#541)", gone)
 		}
 	}
 	// Sources mode emits no project scaffolding.

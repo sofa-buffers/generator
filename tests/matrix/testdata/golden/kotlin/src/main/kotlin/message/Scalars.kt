@@ -94,12 +94,6 @@ public class Scalars {
         private val m = Scalars()
         private val ist = IStream()
         private val v = ScalarsVisitor(m)
-        // What the last feed answered. The stream publishes its outcome once, as
-        // feed's return value, and offers no accessor to ask a second time, so the
-        // caller is the one that remembers -- and this decoder is the caller.
-        // COMPLETE before the first feed: an all-default message is zero bytes, so
-        // a stream that has been fed nothing ended on a field boundary.
-        private var st: DecodeStatus = DecodeStatus.COMPLETE
 
         /**
          * Feed the next chunk, of any size.
@@ -109,37 +103,8 @@ public class Scalars {
         public fun feed(chunk: ByteArray): DecodeStatus = feed(chunk, 0, chunk.size)
 
         /** As [feed], over a slice of [chunk]. */
-        public fun feed(chunk: ByteArray, off: Int, len: Int): DecodeStatus {
-            try {
-                st = ist.feed(chunk, off, len, v)
-            } catch (e: SofabException) {
-                // A refusal is terminal and never comes back as a status, so
-                // record what it means for the stream before rethrowing.
-                // Malformed bytes make the message INVALID; a receiver limit is
-                // this side's policy, so it leaves the message unfinished
-                // rather than wrong -- the two are never folded together.
-                //
-                // Anything else leaves the memory alone. ARGUMENT says the mistake
-                // is in the CALL and not in the bytes, and a status is a verdict on
-                // the MESSAGE, so recording one for a caller fault would report
-                // something about the wire that is not true. This is the same
-                // three-way test IStream applies to its own latches.
-                when (e.error) {
-                    SofabError.INVALID_MSG -> st = DecodeStatus.INVALID
-                    SofabError.LIMIT_EXCEEDED -> st = DecodeStatus.INCOMPLETE
-                    else -> Unit
-                }
-                throw e
-            }
-            return st
-        }
-
-        /**
-         * The outcome for everything fed so far, without feeding more: what the
-         * last [feed] returned, remembered here. The stream itself answers only
-         * through that return value.
-         */
-        public val status: DecodeStatus get() = st
+        public fun feed(chunk: ByteArray, off: Int, len: Int): DecodeStatus =
+            ist.feed(chunk, off, len, v)
 
         /** The destination, holding whatever has been decoded so far. */
         public val message: Scalars get() = m
@@ -152,8 +117,16 @@ public class Scalars {
          * @throws IllegalStateException the message ended inside a field or an
          *   open sequence -- which is not a malformed message, so it is not a
          *   SofabException.
+         * @throws SofabException the stream had already refused these bytes;
+         *   the rejection is terminal, so asking it again re-throws the code
+         *   it was refused with. A decoder that rejected a message cannot
+         *   hand one back.
          */
         public fun finish(): Scalars {
+            // The stream latched any refusal and re-throws it here,
+            // consuming no byte and driving no visitor callback;
+            // otherwise this is the outcome for everything fed so far.
+            val st = ist.feed(ByteArray(0), 0, 0, v)
             check(st == DecodeStatus.COMPLETE) { "Scalars: stream ended mid-field (" + st + ")" }
             return m
         }

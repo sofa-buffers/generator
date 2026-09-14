@@ -983,38 +983,35 @@ func TestKotlinProjectMode(t *testing.T) {
 	// wire type, bytes no encoder here emits -- be replayed through the chunked
 	// path and compared against the one-shot surface.
 	//
-	// It also reads the generated Decoder's remembered `status` back against the
-	// feed that set it (generator#521). The corelib answers once, as feed's
-	// return value; the wrapper's `status` is a copy, nothing else in the suite
-	// reads that copy, and a stale one would let every vector pass -- so the
-	// harness is where the two are compared, and its error path names what the
-	// refusal latched.
+	// Its error path names what FINISH answered after the refusal (generator#541).
+	// A refusal is terminal and the corelib latches it, so a finish that follows
+	// one must re-throw the same code; a reject vector exits 1 either way, so this
+	// print is the only way a suite sees the terminal guard at all.
 	for _, want := range []string{
 		"val dec = M.decoder()",
-		"val fed = dec.feed(one)",
-		"check(dec.status == fed) {",
-		"\"status \" + dec.status + \" disagrees with the feed that set it (\" + fed + \")\"",
+		"dec.feed(one)",
 		"dec.finish()",
-		"\"decode error: \" + e + \" [status=\" + dec.status + \"]\"",
+		"val fin = try { dec.finish(); \"RETURNED\" }",
+		"catch (fe: SofabException) { fe.error.name }",
+		"\"decode error: \" + e + \" [finish=\" + fin + \"]\"",
 	} {
 		if !strings.Contains(main, want) {
 			t.Errorf("the streamdecode mode is missing %q", want)
 		}
 	}
-	// `streamdecode1` is the same replay in ONE feed, and it exists so the
-	// conformance latch can discriminate. Fed a byte at a time, a stream is
-	// already mid-field when a receiver cap refuses, so the memory holds
-	// INCOMPLETE before the catch arm runs and a DELETED arm still prints the
-	// expected value. In one feed the memory is untouched at COMPLETE, so what a
-	// suite reads back can only have come from the latch.
-	for _, want := range []string{
+	// `streamdecode1` is GONE (generator#541). It existed only because the
+	// remembered status could be read back from a value an earlier feed had left
+	// behind, so a one-byte replay could not tell a recorded status from a
+	// leftover (#528) and feeding the whole buffer at once was the workaround.
+	// Nothing but finish produces finish's answer, so the chunked replay alone
+	// discriminates and the second mode has no job left.
+	for _, gone := range []string{
 		"\"streamdecode1\" -> {",
-		"val fed = dec.feed(input)",
 		"check(dec.status == fed) {",
-		"\"decode error: \" + e + \" [status=\" + dec.status + \"]\"",
+		"[status=",
 	} {
-		if !strings.Contains(main, want) {
-			t.Errorf("the streamdecode1 mode is missing %q", want)
+		if strings.Contains(main, gone) {
+			t.Errorf("the harness still carries the retired status-latch shape %q (generator#541)", gone)
 		}
 	}
 	// A u64 must survive the JSON round trip exactly, which a double-based
@@ -1364,13 +1361,18 @@ func TestKotlinCapGuardsSitBehindTheKindTest(t *testing.T) {
 	}
 }
 
-// TestKotlinDecoderRemembersFeedStatus pins the "one fact, one channel" adoption
-// (issue #521, the Kotlin half of #461): the corelib's IStream publishes its
-// outcome exactly once, as feed's return value, and its `status` property is
-// gone. The generated Decoder keeps its own public `status` — so no user of
-// generated code breaks — by REMEMBERING what the last feed returned, and by
-// latching a refusal that never comes back as a status at all.
-func TestKotlinDecoderRemembersFeedStatus(t *testing.T) {
+// TestKotlinDecoderAsksTheStreamForItsVerdict pins issue #541: the generated
+// Decoder remembers NOTHING about the outcome. The stream already holds it — a
+// refusal is terminal (CORELIB_PLAN §5.2 for malformed bytes, §6.3 for a receiver
+// limit) and IStream latches it, re-throwing the very code it was refused with
+// from every later call. corelib-kotlin-mp keeps a third latch besides, for a
+// destination it refused (§6.6.3), which this layer never mapped at all.
+//
+// #521 had this layer keep a second copy in `st`, with a `when` mapping a refusal
+// onto it. That copy could only restate what the stream held, and it flattened
+// LIMIT_EXCEEDED into an INCOMPLETE that says something untrue about the wire.
+// finish therefore ASKS, with a zero-length feed.
+func TestKotlinDecoderAsksTheStreamForItsVerdict(t *testing.T) {
 	m := exampleFile(t)
 	for _, want := range []string{
 		// The one-shots need no memory: feed's return IS the answer. `decode`
@@ -1378,34 +1380,32 @@ func TestKotlinDecoderRemembersFeedStatus(t *testing.T) {
 		"            val st = ist.feed(data, MyfirstmessageVisitor(m))",
 		"            check(st == DecodeStatus.COMPLETE) { \"Myfirstmessage: stream ended mid-field (\" + st + \")\" }",
 		"            return ist.feed(data, MyfirstmessageVisitor(out))",
-		// COMPLETE, not INCOMPLETE: an all-default message is zero bytes, so a
-		// Decoder that is never fed must still finish().
-		"        private var st: DecodeStatus = DecodeStatus.COMPLETE",
-		// One place records, so the two overloads cannot drift.
+		// Feed forwards and nothing more: no assignment, no catch.
 		"        public fun feed(chunk: ByteArray): DecodeStatus = feed(chunk, 0, chunk.size)",
-		"                st = ist.feed(chunk, off, len, v)",
-		// A refusal leaves feed on the exception channel and is terminal, so the
-		// wrapper records what it MEANT before rethrowing: the wire verdict for
-		// malformed bytes, INCOMPLETE for a receiver limit, and nothing at all
-		// for a fault that is neither -- an ARGUMENT is a mistake in the CALL,
-		// and recording it as a verdict would describe the wire falsely.
-		"            } catch (e: SofabException) {",
-		"                when (e.error) {",
-		"                    SofabError.INVALID_MSG -> st = DecodeStatus.INVALID",
-		"                    SofabError.LIMIT_EXCEEDED -> st = DecodeStatus.INCOMPLETE",
-		"                    else -> Unit",
-		"                throw e",
-		// The public surface is unchanged; only its backing moved.
-		"        public val status: DecodeStatus get() = st",
-		// finish() feeds nothing, so it reads the memory too.
+		"        public fun feed(chunk: ByteArray, off: Int, len: Int): DecodeStatus =",
+		"            ist.feed(chunk, off, len, v)",
+		// finish asks the stream and judges what it answers.
+		"            val st = ist.feed(ByteArray(0), 0, 0, v)",
 		"            check(st == DecodeStatus.COMPLETE) { \"Myfirstmessage: stream ended mid-field (\" + st + \")\" }",
 	} {
 		if !strings.Contains(m, want) {
-			t.Errorf("Myfirstmessage.kt missing %q (generator#521):\n%s", want, m)
+			t.Errorf("Myfirstmessage.kt missing %q (generator#541):\n%s", want, m)
+		}
+	}
+	// Nothing remembers a status, and nothing maps a refusal onto one.
+	for _, gone := range []string{
+		"private var st: DecodeStatus",
+		"catch (e: SofabException) {",
+		"SofabError.INVALID_MSG -> st =",
+		"SofabError.LIMIT_EXCEEDED -> st =",
+		"public val status: DecodeStatus",
+	} {
+		if strings.Contains(m, gone) {
+			t.Errorf("Myfirstmessage.kt still carries the removed status latch %q (generator#541):\n%s", gone, m)
 		}
 	}
 	// The property is gone from the corelib; asking the stream a second time must
-	// not come back in any form.
+	// not come back in any form (generator#521).
 	if strings.Contains(m, "ist.status") {
 		t.Errorf("Myfirstmessage.kt still reads the removed IStream.status (generator#521):\n%s", m)
 	}

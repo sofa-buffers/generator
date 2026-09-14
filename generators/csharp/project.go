@@ -45,6 +45,9 @@ func (g *gen) harness(s *ir.Schema) []byte {
 	f.line("using System.Collections.Generic;")
 	f.line("using System.Text.Json;")
 	f.line("using System.Text.Json.Serialization;")
+	// The corelib's own namespace, for the SofabException the decode path catches
+	// to name the code a refusal was latched under (generator#541).
+	f.line("using sofab;")
 	f.line("using %s;", g.ns)
 	f.blank()
 	f.line("sealed class ByteArrayConverter : JsonConverter<byte[]> {")
@@ -109,30 +112,27 @@ func (g *gen) harness(s *ir.Schema) []byte {
 		f.line("                    var csz = args.Length > 2 ? int.Parse(args[2]) : 1;")
 		f.line("                    var step = csz > 0 ? csz : Math.Max(input.Length, 1);")
 		f.line("                    for (var off = 0; off < input.Length; off += step) {")
-		f.line("                        var fed = dec.Feed(input, off, Math.Min(step, input.Length - off));")
-		// The stream publishes its outcome once, as Feed's return value, and
-		// has no accessor to ask again -- so Decoder.Status is the wrapper
-		// remembering it. Nothing else in the suite reads that memory, and a
-		// stale one would still let every vector pass, so check it here: it has
-		// to agree with the Feed that produced it, on every chunk of every
-		// vector at every split width (generator#461).
-		f.line("                        if (dec.Status != fed) {")
-		f.line("                            throw new InvalidOperationException(")
-		f.line("                                $\"Status {dec.Status} disagrees with the Feed that set it ({fed})\");")
-		f.line("                        }")
+		f.line("                        dec.Feed(input, off, Math.Min(step, input.Length - off));")
 		f.line("                    }")
 		f.line("                    obj = dec.Finish();")
 		f.line("                } catch (Exception e) {")
-		// The remembered status is printed, not just the message. A refusal is
-		// terminal and leaves through this catch, so the ONLY way the latch in
-		// the generated Feed -- the one arm of #461 that is new logic rather
-		// than a rename -- becomes observable to a suite is by naming what it
-		// recorded. Without it an inverted mapping, or a latch that sets
-		// nothing at all, still exits 1 and every reject vector still passes.
-		// tests/conformance/csharp/run.sh greps this for the malformed and the
-		// over-cap fixtures it already builds.
+		// What Finish answers AFTER the refusal is printed, not just the message.
+		// A refusal is terminal: the corelib latched it and re-throws the very
+		// code it was refused with, so a Finish here must refuse too, under that
+		// same code. That is the whole of what generated code contributes now
+		// (generator#541), and a reject vector exits non-zero either way -- so
+		// naming Finish's answer is the only way a suite can see it at all.
+		//
+		// `RETURNED` is the failure: it means Finish handed back a message from a
+		// decoder that had refused one. It cannot be a leftover from an earlier
+		// call the way the old remembered status could (#528), because nothing
+		// but this Finish produces it.
+		f.line("                    string fin;")
+		f.line("                    try { dec.Finish(); fin = \"RETURNED\"; }")
+		f.line("                    catch (SofabException fe) { fin = fe.Error.ToString(); }")
+		f.line("                    catch (Exception fe) { fin = fe.GetType().Name; }")
 		f.line("                    Console.Error.WriteLine(")
-		f.line("                        $\"decode error: {e.Message} [status={dec.Status}]\");")
+		f.line("                        $\"decode error: {e.Message} [finish={fin}]\");")
 		f.line("                    return 1;")
 		f.line("                }")
 		f.line("                var json = JsonSerializer.SerializeToUtf8Bytes(obj, Opts);")

@@ -615,53 +615,66 @@ messages:
 	}
 }
 
-// TestPythonDecoderRemembersWhatFeedAnswered: corelib-py#142 removed
-// Decoder.status — feed already returned the outcome, and CORELIB_PLAN §5.2.4
-// gives one channel per fact. The rule binds the STREAM, not its caller, and the
-// generated _StreamDecoder is the caller, so its own `status` survives, backed by
-// what the last feed returned (generator#461).
-//
-// Nothing pinned this before, and the conformance harness reads the property
-// only BEFORE its feed loop, so a stale or mis-wired one passed every vector.
-func TestPythonDecoderRemembersWhatFeedAnswered(t *testing.T) {
+// TestPythonDecoderKeepsNoStatus pins issue #541: the generated _StreamDecoder
+// remembers nothing. feed's return value is the outcome (CORELIB_PLAN §5.2.4,
+// one channel per fact), and both refusals are terminal and latched in the
+// CORELIB — an INVALID is re-returned by every later feed, a receiver cap is
+// re-raised from its own memory — so #461's `_st` copy could only restate what
+// the decoder already held.
+func TestPythonDecoderKeepsNoStatus(t *testing.T) {
 	mod := string(genPy(t, schemaFile(t, "../../examples/messages/example.yaml"), map[string]any{})["message.py"])
 	for _, want := range []string{
-		// __slots__ is not decoration here: without the name the assignment below
-		// raises AttributeError on the first feed.
-		`    __slots__ = ("message", "_d", "_st")`,
-		// COMPLETE before the first feed: an all-default message is zero bytes on
-		// the wire, so a reader can legitimately be read without ever being fed,
-		// and that is what the removed accessor answered for a fresh decoder.
-		"        self._st = Status.COMPLETE",
-		"    def feed(self, chunk) -> Status:\n        self._st = self._d.feed(chunk)\n        return self._st",
-		"    @property\n    def status(self) -> Status:\n        return self._st",
+		`    __slots__ = ("message", "_d")`,
+		"    def feed(self, chunk) -> Status:\n        return self._d.feed(chunk)",
 		// `error` still belongs to the corelib: §6.3 keeps the reason behind an
-		// INVALID on the decoder, and only `status` had to move.
+		// INVALID on the decoder, and it was never a second copy of anything.
 		"        return self._d.error",
 	} {
 		if !strings.Contains(mod, want) {
-			t.Errorf("message.py missing remembered-status shape %q", want)
+			t.Errorf("message.py missing %q (generator#541)", want)
+		}
+	}
+	for _, gone := range []string{
+		// `self._st` and not a bare `_st`: `max_dyn_string_len` contains that
+		// substring, and a check that matches it tests nothing about the latch.
+		"self._st",
+		`"_st"`,
+		"def status(self) -> Status:",
+	} {
+		if strings.Contains(mod, gone) {
+			t.Errorf("message.py still carries the removed status latch %q (generator#541)", gone)
 		}
 	}
 	// The removed accessor must not come back: it no longer exists on either
-	// engine, so asking is an AttributeError at the first read.
+	// engine, so asking is an AttributeError at the first read (corelib-py#142).
 	if strings.Contains(mod, "self._d.status") {
 		t.Error("Decoder.status is gone (corelib-py#142); feed's return is the only answer")
 	}
 }
 
-// TestPythonHarnessChecksTheRememberedStatus: the streamdecode mode is the only
-// place the suite can see the memory at all, and it read the property just once,
-// before feeding anything. Assert it against the feed that set it, per chunk.
-func TestPythonHarnessChecksTheRememberedStatus(t *testing.T) {
+// TestPythonHarnessNamesWhatRefeedAnswers: this port has no finish() to gate, so
+// the observable form of "a refusal sticks" is asking AGAIN. The harness feeds an
+// empty chunk on its error path and names what came back — an INVALID re-returned
+// or a cap re-raised — which is the leg the python suite never had (#528).
+func TestPythonHarnessNamesWhatRefeedAnswers(t *testing.T) {
 	h := string(genPy(t, schemaFile(t, "../../examples/messages/example.yaml"), map[string]any{"emit": "project"})["harness.py"])
 	for _, want := range []string{
 		"                st = dec.feed(data[off:off + step])",
-		"                if dec.status is not st:",
+		"                again = dec.feed(b'').name",
+		"            except Exception as fe:",
+		"                again = type(fe).__name__",
+		"            sys.stderr.write('decode error: %s: %s [refeed=%s]\\n'",
+		// An INVALID does not raise in this port -- it is feed's return value --
+		// so the malformed-bytes route lands on the status path, not the except.
+		// Both must name what re-feeding answered.
+		"            sys.stderr.write('decode failed: %s [refeed=%s]\\n'",
 	} {
 		if !strings.Contains(h, want) {
-			t.Errorf("harness.py missing %q", want)
+			t.Errorf("harness.py missing %q (generator#541)", want)
 		}
+	}
+	if strings.Contains(h, "dec.status") {
+		t.Error("harness.py still reads the removed Decoder.status (generator#541)")
 	}
 }
 

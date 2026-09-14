@@ -247,22 +247,28 @@ func TestTSHeaderBoundReject(t *testing.T) {
 	for _, want := range []string{
 		`mode === "streamdecode"`,
 		`const dec = new DECODERS[name]();`,
-		`const fed = dec.feed(one);`,
-		// The stream answers once, on feed's return, so the Decoder's `status` is
-		// the wrapper's memory of it -- and nothing else in the suite reads that
-		// memory, so a stale one would let every vector pass. Check it per byte
-		// (generator#461).
-		`if (dec.status !== fed) {`,
-		// ...and on the refusal path NAME what the latch recorded. A reject
-		// vector exits non-zero whatever the latch did, so printing the
-		// remembered status is the only thing that makes an inverted -- or
-		// absent -- mapping visible to the suite, which greps this line.
-		"`decode error: ${String(e)} [status=${dec.status}]\\n`);",
+		`dec.feed(one);`,
+		// On the refusal path, NAME what FINISH answered (generator#541). A refusal
+		// is terminal and the corelib latches it, so a finish that follows one must
+		// re-throw the same code; a reject vector exits non-zero either way, so
+		// this line is the only thing that makes the terminal guard visible to the
+		// suite, which greps it.
+		`try { dec.finish(); fin = "RETURNED"; }`,
+		"`decode error: ${String(e)} [finish=${fin}]\\n`);",
 		`obj = dec.finish();`,
 		`"M": M.MDecoder,`,
 	} {
 		if !strings.Contains(harness, want) {
 			t.Errorf("harness.ts missing streamdecode-mode surface %q:\n%s", want, harness)
+		}
+	}
+	// The remembered status and its per-byte agreement check are gone with it.
+	for _, gone := range []string{
+		`if (dec.status !== fed) {`,
+		"[status=",
+	} {
+		if strings.Contains(harness, gone) {
+			t.Errorf("harness.ts still carries the retired status-latch shape %q (generator#541)", gone)
 		}
 	}
 }
@@ -407,6 +413,13 @@ func TestTSStructural(t *testing.T) {
 		// only channel the outcome travels on (§5.2.4). Asking the stream a second
 		// time no longer compiles, and must not come back (generator#461).
 		"this.is.status()",
+		// ...and generator#541 removed the wrapper's own copy of it. Each of these
+		// is a way the deleted latch could come back: the field, the catch that
+		// wrote it, either mapping arm, or the accessor that read it.
+		"private st: DecodeStatus",
+		"this.st = DecodeStatus.Invalid;",
+		"this.st = DecodeStatus.Incomplete;",
+		"get status(): DecodeStatus",
 	} {
 		if strings.Contains(mod, gone) {
 			t.Errorf("message.ts should no longer emit %q (one visitor surface, §5.3.1)", gone)
@@ -415,26 +428,15 @@ func TestTSStructural(t *testing.T) {
 	// The streaming surface is the same visitor, fed incrementally.
 	for _, want := range []string{
 		"export class MyfirstmessageDecoder {",
-		// corelib-ts#170 left `feed`'s return as the only place the stream
-		// publishes its outcome. The wrapper is the caller, and a caller may
-		// remember: the public surface is unchanged and backed by a field.
-		// Complete before the first feed -- an all-default message is zero bytes,
-		// so a decoder that was never fed still finishes (generator#461).
-		"  private st: DecodeStatus = DecodeStatus.Complete;",
-		"      return (this.st = this.is.feed(chunk));",
-		// A refusal is terminal and never comes back as a status, so it is
-		// latched: InvalidMsg is the wire verdict, a receiver cap is this
-		// side's own stop and leaves the message unfinished, not wrong (S6.3).
-		// A throw that is not the corelib's -- a TypeError out of a callback, an
-		// Argument fault -- is not a wire event at all, so it leaves the memory
-		// alone rather than claiming the stream ended mid-field.
-		"      if (e instanceof SofabError) {",
-		"        if (e.code === SofabErrorCode.InvalidMsg) {",
-		"          this.st = DecodeStatus.Invalid;",
-		"          e.code === SofabErrorCode.LimitExceeded ||",
-		"          this.st = DecodeStatus.Incomplete;",
-		"  get status(): DecodeStatus { return this.st; }",
-		"    if (this.st !== DecodeStatus.Complete) {",
+		// The wrapper remembers NOTHING (generator#541): feed forwards, and finish
+		// ASKS the stream with a zero-length feed. A refusal is terminal and the
+		// corelib latches it, re-throwing the code it was refused with before
+		// looking at a byte -- so the copy this layer used to keep could only
+		// restate what the stream held, and it flattened LimitExceeded into an
+		// Incomplete that says something untrue about the wire.
+		"    return this.is.feed(chunk);",
+		"    const st = this.is.feed(new Uint8Array(0));",
+		"    if (st !== DecodeStatus.Complete) {",
 		"  sequenceBegin(id: number): boolean {",
 		// The scope graph is a tree, so the parent is static and sequenceEnd needs
 		// no stack to restore it.

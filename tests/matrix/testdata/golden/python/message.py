@@ -173,27 +173,21 @@ class _StreamDecoder:
     INCOMPLETE tail is retained and continued by the next chunk, and only
     the caller's framing knows whether more can still come.
 
-    status reports what the last feed() returned. The corelib publishes
-    that outcome exactly once, on feed's return, and keeps no accessor to
-    ask a second time -- so this reader is the caller that remembers, and
-    its own surface is unchanged.
+    Both refusals are terminal and the corelib latches them: an INVALID
+    comes back from every later feed(), and a receiver cap is re-raised.
+    So there is no status to remember here -- feed's return is the answer,
+    and feeding an empty chunk asks again.
     """
 
-    __slots__ = ("message", "_d", "_st")
+    __slots__ = ("message", "_d")
 
     def __init__(self, msg_cls, vis_cls, reassembly=REASSEMBLY) -> None:
         self.message = msg_cls()
         self._d = Decoder(visitor=vis_cls(self.message), max_dyn_array_count=65536, max_dyn_string_len=1048576, max_dyn_blob_len=4194304,
                           reassembly=reassembly)
-        self._st = Status.COMPLETE
 
     def feed(self, chunk) -> Status:
-        self._st = self._d.feed(chunk)
-        return self._st
-
-    @property
-    def status(self) -> Status:
-        return self._st
+        return self._d.feed(chunk)
 
     @property
     def error(self):

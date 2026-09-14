@@ -712,40 +712,46 @@ grep -q "InvalidMessage" "$WORK/cap_eof_maxlen.err" || {
 
 echo "==> string/blob caps OK"
 
-# The LATCH -- the one thing generator#461 added that is new logic rather than a
-# rename. A refusal is terminal and never comes back as a status, so the
-# generated Feed records what it MEANT before rethrowing, and Decoder.Status
-# answers from that memory. Every reject vector exits non-zero whatever the latch
-# recorded, so no amount of vector replay can tell a correct mapping from an
-# inverted one, from one that records nothing, or from a catch arm deleted
-# outright. The harness therefore PRINTS the remembered status on its error path
-# and this block reads it: malformed bytes are Invalid, a receiver cap is
-# Incomplete and never Invalid (CORELIB_PLAN 6.3 -- a policy stop is this side's
-# decision, not a verdict on the wire).
+# A refusal is TERMINAL, and the corelib is what holds that (CORELIB_PLAN 5.2 for
+# malformed bytes, 6.3 for a receiver limit): IStream latches the verdict and
+# re-throws the very code it was refused with from every later call, before
+# looking at a byte. So a Finish() after a caught refusal must refuse too, under
+# that same code -- it cannot hand back a message from a decoder that rejected
+# one.
+#
+# generator#541 deleted the generated status latch that used to restate this one
+# layer up. #528 records why: the old assertion read a remembered field that an
+# EARLIER feed had already written, so it passed whether or not the mapping arm
+# existed. Finish's answer cannot be a leftover -- nothing but this Finish
+# produces it -- so this block is discriminating at every chunk width.
+#
+# The code is the real one now, not a status it was flattened into: a receiver
+# cap reports LimitExceeded rather than the Incomplete the old mapping produced,
+# which is what 6.3 asks for ("raise my limit" is not "these bytes are broken").
 #
 # All three arrival routes are covered: overcount.bin trips a GENERATED
 # schema-bound guard mid-array, cap_eof_maxlen.bin trips one at a fixlen length
 # word, and cap_str_over.bin is refused by the CORELIB's own cap check.
-echo "==> a refusal latches into the remembered status (generator#461)"
-latch() {   # <fixture> <want-status> <message> <harness...>
+echo "==> a refusal is terminal: Finish refuses under the same code (generator#541)"
+latch() {   # <fixture> <want-code> <message> <harness...>
     lfx=$1 lwant=$2 lmsg=$3
     shift 3
     if "$@" streamdecode "$lmsg" < "$lfx" >/dev/null 2>"$WORK/latch.err"; then
         echo "FAIL: $(basename "$lfx") must be refused by the streaming decoder"; exit 1
     fi
-    grep -q "\[status=$lwant\]" "$WORK/latch.err" || {
-        echo "FAIL: $(basename "$lfx") -- the refusal must latch status=$lwant; got:"
+    grep -q "\[finish=$lwant\]" "$WORK/latch.err" || {
+        echo "FAIL: $(basename "$lfx") -- Finish after the refusal must throw $lwant; got:"
         cat "$WORK/latch.err"; exit 1; }
 }
 # A varint past the 64-bit bound: 10 continuation bytes and an eleventh. This one
 # is refused by the CORELIB itself rather than by a generated guard, so it is the
-# other side of the same catch (S4.1 -- INVALID only past the bound).
+# other side of the same terminal guard (S4.1 -- INVALID only past the bound).
 printf '\000\377\377\377\377\377\377\377\377\377\377\001' > "$WORK/varint_overflow.bin"
-latch "$WORK/overcount.bin"       Invalid    myfirstmessage $H
-latch "$WORK/varint_overflow.bin" Invalid    myfirstmessage $H
-latch "$WORK/cap_eof_maxlen.bin"  Invalid    caps           $HP
-latch "$WORK/cap_str_over.bin"    Incomplete caps           $HP
-echo "==> refusal latch OK"
+latch "$WORK/overcount.bin"       InvalidMessage myfirstmessage $H
+latch "$WORK/varint_overflow.bin" InvalidMessage myfirstmessage $H
+latch "$WORK/cap_eof_maxlen.bin"  InvalidMessage caps           $HP
+latch "$WORK/cap_str_over.bin"    LimitExceeded  caps           $HP
+echo "==> terminal-refusal guard OK"
 
 echo "==> shared-vector byte-exact conformance"
 python3 "$ROOT/tests/conformance/csharp/check_vectors.py" "$CORELIB/assets/test_vectors.json" "$WORK/conf/bin/Debug/net9.0/harness.dll"

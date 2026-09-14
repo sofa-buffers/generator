@@ -210,34 +210,32 @@ func (g *gen) harness(s *ir.Schema) []byte {
 		// An .incomplete per feed is the normal verdict for a chunk that ended
 		// mid-field: it says the BYTES ended there, not that the message is bad.
 		// Only finish() decides on the message as a whole.
-		// The stream publishes its outcome once, as feed's return value, and has
-		// no accessor to ask again -- so Decoder.status() is the wrapper
-		// remembering it. Checking it here is not optional bookkeeping: Zig only
-		// semantically analyses a function something calls, so a generated
-		// `pub fn status` that nothing in the harness reaches is never compiled
-		// at all, and a broken body takes the whole suite green. This call both
-		// compiles it and asserts the memory agrees with the feed that set it,
-		// on every byte of every vector (generator#461).
 		f.line("            for (input) |b| {")
-		// `catch`, not `try`: a refusal is terminal and would otherwise leave
-		// main without anyone reading the latch, and the latch -- the errdefer
-		// in the generated feed -- is the one arm of #461 that is new logic
-		// rather than a rename. Printing what it recorded is what makes it
-		// observable to a suite: without it an inverted mapping, or an errdefer
-		// that sets nothing, still exits 1 and every reject vector still
-		// passes. It also forces semantic analysis of the error path, which
+		// `catch`, not `try`: a refusal is terminal and would otherwise leave main
+		// without anyone naming what FINISH then answers. A refusal is latched --
+		// by the corelib for anything raised inside `is.feed`, by the sticky
+		// `v.inv`/`v.lim` flags for the two guards read on the generated side --
+		// so a finish after one must fail under that same code. That is the whole
+		// of what generated code contributes now (generator#541), and a reject
+		// vector exits 1 either way, so printing finish's answer is the only way a
+		// suite sees it. It also forces semantic analysis of the error path, which
 		// Zig performs only for code something reaches.
+		//
+		// `RETURNED` is the failure: finish accepted a decoder that had refused a
+		// message. It cannot be a leftover from an earlier call the way the old
+		// remembered status could (#528) -- nothing but this finish produces it.
 		// tests/conformance/zig/run.sh greps this line.
-		f.line("                const fed = dec.feed(&[_]u8{b}) catch |e| {")
-		f.line("                    std.debug.print(\"decode error: {s} [status={s}]\\n\",")
-		f.line("                                    .{ @errorName(e), @tagName(dec.status()) });")
+		f.line("                _ = dec.feed(&[_]u8{b}) catch |e| {")
+		f.line("                    var fin: []const u8 = \"RETURNED\";")
+		f.line("                    dec.finish() catch |fe| { fin = @errorName(fe); };")
+		f.line("                    std.debug.print(\"decode error: {s} [finish={s}]\\n\",")
+		f.line("                                    .{ @errorName(e), fin });")
 		f.line("                    std.process.exit(1);")
 		f.line("                };")
-		f.line("                if (dec.status() != fed) return error.StatusDisagreesWithFeed;")
 		f.line("            }")
 		f.line("            dec.finish() catch |e| {")
-		f.line("                std.debug.print(\"decode error: {s} [status={s}]\\n\",")
-		f.line("                                .{ @errorName(e), @tagName(dec.status()) });")
+		f.line("                std.debug.print(\"decode error: {s} [finish={s}]\\n\",")
+		f.line("                                .{ @errorName(e), @errorName(e) });")
 		f.line("                std.process.exit(1);")
 		f.line("            };")
 		f.line("            try toJson_%s(&obj, out);", mt)
