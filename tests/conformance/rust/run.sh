@@ -752,7 +752,7 @@ YAML
     { echo "version: 1"; echo "messages:"; } > "$WORK/closed.yaml"
     python3 "$ROOT/tests/conformance/lib/check_closed_kinds.py" --emit-schema >> "$WORK/closed.yaml"
     rust_build "$WORK/closed.yaml" "$WORK/closed-$label"
-    python3 "$ROOT/tests/conformance/lib/check_closed_kinds.py" "$label" \
+    python3 "$ROOT/tests/conformance/lib/check_closed_kinds.py" "$label" --legacy-closed-set \
         --cwd "$WORK/closed-$label" --invalid-pattern 'InvalidMsg' -- cargo run -q --
 
     # The declared WIDTH of a plain integer element is a separate bound and still

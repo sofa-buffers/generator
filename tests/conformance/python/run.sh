@@ -1004,7 +1004,7 @@ python3 "$ROOT/tests/conformance/lib/check_closed_kinds.py" --emit-schema >> "$W
 for ENGINE in $ENGINES; do
     if [ "$ENGINE" = python ]; then export SOFAB_PUREPYTHON=1; else unset SOFAB_PUREPYTHON || true; fi
     require_engine "$ENGINE"
-    python3 "$ROOT/tests/conformance/lib/check_closed_kinds.py" "python/$ENGINE" \
+    python3 "$ROOT/tests/conformance/lib/check_closed_kinds.py" "python/$ENGINE" --legacy-closed-set \
         --cwd "$WORK/closedproj" --invalid-pattern 'SofaDecodeError' -- python3 harness.py
 done
 unset SOFAB_PUREPYTHON || true

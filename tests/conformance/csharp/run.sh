@@ -824,7 +824,7 @@ echo "==> closed enum/bitfield: only what the schema declares is valid (S1, gene
 python3 "$ROOT/tests/conformance/lib/check_closed_kinds.py" --emit-schema >> "$WORK/closed.yaml"
 ( cd "$ROOT" && go run ./cmd/sofabgen --config "$WORK/cfg.yaml" --lang csharp --in "$WORK/closed.yaml" --out "$WORK/closed" )
 ( cd "$WORK/closed" && dotnet build -v q >/dev/null )
-python3 "$ROOT/tests/conformance/lib/check_closed_kinds.py" "csharp" \
+python3 "$ROOT/tests/conformance/lib/check_closed_kinds.py" "csharp" --legacy-closed-set \
     --invalid-pattern 'InvalidMessage' -- dotnet "$WORK/closed/bin/Debug/net9.0/harness.dll"
 
 # CORELIB_PLAN S7.2 item 8 -- the shared file's `sequence_growth` block

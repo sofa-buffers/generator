@@ -723,7 +723,7 @@ run_variant() {
             --in "$WORK/closed-$label.yaml" --out "$WORK/closed-$label" )
         make -C "$WORK/closed-$label" "$@" >/dev/null
         for surface in decode streamdecode; do
-            python3 "$ROOT/tests/conformance/lib/check_closed_kinds.py" "$label/$surface" \
+            python3 "$ROOT/tests/conformance/lib/check_closed_kinds.py" "$label/$surface" --legacy-closed-set \
                 --verb "$surface" --invalid-pattern 'INVALID' \
                 --skip-positions matrix:enum --storage-masked matrix:bitfield \
                 -- "$WORK/closed-$label/harness/harness"

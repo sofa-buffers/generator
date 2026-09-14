@@ -863,7 +863,7 @@ echo "==> closed enum/bitfield: only what the schema declares is valid (S1, gene
 { echo "version: 1"; echo "messages:"; } > "$WORK/closed.yaml"
 python3 "$ROOT/tests/conformance/lib/check_closed_kinds.py" --emit-schema >> "$WORK/closed.yaml"
 zig_build "$WORK/closed.yaml" "$WORK/closed"
-python3 "$ROOT/tests/conformance/lib/check_closed_kinds.py" "zig" \
+python3 "$ROOT/tests/conformance/lib/check_closed_kinds.py" "zig" --legacy-closed-set \
     --invalid-pattern 'InvalidMessage' -- "$WORK/closed/zig-out/bin/harness"
 
 # CORELIB_PLAN S7.2 item 8 -- the shared file's `sequence_growth` block
