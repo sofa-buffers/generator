@@ -809,22 +809,27 @@ OUT=$($H decode myfirstmessage < "$WORK/w_u8_255_ctl.bin") || { echo "FAIL: in-r
 echo "$OUT" | tr -d ' ' | grep -q '"someu8":255' || { echo "FAIL: control must keep 255 exactly; got: $OUT"; exit 1; }
 echo "==> declared-width reject OK"
 
-# An `enum` and a `bitfield` are CLOSED (MESSAGE_SPEC S1, generator#516): what
-# binds is the SET of constants / the MASK of declared positions, never a width
-# and never the integer the target stores the field in. The shared driver prints
-# its own schema and forges its own bytes, and probes ALL SIX positions with
-# GAPPED definitions, so an interval bound cannot pass.
+# An `enum` and a `bitfield` are bound by the WIDTH their declaration implies
+# (MESSAGE_SPEC S1, generator#516): for an enum the smallest SIGNED type holding
+# every declared constant, for a bitfield the smallest UNSIGNED type holding its
+# highest declared `pos`. A value INSIDE that width is valid even when the schema
+# names no constant for it and even when it carries an undeclared bit; only a
+# value outside it is malformed input. The shared driver prints its own schema
+# and forges its own bytes, and probes ALL SIX positions with GAPPED definitions,
+# so a bound taken from the constants themselves refuses rows this one accepts.
 #
 # C# held both kinds through a narrowing cast with no comparison at all, at
-# every one of the twelve stores: 5 into an enum declaring {0,1,2,10} was KEPT,
-# 4 into a bitfield declaring bits 0, 1 and 3 was KEPT, and 256 into that same
-# bitfield came back 0 -- the decode reporting success in every case.
-echo "==> closed enum/bitfield: only what the schema declares is valid (S1, generator#516)"
+# every one of the twelve stores: 256 into a bitfield declaring bits 0, 1 and 3
+# came back 0 and 1000 into an enum declaring {0,1,2,10} came back -24, the
+# decode reporting success in both cases. The cast is still there -- the member
+# IS the declared width here, `byte` and `sbyte` -- which is why the guard has to
+# run on the raw accumulator ahead of it.
+echo "==> enum/bitfield: bounded by the width the declaration implies (S1, generator#516)"
 { echo "version: 1"; echo "messages:"; } > "$WORK/closed.yaml"
 python3 "$ROOT/tests/conformance/lib/check_closed_kinds.py" --emit-schema >> "$WORK/closed.yaml"
 ( cd "$ROOT" && go run ./cmd/sofabgen --config "$WORK/cfg.yaml" --lang csharp --in "$WORK/closed.yaml" --out "$WORK/closed" )
 ( cd "$WORK/closed" && dotnet build -v q >/dev/null )
-python3 "$ROOT/tests/conformance/lib/check_closed_kinds.py" "csharp" --legacy-closed-set \
+python3 "$ROOT/tests/conformance/lib/check_closed_kinds.py" "csharp" \
     --invalid-pattern 'InvalidMessage' -- dotnet "$WORK/closed/bin/Debug/net9.0/harness.dll"
 
 # CORELIB_PLAN S7.2 item 8 -- the shared file's `sequence_growth` block
