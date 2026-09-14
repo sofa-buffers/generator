@@ -1271,104 +1271,111 @@ func TestGoNestedRowElemWidth(t *testing.T) {
 	}
 }
 
-// generator#516: MESSAGE_SPEC §1 closes an `enum` by the SET of constants the
-// schema declares and a `bitfield` by the MASK of the positions it declares.
-// Neither bound is a width, and neither is the integer the target stores the
-// field in — a field whose declared positions are 0..3 does not become 0..255
-// valid because Go holds it in a uint8.
+// widthSixSrc declares an `enum` and a `bitfield` at all SIX positions a value
+// can land in, and both definitions are GAPPED on purpose: the enum declares
+// {0, 1, 2, 10}, so 5 sits inside the implied width and is not a constant, and
+// the bitfield declares positions 0, 1 and 3, so 4 sets a bit no flag declares.
+// Both of those values are VALID under the width rule and were INVALID under the
+// withdrawn closed-set one, which is what makes a gapped definition the shape
+// that tells the two rules apart.
+const widthSixSrc = "version: 1\nmessages:\n  Closed:\n    payload:\n" +
+	"      en:  { id: 0, type: enum, enum: " + widthEnumDef + " }\n" +
+	"      bf:  { id: 1, type: bitfield, bits: " + widthBitsDef + " }\n" +
+	"      ea:  { id: 2, type: array, items: { type: enum, count: 4, enum: " + widthEnumDef + " } }\n" +
+	"      bfa: { id: 3, type: array, items: { type: bitfield, count: 4, bits: " + widthBitsDef + " } }\n" +
+	"      st:\n        id: 4\n        type: struct\n        fields:\n" +
+	"          se:  { id: 0, type: enum, enum: " + widthEnumDef + " }\n" +
+	"          sbf: { id: 1, type: bitfield, bits: " + widthBitsDef + " }\n" +
+	"      sa:\n        id: 5\n        type: array\n        items:\n          type: struct\n          count: 2\n          fields:\n" +
+	"            se:  { id: 0, type: enum, enum: " + widthEnumDef + " }\n" +
+	"            sbf: { id: 1, type: bitfield, bits: " + widthBitsDef + " }\n" +
+	"      un:\n        id: 6\n        type: union\n        default_id: 0\n        oneof:\n" +
+	"          ue:  { id: 0, type: enum, enum: " + widthEnumDef + " }\n" +
+	"          ubf: { id: 1, type: bitfield, bits: " + widthBitsDef + " }\n" +
+	"      mat: { id: 7, type: array, items: { type: array, count: 2, items: { type: enum, count: 3, enum: " + widthEnumDef + " } } }\n" +
+	"      mbf: { id: 8, type: array, items: { type: array, count: 2, items: { type: bitfield, count: 3, bits: " + widthBitsDef + " } } }\n"
+
+const widthEnumDef = "{ A: 0, B: 1, C: 2, Z: 10 }"
+const widthBitsDef = "{ A: { pos: 0 }, B: { pos: 1 }, D: { pos: 3 } }"
+
+// The emitted clause for each kind under the width rule. The enum's constants
+// fit an i8 and the bitfield's highest position a u8, so these are the two
+// intervals the fixture implies — NOT the 0..10 hull of the constants, which is
+// far narrower and would refuse values §1 admits.
+const (
+	widthEnumRej = "if v < -128 || v > 127 {\n\t\t\treturn sofab.ErrInvalidMsg\n\t\t}\n\t\t"
+	widthBitRej  = "if v > 255 {\n\t\t\treturn sofab.ErrInvalidMsg\n\t\t}\n\t\t"
+)
+
+// generator#516: MESSAGE_SPEC §1 binds an `enum` to the width of the smallest
+// SIGNED type holding every declared constant and a `bitfield` to the width of
+// the smallest UNSIGNED type holding its highest declared `pos`. Here that is i8
+// (−128..127) for {0, 1, 2, 10} and u8 (0..255) for positions 0, 1 and 3.
 //
-// Go stored all twelve (six positions × two kinds) through a bare narrowing
-// conversion with no comparison in front of it, so an undeclared value inside
-// the storage width was kept and one past it was masked and kept: 256 into a
-// byte-backed bitfield decoded as 0 with a nil error. The guard runs on the raw
-// callback parameter, ahead of the conversion, so one clause answers both.
+// The guard does not go away with the withdrawn set/mask bound, only its BOUND
+// changes: Go stored all twelve (six positions × two kinds) through a bare
+// narrowing conversion before #516, so 1000 into an int8-backed enum came back
+// −24 and 256 into a byte-backed bitfield came back 0, verdict nil either way
+// (generator#513). The comparison therefore runs on the RAW callback parameter,
+// ahead of the conversion — the only order in which an over-width value can be
+// seen at all.
 //
-// All six positions are pinned by name. Four of them share one arm per kind —
-// emitVisitorMethods runs once per id scope, so the frames differ and the arm
-// does not — which is exactly why "the arm is shared" is not worth trusting
-// after the next refactor. Both definitions are GAPPED: the enum's hull holds 5
-// and its constants do not, and the bitfield's byte holds 4 while its mask
-// (0b1011) does not, so an interval bound passes neither.
-func TestGoClosedEnumAndBitfieldRejectAtEverySixPositions(t *testing.T) {
-	const enumDef = "{ A: 0, B: 1, C: 2, Z: 10 }"
-	const bitsDef = "{ A: { pos: 0 }, B: { pos: 1 }, D: { pos: 3 } }"
-	src := "version: 1\nmessages:\n  Closed:\n    payload:\n" +
-		"      en:  { id: 0, type: enum, enum: " + enumDef + " }\n" +
-		"      bf:  { id: 1, type: bitfield, bits: " + bitsDef + " }\n" +
-		"      ea:  { id: 2, type: array, items: { type: enum, count: 4, enum: " + enumDef + " } }\n" +
-		"      bfa: { id: 3, type: array, items: { type: bitfield, count: 4, bits: " + bitsDef + " } }\n" +
-		"      st:\n        id: 4\n        type: struct\n        fields:\n" +
-		"          se:  { id: 0, type: enum, enum: " + enumDef + " }\n" +
-		"          sbf: { id: 1, type: bitfield, bits: " + bitsDef + " }\n" +
-		"      sa:\n        id: 5\n        type: array\n        items:\n          type: struct\n          count: 2\n          fields:\n" +
-		"            se:  { id: 0, type: enum, enum: " + enumDef + " }\n" +
-		"            sbf: { id: 1, type: bitfield, bits: " + bitsDef + " }\n" +
-		"      un:\n        id: 6\n        type: union\n        default_id: 0\n        oneof:\n" +
-		"          ue:  { id: 0, type: enum, enum: " + enumDef + " }\n" +
-		"          ubf: { id: 1, type: bitfield, bits: " + bitsDef + " }\n" +
-		"      mat: { id: 7, type: array, items: { type: array, count: 2, items: { type: enum, count: 3, enum: " + enumDef + " } } }\n" +
-		"      mbf: { id: 8, type: array, items: { type: array, count: 2, items: { type: bitfield, count: 3, bits: " + bitsDef + " } } }\n"
-	files := genGo(t, schemaFromYAMLString(t, src), map[string]any{"package": "m"})
+// All six positions are pinned by name — scalar, native array element, struct
+// member, struct-array element member, union member, matrix row element — for
+// both kinds. Four of them share one emitted arm per kind, which is exactly why
+// "the arm is shared" is not worth trusting after the next refactor.
+func TestGoEnumAndBitfieldWidthBoundAtEverySixPositions(t *testing.T) {
+	files := genGo(t, schemaFromYAMLString(t, widthSixSrc), map[string]any{"package": "m"})
 	msg, types := files["closed.go"], files["types.go"]
 
-	const enRej = "if v != 0 && v != 1 && v != 2 && v != 10 {\n\t\t\treturn sofab.ErrInvalidMsg\n\t\t}\n\t\t"
-	const bfRej = "if v&^0xb != 0 {\n\t\t\treturn sofab.ErrInvalidMsg\n\t\t}\n\t\t"
 	for _, want := range []string{
 		// 1. scalar
-		"case 0:\n\t\t" + enRej + "m.En = ClosedEn(v)",
-		"case 1:\n\t\t" + bfRej + "m.Bf = ClosedBf(v)",
+		"case 0:\n\t\t" + widthEnumRej + "m.En = ClosedEn(v)",
+		"case 1:\n\t\t" + widthBitRej + "m.Bf = ClosedBf(v)",
 		// 2. native array element
-		"case 2:\n\t\t" + enRej + "m.Ea = append(m.Ea, ClosedEaElem(v))",
-		"case 3:\n\t\t" + bfRej + "m.Bfa = append(m.Bfa, ClosedBfaElem(v))",
+		"case 2:\n\t\t" + widthEnumRej + "m.Ea = append(m.Ea, ClosedEaElem(v))",
+		"case 3:\n\t\t" + widthBitRej + "m.Bfa = append(m.Bfa, ClosedBfaElem(v))",
 	} {
 		if !strings.Contains(msg, want) {
-			t.Errorf("closed.go: a closed-kind position stores without its guard, missing %q:\n%s", want, msg)
+			t.Errorf("closed.go: a position stores without its §1 width bound, missing %q:\n%s", want, msg)
 		}
 	}
 	for _, want := range []string{
 		// 3. struct member, 4. struct-array element member, 5. union member:
 		// three id scopes, one emitter, so each gets its own object visitor.
-		"case 0:\n\t\t" + enRej + "m.Se = ClosedStSe(v)",
-		"case 1:\n\t\t" + bfRej + "m.Sbf = ClosedStSbf(v)",
-		"case 0:\n\t\t" + enRej + "m.Se = ClosedSaElemSe(v)",
-		"case 1:\n\t\t" + bfRej + "m.Sbf = ClosedSaElemSbf(v)",
-		"case 0:\n\t\t" + enRej + "m.Ue = ClosedUnUe(v)",
-		"case 1:\n\t\t" + bfRej + "m.Ubf = ClosedUnUbf(v)",
-		// 6. matrix row element. The values never reach the generated visitor:
-		// sofab.*MatrixSeq gathers them and places the finished row, and the only
-		// bound it carries is an interval armed by a sentinel — which can state
-		// neither a gapped set nor a mask, and which a contiguous enum starting at
-		// 0 would disarm. So the collector is wrapped, and only the value test is
-		// ours; the row id, the row count and the placing stay the corelib's.
-		"type _rowClosedMatElemElem struct {\n\t*sofab.SignedMatrixSeq[ClosedMatElemElem]\n}",
-		"func (s _rowClosedMatElemElem) ArraySigned(id sofab.ID, i int, v int64) error {\n" +
-			"\tif v != 0 && v != 1 && v != 2 && v != 10 {\n\t\treturn sofab.ErrInvalidMsg\n\t}\n" +
-			"\treturn s.SignedMatrixSeq.ArraySigned(id, i, v)\n}",
-		"type _rowClosedMbfElemElem struct {\n\t*sofab.UnsignedMatrixSeq[ClosedMbfElemElem]\n}",
-		"func (s _rowClosedMbfElemElem) ArrayUnsigned(id sofab.ID, i int, v uint64) error {\n" +
-			"\tif v&^0xb != 0 {\n\t\treturn sofab.ErrInvalidMsg\n\t}\n" +
-			"\treturn s.UnsignedMatrixSeq.ArrayUnsigned(id, i, v)\n}",
+		"case 0:\n\t\t" + widthEnumRej + "m.Se = ClosedStSe(v)",
+		"case 1:\n\t\t" + widthBitRej + "m.Sbf = ClosedStSbf(v)",
+		"case 0:\n\t\t" + widthEnumRej + "m.Se = ClosedSaElemSe(v)",
+		"case 1:\n\t\t" + widthBitRej + "m.Sbf = ClosedSaElemSbf(v)",
+		"case 0:\n\t\t" + widthEnumRej + "m.Ue = ClosedUnUe(v)",
+		"case 1:\n\t\t" + widthBitRej + "m.Ubf = ClosedUnUbf(v)",
 	} {
 		if !strings.Contains(types, want) {
-			t.Errorf("types.go: a closed-kind position stores without its guard, missing %q:\n%s", want, types)
+			t.Errorf("types.go: a position stores without its §1 width bound, missing %q:\n%s", want, types)
 		}
 	}
-	// The wrapper is what the collector expression names, and the corelib's own
-	// lo/hi stay off: passing a hull there would arm a SECOND, weaker bound whose
-	// verdict disagrees with this one on exactly the gap values.
+	// 6. matrix row element. Its values never reach the generated visitor —
+	// sofab.*MatrixSeq gathers them and places the finished row — so the bound
+	// has to be one the collector can carry, and the collector's is an INTERVAL
+	// armed by a sentinel. A width IS an interval, so it travels there like every
+	// other element width and the generated wrapper the mask needed is gone.
 	for _, want := range []string{
-		"_rowClosedMatElemElem{sofab.NewSignedMatrixSeq[ClosedMatElemElem](&m.Mat, sofab.Bounds{Count: 2}, sofab.Bounds{Count: 3}, _caps, 0, 0)}",
-		"_rowClosedMbfElemElem{sofab.NewUnsignedMatrixSeq[ClosedMbfElemElem](&m.Mbf, sofab.Bounds{Count: 2}, sofab.Bounds{Count: 3}, _caps, 0)}",
+		"sofab.NewSignedMatrixSeq[ClosedMatElemElem](&m.Mat, sofab.Bounds{Count: 2}, sofab.Bounds{Count: 3}, _caps, -128, 127)",
+		"sofab.NewUnsignedMatrixSeq[ClosedMbfElemElem](&m.Mbf, sofab.Bounds{Count: 2}, sofab.Bounds{Count: 3}, _caps, 255)",
 	} {
 		if !strings.Contains(msg, want) {
-			t.Errorf("closed.go: the matrix row collector is not wrapped, missing %q:\n%s", want, msg)
+			t.Errorf("closed.go: a matrix row collector carries no element width, missing %q:\n%s", want, msg)
 		}
 	}
-	// Storage did not widen with the bound: §1 grants the narrow member as a MAY
-	// precisely because every valid value is a declared one.
+	if strings.Contains(types, "_rowClosed") {
+		t.Errorf("the withdrawn matrix-row wrapper was emitted:\n%s", types)
+	}
+	// Storage stays the smallest integer the declaration implies, which under the
+	// width rule is the bound itself — §1's fourth consequence only obliges a
+	// receiver that holds the field WIDER to add a check, and Go does not.
 	for _, want := range []string{"type ClosedEn int8", "type ClosedBf uint8"} {
 		if !strings.Contains(types, want) {
-			t.Errorf("types.go: the closed bound must not widen storage, missing %q:\n%s", want, types)
+			t.Errorf("types.go: storage must follow the declared width, missing %q:\n%s", want, types)
 		}
 	}
 	// No unguarded store may remain: the exact pre-#516 shapes, spelled out so an
@@ -1380,35 +1387,77 @@ func TestGoClosedEnumAndBitfieldRejectAtEverySixPositions(t *testing.T) {
 		"case 3:\n\t\tm.Bfa = append(m.Bfa, ClosedBfaElem(v))",
 	} {
 		if strings.Contains(msg, bad) {
-			t.Errorf("closed.go still stores a closed kind bare (%q):\n%s", bad, msg)
+			t.Errorf("closed.go still stores an enum/bitfield bare (%q):\n%s", bad, msg)
 		}
 	}
 }
 
-// A CONTIGUOUS enum is the one case where the closed set and an interval
-// coincide, and the cheaper two-sided comparison is emitted for it. It is also
-// why the fixture above is gapped: this shape passes an interval bound, so a
-// contiguous fixture could never have proved anything.
+// The elisions under the width rule: a guard is emitted only where the implied
+// width is NARROWER than the 64-bit accumulator the value arrives in. A bitfield
+// whose highest declared position is 32 or above implies u64 — and an enum
+// needing more than i32 implies i64 — so nothing reachable can breach the bound
+// and the clause would be dead code go vet would be right to flag.
 //
-// A bitfield declaring all 64 positions has mask ^uint64(0), so `v&^mask != 0`
-// is a tautology and the clause is elided — the one case where "no guard" stays
-// right under the closed rule.
-func TestGoClosedContiguousEnumAndTotalMask(t *testing.T) {
+// Note what is NOT an elision any more: whether an enum's constants are
+// contiguous no longer matters at all. The width comes from the extremes, so
+// {−1, 0, 1} and {0, 1, 2, 10} produce the identical i8 guard, and the
+// membership chain a gapped set used to need is gone.
+func TestGoEnumBitfieldWidthElisions(t *testing.T) {
 	var bits []string
 	for i := 0; i < 64; i++ {
 		bits = append(bits, "F"+strconv.Itoa(i)+": { pos: "+strconv.Itoa(i)+" }")
 	}
 	src := "version: 1\nmessages:\n  W:\n    payload:\n" +
 		"      e: { id: 0, type: enum, enum: { A: -1, B: 0, C: 1 } }\n" +
-		"      f: { id: 1, type: bitfield, bits: { " + strings.Join(bits, ", ") + " } }\n"
+		"      f: { id: 1, type: bitfield, bits: { " + strings.Join(bits, ", ") + " } }\n" +
+		"      g: { id: 2, type: bitfield, bits: { LOW: { pos: 0 }, HIGH: { pos: 63 } } }\n" +
+		"      h: { id: 3, type: bitfield, bits: { LOW: { pos: 0 }, TOP: { pos: 31 } } }\n" +
+		"      i: { id: 4, type: enum, enum: { A: 0, B: 300 } }\n"
 	msg := genGo(t, schemaFromYAMLString(t, src), map[string]any{"package": "m"})["w.go"]
-	if !strings.Contains(msg, "case 0:\n\t\tif v < -1 || v > 1 {\n\t\t\treturn sofab.ErrInvalidMsg\n\t\t}\n\t\tm.E = WE(v)") {
-		t.Errorf("a contiguous enum must take the two-sided comparison:\n%s", msg)
+	// A contiguous enum takes the implied i8 width, NOT the 0..1 hull of its
+	// constants: −5 and 100 are valid wire values for this field and must decode.
+	if !strings.Contains(msg, "case 0:\n\t\t"+widthEnumRej+"m.E = WE(v)") {
+		t.Errorf("a contiguous enum must take the implied i8 width, not its constant hull:\n%s", msg)
 	}
 	if !strings.Contains(msg, "case 1:\n\t\tm.F = WF(v)") {
-		t.Errorf("an all-bits-declared bitfield must store unguarded:\n%s", msg)
+		t.Errorf("an all-bits-declared bitfield implies u64 and must store unguarded:\n%s", msg)
 	}
-	if strings.Contains(msg, "0xffffffffffffffff") {
-		t.Errorf("a tautological mask guard was emitted:\n%s", msg)
+	// A single position at 63 implies the same u64 as all 64 do — and retires the
+	// `0x8000000000000001` literal the withdrawn flag mask rendered (generator#470).
+	if !strings.Contains(msg, "case 2:\n\t\tm.G = WG(v)") {
+		t.Errorf("a bitfield whose highest position is 63 must store unguarded:\n%s", msg)
+	}
+	if strings.Contains(msg, "0x8000000000000001") || strings.Contains(msg, "0xffffffffffffffff") {
+		t.Errorf("a withdrawn flag-mask guard was emitted:\n%s", msg)
+	}
+	// One step below the elision, and one width step up on the enum side: the
+	// bound follows the DECLARATION, not the kind.
+	if !strings.Contains(msg, "case 3:\n\t\tif v > 4294967295 {") {
+		t.Errorf("a bitfield whose highest position is 31 must take the u32 width:\n%s", msg)
+	}
+	if !strings.Contains(msg, "case 4:\n\t\tif v < -32768 || v > 32767 {") {
+		t.Errorf("an enum needing i16 must take the i16 width:\n%s", msg)
+	}
+}
+
+// The behavioural difference the width rule makes, stated as the values
+// themselves: a gapped enum admits a value between its constants and a bitfield
+// admits an undeclared bit — both INVALID under the withdrawn closed-set rule.
+// Pinned on the emitted bound so a silent reversion is loud.
+func TestGoWidthAdmitsUndeclaredValues(t *testing.T) {
+	files := genGo(t, schemaFromYAMLString(t, widthSixSrc), map[string]any{"package": "m"})
+	all := files["closed.go"] + files["types.go"]
+	// enum {0,1,2,10}: the guard must admit 5 — i.e. be the i8 interval, never a
+	// membership chain over the constants and never their 0..10 hull.
+	if strings.Contains(all, "v != 10") {
+		t.Errorf("the withdrawn membership chain over enum constants was emitted:\n%s", all)
+	}
+	if strings.Contains(all, "v < 0 || v > 10") {
+		t.Errorf("the enum bound was taken from the constants' hull, not the implied width:\n%s", all)
+	}
+	// bitfield pos{0,1,3}: the guard must admit 4 — i.e. bound the WIDTH (255),
+	// never mask the declared flags (0xb).
+	if strings.Contains(all, "v&^0xb") {
+		t.Errorf("the withdrawn flag-mask guard was emitted:\n%s", all)
 	}
 }
