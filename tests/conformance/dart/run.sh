@@ -904,24 +904,26 @@ python3 "$ROOT/tests/conformance/lib/check_chunk_invariance.py" "Dart" \
     "$WORK/reopen_struct.bin" \
     -- "$H"
 
-# An `enum` and a `bitfield` are CLOSED (MESSAGE_SPEC S1, generator#516): what
-# binds is the SET of constants / the MASK of declared positions, never a width
-# and never the integer the target stores the field in. The shared driver prints
-# its own schema and forges its own bytes, and probes ALL SIX positions with
-# GAPPED definitions, so an interval bound cannot pass.
+# An `enum` and a `bitfield` are bound by the WIDTH their declaration implies
+# (MESSAGE_SPEC S1, generator#516): for an enum the smallest SIGNED type holding
+# every declared constant, for a bitfield the smallest UNSIGNED type holding its
+# highest declared `pos`. A value inside that width is valid even when no
+# constant names it and even when it carries an undeclared bit; only a value
+# outside it is INVALID. The shared driver prints its own schema and forges its
+# own bytes, and probes ALL SIX positions with GAPPED definitions, so a bound
+# derived from the constants rather than from the width cannot pass either.
 #
-# Dart kept a wide member and accepted anything -- its `int` is a 64-bit word, so
-# nothing was even truncated: 5 into an enum declaring {0,1,2,10}, 4 into a
-# bitfield declaring bits 0, 1 and 3 and 2^40 into that same bitfield all decoded
-# and were kept verbatim, at every one of the twelve stores. The matrix row is
-# the position with no generated store at all -- sofab.IntMatrixSeq gathers the
-# row -- and it is covered by a generated SUBCLASS of that collector, so no
-# position is declined here.
-echo "==> closed enum/bitfield: only what the schema declares is valid (S1, generator#516)"
+# The bound is never the integer the target stores the field in: Dart keeps both
+# kinds in its own 64-bit `int`, so 1000 into an i8-implying enum is kept
+# verbatim unless the generated guard refuses it. The matrix row is the position
+# with no generated store at all -- sofab.IntMatrixSeq gathers the row -- and the
+# width is an interval, so the collector's own lo/hi pair carries it; no position
+# is declined here.
+echo "==> enum/bitfield: bounded by the width the declaration implies (S1, generator#516)"
 printf 'version: 1\nmessages:\n' > "$WORK/closed.yaml"
 python3 "$ROOT/tests/conformance/lib/check_closed_kinds.py" --emit-schema >> "$WORK/closed.yaml"
 build "$WORK/closed.yaml" "$WORK/closed"
-python3 "$ROOT/tests/conformance/lib/check_closed_kinds.py" "dart" --legacy-closed-set \
+python3 "$ROOT/tests/conformance/lib/check_closed_kinds.py" "dart" \
     --status-verb trydecode --invalid-pattern 'decode failed: invalid' \
     -- "$WORK/closed/harness"
 # MESSAGE_SPEC §7.4 -- a field id REPEATED inside one scope (generator#523). The

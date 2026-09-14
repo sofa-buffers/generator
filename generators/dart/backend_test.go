@@ -1360,13 +1360,14 @@ func TestDartBitfieldReadsJSONAsUnsigned(t *testing.T) {
 	}
 }
 
-// closedSixSrc declares an `enum` and a `bitfield` at all SIX positions a value
+// widthSixSrc declares an `enum` and a `bitfield` at all SIX positions a value
 // can land in, and both definitions are GAPPED on purpose: the enum declares
-// {0, 1, 2, 10}, so 5 sits inside the hull and is not a constant, and the
-// bitfield declares positions 0, 1 and 3 (mask 0b1011), so 4 sets a bit no flag
-// declares. A contiguous definition makes a closed set look like an interval and
-// would pass under any bound that is one.
-const closedSixSrc = `
+// {0, 1, 2, 10}, so 5 sits inside the implied width and is not a constant, and
+// the bitfield declares positions 0, 1 and 3, so 4 sets a bit no flag declares.
+// Both of those values are VALID under the width rule and were INVALID under the
+// withdrawn closed-set one, which is what makes a gapped definition the shape
+// that tells the two rules apart.
+const widthSixSrc = `
 version: 1
 messages:
   Closed:
@@ -1401,14 +1402,17 @@ messages:
       mbf: { id: 8, type: array, items: { type: array, count: 2, items: { type: bitfield, count: 3, bits: { A: { pos: 0 }, B: { pos: 1 }, D: { pos: 3 } } } } }
 `
 
-// MESSAGE_SPEC §1 closes an `enum` by the SET of constants the schema declares
-// and a `bitfield` by the MASK of the positions it declares (generator#516).
+// MESSAGE_SPEC §1 binds an `enum` to the width of the smallest SIGNED type
+// holding every declared constant and a `bitfield` to the width of the smallest
+// UNSIGNED type holding its highest declared `pos`. Here that is i8 (-128..127)
+// for {0, 1, 2, 10} and u8 (0..255) for positions 0, 1 and 3.
 //
-// This backend kept a wide member and accepted anything -- Dart's `int` is a
-// 64-bit word, so nothing was even truncated: 5 into a gapped enum, 4 into a
-// three-flag bitfield and 2^40 into that same bitfield all decoded and were kept
-// verbatim, at every one of the twelve stores. Storage is never the bound; the
-// declared set is.
+// The bound is not the integer the target stores the field in: Dart keeps both
+// kinds in its own 64-bit `int`, which is §1's fourth consequence -- a receiver
+// that cannot hold the field at exactly the declared width holds it wider and
+// MUST enforce the width as an explicit check, because nothing about its storage
+// will. Nothing is narrowed on the way in, so the guard runs on the value the
+// corelib handed over and no truncation can get in front of it.
 //
 // All six positions are pinned by name -- scalar, native array element, struct
 // member, struct-array element member, union member, matrix row element -- for
@@ -1416,14 +1420,14 @@ messages:
 // struct, a struct-array element and a union their own child visitors, and the
 // arm text is identical in all of them), which is exactly why "the arm is
 // shared" is not worth trusting after the next refactor.
-func TestDartClosedEnumAndBitfieldRejectAtEverySixPositions(t *testing.T) {
-	got := genFor(t, writeDef(t, closedSixSrc), map[string]any{})
-	// The mask test reads the raw 64-bit word and deliberately has NO `value < 0`
-	// term, unlike the unsigned width guard beside it: an unsigned wire value at
-	// or above 2^63 arrives negative in Dart, and for a bitfield declaring
-	// position 63 that is a LEGAL value.
-	const bfRej = "        if ((value & ~0xb) != 0) { invalidate(); return; }\n        "
-	const enRej = "        if (value != 0 && value != 1 && value != 2 && value != 10) { invalidate(); return; }\n        "
+func TestDartEnumAndBitfieldWidthBoundAtEverySixPositions(t *testing.T) {
+	got := genFor(t, writeDef(t, widthSixSrc), map[string]any{})
+	// The bitfield test masks the WIDTH off the raw 64-bit word and deliberately
+	// has no `value < 0` term: an unsigned wire value at or above 2^63 arrives
+	// negative in Dart, and such a value has bits set above the width anyway, so
+	// one mask refuses it and every over-width value in a single operation.
+	const bfRej = "        if ((value & ~0xff) != 0) { invalidate(); return; }\n        "
+	const enRej = "        if (value < -128 || value > 127) { invalidate(); return; }\n        "
 	for _, want := range []string{
 		// 1. scalar
 		enRej + "o.en = value;",
@@ -1434,57 +1438,56 @@ func TestDartClosedEnumAndBitfieldRejectAtEverySixPositions(t *testing.T) {
 		bfRej + "o.sbf = value;",
 		enRej + "o.ue = value;",
 		bfRej + "o.ubf = value;",
-		// 2. native array element: the scan over the assembled list, which is the
-		// EXACT verdict -- the ElemRange below it is an interval and can state
-		// neither a gapped set nor a mask.
-		"        for (final _v in values) { if (_v != 0 && _v != 1 && _v != 2 && _v != 10) { invalidate(); return; } }\n        o.ea = List<int>.from(values);",
-		"        for (final _v in values) { if ((_v & ~0xb) != 0) { invalidate(); return; } }\n        o.bfa = List<int>.from(values);",
-		// ...and the HULL beside it, at the header, which is what the decoder
-		// applies AT each element -- so a value outside the declared RANGE is
-		// refused even when the array is cut short behind it (§5.2), which a scan
-		// of the assembled list cannot reach.
-		"          return const sofab.ElemRange(0, 10);",
-		"          return const sofab.ElemRange(0, 11);",
-		// 6. matrix row element. The row's values never reach the generated
-		// visitor -- sofab.IntMatrixSeq gathers them and places the finished row --
-		// so the verdict is taken in a generated SUBCLASS of the collector, which
-		// overrides the one callback its declared wire kind arrives on and
-		// delegates the row. The lo/hi pair stays 0, 0: arming the interval too
-		// would put a second, weaker bound beside this one that disagrees with it
-		// on exactly the gap.
-		"class _RowClosedMatElemElem extends sofab.IntMatrixSeq {",
-		"  void onSignedArray(int id, Int64List values) {\n" +
-			"    for (final _v in values) { if (_v != 0 && _v != 1 && _v != 2 && _v != 10) { invalidate(); return; } }\n" +
-			"    super.onSignedArray(id, values);",
-		"class _RowClosedMbfElemElem extends sofab.IntMatrixSeq {",
-		"  void onUnsignedArray(int id, Int64List values) {\n" +
-			"    for (final _v in values) { if ((_v & ~0xb) != 0) { invalidate(); return; } }\n" +
-			"    super.onUnsignedArray(id, values);",
-		"return _RowClosedMatElemElem(o.mat, 2, true, 0, 0, rcap: 16384, rowCount: 3, rowCap: 16384);",
-		"return _RowClosedMbfElemElem(o.mbf, 2, false, 0, 0, rcap: 16384, rowCount: 3, rowCap: 16384);",
+		// 2. native array element: the scan over the assembled list, which decides
+		// an array that ARRIVES...
+		"        for (final _v in values) { if (_v < -128 || _v > 127) { invalidate(); return; } }\n        o.ea = List<int>.from(values);",
+		"        for (final _v in values) { if ((_v & ~0xff) != 0) { invalidate(); return; } }\n        o.bfa = List<int>.from(values);",
+		// ...and the SAME interval at the header, which is what the decoder applies
+		// AT each element -- so a value outside the width is refused even when the
+		// array is cut short behind it (§5.2), which a scan of the assembled list
+		// cannot reach. Under the width rule the two state the same bound, so this
+		// position has nothing left unenforced.
+		"          return const sofab.ElemRange(-128, 127);",
+		"          return const sofab.ElemRange(0, 255);",
+		// 6. matrix row element. The row's values never reach the generated visitor
+		// -- sofab.IntMatrixSeq gathers them and places the finished row -- so the
+		// collector's own lo/hi pair is the whole bound, and an interval is exactly
+		// what it can carry.
+		"return sofab.IntMatrixSeq(o.mat, 2, true, -128, 127, rcap: 16384, rowCount: 3, rowCap: 16384);",
+		"return sofab.IntMatrixSeq(o.mbf, 2, false, 0, 255, rcap: 16384, rowCount: 3, rowCap: 16384);",
 	} {
 		if !strings.Contains(got, want) {
-			t.Errorf("Closed message.dart: a closed-kind position stores without its §1 bound, missing %q", want)
+			t.Errorf("Closed message.dart: a position stores without its §1 width bound, missing %q", want)
 		}
 	}
 	for _, bad := range []string{
 		"      case 0:\n        o.en = value;",
 		"      case 1:\n        o.bf = value;",
 		"        o.ea = List<int>.from(values);\n        return;\n    }\n  }\n  @override\n  void onSignedArray",
-		"sofab.IntMatrixSeq(o.mat,",
-		"sofab.IntMatrixSeq(o.mbf,",
+		// The generated collector subclass the set/mask bound needed is gone: the
+		// bound travels through the corelib's own lo/hi pair now.
+		"extends sofab.IntMatrixSeq {",
+		"sofab.IntMatrixSeq(o.mat, 2, true, 0, 0,",
+		"sofab.IntMatrixSeq(o.mbf, 2, false, 0, 0,",
 	} {
 		if strings.Contains(got, bad) {
-			t.Errorf("Closed message.dart still stores a closed kind unguarded (%q)", bad)
+			t.Errorf("Closed message.dart still stores an enum/bitfield unguarded (%q)", bad)
 		}
 	}
 }
 
-// The two elisions, both of which keep "no guard" right under the closed rule.
-// A CONTIGUOUS enum is its own hull, so the cheaper two-sided comparison IS the
-// set; a bitfield declaring all 64 positions has a mask of every bit, so the mask
-// test is a tautology and emitting it would be dead code.
-func TestDartClosedBoundElisions(t *testing.T) {
+// The elision under the width rule: a guard is emitted only where the implied
+// width is NARROWER than the 64-bit accumulator the value arrives in. A bitfield
+// whose highest declared position is 63 implies u64, so nothing reachable can
+// breach the bound and the clause would be dead code. The enum half of the same
+// elision is unreachable from a valid schema -- the validator caps a constant at
+// the signed 32-bit range, so an enum never implies more than i32.
+//
+// Note what is NOT an elision any more: whether an enum's constants are
+// contiguous no longer matters at all. The width is derived from the extremes,
+// so {0,1,2} and {0,1,2,10} produce the identical i8 guard, and the membership
+// chain a gapped set used to need is gone.
+func TestDartEnumBitfieldWidthElisions(t *testing.T) {
 	var bits []string
 	for i := 0; i < 64; i++ {
 		bits = append(bits, fmt.Sprintf("F%d: { pos: %d }", i, i))
@@ -1494,40 +1497,67 @@ func TestDartClosedBoundElisions(t *testing.T) {
 		"      e: { id: 1, type: enum, enum: { R: 0, G: 1, B: 2 }, default: 0 }\n"),
 		map[string]any{})
 	if !strings.Contains(got, "      case 0:\n        o.f = value;") {
-		t.Errorf("an all-bits-declared bitfield must store unguarded:\n%s", got)
+		t.Errorf("a bitfield implying the full u64 width must store unguarded:\n%s", got)
 	}
 	if strings.Contains(got, "0xffffffffffffffff") {
 		t.Errorf("a tautological mask guard was emitted:\n%s", got)
 	}
-	if !strings.Contains(got, "        if (value < 0 || value > 2) { invalidate(); return; }\n        o.e = value;") {
-		t.Errorf("a contiguous enum must take the two-sided comparison:\n%s", got)
+	// {R:0, G:1, B:2} implies i8, NOT the 0..2 hull of its constants: 5 is a valid
+	// wire value for this field and must decode.
+	if !strings.Contains(got, "        if (value < -128 || value > 127) { invalidate(); return; }\n        o.e = value;") {
+		t.Errorf("a contiguous enum must take the implied i8 width, not its constant hull:\n%s", got)
 	}
 }
 
-// A mask that declares position 63 is the literal-rendering trap generator#470
-// already hit once. Dart accepts a HEX literal anywhere in [0, 2^64) and reads it
-// as the signed 64-bit word, which is the only way to spell such a mask at all --
-// and the mask test on the raw word is then right for it, which is why it carries
-// no `value < 0` term.
-//
-// The interval hooks cannot follow it there. sofab.ElemRange and the row
-// collector both compare an unsigned element as `v < 0 || v > max`, so a maximum
-// with the top bit set would refuse the very value that bit is: the array element
-// gets no ElemRange at all, and the scan is the whole bound.
-func TestDartClosedMaskSpansBit63(t *testing.T) {
+// A bitfield declaring position 63 implies u64 -- the accumulator's own width --
+// so under the width rule it carries NO guard at all, at either position. Under
+// the withdrawn closed-set rule the same declaration emitted a
+// `~0x8000000000000001` mask, which is the literal-rendering trap of
+// generator#470: Dart has no unsigned int, so that mask exists only as a hex
+// literal. Deriving the bound from the highest position removes both the trap
+// and the comparison, and the interval hooks that had to decline such a maximum
+// are not asked for one any more.
+func TestDartBitfieldSpanningBit63IsUnguarded(t *testing.T) {
 	got := genFor(t, writeDef(t, "version: 1\nmessages:\n  W:\n    payload:\n"+
 		"      g:  { id: 0, type: bitfield, bits: { LOW: { pos: 0 }, HIGH: { pos: 63 } } }\n"+
 		"      ga: { id: 1, type: array, items: { type: bitfield, count: 2, bits: { LOW: { pos: 0 }, HIGH: { pos: 63 } } } }\n"),
 		map[string]any{})
 	for _, want := range []string{
-		"        if ((value & ~0x8000000000000001) != 0) { invalidate(); return; }\n        o.g = value;",
-		"        for (final _v in values) { if ((_v & ~0x8000000000000001) != 0) { invalidate(); return; } }\n        o.ga = List<int>.from(values);",
+		"      case 0:\n        o.g = value;",
+		"        o.ga = List<int>.from(values);",
 	} {
 		if !strings.Contains(got, want) {
-			t.Errorf("a bit-63 mask must be spelled as a hex literal and tested on the raw word, missing %q:\n%s", want, got)
+			t.Errorf("a bitfield implying the full u64 width must store unguarded, missing %q:\n%s", want, got)
 		}
 	}
+	if strings.Contains(got, "0x8000000000000001") {
+		t.Errorf("the withdrawn flag-mask guard was emitted:\n%s", got)
+	}
 	if strings.Contains(got, "onArrayElemBound") {
-		t.Errorf("a bit-63 mask has no positive maximum to state as an interval:\n%s", got)
+		t.Errorf("a u64-implying element width states no interval:\n%s", got)
+	}
+}
+
+// The behavioural difference the width rule makes, stated as the values
+// themselves: a gapped enum admits a value between its constants, and a bitfield
+// admits an undeclared bit -- both INVALID under the withdrawn closed-set rule.
+// Pinned on the emitted bound so a silent reversion is loud.
+func TestDartWidthAdmitsUndeclaredValues(t *testing.T) {
+	got := genFor(t, writeDef(t, widthSixSrc), map[string]any{})
+	// enum {0,1,2,10}: the guard must admit 5 -- i.e. be the i8 interval, never a
+	// membership chain over the constants, and never their 0..10 hull.
+	if strings.Contains(got, "value != 10") || strings.Contains(got, "_v != 10") {
+		t.Errorf("the withdrawn membership chain over enum constants was emitted:\n%s", got)
+	}
+	if strings.Contains(got, "sofab.ElemRange(0, 10)") {
+		t.Errorf("the withdrawn constant hull was stated as the element interval:\n%s", got)
+	}
+	// bitfield pos{0,1,3}: the guard must admit 4 -- i.e. mask the WIDTH (0xff),
+	// never the flag mask (0xb).
+	if strings.Contains(got, "~0xb)") {
+		t.Errorf("the withdrawn flag-mask guard was emitted:\n%s", got)
+	}
+	if !strings.Contains(got, "~0xff)") {
+		t.Errorf("the bitfield width mask is missing:\n%s", got)
 	}
 }
