@@ -2,7 +2,6 @@ package dart
 
 import (
 	"fmt"
-	"strings"
 
 	"github.com/sofa-buffers/generator/internal/ir"
 )
@@ -273,16 +272,18 @@ func (g *gen) arrayCountHdrGuard(kind string, fld *ir.Field) string {
 // widthGuard renders the §7.1 rejection for a scalar store into a destination
 // the schema declares with Kind k — and, for a composite kind, `ref` carries the
 // rest of that declaration. "" when nothing reachable can breach the bound: the
-// 64-bit kinds, whose range IS the callback parameter's own, and a bitfield
-// declaring all 64 positions. It rejects through the same set as the maxlen and
-// count rejects.
+// 64-bit kinds, whose range IS the callback parameter's own, an enum
+// whose constants need the full i64 and a bitfield whose highest declared `pos`
+// needs the full u64. It rejects through the same set as the maxlen and count
+// rejects.
 //
-// What the schema declares is what binds, and the declaration takes two shapes.
-// For an integer it is a WIDTH (documentation#32): a `u8`/`u16`/`u32`/`i8`/
-// `i16`/`i32` destination carrying a value outside its declared range is
-// malformed input, INVALID — never masked to the width, never kept. For an
-// `enum` or a `bitfield` it is a SET — the declared constants, the mask of
-// declared `pos` bits (MESSAGE_SPEC §1) — and closedCond answers for those.
+// What the schema declares is what binds, and every declaration binds a WIDTH.
+// For an integer it is the declared one (documentation#32): a `u8`/`u16`/`u32`/
+// `i8`/`i16`/`i32` destination carrying a value outside its declared range is
+// malformed input, INVALID — never masked to the width, never kept. An `enum`
+// and a `bitfield` bind the width their declaration IMPLIES (MESSAGE_SPEC §1) —
+// the smallest signed type holding every constant, the smallest unsigned type
+// holding the highest `pos` — and declaredWidthCond answers for those.
 //
 // One clause serves four of the six positions a value lands in: this loop runs
 // once per message, struct and union visitor, so the message field, the struct
@@ -294,13 +295,14 @@ func (g *gen) arrayCountHdrGuard(kind string, fld *ir.Field) string {
 // is a 64-bit SIGNED integer with no unsigned counterpart, so an unsigned wire
 // value at or above 2^63 arrives negative and `value > 255` alone would wave
 // through exactly the largest values. Every narrow maximum is below 2^63, so
-// treating negative as out-of-range is right for all of them. A bitfield mask
-// test needs no such term and must not have one — it reads the raw 64 bits, and
-// for a bitfield declaring position 63 a negative value is a LEGAL one.
+// treating negative as out-of-range is right for all of them. A bitfield needs
+// no such term and gets the same answer for free: its guard masks the implied
+// WIDTH off the raw 64 bits, and a value arriving negative has bits set above
+// every width this can bound.
 func widthGuard(k ir.Kind, ref *ir.TypeRef) string {
 	cond := widthCond("value", k)
 	if cond == "" {
-		cond = closedCond("value", k, ref)
+		cond = declaredWidthCond("value", k, ref)
 	}
 	if cond == "" {
 		return ""
@@ -320,56 +322,57 @@ func widthCond(v string, k ir.Kind) string {
 	return fmt.Sprintf("%s < 0 || %s > %d", v, v, hi)
 }
 
-// closedCond is the reject comparison for the two CLOSED kinds, MESSAGE_SPEC §1:
-// an `enum` is bound by the set of constants the schema declares, a `bitfield`
-// by the mask of the positions it declares, so a value is valid exactly when
-// `v & ~mask == 0`. It returns "" for every other kind (widthCond owns those)
-// and for a bitfield whose declared positions cover all 64 bits, where the test
-// is a tautology and the clause would be dead code.
+// declaredWidthCond is the reject comparison for an `enum` and a `bitfield`,
+// MESSAGE_SPEC §1: each is bound by the WIDTH its declaration implies — for an
+// enum the smallest SIGNED type holding every declared constant, for a bitfield
+// the smallest UNSIGNED type holding its highest declared `pos`. It returns ""
+// for every other kind (widthCond owns those) and wherever the implied width is
+// the 64-bit accumulator itself, where the test is a tautology and the clause
+// would be dead code.
 //
-// Neither bound is a width, and storage is never the bound. Dart holds both
-// kinds in its own `int` whatever the schema declares, and a field whose
-// declared positions are 0..3 does not become 0..2^64 valid because of it. The
-// comparison runs on the value the corelib handed over, before anything is
-// stored, and one clause covers both halves of the old reading at once: a mask
-// test on the raw 64-bit word rejects an undeclared bit inside the byte the
-// field would fit in and everything above it in the same expression, and a
-// membership test does the same for an enum.
+// A value INSIDE that width is valid even when the schema names no constant for
+// it and even when it carries an undeclared bit; only a value outside it is
+// malformed input. So an enum declaring {0, 1, 2, 10} admits 5 and refuses 200,
+// and a bitfield declaring positions 0, 1 and 3 admits 4 — the undeclared bit 2
+// — and refuses 256. An undeclared bit is NOT masked away: masking would turn
+// malformed-looking input into a DECLARED combination and report it Ok.
 //
-// This reverses generator#482, which kept an undeclared bit that fit the backing
-// width on the argument that it is how a peer built from a newer schema carries
-// a flag this one has not got yet. §1 answers that directly: adding a flag — or
-// a constant — is a BREAKING schema change, and a receiver rejects the value
-// rather than storing something its declared type cannot represent.
+// This replaces the set/mask bound of generator#530, which implemented the
+// closed-type reading MESSAGE_SPEC carried for six days (doc PR #89, `a50db95`)
+// and doc PR #95 (`382159e`) withdrew. Both bounds are ordinary intervals now,
+// which is §1's own reason for the change: an array's elements are consumed
+// inside the corelib loop, so a bound must cross that channel as an interval,
+// and a width fits where a set does not. That is why every corelib hook below
+// carries the whole bound now, and why none of them needs a generated subclass
+// to state it.
 //
-// The mask is rendered as a HEXADECIMAL literal: Dart accepts a hex literal
-// anywhere in [0, 2^64) and reinterprets it as the signed 64-bit word, which is
-// the only way to spell a mask with position 63 declared at all. Rendering the
-// literal is the trap generator#470 already hit once.
-func closedCond(v string, k ir.Kind, ref *ir.TypeRef) string {
+// Storage is still never the bound. Dart holds both kinds in its own `int`
+// whatever the schema declares, which is §1's fourth consequence directly: a
+// receiver that cannot hold the field at exactly the declared width holds it
+// wider and MUST then enforce the width as an explicit check, because nothing
+// about its storage will. So the comparison runs on the value the corelib handed
+// over, before anything is stored.
+func declaredWidthCond(v string, k ir.Kind, ref *ir.TypeRef) string {
 	switch k {
 	case ir.KindEnum:
-		vals, ok := ir.EnumValues(ref)
-		if !ok || len(vals) == 0 {
+		lo, hi, ok := ir.EnumWidthRange(ref)
+		if !ok {
 			return ""
 		}
-		if ir.EnumContiguous(ref) {
-			return fmt.Sprintf("%s < %d || %s > %d", v, vals[0], v, vals[len(vals)-1])
-		}
-		terms := make([]string, len(vals))
-		for i, x := range vals {
-			terms[i] = fmt.Sprintf("%s != %d", v, x)
-		}
-		return strings.Join(terms, " && ")
+		return fmt.Sprintf("%s < %d || %s > %d", v, lo, v, hi)
 	case ir.KindBitfield:
-		mask, ok := ir.BitfieldMask(ref)
-		if !ok || mask == ^uint64(0) {
+		// Spelled as a MASK of the width rather than `v < 0 || v > hi`: Dart's int
+		// is a 64-bit signed word with no unsigned counterpart, so an unsigned wire
+		// value at or above 2^63 arrives negative, and one mask on the raw bits
+		// refuses both an over-width value and that sign-bit case in a single
+		// operation. The widest mask a width can produce is `~0xffffffff`, so the
+		// literal-rendering trap of generator#470 — a mask with bit 63 set, which
+		// has no decimal spelling in Dart — is not reachable from here any more.
+		hi, ok := ir.BitfieldWidthMax(ref)
+		if !ok {
 			return ""
 		}
-		if mask == 0 {
-			return fmt.Sprintf("%s != 0", v)
-		}
-		return fmt.Sprintf("(%s & ~0x%x) != 0", v, mask)
+		return fmt.Sprintf("(%s & ~0x%x) != 0", v, hi)
 	}
 	return ""
 }
@@ -378,14 +381,12 @@ func closedCond(v string, k ir.Kind, ref *ir.TypeRef) string {
 // hands the whole array over as a List<int>, so the raw values are still visible
 // and one scan decides the array.
 //
-// For a declared width the scan is the second of two statements of one bound —
-// elemBoundArm below states it at the element, for the array that never
-// completes. For a CLOSED kind the scan is the EXACT one and the hook below can
-// only carry the hull, so this is where a gap value is refused; see there.
+// The scan is the second of two statements of ONE bound: elemBoundArm below
+// states the same interval at the element, for the array that never completes.
 func arrayWidthGuard(elem ir.Kind, ref *ir.TypeRef) string {
 	cond := widthCond("_v", elem)
 	if cond == "" {
-		cond = closedCond("_v", elem, ref)
+		cond = declaredWidthCond("_v", elem, ref)
 	}
 	if cond == "" {
 		return ""
@@ -394,25 +395,22 @@ func arrayWidthGuard(elem ir.Kind, ref *ir.TypeRef) string {
 }
 
 // elemBoundArm is the onArrayElemBound arm body declaring the range an element
-// of this array may take (MESSAGE_SPEC §7.1) — "" for u64/i64 and bool, whose
-// range is the callback parameter's own.
+// of this array may take (MESSAGE_SPEC §7.1) — "" for u64/i64, bool, and an
+// enum or bitfield whose implied width is the accumulator, whose range is the
+// callback parameter's own.
 //
 // Emitted exactly where arrayWidthGuard is: the two are one bound at two times.
 // The guard scans the assembled list, which decides an array that ARRIVES; this
 // is what the decoder applies to one that does not, where the whole-array
 // callback never fires and the guard therefore never runs (generator#267).
 //
-// For a declared WIDTH the two say the same thing. For the two CLOSED kinds they
-// do not, and cannot: sofab.ElemRange is an INTERVAL and a declared set is not
-// one — the constants are gapped in general, and a mask is not a range at all —
-// so what is stated here is the HULL (elemRange), the most of the bound this
-// hook can carry. It refuses every value outside the declared range whether the
-// array completes or is cut short behind the offending element, and
-// arrayWidthGuard's scan closes the gap for an array that arrives. What stays
-// unenforced is exactly one case, reported rather than papered over: a value
-// inside the hull that the set does not declare, in an array a truncation cuts
-// short behind it. Closing it needs a set/mask channel on corelib-dart's
-// onArrayElemBound.
+// The two say the same thing for every kind, an `enum` and a `bitfield`
+// included: under MESSAGE_SPEC §1 their bound is the implied WIDTH, which is an
+// interval and fits sofab.ElemRange whole. So nothing is left unenforced at this
+// position — a value outside the range is refused whether the array completes or
+// is cut short behind the offending element (§5.2). The set/mask bound of
+// generator#530 could not cross this channel and left exactly that truncated
+// case to a comment.
 //
 // Gated on `kind` for the reason arrayCountHdrGuard is: the hook is asked per
 // field id, and an array whose wire element kind contradicts the declared one is
@@ -428,35 +426,35 @@ func elemBoundArm(kind string, elem ir.Kind, ref *ir.TypeRef) string {
 	return fmt.Sprintf("if (kind == sofab.ArrayKind.%s) {\n          return const sofab.ElemRange(%d, %d);\n        }", kind, lo, hi)
 }
 
-// elemRange is the inclusive INTERVAL an element may take: a declared width
-// exactly, or a closed kind's hull — an enum's lowest and highest constant,
-// `0..mask` for a bitfield. It is what onArrayElemBound is handed, the one
-// corelib hook here that carries an interval and can carry nothing else, and it
-// is a WEAKER bound than a closed declaration: nothing may use it where
-// closedCond can state the set itself.
+// elemRange is the inclusive INTERVAL an element may take: the declared width,
+// or the width an `enum`/`bitfield` declaration implies (MESSAGE_SPEC §1). It is
+// what onArrayElemBound and the matrix-row collector are handed — the two
+// corelib hooks here that carry an interval and can carry nothing else — and
+// under the width rule that is no longer weaker than the scan emitted beside it:
+// the two state the same range.
 //
-// ok is false where no interval can be stated, and each case is a real one:
-//   - u64/i64 and bool, whose range IS the callback parameter's own;
-//   - an enum declaring no constants, and a bitfield whose mask is 0 — the value
-//     domain is a single value, which `lo == hi` disarms both hooks on;
-//   - a bitfield declaring position 63. Its mask has no positive Dart `int` to
-//     state as a maximum, and both hooks compare an unsigned element as
-//     `v < 0 || v > max`, so stating anything at all would refuse the very value
-//     that bit is.
+// ok is false where no interval narrows anything, and each case is a real one:
+// u64/i64 and bool, whose range IS the callback parameter's own, and an enum
+// whose constants need the full i64 or a bitfield whose highest declared `pos`
+// needs the full u64, for the same reason.
+//
+// The widest maximum this returns is 0xffffffff — a bitfield implying u32 — so
+// it always fits a positive Dart `int`. Both hooks compare an unsigned element
+// as `v < 0 || v > max`, and the bit-63 mask that had no positive maximum to
+// state (generator#470) is not reachable from a width.
 func elemRange(k ir.Kind, ref *ir.TypeRef) (lo, hi int64, ok bool) {
 	if lo, hi, ok = ir.NarrowRange(k); ok {
 		return lo, hi, true
 	}
 	switch k {
 	case ir.KindEnum:
-		lo, hi, ok = ir.EnumHull(ref)
-		return lo, hi, ok && lo != hi
+		return ir.EnumWidthRange(ref)
 	case ir.KindBitfield:
-		mask, isBf := ir.BitfieldMask(ref)
-		if !isBf || mask == 0 || mask >= uint64(1)<<63 {
+		max, isBf := ir.BitfieldWidthMax(ref)
+		if !isBf {
 			return 0, 0, false
 		}
-		return 0, int64(mask), true
+		return 0, int64(max), true
 	}
 	return 0, 0, false
 }
@@ -552,17 +550,15 @@ func (g *gen) collector(out string, elem ir.Kind, ref *ir.TypeRef, items *ir.Arr
 			case items.Elem == ir.KindFP32 || items.Elem == ir.KindFP64:
 				return fmt.Sprintf("sofab.DoubleMatrixSeq(%s, %d, %v%s)", out, cap, items.Elem == ir.KindFP64, rows)
 			default:
-				// lo/hi are the DECLARED WIDTH and nothing else. For the two CLOSED
-				// kinds they stay 0, 0 — which the collector reads as "no bound" —
-				// because the wrapper below is the whole bound there, and arming a
-				// hull beside it would put a second, weaker interval on the same
-				// values that disagrees with it on exactly the gap.
-				_lo, _hi, _ := ir.NarrowRange(items.Elem)
-				seq := fmt.Sprintf("sofab.IntMatrixSeq(%s, %d, %v, %d, %d%s)", out, cap, signedArrayElem(items.Elem), _lo, _hi, rows)
-				if gn := g.rowGuardName(items.Elem, items.ElemRef); gn != "" {
-					seq = fmt.Sprintf("%s(%s, %d, %v, %d, %d%s)", gn, out, cap, signedArrayElem(items.Elem), _lo, _hi, rows)
-				}
-				return seq
+				// lo/hi bound a ROW's elements, and this pair is the ONLY bound the
+				// position has: a row's values never reach the generated visitor --
+				// sofab.IntMatrixSeq gathers them and places the finished row -- so
+				// there is no store here to guard. Under the width rule it carries the
+				// whole bound for an `enum` and a `bitfield` too (MESSAGE_SPEC §1),
+				// which the set/mask bound of generator#530 could not: that one needed
+				// a generated subclass of the collector to state itself at all.
+				_lo, _hi, _ := elemRange(items.Elem, items.ElemRef)
+				return fmt.Sprintf("sofab.IntMatrixSeq(%s, %d, %v, %d, %d%s)", out, cap, signedArrayElem(items.Elem), _lo, _hi, rows)
 			}
 		}
 		// Array of wrapper arrays: each element opens a sequence collected into the
@@ -711,103 +707,4 @@ func (g *gen) emitPrelude(f *dfile, s *ir.Schema) {
 		f.line("    (ByteData(4)..setUint32(0, bits, Endian.little)).getFloat32(0, Endian.little);")
 		f.blank()
 	}
-}
-
-// ---- closed matrix-row elements -------------------------------------------
-
-// matrixRowClosed keys, by named type, every `enum` and `bitfield` this schema
-// uses as a MATRIX ROW ELEMENT (`array<array<enum>>`) and whose declared set
-// bounds anything -- i.e. the row collectors that need a guard subclass.
-//
-// It is a scan and not a flag set during emission because the module is one
-// Dart library: the subclass has to exist before the first expression naming it
-// and may be declared exactly once however many messages share the type.
-func (g *gen) matrixRowClosed(s *ir.Schema) map[string]*ir.TypeRef {
-	out := map[string]*ir.TypeRef{}
-	var walk func(elem ir.Kind, items *ir.ArrayElem)
-	walk = func(elem ir.Kind, items *ir.ArrayElem) {
-		// The shape `collector` builds an IntMatrixSeq for: an array whose ELEMENT
-		// is itself an array of natives. Anything deeper recurses the way the
-		// nested wrapper-array collector does.
-		if elem != ir.KindArray || items == nil {
-			return
-		}
-		if !nativeArrayElem(items.Elem) {
-			walk(items.Elem, items.ElemItems)
-			return
-		}
-		if n := g.rowGuardName(items.Elem, items.ElemRef); n != "" {
-			out[items.ElemRef.Key] = items.ElemRef
-		}
-	}
-	scan := func(fields []*ir.Field) {
-		for _, fld := range fields {
-			if fld.Kind == ir.KindArray {
-				walk(fld.Elem, fld.ElemItems)
-			}
-		}
-	}
-	for _, m := range s.Messages {
-		scan(m.Fields)
-	}
-	for _, key := range s.NamedOrder {
-		scan(s.Named[key].Fields)
-	}
-	return out
-}
-
-// rowGuardName is the generated subclass that closes a matrix row element's
-// declared set, or "" for an element kind that needs none. Library-private, so
-// it cannot collide with a generated type name.
-func (g *gen) rowGuardName(elem ir.Kind, ref *ir.TypeRef) string {
-	if ref == nil || closedCond("_v", elem, ref) == "" {
-		return ""
-	}
-	return "_Row" + g.typeName(ref.Key)
-}
-
-// emitRowGuard emits the matrix-row subclass for one closed named type: it
-// overrides the single element callback its declared wire kind arrives on,
-// closes the set, and delegates the row to the corelib collector.
-//
-// It exists because a matrix row's elements never reach the generated visitor --
-// sofab.IntMatrixSeq gathers them and places the finished row -- and the only
-// bound the collector carries of its own is the `lo`/`hi` INTERVAL, which states
-// neither a gapped constant set nor a bitfield mask (MESSAGE_SPEC §1).
-// Subclassing is a purely generated-side fix, the same one the Go backend makes
-// with an embedded collector: the row id, the row count and the placing stay the
-// corelib's, and only the value test is ours.
-//
-// The scan is unconditional because the callback it overrides is the one the
-// collector was constructed for: `signed` is fixed by the schema, and a row of
-// the OTHER wire kind arrives on the other callback, which this subclass does
-// not touch and the collector already skips under §7.3.
-//
-// It decides an array that ARRIVES. A row cut short behind an undeclared element
-// reports INCOMPLETE where §5.2 wants INVALID, and closing that needs a
-// per-element channel on corelib-dart's collector -- the same limit the flat
-// array position has, where onArrayElemBound at least carries the hull.
-func (g *gen) emitRowGuard(f *dfile, nt *ir.NamedType, ref *ir.TypeRef) {
-	kind := ir.KindBitfield
-	cb := "onUnsignedArray"
-	if nt.Category == ir.CatEnum {
-		kind, cb = ir.KindEnum, "onSignedArray"
-	}
-	name := g.rowGuardName(kind, ref)
-	f.line("/// Closes [%s] at a matrix row element. The row's", g.typeName(nt.Key))
-	f.line("/// values never reach the generated visitor -- the collector gathers them and")
-	f.line("/// places the finished row -- and the only bound it carries of its own is an")
-	f.line("/// interval, which states neither a gapped constant set nor a bitfield mask.")
-	f.line("/// So the value test is here and everything else stays the corelib's.")
-	f.line("class %s extends sofab.IntMatrixSeq {", name)
-	f.line("  %s(super.out, super.cap, super.signed, super.lo, super.hi,", name)
-	f.line("      {required super.rcap, required super.rowCount, required super.rowCap});")
-	f.blank()
-	f.line("  @override")
-	f.line("  void %s(int id, Int64List values) {", cb)
-	f.line("    for (final _v in values) { if (%s) { invalidate(); return; } }", closedCond("_v", kind, ref))
-	f.line("    super.%s(id, values);", cb)
-	f.line("  }")
-	f.line("}")
-	f.blank()
 }
