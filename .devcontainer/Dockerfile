@@ -13,6 +13,31 @@ ENV GOPATH=/root/go
 ENV PATH=/usr/local/go/bin:/root/go/bin:$PATH
 
 # Base tooling
+#
+# Beyond the fetch/build essentials, this carries the tools the repository's own
+# workflow leans on:
+#
+#   ripgrep / fd-find  searching a tree that holds eleven generated-code backends
+#                      plus their harnesses. fd-find installs its binary as
+#                      `fdfind` on Debian/Ubuntu (a name clash with another
+#                      package), so it is linked to `fd`, which is what everyone
+#                      and every snippet actually types.
+#   shellcheck/shfmt   every conformance harness and every bench recipe is a
+#                      shell script -- tests/conformance/<lang>/run.sh,
+#                      tests/bench/lang/<x>.sh -- and they are the layer with no
+#                      compiler to catch a typo.
+#   xxd                the format is a BINARY wire format. Reading a fixture, a
+#                      failing vector or a hand-forged header means dumping
+#                      bytes, and the specs are written in hex throughout.
+#   jq                 tests/bench/rows.json, the generator's JSON config and
+#                      `gh ... --json` output. Nothing in the tree shells out to
+#                      it, but every ad-hoc inspection of those three does.
+#   cmake              generators/c/project.go EMITS a CMakeLists.txt, so a
+#                      generated C project is built with cmake even though the
+#                      conformance harness itself drives make.
+#   file               reading what a cross-compile actually produced when a
+#                      footprint row misbehaves (an ELF for the wrong target
+#                      still links and still has a `size` output).
 RUN apt-get update && apt-get install -y --no-install-recommends \
         ca-certificates \
         curl \
@@ -23,7 +48,16 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         xz-utils \
         unzip \
         ripgrep \
-    && rm -rf /var/lib/apt/lists/*
+        fd-find \
+        shellcheck \
+        shfmt \
+        xxd \
+        jq \
+        cmake \
+        file \
+    && rm -rf /var/lib/apt/lists/* \
+    && ln -sf /usr/bin/fdfind /usr/local/bin/fd \
+    && fd --version > /dev/null
 
 # Go toolchain
 RUN ARCH="$(dpkg --print-architecture)" \
@@ -89,10 +123,19 @@ ENV PATH=/usr/local/dart-sdk/bin:$PATH
 # python row by zero instructions. With these three the extension can be built
 # (`python3 setup.py build_ext --inplace` in the corelib checkout), and the engine
 # that actually ran is recorded in results.txt as `sofab-engine`.
+#
+# python3-pip + python3-venv are for the human, not for the harness: the python
+# conformance run prints `missing build dependency: <mod> (pip install <mod>)`
+# when corelib-py's accelerator cannot be built, and that instruction needs a pip
+# to exist. This base is PEP 668 ("externally managed"), so a bare
+# `pip install` into the system interpreter is refused -- python3-venv is what
+# makes the documented way out (`python3 -m venv`) available.
 RUN apt-get update && apt-get install -y --no-install-recommends \
         python3 \
         python3-dev \
         python3-setuptools \
+        python3-pip \
+        python3-venv \
         cython3 \
         default-jdk \
         maven \
