@@ -30,7 +30,7 @@ type frame struct {
 	childLoc  string      // fkSeqObj: element loc; fkSeqMat: inner-row loc
 	elemType  string      // fkSeqObj: Kotlin class for the gap fill
 	innerElem ir.Kind     // fkNativeMat: inner element kind
-	innerRef  *ir.TypeRef // fkNativeMat: inner element ref (the closed kinds' declared set)
+	innerRef  *ir.TypeRef // fkNativeMat: inner element ref (the enum/bitfield declaration)
 	// schema bounds, for the receiver-side decode limits (generator#102):
 	innerHasCount bool // fkNativeMat: the inner array declares a count
 	// innerCap is the inner array's own schema count N (-1 == none) -- the bound on
@@ -210,15 +210,16 @@ func (g *gen) overIndexGuard(cap int64, name string) string {
 // widthThrow renders the §7.1 rejection for a store into a destination the schema
 // declares with Kind k -- and, for a composite kind, `ref` carries the rest of
 // that declaration. "" when nothing reachable can breach the bound: the 64-bit
-// kinds, whose range IS the accumulator the value arrives in, and a bitfield
-// declaring all 64 positions.
+// kinds, whose range IS the accumulator the value arrives in, and the
+// enum/bitfield declarations that imply one -- a bitfield whose highest declared
+// `pos` is 32 or above.
 //
-// What the schema declares is what binds, and the declaration takes two shapes.
-// For an integer it is a WIDTH (MESSAGE_SPEC §7.1): a narrow-width destination
-// receiving a value outside its declared range is malformed input -- never
-// masked to the width, never kept. For an `enum` or a `bitfield` it is a SET --
-// the declared constants, the mask of declared `pos` bits (§1) -- and closedCond
-// answers for those.
+// What the schema declares is what binds, and every declaration binds a WIDTH
+// (MESSAGE_SPEC §7.1): a narrow-width destination receiving a value outside its
+// declared range is malformed input -- never masked to the width, never kept. An
+// `enum` and a `bitfield` bind the width their declaration IMPLIES (§1) -- the
+// smallest signed type holding every constant, the smallest unsigned type
+// holding the highest `pos` -- and declaredWidthCond answers for those.
 //
 // One clause serves every position. The scalar, struct-member, struct-array
 // member and union-member stores are ONE arm per kind serving four positions
@@ -230,13 +231,12 @@ func (g *gen) overIndexGuard(cap int64, name string) string {
 // corelib delivers an unsigned wire value as a `Long`, so a u64 at or above 2^63
 // arrives with its sign bit set and `value > 255` alone would read it as
 // negative, letting precisely the largest values through. A bitfield needs no
-// such term -- its test is a mask on the raw bits, taken on the unsigned view of
-// the same carrier, and a value with bit 63 set is refused by exactly that
-// expression unless position 63 is declared.
+// such term -- its test is a mask on the raw bits, and a value with bit 63 set is
+// refused by exactly that expression.
 func widthThrow(k ir.Kind, ref *ir.TypeRef, name string) string {
 	cond, what := widthCond(k), "width "+k.String()
 	if cond == "" {
-		cond, what = closedCond(k, ref), closedWhat(k)
+		cond, what = declaredWidthCond(k, ref), declaredWidthWhat(k)
 	}
 	if cond == "" {
 		return ""
@@ -257,72 +257,71 @@ func widthCond(k ir.Kind) string {
 	return fmt.Sprintf("value < 0L || value > %dL", hi)
 }
 
-// closedCond is the reject comparison for the two CLOSED kinds, MESSAGE_SPEC §1:
-// an `enum` is bound by the set of constants the schema declares, a `bitfield`
-// by the mask of the positions it declares, so a value is valid exactly when
-// `value & ~mask == 0`. It returns "" for every other kind (widthCond owns
-// those) and for a bitfield whose declared positions cover all 64 bits, where the
-// test is a tautology and the clause would be dead code.
+// declaredWidthCond is the reject comparison for an `enum` and a `bitfield`,
+// MESSAGE_SPEC §1: each is bound by the WIDTH its declaration implies -- for an
+// enum the smallest SIGNED type holding every declared constant, for a bitfield
+// the smallest UNSIGNED type holding its highest declared `pos`. It returns ""
+// for every other kind (widthCond owns those) and wherever the implied width is
+// the 64-bit accumulator itself, where the test is a tautology and the clause
+// would be dead code.
 //
-// This REPLACES the signed-32-bit enum bound this backend carried alone. That
-// bound was the wire type's ceiling read as the field's, and it happened to
-// coincide with the `Int` the target stores an enum in -- which is exactly the
-// confusion §1 settles: storage is never the bound. The member stays the
-// narrowest integer that holds the declared constants/positions (§1 grants that
-// as a MAY), but a field whose declared positions are 0..3 does not become
-// 0..2^64 valid because Kotlin holds it in a `ULong`.
+// A value INSIDE that width is valid even when the schema names no constant for
+// it and even when it carries an undeclared bit; only a value outside it is
+// malformed input. So an enum {RED=1, GREEN=2, BLUE=3} admits 5 and refuses 200,
+// and a bitfield declaring positions 0, 1 and 3 admits 4 -- the undeclared bit 2
+// -- and refuses 256. An undeclared bit is NOT masked away: masking would turn
+// malformed-looking input into a DECLARED combination and report it Ok.
 //
-// Both comparisons run on the RAW carrier, ahead of `fromWire`'s narrowing, which
-// is also why one clause covers both halves of the old reading at once: a mask
-// test on the full 64 bits rejects an undeclared bit inside the storage width and
-// everything above it in the same expression, and a membership test does the same
-// for an enum.
+// This replaces the set/mask bound of generator#530, which implemented the
+// closed-type reading MESSAGE_SPEC carried for six days (doc PR #89, `a50db95`)
+// and doc PR #95 (`382159e`) withdrew. Both bounds are ordinary intervals now,
+// which is §1's own reason for the change: an array's elements are consumed
+// inside the corelib loop, so a bound must cross that channel as an interval,
+// and a width fits where a set does not.
 //
-// The mask is taken on the UNSIGNED view of the carrier. `value` is a `Long`, and
-// a mask that declares position 63 has no `Long` hex literal below
-// `Long.MAX_VALUE` to be written as; `value.toULong()` reinterprets the same bits
-// for free and lets every mask be spelled as itself.
-//
-// This reverses generator#482, which kept an undeclared bit that fit the backing
-// width on the argument that it is how a peer built from a newer schema carries a
-// flag this one has not got yet. §1 answers that directly: adding a flag -- or a
-// constant -- is a BREAKING schema change, and a receiver rejects the value
-// rather than storing something its declared type cannot represent.
-func closedCond(k ir.Kind, ref *ir.TypeRef) string {
+// Storage is still never the bound, and both comparisons run on the RAW carrier,
+// ahead of `fromWire`'s narrowing. Kotlin holds an enum in an `Int`, which the
+// parser's "enum value out of signed 32-bit range" rule makes exactly wide
+// enough -- the implied width is at most i32, so the guard in front of
+// `.toInt()` always covers it. A bitfield is held in a `ULong`, wider than any
+// implied width, which is §1's fourth consequence: a receiver that cannot hold
+// the field at exactly the declared width holds it wider and MUST then enforce
+// the width as an explicit check, because nothing about its storage will.
+func declaredWidthCond(k ir.Kind, ref *ir.TypeRef) string {
 	switch k {
 	case ir.KindEnum:
-		vals, ok := ir.EnumValues(ref)
-		if !ok || len(vals) == 0 {
+		lo, hi, ok := ir.EnumWidthRange(ref)
+		if !ok {
 			return ""
 		}
-		if ir.EnumContiguous(ref) {
-			return fmt.Sprintf("value < %dL || value > %dL", vals[0], vals[len(vals)-1])
-		}
-		terms := make([]string, len(vals))
-		for i, v := range vals {
-			terms[i] = fmt.Sprintf("value != %dL", v)
-		}
-		return strings.Join(terms, " && ")
+		return fmt.Sprintf("value < %dL || value > %dL", lo, hi)
 	case ir.KindBitfield:
-		mask, ok := ir.BitfieldMask(ref)
-		if !ok || mask == ^uint64(0) {
+		// Spelled as a mask rather than `value < 0L || value > hi`: the corelib
+		// delivers an unsigned wire value as a `Long`, so a u64 at or above 2^63
+		// arrives with its sign bit set, and one mask on the raw bits refuses
+		// both an over-width value and that sign-bit case in a single operation.
+		//
+		// The unsigned view the flag mask needed is gone with it: an implied
+		// width is only ever 0xff, 0xffff or 0xffffffff, each a positive `Long`
+		// literal, so `.inv()` is taken on the carrier itself. That also retires
+		// the bit-63 literal-rendering trap of generator#470 -- a bitfield
+		// reaching position 63 implies u64 and carries no guard at all.
+		hi, ok := ir.BitfieldWidthMax(ref)
+		if !ok {
 			return ""
 		}
-		if mask == 0 {
-			return "value != 0L"
-		}
-		return fmt.Sprintf("(value.toULong() and 0x%xuL.inv()) != 0uL", mask)
+		return fmt.Sprintf("(value and 0x%xL.inv()) != 0L", hi)
 	}
 	return ""
 }
 
-// closedWhat names the breached declaration in the INVALID_MSG text, so the two
-// closed kinds read as what they are rather than as a width.
-func closedWhat(k ir.Kind) string {
+// declaredWidthWhat names the breached declaration in the INVALID_MSG text, so
+// the message says which declaration implied the width that was breached.
+func declaredWidthWhat(k ir.Kind) string {
 	if k == ir.KindEnum {
-		return "enum constants"
+		return "enum width"
 	}
-	return "bitfield flags"
+	return "bitfield width"
 }
 
 // ---------------------------------------------------------------------------
@@ -1128,14 +1127,16 @@ func hasBulk(fs []frame) bool {
 //
 // An `enum` or `bitfield` element is NOT. The only bound the offer can carry is
 // the destination array's WIDTH -- handing back a `ShortArray` says "the elements
-// are declared 16 bits wide" -- and the bound of a closed kind is not a width at
-// all but the set of declared constants / the mask of declared positions
-// (MESSAGE_SPEC §1). Taking the offer bypasses the element callback that carries
-// the real one, and it did: the guard emitted in the fill arm for an enum array
-// was dead code, and the only rejection at that position came from the corelib's
-// "array element wider than its destination". Declining routes the elements back
-// through widthThrow, one at a time, so an undeclared value is refused where it
-// arrives rather than after the whole array has landed (generator#516).
+// are declared 16 bits wide" -- and that is the width of the STORAGE, not the one
+// the declaration implies (MESSAGE_SPEC §1). An enum array is an `IntArray` and a
+// bitfield array a `ULongArray` whatever the declaration, so the offer would
+// state 32 or 64 bits for a field bounded at i8 or u8. Taking it bypasses the
+// element callback that carries the real bound, and it did: the guard emitted in
+// the fill arm for an enum array was dead code, and the only rejection at that
+// position came from the corelib's "array element wider than its destination".
+// Declining routes the elements back through widthThrow, one at a time, so an
+// over-width value is refused where it arrives rather than after the whole array
+// has landed (generator#516).
 //
 // MEASURED on tests/bench's vehicletelemetry row, which declares and populates
 // both shapes (gear_history, array<enum> count 8; wheel_faults, array<bitfield>

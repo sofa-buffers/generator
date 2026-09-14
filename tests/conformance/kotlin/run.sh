@@ -735,23 +735,28 @@ echo "$OUT" | tr -d ' ' | grep -q '"someuintarray":\[1,4294967295\]' \
     || { echo "FAIL: control must keep the array exactly; got: $OUT"; exit 1; }
 echo "==> declared-width reject OK (scalar and array element)"
 
-# An `enum` and a `bitfield` are CLOSED (MESSAGE_SPEC S1, generator#516): what
-# binds is the SET of constants / the MASK of declared positions, never a width
-# and never the integer the target stores the field in. The shared driver prints
-# its own schema and forges its own bytes, and probes ALL SIX positions with
-# GAPPED definitions, so an interval bound cannot pass.
+# An `enum` and a `bitfield` are bounded by the WIDTH their declaration implies
+# (MESSAGE_SPEC S1, generator#516): for an enum the smallest SIGNED type holding
+# every declared constant, for a bitfield the smallest UNSIGNED type holding its
+# highest declared `pos`. A value inside that width is valid even where the schema
+# names no constant for it and even where it carries an undeclared bit; only a
+# value outside it is malformed input. The shared driver prints its own schema and
+# forges its own bytes, and probes ALL SIX positions with GAPPED definitions, so a
+# decoder still carrying the withdrawn set/mask bound fails exactly the two rows
+# that tell the rules apart.
 #
 # Kotlin is the target that had a bound already, and it was the wrong one: an
 # enum was checked against the signed 32-bit range -- the WIRE TYPE's ceiling,
-# which happens to coincide with the `Int` the member is held in -- so 5 into an
-# enum declaring {0,1,2,10} decoded and was kept, and a bitfield had no check at
-# all. Its enum ARRAY guard was dead code besides: the corelib bulk offer
-# bypassed the callback, and the offer is declined for both closed kinds now.
-echo "==> closed enum/bitfield: only what the schema declares is valid (S1, generator#516)"
+# which happens to coincide with the `Int` the member is held in -- so 1000 into
+# an enum declaring {0,1,2,10} decoded and was kept, and a bitfield had no check
+# at all. Its enum ARRAY guard was dead code besides: the corelib bulk offer
+# bypassed the callback, and the offer is declined for both kinds now, because
+# the offer states the DESTINATION's width and the bound is the declaration's.
+echo "==> enum/bitfield: bounded by the width the declaration implies (S1, generator#516)"
 { echo "version: 1"; echo "messages:"; } > "$WORK/closed.yaml"
 python3 "$ROOT/tests/conformance/lib/check_closed_kinds.py" --emit-schema >> "$WORK/closed.yaml"
 build "$WORK/closed.yaml" "$WORK/closed"
-python3 "$ROOT/tests/conformance/lib/check_closed_kinds.py" "kotlin" --legacy-closed-set \
+python3 "$ROOT/tests/conformance/lib/check_closed_kinds.py" "kotlin" \
     --invalid-pattern 'INVALID_MSG' -- "$WORK/closed/build/install/harness/bin/harness"
 
 # Invalid UTF-8 in a MATERIALIZED string is INVALID (MESSAGE_SPEC S8): a Kotlin
