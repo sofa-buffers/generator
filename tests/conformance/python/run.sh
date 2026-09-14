@@ -664,6 +664,41 @@ refused_as SofaLimitError "wire count 5 > max_dyn_array_count 4" \
 (cd "$WORK/nolimitproj" && python3 harness.py decode dyn) < "$WORK/limit-over.bin" >/dev/null || { echo "FAIL: unset limit must keep count 5 decodable"; exit 1; }
 echo "==> decode-limit reject OK"
 
+# A refusal is TERMINAL, and the corelib is what holds that (CORELIB_PLAN S5.2 for
+# malformed bytes, S6.3 for a receiver limit). This port has no finish() to gate,
+# so the observable form of "the rejection sticks" is asking AGAIN: decoder.py
+# guards feed at its top -- `if self._limit is not None: raise self._limit` and
+# `if self._status is Status.INVALID: return Status.INVALID` -- so a further feed
+# repeats the same answer without consuming a byte.
+#
+# The harness therefore feeds an EMPTY chunk on its error path and names what came
+# back, `[refeed=X]`. An empty chunk moves no decoder state, so the value can only
+# have come from the latch; a COMPLETE or INCOMPLETE here would mean the decoder
+# forgot it had refused. This leg did not exist before generator#541: python was
+# the one port of the six with no latch assertion at all (#528).
+#
+# Both routes are covered: overcount.bin is refused by a GENERATED schema-bound
+# guard and comes back as a feed status, limit-over.bin by the CORELIB's own cap
+# and arrives as a raise.
+echo "==> a refusal is terminal: re-feeding repeats it (generator#541)"
+refeed() {  # <project-dir> <fixture> <want> <message>
+    rdir=$1 rfx=$2 rwant=$3 rmsg=$4
+    if (cd "$rdir" && python3 harness.py streamdecode "$rmsg") \
+            < "$rfx" >/dev/null 2>"$WORK/refeed.err"; then
+        echo "FAIL: $(basename "$rfx") must be refused by the streaming decoder"; exit 1
+    fi
+    grep -q "\[refeed=$rwant\]" "$WORK/refeed.err" || {
+        echo "FAIL: $(basename "$rfx") -- re-feeding after the refusal must answer $rwant; got:"
+        cat "$WORK/refeed.err"; exit 1; }
+}
+# A varint past the 64-bit bound: 10 continuation bytes and an eleventh (S4.1),
+# refused by the CORELIB itself rather than by a generated guard.
+printf '\000\377\377\377\377\377\377\377\377\377\377\001' > "$WORK/varint_overflow.bin"
+refeed "$WORK/proj"       "$WORK/varint_overflow.bin" INVALID        myfirstmessage
+refeed "$WORK/proj"       "$WORK/overcount.bin"       INVALID        myfirstmessage
+refeed "$WORK/limitproj"  "$WORK/limit-over.bin"      SofaLimitError dyn
+echo "==> terminal-refusal guard OK"
+
 # The two refusals of CORELIB_PLAN §6.3, on one schema and one harness
 # (generator#416). A configured receiver cap on a schema-UNBOUNDED field is a
 # policy verdict -- SofaLimitError, because the bytes are well formed and the

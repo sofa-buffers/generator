@@ -604,35 +604,39 @@ fi
 "$WORK/nolim/zig-out/bin/harness" decode dyn < "$WORK/overlimit.bin" >/dev/null || { echo "FAIL: default-cap project must accept count 5"; exit 1; }
 echo "==> decode limits OK"
 
-# The LATCH -- the one thing generator#461 added that is new logic rather than a
-# rename. A refusal is terminal and never comes back as a status, so the
-# generated feed's errdefer records what it MEANT before the error leaves, and
-# Decoder.status() answers from that memory. Every reject vector exits non-zero
-# whatever the errdefer recorded, so no amount of vector replay can tell a
-# correct mapping from an inverted one or from one that records nothing. The
-# harness therefore PRINTS the remembered status on its error path and this block
-# reads it: malformed bytes are .invalid, a receiver cap is .incomplete and never
-# .invalid (CORELIB_PLAN 6.3 -- a policy stop is this side's decision, not a
-# verdict on the wire). Catching there is also what makes Zig compile the error
+# A refusal is TERMINAL, and it is latched on whichever side raised it. Anything
+# raised INSIDE the corelib -- a malformed varint, a receiver cap -- is latched by
+# IStream (CORELIB_PLAN 5.2, 6.3), which re-throws the very code it was refused
+# with from every later call. The two GENERATED guards are the other side: `v.inv`
+# and `v.lim` are read after is.feed has already returned, so the stream never
+# sees those errors; the sticky flags themselves are the latch, and finish
+# re-tests them in the same order feed does. Either way a finish() after a caught
+# refusal must fail under that refusal's own code.
+#
+# generator#541 deleted the generated status latch that used to restate the
+# corelib half one layer up. #528 records why the old assertion could not see a
+# deleted arm: it read a remembered field an EARLIER feed had already written.
+# finish's answer cannot be a leftover, so this block is discriminating at every
+# chunk width. Catching in the harness is also what makes Zig compile the error
 # path at all: it analyses only what something reaches.
-echo "==> a refusal latches into the remembered status (generator#461)"
+echo "==> a refusal is terminal: finish refuses under the same code (generator#541)"
 # A varint past the 64-bit bound: 10 continuation bytes and an eleventh. Refused
-# by the CORELIB, where overcount.bin is refused by a GENERATED guard -- the two
-# routes into the same errdefer (4.1).
+# by the CORELIB, where overcount.bin is refused by a GENERATED guard -- one
+# fixture per side of the split above (4.1).
 printf '\000\377\377\377\377\377\377\377\377\377\377\001' > "$WORK/varint_overflow.bin"
-latch() {   # <harness> <fixture> <want-status> <message>
+latch() {   # <harness> <fixture> <want-error> <message>
     lh=$1 lfx=$2 lwant=$3 lmsg=$4
     if "$lh" streamdecode "$lmsg" < "$lfx" >/dev/null 2>"$WORK/latch.err"; then
         echo "FAIL: $(basename "$lfx") must be refused by the streaming decoder"; exit 1
     fi
-    grep -q "\[status=$lwant\]" "$WORK/latch.err" || {
-        echo "FAIL: $(basename "$lfx") -- the refusal must latch status=$lwant; got:"
+    grep -q "\[finish=$lwant\]" "$WORK/latch.err" || {
+        echo "FAIL: $(basename "$lfx") -- finish after the refusal must fail with $lwant; got:"
         cat "$WORK/latch.err"; exit 1; }
 }
-latch "$WORK/ex/zig-out/bin/harness"  "$WORK/varint_overflow.bin" invalid    myfirstmessage
-latch "$WORK/ex/zig-out/bin/harness"  "$WORK/overcount.bin"       invalid    myfirstmessage
-latch "$WORK/lim/zig-out/bin/harness" "$WORK/overlimit.bin"       incomplete dyn
-echo "==> refusal latch OK"
+latch "$WORK/ex/zig-out/bin/harness"  "$WORK/varint_overflow.bin" InvalidMessage myfirstmessage
+latch "$WORK/ex/zig-out/bin/harness"  "$WORK/overcount.bin"       InvalidMessage myfirstmessage
+latch "$WORK/lim/zig-out/bin/harness" "$WORK/overlimit.bin"       LimitExceeded  dyn
+echo "==> terminal-refusal guard OK"
 
 # CORELIB_PLAN 6.2.1, "a skipped field is never capped": a limit bounds an
 # ALLOCATION, and a field MESSAGE_SPEC 7.3 skips is walked, not materialised, so

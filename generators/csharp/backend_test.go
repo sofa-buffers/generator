@@ -1380,43 +1380,50 @@ messages:
 	}
 }
 
-// TestCsDecoderRemembersFeedStatus pins the "one fact, one channel" adoption
-// (issue #461): the corelib's IStream publishes its outcome exactly once, as
-// Feed's return value, and its status accessor is gone. The generated Decoder
-// keeps its own public Status — so no user of generated code breaks — by
-// REMEMBERING what the last Feed returned, and by latching a refusal that never
-// comes back as a status at all.
-func TestCsDecoderRemembersFeedStatus(t *testing.T) {
+// TestCsDecoderAsksTheStreamForItsVerdict pins issue #541: the generated Decoder
+// remembers NOTHING about the outcome. The stream already holds it — a refusal is
+// terminal (CORELIB_PLAN §5.2 for malformed bytes, §6.3 for a receiver limit) and
+// the corelib latches it, re-throwing the very code it was refused with from every
+// later call. #461 had this layer keep a second copy in `_st`, with a catch that
+// mapped a refusal onto it; that copy could only restate what the stream held, and
+// it flattened LimitExceeded into an Incomplete that says something untrue about
+// the wire.
+//
+// Finish therefore ASKS, with a zero-length feed: refused streams re-throw before
+// looking at a byte, and an unrefused one answers with the outcome for everything
+// fed so far.
+func TestCsDecoderAsksTheStreamForItsVerdict(t *testing.T) {
 	m := exampleModule(t)
 	for _, want := range []string{
-		// Complete, not Incomplete: an all-default message is zero bytes, so a
-		// Decoder that is never fed must still Finish().
-		"private DecodeStatus _st = DecodeStatus.Complete;",
-		// One place records, so the two overloads cannot drift.
+		// Feed forwards and nothing more: no assignment, no catch.
 		"public DecodeStatus Feed(byte[] chunk) => Feed(chunk, 0, chunk.Length);",
-		"                return _st = _is.Feed(chunk, off, len, _v);",
-		// A refusal is terminal and leaves no status behind: latch what it
-		// meant, keeping the wire verdict apart from a receiver-limit stop --
-		// and leaving the memory alone for a fault that is neither, an
-		// Argument (a caller mistake, not a statement about the bytes) above
-		// all.
-		"            } catch (SofabException e) {",
-		"                if (e.Error == SofabError.InvalidMessage) {",
-		"                    _st = DecodeStatus.Invalid;",
-		"                } else if (e.Error == SofabError.LimitExceeded) {",
-		"                    _st = DecodeStatus.Incomplete;",
-		"                }",
-		// The public surface is unchanged; only its backing moved.
-		"public DecodeStatus Status => _st;",
-		"            if (_st != DecodeStatus.Complete) {",
-		"                    $\"Myfirstmessage: stream ended mid-field ({_st})\");",
+		"        public DecodeStatus Feed(byte[] chunk, int off, int len) =>",
+		"            _is.Feed(chunk, off, len, _v);",
+		// Finish asks the stream and judges what it answers.
+		"            var st = _is.Feed(System.Array.Empty<byte>(), 0, 0, _v);",
+		"            if (st != DecodeStatus.Complete) {",
+		"                    $\"Myfirstmessage: stream ended mid-field ({st})\");",
 	} {
 		if !strings.Contains(m, want) {
-			t.Errorf("Message.cs missing %q (generator#461):\n%s", want, m)
+			t.Errorf("Message.cs missing %q (generator#541):\n%s", want, m)
+		}
+	}
+	// Nothing remembers a status, and nothing maps a refusal onto one. Each of
+	// these is a way the deleted latch could come back: the field itself, the
+	// catch that wrote it, either mapping arm, or the accessor that read it.
+	for _, gone := range []string{
+		"_st",
+		"catch (SofabException e) {",
+		"_st = DecodeStatus.Invalid;",
+		"_st = DecodeStatus.Incomplete;",
+		"public DecodeStatus Status",
+	} {
+		if strings.Contains(m, gone) {
+			t.Errorf("Message.cs still carries the removed status latch %q (generator#541):\n%s", gone, m)
 		}
 	}
 	// The accessor is gone from the corelib; asking the stream a second time
-	// must not come back in any form.
+	// must not come back in any form (generator#461).
 	if strings.Contains(m, "_is.Status") {
 		t.Errorf("Message.cs still reads the removed IStream.Status (generator#461):\n%s", m)
 	}

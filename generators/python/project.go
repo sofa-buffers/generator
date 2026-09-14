@@ -158,18 +158,12 @@ func (g *gen) harness(s *ir.Schema) []byte {
 	f.line("        csz = int(sys.argv[3]) if len(sys.argv) > 3 else 1")
 	f.line("        step = csz if csz > 0 else max(len(data), 1)")
 	f.line("        dec = cls.decoder()")
-	f.line("        st = dec.status")
+	// COMPLETE before the first feed: an all-default message is zero bytes, so a
+	// reader that is never fed still ended on a field boundary.
+	f.line("        st = message.Status.COMPLETE")
 	f.line("        try:")
 	f.line("            for off in range(0, len(data), step):")
 	f.line("                st = dec.feed(data[off:off + step])")
-	// The corelib publishes its outcome once, as feed's return value, and has no
-	// accessor to ask again -- so the reader's `status` is the wrapper
-	// remembering it (generator#461). Nothing else in the suite reads that memory
-	// after a feed (the line above reads only its initial value), so a stale or
-	// mis-wired property would let every vector pass. Check it against the feed
-	// that produced it, on every chunk of every vector.
-	f.line("                if dec.status is not st:")
-	f.line("                    raise AssertionError('status %%s disagrees with the feed that set it (%%s)' %% (dec.status, st))")
 	// NAME the category on both refusal paths, as the cpp harness does. The
 	// §6.3 categories are what a conformance driver has to tell apart, and
 	// neither rendering carried one: `str(e)` is the message text alone, in
@@ -179,11 +173,37 @@ func (g *gen) harness(s *ir.Schema) []byte {
 	// are the two halves of one channel -- with the class and the status name
 	// spelled out, `streamdecode` can assert the category the one-shot `decode`
 	// asserts off its traceback (generator#416).
+	// ...and NAME what asking again answers (generator#541). A refusal is terminal
+	// and the corelib latches it: a receiver cap is re-raised out of its own
+	// `_limit`, and an INVALID is re-returned by every later feed. So a feed of an
+	// EMPTY chunk -- which moves no decoder state -- must repeat that same answer.
+	// This port has no finish() to gate, so re-asking IS the observable form of
+	// "the rejection sticks", and it is the leg the suite never had (#528).
+	//
+	// A COMPLETE or INCOMPLETE here is the failure: it would mean the decoder
+	// forgot it had refused. The value cannot be a leftover from an earlier feed
+	// the way a remembered status could -- it is produced by this call.
 	f.line("        except Exception as e:")
-	f.line("            sys.stderr.write('decode error: %%s: %%s\\n' %% (type(e).__name__, e))")
+	f.line("            try:")
+	f.line("                again = dec.feed(b'').name")
+	f.line("            except Exception as fe:")
+	f.line("                again = type(fe).__name__")
+	f.line("            sys.stderr.write('decode error: %%s: %%s [refeed=%%s]\\n'")
+	f.line("                             %% (type(e).__name__, e, again))")
 	f.line("            return 1")
+	// The same re-feed on the OTHER refusal route. An INVALID does not raise in
+	// this port -- it comes back as feed's return value (§5.2) -- so it lands here
+	// rather than in the except above, and this is where the terminal guard is
+	// actually observable for malformed bytes. The category text is unchanged and
+	// only extended, so the `decode failed: <STATUS>` patterns the suite already
+	// matches on still match.
 	f.line("        if st != message.Status.COMPLETE:")
-	f.line("            sys.stderr.write('decode failed: %%s\\n' %% (getattr(st, 'name', st),))")
+	f.line("            try:")
+	f.line("                again = dec.feed(b'').name")
+	f.line("            except Exception as fe:")
+	f.line("                again = type(fe).__name__")
+	f.line("            sys.stderr.write('decode failed: %%s [refeed=%%s]\\n'")
+	f.line("                             %% (getattr(st, 'name', st), again))")
 	f.line("            return 1")
 	f.line("        sys.stdout.write(json.dumps(dec.message.to_jsonable()))")
 	f.line("        sys.stdout.write('\\n')")

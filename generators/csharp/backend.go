@@ -300,13 +300,6 @@ func (g *gen) emitDecoder(f *cfile, name string) {
 	f.line("        private readonly %s _m = new %s();", name, name)
 	f.line("        private readonly IStream _is = new IStream();")
 	f.line("        private readonly %sVisitor _v;", name)
-	f.line("        // What the last Feed answered. The stream publishes its outcome once,")
-	f.line("        // as Feed's return value, and offers no accessor to ask a second time,")
-	f.line("        // so the caller is the one that remembers -- and this decoder is the")
-	f.line("        // caller. Complete before the first Feed: an all-default message is")
-	f.line("        // zero bytes, so a stream that has been fed nothing ended on a field")
-	f.line("        // boundary.")
-	f.line("        private DecodeStatus _st = DecodeStatus.Complete;")
 	f.blank()
 	f.line("        public Decoder() { _v = new %sVisitor(_m); }", name)
 	f.blank()
@@ -318,36 +311,15 @@ func (g *gen) emitDecoder(f *cfile, name string) {
 	f.line("        public DecodeStatus Feed(byte[] chunk) => Feed(chunk, 0, chunk.Length);")
 	f.blank()
 	f.line("        /// <summary>As <c>Feed</c>, over a slice of <paramref name=\"chunk\"/>.</summary>")
-	f.line("        public DecodeStatus Feed(byte[] chunk, int off, int len) {")
-	f.line("            try {")
-	f.line("                return _st = _is.Feed(chunk, off, len, _v);")
-	f.line("            } catch (SofabException e) {")
-	f.line("                // A refusal is terminal and never comes back as a status, so")
-	f.line("                // record what it means for the stream before rethrowing.")
-	f.line("                // Malformed bytes make the message Invalid; a receiver limit")
-	f.line("                // is this side's policy, so it leaves the message unfinished")
-	f.line("                // rather than wrong.")
-	f.line("                //")
-	f.line("                // Anything else leaves the memory alone. <c>Argument</c>")
-	f.line("                // above all says the mistake is in the CALL and not in the")
-	f.line("                // bytes; a status is a verdict on the MESSAGE, so answering")
-	f.line("                // <c>Incomplete</c> for a caller fault would report")
-	f.line("                // something about the wire that is not true.")
-	f.line("                if (e.Error == SofabError.InvalidMessage) {")
-	f.line("                    _st = DecodeStatus.Invalid;")
-	f.line("                } else if (e.Error == SofabError.LimitExceeded) {")
-	f.line("                    _st = DecodeStatus.Incomplete;")
-	f.line("                }")
-	f.line("                throw;")
-	f.line("            }")
-	f.line("        }")
-	f.blank()
-	f.line("        /// <summary>")
-	f.line("        /// The outcome for everything fed so far: what the last <c>Feed</c>")
-	f.line("        /// returned, remembered here. The stream itself answers only through")
-	f.line("        /// that return value.")
-	f.line("        /// </summary>")
-	f.line("        public DecodeStatus Status => _st;")
+	// No catch, and no remembered status. A refusal is terminal and the STREAM
+	// latches it (CORELIB_PLAN §5.2 for malformed bytes, §6.3 for a receiver
+	// limit), re-throwing the very code it was refused with from every later
+	// call. Recording a second copy here bought nothing the stream did not
+	// already hold, and flattened LimitExceeded -- a policy stop on well-formed
+	// bytes -- into an Incomplete that says something untrue about the wire.
+	// Finish asks the stream instead; see below.
+	f.line("        public DecodeStatus Feed(byte[] chunk, int off, int len) =>")
+	f.line("            _is.Feed(chunk, off, len, _v);")
 	f.blank()
 	f.line("        /// <summary>The destination, holding whatever has been decoded so far.</summary>")
 	f.line("        public %s Message => _m;", name)
@@ -365,9 +337,19 @@ func (g *gen) emitDecoder(f *cfile, name string) {
 	f.line("        /// declared end-of-input at a point they did not agree with.")
 	f.line("        /// </remarks>")
 	f.line("        public %s Finish() {", name)
-	f.line("            if (_st != DecodeStatus.Complete) {")
+	// One call answers both halves. If the stream refused, its terminal guard
+	// runs before a byte is looked at and re-throws that refusal's own code --
+	// so a decoder that was refused cannot hand back a message, and the caller
+	// sees LimitExceeded as itself. If it did not, the return value is the
+	// outcome for everything fed so far, computed from the stream's own state at
+	// this field boundary; an empty chunk moves that state nowhere.
+	f.line("            // The stream latched any refusal and re-throws it here,")
+	f.line("            // consuming no byte and driving no visitor callback;")
+	f.line("            // otherwise this is the outcome for everything fed so far.")
+	f.line("            var st = _is.Feed(System.Array.Empty<byte>(), 0, 0, _v);")
+	f.line("            if (st != DecodeStatus.Complete) {")
 	f.line("                throw new InvalidOperationException(")
-	f.line("                    $\"%s: stream ended mid-field ({_st})\");", name)
+	f.line("                    $\"%s: stream ended mid-field ({st})\");", name)
 	f.line("            }")
 	f.line("            return _m;")
 	f.line("        }")

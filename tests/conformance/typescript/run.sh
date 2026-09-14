@@ -356,17 +356,17 @@ echo "==> fixlen subtype skip OK"
 # row goes through the `status` verb, the channel the blocks above use. The
 # `streamdecode` row cannot: `status` always runs cls.decode, the one-shot
 # whole-buffer surface, so pointing it at the streaming row would assert that
-# decoder's verdict twice and the chunked decoder's never. Its channel is the
-# LATCH the harness prints on its error path instead, `[status=INVALID]`
-# (generator#461) -- the streaming decoder's own remembered verdict, and the only
-# way to tell an INVALID from the INCOMPLETE a mis-measured skip produces the
-# moment it walks off the payload.
+# decoder's verdict twice and the chunked decoder's never. Its channel is what
+# the harness prints on its error path instead, `[finish=INVALID_MSG]`
+# (generator#541) -- the code the stream latched the refusal under and re-throws
+# from the finish that follows, and the only way to tell an INVALID_MSG from the
+# INCOMPLETE a mis-measured skip produces the moment it walks off the payload.
 echo "==> a skipped string is not UTF-8-validated (CORELIB_PLAN S6.4.5, generator#417)"
 for surface in decode streamdecode; do
     if [ "$surface" = decode ]; then
         SU_CAT="--status-verb status"
     else
-        SU_CAT='--invalid-pattern status=INVALID'
+        SU_CAT='--invalid-pattern finish=INVALID_MSG'
     fi
     python3 "$ROOT/tests/conformance/lib/check_skipped_string_utf8.py" "typescript" \
         --cwd "$WORK/ex" --verb "$surface" $SU_CAT \
@@ -492,35 +492,38 @@ grep -q "_decode(bytes, new _DynVis(o, new PayloadAcc()));" "$WORK/lim/message.t
 (cd "$WORK/nolim" && npx tsx harness.ts decode dyn) < "$WORK/overlimit.bin" >/dev/null || { echo "FAIL: default-cap project must accept count 5"; exit 1; }
 echo "==> decode limits OK"
 
-# The LATCH -- the one thing generator#461 added that is new logic rather than a
-# rename. A refusal is terminal and never comes back as a status, so the
-# generated feed records what it MEANT before rethrowing, and the Decoder's
-# `status` answers from that memory. Every reject vector exits non-zero whatever
-# the latch recorded, so no amount of vector replay can tell a correct mapping
-# from an inverted one, from one that records nothing, or from a catch arm
-# deleted outright. The harness therefore PRINTS the remembered status on its
-# error path and this block reads it: malformed bytes are INVALID, a receiver cap
-# is INCOMPLETE and never INVALID (CORELIB_PLAN S6.3 -- a policy stop is this
-# side's decision, not a verdict on the wire).
-echo "==> a refusal latches into the remembered status (generator#461)"
+# A refusal is TERMINAL, and the corelib is what holds that (CORELIB_PLAN S5.2 for
+# malformed bytes, S6.3 for a receiver limit): IStream latches the verdict and
+# re-throws the very code it was refused with from every later call, before
+# looking at a byte. So a finish() after a caught refusal must refuse too, under
+# that same code: a decoder that rejected a message cannot hand one back.
+#
+# generator#541 deleted the generated status latch that used to restate this one
+# layer up. #528 records why the old assertion could not see a deleted arm: it
+# read a remembered field an EARLIER feed had already written. finish's answer
+# cannot be a leftover, so this block is discriminating at every chunk width.
+#
+# The code is the real one now, not a status it was flattened into: a receiver
+# cap reports LIMIT_EXCEEDED rather than the INCOMPLETE the old mapping produced.
+echo "==> a refusal is terminal: finish refuses under the same code (generator#541)"
 # A varint past the 64-bit bound: 10 continuation bytes and an eleventh. Refused
 # by the CORELIB, where overcount.bin is refused by a GENERATED guard -- the two
-# routes into the same catch (S4.1).
+# routes into the same terminal latch (S4.1).
 printf '\000\377\377\377\377\377\377\377\377\377\377\001' > "$WORK/varint_overflow.bin"
-latch() {   # <project-dir> <fixture> <want-status> <message>
+latch() {   # <project-dir> <fixture> <want-code> <message>
     ldir=$1 lfx=$2 lwant=$3 lmsg=$4
     if (cd "$ldir" && npx tsx harness.ts streamdecode "$lmsg") \
             < "$lfx" >/dev/null 2>"$WORK/latch.err"; then
         echo "FAIL: $(basename "$lfx") must be refused by the streaming decoder"; exit 1
     fi
-    grep -q "\[status=$lwant\]" "$WORK/latch.err" || {
-        echo "FAIL: $(basename "$lfx") -- the refusal must latch status=$lwant; got:"
+    grep -q "\[finish=$lwant\]" "$WORK/latch.err" || {
+        echo "FAIL: $(basename "$lfx") -- finish after the refusal must throw $lwant; got:"
         cat "$WORK/latch.err"; exit 1; }
 }
-latch "$WORK/ex"  "$WORK/varint_overflow.bin" INVALID    myfirstmessage
-latch "$WORK/ex"  "$WORK/overcount.bin"       INVALID    myfirstmessage
-latch "$WORK/lim" "$WORK/overlimit.bin"       INCOMPLETE dyn
-echo "==> refusal latch OK"
+latch "$WORK/ex"  "$WORK/varint_overflow.bin" INVALID_MSG    myfirstmessage
+latch "$WORK/ex"  "$WORK/overcount.bin"       INVALID_MSG    myfirstmessage
+latch "$WORK/lim" "$WORK/overlimit.bin"       LIMIT_EXCEEDED dyn
+echo "==> terminal-refusal guard OK"
 
 # CORELIB_PLAN S6.2.1, "a skipped field is never capped": a limit bounds an
 # ALLOCATION, and a field MESSAGE_SPEC S7.3 skips is walked, not materialised, so

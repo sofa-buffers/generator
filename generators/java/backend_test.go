@@ -1768,52 +1768,52 @@ messages:
 	}
 }
 
-// TestJavaDecoderRemembersFeedStatus pins the "one fact, one channel" adoption
-// (issue #461): the corelib's IStream publishes its outcome exactly once, as
-// feed's return value, and status() is gone. The generated Decoder keeps its own
-// public status() — so no user of generated code breaks — by REMEMBERING what
-// the last feed returned, and by latching a refusal that never comes back as a
-// status at all.
-func TestJavaDecoderRemembersFeedStatus(t *testing.T) {
+// TestJavaDecoderAsksTheStreamForItsVerdict pins issue #541: the generated
+// Decoder remembers NOTHING about the outcome. The stream already holds it — a
+// refusal is terminal (CORELIB_PLAN §5.2 for malformed bytes, §6.3 for a receiver
+// limit) and IStream.feed latches it on BOTH carriers, the bare SofabException
+// and the UncheckedIOException a Visitor guard has to wrap in, re-throwing the
+// very code it was refused with from every later call.
+//
+// #461 had this layer keep a second copy in `st`, with two catches mapping a
+// refusal onto it. That copy could only restate what the stream held, and it
+// flattened LIMIT_EXCEEDED into an INCOMPLETE that says something untrue about
+// the wire. finish therefore ASKS, with a zero-length feed.
+func TestJavaDecoderAsksTheStreamForItsVerdict(t *testing.T) {
 	m := exampleFile(t)
 	for _, want := range []string{
 		// The one-shot needs no memory: feed's return IS the answer.
 		"        return is.feed(data, new MyfirstmessageVisitor(out));",
-		// COMPLETE, not INCOMPLETE: an all-default message is zero bytes, so a
-		// Decoder that is never fed must still finish().
-		"        private DecodeStatus st = DecodeStatus.COMPLETE;",
-		// One place records, so the two overloads cannot drift.
+		// Feed forwards and nothing more: no assignment, no catch.
 		"            return feed(chunk, 0, chunk.length);",
-		"                return st = is.feed(chunk, off, len, v);",
-		// Both carriers apply the SAME three-way test: the wire verdict for
-		// malformed bytes, INCOMPLETE for a receiver limit, and nothing at all
-		// for a fault that is neither -- an ARGUMENT is a mistake in the CALL,
-		// and recording it as a verdict would describe the wire falsely.
-		"            } catch (SofabException e) {",
-		"                if (e.error() == SofabError.INVALID_MSG) {",
-		"                    st = DecodeStatus.INVALID;",
-		"                } else if (e.error() == SofabError.LIMIT_EXCEEDED) {",
-		"                    st = DecodeStatus.INCOMPLETE;",
-		// A Visitor cannot throw the checked exception, so every generated
-		// schema-bound guard and every receiver-limit refusal arrives wrapped
-		// instead. Catching only SofabException would latch none of them.
-		"            } catch (java.io.UncheckedIOException e) {",
-		"                if (e.getCause() instanceof SofabException cause) {",
-		"                    if (cause.error() == SofabError.INVALID_MSG) {",
-		"                        st = DecodeStatus.INVALID;",
-		"                    } else if (cause.error() == SofabError.LIMIT_EXCEEDED) {",
-		"                        st = DecodeStatus.INCOMPLETE;",
-		// The public surface is unchanged; only its backing moved.
-		"        public DecodeStatus status() { return st; }",
+		"            return is.feed(chunk, off, len, v);",
+		// finish asks the stream and judges what it answers. It can now surface
+		// the refusal's own code, so it declares the checked exception.
+		"        public Myfirstmessage finish() throws SofabException {",
+		"            DecodeStatus st = is.feed(new byte[0], 0, 0, v);",
 		"            if (st != DecodeStatus.COMPLETE) {",
 		"                    \"Myfirstmessage: stream ended mid-field (\" + st + \")\");",
 	} {
 		if !strings.Contains(m, want) {
-			t.Errorf("Myfirstmessage.java missing %q (generator#461):\n%s", want, m)
+			t.Errorf("Myfirstmessage.java missing %q (generator#541):\n%s", want, m)
+		}
+	}
+	// Nothing remembers a status, and neither carrier maps a refusal onto one.
+	// Each of these is a way the deleted latch could come back.
+	for _, gone := range []string{
+		"private DecodeStatus st =",
+		"catch (SofabException e) {",
+		"catch (java.io.UncheckedIOException e) {",
+		"st = DecodeStatus.INVALID;",
+		"st = DecodeStatus.INCOMPLETE;",
+		"public DecodeStatus status()",
+	} {
+		if strings.Contains(m, gone) {
+			t.Errorf("Myfirstmessage.java still carries the removed status latch %q (generator#541):\n%s", gone, m)
 		}
 	}
 	// The accessor is gone from the corelib; asking the stream a second time
-	// must not come back in any form.
+	// must not come back in any form (generator#461).
 	if strings.Contains(m, "is.status()") {
 		t.Errorf("Myfirstmessage.java still calls the removed IStream.status() (generator#461):\n%s", m)
 	}

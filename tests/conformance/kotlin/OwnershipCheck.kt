@@ -163,20 +163,12 @@ fun main() {
         while (i < want.size) {
             val n = minOf(size, want.size - i)
             want.copyInto(scratch, 0, i, i + n)
+            // feed's return value IS the outcome, and the only copy of it: the
+            // generated Decoder remembers nothing and exposes no `status`
+            // (generator#541). There is no second reading left to disagree with
+            // the first, so this loop asserts what it was always really about --
+            // the width sweep below, and the value finish() hands back.
             last = dec.feed(scratch, 0, n)
-            // The stream publishes its outcome once, as feed's return value, and
-            // has no accessor to ask it again -- so Decoder.status is the
-            // generated wrapper REMEMBERING it (generator#521). A stale memory
-            // would let every vector in the suite pass, and this loop is the one
-            // place that already varies the chunk WIDTH, so the agreement is
-            // asserted here: on every chunk, at every size in CHUNK_SIZES.
-            if (dec.status != last) {
-                println(
-                    "FAIL: streaming feed(chunk=$size): status ${dec.status} disagrees " +
-                        "with the feed that set it ($last)"
-                )
-                failures++
-            }
             scratch.fill(SCRIBBLE)
             i += n
         }

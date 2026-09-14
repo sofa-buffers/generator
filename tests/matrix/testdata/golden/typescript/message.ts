@@ -225,12 +225,6 @@ class _ScalarsVis implements Visitor {
 export class ScalarsDecoder {
   private readonly out: Scalars;
   private readonly is: IStream;
-  // What the last `feed` answered. The stream publishes its outcome once, as
-  // that return value, and offers no accessor to ask a second time, so the
-  // caller is the one that remembers -- and this decoder is the caller.
-  // `Complete` before the first feed: an all-default message is zero bytes,
-  // so a stream that has been fed nothing ended on a field boundary.
-  private st: DecodeStatus = DecodeStatus.Complete;
 
   constructor(out?: Scalars) {
     this.out = out ?? new Scalars();
@@ -245,40 +239,8 @@ export class ScalarsDecoder {
    * @throws SofabError the bytes are malformed; terminal.
    */
   feed(chunk: Uint8Array): DecodeStatus {
-    try {
-      return (this.st = this.is.feed(chunk));
-    } catch (e) {
-      // A refusal is terminal and never comes back as a status, so record
-      // what it means for the stream before rethrowing. Malformed bytes make
-      // the message Invalid; a receiver limit is this side's policy, so it
-      // leaves the message unfinished rather than wrong.
-      //
-      // Anything else leaves the memory alone: a TypeError out of a
-      // callback, or a SofabError carrying Argument, says the mistake is in
-      // the CALL and not in the bytes. A status is a verdict on the
-      // MESSAGE, so recording one for a fault that is not a wire event
-      // would report something about the wire that is not true.
-      if (e instanceof SofabError) {
-        if (e.code === SofabErrorCode.InvalidMsg) {
-          this.st = DecodeStatus.Invalid;
-        } else if (
-          e.code === SofabErrorCode.LimitExceeded ||
-          e.code === SofabErrorCode.Incomplete
-        ) {
-          this.st = DecodeStatus.Incomplete;
-        }
-      }
-      throw e;
-    }
+    return this.is.feed(chunk);
   }
-
-  /**
-   * The outcome for everything fed so far: what the last `feed` returned,
-   * remembered here. The stream itself answers only through that return
-   * value, so this is the wrapper's memory of it, not a second question
-   * put to the stream.
-   */
-  get status(): DecodeStatus { return this.st; }
 
   /** The destination, holding whatever has been decoded so far. */
   get message(): Scalars { return this.out; }
@@ -287,9 +249,17 @@ export class ScalarsDecoder {
    * Take the decoded message once the caller's framing says the input is
    * over. Rejects a stream that ended mid-field rather than returning a
    * half-filled value; read `message` to get it anyway.
+   *
+   * A stream that was REFUSED throws that refusal's own code instead: the
+   * rejection is terminal, so asking the stream again re-throws it. A
+   * decoder that rejected a message cannot hand one back.
    */
   finish(): Scalars {
-    if (this.st !== DecodeStatus.Complete) {
+    // The stream latched any refusal and re-throws it here, consuming no
+    // byte and driving no visitor callback; otherwise this is the outcome
+    // for everything fed so far.
+    const st = this.is.feed(new Uint8Array(0));
+    if (st !== DecodeStatus.Complete) {
       throw new SofabError(SofabErrorCode.Incomplete, "Scalars: stream ended mid-field");
     }
     return this.out;

@@ -200,33 +200,33 @@ func (g *gen) mainHarness(s *ir.Schema) []byte {
 		f.line("                    int csz = args.length > 2 ? Integer.parseInt(args[2]) : 1;")
 		f.line("                    int step = csz > 0 ? csz : Math.max(input.length, 1);")
 		f.line("                    for (int off = 0; off < input.length; off += step) {")
-		f.line("                        org.sofabuffers.sofab.DecodeStatus fed =")
-		f.line("                            dec.feed(input, off, Math.min(step, input.length - off));")
-		// The stream publishes its outcome once, as feed's return value, and has
-		// no accessor to ask again -- so Decoder.status() is the wrapper
-		// remembering it. Nothing else in the suite reads that memory, and a
-		// stale one would still let every vector pass, so check it here: it has
-		// to agree with the feed that produced it, on every chunk of every
-		// vector at every split width (generator#461).
-		f.line("                        if (dec.status() != fed) {")
-		f.line("                            throw new IllegalStateException(")
-		f.line("                                \"status \" + dec.status() + \" disagrees with the feed that set it (\" + fed + \")\");")
-		f.line("                        }")
+		f.line("                        dec.feed(input, off, Math.min(step, input.length - off));")
 		f.line("                    }")
 		f.line("                    obj = dec.finish();")
 		f.line("                } catch (Exception e) {")
-		// The remembered status is printed, not just the throwable. A refusal is
-		// terminal and leaves through this catch, so the ONLY way the latch in
-		// the generated feed -- the one arm of #461 that is new logic rather
-		// than a rename, and the one that has to answer for BOTH carriers
-		// (bare SofabException and the UncheckedIOException a Visitor callback
-		// has to wrap in) -- becomes observable to a suite is by naming what it
-		// recorded. Without it a deleted arm, or an inverted mapping, still
-		// exits 1 and every reject vector still passes.
-		// tests/conformance/java/run.sh greps this for the malformed and the
-		// over-cap fixtures it already builds.
+		// What finish answers AFTER the refusal is printed, not just the throwable.
+		// A refusal is terminal: the corelib latched it -- through either carrier,
+		// the bare SofabException or the UncheckedIOException a Visitor guard has
+		// to wrap in -- and re-throws the very code it was refused with, so a
+		// finish here must refuse too, under that same code. That is the whole of
+		// what generated code contributes now (generator#541), and a reject vector
+		// exits 1 either way, so naming finish's answer is the only way a suite
+		// sees it.
+		//
+		// `RETURNED` is the failure: finish handed back a message from a decoder
+		// that had refused one. It cannot be a leftover from an earlier call the
+		// way the old remembered status could (#528) -- nothing but this finish
+		// produces it.
+		f.line("                    String fin;")
+		f.line("                    try { dec.finish(); fin = \"RETURNED\"; }")
+		f.line("                    catch (org.sofabuffers.sofab.SofabException fe) { fin = fe.error().name(); }")
+		f.line("                    catch (java.io.UncheckedIOException fe) {")
+		f.line("                        fin = fe.getCause() instanceof org.sofabuffers.sofab.SofabException c")
+		f.line("                            ? c.error().name() : fe.getClass().getSimpleName();")
+		f.line("                    }")
+		f.line("                    catch (Exception fe) { fin = fe.getClass().getSimpleName(); }")
 		f.line("                    System.err.println(")
-		f.line("                        \"decode error: \" + e + \" [status=\" + dec.status() + \"]\");")
+		f.line("                        \"decode error: \" + e + \" [finish=\" + fin + \"]\");")
 		f.line("                    System.exit(1); return;")
 		f.line("                }")
 		f.line("                StringBuilder sb = new StringBuilder(); Json.to(obj, sb);")

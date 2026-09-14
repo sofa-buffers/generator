@@ -1138,7 +1138,7 @@ backends must surface it explicitly:
   `Result<sofab::Status, sofab::Error>` — mid-stream it holds no framing and has
   no verdict to give.
 
-#### The stream answers once: `feed` is the only channel (generator#461)
+#### The stream answers once: `feed` is the only channel (generator#461, #541)
 
 A corelib's incremental decoder used to publish its outcome twice — as `feed`'s
 return value *and* through a status accessor on the stream (`IStream.Status` /
@@ -1156,131 +1156,99 @@ the same move through the other surface: they took INCOMPLETE *off* the error
 channel, which is the one break in the sweep that reaches generated code (last
 subsection).
 
-**The generated wrapper is the caller, and a caller may remember.** The removal is
-a corelib-side break, but it must not become a break for users of generated code,
-so the accessor-shaped backends keep their public surface exactly as it was and
-back it with a private field holding what the last `feed` returned:
+**The generated wrapper asks; it remembers nothing** (generator#541). The removal
+is a corelib-side break, and #461/#521 first absorbed it by keeping each backend's
+public accessor and backing it with a private field holding what the last `feed`
+returned. That copy is gone. It could only ever restate what the corelib already
+holds, and it cost two things to keep:
 
-- **C#** `Msg.Decoder` keeps `public DecodeStatus Status`, now reading `_st`.
-  Both `Feed` overloads funnel through the `(chunk, off, len)` one so a single
-  statement records; `Finish()` tests `_st`.
-- **Java** `Msg.Decoder` keeps `public DecodeStatus status()`, now reading `st`,
-  with the same funnel and the same `finish()`. The static `tryDecode` needs no
-  memory at all — `feed`'s return *is* what it returns.
-- **Kotlin** `Msg.Decoder` keeps `public val status: DecodeStatus`, now reading
-  `st`, with the same funnel — `feed(chunk)` delegates to
-  `feed(chunk, off, len)`, which is the single write site — and the same
-  `finish()`. It needs only ONE catch where Java needs two: Kotlin has no checked
-  exceptions, so a `Visitor` callback raises `SofabException` directly and
-  nothing arrives wrapped. Its one-shots take `feed`'s return the same way as
-  Java's: `tryDecode` returns it, and the strict `decode` checks the value it was
-  handed rather than asking the stream again.
-- **TypeScript** `MsgDecoder` keeps `get status(): DecodeStatus`, now reading a
-  private `st`, and `finish()` tests it. corelib-ts expressed the removal by
-  *narrowing* `feed`'s return type — `DecodeStatus` → `FeedStatus`, a type that
-  admits only Complete and Incomplete, so a caller has no unreachable Invalid arm
-  to write. The generated surface deliberately stays `DecodeStatus`: `FeedStatus`
-  is a **type-only** export, and a value-import of it would break any consumer
-  project compiling with `verbatimModuleSyntax`. Its supertype is import-neutral,
-  non-breaking, and wide enough for the latched Invalid the wrapper can hold.
-- **Python** `_StreamDecoder` keeps its `status` property, now reading `_st`.
-  corelib-py's `feed` already returned the `Status`; only the accessor beside it
-  went. A `SofaLimitError` raised out of `feed` deliberately leaves `_st`
-  untouched, because the corelib's own `_status` was not written on that path
-  either (§6.3 keeps a policy refusal off the three-outcome channel entirely), so
-  remembering `feed`'s return reproduces the removed accessor's readings exactly.
-  An INVALID needs no latch: it is terminal and every later `feed` returns it
-  again.
-- **Zig** `Msg.Decoder` keeps `pub fn status(self: *const Decoder) sofab.Status`,
-  now reading `st: sofab.Status = .complete`. corelib-zig's `feed` already
-  returned `Error!Status`, so it expressed the same removal by deleting the
-  `.refused` enum member that only the accessor could ever produce — `Status` is
-  back to the three §7 outcomes, and `.invalid` is documented as being kept for
-  precisely this mapping. The latch is an `errdefer |e|`, which covers all three
-  error exits in one line: the corelib's own raise and both generated-side
-  guards (`v.inv`, `v.lim`) that run after it.
+- **It was a second implementation of a rule the corelib states.** A refusal is
+  **terminal** — §5.2 for malformed bytes, §6.3 for a receiver limit ("a terminal,
+  receiver-local policy rejection") — and every corelib enforces that with a
+  latched verdict checked at the top of `feed`, before a byte is looked at:
+  `IStream.java`'s `terminal`, `IStream.cs`'s `State.Rejected`, kotlin-mp's
+  `invalid`/`limitStopped`/`argRefused`, `istream.zig`'s `terminal`, corelib-ts's
+  latched rejection, corelib-py's `_limit` + `_status`. It covers refusals raised
+  *inside* the codec and those a generated guard raises in the visitor, which
+  propagate out through `feed` — `IStream.java` catches the `UncheckedIOException`
+  wrapper for exactly that. ARCHITECTURE §8 assigns code of the same shape for
+  every schema to the corelib, and this is that code.
+- **It flattened a category §6.3 requires kept apart.** `LimitExceeded` mapped to
+  INCOMPLETE, because the three-valued outcome has no value for "valid, but more
+  than I am configured to accept". That is true, and it is the reason not to put
+  the answer on that channel at all: a caller reading the flattened status was told
+  the bytes ran out when they did not.
 
-Two details are load-bearing and neither is caught by simply compiling:
+So `finish` **asks the stream** instead, with a zero-length feed. One call answers
+both halves: a stream that refused re-throws that refusal's own code before
+looking at a byte, so a decoder that rejected a message cannot hand one back and
+the caller sees `LimitExceeded` as itself; a stream that did not answers with the
+outcome for everything fed so far, computed from its own state at this field
+boundary, which an empty chunk does not move. `feed` becomes a forward and nothing
+else — no assignment, no catch. Java's second catch, which existed only for the
+`UncheckedIOException` carrier, goes with it.
 
-1. **The initial value is COMPLETE, not INCOMPLETE.** An all-default message
-   encodes to zero bytes, so a `Decoder` can legitimately be finished without
-   ever being fed; a stream fed nothing ended on a field boundary. Both corelibs'
-   removed accessors returned COMPLETE for a fresh stream, so this preserves the
-   observable behaviour exactly.
-2. **A refusal must be latched, in every carrier it can arrive in — and only a
-   refusal.** It never comes back as a status, so without a latch a caller that
-   catches the rejection and then asks would be told the stream is Complete. The
-   mapping is the same everywhere and it is a *three-way* test, not an if/else:
-   malformed bytes (`InvalidMessage` / `INVALID_MSG`) → Invalid; a receiver cap
-   (`LimitExceeded`) → Incomplete, since §6.3 forbids reporting a policy stop as
-   the wire verdict; **anything else leaves the memory untouched**. That third
-   arm matters because the same carriers also deliver faults that are not
-   statements about the wire at all — `ARGUMENT` (a missing bound, a bad
-   off/len), a `TypeError` out of a callback, an allocator failure — and a status
-   is a verdict on the message. Answering Incomplete for a caller's own mistake
-   would tell that caller something about the bytes that is not true. Java needs
-   *two* catches applying that same test: a `Visitor` cannot declare a checked
-   exception, so every generated schema-bound guard (§7.1) and every receiver-cap
-   refusal (§6.2.1) arrives as an `UncheckedIOException` wrapping a
-   `SofabException`, and a `catch (SofabException)` alone latches none of them.
-   TypeScript tests `SofabError.code` and requires the `instanceof` first, so a
-   non-corelib throw falls through; Zig's `errdefer` capture tests the error
-   value the same way. Kotlin is the contrast that shows what drives the count:
-   it is the same JVM shape as Java but needs a single
-   `catch (e: SofabException)`, because Kotlin has no checked exceptions and
-   therefore no wrapper for a `Visitor` guard to arrive in. The number of arms
-   follows from the language's carriers, not from the corelib. The one visible
-   movement is Zig's, and it is forced: a receiver-cap refusal used to read
-   back as `.refused`, a value that no longer exists, so it now maps to
-   `.incomplete` and a `finish()` after a caught cap refusal fails where it
-   once succeeded. Mapping it to `.invalid` instead would report a policy stop
-   as the wire verdict, which §6.3 forbids.
+What this costs on the public surface: `Status` / `status()` / `status` /
+`get status()` are gone from generated decoders, and Java's `finish()` now
+declares `throws SofabException` because it can surface the refusal's code.
+CORELIB_PLAN mandates no such accessor — §5.2.4 is explicit that there is no
+finish step and nothing to read back — so this removes the last copy of a fact
+that always belonged to `feed`'s return value.
 
-The remembered value had no conformance coverage — every suite reads it only
-indirectly, through `Finish()`/`finish()` — so the project harnesses' `streamdecode`
-mode now asserts `status == fed` after each chunk. That puts the memory under the
-shared-vector skip matrix at one byte per feed and under the chunk-invariance
-sweep at every split width, where a stale or mis-wired accessor fails loudly
-instead of passing silently. Kotlin's suite has no chunk-invariance sweep to
-ride, so its width axis is `tests/conformance/kotlin/OwnershipCheck.kt`, which
-already feeds the same message at six chunk sizes and now checks the agreement on
-every chunk of every one of them.
+**Zig is the one documented exception, and it is not about the status.** Its two
+generated guards, `v.inv` and `v.lim`, are *flags the visitor sets and the wrapper
+reads after `is.feed` has already returned* — so the stream never sees those errors
+and cannot latch them. The flags are sticky by construction, they are per-field
+schema knowledge (§8's own test for what stays generated), and `finish` therefore
+re-tests them in the same order `feed` does before asking the stream. That is a
+generated latch; it is not a remembered status.
 
-That covers the *accepting* half only, and the latch is the half that is new
-logic. A reject vector exits non-zero whatever the latch recorded, so replaying
-vectors can never distinguish a correct mapping from an inverted one, from one
-that records nothing, or from a deleted catch arm. The harnesses therefore
-**print the remembered status on their refusal path** — `decode error: … [status=X]`
-— and five suites read it back for three fixtures each: a corelib-raised
-malformation (a varint past the 64-bit bound), a generated-guard rejection (an
-over-count array or an over-maxlen length word), and a receiver-cap refusal.
-Malformed → Invalid, capped → Incomplete, on both of Java's carriers. In Zig the
-`catch` that prints it is also what makes the error path compile at all, for the
-same reason the `status()` call is.
+**Python is the other shape.** Its `feed` *returns* INVALID rather than throwing,
+and it has no `finish` on the stream reader at all, so "the rejection sticks" is
+observable there only by asking again: `decoder.py` guards `feed` at its top with
+`raise self._limit` and `return Status.INVALID`, and a further feed repeats the
+same answer without consuming a byte.
 
-**A latch fixture must be read from a memory that could not already hold the
-answer.** Those three fixtures are replayed one byte per feed, and at that width
-the check is weaker than it looks: the cap fixture's first byte is a complete
-field header, so the stream is mid-field and the feed *before* the refusal has
-already written Incomplete into the memory. Deleting the cap arm outright still
-prints `[status=Incomplete]` and the assertion still passes — it discriminates an
-inverted mapping but not an omitted one. (The malformation fixtures do not have
-this problem: Invalid is never what the preceding feed left behind.) Kotlin's
-suite therefore drives every latch fixture through a **second, single-feed
-harness mode** as well, where the memory is still at its initial Complete when
-the refusal fires and the value read back can only have come from the latch. The
-chunked mode still runs, and catches the opposite error — an arm that overwrites
-a memory the stream had already moved past. The other four suites carry the
-one-byte shape only, and mirroring the single-feed mode into them is open work.
+**How the suites see it.** A reject vector exits non-zero whatever the generated
+layer did, so each harness **names what `finish` answered after the refusal** —
+`decode error: … [finish=<code>]`, and `[refeed=<code>]` in python, whose route is
+the return value. `RETURNED` is the failure marker: it means `finish` handed back
+a message from a decoder that had refused one. Five suites read three fixtures
+each, covering both arrival routes — a corelib-raised malformation (a varint past
+the 64-bit bound), a generated-guard rejection (an over-count array or an
+over-maxlen length word) and a receiver-cap refusal, which now asserts
+`LimitExceeded` rather than the INCOMPLETE the old mapping produced. Python gains
+this leg for the first time; it was the one port of the six with no latch
+assertion at all.
 
-In Zig that assertion does more than assert. **Zig only semantically analyses a
+**This answer cannot be a leftover, which the old one could.** #528 recorded the
+defect: the remembered status was also written by every ordinary `feed`, so under
+one byte per feed an earlier call had already left the expected value in the field
+by the time a refusal fired, and the assertion passed whether or not the mapping
+arm existed. Deleting kotlin's `LIMIT_EXCEEDED` arm left the suite green.
+Kotlin's `streamdecode1` — a second harness mode feeding the whole buffer in one
+call, so the memory was still at its initial COMPLETE when the refusal fired —
+existed only to work around that, and is deleted here along with the field it
+observed. Nothing but the `finish` in question produces `finish`'s answer, so the
+chunked replay alone discriminates, at every split width.
+
+Measured on the C# pilot, deleting `IStream.cs`'s terminal guard and rebuilding:
+
+| corelib terminal guard | generated layer | assertion | result |
+|---|---|---|---|
+| present | `_st` latch (#461) | `[status=Invalid]` | passes |
+| **deleted** | `_st` latch (#461) | `[status=Invalid]` | **passes — blind** |
+| present | `finish` asks (#541) | `[finish=InvalidMessage]` | passes |
+| **deleted** | `finish` asks (#541) | `[finish=InvalidMessage]` | **fails** — reports `InvalidOperationException` |
+
+In Zig the harness call does more than assert. **Zig only semantically analyses a
 function something calls**, so a generated `pub fn` no harness reaches is never
-compiled at all: with the old body still in place, `zig build` reported the break
-inside `finish()` and said nothing about `status()`, and a fix repairing only
-`finish()` would have taken the whole `lang-zig` suite green with the accessor
-dead-broken for every user of generated code. The harness call is what puts a
-compiler behind it. The same blind spot applies to every `pub fn` a generated Zig
-module exposes but no harness exercises.
+compiled at all — when this was found, `zig build` reported a break inside
+`finish()` and said nothing about the then-existing `status()`, and a fix
+repairing only `finish()` would have taken the whole `lang-zig` suite green with
+the accessor dead-broken for every user of generated code. The harness `catch` is
+what puts a compiler behind the refusal path. The same blind spot applies to every
+`pub fn` a generated Zig module exposes but no harness exercises.
 
 **Rust is the one target where this is a break for generated code, and it is not
 about an accessor.** corelib-rs and corelib-rs-no-std had no status accessor to
@@ -4829,9 +4797,10 @@ A reimplementation is **conformant** when it reproduces these gates:
    is the case that shows why: its `status` verb always runs the one-shot
    decoder, so passing it on the `streamdecode` row would assert the same
    decoder's verdict twice and the streaming one's never. That row takes its
-   category from the latch the harness prints on its error path instead
-   (`[status=INVALID]`, generator#461) — the streaming decoder's own remembered
-   verdict. A suite whose `status` verb is surface-agnostic can use it for both.
+   category from what the harness prints on its error path instead
+   (`[finish=INVALID_MSG]`, generator#541) — the code the stream latched the
+   refusal under and re-throws from the `finish` that follows. A suite whose
+   `status` verb is surface-agnostic can use it for both.
 
    Where a harness had no channel on one surface, the harness grew one rather than
    the row being asserted on an exit status. The emitted `c` harness's

@@ -681,57 +681,49 @@ func (g *gen) emitStreamDecoder(f *zfile, name string, fields []*ir.Field) {
 	f.line("    pub const Decoder = struct {")
 	f.line("        is: sofab.IStream = sofab.IStream.init(),")
 	f.line("        v: _dec_%s,", name)
-	f.line("        /// What the last `feed` answered. The stream publishes its outcome")
-	f.line("        /// once, as that return value, and offers no accessor to ask a second")
-	f.line("        /// time (S5.3.1), so the caller is the one that remembers -- and this")
-	f.line("        /// decoder is the caller. `.complete` before the first feed: an")
-	f.line("        /// all-default message is zero bytes, so a stream that has been fed")
-	f.line("        /// nothing ended on a field boundary.")
-	f.line("        st: sofab.Status = .complete,")
 	f.blank()
 	f.line("        /// Feed the next chunk, of any size. `.complete` means the bytes")
 	f.line("        /// ended on a field boundary, `.incomplete` mid-field -- neither")
 	f.line("        /// answers whether the MESSAGE is done.")
+	// No errdefer, and no remembered status. A refusal raised INSIDE the corelib is
+	// terminal and the stream latches it (CORELIB_PLAN §5.2, §6.3), re-throwing the
+	// very code it was refused with from every later call -- so a copy here could
+	// only restate what it already held, and it flattened LimitExceeded into an
+	// .incomplete that says something untrue about the wire.
+	//
+	// The two generated guards are the exception, and they are why `finish` below
+	// re-tests them: `v.inv` and `v.lim` are set by the visitor but READ here,
+	// after `is.feed` has already returned, so the stream never sees the error and
+	// cannot latch it. Those flags are the generated latch, they are sticky by
+	// construction (set, never cleared), and they are per-field schema knowledge --
+	// ARCHITECTURE §8's own test for what stays in generated code.
 	f.line("        pub fn feed(self: *Decoder, chunk: []const u8) DecodeError!sofab.Status {")
-	// A refusal is terminal and never comes back as a status, so record what it
-	// means for the stream before it leaves. Malformed bytes make the message
-	// .invalid -- §6.3 pairs INVALID with error.InvalidMessage, and Status.invalid
-	// exists for exactly this mapping. A receiver cap is this side's own policy,
-	// not a verdict on the wire, so it leaves the message unfinished rather than
-	// wrong. Anything else -- an allocator failure above all -- is neither a
-	// statement about the bytes nor about a limit they crossed, so it leaves the
-	// memory alone, matching what the C#, Java and TypeScript decoders record for
-	// the same class of fault. The errdefer covers every exit: the corelib's raise
-	// and both generated-side guards.
-	f.line("            errdefer |e| {")
-	f.line("                if (e == error.InvalidMessage) {")
-	f.line("                    self.st = .invalid;")
-	f.line("                } else if (e == error.LimitExceeded) {")
-	f.line("                    self.st = .incomplete;")
-	f.line("                }")
-	f.line("            }")
 	f.line("            const st = try self.is.feed(chunk, &self.v);")
 	f.line("            if (self.v.inv) return error.InvalidMessage;")
 	if g.msgLimitGuards(fields) {
 		f.line("            if (self.v.lim) return error.LimitExceeded;")
 	}
-	f.line("            self.st = st;")
 	f.line("            return st;")
-	f.line("        }")
-	f.blank()
-	f.line("        /// The outcome for everything fed so far: what the last `feed`")
-	f.line("        /// returned, remembered here. The stream itself answers only through")
-	f.line("        /// that return value, so this is the wrapper's memory of it, not a")
-	f.line("        /// second question put to the stream.")
-	f.line("        pub fn status(self: *const Decoder) sofab.Status {")
-	f.line("            return self.st;")
 	f.line("        }")
 	f.blank()
 	f.line("        /// Declare end-of-input. Fails a stream that ended mid-field rather")
 	f.line("        /// than leaving the destination half-filled; the destination is the")
-	f.line("        /// caller's either way.")
-	f.line("        pub fn finish(self: *const Decoder) DecodeError!void {")
-	f.line("            if (self.st == .incomplete) return error.IncompleteMessage;")
+	f.line("        /// caller's either way. A stream that was REFUSED fails with that")
+	f.line("        /// refusal's own code: the rejection is terminal, so a decoder that")
+	f.line("        /// rejected a message cannot hand one back.")
+	f.line("        pub fn finish(self: *Decoder) DecodeError!void {")
+	// Same order as feed, and for the same reason: the generated guards are read
+	// on this side of the corelib call, so they are tested here rather than left
+	// to the stream. The zero-length feed then re-raises anything the stream
+	// itself latched, and otherwise reports the outcome for everything fed so
+	// far -- computed from the stream's own state, which an empty chunk does not
+	// move.
+	f.line("            if (self.v.inv) return error.InvalidMessage;")
+	if g.msgLimitGuards(fields) {
+		f.line("            if (self.v.lim) return error.LimitExceeded;")
+	}
+	f.line("            const st = try self.is.feed(&.{}, &self.v);")
+	f.line("            if (st == .incomplete) return error.IncompleteMessage;")
 	f.line("        }")
 	f.line("    };")
 	f.blank()
