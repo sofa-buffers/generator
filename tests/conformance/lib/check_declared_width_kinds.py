@@ -269,10 +269,10 @@ def emit_schema(live) -> int:
     names, and the rule it probes changed, not the shape.
 
     A cell a suite declined with --skip-positions is not DECLARED either: a
-    target that cannot express the shape at all -- `array<array<enum>>` does not
-    compile on either C++ corelib -- could not build a harness for a schema that
-    names it. The declension is per (position, kind), so a target that can carry
-    a bitfield matrix but not an enum one declares the half it can build.
+    target that cannot express the shape at all could not build a harness for a
+    schema that names it. The declension is per (position, kind), so a target
+    that can carry one kind of matrix row but not the other declares the half it
+    can build. No suite declines anything this way today.
 
     `live` is the set of (position, kind) pairs still in play.
     """
@@ -554,8 +554,9 @@ def main():
 
         An item is a position (both kinds) or `position:kind` (one of them), so a
         suite declines exactly the cell its corelib cannot reach -- corelib-cpp
-        can carry a bitfield matrix row and cannot compile an enum one, and
-        before this granularity existed that cost the whole position.
+        carries an enum matrix row with a bound and reads a bitfield one
+        unbounded, so only the latter is declined, and before this granularity
+        existed that cost the whole position.
         """
         cells = set()
         for item in (x.strip() for x in raw.split(",")):
