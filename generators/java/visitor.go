@@ -31,7 +31,7 @@ type frame struct {
 	childLoc  string      // fkSeqObj: element loc; fkSeqMat: inner-row loc
 	elemType  string      // fkSeqObj: java class for `new X()`
 	innerElem ir.Kind     // fkNativeMat: inner element kind
-	innerRef  *ir.TypeRef // fkNativeMat: inner element ref (the closed kinds' declared set)
+	innerRef  *ir.TypeRef // fkNativeMat: inner element ref (an enum/bitfield's declared width)
 	// schema bounds, for the receiver-side decode limits (generator#102):
 	elemMaxHas    bool // fkSeqLeaf: the string/blob element declares a maxlen
 	innerHasCount bool // fkNativeMat: the inner array declares a count
@@ -1601,8 +1601,8 @@ func fillTargetsFor(fs []frame, cb string) map[*frame]map[int64]int {
 // objection that once restricted this to SCHEMA-BOUNDED arrays (#96) is answered
 // by the check rather than by the reservation (ARCHITECTURE §9.5, shape A). That
 // leaves out boolean arrays (a List), fp arrays (the offer is integer-only),
-// matrix rows (whose destination is a row cursor, not a field) and the two CLOSED
-// kinds (bulkCapable says why).
+// matrix rows (whose destination is a row cursor, not a field) and the enum and
+// bitfield kinds (bulkCapable says why).
 func hasBulk(fs []frame) bool {
 	for i := range fs {
 		fr := &fs[i]
@@ -1622,14 +1622,15 @@ func hasBulk(fs []frame) bool {
 //
 // An `enum` or `bitfield` element is NOT, however wide the array it lands in.
 // The only bound the offer can carry is the destination array's WIDTH -- handing
-// back a short[] says "the elements are declared 16 bits wide" -- and the bound
-// of a closed kind is not a width at all but the set of declared constants / the
-// mask of declared positions (MESSAGE_SPEC §1). Java holds both in a long[], so
-// taking the offer would hand the decoder an array with no bound to state and
-// bypass the element callback that carries the real one: the elements would land
-// unchecked, and the guard in the fill arm would be dead code (measured -- the
-// arm existed and never ran). Declining the offer routes them back through
-// widthThrow, one element at a time, so an undeclared value is refused where it
+// back a short[] says "the elements are declared 16 bits wide" -- and Java holds
+// both kinds in a long[], whose width IS the accumulator's, so the offer would
+// state no bound at all. The one that binds them is the width their DECLARATION
+// implies (MESSAGE_SPEC §1), which the destination never carries. Taking the
+// offer would therefore hand the decoder an array with nothing to say about the
+// elements and bypass the element callback that does carry the real bound: the
+// elements would land unchecked, and the guard in the fill arm would be dead
+// code (measured -- the arm existed and never ran). Declining routes them through
+// widthThrow, one element at a time, so an over-width value is refused where it
 // arrives rather than after the whole array has landed. Validating in
 // arrayBulkEnd instead was the alternative and is weaker: it cannot report the
 // value at all when the array is cut short behind it (generator#516).

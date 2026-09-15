@@ -508,10 +508,10 @@ func (g *gen) scalarMember(cType string, f *ir.Field) (decl, entry string, err e
 		decl = fmt.Sprintf("%s %s_len; uint8_t %s[%d];", lenT, mn, mn, f.Maxlen)
 		entry = fmt.Sprintf("    SOFAB_OBJECT_FIELD_BLOB_SIZED(%d, %s, %s, %s_len),", f.ID, cType, mn, mn)
 	case ir.KindEnum:
-		decl = fmt.Sprintf("%s %s;", enumC(f.Ref.Target), mn)
+		decl = fmt.Sprintf("%s %s;", enumC(f.Ref), mn)
 		entry = field(f.ID, cType, mn, "SIGNED")
 	case ir.KindBitfield:
-		decl = fmt.Sprintf("%s %s;", bitfieldC(f.Ref.Target), mn)
+		decl = fmt.Sprintf("%s %s;", bitfieldC(f.Ref), mn)
 		entry = field(f.ID, cType, mn, "UNSIGNED")
 	case ir.KindArray:
 		// Native array element (numeric/enum/boolean/bitfield): enum -> signed,
@@ -663,9 +663,9 @@ func (g *gen) cAlign(f *ir.Field) int64 {
 	case ir.KindU64, ir.KindI64, ir.KindFP64:
 		return 8
 	case ir.KindEnum:
-		return cScalarWidth(enumC(f.Ref.Target))
+		return cScalarWidth(enumC(f.Ref))
 	case ir.KindBitfield:
-		return cScalarWidth(bitfieldC(f.Ref.Target))
+		return cScalarWidth(bitfieldC(f.Ref))
 	case ir.KindString:
 		return 1 // char[]
 	case ir.KindBlob:
@@ -1126,54 +1126,60 @@ func needsValue64(cType string) bool { return cScalarWidth(cType) == 8 }
 func (g *gen) arrayElemCType(elem ir.Kind, ref *ir.TypeRef) string {
 	switch elem {
 	case ir.KindEnum:
-		return enumC(ref.Target)
+		return enumC(ref)
 	case ir.KindBitfield:
-		return bitfieldC(ref.Target)
+		return bitfieldC(ref)
 	case ir.KindBool:
 		return "uint8_t"
 	}
 	return arrayElemC(elem)
 }
 
-// enumC backs an enum with the smallest SIGNED width covering its range (§6.1).
-func enumC(nt *ir.NamedType) string {
-	var lo, hi int64
-	for _, c := range nt.Consts {
-		if c.Value < lo {
-			lo = c.Value
-		}
-		if c.Value > hi {
-			hi = c.Value
-		}
+// enumC backs an enum with the width its declaration implies: the smallest
+// SIGNED type holding every declared constant (MESSAGE_SPEC §1, §6.1).
+//
+// On this target that width is not merely storage, it IS the validity bound. The
+// backend emits no inline guard for either named kind; what refuses an over-width
+// value is the corelib, against the element_size the descriptor carries — and
+// that size is the width chosen here. So the width comes from ir.EnumWidthRange,
+// the one derivation the other ten backends build their guards from, rather than
+// being walked again from the constants: a second derivation can drift from the
+// first, and the drift would surface as this target alone disagreeing with the
+// family about which values are valid.
+func enumC(ref *ir.TypeRef) string {
+	_, hi, ok := ir.EnumWidthRange(ref)
+	if !ok {
+		// The helper reports false where the implied width is the 64-bit
+		// accumulator's own, so no reachable value can breach it and the other
+		// backends emit no guard. C still needs a concrete type for the member
+		// and for the descriptor's element_size.
+		return "int64_t"
 	}
 	switch {
-	case lo >= -128 && hi <= 127:
+	case hi <= 127:
 		return "int8_t"
-	case lo >= -32768 && hi <= 32767:
+	case hi <= 32767:
 		return "int16_t"
-	default:
-		return "int32_t"
 	}
+	return "int32_t"
 }
 
-// bitfieldC backs a bitfield with the smallest UNSIGNED width covering its bits.
-func bitfieldC(nt *ir.NamedType) string {
-	var max int64
-	for _, fl := range nt.Flags {
-		if fl.Pos > max {
-			max = fl.Pos
-		}
-	}
-	switch {
-	case max <= 7:
-		return "uint8_t"
-	case max <= 15:
-		return "uint16_t"
-	case max <= 31:
-		return "uint32_t"
-	default:
+// bitfieldC backs a bitfield with the width its declaration implies: the smallest
+// UNSIGNED type holding its highest declared `pos` (MESSAGE_SPEC §1). It takes
+// that width from ir.BitfieldWidthMax for the reason enumC gives above, and names
+// uint64_t where the helper reports the bound is the accumulator's own.
+func bitfieldC(ref *ir.TypeRef) string {
+	hi, ok := ir.BitfieldWidthMax(ref)
+	if !ok {
 		return "uint64_t"
 	}
+	switch {
+	case hi <= 0xFF:
+		return "uint8_t"
+	case hi <= 0xFFFF:
+		return "uint16_t"
+	}
+	return "uint32_t"
 }
 
 // maxDepth returns the maximum struct/union nesting under fields (for the

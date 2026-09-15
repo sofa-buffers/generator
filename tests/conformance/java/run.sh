@@ -861,18 +861,22 @@ echo "$OUT" | tr -d ' ' | grep -q '"someuintarray":\[1,4294967295\]' \
     || { echo "FAIL: control must keep the array exactly; got: $OUT"; exit 1; }
 echo "==> declared-width reject OK (scalar and array element)"
 
-# An `enum` and a `bitfield` are CLOSED (MESSAGE_SPEC S1, generator#516): what
-# binds is the SET of constants / the MASK of declared positions, never a width
-# and never the integer the target stores the field in. The shared driver prints
-# its own schema and forges its own bytes, and probes ALL SIX positions with
-# GAPPED definitions, so an interval bound cannot pass.
+# An `enum` and a `bitfield` are bounded by the WIDTH their declaration implies
+# (MESSAGE_SPEC S1, generator#516): for an enum the smallest SIGNED type holding
+# every declared constant, for a bitfield the smallest UNSIGNED type holding its
+# highest declared `pos`. A value inside that width is valid even where the schema
+# names no constant for it and even where it carries an undeclared bit; only a
+# value outside it is malformed input. The shared driver prints its own schema and
+# forges its own bytes, and probes ALL SIX positions with GAPPED definitions, so a
+# decoder still carrying the withdrawn set/mask bound fails exactly the two rows
+# that tell the rules apart.
 #
-# Java keeps both kinds in a `long` and accepted ANYTHING at all twelve stores:
-# 5 into an enum declaring {0,1,2,10}, 4 into a bitfield declaring bits 0, 1 and
-# 3, and 2^40 into that same bitfield all decoded and were kept verbatim. The two
-# array positions additionally rode the corelib bulk offer, whose only bound is
-# the destination array's WIDTH; the offer is declined for these two kinds now,
-# so the elements come back through the callback that carries the real bound.
+# Java keeps both kinds in a `long`, i.e. at the accumulator's own width, and had
+# no bound at all: 2^40 into a bitfield declaring bits 0, 1 and 3 -- a u8 --
+# decoded and was kept verbatim at all twelve stores. The two array positions
+# additionally rode the corelib bulk offer, which states the DESTINATION's width
+# and so states nothing for a `long[]`; the offer is declined for both kinds now,
+# so the elements come back through the callback that carries the declared width.
 echo "==> enum/bitfield: bounded by the width the declaration implies (S1, generator#516)"
 { echo "version: 1"; echo "messages:"; } > "$WORK/closed.yaml"
 python3 "$ROOT/tests/conformance/lib/check_declared_width_kinds.py" --emit-schema >> "$WORK/closed.yaml"
