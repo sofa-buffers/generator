@@ -92,11 +92,18 @@ with the byte/bit layout in
 [CORELIB_PLAN](https://github.com/sofa-buffers/documentation/blob/main/CORELIB_PLAN.md)
 (both in the documentation repo). This README does **not** duplicate them.
 
-Two generator-side specifics those documents do not cover:
+Two specifics worth stating here:
 
-- **enum backing type:** the generated enum's backing integer is the smallest
-  **signed** width (`i8`/`i16`/`i32`) that covers its value range; every backend
-  derives it identically so an enum interoperates across languages.
+- **enum / bitfield declared width:** the generated enum's backing integer is the
+  smallest **signed** width (`i8`/`i16`/`i32` — the constants are themselves
+  signed 32-bit) covering its value range, and a `bitfield`'s the smallest
+  **unsigned** width covering its highest declared `pos`. Those widths are not a
+  storage preference: MESSAGE_SPEC §1 makes each the **validity bound** for its
+  field, so a wire value outside is INVALID while one inside is valid even where
+  no constant names it or it sets an undeclared bit (which is never masked away).
+  Every backend derives them identically, so the two types interoperate across
+  languages; a target that holds the field *wider* must then enforce the width
+  itself.
 - **sequence routing / capability:** `struct`, `union`, and arrays of dynamic or
   composite elements (`string`/`blob`/`struct`/`union`/`array`) are emitted as
   sequences, so the generator must route them through the corelib's
@@ -189,17 +196,25 @@ ajv.addKeyword({
 > **after** `$ref` resolution (a `{ $ref }` enum is only a map of values once
 > dereferenced).
 
-> **Why the absent-`default` half.** An `enum` is a **closed** type: only the
-> constants it declares are valid values, on the wire and off it. A field with no
-> `default` initializes to its type's zero value, and a sparse encoder omits the
-> field at exactly that value — so an enum `{RED: 1, GREEN: 2}` whose field
-> declares no `default` would initialize to `0`, a value the enum itself rejects,
-> and absence would reconstruct it on every receiver. Give the field a `default`
-> naming one of the constants, or give the enum a `0` constant. The rule binds a
-> **field**: an `array` of enum needs no counterpart, because `count` is a
-> capacity and nothing is padded to it — an array with no `default` initializes
-> empty, never to a run of zeros. A `bitfield` needs none either: its zero is the
-> "no flags set" combination and is always valid.
+> **Why the absent-`default` half.** This keyword is a **schema-authoring** rule
+> and not a wire one. On the wire MESSAGE_SPEC §1 bounds an `enum` by the
+> **width** its declaration implies — the smallest signed type holding every
+> declared constant — so a value inside that width decodes even where the schema
+> names no constant for it. What §1 still requires of a *definition* is that a
+> field's `default` **name a constant**, and §2 is why the absent case needs the
+> same care: a field with no `default` initializes to its type's zero value and a
+> sparse encoder omits the field at exactly that value, so an enum
+> `{RED: 1, GREEN: 2}` whose field declares no `default` would initialize to `0`
+> — a number its own declaration gives no name to — and absence would reconstruct
+> that unnamed value on every receiver. That `0` *would* decode, being inside the
+> implied width, is beside the point: it never reaches the wire at all, precisely
+> because the field is omitted at its default, which is why this is caught at
+> generate time and not by a decoder. Give the field a `default` naming one of
+> the constants, or give the enum a `0` constant. The rule binds a **field**: an
+> `array` of enum needs no counterpart, because `count` is a capacity and nothing
+> is padded to it — an array with no `default` initializes empty, never to a run
+> of zeros. A `bitfield` needs none either: its zero is the "no flags set"
+> combination and is always valid.
 
 ### 5. Custom keyword: `blobDefaultLength`
 
@@ -343,20 +358,27 @@ exponent, because a bit pattern has no fractional spelling and the generator wou
 render `1000000.0` into the emitted source as `1e+06`.
 
 The value bound is the **declared mask**: one bit per declared `pos`, and an
-element setting any other bit is rejected. A `bitfield` is **closed** by that mask
-(MESSAGE_SPEC §1) — `v & ~mask == 0` — and a `default` is what absence
-reconstructs (§2), so a default outside the mask would be a field value no
-conformant peer accepts on the wire while this schema's own encoder still writes
-it. Every combination of the declared flags is valid, the zero value included; the
-mask is **not** every bit up to the highest declared one, so `bits: {A: {pos: 0},
-C: {pos: 2}}` admits `0`, `1`, `4` and `5` and nothing else.
+element setting any other bit is rejected — `v & ~mask == 0`. That is an
+**authoring** bound and nothing else. On the wire MESSAGE_SPEC §1 bounds a
+`bitfield` by the **width** its highest declared `pos` implies — positions
+`{0, 1, 3}` imply a `u8`, so every value `0..255` is valid whichever bits it
+carries, undeclared ones included, and they are never masked away. What an author
+may *write* is narrower for a reason of its own: a `default` is what absence
+reconstructs (§2), so a default carrying an undeclared bit would pin the field at
+a combination the schema gives the author no name to spell and no flag to read it
+back with — a mistake worth reporting where it is made. Every combination of the
+declared flags is accepted, the zero value included; the mask is **not** every bit
+up to the highest declared one, so `bits: {A: {pos: 0}, C: {pos: 2}}` admits `0`,
+`1`, `4` and `5` as an element default and nothing else.
 
 **Storage is never the bound.** The same bitfield is held in one byte by six of
-the eleven targets, and `default: [255]` is still rejected: which integer a
-receiver picks is a footprint decision (§1, a `MAY`) and says nothing about
-validity. The mask is strictly narrower than the backing width it replaced — the
-declared positions all fit that type by construction — so it also subsumes the
-64-bit ceiling: `18446744073709551616` sets bit 64, which no flag declares.
+the eleven targets, and `default: [255]` is still rejected — not for being too
+wide (§1 makes `255` a perfectly valid *wire* value for a bitfield whose highest
+`pos` is 3) but for setting bits no flag declares. Which integer a receiver picks
+is a footprint decision (§1, a `MAY`) and says nothing about either bound. The
+mask is strictly narrower than the width §1 implies — the declared positions all
+fit that width by construction — so it also subsumes the 64-bit ceiling:
+`18446744073709551616` sets bit 64, which no flag declares.
 
 What a stock JSON Schema validator can check here is the **spelling and the sign**:
 the shipped branch carries `"type": ["integer", "string"]`, `"minimum": 0` (the
@@ -533,7 +555,7 @@ A validator is only conformant if it does **all** of:
 - [ ] enforce `bitfield` **`pos` uniqueness** across a bitfield's flags (§6);
 - [ ] enforce `union` **`default_id` membership** against the declared option ids (§7);
 - [ ] enforce **exact 64-bit range** for `i64`/`u64` `default`s, accepting an integer or string and range-checking with a big-integer type (§8);
-- [ ] enforce **array-of-`bitfield` element defaults** as non-negative decimal masks — an integer or a quoted decimal string, within the exact 64-bit range and within the bitfield's own backing width (§8.1);
+- [ ] enforce **array-of-`bitfield` element defaults** as non-negative decimal masks — an integer or a quoted decimal string, within the bitfield's **declared mask** (one bit per declared `pos`, which subsumes the exact 64-bit top), an authoring bound narrower than the wire one §1 states (§8.1);
 - [ ] enforce **array-of-`u64`/`i64`** element defaults by the same rule as the field default of that type — an integer or a quoted decimal string, exact-64-bit-range-checked, no fractional or exponent spelling, and no sign for a `u64` (§8, §8.2);
 - [ ] enforce **enum values are signed 32-bit** (`-2147483648 … 2147483647`), values and `default` alike;
 - [ ] refuse a **decimal-point or exponent spelling** for *every* integer default — narrow scalars, enums, their array elements, `u64`/`i64` and bitfield masks alike — and name the integer to write (§8.3);

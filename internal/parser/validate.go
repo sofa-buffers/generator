@@ -327,7 +327,7 @@ func (v *validator) checkInt64Range(f map[string]any, loc, kind string) {
 // It is deliberately the same shape as checkMaskElem, which #482 gave the
 // array-of-bitfield arm: a bitfield mask IS a u64, so a divergence between the
 // two would mean the same literal is legal for one element type and not the
-// other. What differs is only what a bitfield adds on top — its backing width —
+// other. What differs is only what a bitfield adds on top — its declared mask —
 // and the sign, since an i64 default may be negative.
 //
 // One rule here is WIDER than what the code accepted before #484: an unquoted
