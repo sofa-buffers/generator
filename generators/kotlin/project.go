@@ -456,7 +456,7 @@ func (g *gen) jsonFromArray(f *kfile, ind, target, src string, elem ir.Kind, ref
 	kv := fmt.Sprintf("_k%d", depth)
 	f.line("%sval %s = %s", ind, av, src)
 	if nativeArrayElem(elem) {
-		arrType := primArrayType(elem)
+		arrType := primArrayType(elem, ref)
 		f.line("%s%s = %s(%s.size)", ind, target, arrType, av)
 		var rhs string
 		switch elem {
@@ -467,7 +467,9 @@ func (g *gen) jsonFromArray(f *kfile, ind, target, src string, elem ir.Kind, ref
 		case ir.KindFP64:
 			rhs = av + "[" + kv + "].num()"
 		default:
-			rhs = jsonIntRead(elem, av+"["+kv+"]")
+			// Read at the ELEMENT's width, which for an enum or a bitfield is the
+			// one its declaration implies -- the same width the member holds.
+			rhs = jsonIntRead(arrayElemKind(arrType), av+"["+kv+"]")
 		}
 		f.line("%sfor (%s in %s.indices) %s[%s] = %s", ind, kv, av, target, kv, rhs)
 		return
@@ -497,7 +499,7 @@ func (g *gen) jsonFromArray(f *kfile, ind, target, src string, elem ir.Kind, ref
 // emptyArrayInit is the fresh, empty container a nested JSON row is built into.
 func (g *gen) emptyArrayInit(elem ir.Kind, ref *ir.TypeRef, items *ir.ArrayElem) string {
 	if nativeArrayElem(elem) {
-		return emptyArrayExpr(primArrayType(elem))
+		return emptyArrayExpr(primArrayType(elem, ref))
 	}
 	return "mutableListOf()"
 }

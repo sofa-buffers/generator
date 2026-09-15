@@ -157,7 +157,25 @@ func ktScalarType(k ir.Kind) string {
 // lowers to. Every native element kind has one -- including `boolean`
 // (`BooleanArray`) -- so a native array never boxes, which is the whole reason
 // this target maps them at all.
-func primArrayType(k ir.Kind) string {
+//
+// The type carries the element's declared WIDTH, and its signedness with it: a
+// `u8` array is a `UByteArray`, an `i8` array a `ByteArray`. An `enum` and a
+// `bitfield` have a declared width too -- the one their DECLARATION implies
+// (MESSAGE_SPEC §1), for an enum the smallest SIGNED type holding every constant
+// and for a bitfield the smallest UNSIGNED type holding its highest `pos` -- and
+// `ref` is what those two composite kinds are resolved through. An array of an
+// enum over {0,1,2,3,4} is a `ByteArray` exactly as an `array<i8>` is, and an
+// array of a bitfield over positions 0..4 a `UByteArray` exactly as an
+// `array<u8>` is.
+//
+// Both sat on a fixed `IntArray`/`ULongArray` while the withdrawn closed-set
+// reading (generator#530) left them with no declared width at all. Under §1 they
+// have one, and holding a one-byte element in four or eight bytes is the same
+// waste here as it would be for a `u8`. Kotlin spends nothing to hold it exactly:
+// an unsigned array is an inline class over its signed peer, so a narrow unsigned
+// element is a VALUE in the member -- not raw bits a reader has to widen back,
+// which is what a target without unsigned primitives has to settle for.
+func primArrayType(k ir.Kind, ref *ir.TypeRef) string {
 	switch k {
 	case ir.KindU8:
 		return "UByteArray"
@@ -182,11 +200,84 @@ func primArrayType(k ir.Kind) string {
 	case ir.KindBool:
 		return "BooleanArray"
 	case ir.KindEnum:
-		return "IntArray"
+		// ok == false says the implied width IS the 64-bit accumulator the value
+		// arrives in, so there is nothing narrower to hold it in.
+		if _, hi, ok := ir.EnumWidthRange(ref); ok {
+			return primArrayHolding(uint64(hi), false)
+		}
+		return "LongArray"
 	case ir.KindBitfield:
+		if hi, ok := ir.BitfieldWidthMax(ref); ok {
+			return primArrayHolding(hi, true)
+		}
 		return "ULongArray"
 	}
 	return ""
+}
+
+// primArrayHolding is the narrowest Kotlin primitive array whose element holds an
+// inclusive maximum of hi -- the same rule the fixed kinds above are spelled out
+// with, applied to a width that is derived rather than named. An enum's 127 and a
+// bitfield's 255 both fit a byte; `unsigned` is what then separates the
+// `UByteArray` from the `ByteArray`, and at this position it is the whole of the
+// difference between the two kinds.
+func primArrayHolding(hi uint64, unsigned bool) string {
+	base := "Int"
+	switch {
+	case hi <= 0xFF:
+		base = "Byte"
+	case hi <= 0xFFFF:
+		base = "Short"
+	}
+	if unsigned {
+		return "U" + base + "Array"
+	}
+	return base + "Array"
+}
+
+// arrayElemKind is the integer Kind an element of arrType carries: the named kind
+// whose declared width and signedness that array type already states. It is how a
+// DERIVED width rejoins the named ones -- an enum implying i8 answers KindI8, a
+// bitfield implying u8 answers KindU8 -- so the element conversion, the element
+// literal and the JSON element read are each rendered once, for the WIDTH, rather
+// than once per kind that can imply it.
+func arrayElemKind(arrType string) ir.Kind {
+	switch arrType {
+	case "UByteArray":
+		return ir.KindU8
+	case "UShortArray":
+		return ir.KindU16
+	case "UIntArray":
+		return ir.KindU32
+	case "ULongArray":
+		return ir.KindU64
+	case "ByteArray":
+		return ir.KindI8
+	case "ShortArray":
+		return ir.KindI16
+	case "IntArray":
+		return ir.KindI32
+	}
+	return ir.KindI64
+}
+
+// signedArrayView reinterprets a primitive array as the signed peer the corelib
+// takes -- for a write, and for the bulk decode destination. Kotlin's unsigned
+// arrays are inline classes over those peers, so this is a reinterpretation and
+// not a conversion: the SAME backing array under another type, with no copy and
+// no per-element widening, in either direction.
+func signedArrayView(arrType, val string) string {
+	switch arrType {
+	case "UByteArray":
+		return val + ".asByteArray()"
+	case "UShortArray":
+		return val + ".asShortArray()"
+	case "UIntArray":
+		return val + ".asIntArray()"
+	case "ULongArray":
+		return val + ".asLongArray()"
+	}
+	return val
 }
 
 // primBaseOrder is every primitive array a field can be backed by, in a fixed
@@ -253,7 +344,7 @@ func (g *gen) ktType(f *ir.Field) string {
 // a native element kind, a MutableList for a wrapper-sequence one.
 func (g *gen) ktArrayType(elem ir.Kind, ref *ir.TypeRef, items *ir.ArrayElem) string {
 	if nativeArrayElem(elem) {
-		return primArrayType(elem)
+		return primArrayType(elem, ref)
 	}
 	return "MutableList<" + g.ktArrayElemType(elem, ref, items) + ">"
 }
@@ -331,30 +422,15 @@ func fromWire(k ir.Kind, expr string) string {
 // `idExpr`.
 //
 // This is where holding the exact declared width comes out free rather than
-// merely correct: Kotlin's unsigned arrays are inline classes over their signed
-// peers, so `asByteArray()` and friends are a reinterpretation, not a
-// conversion. The corelib's `writeArrayUnsigned(ByteArray)` receives the very
-// same backing array a `UByteArray` field holds -- no copy, no per-element
-// widening -- and the bulk decode offer hands that same view back as the
-// destination, so neither direction pays for the narrow type.
-func arrayWriteCall(elem ir.Kind, idExpr, val string) string {
+// merely correct. The overload is picked from the array TYPE, not from the
+// element kind: whatever width the declaration implies, an unsigned array goes
+// out through signedArrayView -- a reinterpretation, not a conversion -- so
+// `writeArrayUnsigned` receives the very same backing array the field holds, with
+// no copy and no per-element widening. A narrowed enum or bitfield array is
+// written by the same two lines that write a `u8` or an `i8` one, because by then
+// it IS one.
+func arrayWriteCall(elem ir.Kind, ref *ir.TypeRef, idExpr, val string) string {
 	switch elem {
-	case ir.KindU8:
-		return fmt.Sprintf("os.writeArrayUnsigned(%s, %s.asByteArray())", idExpr, val)
-	case ir.KindU16:
-		return fmt.Sprintf("os.writeArrayUnsigned(%s, %s.asShortArray())", idExpr, val)
-	case ir.KindU32:
-		return fmt.Sprintf("os.writeArrayUnsigned(%s, %s.asIntArray())", idExpr, val)
-	case ir.KindU64, ir.KindBitfield:
-		return fmt.Sprintf("os.writeArrayUnsigned(%s, %s.asLongArray())", idExpr, val)
-	case ir.KindI8:
-		return fmt.Sprintf("os.writeArraySigned(%s, %s)", idExpr, val)
-	case ir.KindI16:
-		return fmt.Sprintf("os.writeArraySigned(%s, %s)", idExpr, val)
-	case ir.KindI32, ir.KindEnum:
-		return fmt.Sprintf("os.writeArraySigned(%s, %s)", idExpr, val)
-	case ir.KindI64:
-		return fmt.Sprintf("os.writeArraySigned(%s, %s)", idExpr, val)
 	case ir.KindFP32:
 		return fmt.Sprintf("os.writeArrayFp32(%s, %s)", idExpr, val)
 	case ir.KindFP64:
@@ -365,7 +441,14 @@ func arrayWriteCall(elem ir.Kind, idExpr, val string) string {
 		// is materialised as bytes for the write.
 		return fmt.Sprintf("os.writeArrayUnsigned(%s, Seq.boolsToBytes(%s))", idExpr, val)
 	}
-	return ""
+	t := primArrayType(elem, ref)
+	if t == "" {
+		return ""
+	}
+	if strings.HasPrefix(t, "U") {
+		return fmt.Sprintf("os.writeArrayUnsigned(%s, %s)", idExpr, signedArrayView(t, val))
+	}
+	return fmt.Sprintf("os.writeArraySigned(%s, %s)", idExpr, val)
 }
 
 // ---------------------------------------------------------------------------
@@ -384,7 +467,7 @@ func (g *gen) ktDefaultValue(f *ir.Field) string {
 			if lit, ok := g.ktPrimArrayLiteral(f); ok {
 				return lit
 			}
-			return emptyArrayExpr(primArrayType(f.Elem))
+			return emptyArrayExpr(primArrayType(f.Elem, f.ElemRef))
 		}
 		// A wrapper array starts EMPTY, with or without a declared `count: N`:
 		// `count` is a capacity, not a length (MESSAGE_SPEC §3), so a fresh
@@ -480,26 +563,29 @@ func (g *gen) ktPrimArrayLiteral(f *ir.Field) (string, bool) {
 		return "", false
 	}
 	if len(vals) == 0 {
-		return emptyArrayExpr(primArrayType(f.Elem)), true
+		return emptyArrayExpr(primArrayType(f.Elem, f.ElemRef)), true
 	}
 	parts := make([]string, len(vals))
 	for i, v := range vals {
-		parts[i] = ktArrayElemLit(f.Elem, v)
+		parts[i] = ktArrayElemLit(f.Elem, f.ElemRef, v)
 	}
-	return primArrayCtor(f.Elem) + "(" + strings.Join(parts, ", ") + ")", true
+	return primArrayCtor(f.Elem, f.ElemRef) + "(" + strings.Join(parts, ", ") + ")", true
 }
 
 // primArrayCtor is the `xArrayOf` factory for a native element kind. Kotlin
 // spells the unsigned ones all-lowercase (`ubyteArrayOf`, not `uByteArrayOf`),
 // so the whole element prefix is lowered rather than just its first letter.
-func primArrayCtor(k ir.Kind) string {
-	t := primArrayType(k)
+func primArrayCtor(k ir.Kind, ref *ir.TypeRef) string {
+	t := primArrayType(k, ref)
 	return strings.ToLower(baseSuffix(t)) + "ArrayOf"
 }
 
 // ktArrayElemLit renders one native array element default at the array's
-// element type.
-func ktArrayElemLit(elem ir.Kind, v any) string {
+// element type -- which for an enum and a bitfield is the type their declared
+// width implies, so the literal is rendered for that WIDTH rather than for the
+// kind: an enum constant in a `ByteArray` is `(3).toByte()`, a bitfield default
+// in a `UByteArray` is `5u.toUByte()`.
+func ktArrayElemLit(elem ir.Kind, ref *ir.TypeRef, v any) string {
 	switch elem {
 	case ir.KindBool:
 		if b, ok := v.(bool); ok && b {
@@ -511,7 +597,7 @@ func ktArrayElemLit(elem ir.Kind, v any) string {
 	case ir.KindFP64:
 		return floatLit(v)
 	}
-	return ktIntLit(elem, scalarLit(v))
+	return ktIntLit(arrayElemKind(primArrayType(elem, ref)), scalarLit(v))
 }
 
 func (g *gen) bitfieldDefault(f *ir.Field) uint64 {
@@ -658,7 +744,7 @@ func (g *gen) arrayCompareDefault(f *ir.Field) (string, bool) {
 		return "", false
 	}
 	lit, ok := g.ktPrimArrayLiteral(f)
-	if !ok || lit == emptyArrayExpr(primArrayType(f.Elem)) {
+	if !ok || lit == emptyArrayExpr(primArrayType(f.Elem, f.ElemRef)) {
 		return "", false
 	}
 	return lit, true

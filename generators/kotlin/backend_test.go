@@ -1458,13 +1458,18 @@ messages:
 // UNSIGNED type holding its highest declared `pos`. Here that is i8 (−128..127)
 // for {0, 1, 2, 10} and u8 (0..255) for positions 0, 1 and 3.
 //
-// The bound is not the integer the target stores the field in. Kotlin holds an
-// enum in an `Int` and a bitfield in a `ULong` — one as wide as the widest
-// implied enum width, one wider than any implied bitfield width — so neither
-// member enforces anything and the guard has to, which is §1's fourth
+// The bound is not the integer the target stores the field in. Kotlin holds a
+// SCALAR enum in an `Int` and a scalar bitfield in a `ULong` — one as wide as the
+// widest implied enum width, one wider than any implied bitfield width — so
+// neither member enforces anything and the guard has to, which is §1's fourth
 // consequence. It runs on the RAW `Long` the corelib delivers, ahead of the
 // `.toInt()` / `.toULong()` that would otherwise fold an over-width value into a
 // representable one.
+//
+// The ARRAY positions do hold the element at exactly the declared width (a
+// `ByteArray` and a `UByteArray` here), and the guard is emitted there all the
+// same: it is the fallback for a corelib that declines the bulk offer, and a
+// store that happens to be narrow enough is never what satisfies the rule.
 //
 // All six positions are pinned by name — scalar, native array element, struct
 // member, struct-array element member, union member, matrix row element — for
@@ -1481,8 +1486,8 @@ func TestKotlinEnumAndBitfieldWidthBoundAtEverySixPositions(t *testing.T) {
 		// 2. native array element — in the armed-fill arm, only reached while
 		// arrayBegin has this array armed, so a bare scalar at an array id stays a
 		// §7.3 skip rather than becoming a spurious INVALID.
-		enRej + `"ea element: value outside declared enum width"); m.ea[ai] = value.toInt(); ai++ }`,
-		bfRej + `"bfa element: value outside declared bitfield width"); m.bfa[ai] = value.toULong(); ai++ }`,
+		enRej + `"ea element: value outside declared enum width"); m.ea[ai] = value.toByte(); ai++ }`,
+		bfRej + `"bfa element: value outside declared bitfield width"); m.bfa[ai] = value.toUByte(); ai++ }`,
 		// 3. struct member
 		`0 -> { ` + enRej + `"se: value outside declared enum width"); m.st.se = value.toInt() }`,
 		`1 -> { ` + bfRej + `"sbf: value outside declared bitfield width"); m.st.sbf = value.toULong() }`,
@@ -1493,20 +1498,28 @@ func TestKotlinEnumAndBitfieldWidthBoundAtEverySixPositions(t *testing.T) {
 		`0 -> { ` + enRej + `"ue: value outside declared enum width"); m.un.ue = value.toInt() }`,
 		`1 -> { ` + bfRej + `"ubf: value outside declared bitfield width"); m.un.ubf = value.toULong() }`,
 		// 6. matrix row element — the row cursor, not a field.
-		enRej + `"mat element: value outside declared enum width"); _arowInt[ai] = value.toInt(); ai++ }`,
-		bfRej + `"mbf element: value outside declared bitfield width"); _arowULong[ai] = value.toULong(); ai++ }`,
+		enRej + `"mat element: value outside declared enum width"); _arowByte[ai] = value.toByte(); ai++ }`,
+		bfRej + `"mbf element: value outside declared bitfield width"); _arowUByte[ai] = value.toUByte(); ai++ }`,
 	} {
 		if !strings.Contains(m, want) {
 			t.Errorf("Closed.kt: an enum/bitfield position stores without its §1 bound, missing %q:\n%s", want, m)
 		}
 	}
-	// The bulk offer is still declined for both kinds. The bound is an interval
-	// now, but it is the width the DECLARATION implies, not the width of the
-	// destination array — an enum array is an `IntArray` and a bitfield array a
-	// `ULongArray` whatever the declaration says — so taking the offer would route
-	// the elements past the callback carrying the real bound.
-	if strings.Contains(m, "abulk") {
-		t.Errorf("a message whose only arrays are enum/bitfield arrays must make no bulk offer:\n%s", m)
+	// The two ARRAY positions also ride the bulk offer, and that is not a hole in
+	// the twelve stores above: the destination states the i8 and u8 the two
+	// declarations imply, and the corelib refuses an element that does not fit it
+	// (IStream's narrowI8 / narrowU8, picked off the header's ArrayKind). The
+	// guards above stay put as the fallback for a corelib that declines the offer.
+	if !strings.Contains(m, "m.ea = ByteArray(count); abulk = m.ea }") {
+		t.Errorf("an enum array must offer its narrow destination in bulk:\n%s", m)
+	}
+	if !strings.Contains(m, "m.bfa = UByteArray(count); abulk = m.bfa.asByteArray() }") {
+		t.Errorf("a bitfield array must offer its narrow destination in bulk:\n%s", m)
+	}
+	// A matrix ROW is never the bulk destination -- it is a row cursor, not a
+	// field -- so its elements keep coming through the guarded arm above.
+	if strings.Contains(m, "abulk = _arow") {
+		t.Errorf("a matrix row must not be offered in bulk:\n%s", m)
 	}
 	// The pre-#516 bound must stay gone: an enum was checked against the signed
 	// 32-bit range — the WIRE TYPE's ceiling, which happens to coincide with the
@@ -1518,6 +1531,10 @@ func TestKotlinEnumAndBitfieldWidthBoundAtEverySixPositions(t *testing.T) {
 		"0 -> { m.en = value.toInt() }",
 		"1 -> { m.bf = value.toULong() }",
 		"1 -> { m.un.ubf = value.toULong() }",
+		// The two array positions too: narrowing the destination moves who
+		// enforces the bound on the BULK path, it does not retire the fallback.
+		"{ m.ea[ai] = value.toByte(); ai++ }",
+		"{ m.bfa[ai] = value.toUByte(); ai++ }",
 	} {
 		if strings.Contains(m, bad) {
 			t.Errorf("Closed.kt still stores an enum/bitfield unguarded (%q):\n%s", bad, m)
@@ -1613,5 +1630,149 @@ func TestKotlinWidthAdmitsUndeclaredValues(t *testing.T) {
 	}
 	if !strings.Contains(m, "0xffL.inv()") {
 		t.Errorf("the bitfield width mask is missing:\n%s", m)
+	}
+}
+
+// An enum/bitfield ARRAY is backed by the Kotlin primitive array whose width its
+// DECLARATION implies (MESSAGE_SPEC §1), exactly as an array<i8> is backed by a
+// ByteArray and an array<u8> by a UByteArray. Under the withdrawn closed-set rule
+// neither kind had a declared width, so an enum array sat on `IntArray` and a
+// bitfield array on `ULongArray` — four or eight bytes for an element the schema
+// bounds at one.
+//
+// Where Java has to hold a narrowed UNSIGNED element as raw bits and mask it back
+// wherever it leaves the field as a value, Kotlin has the unsigned array types:
+// the bitfield rows below land in a `UByteArray`/`UShortArray`/`UIntArray` whose
+// element already IS the value, so there is no widening step anywhere and no
+// place for one to be forgotten.
+//
+// Pinned per implied width, on both sides of every step, because the mapping is
+// derived rather than named: an enum by the smallest SIGNED type holding every
+// constant, a bitfield by the smallest UNSIGNED type holding its highest `pos`.
+// The schema validator caps enum constants at signed 32 bits, so i64 is
+// unreachable from a declaration and the enum table stops at IntArray.
+//
+// The bulk decision is pinned in the same table, because it follows from exactly
+// this mapping: the offer's only bound is the destination's width, so it may be
+// taken wherever that width IS the declared one — which, now that the two kinds
+// have one, is every integer element.
+func TestKotlinEnumBitfieldArrayElementWidth(t *testing.T) {
+	for _, tc := range []struct {
+		name, decl, want, view string
+		bulk                   bool
+	}{
+		// enum: the extremes decide, so one constant at the edge of a width is
+		// enough to take the array up to it. An enum width is SIGNED whatever its
+		// constants are, so a purely non-negative set still lands on ByteArray and
+		// never on UByteArray.
+		{"enum_i8", `{ type: enum, count: 4, enum: { A: -128, B: 127 } }`, "ByteArray", "", true},
+		{"enum_i8_nonneg", `{ type: enum, count: 4, enum: { A: 0, B: 127 } }`, "ByteArray", "", true},
+		{"enum_i16", `{ type: enum, count: 4, enum: { A: 0, B: 128 } }`, "ShortArray", "", true},
+		{"enum_i16_low", `{ type: enum, count: 4, enum: { A: -129, B: 0 } }`, "ShortArray", "", true},
+		{"enum_i32", `{ type: enum, count: 4, enum: { A: 0, B: 32768 } }`, "IntArray", "", true},
+		{"enum_i32_max", `{ type: enum, count: 4, enum: { A: 0, B: 2147483647 } }`, "IntArray", "", true},
+		// bitfield: the highest declared position decides, and the width is
+		// UNSIGNED, so each one is the unsigned peer of the enum row above it.
+		{"bf_u8", `{ type: bitfield, count: 4, bits: { A: { pos: 0 }, H: { pos: 7 } } }`, "UByteArray", ".asByteArray()", true},
+		{"bf_u16", `{ type: bitfield, count: 4, bits: { A: { pos: 0 }, H: { pos: 8 } } }`, "UShortArray", ".asShortArray()", true},
+		{"bf_u32", `{ type: bitfield, count: 4, bits: { A: { pos: 0 }, H: { pos: 16 } } }`, "UIntArray", ".asIntArray()", true},
+		// u64 is the accumulator's own width: `ULongArray` states it, and there is
+		// no bound left for the offer to lose — the position array<u64> is in.
+		{"bf_u64", `{ type: bitfield, count: 4, bits: { A: { pos: 0 }, H: { pos: 32 } } }`, "ULongArray", ".asLongArray()", true},
+		{"bf_u64_top", `{ type: bitfield, count: 4, bits: { A: { pos: 0 }, H: { pos: 63 } } }`, "ULongArray", ".asLongArray()", true},
+		// The references the derivation has to match, narrow and wide.
+		{"i8_ref", `{ type: i8, count: 4 }`, "ByteArray", "", true},
+		{"u8_ref", `{ type: u8, count: 4 }`, "UByteArray", ".asByteArray()", true},
+		{"u64_ref", `{ type: u64, count: 4 }`, "ULongArray", ".asLongArray()", true},
+		// fp is the one integer-array offer still declined: those elements arrive
+		// through the decoder's fixlen loop, which the offer does not cover.
+		{"fp32_ref", `{ type: fp32, count: 4 }`, "FloatArray", "", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			m := genFromYAML(t, "version: 1\nmessages:\n  W:\n    payload:\n"+
+				"      a: { id: 0, type: array, items: "+tc.decl+" }\n",
+				map[string]any{})["src/main/kotlin/message/W.kt"]
+			if want := "public var a: " + tc.want + " = "; !strings.Contains(m, want) {
+				t.Errorf("the field is not backed by %s; missing %q:\n%s", tc.want, want, m)
+			}
+			alloc := "m.a = " + tc.want + "(count)"
+			if !strings.Contains(m, alloc) {
+				t.Errorf("the destination is not sized as a %s; missing %q:\n%s", tc.want, alloc, m)
+			}
+			if tc.bulk {
+				// The offer hands back the SIGNED peer: an unsigned array is an
+				// inline class over it, so this is the same backing array and not a
+				// copy -- and the corelib picks narrowU*/narrowI* off the header's
+				// ArrayKind rather than off the destination's signedness.
+				if want := "abulk = m.a" + tc.view; !strings.Contains(m, want) {
+					t.Errorf("a %s destination states the declared width, so the bulk offer must be taken; missing %q:\n%s", tc.want, want, m)
+				}
+			} else if strings.Contains(m, "abulk") {
+				t.Errorf("the bulk offer must not be made for a %s destination:\n%s", tc.want, m)
+			}
+		})
+	}
+}
+
+// The declared width reaches every OTHER place the element type is spelled, not
+// only the member and the decode destination: the write overload, the schema
+// default literal, and both directions of JSON.
+//
+// This is where Kotlin's unsigned arrays pay off against Java's raw-bits bargain.
+// A u8-wide bitfield element of 128 is a `UByte` holding 128 -- it prints as 128
+// with no mask, and it parses back with no cast that could lose the top bit --
+// where the same element in a Java `byte[]` is stored as -128 and has to be
+// widened at every exit. There is simply no widening step here to get wrong.
+func TestKotlinNarrowEnumBitfieldArrayRoundTrip(t *testing.T) {
+	files := genFromYAML(t, "version: 1\nmessages:\n  W:\n    payload:\n"+
+		"      bf:   { id: 0, type: array, items: { type: bitfield, count: 4, bits: { A: { pos: 0 }, H: { pos: 7 } } }, default: [1, 128] }\n"+
+		"      bf16: { id: 1, type: array, items: { type: bitfield, count: 4, bits: { A: { pos: 0 }, H: { pos: 8 } } } }\n"+
+		"      wide: { id: 2, type: array, items: { type: bitfield, count: 4, bits: { A: { pos: 0 }, H: { pos: 63 } } } }\n"+
+		"      en:   { id: 3, type: array, items: { type: enum, count: 4, enum: { A: 0, B: 1, Z: -128 } }, default: [1, -128] }\n"+
+		"      u8:   { id: 4, type: array, items: { type: u8, count: 4 } }\n",
+		map[string]any{"emit": "project"})
+	m := files["src/main/kotlin/message/W.kt"]
+	for _, want := range []string{
+		// The schema default is rendered at the ELEMENT's type, not at the kind's:
+		// a bitfield element is a UByte and an enum element a Byte.
+		"ubyteArrayOf(1u.toUByte(), 128u.toUByte())",
+		"byteArrayOf((1).toByte(), (-128).toByte())",
+		"public var bf16: UShortArray = Seq.EMPTY_USHORTS",
+		"public var wide: ULongArray = Seq.EMPTY_ULONGS",
+		// The write overload follows the same type: unsigned through the signed
+		// view (a reinterpretation), signed straight through.
+		"os.writeArrayUnsigned(0, this.bf.asByteArray())",
+		"os.writeArrayUnsigned(1, this.bf16.asShortArray())",
+		"os.writeArraySigned(3, this.en)",
+	} {
+		if !strings.Contains(m, want) {
+			t.Errorf("W.kt missing %q:\n%s", want, m)
+		}
+	}
+	j := files["src/main/kotlin/message/Json.kt"]
+	if j == "" {
+		t.Fatal("no Json.kt generated")
+	}
+	for _, want := range []string{
+		// A UByte element already IS the value: it prints unsigned with no mask,
+		// which is the whole of the difference from the Java twin of this rule.
+		"b.append(o.bf[_i0])",
+		"b.append(o.en[_i0])",
+		// And back in, parsed at the element's own width.
+		"o.bf[_k0] = _a0[_k0].uint().toUByte()",
+		"o.bf16[_k0] = _a0[_k0].uint().toUShort()",
+		"o.wide[_k0] = _a0[_k0].uint()",
+		"o.en[_k0] = _a0[_k0].int().toByte()",
+		// The u8 array this is modelled on, so the comparison is on the record.
+		"o.u8[_k0] = _a0[_k0].uint().toUByte()",
+	} {
+		if !strings.Contains(j, want) {
+			t.Errorf("Json.kt missing %q:\n%s", want, j)
+		}
+	}
+	// No mask may appear on either side: masking is how a target WITHOUT unsigned
+	// arrays recovers a value from raw bits, and this one must not grow one.
+	if strings.Contains(j, "o.bf[_i0] and 0x") || strings.Contains(j, "o.en[_i0] and 0x") {
+		t.Errorf("a narrow element was masked -- the array type already holds the value:\n%s", j)
 	}
 }
