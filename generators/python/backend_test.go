@@ -1977,13 +1977,14 @@ func varint(n uint64) []byte {
 	return append(out, byte(n))
 }
 
-// closedSixSrc declares an `enum` and a `bitfield` at all SIX positions a value
+// widthSixSrc declares an `enum` and a `bitfield` at all SIX positions a value
 // can land in, and both definitions are GAPPED on purpose: the enum declares
-// {0, 1, 2, 10}, so 5 sits inside the hull and is not a constant, and the
-// bitfield declares positions 0, 1 and 3 (mask 0b1011), so 4 sets a bit no flag
-// declares. A contiguous definition makes a closed set look like an interval and
-// would pass under any bound that is one.
-const closedSixSrc = `
+// {0, 1, 2, 10}, so 5 sits inside the implied width and is not a constant, and
+// the bitfield declares positions 0, 1 and 3, so 4 sets a bit no flag declares.
+// Both of those values are VALID under the width rule and were INVALID under the
+// withdrawn closed-set one, which is what makes a gapped definition the shape
+// that tells the two rules apart.
+const widthSixSrc = `
 version: 1
 messages:
   Closed:
@@ -2018,20 +2019,6 @@ messages:
       mbf: { id: 8, type: array, items: { type: array, count: 2, items: { type: bitfield, count: 3, bits: { A: { pos: 0 }, B: { pos: 1 }, D: { pos: 3 } } } } }
 `
 
-// MESSAGE_SPEC §1 closes an `enum` by the SET of constants the schema declares
-// and a `bitfield` by the MASK of the positions it declares (generator#516).
-//
-// This backend kept a wide member and accepted anything -- a Python int is
-// unbounded, so nothing was even truncated: 5 into a gapped enum, 4 into a
-// three-flag bitfield and 2^40 into that same bitfield all decoded and were kept
-// verbatim, at every one of the twelve stores. Storage is never the bound; the
-// declared set is.
-//
-// All six positions are pinned by name -- scalar, native array element, struct
-// member, struct-array element member, union member, matrix row element -- for
-// both kinds. Four of the six share one emitted arm per kind and appear twice
-// besides (the standalone per-class visitor and the flat root visitor), which is
-// exactly why "the arm is shared" is not worth trusting after the next refactor.
 // TestPythonBitfieldIsIntFlagAndEnumIsIntEnum pins the two named kinds to the two
 // enum bases, which are NOT interchangeable here.
 //
@@ -2057,86 +2044,131 @@ func TestPythonBitfieldIsIntFlagAndEnumIsIntEnum(t *testing.T) {
 	}
 }
 
-func TestPythonClosedEnumAndBitfieldRejectAtEverySixPositions(t *testing.T) {
-	mod := string(genPy(t, schema(t, closedSixSrc), map[string]any{})["message.py"])
-	// A Python int is unbounded and ``~mask`` is an infinite-precision negative,
-	// so the mask test needs no width term: it carries every bit above the
-	// highest declared position as well as every undeclared one below it.
-	const bfRej = "                if (value & ~0xb) != 0:\n                    raise SofaDecodeError(%q)\n                %s = value\n"
-	const enRej = "                if value not in (0, 1, 2, 10):\n                    raise SofaDecodeError(%q)\n                %s = value\n"
+// MESSAGE_SPEC §1 binds an `enum` to the width of the smallest SIGNED type
+// holding every declared constant and a `bitfield` to the width of the smallest
+// UNSIGNED type holding its highest declared `pos`. For widthSixSrc that is i8
+// (-128..127) for {0, 1, 2, 10} and u8 (0..255) for positions 0, 1 and 3.
+//
+// The bound is not the integer the target stores the field in, and here it could
+// not be: Python keeps both kinds in its own unbounded `int`, so nothing was even
+// truncated -- 5 into a gapped enum, 4 into a three-flag bitfield and 2^40 into
+// that same bitfield all decoded and were kept verbatim, at every one of the
+// twelve stores (generator#513). That is §1's fourth consequence: a receiver that
+// cannot hold the field at exactly the declared width holds it wider and MUST
+// then enforce the width as an explicit check, because nothing about its storage
+// will.
+//
+// All six positions are pinned by name -- scalar, native array element, struct
+// member, struct-array element member, union member, matrix row element -- for
+// both kinds. Four of the six share one emitted arm per kind and appear twice
+// besides (the standalone per-class visitor and the flat root visitor), which is
+// exactly why "the arm is shared" is not worth trusting after the next refactor.
+//
+// The two ELEMENT positions are pinned at on_array_begin rather than at the
+// store: a width is an interval, so it crosses the corelib's element channel
+// whole, and the decoder applies it AT each element -- the only place that can
+// refuse an element a truncation stops the array from ever completing (§5.2's
+// INVALID over INCOMPLETE).
+func TestPythonEnumAndBitfieldWidthBoundAtEverySixPositions(t *testing.T) {
+	mod := string(genPy(t, schema(t, widthSixSrc), map[string]any{})["message.py"])
+	// The bitfield test is a MASK of the width, the same single operation the
+	// withdrawn flag mask was: `~0xff` is an infinite-precision negative, so one
+	// comparison refuses every value above the implied u8 and a negative one too.
+	const bfRej = "                if (value & ~0xff) != 0:\n                    raise SofaDecodeError(%q)\n                %s = value\n"
+	const enRej = "                if value < -128 or value > 127:\n                    raise SofaDecodeError(%q)\n                %s = value\n"
 	for _, want := range []string{
 		// 1. scalar, in the flat root visitor.
-		fmt.Sprintf(enRej, "en: value outside declared enum constants", "self._o.en"),
-		fmt.Sprintf(bfRej, "bf: value outside declared bitfield flags", "self._o.bf"),
-		// 2. native array element. The scan is the EXACT verdict here: the interval
-		// on_array_begin carries cannot state a gapped set or a mask.
-		"                if any(_v not in (0, 1, 2, 10) for _v in value):\n" +
-			"                    raise SofaDecodeError(\"ea element: value outside declared enum constants\")\n" +
-			"                self._o.ea = value\n",
-		"                if any((_v & ~0xb) != 0 for _v in value):\n" +
-			"                    raise SofaDecodeError(\"bfa element: value outside declared bitfield flags\")\n" +
-			"                self._o.bfa = value\n",
+		fmt.Sprintf(enRej, "en: value outside declared enum width", "self._o.en"),
+		fmt.Sprintf(bfRej, "bf: value outside declared bitfield width", "self._o.bf"),
+		// 2. native array element -- stated once, at the header, as the interval
+		// the decoder applies to every element. BOTH sides of the enum width: an
+		// enum array travels as WT_ARRAY_SIGNED, so a negative element is
+		// expressible on the wire and -129 must be refused as surely as 128. A
+		// bitfield array is WT_ARRAY_UNSIGNED, whose own floor is 0, so its
+		// interval states the ceiling alone.
+		"            if fid == 2:\n                return (None, -128, 127)\n            elif fid == 3:\n                return (None, None, 255)\n",
 		// 3. struct member -- both surfaces: the standalone class visitor...
-		fmt.Sprintf(enRej, "se: value outside declared enum constants", "self._o.se"),
-		fmt.Sprintf(bfRej, "sbf: value outside declared bitfield flags", "self._o.sbf"),
+		fmt.Sprintf(enRej, "se: value outside declared enum width", "self._o.se"),
+		fmt.Sprintf(bfRej, "sbf: value outside declared bitfield width", "self._o.sbf"),
 		// ...and the flat root visitor's frame for the same member.
-		fmt.Sprintf(enRej, "se: value outside declared enum constants", "self._o.st.se"),
-		fmt.Sprintf(bfRej, "sbf: value outside declared bitfield flags", "self._o.st.sbf"),
+		fmt.Sprintf(enRej, "se: value outside declared enum width", "self._o.st.se"),
+		fmt.Sprintf(bfRej, "sbf: value outside declared bitfield width", "self._o.st.sbf"),
 		// 4. struct-array element member.
-		fmt.Sprintf(enRej, "se: value outside declared enum constants", "self._o.sa[self._ix2].se"),
-		fmt.Sprintf(bfRej, "sbf: value outside declared bitfield flags", "self._o.sa[self._ix2].sbf"),
+		fmt.Sprintf(enRej, "se: value outside declared enum width", "self._o.sa[self._ix2].se"),
+		fmt.Sprintf(bfRej, "sbf: value outside declared bitfield width", "self._o.sa[self._ix2].sbf"),
 		// 5. union member.
-		fmt.Sprintf(enRej, "ue: value outside declared enum constants", "self._o.un.ue"),
-		fmt.Sprintf(bfRej, "ubf: value outside declared bitfield flags", "self._o.un.ubf"),
-		// 6. matrix row element -- the row cursor `_t`, not a field id.
-		"            if any(_v not in (0, 1, 2, 10) for _v in value):\n" +
-			"                raise SofaDecodeError(\"mat row element: value outside declared enum constants\")\n" +
-			"            _t[fid] = value\n",
-		"            if any((_v & ~0xb) != 0 for _v in value):\n" +
-			"                raise SofaDecodeError(\"mbf row element: value outside declared bitfield flags\")\n" +
-			"            _t[fid] = value\n",
-		// The HULL, stated at the header for both element positions. It is what
-		// the corelib applies AT each element, so a value outside the declared
-		// RANGE is refused even when the array is cut short behind it (§5.2) --
-		// which the scan above, running on the assembled list, cannot reach.
-		//
-		// BOTH sides of the enum hull, including a floor of 0. An enum array is
-		// WT_ARRAY_SIGNED on the wire, so a negative element is expressible, and an
-		// enum declaring only non-negative constants must refuse one; handing the
-		// hook `elem_min=None` dropped the lower half of a bound ir.EnumHull
-		// already knew, and -1 under a truncation then reported INCOMPLETE where
-		// §5.2/§7.1 require INVALID. A bitfield array is WT_ARRAY_UNSIGNED, whose
-		// own floor is 0, so its interval states the ceiling alone.
-		"            if fid == 2:\n                return (None, 0, 10)\n            elif fid == 3:\n                return (None, None, 11)\n",
-		"        elif c == _L_Closed_mat:\n            return (None, 0, 10)\n",
-		"        elif c == _L_Closed_mbf:\n            return (None, None, 11)\n",
+		fmt.Sprintf(enRej, "ue: value outside declared enum width", "self._o.un.ue"),
+		fmt.Sprintf(bfRej, "ubf: value outside declared bitfield width", "self._o.un.ubf"),
+		// 6. matrix row element -- a row scope keyed by row index, so its interval
+		// is the scope's whole arm rather than one keyed by a field id.
+		"        elif c == _L_Closed_mat:\n            return (None, -128, 127)\n",
+		"        elif c == _L_Closed_mbf:\n            return (None, None, 255)\n",
 	} {
 		if !strings.Contains(mod, want) {
-			t.Errorf("Closed message.py: a closed-kind position stores without its §1 bound, missing %q", want)
+			t.Errorf("Closed message.py: an enum/bitfield position stores without its §1 width bound, missing %q", want)
 		}
 	}
+	// The scalar-shaped stores must not reappear unguarded: that is the #513
+	// defect itself, an out-of-width value kept because nothing narrows it.
 	for _, bad := range []string{
 		"            if fid == 0:\n                self._o.en = value\n",
 		"            if fid == 1:\n                self._o.bf = value\n",
+	} {
+		if strings.Contains(mod, bad) {
+			t.Errorf("Closed message.py stores an enum/bitfield scalar unguarded (%q)", bad)
+		}
+	}
+	// The element positions carry NO scan of the assembled list. It was only ever
+	// there to close the gap a hull left open, and a width has no gap -- so the
+	// array stores straight through and the pure-Python per-element pass is gone.
+	for _, want := range []string{
 		"            if fid == 2:\n                self._o.ea = value\n",
 		"            if fid == 3:\n                self._o.bfa = value\n",
 	} {
-		if strings.Contains(mod, bad) {
-			t.Errorf("Closed message.py still stores a closed kind unguarded (%q)", bad)
+		if !strings.Contains(mod, want) {
+			t.Errorf("Closed message.py: an enum/bitfield array must store straight through, missing %q", want)
 		}
+	}
+	if strings.Contains(mod, "for _v in value") {
+		t.Errorf("Closed message.py still scans an enum/bitfield array element by element:\n%s", mod)
 	}
 }
 
-// The two elisions, both of which keep "no guard" right under the closed rule.
-// A CONTIGUOUS enum is its own hull, so the cheaper two-sided comparison IS the
-// set; a bitfield declaring all 64 positions has a mask of every bit, so the mask
-// test is a tautology and emitting it would be dead code.
+// The behavioural difference the width rule makes, stated as the values
+// themselves: a gapped enum admits a value between its constants (5), and a
+// bitfield admits an undeclared bit (4) -- both INVALID under the withdrawn
+// closed-set rule of generator#530. Pinned on the emitted bound, at the store and
+// at the element channel alike, so a silent reversion is loud.
+func TestPythonWidthAdmitsUndeclaredValues(t *testing.T) {
+	mod := string(genPy(t, schema(t, widthSixSrc), map[string]any{})["message.py"])
+	for _, bad := range []string{
+		"not in (0, 1, 2, 10)", // the membership chain over the constants
+		"~0xb)",                // the flag mask
+		"(None, 0, 10)",        // the constants' hull, at the element channel
+		"(None, None, 11)",     // the flag mask, at the element channel
+	} {
+		if strings.Contains(mod, bad) {
+			t.Errorf("the withdrawn closed-set bound was emitted (%q):\n%s", bad, mod)
+		}
+	}
+	if !strings.Contains(mod, "~0xff)") {
+		t.Errorf("the bitfield width mask is missing:\n%s", mod)
+	}
+}
+
+// The elisions under the width rule: a guard is emitted only where the implied
+// width is NARROWER than the 64-bit accumulator the value arrives in. A bitfield
+// whose highest declared position is 63 implies u64, so nothing reachable can
+// breach the bound and both the store guard and the element interval would be
+// dead code.
 //
-// The array halves of the same two: an all-bits mask states nothing an interval
-// could narrow, and a mask of 0 -- a bitfield declaring no flag at all -- admits
-// only the zero value, which the scan states exactly and `(None, None, 0)` could
-// not be told apart from "no bound".
-func TestPythonClosedBoundElisions(t *testing.T) {
+// Note what is NOT an elision any more: whether an enum's constants are
+// contiguous no longer matters at all. The width comes from the extremes, so
+// {R:0, G:1, B:2} and {A:0, B:1, C:2, Z:10} produce the identical i8 guard, and
+// the membership chain a gapped set used to need is gone. The enum's own
+// ok == false case is unreachable from a valid schema: the parser already refuses
+// a constant outside signed 32 bits, so no declaration can imply i64.
+func TestPythonEnumBitfieldWidthElisions(t *testing.T) {
 	var bits []string
 	for i := 0; i < 64; i++ {
 		bits = append(bits, fmt.Sprintf("F%d: { pos: %d }", i, i))
@@ -2147,36 +2179,42 @@ func TestPythonClosedBoundElisions(t *testing.T) {
 		"      e: { id: 2, type: enum, enum: { R: 0, G: 1, B: 2 }, default: 0 }\n"),
 		map[string]any{})["message.py"])
 	if !strings.Contains(mod, "            if fid == 0:\n                self._o.f = value\n") {
-		t.Errorf("an all-bits-declared bitfield must store unguarded:\n%s", mod)
+		t.Errorf("a bitfield implying the full u64 width must store unguarded:\n%s", mod)
 	}
 	if strings.Contains(mod, "0xffffffffffffffff") {
-		t.Errorf("a tautological mask guard was emitted:\n%s", mod)
+		t.Errorf("a tautological width-mask guard was emitted:\n%s", mod)
 	}
 	if strings.Contains(mod, "def on_array_begin") {
-		t.Errorf("an all-bits-declared bitfield array has no interval to state:\n%s", mod)
+		t.Errorf("an array whose element width IS the accumulator has no interval to state:\n%s", mod)
 	}
-	if !strings.Contains(mod, "                if value < 0 or value > 2:\n"+
-		"                    raise SofaDecodeError(\"e: value outside declared enum constants\")\n") {
-		t.Errorf("a contiguous enum must take the two-sided comparison:\n%s", mod)
+	// {R:0, G:1, B:2} implies i8, NOT the 0..2 hull of its constants: 5 is a valid
+	// wire value for this field and must decode.
+	if !strings.Contains(mod, "                if value < -128 or value > 127:\n"+
+		"                    raise SofaDecodeError(\"e: value outside declared enum width\")\n") {
+		t.Errorf("a contiguous enum must take the implied i8 width, not its constant hull:\n%s", mod)
 	}
 }
 
-// A mask that declares position 63 is the literal-rendering trap generator#470
-// already hit once. Python needs no declension for it -- its int is unbounded and
-// its `~` is infinite-precision -- and the interval at the header carries the
-// same number, because `elem_max` is a Python int too.
-func TestPythonClosedMaskSpansBit63(t *testing.T) {
+// A bitfield declaring position 63 implies u64 -- the accumulator's own width --
+// so under the width rule it carries no guard at all, at either position. Under
+// the withdrawn closed-set rule the same declaration emitted a
+// `~0x8000000000000001` mask, which is the literal-rendering trap generator#470
+// hit once; deriving the bound from the highest declared position removes the
+// trap along with the comparison.
+func TestPythonBitfieldSpanningBit63IsUnguarded(t *testing.T) {
 	mod := string(genPy(t, schema(t, "version: 1\nmessages:\n  W:\n    payload:\n"+
 		"      g:  { id: 0, type: bitfield, bits: { LOW: { pos: 0 }, HIGH: { pos: 63 } } }\n"+
 		"      ga: { id: 1, type: array, items: { type: bitfield, count: 2, bits: { LOW: { pos: 0 }, HIGH: { pos: 63 } } } }\n"),
 		map[string]any{})["message.py"])
 	for _, want := range []string{
-		"                if (value & ~0x8000000000000001) != 0:\n" +
-			"                    raise SofaDecodeError(\"g: value outside declared bitfield flags\")\n",
-		"                return (None, None, 9223372036854775809)",
+		"            if fid == 0:\n                self._o.g = value\n",
+		"            if fid == 1:\n                self._o.ga = value\n",
 	} {
 		if !strings.Contains(mod, want) {
-			t.Errorf("a bit-63 mask must be carried whole, missing %q:\n%s", want, mod)
+			t.Errorf("a bitfield implying the full u64 width must store unguarded, missing %q:\n%s", want, mod)
 		}
+	}
+	if strings.Contains(mod, "0x8000000000000001") {
+		t.Errorf("the withdrawn flag-mask guard was emitted:\n%s", mod)
 	}
 }

@@ -1062,24 +1062,29 @@ python3 "$ROOT/tests/conformance/lib/check_growth.py" \
     "$CORELIB/assets/test_vectors.json" "TypeScript" --cap 4 \
     --cwd "$WORK/growth" -- npx tsx harness.ts
 
-# An `enum` and a `bitfield` are CLOSED (MESSAGE_SPEC S1, generator#516): what
-# binds is the SET of constants / the MASK of declared positions, never a width
-# and never the integer the target stores the field in. The shared driver prints
-# its own schema and forges its own bytes, and probes ALL SIX positions with
-# GAPPED definitions, so an interval bound cannot pass.
+# An `enum` and a `bitfield` are bound by the WIDTH their declaration IMPLIES
+# (MESSAGE_SPEC S1, generator#516): for an enum the smallest SIGNED type holding
+# every declared constant, for a bitfield the smallest UNSIGNED type holding its
+# highest declared `pos`. A value inside that width is valid even when the schema
+# names no constant for it and even when it carries an undeclared bit; only a
+# value outside it is malformed input and MUST be reported INVALID (S7.1), never
+# masked to the width and never kept.
 #
-# TypeScript kept a wide member and accepted anything, at every one of the twelve
-# stores: 5 into an enum declaring {0,1,2,10} was KEPT, 4 into a bitfield
-# declaring bits 0, 1 and 3 was KEPT, and so were 1000 and 256 -- the decode
-# reporting success in every case. Nothing here is corelib-blocked: every element
-# arrives through a per-element callback, and the bulk hand-off (whose only bound
-# is an INTERVAL) is declined for both closed kinds and must stay declined.
-echo "==> closed enum/bitfield: only what the schema declares is valid (S1, generator#516)"
+# The shared driver prints its own schema and forges its own bytes, and probes
+# ALL SIX positions with GAPPED definitions -- enum {0,1,2,10}, bitfield pos
+# {0,1,3} -- because the gap rows are what tell this rule from the closed-set one
+# it replaces: 5 and 4 were refused under that reading and MUST decode under this
+# one. Both edges of each implied width are probed on each side, so a bound taken
+# from the constants' hull (0..10, far narrower than the i8) fails here.
+#
+# Nothing is corelib-blocked: every element arrives through a per-element
+# callback, so the bound runs on the raw accumulator ahead of any store.
+echo "==> enum/bitfield: the declared width binds (S1, generator#516)"
 { echo "version: 1"; echo "messages:"; } > "$WORK/closed.yaml"
-python3 "$ROOT/tests/conformance/lib/check_closed_kinds.py" --emit-schema >> "$WORK/closed.yaml"
+python3 "$ROOT/tests/conformance/lib/check_declared_width_kinds.py" --emit-schema >> "$WORK/closed.yaml"
 gen "$WORK/closed.yaml" "$WORK/closed"
 ln -s "$WORK/ex/node_modules" "$WORK/closed/node_modules"
-python3 "$ROOT/tests/conformance/lib/check_closed_kinds.py" "typescript" \
+python3 "$ROOT/tests/conformance/lib/check_declared_width_kinds.py" "typescript" \
     --cwd "$WORK/closed" --status-verb status -- npx tsx harness.ts
 # MESSAGE_SPEC §7.4 -- a field id REPEATED inside one scope (generator#523). The
 # rule has two halves and this checks BOTH on one message: a re-opened SEQUENCE

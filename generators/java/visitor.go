@@ -31,7 +31,7 @@ type frame struct {
 	childLoc  string      // fkSeqObj: element loc; fkSeqMat: inner-row loc
 	elemType  string      // fkSeqObj: java class for `new X()`
 	innerElem ir.Kind     // fkNativeMat: inner element kind
-	innerRef  *ir.TypeRef // fkNativeMat: inner element ref (the closed kinds' declared set)
+	innerRef  *ir.TypeRef // fkNativeMat: inner element ref (an enum/bitfield's declared width)
 	// schema bounds, for the receiver-side decode limits (generator#102):
 	elemMaxHas    bool // fkSeqLeaf: the string/blob element declares a maxlen
 	innerHasCount bool // fkNativeMat: the inner array declares a count
@@ -349,12 +349,13 @@ func maxlenThrow(name, noun string, max int64) string {
 // whose range IS the accumulator the value arrives in, and a bitfield declaring
 // all 64 positions.
 //
-// What the schema declares is what binds, and the declaration takes two shapes.
-// For an integer it is a WIDTH (MESSAGE_SPEC §7.1, documentation#32): a
-// `u8`/`u16`/`u32`/`i8`/`i16`/`i32` destination receiving a value outside its
-// declared range is malformed input — never masked to the width, never kept. For
-// an `enum` or a `bitfield` it is a SET — the declared constants, the mask of
-// declared `pos` bits (§1) — and closedCond answers for those.
+// What the schema declares is what binds, and every declaration binds a WIDTH
+// (MESSAGE_SPEC §7.1, documentation#32): a `u8`/`u16`/`u32`/`i8`/`i16`/`i32`
+// destination receiving a value outside its declared range is malformed input —
+// never masked to the width, never kept. An `enum` and a `bitfield` bind the
+// width their declaration IMPLIES (§1) — the smallest signed type holding every
+// constant, the smallest unsigned type holding the highest `pos` — and
+// declaredWidthCond answers for those.
 //
 // One clause serves every position. The scalar, struct-member, struct-array
 // member and union-member stores are ONE arm per kind serving four positions
@@ -373,7 +374,7 @@ func maxlenThrow(name, noun string, max int64) string {
 func widthThrow(k ir.Kind, ref *ir.TypeRef, name string) string {
 	cond, what := widthCond(k), "width "+k.String()
 	if cond == "" {
-		cond, what = closedCond(k, ref), closedWhat(k)
+		cond, what = declaredWidthCond(k, ref), declaredWidthWhat(k)
 	}
 	if cond == "" {
 		return ""
@@ -399,62 +400,65 @@ func widthCond(k ir.Kind) string {
 	return fmt.Sprintf("value < 0 || value > %dL", hi)
 }
 
-// closedCond is the reject comparison for the two CLOSED kinds, MESSAGE_SPEC §1:
-// an `enum` is bound by the set of constants the schema declares, a `bitfield`
-// by the mask of the positions it declares, so `value` is valid exactly when
-// `value & ~mask == 0`. It returns "" for every other kind (widthCond owns
-// those) and for a bitfield whose declared positions cover all 64 bits, where the
-// test is a tautology and the clause would be dead code.
+// declaredWidthCond is the reject comparison for an `enum` and a `bitfield`,
+// MESSAGE_SPEC §1: each is bound by the WIDTH its declaration implies — for an
+// enum the smallest SIGNED type holding every declared constant, for a bitfield
+// the smallest UNSIGNED type holding its highest declared `pos`. It returns ""
+// for every other kind (widthCond owns those) and wherever the implied width is
+// the 64-bit accumulator itself, where the test is a tautology and the clause
+// would be dead code.
 //
-// Neither bound is a width, and storage is never the bound. Java holds both kinds
-// in a `long` — §1 leaves the integer to the target as a MAY — but a field whose
-// declared positions are 0..3 does not become 0..2^63 valid because of it. Both
-// comparisons run on the RAW accumulator, ahead of any narrowing, which is also
-// why one clause covers both halves of the old reading at once: a mask test on
-// the full `long` rejects an undeclared bit inside the storage width and
-// everything above it in the same expression, and a membership test does the same
-// for an enum.
+// A value INSIDE that width is valid even when the schema names no constant for
+// it and even when it carries an undeclared bit; only a value outside it is
+// malformed input. So an enum {RED=1, GREEN=2, BLUE=3} admits 5 and refuses 200,
+// and a bitfield declaring positions 0, 1 and 3 admits 4 — the undeclared bit 2 —
+// and refuses 256. An undeclared bit is NOT masked away: masking would turn
+// malformed-looking input into a DECLARED combination and report it Ok.
 //
-// This reverses generator#482, which kept an undeclared bit that fit the backing
-// width on the argument that it is how a peer built from a newer schema carries a
-// flag this one has not got yet. §1 answers that directly: adding a flag — or a
-// constant — is a BREAKING schema change, and a receiver rejects the value rather
-// than storing something its declared type cannot represent.
-func closedCond(k ir.Kind, ref *ir.TypeRef) string {
+// This replaces the set/mask bound of generator#530, which implemented the
+// closed-type reading MESSAGE_SPEC carried for six days (doc PR #89, `a50db95`)
+// and doc PR #95 (`382159e`) withdrew. Both bounds are ordinary intervals now,
+// which is §1's own reason for the change: an array's elements are consumed
+// inside the corelib loop, so a bound must cross that channel as an interval,
+// and a width fits where a set does not.
+//
+// Storage is still never the bound. Java holds both kinds in a `long` — §1
+// leaves the carrier to the target — so the comparison runs on the RAW
+// accumulator, ahead of any narrowing, and a field whose declared positions are
+// 0..3 does not become 0..2^63 valid because of it. §1's fourth consequence
+// names this case directly: a receiver that cannot hold the field at exactly the
+// declared width holds it wider and MUST then enforce the width as an explicit
+// check, because nothing about its storage will.
+func declaredWidthCond(k ir.Kind, ref *ir.TypeRef) string {
 	switch k {
 	case ir.KindEnum:
-		vals, ok := ir.EnumValues(ref)
-		if !ok || len(vals) == 0 {
+		lo, hi, ok := ir.EnumWidthRange(ref)
+		if !ok {
 			return ""
 		}
-		if ir.EnumContiguous(ref) {
-			return fmt.Sprintf("value < %dL || value > %dL", vals[0], vals[len(vals)-1])
-		}
-		terms := make([]string, len(vals))
-		for i, v := range vals {
-			terms[i] = fmt.Sprintf("value != %dL", v)
-		}
-		return strings.Join(terms, " && ")
+		return fmt.Sprintf("value < %dL || value > %dL", lo, hi)
 	case ir.KindBitfield:
-		mask, ok := ir.BitfieldMask(ref)
-		if !ok || mask == ^uint64(0) {
+		// Spelled as a mask rather than `value < 0 || value > hi`: the corelib
+		// delivers an unsigned wire value as a Java `long`, so a u64 at or above
+		// 2^63 arrives with its sign bit set, and one mask on the raw bits
+		// refuses both an over-width value and that sign-bit case in a single
+		// operation. widthThrow's doc comment covers the same hazard.
+		hi, ok := ir.BitfieldWidthMax(ref)
+		if !ok {
 			return ""
 		}
-		if mask == 0 {
-			return "value != 0"
-		}
-		return fmt.Sprintf("(value & ~0x%xL) != 0", mask)
+		return fmt.Sprintf("(value & ~0x%xL) != 0", hi)
 	}
 	return ""
 }
 
-// closedWhat names the breached declaration in the INVALID_MSG text, so the two
-// closed kinds read as what they are rather than as a width.
-func closedWhat(k ir.Kind) string {
+// declaredWidthWhat names the breached declaration in the INVALID_MSG text, so
+// the message says which declaration implied the width that was breached.
+func declaredWidthWhat(k ir.Kind) string {
 	if k == ir.KindEnum {
-		return "enum constants"
+		return "enum width"
 	}
-	return "bitfield flags"
+	return "bitfield width"
 }
 
 // emitStringCb writes the string() visitor callback: the destination gate, the
@@ -1597,8 +1601,8 @@ func fillTargetsFor(fs []frame, cb string) map[*frame]map[int64]int {
 // objection that once restricted this to SCHEMA-BOUNDED arrays (#96) is answered
 // by the check rather than by the reservation (ARCHITECTURE §9.5, shape A). That
 // leaves out boolean arrays (a List), fp arrays (the offer is integer-only),
-// matrix rows (whose destination is a row cursor, not a field) and the two CLOSED
-// kinds (bulkCapable says why).
+// matrix rows (whose destination is a row cursor, not a field) and the enum and
+// bitfield kinds (bulkCapable says why).
 func hasBulk(fs []frame) bool {
 	for i := range fs {
 		fr := &fs[i]
@@ -1618,14 +1622,15 @@ func hasBulk(fs []frame) bool {
 //
 // An `enum` or `bitfield` element is NOT, however wide the array it lands in.
 // The only bound the offer can carry is the destination array's WIDTH -- handing
-// back a short[] says "the elements are declared 16 bits wide" -- and the bound
-// of a closed kind is not a width at all but the set of declared constants / the
-// mask of declared positions (MESSAGE_SPEC §1). Java holds both in a long[], so
-// taking the offer would hand the decoder an array with no bound to state and
-// bypass the element callback that carries the real one: the elements would land
-// unchecked, and the guard in the fill arm would be dead code (measured -- the
-// arm existed and never ran). Declining the offer routes them back through
-// widthThrow, one element at a time, so an undeclared value is refused where it
+// back a short[] says "the elements are declared 16 bits wide" -- and Java holds
+// both kinds in a long[], whose width IS the accumulator's, so the offer would
+// state no bound at all. The one that binds them is the width their DECLARATION
+// implies (MESSAGE_SPEC §1), which the destination never carries. Taking the
+// offer would therefore hand the decoder an array with nothing to say about the
+// elements and bypass the element callback that does carry the real bound: the
+// elements would land unchecked, and the guard in the fill arm would be dead
+// code (measured -- the arm existed and never ran). Declining routes them through
+// widthThrow, one element at a time, so an over-width value is refused where it
 // arrives rather than after the whole array has landed. Validating in
 // arrayBulkEnd instead was the alternative and is weaker: it cannot report the
 // value at all when the array is cut short behind it (generator#516).

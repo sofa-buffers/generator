@@ -734,25 +734,25 @@ YAML
     echo "$OUT" | tr -d ' ' | grep -q '"someu8":255' || { echo "FAIL: [$label] control must keep 255; got: $OUT"; exit 1; }
     echo "==> [$label] declared-width reject OK"
 
-    # An `enum` and a `bitfield` are CLOSED (MESSAGE_SPEC §1, generator#516):
-    # what binds is the SET of constants / the MASK of declared positions, not a
-    # width and not the integer the target stores the field in. The shared driver
-    # prints its own schema and forges its own bytes, so the declared sets and the
-    # values that breach them have one definition for the whole family; it probes
-    # ALL SIX positions a value can land in, with GAPPED definitions so an
-    # interval bound cannot pass.
+    # An `enum` and a `bitfield` are bound by the WIDTH their declaration implies
+    # (MESSAGE_SPEC S1, generator#516): for an enum the smallest SIGNED type
+    # holding every declared constant, for a bitfield the smallest UNSIGNED type
+    # holding its highest declared `pos`. A value inside that width is valid even
+    # when no constant names it and even when it carries an undeclared bit; only a
+    # value outside it is INVALID. The shared driver prints its own schema and
+    # forges its own bytes, so the declared widths and the values on either side of
+    # them have one definition for the whole family; it probes ALL SIX positions a
+    # value can land in, with GAPPED definitions so a bound taken from the
+    # constants' hull cannot pass either.
     #
-    # This replaces the narrower generator#513 block that stood here, which pinned
-    # the bitfield ARRAY element at its storage REPR and asserted an undeclared bit
-    # inside that width was KEPT. §1 reverses exactly that: the mask is not every
-    # bit up to the highest declared one, and storage is never the bound. The
-    # enum half, which #513 left open pending this decision, is covered by the same
-    # driver at the same six positions.
-    echo "==> [$label] closed enum/bitfield: only what the schema declares is valid (S1, generator#516)"
+    # The generator#513 block this replaced pinned the bitfield ARRAY element at
+    # its storage REPR. The bound is now reached from the declaration instead --
+    # the same number in rust, but never read off the member.
+    echo "==> [$label] enum/bitfield bound by the declared width (S1, generator#516)"
     { echo "version: 1"; echo "messages:"; } > "$WORK/closed.yaml"
-    python3 "$ROOT/tests/conformance/lib/check_closed_kinds.py" --emit-schema >> "$WORK/closed.yaml"
+    python3 "$ROOT/tests/conformance/lib/check_declared_width_kinds.py" --emit-schema >> "$WORK/closed.yaml"
     rust_build "$WORK/closed.yaml" "$WORK/closed-$label"
-    python3 "$ROOT/tests/conformance/lib/check_closed_kinds.py" "$label" \
+    python3 "$ROOT/tests/conformance/lib/check_declared_width_kinds.py" "$label" \
         --cwd "$WORK/closed-$label" --invalid-pattern 'InvalidMsg' -- cargo run -q --
 
     # The declared WIDTH of a plain integer element is a separate bound and still

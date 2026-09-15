@@ -2009,10 +2009,11 @@ func TestCppEnumBoolArrayNeverCastsTheContainer(t *testing.T) {
 	for _, want := range []string{
 		"std::vector<std::uint8_t> flags = {};",
 		"sofab::readArray(is, flags, 4);",
-		// The hull of the declared constants rides along on this leg: an `enum`
-		// is CLOSED by its constants (MESSAGE_SPEC §1), and an interval is what
-		// sofab::ElemBound can carry of that set (generator#516).
-		"{ sofabgen::RawArray<std::vector<MColsElem>, std::int8_t> _t0{&cols}; sofab::readArray(is, _t0, 3, sofab::ElemBound{0, 1}); }",
+		// The implied width rides along on this leg: an `enum` is bound by the
+		// smallest SIGNED type holding every declared constant (MESSAGE_SPEC §1),
+		// which for {RED: 0, GREEN: 1} is an i8 — NOT the 0..1 hull of the
+		// constants, since 5 is a valid wire value for this field (generator#516).
+		"{ sofabgen::RawArray<std::vector<MColsElem>, std::int8_t> _t0{&cols}; sofab::readArray(is, _t0, 3, sofab::ElemBound{-128, 127}); }",
 	} {
 		if !strings.Contains(pure, want) {
 			t.Errorf("the corelib-cpp leg is missing %q:\n%s", want, pure)
@@ -2679,44 +2680,73 @@ func TestCppBitfieldArrayDefaultAtBit63IsUnsignedConstant(t *testing.T) {
 	}
 }
 
-// generator#516: MESSAGE_SPEC §1 closes an `enum` by the SET of constants the
-// schema declares and a `bitfield` by the MASK of the positions it declares.
-// Neither bound is a width, and neither is the integer the target stores the
-// field in — a field whose declared positions are 0..3 does not become 0..255
-// valid because C++ holds it in a std::uint8_t.
-//
-// The four scalar-family positions — a scalar field, a struct member, a member
-// of a struct-array element, a union member — are one emitter serving four id
-// scopes, and every one of them read a 64-bit temporary and cast it into the
-// member with no comparison at all. They take the shape the narrow-integer arm
-// has taken since generator#266, and for the same reason: the cast IS the mask
-// §7.1 forbids, so the check precedes it and sees the raw value.
-//
-// The definitions are GAPPED. A contiguous enum and a mask that is every bit up
-// to the highest declared one both read as intervals, so the fixture would pass
-// under the bound this replaces; here 5 is inside the enum's hull and not a
-// constant, and 4 fits the bitfield's byte while setting a bit no flag declares.
-func TestCppClosedEnumAndBitfieldRejectBeforeTheCast(t *testing.T) {
-	const enumDef = "{ A: 0, B: 1, C: 2, Z: 10 }"
-	const bitsDef = "{ A: { pos: 0 }, B: { pos: 1 }, D: { pos: 3 } }"
-	src := "version: 1\nmessages:\n  Closed:\n    payload:\n" +
-		"      cen:  { id: 0, type: enum, enum: " + enumDef + " }\n" +
-		"      cbf:  { id: 1, type: bitfield, bits: " + bitsDef + " }\n" +
-		"      cena: { id: 2, type: array, items: { type: enum, count: 4, enum: " + enumDef + " } }\n" +
-		"      cbfa: { id: 3, type: array, items: { type: bitfield, count: 4, bits: " + bitsDef + " } }\n" +
-		"      cst:\n        id: 4\n        type: struct\n        fields:\n" +
-		"          st_en: { id: 0, type: enum, enum: " + enumDef + " }\n" +
-		"          st_bf: { id: 1, type: bitfield, bits: " + bitsDef + " }\n" +
-		"      csa:\n        id: 5\n        type: array\n        items:\n          type: struct\n          count: 2\n          fields:\n" +
-		"            sa_en: { id: 0, type: enum, enum: " + enumDef + " }\n" +
-		"            sa_bf: { id: 1, type: bitfield, bits: " + bitsDef + " }\n" +
-		"      cun:\n        id: 6\n        type: union\n        default_id: 0\n        oneof:\n" +
-		"          un_en: { id: 0, type: enum, enum: " + enumDef + " }\n" +
-		"          un_bf: { id: 1, type: bitfield, bits: " + bitsDef + " }\n"
-	h := headerFromYAML(t, src, "closed.hpp")
+// widthSixSrc declares an `enum` and a `bitfield` at all SIX positions a value
+// can land in, and both definitions are GAPPED on purpose: the enum declares
+// {0, 1, 2, 10}, so 5 sits inside the implied width and is not a constant, and
+// the bitfield declares positions 0, 1 and 3, so 4 sets a bit no flag declares.
+// Both of those values are VALID under the width rule and were INVALID under the
+// withdrawn closed-set one, which is what makes a gapped definition the shape
+// that tells the two rules apart.
+const widthSixSrc = `
+version: 1
+messages:
+  Closed:
+    payload:
+      cen:  { id: 0, type: enum, enum: { A: 0, B: 1, C: 2, Z: 10 } }
+      cbf:  { id: 1, type: bitfield, bits: { A: { pos: 0 }, B: { pos: 1 }, D: { pos: 3 } } }
+      cena: { id: 2, type: array, items: { type: enum, count: 4, enum: { A: 0, B: 1, C: 2, Z: 10 } } }
+      cbfa: { id: 3, type: array, items: { type: bitfield, count: 4, bits: { A: { pos: 0 }, B: { pos: 1 }, D: { pos: 3 } } } }
+      cst:
+        id: 4
+        type: struct
+        fields:
+          st_en: { id: 0, type: enum, enum: { A: 0, B: 1, C: 2, Z: 10 } }
+          st_bf: { id: 1, type: bitfield, bits: { A: { pos: 0 }, B: { pos: 1 }, D: { pos: 3 } } }
+      csa:
+        id: 5
+        type: array
+        items:
+          type: struct
+          count: 2
+          fields:
+            sa_en: { id: 0, type: enum, enum: { A: 0, B: 1, C: 2, Z: 10 } }
+            sa_bf: { id: 1, type: bitfield, bits: { A: { pos: 0 }, B: { pos: 1 }, D: { pos: 3 } } }
+      cun:
+        id: 6
+        type: union
+        default_id: 0
+        oneof:
+          un_en: { id: 0, type: enum, enum: { A: 0, B: 1, C: 2, Z: 10 } }
+          un_bf: { id: 1, type: bitfield, bits: { A: { pos: 0 }, B: { pos: 1 }, D: { pos: 3 } } }
+      cmat: { id: 7, type: array, items: { type: array, count: 2, items: { type: enum, count: 3, enum: { A: 0, B: 1, C: 2, Z: 10 } } } }
+      cmbf: { id: 8, type: array, items: { type: array, count: 2, items: { type: bitfield, count: 3, bits: { A: { pos: 0 }, B: { pos: 1 }, D: { pos: 3 } } } } }
+`
 
-	const enRej = "{ std::int64_t _v; if (is.read(_v)) { if (_v != 0 && _v != 1 && _v != 2 && _v != 10) { is.invalidate(); return; } "
-	const bfRej = "{ std::uint64_t _v; if (is.read(_v)) { if ((_v & ~11ULL) != 0) { is.invalidate(); return; } "
+// MESSAGE_SPEC §1 binds an `enum` to the width of the smallest SIGNED type
+// holding every declared constant and a `bitfield` to the width of the smallest
+// UNSIGNED type holding its highest declared `pos`. Here that is i8 (−128..127)
+// for {0, 1, 2, 10} and u8 (0..255) for positions 0, 1 and 3.
+//
+// All six positions are pinned by name — scalar, native array element, struct
+// member, struct-array element member, union member, matrix row element — for
+// both kinds. The bound travels two different ways, and both are asserted:
+//
+//   - the four scalar-family positions read a 64-bit temporary, compare, then
+//     narrow. The comparison has to precede the static_cast because the cast IS
+//     the mask §7.1 forbids — it would turn 1000 into -24 and report it Ok, which
+//     is the defect generator#513 named.
+//   - every ARRAY element position hands the interval to the corelib as
+//     sofab::ElemBound, which is the whole of the rule there: under the width
+//     rule the bound IS an interval, so the second pass over the destination the
+//     withdrawn set/mask bound needed is gone.
+//
+// The one cell that carries nothing is the BITFIELD matrix row; see
+// TestCppBitfieldMatrixRowIsStorageMasked for what that costs and why.
+func TestCppEnumAndBitfieldWidthBoundAtEverySixPositions(t *testing.T) {
+	h := headerFromYAML(t, widthSixSrc, "closed.hpp")
+
+	const enRej = "{ std::int64_t _v; if (is.read(_v)) { if (_v < -128 || _v > 127) { is.invalidate(); return; } "
+	const bfRej = "{ std::uint64_t _v; if (is.read(_v)) { if (_v > 255ULL) { is.invalidate(); return; } "
 	for _, want := range []string{
 		// 1. scalar
 		enRej + "cen = static_cast<ClosedCen>(_v); } }",
@@ -2731,36 +2761,25 @@ func TestCppClosedEnumAndBitfieldRejectBeforeTheCast(t *testing.T) {
 		enRej + "un_en = static_cast<ClosedCunUnEn>(_v); } }",
 		bfRej + "un_bf = static_cast<std::uint8_t>(_v); } }",
 		// 2. native array element. The elements are converted inside
-		// sofab::readArray, so the interval bound rides in — sofab::ElemBound is
-		// an INTERVAL, so what fits is the enum's hull and the bitfield's mask as
-		// a ceiling — and the GAP it admits is closed by a scan of the member,
-		// GATED ON THE READ'S OWN RETURN.
-		//
-		// The gate is the whole reason a scan is sound here. corelib-cpp resumes
-		// an array split across fed chunks, re-entering readArray once per chunk
-		// that carries part of it, and returns true only when the last element has
-		// landed. Without the gate the scan would read the not-yet-arrived tail at
-		// its value-initialized 0 and false-reject every split message whose enum
-		// does not declare 0.
-		//
-		// The interval is not made redundant by the scan and stays: it refuses an
-		// out-of-hull element the moment it is read, which is what keeps the
-		// verdict INVALID rather than INCOMPLETE when a truncation follows the
-		// offending element (§5.2). The scan answers the completed array.
-		"{ sofabgen::RawArray<std::vector<ClosedCenaElem>, std::int8_t> _t0{&cena}; if (sofab::readArray(is, _t0, 4, sofab::ElemBound{0, 10})) {",
-		"for (auto _se0 : cena) { const std::int64_t _sv0 = static_cast<std::int64_t>(_se0); if (_sv0 != 0 && _sv0 != 1 && _sv0 != 2 && _sv0 != 10) { is.invalidate(); return; } }",
-		"if (sofab::readArray(is, cbfa, 4, sofab::ElemBound{0, 11})) {",
-		"for (auto _se0 : cbfa) { const std::uint64_t _sv0 = static_cast<std::uint64_t>(_se0); if ((_sv0 & ~11ULL) != 0) { is.invalidate(); return; } }",
+		// sofab::readArray, so the bound rides in as its ElemBound argument, and
+		// NOTHING follows the call: the interval states the width whole.
+		"{ sofabgen::RawArray<std::vector<ClosedCenaElem>, std::int8_t> _t0{&cena}; sofab::readArray(is, _t0, 4, sofab::ElemBound{-128, 127}); }",
+		"sofab::readArray(is, cbfa, 4, sofab::ElemBound{0, 255});",
+		// 6a. matrix row element, enum rows. The row is placed by a GENERATED row
+		// placer, which reads it with sofab::readArray and so can arm the same
+		// interval one level in.
+		"{ sofabgen::RawArray<std::vector<ClosedCmatElemElem>, std::int8_t> _t1{&_e0}; sofab::readArray(is, _t1, 3, sofab::ElemBound{-128, 127}); }",
 	} {
 		if !strings.Contains(h, want) {
-			t.Errorf("a closed-kind position stores without its guard, missing %q:\n%s", want, h)
+			t.Errorf("an enum/bitfield position stores without its §1 width bound, missing %q:\n%s", want, h)
 		}
 	}
-	// Storage did not widen with the bound: §1 grants the narrow member as a MAY
-	// precisely because every valid value is a declared one.
+	// Storage is at exactly the implied width, which is what lets the narrowing
+	// cast be harmless once the guard in front of it has run — but never the bound
+	// itself: the guard is emitted whether or not the member happens to be narrow.
 	for _, want := range []string{"enum class ClosedCen : std::int8_t", "std::uint8_t cbf = "} {
 		if !strings.Contains(h, want) {
-			t.Errorf("the closed bound must not widen storage, missing %q:\n%s", want, h)
+			t.Errorf("storage must follow the implied width, missing %q:\n%s", want, h)
 		}
 	}
 	// The pre-#516 shapes. Note they also stored the zero-initialized temporary
@@ -2771,73 +2790,76 @@ func TestCppClosedEnumAndBitfieldRejectBeforeTheCast(t *testing.T) {
 		"sofab::ElemBound::of<std::uint8_t>()",
 	} {
 		if strings.Contains(h, bad) {
-			t.Errorf("a closed kind still decodes through the pre-#516 shape (%q):\n%s", bad, h)
+			t.Errorf("an enum/bitfield position still decodes through the pre-#516 shape (%q):\n%s", bad, h)
 		}
 	}
 }
 
-// The SIXTH position: a matrix row element, array<array<bitfield>>.
+// The behavioural difference the width rule makes, stated as the values
+// themselves: a gapped enum admits a value between its constants, and a bitfield
+// admits an undeclared bit — both INVALID under the withdrawn closed-set rule.
+// Pinned on the emitted bound so a silent reversion is loud.
+func TestCppWidthAdmitsUndeclaredValues(t *testing.T) {
+	h := headerFromYAML(t, widthSixSrc, "closed.hpp")
+	// enum {0,1,2,10}: the guard must admit 5 — i.e. be the i8 interval, never a
+	// membership chain over the constants, and never their 0..10 hull.
+	for _, bad := range []string{"_v != 10", "sofab::ElemBound{0, 10}"} {
+		if strings.Contains(h, bad) {
+			t.Errorf("the withdrawn enum constant-set bound was emitted (%q):\n%s", bad, h)
+		}
+	}
+	// bitfield pos{0,1,3}: the guard must admit 4 — i.e. bound the WIDTH (255),
+	// never the flag mask (0b1011 == 11).
+	for _, bad := range []string{"~11ULL", "sofab::ElemBound{0, 11}"} {
+		if strings.Contains(h, bad) {
+			t.Errorf("the withdrawn bitfield flag-mask bound was emitted (%q):\n%s", bad, h)
+		}
+	}
+	// And the per-element rescan the set/mask bound needed, at either level.
+	if strings.Contains(h, "_sv0") || strings.Contains(h, "_sr0") {
+		t.Errorf("the width bound is an interval and needs no second pass over the destination:\n%s", h)
+	}
+}
+
+// The SIXTH position's weaker half: a BITFIELD matrix row, array<array<bitfield>>.
 //
-// The row never reaches generated code element by element -- sofab::MessageSeq
+// It is the one cell of the twelve that carries no bound. sofab::MessageSeq
 // places the row and reads it with sofab::readArray itself, passing no element
-// bound at all -- so before this the row was not merely unchecked, it was
-// silently MASKED: a bitfield row declaring positions 0, 1 and 3 took 4 as [[4]]
-// and 1000 as [[232]], both with an Ok verdict, which MESSAGE_SPEC §7 forbids in
-// terms ("never silently truncated to the bound, and never silently masked").
+// bound, and corelib-cpp offers none to pass. Under the width rule that costs
+// exactly one row of the shared fixture: the row is a container of the
+// bitfield's backing integer, which is the implied width, so every value INSIDE
+// the bound decodes and keeps its value, and only a value PAST it is wrong —
+// masked by readArray's unbounded static_cast before any generated line could
+// look, which §7 forbids in terms ("never silently truncated to the bound, and
+// never silently masked"). The conformance suite declines that cell by name
+// (--storage-masked matrix:bitfield) rather than leaving it silent.
 //
-// The fix is the same shape as the flat array's, one level out: the collector
-// read is gated on its own return -- is.read() on a collector reports false while
-// the sequence is cut short and true only once it closed -- and generated code
-// then scans the rows it placed. What stays out of reach is a value the ROW's
-// storage narrows first: 256 into a one-byte row is 0 before any generated line
-// runs, and closing that needs an element bound on sofab::MessageSeq.
-//
-// array<array<enum>> is not tested here because it does not COMPILE on either C++
-// corelib: the row reaches sofab::readArray as a span of the scoped enum and hits
-// its "Unsupported span element type" static_assert. Pre-existing, reproduced on
-// origin/main, and the reason the conformance suite declines that one cell.
-func TestCppClosedMatrixRowElementIsScanned(t *testing.T) {
-	src := "version: 1\nmessages:\n  M:\n    payload:\n" +
-		"      mbf: { id: 0, type: array, items: { type: array, count: 2, items: { type: bitfield, count: 3, bits: { A: { pos: 0 }, B: { pos: 1 }, D: { pos: 3 } } } } }\n"
-	h := headerFromYAML(t, src, "m.hpp")
-	for _, want := range []string{
-		"if (sofab::read(is, _r0)) {",
-		"for (auto &_sr0 : mbf) {",
-		"for (auto _se0 : _sr0) { const std::uint64_t _sv0 = static_cast<std::uint64_t>(_se0); if ((_sv0 & ~11ULL) != 0) { is.invalidate(); return; } }",
-	} {
-		if !strings.Contains(h, want) {
-			t.Errorf("a matrix row element stores without its §1 bound, missing %q:\n%s", want, h)
-		}
+// Pinned here because the fix is a corelib change, not a generator one: a rescan
+// of the destination would only re-test values the cast has already put back
+// inside the bound, so emitting one would look like enforcement and be none.
+func TestCppBitfieldMatrixRowIsStorageMasked(t *testing.T) {
+	h := headerFromYAML(t, widthSixSrc, "closed.hpp")
+	const want = "{ sofab::MessageSeq<std::vector<std::vector<std::uint8_t>>> _r0; _r0.out = &cmbf; _r0.cap = 2; _r0.rowCap = 3; sofab::read(is, _r0); }"
+	if !strings.Contains(h, want) {
+		t.Errorf("the bitfield matrix row must read straight through the collector, missing %q:\n%s", want, h)
 	}
-	// The pre-#516 shape: the read discarded, nothing looked at afterwards.
-	if strings.Contains(h, "sofab::read(is, _r0); }") {
-		t.Errorf("the matrix row read must be gated so the rows can be scanned:\n%s", h)
+	// The row container is the implied width, so an in-width value survives it.
+	if !strings.Contains(h, "std::vector<std::vector<std::uint8_t>> cmbf") {
+		t.Errorf("the row must be stored at the width the declaration implies:\n%s", h)
 	}
 }
 
-// A matrix whose row element is NOT a closed kind keeps the ungated read: the
-// scan is emitted for the two closed kinds and nothing else, so array<array<u32>>
-// pays no second pass.
-func TestCppMatrixOfPlainIntegersKeepsTheUngatedRead(t *testing.T) {
-	src := "version: 1\nmessages:\n  M:\n    payload:\n" +
-		"      m: { id: 0, type: array, items: { type: array, count: 2, items: { type: u32, count: 3 } } }\n"
-	h := headerFromYAML(t, src, "m.hpp")
-	if !strings.Contains(h, "sofab::read(is, _r0); }") {
-		t.Errorf("a plain integer matrix must keep its ungated read:\n%s", h)
-	}
-	if strings.Contains(h, "_sv0") {
-		t.Errorf("no element scan belongs on a plain integer row:\n%s", h)
-	}
-}
-
-// The c-cpp leg cannot make the check and must not pretend to. Its read binds
-// the destination by ADDRESS and the C runtime fills it after the field callback
-// returns, so generated code never holds the value; a wide local temporary is
-// the dangling-destination trap this backend already documents. The only bound
-// sofab_istream_read_field carries is sizeof(the destination) — its option word
-// is wire type, fixlen subtype and string termination — so that leg keeps
-// binding the member directly, and the set half stays a corelib-c-cpp matter.
-func TestCppCCppClosedKindsStayCorelibEnforced(t *testing.T) {
+// The c-cpp leg cannot make the check itself and must not pretend to. Its read
+// binds the destination by ADDRESS and the C runtime fills it after the field
+// callback returns, so generated code never holds the value; a wide local
+// temporary is the dangling-destination trap this backend already documents.
+//
+// Under the WIDTH rule that leg is no longer short of a bound, only of the
+// ability to state one: the only thing sofab_istream_read_field carries is
+// sizeof(the destination), and this backend stores both kinds at exactly the
+// implied width, so that size IS the §1 bound. What it could not express was the
+// withdrawn set/mask form, which no destination size can.
+func TestCppCCppEnumBitfieldStayCorelibEnforced(t *testing.T) {
 	src := "version: 1\nmessages:\n  M:\n    payload:\n" +
 		"      e: { id: 0, type: enum, enum: { A: 0, B: 1, C: 2, Z: 10 } }\n" +
 		"      f: { id: 1, type: bitfield, bits: { A: { pos: 0 }, B: { pos: 1 }, D: { pos: 3 } } }\n"
@@ -2848,9 +2870,12 @@ func TestCppCCppClosedKindsStayCorelibEnforced(t *testing.T) {
 	for _, want := range []string{
 		"is.read(reinterpret_cast<std::int8_t &>(e));",
 		"is.read(f);",
+		// The storage the C runtime measures against is the implied width.
+		"enum class ME : std::int8_t",
+		"std::uint8_t f = 0ULL;",
 	} {
 		if !strings.Contains(h, want) {
-			t.Errorf("the c-cpp leg must bind the member directly, missing %q:\n%s", want, h)
+			t.Errorf("the c-cpp leg must bind the member directly at the implied width, missing %q:\n%s", want, h)
 		}
 	}
 	if strings.Contains(h, "is.invalidate()") {
@@ -2858,13 +2883,20 @@ func TestCppCCppClosedKindsStayCorelibEnforced(t *testing.T) {
 	}
 }
 
-// A CONTIGUOUS enum is the one case where the closed set and an interval
-// coincide, and the cheaper two-sided comparison is emitted for it — which is
-// also why the fixture above is gapped. A bitfield declaring all 64 positions
-// has mask ~0, so the mask test is a tautology and the clause is elided; its
-// ElemBound goes with it, since an armed {0, INT64_MAX} would refuse values the
-// schema declares.
-func TestCppClosedContiguousEnumAndTotalMask(t *testing.T) {
+// The elisions under the width rule: a guard is emitted only where the implied
+// width is NARROWER than the 64-bit accumulator the value arrives in. A bitfield
+// whose highest declared position is 32 or above implies u64, which IS the
+// accumulator, so nothing reachable can breach the bound and both the comparison
+// and the element bound would be dead code.
+//
+// Note what is NOT an elision any more: whether an enum's constants are
+// contiguous no longer matters at all. The width is derived from the extremes,
+// so {-1, 0, 1} and {0, 1, 2, 10} produce the identical i8 guard, and the
+// membership chain a gapped set used to need is gone. An enum can never reach the
+// elision either — the validator bounds every constant to signed 32 bits, so the
+// widest an enum declaration can imply is i32, which is narrower than the
+// accumulator.
+func TestCppEnumBitfieldWidthElisions(t *testing.T) {
 	var bits []string
 	for i := 0; i < 64; i++ {
 		bits = append(bits, fmt.Sprintf("F%d: { pos: %d }", i, i))
@@ -2875,55 +2907,51 @@ func TestCppClosedContiguousEnumAndTotalMask(t *testing.T) {
 		"      f: { id: 1, type: bitfield, bits: { " + all + " } }\n" +
 		"      fa: { id: 2, type: array, items: { type: bitfield, count: 2, bits: { " + all + " } } }\n" +
 		"      t: { id: 3, type: bitfield, bits: { low: { pos: 0 }, top: { pos: 63 } } }\n" +
-		"      ta: { id: 4, type: array, items: { type: bitfield, count: 2, bits: { low: { pos: 0 }, top: { pos: 63 } } } }\n"
+		"      ta: { id: 4, type: array, items: { type: bitfield, count: 2, bits: { low: { pos: 0 }, top: { pos: 63 } } } }\n" +
+		"      w: { id: 5, type: bitfield, bits: { low: { pos: 0 }, hi: { pos: 20 } } }\n"
 	h := headerFromYAML(t, src, "w.hpp")
 	for _, want := range []string{
-		"{ std::int64_t _v; if (is.read(_v)) { if (_v < -1 || _v > 1) { is.invalidate(); return; } e = static_cast<WE>(_v); } }",
+		// A CONTIGUOUS enum takes the implied i8 width, NOT the -1..1 hull of its
+		// constants: 5 is a valid wire value for this field and must decode.
+		"{ std::int64_t _v; if (is.read(_v)) { if (_v < -128 || _v > 127) { is.invalidate(); return; } e = static_cast<WE>(_v); } }",
+		// A declaration reaching position 63 implies u64 — the accumulator's own
+		// width — so scalar and element alike carry nothing. This also retires the
+		// bit-63 mask literal that sofab::ElemBound's int64_t `hi` could not state
+		// at all (generator#470).
 		"{ std::uint64_t _v; if (is.read(_v)) { f = static_cast<std::uint64_t>(_v); } }",
 		"sofab::readArray(is, fa, 2);",
-		// A mask WITH bit 63 is not total, so the scalar takes its guard and the
-		// literal carries ULL (generator#470) -- but sofab::ElemBound's `hi` is an
-		// int64_t, so the ARRAY element cannot state that mask: clamping it to
-		// INT64_MAX would refuse the very value bit 63 is. The element bound is
-		// left off there rather than made wrong -- and the SCAN is what enforces
-		// the element, on the raw 64-bit carrier where bit 63 is expressible. The
-		// position used to be unenforced entirely.
-		"{ std::uint64_t _v; if (is.read(_v)) { if ((_v & ~9223372036854775809ULL) != 0) { is.invalidate(); return; } t = static_cast<std::uint64_t>(_v); } }",
-		"if (sofab::readArray(is, ta, 2)) {",
-		"for (auto _se0 : ta) { const std::uint64_t _sv0 = static_cast<std::uint64_t>(_se0); if ((_sv0 & ~9223372036854775809ULL) != 0) { is.invalidate(); return; } }",
+		"{ std::uint64_t _v; if (is.read(_v)) { t = static_cast<std::uint64_t>(_v); } }",
+		"sofab::readArray(is, ta, 2);",
+		// Position 20 implies u32, which is narrower than the accumulator, so the
+		// guard stays — the elision is about the WIDTH, not about the mask having
+		// holes in it.
+		"{ std::uint64_t _v; if (is.read(_v)) { if (_v > 4294967295ULL) { is.invalidate(); return; } w = static_cast<std::uint32_t>(_v); } }",
 	} {
 		if !strings.Contains(h, want) {
 			t.Errorf("missing %q:\n%s", want, h)
 		}
 	}
-	// A mask declaring all 64 positions admits every value, so there is nothing
-	// to test and no scan is worth the pass over the array.
-	if strings.Contains(h, "for (auto _se0 : fa)") {
-		t.Errorf("a total mask needs no element scan:\n%s", h)
+	// The withdrawn mask forms, neither of which is derivable from a width.
+	for _, bad := range []string{"0xffffffffffffffff", "~9223372036854775809ULL", "18446744073709551615ULL) != 0"} {
+		if strings.Contains(h, bad) {
+			t.Errorf("a withdrawn flag-mask guard was emitted (%q):\n%s", bad, h)
+		}
 	}
 }
 
-// The scan is emitted only where the INTERVAL is not already the bound. A
-// CONTIGUOUS enum's hull IS its declared set, and a bitfield whose positions are
-// the low bits 0..k has a mask that is exactly 0..mask, so in both cases
-// sofab::ElemBound states the rule completely and a second pass over the array
-// would cost throughput for nothing. That distinction is the reason ir.EnumValues
-// and ir.EnumContiguous are separate facts.
-func TestCppClosedElementScanOnlyWhereTheIntervalIsNotTheSet(t *testing.T) {
-	src := "version: 1\nmessages:\n  C:\n    payload:\n" +
-		"      ea: { id: 0, type: array, items: { type: enum, count: 4, enum: { A: 3, B: 4, C: 5 } } }\n" +
-		"      ba: { id: 1, type: array, items: { type: bitfield, count: 4, bits: { A: { pos: 0 }, B: { pos: 1 }, C: { pos: 2 } } } }\n"
-	h := headerFromYAML(t, src, "c.hpp")
-	for _, want := range []string{
-		"sofab::readArray(is, _t0, 4, sofab::ElemBound{3, 5}); }",
-		"sofab::readArray(is, ba, 4, sofab::ElemBound{0, 7});",
-	} {
-		if !strings.Contains(h, want) {
-			t.Errorf("an interval that IS the set must be stated alone, missing %q:\n%s", want, h)
-		}
+// A matrix whose row element is a plain integer keeps its ungated read, as does
+// every other wrapper sequence: under the width rule NOTHING follows a
+// collector's read any more, so the gate the set/mask rescan needed is gone from
+// the emitter entirely.
+func TestCppMatrixOfPlainIntegersKeepsTheUngatedRead(t *testing.T) {
+	src := "version: 1\nmessages:\n  M:\n    payload:\n" +
+		"      m: { id: 0, type: array, items: { type: array, count: 2, items: { type: u32, count: 3 } } }\n"
+	h := headerFromYAML(t, src, "m.hpp")
+	if !strings.Contains(h, "sofab::read(is, _r0); }") {
+		t.Errorf("a plain integer matrix must keep its ungated read:\n%s", h)
 	}
 	if strings.Contains(h, "_sv0") {
-		t.Errorf("no element scan belongs on a contiguous set or a low-bits mask:\n%s", h)
+		t.Errorf("no element scan belongs on a plain integer row:\n%s", h)
 	}
 }
 

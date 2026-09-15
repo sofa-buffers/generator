@@ -555,12 +555,12 @@ messages:
 		`case (Root, 3): if (kind != ArrayKind.Fp32) break; if (count > 4) throw new SofabException(SofabError.InvalidMessage, "ff32: array count above schema capacity 4"); m.ff32 = new float[count]; break;`,
 		`case (Root, 5): if (kind != ArrayKind.Unsigned) break; if (count > 3) throw new SofabException(SofabError.InvalidMessage, "fb: array count above schema capacity 3"); m.fb.Clear(); break;`,
 		"case (Root, 5): if (afill == 0) break; afill--; m.fb.Add(value != 0); break;",
-		// Both closed kinds carry their §1 bound between fillGuard and the store
-		// (generator#516): the enum's constants are contiguous here so the cheaper
-		// two-sided comparison stands in for the set, and the bitfield's mask is
-		// the two positions it declares -- never the byte it is held in.
-		`case (Root, 6): if (afill == 0) break; afill--; if (value < 0 || value > 2) throw new SofabException(SofabError.InvalidMessage, "fe element: value outside declared enum constants"); m.fe.Add((EnumColor)value); break;`,
-		`case (Root, 7): if (afill == 0) break; afill--; if ((value & ~0x3UL) != 0) throw new SofabException(SofabError.InvalidMessage, "fp element: value outside declared bitfield flags"); m.fp.Add((BitfieldPerm)value); break;`,
+		// Both kinds carry their §1 width bound between fillGuard and the store
+		// (generator#516): {0,1,2} implies an i8 and positions {0,1} imply a u8,
+		// so an element outside those intervals is INVALID -- and one inside them
+		// decodes whether or not the schema names it.
+		`case (Root, 6): if (afill == 0) break; afill--; if (value < -128 || value > 127) throw new SofabException(SofabError.InvalidMessage, "fe element: value outside declared enum width"); m.fe.Add((EnumColor)value); break;`,
+		`case (Root, 7): if (afill == 0) break; afill--; if (value > 255) throw new SofabException(SofabError.InvalidMessage, "fp element: value outside declared bitfield width"); m.fp.Add((BitfieldPerm)value); break;`,
 
 		// A count:N array with no declared default is default only when EMPTY: an
 		// all-zero length-N value is a different value and stays on the wire.
@@ -1429,14 +1429,14 @@ func TestCsDecoderAsksTheStreamForItsVerdict(t *testing.T) {
 	}
 }
 
-// closedSixSrc declares an `enum` and a `bitfield` at all SIX positions a value
+// widthSixSrc declares an `enum` and a `bitfield` at all SIX positions a value
 // can land in, and both definitions are GAPPED on purpose: the enum declares
-// {0, 1, 2, 10}, so 5 sits inside the hull and is not a constant, and the
-// bitfield declares positions 0, 1 and 3 (mask 0b1011), so 4 fits the byte the
-// member is held in and sets a bit no flag declares. A contiguous definition
-// makes a closed set look like an interval and would pass under the width bound
-// this replaces.
-const closedSixSrc = `
+// {0, 1, 2, 10}, so 5 sits inside the implied width and is not a constant, and
+// the bitfield declares positions 0, 1 and 3, so 4 sets a bit no flag declares.
+// Both of those values are VALID under the width rule and were INVALID under the
+// withdrawn closed-set one, which is what makes a gapped definition the shape
+// that tells the two rules apart.
+const widthSixSrc = `
 version: 1
 messages:
   Closed:
@@ -1471,54 +1471,60 @@ messages:
       mbf: { id: 8, type: array, items: { type: array, count: 2, items: { type: bitfield, count: 3, bits: { A: { pos: 0 }, B: { pos: 1 }, D: { pos: 3 } } } } }
 `
 
-// MESSAGE_SPEC §1 closes an `enum` by the SET of constants the schema declares
-// and a `bitfield` by the MASK of the positions it declares. Neither bound is a
-// width, and neither is the integer the target stores the field in: C# held both
-// through a narrowing cast with no comparison at all, so 5 into a gapped enum and
-// 4 into a three-flag bitfield were KEPT, and 256 came back 0 with the decode
-// reporting success (generator#516).
+// MESSAGE_SPEC §1 binds an `enum` to the width of the smallest SIGNED type
+// holding every declared constant and a `bitfield` to the width of the smallest
+// UNSIGNED type holding its highest declared `pos`. Here that is i8 (−128..127)
+// for {0, 1, 2, 10} and u8 (0..255) for positions 0, 1 and 3.
+//
+// C# stores both at exactly that width — `sbyte` and `byte` here — which is why
+// the comparison MUST run on the raw accumulator, ahead of the narrowing cast:
+// before #516 there was no comparison at all, so 5 into the gapped enum and 4
+// into the three-flag bitfield were kept and 256 came back 0, the decode
+// reporting success in every case.
 //
 // All six positions are pinned by name — scalar, native array element, struct
 // member, struct-array element member, union member, matrix row element — for
 // both kinds. Four of them share one emitted arm per kind, which is exactly why
 // "the arm is shared" is not worth trusting after the next refactor.
-func TestCsClosedEnumAndBitfieldRejectAtEverySixPositions(t *testing.T) {
-	m := buildModule(t, []byte(closedSixSrc), "closed.yaml", map[string]any{})
-	const enRej = `if (value != 0 && value != 1 && value != 2 && value != 10) throw new SofabException(SofabError.InvalidMessage, `
-	const bfRej = `if ((value & ~0xbUL) != 0) throw new SofabException(SofabError.InvalidMessage, `
+func TestCsEnumAndBitfieldWidthBoundAtEverySixPositions(t *testing.T) {
+	m := buildModule(t, []byte(widthSixSrc), "width.yaml", map[string]any{})
+	const enRej = `if (value < -128 || value > 127) throw new SofabException(SofabError.InvalidMessage, `
+	const bfRej = `if (value > 255) throw new SofabException(SofabError.InvalidMessage, `
 	const fill = "if (afill == 0) break; afill--; "
 	for _, want := range []string{
 		// 1. scalar
-		`case (Root, 0): ` + enRej + `"en: value outside declared enum constants"); m.en = (ClosedEn)value; break;`,
-		`case (Root, 1): ` + bfRej + `"bf: value outside declared bitfield flags"); m.bf = (ClosedBf)value; break;`,
+		`case (Root, 0): ` + enRej + `"en: value outside declared enum width"); m.en = (ClosedEn)value; break;`,
+		`case (Root, 1): ` + bfRej + `"bf: value outside declared bitfield width"); m.bf = (ClosedBf)value; break;`,
 		// 2. native array element — the guard sits BEHIND fillGuard, never in
 		// front of it: a bare scalar delivered at an array id is a §7.3 skip, and
 		// rejecting it ahead of the fill check would turn that skip into a
 		// spurious INVALID.
-		`case (Root, 2): ` + fill + enRej + `"ea element: value outside declared enum constants"); m.ea.Add((ClosedEaElem)value); break;`,
-		`case (Root, 3): ` + fill + bfRej + `"bfa element: value outside declared bitfield flags"); m.bfa.Add((ClosedBfaElem)value); break;`,
+		`case (Root, 2): ` + fill + enRej + `"ea element: value outside declared enum width"); m.ea.Add((ClosedEaElem)value); break;`,
+		`case (Root, 3): ` + fill + bfRej + `"bfa element: value outside declared bitfield width"); m.bfa.Add((ClosedBfaElem)value); break;`,
 		// 3. struct member
-		`case (Root_st, 0): ` + enRej + `"se: value outside declared enum constants"); m.st.se = (ClosedStSe)value; break;`,
-		`case (Root_st, 1): ` + bfRej + `"sbf: value outside declared bitfield flags"); m.st.sbf = (ClosedStSbf)value; break;`,
+		`case (Root_st, 0): ` + enRej + `"se: value outside declared enum width"); m.st.se = (ClosedStSe)value; break;`,
+		`case (Root_st, 1): ` + bfRej + `"sbf: value outside declared bitfield width"); m.st.sbf = (ClosedStSbf)value; break;`,
 		// 4. struct-array element member
-		`case (Root_sa_e, 0): ` + enRej + `"se: value outside declared enum constants"); m.sa[_ixRoot_sa].se = (ClosedSaElemSe)value; break;`,
-		`case (Root_sa_e, 1): ` + bfRej + `"sbf: value outside declared bitfield flags"); m.sa[_ixRoot_sa].sbf = (ClosedSaElemSbf)value; break;`,
+		`case (Root_sa_e, 0): ` + enRej + `"se: value outside declared enum width"); m.sa[_ixRoot_sa].se = (ClosedSaElemSe)value; break;`,
+		`case (Root_sa_e, 1): ` + bfRej + `"sbf: value outside declared bitfield width"); m.sa[_ixRoot_sa].sbf = (ClosedSaElemSbf)value; break;`,
 		// 5. union member
-		`case (Root_un, 0): ` + enRej + `"ue: value outside declared enum constants"); m.un.ue = (ClosedUnUe)value; break;`,
-		`case (Root_un, 1): ` + bfRej + `"ubf: value outside declared bitfield flags"); m.un.ubf = (ClosedUnUbf)value; break;`,
+		`case (Root_un, 0): ` + enRej + `"ue: value outside declared enum width"); m.un.ue = (ClosedUnUe)value; break;`,
+		`case (Root_un, 1): ` + bfRej + `"ubf: value outside declared bitfield width"); m.un.ubf = (ClosedUnUbf)value; break;`,
 		// 6. matrix row element
 		`case (Root_mat, _): ` + fill + enRej,
 		`case (Root_mbf, _): ` + fill + bfRej,
 	} {
 		if !strings.Contains(m, want) {
-			t.Errorf("Message.cs: a closed-kind position stores without its §1 bound, missing %q:\n%s", want, m)
+			t.Errorf("Message.cs: an enum/bitfield position stores without its §1 width bound, missing %q:\n%s", want, m)
 		}
 	}
-	// Storage did not widen with the bound: §1 grants the narrow member as a MAY
-	// precisely because every valid value is a declared one.
+	// Storage is the declared width itself, so guard and member agree: every
+	// value the guard admits is one the member holds verbatim, and every value it
+	// refuses is one the cast would otherwise have folded into a representable
+	// one.
 	for _, want := range []string{"public enum ClosedEn : sbyte {", "public enum ClosedBf : byte {"} {
 		if !strings.Contains(m, want) {
-			t.Errorf("Message.cs: the closed bound must not widen storage, missing %q:\n%s", want, m)
+			t.Errorf("Message.cs: the width bound must not widen storage, missing %q:\n%s", want, m)
 		}
 	}
 	// No bare cast may remain on any of the twelve paths. Spelled as the exact
@@ -1531,16 +1537,22 @@ func TestCsClosedEnumAndBitfieldRejectAtEverySixPositions(t *testing.T) {
 		`case (Root_un, 1): m.un.ubf = (ClosedUnUbf)value;`,
 	} {
 		if strings.Contains(m, bad) {
-			t.Errorf("Message.cs still stores a closed kind through a bare cast (%q):\n%s", bad, m)
+			t.Errorf("Message.cs still stores an enum/bitfield through a bare cast (%q):\n%s", bad, m)
 		}
 	}
 }
 
-// The two elisions, both of which keep "no guard" right under the closed rule.
-// A CONTIGUOUS enum is its own hull, so the cheaper two-sided comparison is the
-// set; a bitfield declaring all 64 positions has mask ulong.MaxValue, so the mask
-// test is a tautology and emitting it would be dead code.
-func TestCsClosedBoundElisions(t *testing.T) {
+// The elisions under the width rule: a guard is emitted only where the implied
+// width is NARROWER than the 64-bit accumulator the value arrives in. A bitfield
+// whose highest declared position is 63 implies u64, and an enum needing more
+// than i32 implies i64 — in both cases nothing reachable can breach the bound
+// and the clause would be dead code.
+//
+// Note what is NOT an elision any more: whether an enum's constants are
+// contiguous no longer matters at all. The width is derived from the extremes, so
+// {0,1,2} and {0,1,2,10} produce the identical i8 guard, and the membership chain
+// a gapped set used to need is gone.
+func TestCsEnumBitfieldWidthElisions(t *testing.T) {
 	var bits []string
 	for i := 0; i < 64; i++ {
 		bits = append(bits, fmt.Sprintf("F%d: { pos: %d }", i, i))
@@ -1550,25 +1562,60 @@ func TestCsClosedBoundElisions(t *testing.T) {
 		"      e: { id: 1, type: enum, enum: { R: 0, G: 1, B: 2 }, default: 0 }\n"),
 		"elide.yaml", map[string]any{})
 	if !strings.Contains(m, "case (Root, 0): m.f = (WF)value; break;") {
-		t.Errorf("an all-bits-declared bitfield must store unguarded:\n%s", m)
+		t.Errorf("a bitfield implying the full u64 width must store unguarded:\n%s", m)
 	}
 	if strings.Contains(m, "0xffffffffffffffff") {
 		t.Errorf("a tautological mask guard was emitted:\n%s", m)
 	}
-	if !strings.Contains(m, `case (Root, 1): if (value < 0 || value > 2) throw new SofabException(SofabError.InvalidMessage, "e: value outside declared enum constants"); m.e = (WE)value; break;`) {
-		t.Errorf("a contiguous enum must take the two-sided comparison:\n%s", m)
+	// {R:0, G:1, B:2} implies i8, NOT the 0..2 hull of its constants: 5 is a
+	// valid wire value for this field and must decode.
+	if !strings.Contains(m, `case (Root, 1): if (value < -128 || value > 127) throw new SofabException(SofabError.InvalidMessage, "e: value outside declared enum width"); m.e = (WE)value; break;`) {
+		t.Errorf("a contiguous enum must take the implied i8 width, not its constant hull:\n%s", m)
 	}
 }
 
-// A mask that declares position 63 is the literal-rendering trap generator#470
-// already hit once: `value` is a `ulong`, so the mask has to be suffixed or C#
-// gives the hex constant a signed type and refuses to combine the two. Pinned
-// because the compiler catches it and the unit tests otherwise would not.
-func TestCsClosedMaskSpansBit63(t *testing.T) {
+// A bitfield declaring position 63 implies u64 — the accumulator's own width —
+// so under the width rule it carries NO guard at all. Under the withdrawn
+// closed-set rule the same declaration emitted a `~0x8000000000000001UL` mask,
+// the literal-rendering trap generator#470 hit once; deriving the bound from the
+// highest position instead removes both the trap and the comparison.
+//
+// One position below it is the widest literal this backend still renders, and
+// `value` is a `ulong` there — pinned because a mistyped constant is a C#
+// compile error, so otherwise only conformance would catch it.
+func TestCsBitfieldWidthLiterals(t *testing.T) {
 	m := buildModule(t, []byte("version: 1\nmessages:\n  W:\n    payload:\n"+
-		"      g: { id: 0, type: bitfield, bits: { LOW: { pos: 0 }, HIGH: { pos: 63 } } }\n"),
+		"      g: { id: 0, type: bitfield, bits: { LOW: { pos: 0 }, HIGH: { pos: 63 } } }\n"+
+		"      h: { id: 1, type: bitfield, bits: { LOW: { pos: 0 }, TOP: { pos: 31 } } }\n"),
 		"bit63.yaml", map[string]any{})
-	if !strings.Contains(m, `if ((value & ~0x8000000000000001UL) != 0) throw new SofabException(SofabError.InvalidMessage, "g: value outside declared bitfield flags");`) {
-		t.Errorf("a bit-63 mask must be rendered as an unsigned 64-bit literal:\n%s", m)
+	if !strings.Contains(m, "case (Root, 0): m.g = (WG)value; break;") {
+		t.Errorf("a bitfield implying the full u64 width must store unguarded:\n%s", m)
+	}
+	if strings.Contains(m, "0x8000000000000001") {
+		t.Errorf("the withdrawn flag-mask guard was emitted:\n%s", m)
+	}
+	if !strings.Contains(m, `case (Root, 1): if (value > 4294967295) throw new SofabException(SofabError.InvalidMessage, "h: value outside declared bitfield width"); m.h = (WH)value; break;`) {
+		t.Errorf("a pos-31 bitfield must take the u32 width bound:\n%s", m)
+	}
+}
+
+// The behavioural difference the width rule makes, stated as the values
+// themselves: a gapped enum admits a value between its constants, and a bitfield
+// admits an undeclared bit — both INVALID under the withdrawn closed-set rule.
+// Pinned on the emitted bound so a silent reversion is loud.
+func TestCsWidthAdmitsUndeclaredValues(t *testing.T) {
+	m := buildModule(t, []byte(widthSixSrc), "width.yaml", map[string]any{})
+	// enum {0,1,2,10}: the guard must admit 5 — i.e. be the i8 interval, never a
+	// membership chain over the constants.
+	if strings.Contains(m, "value != 10") {
+		t.Errorf("the withdrawn membership chain over enum constants was emitted:\n%s", m)
+	}
+	// bitfield pos{0,1,3}: the guard must admit 4 — i.e. bound the WIDTH (255),
+	// never mask the declared flags (0xb).
+	if strings.Contains(m, "~0xbUL") {
+		t.Errorf("the withdrawn flag-mask guard was emitted:\n%s", m)
+	}
+	if !strings.Contains(m, "value > 255") {
+		t.Errorf("the bitfield width bound is missing:\n%s", m)
 	}
 }

@@ -174,28 +174,28 @@ func TestNegativeCases(t *testing.T) {
 		},
 		{
 			// Past 2^64. Every bit above 63 is undeclared by construction, so the
-			// closed-mask comparison answers it and no separate width term is
-			// needed — the same clause the generated decoders use.
+			// declared-mask comparison answers it and no separate width term is
+			// needed in this authoring check.
 			name:   "array-of-bitfield element mask past 64 bits",
 			src:    "version: 1\nmessages:\n  M:\n    payload:\n      a: {id: 0, type: array, items: {type: bitfield, count: 2, bits: {LOW: {pos: 0}, HIGH: {pos: 63}}}, default: [\"18446744073709551616\"]}\n",
 			expect: "element mask 18446744073709551616 sets bit 64, which no flag declares",
 		},
 		{
-			// The GAP row, and the one a bound at the backing width could not
-			// state: 1000 is wider than the byte this bitfield is stored in, but
-			// what the message names is the undeclared BIT, because that is the
-			// bound MESSAGE_SPEC §1 gives (mask 0b101 — bit 1 is not declared).
-			name:   "array-of-bitfield element mask past the declared backing width",
+			// The GAP row: 1000 is wider than the byte this bitfield implies AND
+			// sets bits no flag declares. What the message names is the undeclared
+			// BIT, because the authoring bound is the declared mask (0b101 — bit 1
+			// is not declared), not the width.
+			name:   "array-of-bitfield element mask past the declared mask AND the implied width",
 			src:    "version: 1\nmessages:\n  M:\n    payload:\n      a: {id: 0, type: array, items: {type: bitfield, count: 2, bits: {A: {pos: 0}, C: {pos: 2}}}, default: [1000]}\n",
 			expect: "element mask 1000 sets bit 3, which no flag declares (the declared mask is 0x5)",
 		},
 		{
-			// An undeclared bit that FITS the storage. This is the row the old
-			// width bound accepted, and the one that made the schema and the wire
-			// disagree: `2` fits the byte a two-flag bitfield is held in, sets bit
-			// 1 which no flag declares, and every generated decoder in the family
-			// refuses it (§1). Storage is never the bound, for a default any more
-			// than for a wire value.
+			// An undeclared bit that FITS the implied width, and so the row that
+			// separates this AUTHORING bound from the wire bound: `2` sets bit 1,
+			// which no flag declares, and every decoder in the family accepts and
+			// keeps it (§1 bounds a decoded bitfield by the width, u8 here). An
+			// author still may not WRITE it as a default, because §2 would make it
+			// the value absence reconstructs and the schema offers no name for it.
 			name:   "array-of-bitfield element mask inside the storage, outside the declared mask",
 			src:    "version: 1\nmessages:\n  M:\n    payload:\n      a: {id: 0, type: array, items: {type: bitfield, count: 2, bits: {A: {pos: 0}, C: {pos: 2}}}, default: [2]}\n",
 			expect: "element mask 2 sets bit 1, which no flag declares (the declared mask is 0x5)",
@@ -423,17 +423,16 @@ func TestNegativeCases(t *testing.T) {
 	}
 }
 
-// An `enum` that declares NO constant at all. §1 makes the declared set the
-// bound, so an empty set admits no value — the field could be given none and no
-// wire value could be stored in it. It is refused at the definition, and that
-// refusal is load-bearing rather than tidy: every backend builds its closed-set
-// comparison from the constants, so an empty set rendered NO comparison and the
-// field accepted every value on the wire — the exact opposite of what it
-// declares. checkEnumInitialisable suppressed itself on the same emptiness, so
-// the field additionally initialised to 0.
+// An `enum` that declares NO constant at all. It is refused at the definition,
+// and not because of the wire: §1 bounds a decoded enum by the WIDTH its
+// declaration implies, and an empty declaration implies i8 like any other. What
+// it cannot do is NAME a value — so no field of it can satisfy the §1 rule that
+// an enum field declare a `default` naming one of the constants or belong to an
+// enum declaring a 0 constant. checkEnumInitialisable suppresses itself on the
+// same emptiness, so without this refusal nothing would report it.
 //
-// The bitfield twin is NOT an error: an empty `bits` map is mask 0, whose one
-// valid value (no flags set) every backend does state, so it stays legal.
+// The bitfield twin is NOT an error: an empty `bits` map still denotes the "no
+// flags set" combination, which is a value the type names, so it stays legal.
 func TestEnumDeclaringNoConstantIsRejected(t *testing.T) {
 	for _, tc := range []struct {
 		name string
@@ -461,14 +460,14 @@ func TestEnumDeclaringNoConstantIsRejected(t *testing.T) {
 	}
 }
 
-// An `enum` is CLOSED: only the constants it declares are valid values
-// (MESSAGE_SPEC §1). That has a consequence the wire never sees, because §2
-// initializes a field with no `default` to its type's zero value and a sparse
-// encoder omits the field at exactly that value — absence has to reconstruct
-// something the type admits. So an `enum` field MUST either declare a `default`
-// naming one of the constants, or belong to an enum that declares a constant
-// with the value 0; otherwise the field initializes to 0, which the enum itself
-// rejects, on every receiver in the family.
+// An `enum` NAMES the constants it declares (MESSAGE_SPEC §1). That has a
+// consequence the wire never sees, because §2 initializes a field with no
+// `default` to its type's zero value and a sparse encoder omits the field at
+// exactly that value — absence has to reconstruct a value the schema names. So
+// an `enum` field MUST either declare a `default` naming one of the constants,
+// or belong to an enum that declares a constant with the value 0; otherwise the
+// field initializes to 0, a number the enum gives no name to, on every receiver
+// in the family.
 //
 // It is a schema-validity rule, not a decode check. Nothing catches it at decode
 // time precisely because no such value ever reaches the wire.
@@ -545,7 +544,7 @@ func TestBrokenEnumDefinitionDoesNotAlsoReportInitialisability(t *testing.T) {
 // quoted decimal string for a value the double-safe range cannot carry exactly.
 // Every element is a combination of the DECLARED flags (mask 0x8000000000000001):
 // spelling is what this test is about, and a spelling can only be exercised on a
-// value the closed-mask rule admits.
+// value the declared-mask authoring bound admits.
 func TestBitfieldArrayElementSpellingsAccepted(t *testing.T) {
 	src := "version: 1\nmessages:\n  M:\n    payload:\n" +
 		"      a: {id: 0, type: array, items: {type: bitfield, count: 5, bits: {LOW: {pos: 0}, HIGH: {pos: 63}}}, " +

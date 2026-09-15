@@ -986,25 +986,33 @@ require_engine python
 chunk_invariance "Python (pure)"
 unset SOFAB_PUREPYTHON || true
 
-# An `enum` and a `bitfield` are CLOSED (MESSAGE_SPEC S1, generator#516): what
-# binds is the SET of constants / the MASK of declared positions, never a width
-# and never the integer the target stores the field in. The shared driver prints
-# its own schema and forges its own bytes, and probes ALL SIX positions with
-# GAPPED definitions, so an interval bound cannot pass.
+# An `enum` and a `bitfield` are bound by the WIDTH their declaration implies
+# (MESSAGE_SPEC S1, generator#516): for an enum the smallest SIGNED type holding
+# every declared constant, for a bitfield the smallest UNSIGNED type holding its
+# highest declared `pos`. A value inside that width is valid even when no constant
+# names it and even when it carries an undeclared bit; only one outside it is
+# malformed. The shared driver prints its own schema and forges its own bytes, and
+# probes ALL SIX positions with GAPPED definitions, so a bound taken from the
+# constants' hull or from a flag mask fails on the accepting rows.
 #
 # Python kept a wide member and accepted anything -- its int is unbounded, so
-# nothing was even truncated: 5 into an enum declaring {0,1,2,10}, 4 into a
-# bitfield declaring bits 0, 1 and 3 and 2^40 into that same bitfield all decoded
-# and were kept verbatim, at every one of the twelve stores. Both engines run it:
-# the element bound the accelerator applies is C code and the pure one is not.
-echo "==> closed enum/bitfield: only what the schema declares is valid (S1, generator#516)"
+# nothing was even truncated: 1000 into an enum declaring {0,1,2,10} and 2^40 into
+# a bitfield declaring bits 0, 1 and 3 both decoded and were kept verbatim, at
+# every one of the twelve stores. Nothing here narrows, so the guard is the only
+# thing standing between a malformed value and the decoded object.
+#
+# Both engines run it, and for these two kinds that is the whole point: the bound
+# is stated once, at the array header, as the interval the DECODER applies to each
+# element -- C code in the accelerator, Python in the pure engine -- so a run on
+# one engine leaves the other's half of the element bound unmeasured.
+echo "==> enum/bitfield: bounded by the width the declaration implies (S1, generator#516)"
 printf 'version: 1\nmessages:\n' > "$WORK/closed.yaml"
-python3 "$ROOT/tests/conformance/lib/check_closed_kinds.py" --emit-schema >> "$WORK/closed.yaml"
+python3 "$ROOT/tests/conformance/lib/check_declared_width_kinds.py" --emit-schema >> "$WORK/closed.yaml"
 ( cd "$ROOT" && go run ./cmd/sofabgen --config "$WORK/cfg.yaml" --lang python --in "$WORK/closed.yaml" --out "$WORK/closedproj" )
 for ENGINE in $ENGINES; do
     if [ "$ENGINE" = python ]; then export SOFAB_PUREPYTHON=1; else unset SOFAB_PUREPYTHON || true; fi
     require_engine "$ENGINE"
-    python3 "$ROOT/tests/conformance/lib/check_closed_kinds.py" "python/$ENGINE" \
+    python3 "$ROOT/tests/conformance/lib/check_declared_width_kinds.py" "python/$ENGINE" \
         --cwd "$WORK/closedproj" --invalid-pattern 'SofaDecodeError' -- python3 harness.py
 done
 unset SOFAB_PUREPYTHON || true

@@ -293,10 +293,8 @@ func (g *gen) typesFile() []byte {
 		return nil
 	}
 	f := newGoFile(g.pkg)
-	// sofab is imported by emitObject and by a matrix row guard only (structs and
-	// unions use the codec); an enum/bitfield-only types file must not import it
-	// unused.
-	rowGuards := g.matrixRowClosed()
+	// sofab is imported by emitObject only (structs/unions use the codec); an
+	// enum/bitfield-only types file must not import it unused.
 	for _, key := range g.schema.NamedOrder {
 		nt := g.schema.Named[key]
 		switch nt.Category {
@@ -307,109 +305,8 @@ func (g *gen) typesFile() []byte {
 		case ir.CatStruct, ir.CatUnion:
 			g.emitObject(f, g.typeName(key), nt.Fields)
 		}
-		if ref := rowGuards[key]; ref != nil {
-			g.emitRowGuard(f, nt, ref)
-		}
 	}
 	return f.bytes(g.banner, g.license)
-}
-
-// matrixRowClosed keys, by named type, every `enum` and `bitfield` this schema
-// uses as a MATRIX ROW ELEMENT (`array<array<enum>>`) and whose declared set
-// bounds anything -- i.e. the row collectors that need a guard wrapper.
-//
-// It is a scan and not a flag set during emission because types.go is written
-// once for the whole schema while the collectors are emitted per message: the
-// wrapper has to exist before the first expression naming it, and the package
-// admits exactly one declaration of it however many messages share the type.
-func (g *gen) matrixRowClosed() map[string]*ir.TypeRef {
-	out := map[string]*ir.TypeRef{}
-	var walk func(elem ir.Kind, items *ir.ArrayElem)
-	walk = func(elem ir.Kind, items *ir.ArrayElem) {
-		// The shape matrixCollector answers for: an array whose ELEMENT is itself
-		// an array of natives. Anything deeper recurses the way arrayCollector
-		// does, through the nested wrapper-array collector.
-		if elem != ir.KindArray || items == nil {
-			return
-		}
-		if !isNativeArrayElem(items.Elem) {
-			walk(items.Elem, items.ElemItems)
-			return
-		}
-		if items.ElemRef == nil || closedCond(items.Elem, items.ElemRef) == "" {
-			return
-		}
-		out[items.ElemRef.Key] = items.ElemRef
-	}
-	scan := func(fields []*ir.Field) {
-		for _, fld := range fields {
-			if fld.Kind == ir.KindArray {
-				walk(fld.Elem, fld.ElemItems)
-			}
-		}
-	}
-	for _, m := range g.schema.Messages {
-		scan(m.Fields)
-	}
-	for _, key := range g.schema.NamedOrder {
-		scan(g.schema.Named[key].Fields)
-	}
-	return out
-}
-
-// rowGuardName is the generated wrapper type that closes a matrix row element's
-// set, or "" for an element kind that needs none. The leading underscore keeps
-// it out of the way of every generated type name, which typeName exports.
-func (g *gen) rowGuardName(elem ir.Kind, ref *ir.TypeRef) string {
-	if ref == nil || closedCond(elem, ref) == "" {
-		return ""
-	}
-	return "_row" + g.typeName(ref.Key)
-}
-
-// emitRowGuard emits the matrix-row wrapper for one closed named type: a struct
-// embedding the corelib row collector, overriding the single element callback to
-// close the declared set, and delegating everything else.
-//
-// It exists because a matrix row's elements never reach the generated visitor --
-// sofab.*MatrixSeq gathers them and places the finished row -- and the only bound
-// the collector itself carries is an INTERVAL armed by a sentinel, which can
-// express neither a gapped set nor a mask (MESSAGE_SPEC §1). Overriding one
-// exported method is a purely generated-side fix: corelib-go dispatches through
-// the sofab.Visitor interface, so the embedded collector keeps ownership of the
-// row id, the row count and the placing, and only the value test is ours.
-func (g *gen) emitRowGuard(f *gofile, nt *ir.NamedType, ref *ir.TypeRef) {
-	f.imp(corelibImport)
-	tn := g.typeName(nt.Key)
-	name := g.rowGuardName(kindOfClosed(nt), ref)
-	cb, param, seq := "ArrayUnsigned", "uint64", "UnsignedMatrixSeq"
-	if nt.Category == ir.CatEnum {
-		cb, param, seq = "ArraySigned", "int64", "SignedMatrixSeq"
-	}
-	f.line("// %s closes %s at a matrix row element", name, tn)
-	f.line("// The row's values never reach the generated visitor --")
-	f.line("// the collector gathers them and places the finished row -- and the only")
-	f.line("// bound it carries of its own is an interval armed by a sentinel, which")
-	f.line("// states neither a gapped constant set nor a bitfield mask. So the value")
-	f.line("// test is here and everything else stays the corelib's.")
-	f.line("type %s struct{ *sofab.%s[%s] }", name, seq, tn)
-	f.blank()
-	f.line("func (s %s) %s(id sofab.ID, i int, v %s) error {", name, cb, param)
-	f.line("	if %s {", closedCond(kindOfClosed(nt), ref))
-	f.line("		return sofab.ErrInvalidMsg")
-	f.line("	}")
-	f.line("	return s.%s.%s(id, i, v)", seq, cb)
-	f.line("}")
-	f.blank()
-}
-
-// kindOfClosed maps a closed named type back to the ir.Kind a field of it has,
-// so one *ir.NamedType answers the same question a field's Kind does.
-func kindOfClosed(nt *ir.NamedType) ir.Kind {
-	if nt.Category == ir.CatEnum {
-		return ir.KindEnum
-	}
-	return ir.KindBitfield
 }
 
 func (g *gen) emitEnum(f *gofile, nt *ir.NamedType) {
@@ -867,21 +764,22 @@ func (g *gen) marshalArray(f *gofile, ind, idExpr, val string, elem ir.Kind, ref
 // schema declares with Kind k -- and, for a composite kind, the named type ref
 // carries the rest of that declaration -- or "" when nothing reachable can
 // breach the bound: the 64-bit kinds, whose range IS the callback parameter's
-// own, `bool`, and a bitfield declaring all 64 positions.
+// own, `bool`, an enum whose constants need the full i64 and a bitfield whose
+// highest declared position is 32 or above.
 //
-// What the schema declares is what binds, and the declaration takes two shapes.
-// For an integer it is a WIDTH (MESSAGE_SPEC §7.1, documentation#32): the width
-// is a normative validity bound, not a storage hint, and the `uint8(v)`
-// conversion that follows IS the mask §7.1 forbids, so the check has to precede
-// it. For an `enum` or a `bitfield` it is a SET -- the declared constants, the
-// mask of declared `pos` bits (§1) -- and closedCond answers for those.
+// What the schema declares is what binds, and every declaration binds a WIDTH.
+// For an integer it is the width it names (MESSAGE_SPEC §7.1, documentation#32):
+// the width is a normative validity bound, not a storage hint, and the
+// `uint8(v)` conversion that follows IS the mask §7.1 forbids, so the check has
+// to precede it. For an `enum` or a `bitfield` it is the width the declaration
+// IMPLIES (§1), and declaredWidthCond answers for those.
 //
 // It serves the scalar callbacks and the array-element ones alike: both name the
 // value `v`, and the bound is the same statement about the same declaration. The
 // scalar, struct-member, struct-array-member and union-member stores are ONE arm
 // per kind serving four positions -- emitVisitorMethods runs once per id scope,
 // so the frames differ and the arm does not -- and the array element arm carries
-// the same clause, so a value the schema does not declare gets one verdict
+// the same clause, so a value outside the declared width gets one verdict
 // wherever it lands (generator#516).
 //
 // No negative-value term is needed on the unsigned side: Unsigned delivers a
@@ -889,7 +787,7 @@ func (g *gen) marshalArray(f *gofile, ind, idExpr, val string, elem ir.Kind, ref
 func widthGuard(k ir.Kind, ref *ir.TypeRef) string {
 	cond := widthCond(k)
 	if cond == "" {
-		cond = closedCond(k, ref)
+		cond = declaredWidthCond(k, ref)
 	}
 	if cond == "" {
 		return ""
@@ -909,51 +807,54 @@ func widthCond(k ir.Kind) string {
 	return fmt.Sprintf("v > %d", hi)
 }
 
-// closedCond is the reject comparison for the two CLOSED kinds, MESSAGE_SPEC §1:
-// an `enum` is bound by the set of constants the schema declares, a `bitfield`
-// by the mask of the positions it declares, so v is valid exactly when
-// v&^mask == 0. It returns "" for every other kind (widthCond owns those) and
-// for a bitfield whose declared positions cover all 64 bits, where the test is a
-// tautology and go vet would be right to call the clause dead.
+// declaredWidthCond is the reject comparison for an `enum` and a `bitfield`,
+// MESSAGE_SPEC §1: each is bound by the WIDTH its declaration implies -- for an
+// enum the smallest SIGNED type holding every declared constant, for a bitfield
+// the smallest UNSIGNED type holding its highest declared `pos`. It returns ""
+// for every other kind (widthCond owns those) and wherever the implied width is
+// the 64-bit accumulator the value arrives in, where the clause would be dead
+// code and go vet would be right to say so.
 //
-// Neither bound is a width, and storage is never the bound. The member stays the
-// smallest integer that holds the declared constants/positions -- §1 grants that
-// as a MAY -- but a field whose declared positions are 0..3 does not become
-// 0..255 valid because Go holds it in a uint8. Both comparisons therefore run on
-// the RAW callback parameter, ahead of the narrowing conversion, which is also
-// why one clause covers both halves at once: a mask test on the full uint64
-// rejects an undeclared bit inside the storage width and everything above it in
-// the same expression, and a membership test does the same for an enum.
+// A value INSIDE that width is valid even when the schema names no constant for
+// it and even when it carries an undeclared bit; only a value outside it is
+// malformed input. So an enum {A: 0, B: 1, C: 2, Z: 10} is bounded as an i8 and
+// admits 5 while refusing 200, and a bitfield declaring positions 0, 1 and 3 is
+// bounded as a u8 and admits 4 -- the undeclared bit 2 -- while refusing 256. An
+// undeclared bit is NOT masked away: masking would turn malformed-looking input
+// into a DECLARED combination and report it Ok.
 //
-// This reverses generator#482, which kept an undeclared bit that fit the backing
-// width on the argument that it is how a peer built from a newer schema carries
-// a flag this one has not got yet. §1 answers that directly: adding a flag -- or
-// a constant -- is a BREAKING schema change, and a receiver rejects the value
-// rather than storing something its declared type cannot represent.
-func closedCond(k ir.Kind, ref *ir.TypeRef) string {
+// This replaces the set/mask bound of generator#530, which implemented the
+// closed-type reading MESSAGE_SPEC carried for six days (doc PR #89, `a50db95`)
+// and doc PR #95 (`382159e`) withdrew. Both bounds are ordinary intervals now,
+// which is §1's own reason for the change: an array's elements are consumed
+// inside the corelib loop, so a bound must cross that channel as an interval,
+// and a width fits where a set does not -- which is also what lets the matrix
+// row collector state its own bound again instead of a generated wrapper.
+//
+// Storage is still never the bound, even where Go's coincides with it:
+// enumGoType and bitfieldGoType pick the smallest integer from the same
+// declaration, so the member happens to BE the declared width. The comparison
+// runs on the RAW callback parameter all the same, ahead of the narrowing
+// conversion, which is the only order in which an over-width value can be seen
+// at all -- §1's fourth consequence, stated for the receiver that holds the
+// field wider.
+func declaredWidthCond(k ir.Kind, ref *ir.TypeRef) string {
 	switch k {
 	case ir.KindEnum:
-		vals, ok := ir.EnumValues(ref)
-		if !ok || len(vals) == 0 {
+		lo, hi, ok := ir.EnumWidthRange(ref)
+		if !ok {
 			return ""
 		}
-		if ir.EnumContiguous(ref) {
-			return fmt.Sprintf("v < %d || v > %d", vals[0], vals[len(vals)-1])
-		}
-		terms := make([]string, len(vals))
-		for i, x := range vals {
-			terms[i] = fmt.Sprintf("v != %d", x)
-		}
-		return strings.Join(terms, " && ")
+		return fmt.Sprintf("v < %d || v > %d", lo, hi)
 	case ir.KindBitfield:
-		mask, ok := ir.BitfieldMask(ref)
-		if !ok || mask == ^uint64(0) {
+		// One comparison rather than a mask of the width: Unsigned delivers a
+		// uint64, so `v > hi` already refuses everything above the width, with no
+		// sign-bit case to fold in the way a signed carrier would need.
+		hi, ok := ir.BitfieldWidthMax(ref)
+		if !ok {
 			return ""
 		}
-		if mask == 0 {
-			return "v != 0"
-		}
-		return fmt.Sprintf("v&^%#x != 0", mask)
+		return fmt.Sprintf("v > %d", hi)
 	}
 	return ""
 }
@@ -1330,7 +1231,7 @@ func (g *gen) matrixCollector(ptr string, items *ir.ArrayElem, bounds string) st
 	// runs before sofab.Narrow* masks anything (generator#330). NarrowRange
 	// answers false for u64/i64, whose range is the callback parameter's own, so
 	// the zero bound switches the scan off rather than emitting one that can
-	// never fire -- and for enum/bitfield, whose bound is not a width at all.
+	// never fire.
 	lo, hi, _ := ir.NarrowRange(elem)
 	// The row axis carries only its `count:`; a row's ELEMENTS are numbers, so
 	// the ElemLen half of Bounds is not a thing a matrix has.
@@ -1341,24 +1242,21 @@ func (g *gen) matrixCollector(ptr string, items *ir.ArrayElem, bounds string) st
 	case ir.KindI8, ir.KindI16, ir.KindI32, ir.KindI64:
 		return fmt.Sprintf("sofab.NewSignedMatrixSeq[%s](%s, %s, %d, %d)", goNumType(elem), ptr, rows, lo, hi)
 	case ir.KindBitfield:
-		// The collector's own element bound is an INTERVAL armed by a sentinel
-		// (`hi != 0` / `lo != 0`), and a closed set is neither: a mask cannot be
-		// stated as a range at all, and a contiguous enum starting at 0 would
-		// disarm its own check. So the numbers stay off and the row's elements are
-		// bounded by a generated WRAPPER instead -- rowGuardName's type embeds the
-		// corelib collector, closes the set on the way in and delegates the placing
-		// (§1, generator#516). Nothing is owed to corelib-go: every collector method
-		// is exported and the decoder takes a sofab.Visitor, so intercepting one
-		// callback needs no hook.
-		if n := g.rowGuardName(elem, ref); n != "" {
-			return fmt.Sprintf("%s{sofab.NewUnsignedMatrixSeq[%s](%s, %s, 0)}", n, g.typeName(ref.Key), ptr, rows)
-		}
-		return fmt.Sprintf("sofab.NewUnsignedMatrixSeq[%s](%s, %s, 0)", g.typeName(ref.Key), ptr, rows)
+		// A matrix row's elements never reach the generated visitor -- the
+		// collector gathers them and places the finished row -- so the row element
+		// bound has to be one the collector can carry, and the collector's is an
+		// INTERVAL armed by a sentinel. The width §1 implies IS an interval, so it
+		// travels there like every other element width, and the wrapper type
+		// generator#530 needed to state a mask is gone with the mask.
+		//
+		// BitfieldWidthMax and EnumWidthRange answer 0 where the implied width is
+		// the accumulator's own, which is exactly the value that switches the
+		// collector's scan off -- the same sentinel u64/i64 use above.
+		bhi, _ := ir.BitfieldWidthMax(ref)
+		return fmt.Sprintf("sofab.NewUnsignedMatrixSeq[%s](%s, %s, %d)", g.typeName(ref.Key), ptr, rows, bhi)
 	case ir.KindEnum:
-		if n := g.rowGuardName(elem, ref); n != "" {
-			return fmt.Sprintf("%s{sofab.NewSignedMatrixSeq[%s](%s, %s, 0, 0)}", n, g.typeName(ref.Key), ptr, rows)
-		}
-		return fmt.Sprintf("sofab.NewSignedMatrixSeq[%s](%s, %s, 0, 0)", g.typeName(ref.Key), ptr, rows)
+		elo, ehi, _ := ir.EnumWidthRange(ref)
+		return fmt.Sprintf("sofab.NewSignedMatrixSeq[%s](%s, %s, %d, %d)", g.typeName(ref.Key), ptr, rows, elo, ehi)
 	case ir.KindFP32:
 		return fmt.Sprintf("sofab.NewFloat32MatrixSeq(%s, %s)", ptr, rows)
 	case ir.KindFP64:

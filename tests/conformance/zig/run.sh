@@ -847,11 +847,19 @@ OUT=$("$WORK/ex/zig-out/bin/harness" decode myfirstmessage < "$WORK/w_u8_255_ctl
 echo "$OUT" | tr -d ' ' | grep -q '"someu8":255' || { echo "FAIL: control must keep 255 exactly; got: $OUT"; exit 1; }
 echo "==> declared-width reject OK"
 
-# An `enum` and a `bitfield` are CLOSED (MESSAGE_SPEC S1, generator#516): what
-# binds is the SET of constants / the MASK of declared positions, never a width
-# and never the integer the target stores the field in. The shared driver prints
-# its own schema and forges its own bytes, and probes ALL SIX positions with
-# GAPPED definitions, so an interval bound cannot pass.
+# An `enum` and a `bitfield` are bound by the WIDTH their declaration implies
+# (MESSAGE_SPEC S1, generator#516): for an enum the smallest SIGNED type holding
+# every declared constant, for a bitfield the smallest UNSIGNED type holding its
+# highest declared `pos`. A value inside that width is valid even where the
+# schema names no constant for it and even where it carries an undeclared bit;
+# only a value outside it is INVALID. The shared driver prints its own schema and
+# forges its own bytes, and probes ALL SIX positions with GAPPED definitions, so
+# a decoder still carrying the withdrawn set/mask bound fails on exactly the rows
+# those gaps make ACCEPTING.
+#
+# The bound is not the integer this backend stores the field in -- an i8/u8
+# member here -- so the driver also probes both EDGES of the implied width, which
+# is what separates a real width check from one taken from the constants' hull.
 #
 # On this backend the same missing guard was also generator#517, and the two
 # build modes disagreed about it: every one of the twelve stores reached a bare
@@ -859,11 +867,11 @@ echo "==> declared-width reject OK"
 # type") where the --release=fast build this suite ships truncated the value and
 # reported Ok. Neither is a verdict. zig_build uses --release=fast on purpose --
 # a Debug-only case would report a crash rather than a decode outcome.
-echo "==> closed enum/bitfield: only what the schema declares is valid (S1, generator#516)"
+echo "==> enum/bitfield bound by the width their declaration implies (S1, generator#516)"
 { echo "version: 1"; echo "messages:"; } > "$WORK/closed.yaml"
-python3 "$ROOT/tests/conformance/lib/check_closed_kinds.py" --emit-schema >> "$WORK/closed.yaml"
+python3 "$ROOT/tests/conformance/lib/check_declared_width_kinds.py" --emit-schema >> "$WORK/closed.yaml"
 zig_build "$WORK/closed.yaml" "$WORK/closed"
-python3 "$ROOT/tests/conformance/lib/check_closed_kinds.py" "zig" \
+python3 "$ROOT/tests/conformance/lib/check_declared_width_kinds.py" "zig" \
     --invalid-pattern 'InvalidMessage' -- "$WORK/closed/zig-out/bin/harness"
 
 # CORELIB_PLAN S7.2 item 8 -- the shared file's `sequence_growth` block

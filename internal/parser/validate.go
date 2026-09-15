@@ -327,7 +327,7 @@ func (v *validator) checkInt64Range(f map[string]any, loc, kind string) {
 // It is deliberately the same shape as checkMaskElem, which #482 gave the
 // array-of-bitfield arm: a bitfield mask IS a u64, so a divergence between the
 // two would mean the same literal is legal for one element type and not the
-// other. What differs is only what a bitfield adds on top — its backing width —
+// other. What differs is only what a bitfield adds on top — its declared mask —
 // and the sign, since an i64 default may be negative.
 //
 // One rule here is WIDER than what the code accepted before #484: an unquoted
@@ -571,19 +571,20 @@ func (v *validator) checkEnumField(f map[string]any, loc string) {
 	v.checkEnumInitialisable(values, loc)
 }
 
-// checkEnumInitialisable enforces the third consequence of the closed enum
-// (MESSAGE_SPEC §1): an `enum` field MUST either declare a `default` naming one
-// of the enum's constants, or belong to an enum that declares a constant with
-// the value 0.
+// checkEnumInitialisable enforces the rule MESSAGE_SPEC §1 keeps on an enum
+// FIELD: it MUST either declare a `default` naming one of the enum's constants,
+// or belong to an enum that declares a constant with the value 0.
 //
 // It is a schema-validity rule, not a decode check, and it follows from §2
 // rather than from §7.1. §2 initialises a field with no `default` to its type's
 // zero value and a sparse encoder omits the field at exactly that value, so
-// absence has to reconstruct something the type admits. An enum {RED = 1,
-// GREEN = 2} whose field declares no default would initialise to 0 — a value the
-// enum itself rejects — and no receiver could hold it legally. Such a value
-// never reaches the wire, precisely because the field is omitted at its default,
-// which is why this is caught at generate time and not by a decoder.
+// absence has to reconstruct a value the schema NAMES. An enum {RED = 1,
+// GREEN = 2} whose field declares no default would initialise to 0 — a number
+// its declaration gives no name to — so absence would reconstruct something
+// neither peer can spell. That 0 is inside the width the declaration implies,
+// and would therefore decode, is beside the point: this value never reaches the
+// wire at all, precisely because the field is omitted at its default, which is
+// why it is caught at generate time and not by a decoder.
 //
 // It binds a FIELD, and only a scalar one. An array of enum needs no
 // counterpart: `count` is a capacity and nothing is padded to it (§3), so an
@@ -651,25 +652,25 @@ func (v *validator) validateEnumDef(node any, loc string) []int64 {
 		}
 		values = append(values, n)
 	}
-	// An enum with no constants at all. MESSAGE_SPEC §1 makes the declared SET
-	// the bound, so an empty set admits NO value — the field could not be given
-	// one, and no wire value could ever be stored in it. That is not a usable
-	// declaration, and it is not merely useless: every backend's closed-set
-	// comparison is built from the constants, so an empty set renders no
-	// comparison and the field silently accepts EVERY value — the exact opposite
-	// of what it declares (measured on all ten: `case 0: m.A = EA(v)` with no
-	// test). checkEnumInitialisable suppresses itself here too, so the field also
-	// initialises to 0, which the enum rejects. Refusing the definition is what
-	// makes those two suppressions the "already reported upstream" they document
-	// themselves as. The bitfield twin needs no counterpart: an empty `bits` map
-	// is mask 0, whose one valid value — no flags set — every backend does state.
+	// An enum with no constants at all. What refuses it is not the wire bound —
+	// §1 bounds a decoded enum by the WIDTH its declaration implies, and an empty
+	// declaration implies i8 like any other — but what the type can NAME. An enum
+	// naming no value gives an author no way to write one or read one back, and
+	// it cannot satisfy the §1 rule on its own fields either: a field must declare
+	// a `default` naming one of the constants or belong to an enum declaring a 0
+	// constant, and an empty declaration offers neither, so every field of it is
+	// unbuildable. checkEnumInitialisable suppresses itself on exactly this
+	// emptiness, and would leave that unreported; refusing the definition is what
+	// makes that suppression the "already reported upstream" it documents itself
+	// as. The bitfield twin needs no counterpart: an empty `bits` map still
+	// denotes the "no flags set" combination, which is a value the type names.
 	//
 	// Keyed on the MAP being empty rather than on `values`, which is also empty
 	// when every constant in a non-empty map failed above; those errors are
 	// reported already and this one would only pile on.
 	if len(m) == 0 {
-		v.add(loc, "enum declares no constants; an enum is closed by the set it declares, "+
-			"so an empty set admits no value at all")
+		v.add(loc, "enum declares no constants; an enum names the values it declares, "+
+			"so an empty declaration names none and no field of it can be given one")
 	}
 	return values
 }
@@ -686,12 +687,13 @@ func (v *validator) checkBitfieldField(f map[string]any, loc string) {
 // validateBitfieldDef validates a bitfield and enforces uniquePositions (§6).
 //
 // It returns the DECLARED MASK — one bit set per valid declared `pos`, 0 when the
-// definition declares none. Only the array-element default check uses it, and it
-// is the mask rather than the highest position because MESSAGE_SPEC §1 bounds a
-// bitfield by the mask and not by an interval: positions 0, 1 and 3 give
-// 0b1011, so bit 2 is undeclared and 4 is not a value of this type. It mirrors
-// ir.BitfieldMask, which is what the backends emit the decode comparison from.
-// Every other caller ignores the result.
+// definition declares none. Only the array-element default check uses it, to
+// refuse an AUTHORED default that names a bit no flag declares: positions 0, 1
+// and 3 give 0b1011, so a default of 4 sets bit 2, which the schema gives the
+// author no way to name or read back. That is a schema-authoring check and not
+// the wire bound — MESSAGE_SPEC §1 bounds a decoded bitfield by the WIDTH its
+// highest `pos` implies (ir.BitfieldWidthMax), so 4 is a value every decoder in
+// the family accepts. Every other caller ignores the result.
 func (v *validator) validateBitfieldDef(node any, loc string) uint64 {
 	var mask uint64
 	m, ok := node.(map[string]any)
@@ -952,30 +954,26 @@ func (v *validator) checkArrayElem(etyp string, el any, enumValues []int64, bitM
 //     decimal, which is what checkInt64Range requires of a u64 too.
 //
 //   - The bound is the bitfield's DECLARED MASK: one bit per declared `pos`, and
-//     a bit set anywhere else is refused. MESSAGE_SPEC §1 closes a bitfield by
-//     that mask — `v & ~mask == 0` — and §2 makes a `default` the value absence
-//     reconstructs, so a default outside the mask would declare a field value no
-//     conformant peer can send: every generated decoder in the family refuses it
-//     on the wire (generator#516), and the encoder would still write it, because
-//     the last element of an array is always written. The two halves of one
-//     closed rule cannot disagree, and the enum twin above already binds the
-//     authored element to the declared SET.
-//
-//     It replaces a bound at the backing WIDTH, which #482 chose on the argument
-//     that "an undeclared bit is how a peer built from a newer schema carries a
-//     flag this one does not declare yet". §1 rejects that outright: adding a
-//     flag is a BREAKING schema change. The mask is strictly narrower than the
-//     width it replaces — the declared positions all fit the backing type by
-//     construction — so nothing the width bound refused is admitted now.
+//     a bit set anywhere else is refused. This is a schema-AUTHORING bound and
+//     nothing else. It is strictly narrower than the wire bound, which
+//     MESSAGE_SPEC §1 puts at the WIDTH the highest declared `pos` implies
+//     (ir.BitfieldWidthMax): an undeclared bit inside that width is a value every
+//     decoder in the family accepts and keeps. What an author may WRITE here is
+//     narrower for a reason of its own — §2 makes a `default` the value absence
+//     reconstructs, and a default carrying an undeclared bit would pin the field
+//     at a combination the schema gives the author no name to spell and no flag
+//     to read it back with. That is a mistake worth reporting where it is made,
+//     and the enum twin above bounds the authored element the same way, to the
+//     declared constants.
 //
 //     The mask also subsumes the 64-bit ceiling: a value past 2^64 sets bits no
 //     flag declares, so it is refused by the same comparison, and the message
-//     names the highest declared position rather than a width.
+//     names the undeclared bit rather than a width.
 //
 // It stays a separate function from int64Verdict, which #484 gave the u64/i64
 // element and field arms, rather than calling it: the two agree line for line on
 // the spelling and the sign, but every message here names an "element mask" and
-// the width bound above has no counterpart there. The parallel is deliberate and
+// the mask bound above has no counterpart there. The parallel is deliberate and
 // both doc comments say so — a change to one belongs in the other. The one line
 // they do share outright is the exact-valued-float sentence, which comes from
 // integralFloatVerdict; that one guards every integer default in the schema, not
@@ -1038,11 +1036,12 @@ func (v *validator) checkMaskElem(el any, mask uint64, loc string) {
 		v.add(loc, "element mask %s must not be negative (a bitfield is unsigned)", n.String())
 		return
 	}
-	// The closed comparison, on the value itself: v &^ mask, exactly what every
-	// generated decoder emits for a wire value at this element (ir.BitfieldMask).
-	// big.Int rather than uint64 because a spelling past 2^64 has already been
-	// accepted as a number by this point, and AndNot answers it without a second
-	// range test — every bit above 63 is undeclared by construction.
+	// The declared-mask comparison, on the value itself: v &^ mask. It bounds an
+	// authored default only — the decode bound is the implied width — so it is
+	// taken here and nowhere a wire value travels. big.Int rather than uint64
+	// because a spelling past 2^64 has already been accepted as a number by this
+	// point, and AndNot answers it without a second range test — every bit above
+	// 63 is undeclared by construction.
 	if surplus := new(big.Int).AndNot(n, maskBig(mask)); surplus.Sign() != 0 {
 		if mask == 0 {
 			// No flag was declared (an empty or malformed `bits` map, which has an
@@ -1052,8 +1051,8 @@ func (v *validator) checkMaskElem(el any, mask uint64, loc string) {
 			return
 		}
 		v.add(loc, "element mask %s sets bit %d, which no flag declares (the declared mask is %#x); "+
-			"a bitfield is closed by the positions it declares (MESSAGE_SPEC §1), so a value outside the mask "+
-			"is one every conformant decoder refuses", n.String(), lowestSetBit(surplus), mask)
+			"a default names a combination of DECLARED flags, and this schema offers no name for that bit",
+			n.String(), lowestSetBit(surplus), mask)
 	}
 }
 

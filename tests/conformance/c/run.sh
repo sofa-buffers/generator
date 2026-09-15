@@ -689,6 +689,67 @@ OUT=$("$WORK/proj/harness/harness" decode < "$WORK/w_u8_255_ctl.bin") || { echo 
 echo "$OUT" | tr -d ' ' | grep -q '"someu8":255' || { echo "FAIL: control must keep 255 exactly; got: $OUT"; exit 1; }
 echo "==> declared-width reject OK"
 
+# An `enum` and a `bitfield` are bound by the WIDTH their declaration implies
+# (MESSAGE_SPEC §1, doc `382159e`, PR #95, generator#516): for an enum the
+# smallest SIGNED type holding every declared constant, for a bitfield the
+# smallest UNSIGNED type holding its highest declared `pos`. A value INSIDE that
+# width is valid even when the schema names no constant for it and even when it
+# carries an undeclared bit; only a value outside it is malformed input and MUST
+# be reported INVALID (§7.1), and it is never masked to the width -- masking
+# would turn malformed-looking input into a DECLARED combination and report it
+# Ok.
+#
+# One shared driver for all eleven suites (ARCHITECTURE §12): it prints its own
+# schema and forges its own bytes, probing both kinds at all six positions --
+# scalar, native array element, struct member, struct-array member, union member
+# and matrix row. The declarations are GAPPED on purpose (the enum declares
+# {0,1,2,10}, the bitfield positions 0, 1 and 3), which under the width rule is
+# what the ACCEPTING rows are made of: 5 between the constants and 4 on the
+# undeclared bit MUST decode and keep their exact value, so a decoder still
+# carrying the withdrawn set/mask bound fails exactly those two rows and passes
+# everything else here.
+#
+# This backend emits no inline guard for either kind and needs none, for the same
+# reason the scalar width above needs none: the enum is backed by the smallest
+# signed C type its constants fit (int8_t here) and the bitfield by the smallest
+# unsigned one its highest `pos` fits (uint8_t), so the descriptor hands
+# sofab_istream_read_field a destination whose SIZE *is* the §1 bound, and
+# istream.c's _FITS_SIGNED_CHECK / _FITS_UNSIGNED_CHECK refuse everything outside
+# it. What this leg pins is therefore the descriptor the generator hands over --
+# the behaviour is the corelib's, and it can only stay correct while the emitted
+# storage width keeps matching the declared one.
+#
+# NO cell is declined. Every position the driver offers compiles and answers
+# here, the enum MATRIX row included -- the one cell both C++ legs decline,
+# because there a row of scoped enums has no sofab::readArray overload. The C
+# object model has no such gap: the row is a plain int8_t[3] the descriptor
+# describes like any other.
+#
+# Both surfaces name the CATEGORY rather than resting on exit status, so a crash
+# or a safety-checked abort cannot score as a correct rejection. On `decode` the
+# channel is the `status` verb, which runs the same one-shot decode and prints
+# its sofab_ret_t by name; `status` cannot serve the streaming row -- it would
+# assert the one-shot decoder's verdict twice and the chunked decoder's never --
+# so that arm matches the streaming harness's own error line instead. Every
+# payload the driver forges is COMPLETE, so an INCOMPLETE could never explain a
+# rejection either.
+echo "==> enum/bitfield: the declared width is the bound (MESSAGE_SPEC §1, generator#516)"
+printf 'version: 1\nmessages:\n' > "$WORK/closed.yaml"
+python3 "$ROOT/tests/conformance/lib/check_declared_width_kinds.py" --emit-schema >> "$WORK/closed.yaml"
+( cd "$ROOT" && go run ./cmd/sofabgen --config "$WORK/proj.yaml" --lang c \
+    --in "$WORK/closed.yaml" --out "$WORK/closed" )
+make -C "$WORK/closed" SOFAB_C_CORELIB="$CORELIB" >/dev/null
+for surface in decode streamdecode; do
+    if [ "$surface" = decode ]; then
+        CW_OPT=--status-verb; CW_VAL=status
+    else
+        CW_OPT=--invalid-pattern; CW_VAL='decode error: INVALID'
+    fi
+    python3 "$ROOT/tests/conformance/lib/check_declared_width_kinds.py" "c/$surface" \
+        --verb "$surface" "$CW_OPT" "$CW_VAL" \
+        -- "$WORK/closed/harness/harness"
+done
+
 echo "==> shared-vector decode conformance (skip matrix)"
 # generator#444: each vector's DENSE bytes fed into a message that declares u64
 # on the anchors and nothing else, so every other field on the wire is an unknown

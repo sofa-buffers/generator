@@ -2,7 +2,6 @@ package csharp
 
 import (
 	"fmt"
-	"strings"
 
 	"github.com/sofa-buffers/generator/internal/ir"
 )
@@ -146,16 +145,18 @@ func (g *gen) frames(m *ir.Message) []frame {
 // widthThrow renders the §7.1 rejection for a store into a destination the
 // schema declares with Kind k — and, for a composite kind, `ref` carries the
 // rest of that declaration. "" when nothing reachable can breach the bound: the
-// 64-bit kinds, whose range IS the accumulator, and a bitfield declaring all 64
-// positions.
+// 64-bit kinds, whose range IS the accumulator, and the enum/bitfield
+// declarations that imply one — an enum needing more than i32, a bitfield whose
+// highest declared `pos` is 32 or above.
 //
-// What the schema declares is what binds, and the declaration takes two shapes.
-// For an integer it is a WIDTH (MESSAGE_SPEC §7.1, documentation#32): a
-// `u8`/`u16`/`u32`/`i8`/`i16`/`i32` destination receiving a value outside its
-// declared range is malformed input and fails the decode with InvalidMessage —
-// never masked to the width by the `(byte)value` cast that follows, never kept.
-// For an `enum` or a `bitfield` it is a SET — the declared constants, the mask
-// of declared `pos` bits (§1) — and closedCond answers for those.
+// What the schema declares is what binds, and every declaration binds a WIDTH
+// (MESSAGE_SPEC §7.1, documentation#32): a `u8`/`u16`/`u32`/`i8`/`i16`/`i32`
+// destination receiving a value outside its declared range is malformed input
+// and fails the decode with InvalidMessage — never masked to the width by the
+// `(byte)value` cast that follows, never kept. An `enum` and a `bitfield` bind
+// the width their declaration IMPLIES (§1) — the smallest signed type holding
+// every constant, the smallest unsigned type holding the highest `pos` — and
+// declaredWidthCond answers for those.
 //
 // One clause serves every position. The scalar, struct-member, struct-array
 // member and union-member stores are ONE arm per kind serving four positions
@@ -168,7 +169,7 @@ func (g *gen) frames(m *ir.Message) []frame {
 func widthThrow(k ir.Kind, ref *ir.TypeRef, name string) string {
 	cond, what := widthCond(k), "width "+k.String()
 	if cond == "" {
-		cond, what = closedCond(k, ref), closedWhat(k)
+		cond, what = declaredWidthCond(k, ref), declaredWidthWhat(k)
 	}
 	if cond == "" {
 		return ""
@@ -188,67 +189,61 @@ func widthCond(k ir.Kind) string {
 	return fmt.Sprintf("value > %d", hi)
 }
 
-// closedCond is the reject comparison for the two CLOSED kinds, MESSAGE_SPEC §1:
-// an `enum` is bound by the set of constants the schema declares, a `bitfield`
-// by the mask of the positions it declares, so `value` is valid exactly when
-// `value & ~mask == 0`. It returns "" for every other kind (widthCond owns
-// those) and for a bitfield whose declared positions cover all 64 bits, where
-// the test is a tautology and the clause would be dead code.
+// declaredWidthCond is the reject comparison for an `enum` and a `bitfield`,
+// MESSAGE_SPEC §1: each is bound by the WIDTH its declaration implies — for an
+// enum the smallest SIGNED type holding every declared constant, for a bitfield
+// the smallest UNSIGNED type holding its highest declared `pos`. It returns ""
+// for every other kind (widthCond owns those) and wherever the implied width is
+// the 64-bit accumulator itself, where the test is a tautology and the clause
+// would be dead code.
 //
-// Neither bound is a width, and storage is never the bound. The member stays the
-// smallest integer that holds the declared constants/positions — §1 grants that
-// as a MAY — but a field whose declared positions are 0..3 does not become
-// 0..255 valid because C# holds it in a `byte`. Both comparisons therefore run
-// on the RAW accumulator, ahead of the narrowing cast, which is also why one
-// clause covers both halves of the old reading at once: a mask test on the full
-// `ulong` rejects an undeclared bit inside the storage width and everything
-// above it in the same expression, and a membership test does the same for an
-// enum.
+// A value INSIDE that width is valid even when the schema names no constant for
+// it and even when it carries an undeclared bit; only a value outside it is
+// malformed input. So an enum {RED=1, GREEN=2, BLUE=3} admits 5 and refuses 200,
+// and a bitfield declaring positions 0, 1 and 3 admits 4 — the undeclared bit 2 —
+// and refuses 256. An undeclared bit is NOT masked away: masking would turn
+// malformed-looking input into a DECLARED combination and report it Ok.
 //
-// This reverses generator#482, which kept an undeclared bit that fit the backing
-// width on the argument that it is how a peer built from a newer schema carries
-// a flag this one has not got yet. §1 answers that directly: adding a flag — or
-// a constant — is a BREAKING schema change, and a receiver rejects the value
-// rather than storing something its declared type cannot represent.
+// This replaces the set/mask bound of generator#530, which implemented the
+// closed-type reading MESSAGE_SPEC carried for six days (doc PR #89, `a50db95`)
+// and doc PR #95 (`382159e`) withdrew. Both bounds are ordinary intervals now,
+// which is §1's own reason for the change: an array's elements are consumed
+// inside the corelib loop, so a bound must cross that channel as an interval,
+// and a width fits where a set does not.
 //
-// The mask literal is suffixed `UL`: `value` is a `ulong`, and an unsuffixed
-// hexadecimal above int.MaxValue would take a signed type C# then refuses to
-// combine with it.
-func closedCond(k ir.Kind, ref *ir.TypeRef) string {
+// The comparison is the same shape widthCond emits for the plain integer of that
+// width, and for the same reason: C# holds an enum in an `sbyte`/`short`/`int`
+// and a bitfield in a `byte`/`ushort`/`uint` — exactly the implied width, which
+// is why the guard MUST run on the RAW accumulator, ahead of the narrowing cast
+// that would otherwise fold the over-width value into a representable one.
+// Nothing here needs a mask: the bitfield arrives through Unsigned, as a `ulong`,
+// so one unsigned comparison covers the whole bound (Java needs a mask there only
+// because its carrier is signed and a u64 above 2^63 arrives negative).
+func declaredWidthCond(k ir.Kind, ref *ir.TypeRef) string {
 	switch k {
 	case ir.KindEnum:
-		vals, ok := ir.EnumValues(ref)
-		if !ok || len(vals) == 0 {
+		lo, hi, ok := ir.EnumWidthRange(ref)
+		if !ok {
 			return ""
 		}
-		if ir.EnumContiguous(ref) {
-			return fmt.Sprintf("value < %d || value > %d", vals[0], vals[len(vals)-1])
-		}
-		terms := make([]string, len(vals))
-		for i, v := range vals {
-			terms[i] = fmt.Sprintf("value != %d", v)
-		}
-		return strings.Join(terms, " && ")
+		return fmt.Sprintf("value < %d || value > %d", lo, hi)
 	case ir.KindBitfield:
-		mask, ok := ir.BitfieldMask(ref)
-		if !ok || mask == ^uint64(0) {
+		hi, ok := ir.BitfieldWidthMax(ref)
+		if !ok {
 			return ""
 		}
-		if mask == 0 {
-			return "value != 0"
-		}
-		return fmt.Sprintf("(value & ~0x%xUL) != 0", mask)
+		return fmt.Sprintf("value > %d", hi)
 	}
 	return ""
 }
 
-// closedWhat names the breached declaration in the exception message, so the
-// two closed kinds read as what they are rather than as a width.
-func closedWhat(k ir.Kind) string {
+// declaredWidthWhat names the breached declaration in the exception message, so
+// the message says which declaration implied the width that was breached.
+func declaredWidthWhat(k ir.Kind) string {
 	if k == ir.KindEnum {
-		return "enum constants"
+		return "enum width"
 	}
-	return "bitfield flags"
+	return "bitfield width"
 }
 
 // primFill is the statement filling the next slot of the primitive array field

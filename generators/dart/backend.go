@@ -206,7 +206,6 @@ func (g *gen) module(s *ir.Schema) []byte {
 	g.emitLimits(f)
 	g.emitPrelude(f, s)
 
-	rowGuards := g.matrixRowClosed(s)
 	for _, key := range s.NamedOrder {
 		nt := s.Named[key]
 		switch nt.Category {
@@ -214,9 +213,6 @@ func (g *gen) module(s *ir.Schema) []byte {
 			g.emitEnum(f, nt)
 		case ir.CatBitfield:
 			g.emitBitfield(f, nt)
-		}
-		if ref := rowGuards[key]; ref != nil {
-			g.emitRowGuard(f, nt, ref)
 		}
 	}
 	for _, key := range s.NamedOrder {
