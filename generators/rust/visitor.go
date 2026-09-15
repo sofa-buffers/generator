@@ -2,7 +2,6 @@ package rust
 
 import (
 	"fmt"
-	"strconv"
 	"strings"
 
 	"github.com/sofa-buffers/generator/internal/ir"
@@ -1968,27 +1967,28 @@ const fillGuard = "if self.afill == 0 { return; } self.afill -= 1; "
 // widthGuard returns the §7.1 reject clause for a store into a destination the
 // schema declares with Kind k (and, for a composite kind, the named type ref
 // carries the rest of the declaration), or "" when nothing reachable can breach
-// the bound — the 64-bit kinds, whose range IS the accumulator's, and a bitfield
-// that declares all 64 positions.
+// the bound — the 64-bit kinds, whose range IS the accumulator's, and an enum or
+// bitfield whose implied width is that same 64-bit accumulator.
 //
-// What the schema declares is what binds, and the declaration takes two shapes.
-// For an integer it is a WIDTH (MESSAGE_SPEC §1/§7.1, documentation#32): an
-// out-of-range value is INVALID and must be neither masked to the width nor
-// kept, and without this clause the `value as u8` that follows is exactly the
-// mask the clause forbids. For an `enum` or a `bitfield` it is a SET — the
-// constants, the mask of declared `pos` bits (§1) — and closedCond answers for
-// those. Either way it is the same sticky flag, and so the same
-// Error::InvalidMsg, as the maxlen and count guards.
+// What the schema declares is what binds, and every declaration binds a WIDTH
+// (MESSAGE_SPEC §1/§7.1, documentation#32): an out-of-range value is INVALID and
+// must be neither masked to the width nor kept, and without this clause the
+// `value as u8` that follows is exactly the mask the clause forbids. For an
+// `enum` or a `bitfield` the width is the one the declaration IMPLIES — the
+// smallest signed type holding every constant, the smallest unsigned type
+// holding the highest `pos` (§1) — and declaredWidthCond answers for those.
+// Either way it is the same sticky flag, and so the same Error::InvalidMsg, as
+// the maxlen and count guards.
 //
 // Placement matters as much as the comparison. In an ARRAY arm the clause goes
 // *after* fillGuard, never before: a value arriving at an array id with no
 // array_begin in front of it is a §7.3 skip, and rejecting it ahead of the fill
 // check would turn that skip into a spurious INVALID.
-// The comparison form follows from the declaration: a u* destination is
-// delivered through unsigned() as an Unsigned, where only the upper bound is
-// reachable, while an i* destination arrives through signed() as a Signed and
-// needs both ends; a bitfield tests one mask against the raw carrier and an enum
-// tests membership.
+//
+// The comparison form follows from the carrier: a u* destination and a bitfield
+// are delivered through unsigned() as an Unsigned, where only the upper bound is
+// reachable, while an i* destination and an enum arrive through signed() as a
+// Signed and need both ends.
 //
 // Every position takes the same clause. The scalar, struct-member, struct-array
 // member and union-member stores are ONE arm per kind serving four positions
@@ -1998,7 +1998,7 @@ const fillGuard = "if self.afill == 0 { return; } self.afill -= 1; "
 func widthGuard(k ir.Kind, ref *ir.TypeRef) string {
 	cond := widthCond(k)
 	if cond == "" {
-		cond = closedCond(k, ref)
+		cond = declaredWidthCond(k, ref)
 	}
 	if cond == "" {
 		return ""
@@ -2006,61 +2006,57 @@ func widthGuard(k ir.Kind, ref *ir.TypeRef) string {
 	return fmt.Sprintf("if %s { self.inv = true; return; } ", cond)
 }
 
-// closedCond is the reject comparison for the two CLOSED kinds, MESSAGE_SPEC §1:
-// an `enum` is bound by the set of constants the schema declares, a `bitfield`
-// by the mask of the positions it declares. It returns "" for every other kind
-// (widthCond owns those) and for a bitfield whose declared positions cover all
-// 64 bits, where the test is a tautology and emitting it would be dead code a
-// linter flags.
+// declaredWidthCond is the reject comparison for an `enum` and a `bitfield`,
+// MESSAGE_SPEC §1: each is bound by the WIDTH its declaration implies — for an
+// enum the smallest SIGNED type holding every declared constant, for a bitfield
+// the smallest UNSIGNED type holding its highest declared `pos`. It returns ""
+// for every other kind (widthCond owns those) and wherever the implied width is
+// the 64-bit accumulator itself, where the test is a tautology and emitting it
+// would be dead code a linter flags.
 //
-// Neither bound is a width, and storage is never the bound. The member stays the
-// smallest integer that holds the declared constants/positions — that is a MAY
-// (§1) and a footprint decision — but a field whose declared positions are 0..3
-// does not become 0..255 valid because rust holds it in a u8. Both comparisons
-// therefore run on the RAW carrier, ahead of the narrowing `as` cast, which is
-// also why one clause covers both halves of the old reading at once: a mask test
-// on the full accumulator rejects an undeclared bit inside the storage width and
-// everything above it in the same expression, and a membership test does the
-// same for an enum.
+// A value INSIDE that width is valid even when the schema names no constant for
+// it and even when it carries an undeclared bit; only a value outside it is
+// malformed input. So an enum {RED=1, GREEN=2, BLUE=3} admits 5 and refuses 200,
+// and a bitfield declaring positions 0, 1 and 3 admits 4 — the undeclared bit 2 —
+// and refuses 256. An undeclared bit is NOT masked away: masking would turn
+// malformed-looking input into a DECLARED combination and report it Ok.
 //
-// This reverses generator#482, which kept an undeclared bit that fit the backing
-// width on the argument that it is how a peer built from a newer schema carries
-// a flag this one has not got yet. §1 now answers that directly: adding a flag —
-// or a constant — is a BREAKING schema change, and a receiver rejects the value
-// rather than storing something its declared type cannot represent.
+// This replaces the set/mask bound of generator#530, which implemented the
+// closed-type reading MESSAGE_SPEC carried for six days (doc PR #89, `a50db95`)
+// and doc PR #95 (`382159e`) withdrew. Both bounds are ordinary intervals now,
+// which is §1's own reason for the change: an array's elements are consumed
+// inside the corelib loop, so a bound must cross that channel as an interval,
+// and a width fits where a set does not.
 //
-// The literal form is chosen so the clause compiles on both scalar profiles.
+// Storage is still never the bound, even where the two coincide. Rust happens to
+// hold each kind in exactly the integer its declaration implies (enumBackingKind,
+// bitfieldBackingKind), but the value arrives in the corelib's 64-bit
+// accumulator, so the comparison runs on the RAW carrier ahead of the narrowing
+// `value as <backing>` cast — which is the only place it can catch anything at
+// all, since that cast is itself the mask §7.1 forbids.
+//
+// Both literals stay unsuffixed, and that is now safe by construction:
 // corelib-rs-no-std narrows Unsigned/Signed to 32 bits when its `value64`
-// feature is off, so an unsuffixed mask above u32::MAX would overflow the
-// inferred type; such a mask is widened explicitly instead. Enum constants are
-// signed-32-bit by schema rule, so they always fit and never need it.
-func closedCond(k ir.Kind, ref *ir.TypeRef) string {
+// feature is off, and neither helper ever yields a bound outside i32 / u32 — the
+// wider widths ARE the accumulator and answer ok == false.
+func declaredWidthCond(k ir.Kind, ref *ir.TypeRef) string {
 	switch k {
 	case ir.KindEnum:
-		vals, ok := ir.EnumValues(ref)
-		if !ok || len(vals) == 0 {
+		lo, hi, ok := ir.EnumWidthRange(ref)
+		if !ok {
 			return ""
 		}
-		if ir.EnumContiguous(ref) {
-			return fmt.Sprintf("value < %d || value > %d", vals[0], vals[len(vals)-1])
-		}
-		pats := make([]string, len(vals))
-		for i, v := range vals {
-			pats[i] = strconv.FormatInt(v, 10)
-		}
-		return fmt.Sprintf("!matches!(value, %s)", strings.Join(pats, " | "))
+		return fmt.Sprintf("value < %d || value > %d", lo, hi)
 	case ir.KindBitfield:
-		mask, ok := ir.BitfieldMask(ref)
-		if !ok || mask == ^uint64(0) {
+		// One comparison, not a mask of the width: `value` is an unsigned carrier
+		// here, so the lower end is unreachable and `value > hi` states the whole
+		// bound. (Java spells the same bound as a mask because its `long` carries
+		// an unsigned wire value with the sign bit set.)
+		hi, ok := ir.BitfieldWidthMax(ref)
+		if !ok {
 			return ""
 		}
-		if mask == 0 {
-			return "value != 0"
-		}
-		if mask > uint64(^uint32(0)) {
-			return fmt.Sprintf("(value as u64) & !0x%x_u64 != 0", mask)
-		}
-		return fmt.Sprintf("value & !0x%x != 0", mask)
+		return fmt.Sprintf("value > %d", hi)
 	}
 	return ""
 }
@@ -2085,30 +2081,21 @@ func widthCond(k ir.Kind) string {
 // message decoded Ok, where every other narrow element (u8..i32) is InvalidMsg
 // (generator#513).
 //
-// The bound is the SET the schema declares — the enum's constants, the
-// bitfield's mask of declared positions (MESSAGE_SPEC §1) — not the repr the
-// element is stored in. Bounding at the repr, which this helper did for a
-// bitfield since generator#513, is both too wide (it admits every undeclared bit
-// the backing happens to hold: 4 into a bitfield declaring 0, 1 and 3) and beside
-// the point (a byte destination is a footprint choice, granted as a MAY, and §1
-// says outright that storage is never the bound). closedCond states the real one,
-// and it subsumes the repr test: run on the raw carrier, `value & !mask != 0`
-// rejects the undeclared bit and everything above the backing width in one
-// expression.
+// The bound is the width the DECLARATION implies (MESSAGE_SPEC §1), which in
+// rust is the same number the element is stored in — but it is reached from the
+// declaration, not read off the storage, because §1 leaves the carrier to the
+// target and a backend that held the field wider would still owe the declared
+// width. Deriving it in ir keeps every target on one number.
 //
-// The enum half lands here at the same time and for the same reason. It was left
-// out under the previous reading of §1, where an enum was bound by the signed
-// 32-bit range of its wire type and a narrower rust bound would have refused
-// elements java, python, typescript, dart and kotlin all kept — one schema, one
-// byte string, opposite verdicts, exactly what §7.1 forbids. §1 now closes the
-// enum by its constants for every target, so the family agrees on the set
-// instead of disagreeing about the width, and the member keeps its narrow
-// backing on every profile.
+// An element is the position that makes the interval matter: it is consumed
+// inside the corelib's array loop, so a bound has to cross that channel, and a
+// width fits where the set/mask bound of generator#530 did not. That is §1's own
+// stated reason for withdrawing the set reading.
 func elemWidthCond(k ir.Kind, ref *ir.TypeRef) string {
 	if cond := widthCond(k); cond != "" {
 		return cond
 	}
-	return closedCond(k, ref)
+	return declaredWidthCond(k, ref)
 }
 
 // arrayWidthGuard is widthGuard inside a native-array FILL arm: the same §7.1

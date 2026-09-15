@@ -1982,11 +1982,12 @@ func TestRustDeclaredWidthIsAValidityBound(t *testing.T) {
 // enumBitfieldElemSrc pairs an enum and a bitfield ARRAY element with the plain
 // narrow element that always carried the guard, so the three are read side by
 // side. Both named types are deliberately GAPPED — the enum declares 0, 1, 2 and
-// 10, so 5 is inside its hull and still not a constant; the bitfield declares
-// pos 0 and 2, so mask 0b101 leaves bit 1 undeclared and 2 is not a legal value
-// — because a contiguous definition makes a closed set look like an interval and
-// hides exactly the bug this pins. Both are narrow (`i8`, `u8`) as well, so the
-// assertions also show that the bound and the storage are two different numbers.
+// 10, so 5 sits inside the implied i8 and is not a constant; the bitfield
+// declares pos 0 and 2, so bit 1 is undeclared and 2 sits inside the implied u8.
+// Those two values are exactly the ones the width rule ADMITS and the withdrawn
+// set/mask rule refused, which makes a gapped definition the shape that tells the
+// two rules apart. Both are narrow (`i8`, `u8`) as well, so the assertions also
+// show which number the bound is derived from.
 const enumBitfieldElemSrc = `
 version: 1
 messages:
@@ -2000,21 +2001,20 @@ messages:
       w64: { id: 8, type: array, items: { type: bitfield, count: 4, bits: { A: { pos: 0 }, Z: { pos: 63 } } } }
 `
 
-// generator#516 closes both kinds by what the schema DECLARES: an `enum` by its
-// set of constants, a `bitfield` by the mask of its declared `pos` bits
-// (MESSAGE_SPEC §1). Before it, an ARRAY element of either kind was bounded at
-// the wrong thing or not at all — the enum store was emitted bare, so a wire
-// element of 1000 was masked by the `as` cast into `es: [-24]` and the message
-// decoded Ok, and the bitfield store was bounded at its REPR (generator#513), so
-// a 4 into a bitfield declaring only pos 0 and 2 was kept because a u8 holds it.
+// MESSAGE_SPEC §1 (doc `382159e`, PR #95) bounds an ARRAY element of either kind
+// at the WIDTH its declaration implies: the smallest signed type holding every
+// enum constant, the smallest unsigned type holding the bitfield's highest `pos`.
+// Before generator#513 the enum element was emitted bare, so a wire element of
+// 1000 was masked by the `as` cast into `es: [-24]` and the message decoded Ok —
+// that defect is what the guard exists for, and it stays.
 //
-// The fixture is gapped on purpose (see enumBitfieldElemSrc). The clause is a
-// membership test for the enum and a mask test for the bitfield, both on the raw
-// accumulator ahead of the narrowing cast, so one comparison rejects an
-// undeclared value inside the storage width and everything above it at once.
-// Placement is unchanged: behind fillGuard, so a bare scalar at an array id
-// stays a §7.3 skip, and the reject still DISARMS the fill (generator#508).
-func TestRustClosedArrayElementsCarryTheirDeclaredSet(t *testing.T) {
+// What changed with #516 is the BOUND, from the set/mask of generator#530 back to
+// an interval: `es` now admits 5 and `bs` admits 2, and both refuse anything past
+// the i8 / u8 the declaration implies. The clause still runs on the raw
+// accumulator ahead of the narrowing cast, and placement is unchanged — behind
+// fillGuard, so a bare scalar at an array id stays a §7.3 skip, and the reject
+// still DISARMS the fill (generator#508).
+func TestRustEnumAndBitfieldArrayElementsCarryTheirDeclaredWidth(t *testing.T) {
 	// The two corelibs spell the push differently -- heapless returns a Result the
 	// no_std store discards -- so the store half is per-corelib; the guard half,
 	// which is what this test is about, is identical for both.
@@ -2025,16 +2025,17 @@ func TestRustClosedArrayElementsCarryTheirDeclaredSet(t *testing.T) {
 		got := moduleFromYAML(t, enumBitfieldElemSrc, map[string]any{"corelib": c.corelib})
 		const fill = "if self.afill == 0 { return; } self.afill -= 1; "
 		const u8Rej = "if value > 255 { self.inv = true; self.afill = 0; return; } "
-		const bfRej = "if value & !0x5 != 0 { self.inv = true; self.afill = 0; return; } "
-		const enRej = "if !matches!(value, 0 | 1 | 2 | 10) { self.inv = true; self.afill = 0; return; } "
+		const bfRej = "if value > 255 { self.inv = true; self.afill = 0; return; } "
+		const enRej = "if value < -128 || value > 127 { self.inv = true; self.afill = 0; return; } "
 		for _, want := range []string{
-			// The bitfield element: its bound is the mask 0b101, NOT the u8 the
-			// member is stored in, so 2 and 4 are refused alongside 256.
+			// The bitfield element: the highest declared pos is 2, so the implied
+			// width is u8 and 256 is the first refused value. 2 and 4 are in.
 			fill + bfRej + c.bs,
-			// The enum element: its bound is the set, so 5 is refused although the
-			// hull 0..10 contains it and the i8 member holds it.
+			// The enum element: {0,1,2,10} implies i8, so 5 and -1 are in and 128 is
+			// out. The constants' own hull (0..10) is NOT the bound.
 			fill + enRej + c.es,
-			// The plain narrow element is unchanged: a WIDTH is still a width.
+			// The plain narrow element is unchanged, and now spells the identical
+			// clause: a WIDTH was always a width.
 			fill + u8Rej + c.u1,
 			// A nested-native ROW element is the same element one level down and
 			// takes the same clause, for both kinds.
@@ -2042,59 +2043,71 @@ func TestRustClosedArrayElementsCarryTheirDeclaredSet(t *testing.T) {
 			"self.afill -= 1; " + enRej + "if let Some(_r) = self.m.nes.get_mut(self._ix0)",
 		} {
 			if !strings.Contains(got, want) {
-				t.Errorf("[%s] message.rs missing element closed-set guard %q:\n%s", c.corelib, want, got)
+				t.Errorf("[%s] message.rs missing element width guard %q:\n%s", c.corelib, want, got)
 			}
 		}
-		// A bitfield declaring pos 0 and pos 63 backs onto u64, and under the old
-		// REPR rule that meant no guard at all: its range was the accumulator's.
-		// Under the mask rule its bound is 0x8000000000000001, so the 62 bits in
-		// between are undeclared and the element IS guarded — the assertion that
-		// most directly inverts with generator#516. The mask does not fit an
-		// unsuffixed literal on a 32-bit `value32` no_std build, so it is widened
-		// explicitly.
-		const w64Rej = "if (value as u64) & !0x8000000000000001_u64 != 0 { self.inv = true; self.afill = 0; return; } "
-		if !strings.Contains(got, fill+w64Rej+c.w64) {
-			t.Errorf("[%s] a u64-backed bitfield element must be bounded by its declared mask:\n%s", c.corelib, got)
+		// A bitfield declaring pos 63 implies u64 — the accumulator the value
+		// arrives in — so nothing reachable can breach the bound and the element
+		// stores unguarded. Under the withdrawn mask rule the same declaration
+		// emitted `!0x8000000000000001_u64`, the literal-rendering trap of #470;
+		// deriving the bound from the highest position retires both.
+		if !strings.Contains(got, fill+c.w64) {
+			t.Errorf("[%s] a bitfield element implying the full u64 width must store unguarded:\n%s", c.corelib, got)
+		}
+		if strings.Contains(got, "0x8000000000000001") {
+			t.Errorf("[%s] the withdrawn flag-mask guard was emitted:\n%s", c.corelib, got)
 		}
 	}
 }
 
-// A bitfield that declares every one of the 64 positions has mask u64::MAX, so
-// `value & !mask != 0` is a tautology. It is elided rather than emitted: dead
-// code in every generated crate, and the one case where "no guard" is still the
-// right answer under the closed rule.
-func TestRustAllBitsDeclaredBitfieldNeedsNoGuard(t *testing.T) {
+// The elisions under the width rule: a guard is emitted only where the implied
+// width is NARROWER than the accumulator the value arrives in. A bitfield
+// declaring all 64 positions implies u64, so the clause would be dead code in
+// every generated crate — and Clippy would say so.
+//
+// Note what is NOT an elision any more: whether an enum's constants are
+// contiguous no longer matters at all. The width is derived from the extremes, so
+// {0,1,2} and {0,1,2,10} produce the identical i8 guard and the membership chain
+// a gapped set used to need is gone.
+func TestRustEnumBitfieldWidthElisions(t *testing.T) {
 	var bits []string
 	for i := 0; i < 64; i++ {
 		bits = append(bits, fmt.Sprintf("F%d: { pos: %d }", i, i))
 	}
 	src := "version: 1\nmessages:\n  r:\n    payload:\n" +
 		"      f: { id: 0, type: bitfield, bits: { " + strings.Join(bits, ", ") + " } }\n" +
-		"      fa: { id: 1, type: array, items: { type: bitfield, count: 2, bits: { " + strings.Join(bits, ", ") + " } } }\n"
+		"      fa: { id: 1, type: array, items: { type: bitfield, count: 2, bits: { " + strings.Join(bits, ", ") + " } } }\n" +
+		"      e: { id: 2, type: enum, enum: { R: 0, G: 1, B: 2 } }\n"
 	got := moduleFromYAML(t, src, map[string]any{"corelib": "rs"})
 	for _, want := range []string{
 		"(_Loc::Root, 0) => { self.m.f = value as u64 },",
 		"if self.afill == 0 { return; } self.afill -= 1; self.m.fa.push(value as u64);",
 	} {
 		if !strings.Contains(got, want) {
-			t.Errorf("an all-bits-declared bitfield must store unguarded (%q):\n%s", want, got)
+			t.Errorf("a bitfield implying the full u64 width must store unguarded (%q):\n%s", want, got)
 		}
 	}
-	if strings.Contains(got, "!0xffffffffffffffff") {
-		t.Errorf("a tautological mask guard was emitted:\n%s", got)
+	if strings.Contains(got, "!0xffffffffffffffff") || strings.Contains(got, "value > 18446744073709551615") {
+		t.Errorf("a tautological u64 guard was emitted:\n%s", got)
+	}
+	// {R:0, G:1, B:2} implies i8, NOT the 0..2 hull of its constants: 5 is a valid
+	// wire value for this field and must decode.
+	if !strings.Contains(got, "(_Loc::Root, 2) => { if value < -128 || value > 127 { self.inv = true; return; } self.m.e = value as i8 },") {
+		t.Errorf("a contiguous enum must take the implied i8 width, not its constant hull:\n%s", got)
 	}
 }
 
-// The guard and the member are deliberately DIFFERENT numbers. Storage follows
-// the highest declared position (bitfieldBackingKind, a MAY under MESSAGE_SPEC
-// §1 and a footprint decision); the bound follows the declared positions
-// themselves. A bitfield declaring only pos 7 is held in a `u8` and admits
-// exactly two values, 0 and 128 — the width the member happens to have never
-// enters the comparison, which is the whole content of the closed rule.
+// The bitfield bound is the width the highest declared `pos` implies, and rust
+// stores the field in exactly that width (bitfieldBackingKind) — so here the two
+// numbers agree. That agreement is a consequence, not the derivation: the guard
+// is reached through ir.BitfieldWidthMax from the DECLARATION, because §1 leaves
+// the carrier to the target and a backend holding the field wider would owe the
+// same interval.
 //
-// This is the inverse of what the test asserted before generator#516, when the
-// two came from one function precisely so they could not drift.
-func TestRustElementClosedGuardIsTheMaskNotTheBacking(t *testing.T) {
+// This inverts what the test asserted under generator#530, where the bound was
+// the flag mask (`!0x80`, one undeclared bit at a time) and the point was that
+// the two numbers must NOT agree.
+func TestRustBitfieldWidthFollowsTheHighestDeclaredPos(t *testing.T) {
 	const src = `
 version: 1
 messages:
@@ -2106,32 +2119,31 @@ messages:
 `
 	got := moduleFromYAML(t, src, map[string]any{"corelib": "rs"})
 	for _, want := range []string{
-		"if value & !0x80 != 0 { self.inv = true; self.afill = 0; return; } self.m.b8.push(value as u8);",
-		"if value & !0x100 != 0 { self.inv = true; self.afill = 0; return; } self.m.b16.push(value as u16);",
-		"if value & !0x10000 != 0 { self.inv = true; self.afill = 0; return; } self.m.b32.push(value as u32);",
+		"if value > 255 { self.inv = true; self.afill = 0; return; } self.m.b8.push(value as u8);",
+		"if value > 65535 { self.inv = true; self.afill = 0; return; } self.m.b16.push(value as u16);",
+		"if value > 4294967295 { self.inv = true; self.afill = 0; return; } self.m.b32.push(value as u32);",
 	} {
 		if !strings.Contains(got, want) {
 			t.Errorf("message.rs missing %q:\n%s", want, got)
 		}
 	}
-	// The old repr bound must be gone: it admitted every undeclared bit the
-	// backing held (255 into a bitfield declaring one position).
-	for _, gone := range []string{"if value > 255 { self.inv = true; self.afill = 0; return; } self.m.b8.push"} {
+	// The withdrawn flag masks must be gone: each refused every undeclared bit
+	// below the highest declared one, which §1 now admits.
+	for _, gone := range []string{"!0x80 ", "!0x100 ", "!0x10000 "} {
 		if strings.Contains(got, gone) {
-			t.Errorf("the superseded repr bound is still emitted (%q):\n%s", gone, got)
+			t.Errorf("the withdrawn flag-mask bound is still emitted (%q):\n%s", gone, got)
 		}
 	}
 }
 
-// The closed check reaches ALL SIX positions a value can land in, for both
-// kinds: a scalar field, a native array element, a struct member, a member of a
-// struct-array element, a union member, and a matrix row element. The first four
-// scalar-family positions are one match arm per kind serving four frames, and
-// the two array positions route the same condition through arrayWidthGuard —
-// but "the arm is shared" is exactly the kind of claim that stops being true
-// after a refactor, so each frame is pinned by name.
-func TestRustClosedKindsRejectAtEverySixPositions(t *testing.T) {
-	const src = `
+// widthSixSrc declares an `enum` and a `bitfield` at all SIX positions a value
+// can land in, and both definitions are GAPPED on purpose: the enum declares
+// {0, 1, 2, 10}, so 5 sits inside the implied width and is not a constant, and
+// the bitfield declares positions 0, 1 and 3, so 4 sets a bit no flag declares.
+// Both of those values are VALID under the width rule and were INVALID under the
+// withdrawn closed-set one, which is what makes a gapped definition the shape
+// that tells the two rules apart.
+const widthSixSrc = `
 version: 1
 messages:
   Closed:
@@ -2165,13 +2177,26 @@ messages:
       mat: { id: 7, type: array, items: { type: array, count: 2, items: { type: enum, count: 3, enum: { A: 0, B: 1, C: 2, Z: 10 } } } }
       mbf: { id: 8, type: array, items: { type: array, count: 2, items: { type: bitfield, count: 3, bits: { A: { pos: 0 }, B: { pos: 1 }, D: { pos: 3 } } } } }
 `
-	const enRej = "if !matches!(value, 0 | 1 | 2 | 10) { self.inv = true; return; } "
-	const bfRej = "if value & !0xb != 0 { self.inv = true; return; } "
-	const enFill = "if !matches!(value, 0 | 1 | 2 | 10) { self.inv = true; self.afill = 0; return; } "
-	const bfFill = "if value & !0xb != 0 { self.inv = true; self.afill = 0; return; } "
+
+// MESSAGE_SPEC §1 binds an `enum` to the width of the smallest SIGNED type
+// holding every declared constant and a `bitfield` to the width of the smallest
+// UNSIGNED type holding its highest declared `pos`. Here that is i8 (−128..127)
+// for {0, 1, 2, 10} and u8 (0..255) for positions 0, 1 and 3.
+//
+// The bound reaches ALL SIX positions a value can land in: a scalar field, a
+// native array element, a struct member, a member of a struct-array element, a
+// union member, and a matrix row element. The first four are one match arm per
+// kind serving four frames, and the two array positions route the same condition
+// through arrayWidthGuard — but "the arm is shared" is exactly the kind of claim
+// that stops being true after a refactor, so each frame is pinned by name.
+func TestRustEnumAndBitfieldWidthBoundAtEverySixPositions(t *testing.T) {
+	const enRej = "if value < -128 || value > 127 { self.inv = true; return; } "
+	const bfRej = "if value > 255 { self.inv = true; return; } "
+	const enFill = "if value < -128 || value > 127 { self.inv = true; self.afill = 0; return; } "
+	const bfFill = "if value > 255 { self.inv = true; self.afill = 0; return; } "
 	const fill = "if self.afill == 0 { return; } self.afill -= 1; "
 	for _, corelib := range []string{"rs", "rs-no-std"} {
-		got := moduleFromYAML(t, src, map[string]any{"corelib": corelib})
+		got := moduleFromYAML(t, widthSixSrc, map[string]any{"corelib": corelib})
 		for _, want := range []string{
 			// 1. scalar
 			"(_Loc::Root, 0) => { " + enRej,
@@ -2193,14 +2218,35 @@ messages:
 			"(_Loc::Root_mbf, _) => { " + fill + bfFill,
 		} {
 			if !strings.Contains(got, want) {
-				t.Errorf("[%s] a closed-kind position stores without its guard, missing %q:\n%s", corelib, want, got)
+				t.Errorf("[%s] a position stores without its §1 width bound, missing %q:\n%s", corelib, want, got)
 			}
 		}
-		// Storage stays narrow: the bound moved, the member did not.
+		// Storage follows the same declaration the bound does, so the member stays
+		// narrow and holds every value the guard admits.
 		for _, want := range []string{"pub en: i8", "pub bf: u8"} {
 			if !strings.Contains(got, want) {
-				t.Errorf("[%s] the closed bound must not widen storage, missing %q:\n%s", corelib, want, got)
+				t.Errorf("[%s] the member must be the integer the declaration implies, missing %q:\n%s", corelib, want, got)
 			}
+		}
+	}
+}
+
+// The behavioural difference the width rule makes, stated as the values
+// themselves: a gapped enum admits a value between its constants, and a bitfield
+// admits an undeclared bit — both INVALID under the withdrawn closed-set rule of
+// generator#530. Pinned on the emitted bound so a silent reversion is loud.
+func TestRustWidthAdmitsUndeclaredValues(t *testing.T) {
+	for _, corelib := range []string{"rs", "rs-no-std"} {
+		got := moduleFromYAML(t, widthSixSrc, map[string]any{"corelib": corelib})
+		// enum {0,1,2,10}: the guard must admit 5 — i.e. be the i8 interval, never a
+		// membership test over the constants.
+		if strings.Contains(got, "matches!(value,") {
+			t.Errorf("[%s] the withdrawn membership test over enum constants was emitted:\n%s", corelib, got)
+		}
+		// bitfield pos{0,1,3}: the guard must admit 4 — i.e. bound the WIDTH (255),
+		// never mask against the flag mask (0xb).
+		if strings.Contains(got, "!0xb ") {
+			t.Errorf("[%s] the withdrawn flag-mask guard was emitted:\n%s", corelib, got)
 		}
 	}
 }
