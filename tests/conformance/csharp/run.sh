@@ -824,6 +824,13 @@ echo "==> declared-width reject OK"
 # decode reporting success in both cases. The cast is still there -- the member
 # IS the declared width here, `byte` and `sbyte` -- which is why the guard has to
 # run on the raw accumulator ahead of it.
+#
+# That holds at the two ARRAY cells as well, now that both are stored in a
+# primitive array of the same width (`sbyte[]`/`byte[]`, generator#516). Unlike
+# java and kotlin, narrowing the destination moves nothing here: corelib-cs's
+# IVisitor offers no bulk element hand-off, so every element still arrives
+# through Signed/Unsigned in the 64-bit accumulator and all twelve cells below
+# are testing GENERATED code.
 echo "==> enum/bitfield: bounded by the width the declaration implies (S1, generator#516)"
 { echo "version: 1"; echo "messages:"; } > "$WORK/closed.yaml"
 python3 "$ROOT/tests/conformance/lib/check_declared_width_kinds.py" --emit-schema >> "$WORK/closed.yaml"

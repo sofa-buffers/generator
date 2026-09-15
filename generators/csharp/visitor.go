@@ -267,9 +267,9 @@ func primFill(target string, fld *ir.Field, guard, rhs string) string {
 const fillGuard = "if (afill == 0) break; afill--; "
 
 // nativeListFill is the statement filling the next slot of a native List<T>
-// array field `target` (boolean/enum/bitfield elements — these value-convert
-// element-wise and so stay List<T>, cf. primArrayElem). It appends, with or
-// without a declared `count: N`: the wire count M IS the array's length
+// array field `target` — the boolean array, the one native element kind with no
+// shared width to put it in a primitive array (cf. primArrayElem). It appends,
+// with or without a declared `count: N`: the wire count M IS the array's length
 // (MESSAGE_SPEC §3), so the M elements that arrived are the whole value and a
 // capacity N never adds any behind them.
 func nativeListFill(target, guard, rhs string) string {
@@ -861,7 +861,7 @@ func (g *gen) emitVisitor(f *cfile, name string, fields []*ir.Field) {
 			case fld.Kind == ir.KindBool:
 				f.line("            case (%s, %d): %s.%s = value != 0; break;", fr.loc, fld.ID, fr.path, csIdent(fld.Name))
 			case fld.Kind == ir.KindArray && primArrayElem(fld.Elem) && unsignedArrayElem(fld.Elem):
-				f.line("            case (%s, %d): %s break;", fr.loc, fld.ID, primFill(fr.path+"."+csIdent(fld.Name), fld, widthThrow(fld.Elem, fld.ElemRef, fld.Name+" element"), g.arrayElemAddRHS(fld.Elem, fld.ElemRef, "value")))
+				f.line("            case (%s, %d): %s break;", fr.loc, fld.ID, primFill(fr.path+"."+csIdent(fld.Name), fld, widthThrow(fld.Elem, fld.ElemRef, fld.Name+" element"), primElemCast(fld.Elem, fld.ElemRef, "value")))
 			case fld.Kind == ir.KindArray && unsignedArrayElem(fld.Elem):
 				f.line("            case (%s, %d): %s break;", fr.loc, fld.ID, nativeListFill(fr.path+"."+csIdent(fld.Name), widthThrow(fld.Elem, fld.ElemRef, fld.Name+" element"), g.arrayElemAddRHS(fld.Elem, fld.ElemRef, "value")))
 			}
@@ -889,7 +889,7 @@ func (g *gen) emitVisitor(f *cfile, name string, fields []*ir.Field) {
 			case fld.Kind == ir.KindEnum:
 				f.line("            case (%s, %d): %s%s.%s = (%s)value; break;", fr.loc, fld.ID, widthThrow(fld.Kind, fld.Ref, fld.Name), fr.path, csIdent(fld.Name), g.typeName(fld.Ref.Key))
 			case fld.Kind == ir.KindArray && primArrayElem(fld.Elem) && signedArrayElem(fld.Elem):
-				f.line("            case (%s, %d): %s break;", fr.loc, fld.ID, primFill(fr.path+"."+csIdent(fld.Name), fld, widthThrow(fld.Elem, fld.ElemRef, fld.Name+" element"), g.arrayElemAddRHS(fld.Elem, fld.ElemRef, "value")))
+				f.line("            case (%s, %d): %s break;", fr.loc, fld.ID, primFill(fr.path+"."+csIdent(fld.Name), fld, widthThrow(fld.Elem, fld.ElemRef, fld.Name+" element"), primElemCast(fld.Elem, fld.ElemRef, "value")))
 			case fld.Kind == ir.KindArray && signedArrayElem(fld.Elem):
 				f.line("            case (%s, %d): %s break;", fr.loc, fld.ID, nativeListFill(fr.path+"."+csIdent(fld.Name), widthThrow(fld.Elem, fld.ElemRef, fld.Name+" element"), g.arrayElemAddRHS(fld.Elem, fld.ElemRef, "value")))
 			}
@@ -905,7 +905,8 @@ func (g *gen) emitVisitor(f *cfile, name string, fields []*ir.Field) {
 
 	g.emitBlobCb(f, fs)
 
-	// ArrayBegin: clear direct native arrays; place a fresh inner row for a
+	// ArrayBegin: allocate a direct primitive array at the wire count (clear it,
+	// where the field is still a List); place a fresh inner row for a
 	// native-nested (array-of-array) scope (each row arrives as ArrayBegin(index),
 	// and the index IS the row's position, see placeRow).
 	f.line("    public void ArrayBegin(int id, ArrayKind kind, int count) {")
@@ -979,9 +980,9 @@ func (g *gen) emitVisitor(f *cfile, name string, fields []*ir.Field) {
 				if guard == "" {
 					panic("csharp: native array with neither a schema count nor a cap -- every target has a finite default (§9.5)")
 				}
-				f.line("            case (%s, %d): %s%s%s.%s = new %s[count]; break;", fr.loc, fld.ID, kindGuard, guard, fr.path, csIdent(fld.Name), g.csArrayElemType(fld.Elem, fld.ElemRef, fld.ElemItems))
+				f.line("            case (%s, %d): %s%s%s.%s = new %s[count]; break;", fr.loc, fld.ID, kindGuard, guard, fr.path, csIdent(fld.Name), primArrayBase(fld.Elem, fld.ElemRef))
 			} else if fld.Kind == ir.KindArray && nativeArrayElem(fld.Elem) {
-				// List<T> (boolean/enum/bitfield): cleared and appended to, with or
+				// List<T> (the boolean array): cleared and appended to, with or
 				// without a count -- the M elements the wire carried are the whole value.
 				f.line("            case (%s, %d): %s%s%s.%s.Clear(); break;", fr.loc, fld.ID, kindGuard, guard, fr.path, csIdent(fld.Name))
 			}

@@ -637,10 +637,21 @@ func (g *gen) marshalArray(f *cfile, ind, idExpr, val string, elem ir.Kind, ref 
 	case ir.KindFP64:
 		f.line("%sos.WriteArrayFp64(%s, %s);", ind, idExpr, arr)
 	case ir.KindEnum:
-		// enum -> signed array at the enum's backing width (matches Go's typed array).
-		f.line("%sos.WriteArraySigned(%s, Array.ConvertAll(%s.ToArray(), _x => (%s)_x));", ind, idExpr, val, enumBacking(ref.Target))
+		// enum -> signed array at the width the declaration implies (§1), which is
+		// what the field itself is stored in: a direct field passes straight to the
+		// OStream overload, and only a matrix ROW -- a List<Gear>, because its
+		// elements arrive one at a time -- still needs the converting bridge.
+		if isPrim {
+			f.line("%sos.WriteArraySigned(%s, %s);", ind, idExpr, arr)
+		} else {
+			f.line("%sos.WriteArraySigned(%s, Array.ConvertAll(%s.ToArray(), _x => (%s)_x));", ind, idExpr, val, enumBacking(ref.Target))
+		}
 	case ir.KindBitfield:
-		f.line("%sos.WriteArrayUnsigned(%s, Array.ConvertAll(%s.ToArray(), _x => (%s)_x));", ind, idExpr, val, bitfieldBacking(ref.Target))
+		if isPrim {
+			f.line("%sos.WriteArrayUnsigned(%s, %s);", ind, idExpr, arr)
+		} else {
+			f.line("%sos.WriteArrayUnsigned(%s, Array.ConvertAll(%s.ToArray(), _x => (%s)_x));", ind, idExpr, val, bitfieldBacking(ref.Target))
+		}
 	case ir.KindBool:
 		// boolean -> unsigned u8 array of 0/1.
 		f.line("%sos.WriteArrayUnsigned(%s, Array.ConvertAll(%s.ToArray(), _x => _x ? (byte)1 : (byte)0));", ind, idExpr, val)

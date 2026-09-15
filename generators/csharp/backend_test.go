@@ -225,11 +225,12 @@ messages:
 		`case (Root, 0): if (kind != ArrayKind.Unsigned) break; if (count > 5) throw new SofabException(SofabError.InvalidMessage, "ua: array count above schema capacity 5"); m.ua = new byte[count]; break;`,
 		`case (Root, 1): if (kind != ArrayKind.Signed) break; if (count > 5) throw new SofabException(SofabError.InvalidMessage, "ia: array count above schema capacity 5"); m.ia = new sbyte[count]; break;`,
 		`case (Root, 2): if (kind != ArrayKind.Fp32) break; if (count > 3) throw new SofabException(SofabError.InvalidMessage, "fa: array count above schema capacity 3"); m.fa = new float[count]; break;`,
-		// A boolean/enum array is a List: clearing it is decoding into it too, so
-		// the kind test fronts the Clear() as well. boolean rides the Unsigned wire
-		// type, enum the Signed one.
+		// A boolean array is a List: clearing it is decoding into it too, so the
+		// kind test fronts the Clear() as well. An ENUM array is a primitive array
+		// at the width its declaration implies, so it allocates exactly as `ia`
+		// does. boolean rides the Unsigned wire type, enum the Signed one.
 		`case (Root, 3): if (kind != ArrayKind.Unsigned) break; if (count > 2) throw new SofabException(SofabError.InvalidMessage, "ba: array count above schema capacity 2"); m.ba.Clear(); break;`,
-		`case (Root, 4): if (kind != ArrayKind.Signed) break; if (count > 2) throw new SofabException(SofabError.InvalidMessage, "ea: array count above schema capacity 2"); m.ea.Clear(); break;`,
+		`case (Root, 4): if (kind != ArrayKind.Signed) break; if (count > 2) throw new SofabException(SofabError.InvalidMessage, "ea: array count above schema capacity 2"); m.ea = new sbyte[count]; break;`,
 		// A count-less array has no schema bound, so the target's finite default
 		// cap governs it (§9.5, generator#385) -- like a schema bound, checked
 		// BEHIND the kind test.
@@ -533,18 +534,18 @@ messages:
 		"os.WriteArrayFp32(3, this.ff32);",
 		"os.WriteArrayFp64(4, this.ff64);",
 		"os.WriteArrayUnsigned(5, Array.ConvertAll(this.fb.ToArray(), _x => _x ? (byte)1 : (byte)0));",
-		"os.WriteArraySigned(6, Array.ConvertAll(this.fe.ToArray(), _x => (sbyte)_x));",
-		"os.WriteArrayUnsigned(7, Array.ConvertAll(this.fp.ToArray(), _x => (byte)_x));",
+		"os.WriteArraySigned(6, this.fe);",
+		"os.WriteArrayUnsigned(7, this.fp);",
 
 		// A fresh count:N array is EMPTY (nothing materialized to N), and a declared
 		// default shorter than N stands exactly as written (never tail-padded).
 		"public uint[] fx = Array.Empty<uint>();",
 		"public double[] ff64 = Array.Empty<double>();",
 		"public List<bool> fb = new();",
-		"public List<BitfieldPerm> fp = new();",
+		"public byte[] fp = Array.Empty<byte>();",
 		"public List<string> strs = new();",
 		"public float[] ff32 = new float[]{1.5f};",
-		"public List<EnumColor> fe = new List<EnumColor>{(EnumColor)(2)};",
+		"public sbyte[] fe = new sbyte[]{2};",
 		"public uint[] fxd = new uint[]{1, 2};",
 		"private static readonly uint[] _arrdef_fxd = new uint[]{1, 2};",
 
@@ -559,8 +560,8 @@ messages:
 		// (generator#516): {0,1,2} implies an i8 and positions {0,1} imply a u8,
 		// so an element outside those intervals is INVALID -- and one inside them
 		// decodes whether or not the schema names it.
-		`case (Root, 6): if (afill == 0) break; afill--; if (value < -128 || value > 127) throw new SofabException(SofabError.InvalidMessage, "fe element: value outside declared enum width"); m.fe.Add((EnumColor)value); break;`,
-		`case (Root, 7): if (afill == 0) break; afill--; if (value > 255) throw new SofabException(SofabError.InvalidMessage, "fp element: value outside declared bitfield width"); m.fp.Add((BitfieldPerm)value); break;`,
+		`case (Root, 6): if (afill == 0) break; afill--; if (value < -128 || value > 127) throw new SofabException(SofabError.InvalidMessage, "fe element: value outside declared enum width"); m.fe[ai++] = (sbyte)value; break;`,
+		`case (Root, 7): if (afill == 0) break; afill--; if (value > 255) throw new SofabException(SofabError.InvalidMessage, "fp element: value outside declared bitfield width"); m.fp[ai++] = (byte)value; break;`,
 
 		// A count:N array with no declared default is default only when EMPTY: an
 		// all-zero length-N value is a different value and stays on the wire.
@@ -1499,8 +1500,8 @@ func TestCsEnumAndBitfieldWidthBoundAtEverySixPositions(t *testing.T) {
 		// front of it: a bare scalar delivered at an array id is a §7.3 skip, and
 		// rejecting it ahead of the fill check would turn that skip into a
 		// spurious INVALID.
-		`case (Root, 2): ` + fill + enRej + `"ea element: value outside declared enum width"); m.ea.Add((ClosedEaElem)value); break;`,
-		`case (Root, 3): ` + fill + bfRej + `"bfa element: value outside declared bitfield width"); m.bfa.Add((ClosedBfaElem)value); break;`,
+		`case (Root, 2): ` + fill + enRej + `"ea element: value outside declared enum width"); m.ea[ai++] = (sbyte)value; break;`,
+		`case (Root, 3): ` + fill + bfRej + `"bfa element: value outside declared bitfield width"); m.bfa[ai++] = (byte)value; break;`,
 		// 3. struct member
 		`case (Root_st, 0): ` + enRej + `"se: value outside declared enum width"); m.st.se = (ClosedStSe)value; break;`,
 		`case (Root_st, 1): ` + bfRej + `"sbf: value outside declared bitfield width"); m.st.sbf = (ClosedStSbf)value; break;`,
@@ -1522,7 +1523,16 @@ func TestCsEnumAndBitfieldWidthBoundAtEverySixPositions(t *testing.T) {
 	// value the guard admits is one the member holds verbatim, and every value it
 	// refuses is one the cast would otherwise have folded into a representable
 	// one.
-	for _, want := range []string{"public enum ClosedEn : sbyte {", "public enum ClosedBf : byte {"} {
+	// The two ARRAY cells store into `sbyte[]`/`byte[]` — the same width, one
+	// level in — so the generated guard is what enforces the bound there too.
+	// corelib-cs's IVisitor is flat: every element arrives through
+	// Signed/Unsigned in the 64-bit accumulator, with no bulk element offer that
+	// could carry the destination's width, so unlike Java there is no corelib
+	// half to hand the check to and the guard may never be dropped.
+	for _, want := range []string{
+		"public enum ClosedEn : sbyte {", "public enum ClosedBf : byte {",
+		"public sbyte[] ea = Array.Empty<sbyte>();", "public byte[] bfa = Array.Empty<byte>();",
+	} {
 		if !strings.Contains(m, want) {
 			t.Errorf("Message.cs: the width bound must not widen storage, missing %q:\n%s", want, m)
 		}
@@ -1538,6 +1548,90 @@ func TestCsEnumAndBitfieldWidthBoundAtEverySixPositions(t *testing.T) {
 	} {
 		if strings.Contains(m, bad) {
 			t.Errorf("Message.cs still stores an enum/bitfield through a bare cast (%q):\n%s", bad, m)
+		}
+	}
+}
+
+// An enum/bitfield ARRAY is backed by a primitive array of the width its
+// declaration implies (MESSAGE_SPEC §1, generator#516) — `sbyte[]`/`byte[]` for
+// the narrow declarations, widening step by step with the constants and the
+// positions, and never the named type.
+//
+// The width is the same one enumBacking/bitfieldBacking already hold the SCALAR
+// in, which is what makes the container swap a drop-in: `public enum X : sbyte`
+// beside `public sbyte[] xs`, one width per declaration, derived once through
+// ir.EnumWidthRange / ir.BitfieldWidthMax. It is also what the List<T> shape
+// cost — `Array.ConvertAll(this.xs.ToArray(), _x => (sbyte)_x)` allocated two
+// throwaway arrays per field per encode, and the decode appended element by
+// element into a list with no capacity reserve where the wire count was already
+// in hand.
+//
+// Every step of both ladders is pinned, because a single narrow case would pass
+// on `byte[]` hard-coded. The boolean array is pinned too, from the other side:
+// its wire element is a u8 and its member is a bool, so there is no shared width
+// and it stays a List<bool>.
+func TestCsEnumBitfieldArrayIsPrimitiveAtDeclaredWidth(t *testing.T) {
+	src := `
+version: 1
+messages:
+  m:
+    payload:
+      e8:   { id: 0, type: array, items: { type: enum, count: 4, enum: { A: 0, Z: 127 } } }
+      e8n:  { id: 1, type: array, items: { type: enum, count: 4, enum: { A: 0, N: -128 } } }
+      e16:  { id: 2, type: array, items: { type: enum, count: 4, enum: { A: 0, Z: 128 } } }
+      e32:  { id: 3, type: array, items: { type: enum, count: 4, enum: { A: 0, Z: 32768 } } }
+      b8:   { id: 4, type: array, items: { type: bitfield, count: 4, bits: { A: { pos: 0 }, D: { pos: 7 } } } }
+      b16:  { id: 5, type: array, items: { type: bitfield, count: 4, bits: { A: { pos: 0 }, D: { pos: 8 } } } }
+      b32:  { id: 6, type: array, items: { type: bitfield, count: 4, bits: { A: { pos: 0 }, D: { pos: 16 } } } }
+      b64:  { id: 7, type: array, items: { type: bitfield, count: 4, bits: { A: { pos: 0 }, D: { pos: 32 } } } }
+      bl:   { id: 8, type: array, items: { type: boolean, count: 4 } }
+      ed:   { id: 9, type: array, items: { type: enum, count: 4, enum: { A: 0, N: -200, Z: 200 } }, default: [-200, 200] }
+      mat:  { id: 10, type: array, items: { type: array, count: 2, items: { type: enum, count: 3, enum: { A: 0, Z: 10 } } } }
+`
+	m := buildModule(t, []byte(src), "primwidth.yaml", map[string]any{})
+	for _, want := range []string{
+		// The element type is the declared width, and the named type's storage is
+		// the same width: the two are one derivation, so they move together.
+		"public sbyte[] e8 = Array.Empty<sbyte>();", "public enum ME8Elem : sbyte {",
+		"public sbyte[] e8n = Array.Empty<sbyte>();", "public enum ME8nElem : sbyte {",
+		"public short[] e16 = Array.Empty<short>();", "public enum ME16Elem : short {",
+		"public int[] e32 = Array.Empty<int>();", "public enum ME32Elem : int {",
+		"public byte[] b8 = Array.Empty<byte>();", "public enum MB8Elem : byte {",
+		"public ushort[] b16 = Array.Empty<ushort>();", "public enum MB16Elem : ushort {",
+		"public uint[] b32 = Array.Empty<uint>();", "public enum MB32Elem : uint {",
+		"public ulong[] b64 = Array.Empty<ulong>();", "public enum MB64Elem : ulong {",
+		// The boolean array keeps the List: no width is shared with its member.
+		"public List<bool> bl = new();",
+		// A declared default is the bare number at that width — no `(MEdElem)`
+		// cast in front of it — and the omit-compare static matches it exactly.
+		"public short[] ed = new short[]{-200, 200};",
+		"private static readonly short[] _arrdef_ed = new short[]{-200, 200};",
+		// Encode passes the field straight to the OStream overload.
+		"os.WriteArraySigned(0, this.e8);",
+		"os.WriteArrayUnsigned(7, this.b64);",
+		// Decode allocates once, at the wire count the schema bound just admitted,
+		// and fills by index behind the §1 guard.
+		`case (Root, 0): if (kind != ArrayKind.Signed) break; if (count > 4) throw new SofabException(SofabError.InvalidMessage, "e8: array count above schema capacity 4"); m.e8 = new sbyte[count]; break;`,
+		`case (Root, 5): if (kind != ArrayKind.Unsigned) break; if (count > 4) throw new SofabException(SofabError.InvalidMessage, "b16: array count above schema capacity 4"); m.b16 = new ushort[count]; break;`,
+		`case (Root, 2): if (afill == 0) break; afill--; if (value < -32768 || value > 32767) throw new SofabException(SofabError.InvalidMessage, "e16 element: value outside declared enum width"); m.e16[ai++] = (short)value; break;`,
+		`case (Root, 6): if (afill == 0) break; afill--; if (value > 4294967295) throw new SofabException(SofabError.InvalidMessage, "b32 element: value outside declared bitfield width"); m.b32[ai++] = (uint)value; break;`,
+		// A matrix ROW is unchanged: the corelib hands its elements over one at a
+		// time into a List that grows, so it keeps the named type and the bridge.
+		"public List<List<MMatElemElem>> mat = new();",
+		"os.WriteArraySigned(_i0, Array.ConvertAll(this.mat[_i0].ToArray(), _x => (sbyte)_x));",
+	} {
+		if !strings.Contains(m, want) {
+			t.Errorf("Message.cs missing %q:\n%s", want, m)
+		}
+	}
+	for _, bad := range []string{
+		// The List shape and both of its allocations, gone from the direct fields.
+		"public List<ME8Elem>", "public List<MB8Elem>", "public List<MEdElem>",
+		"Array.ConvertAll(this.e8", "Array.ConvertAll(this.b8", "Array.ConvertAll(this.ed",
+		"m.e8.Add(", "m.b8.Clear();", "m.b64.Add(",
+	} {
+		if strings.Contains(m, bad) {
+			t.Errorf("Message.cs still lowers an enum/bitfield array through List<T> (%q):\n%s", bad, m)
 		}
 	}
 }
