@@ -568,12 +568,12 @@ func (g *gen) scalarArm(sc *tsScope, x *ir.Field, cb string) string {
 //	cast   the suffix the value is stored through, "" for most kinds
 //	what   how the breached declaration is named in the InvalidMsg text
 //
-// What the schema declares is what binds, and the declaration takes two shapes.
-// For an integer it is a WIDTH (MESSAGE_SPEC §7.1, documentation#32): a value
-// outside the declared range is malformed input and fails the decode, never
-// clamped and never kept. For an `enum` or a `bitfield` it is a SET -- the
-// declared constants, the mask of declared `pos` bits (§1) -- and closedCond
-// answers for those.
+// What the schema declares is what binds, and every declaration binds a WIDTH
+// (MESSAGE_SPEC §7.1, documentation#32): a value outside the declared range is
+// malformed input and fails the decode, never clamped and never kept. An `enum`
+// and a `bitfield` bind the width their declaration IMPLIES (§1) -- the smallest
+// signed type holding every constant, the smallest unsigned type holding the
+// highest `pos` -- and declaredWidthCond answers for those.
 //
 // One clause serves every position: emitScalarCb walks each id scope, so the
 // scalar, struct-member, struct-array-member and union-member stores are ONE arm
@@ -584,19 +584,20 @@ func (g *gen) guarded(k ir.Kind, ref *ir.TypeRef) (init, cond, cast, what string
 	switch k {
 	case ir.KindEnum:
 		// The comparison runs on a plain `number`, and only the store carries the
-		// enum type: TypeScript refuses `_v !== 5` outright when `_v` is typed as an
-		// enum 5 is not a member of, which is every value this clause exists to
-		// reject.
-		return "Number(v)", closedCond("_v", k, ref),
-			" as " + g.typeName(ref.Key), "enum constants"
+		// enum type: TypeScript narrows a value typed as an enum to the members it
+		// declares, so a comparison against a bound outside them is one the compiler
+		// rejects outright — and everything this clause exists to refuse is outside
+		// them.
+		return "Number(v)", declaredWidthCond("_v", k, ref),
+			" as " + g.typeName(ref.Key), declaredWidthWhat(k)
 	case ir.KindBitfield:
 		// The unsigned callback delivers a number below 2^53 and a bigint above,
 		// so a wide bitfield has to normalise — `Number(v)` would silently round
 		// away the top bits of the value this field exists to carry.
 		if wideBitfield(ref) {
-			return "BigInt(v)", closedCond("_v", k, ref), "", "bitfield flags"
+			return "BigInt(v)", declaredWidthCond("_v", k, ref), "", declaredWidthWhat(k)
 		}
-		return narrowCast, closedCond("_v", k, ref), "", "bitfield flags"
+		return narrowCast, declaredWidthCond("_v", k, ref), "", declaredWidthWhat(k)
 	}
 	if cond := widthCond("_v", k); cond != "" {
 		return narrowCast, cond, "", "width " + k.String()
@@ -852,10 +853,11 @@ func (g *gen) emitArrayCbs(f *tsfile, scopes []*tsScope) {
 			conv, dst := g.elemConv(x.Elem, x.ElemRef)
 			var line string
 			if ei, ec, ecast, ewhat := g.guardedElem(x.Elem, x.ElemRef); ec != "" {
-				// The element's declaration binds it too -- a width for an integer
-				// (§7.1), the declared set or mask for the two closed kinds (§1) --
-				// and it is checked as each element arrives, so a truncation behind a
-				// rejected element cannot downgrade the verdict (§5.2).
+				// The element's declaration binds it too -- its declared width for an
+				// integer (§7.1), the width an `enum` or a `bitfield` declaration
+				// implies (§1) -- and it is checked as each element arrives, so a
+				// truncation behind a rejected element cannot downgrade the verdict
+				// (§5.2).
 				// `_e` IS the store value: re-deriving it from `v` would run the same
 				// conversion a second time, per element.
 				_ = conv
@@ -957,8 +959,8 @@ func (g *gen) rowElemLine(sc *tsScope, conv string) []string {
 
 // guardedElem is `guarded` for a native array ELEMENT: the same declaration, the
 // same clause, read into `_e` instead of `_v`. The element positions are two of
-// the six a closed value lands in, and they take the same verdict as the other
-// four (generator#516).
+// the six an enum or a bitfield lands in, and they take the same verdict as the
+// other four (generator#516).
 func (g *gen) guardedElem(elem ir.Kind, ref *ir.TypeRef) (init, cond, cast, what string) {
 	init, cond, cast, what = g.guarded(elem, ref)
 	return init, strings.ReplaceAll(cond, "_v", "_e"), cast, what
@@ -1025,13 +1027,14 @@ func (g *gen) arrElemType(sc *tsScope) string {
 // with its raw-bits companion) cannot be written into directly at all. Both
 // decline, and keep the element callbacks.
 //
-// `enum` and `bitfield` decline for the first reason and MUST keep declining: a
-// closed set is not an interval (MESSAGE_SPEC §1, generator#516). The declared
-// constants are gapped in general and a mask is not a range at all, so an
-// ArrayTarget's min/max pair could state neither — it would have to be widened
-// to the hull, which keeps exactly the undeclared values this rule refuses.
-// Taking the offer here would move the element verdict into a channel that
-// cannot carry it.
+// `enum` and `bitfield` decline too, and their reason moved. Their bound is an
+// interval now — the width the declaration implies (MESSAGE_SPEC §1,
+// generator#516) — so an ArrayTarget could state it, but ir.NarrowRange answers
+// only for the integer kinds, and neither destination is the plain `number[]`
+// the hand-off fills: an enum array is typed as its enum and a wide bitfield
+// array holds bigints. Both keep the per-element callback that already carries
+// the verdict; offering them the hand-off is a separate change with its own
+// measurement to make, not a consequence of the bound becoming an interval.
 func bulkEligible(x *ir.Field) bool {
 	if _, _, ok := ir.NarrowRange(x.Elem); !ok {
 		return false
@@ -1111,12 +1114,14 @@ func capOf(hasCount bool, count int64) int64 {
 // It is an assertion, and the declared bound that follows it is what makes the
 // assertion true. corelib-ts hands over a `bigint` in exactly one case -- a
 // magnitude above 2^53-1 -- and every narrow width tops out at 2^32-1, as does
-// every mask a NARROW bitfield can declare, so such a value fails the clause and
-// throws before it can be stored. A `Number(v)` here would convert a value the
-// very next line rejects, per scalar field and per array element, on the hot
-// path. An `enum` keeps `Number(v)`, because its clause compares against the
-// declared constants and a bigint would never equal one of them; a WIDE bitfield
-// keeps `BigInt(v)`, because the top bits are the value.
+// the widest a NUMBER-carried bitfield can imply, so such a value fails the
+// clause and throws before it can be stored: a bigint/number relational
+// comparison is legal JS and answers it. A `Number(v)` here would convert a
+// value the very next line rejects, per scalar field and per array element, on
+// the hot path. An `enum` still keeps `Number(v)`, not because of the clause but
+// because of the STORE -- its carrier is a numeric enum, so a bigint that
+// reached it would be kept as a bigint -- and a WIDE bitfield keeps `BigInt(v)`,
+// because the top bits are the value.
 const narrowCast = "v as number"
 
 // widthCond renders the out-of-range test for a narrow declared width, or "" for
@@ -1132,66 +1137,72 @@ func widthCond(v string, k ir.Kind) string {
 	return fmt.Sprintf("%s > %d", v, hi)
 }
 
-// closedCond is the reject comparison for the two CLOSED kinds, MESSAGE_SPEC §1:
-// an `enum` is bound by the set of constants the schema declares, a `bitfield`
-// by the mask of the positions it declares, so a value is valid exactly when
-// `v & ~mask == 0`. It returns "" for every other kind (widthCond owns those)
-// and for a bitfield whose declared positions cover all 64 bits, where the test
-// is a tautology and the clause would be dead code.
+// declaredWidthCond is the reject comparison for an `enum` and a `bitfield`,
+// MESSAGE_SPEC §1: each is bound by the WIDTH its declaration IMPLIES -- for an
+// enum the smallest SIGNED type holding every declared constant, for a bitfield
+// the smallest UNSIGNED type holding its highest declared `pos`. It returns ""
+// for every other kind (widthCond owns those) and wherever the implied width is
+// the 64-bit accumulator itself, where the test is a tautology and the clause
+// would be dead code.
 //
-// Neither bound is a width, and storage is never the bound. The member stays the
-// carrier that holds the declared constants/positions -- a `number` for an enum
-// and a narrow bitfield, a bigint for a wide one -- but a field whose declared
-// positions are 0..3 does not become 0..2^53 valid because TypeScript holds it
-// in a double. Both comparisons therefore run on the value the hook delivered,
-// ahead of the store, which is also why one clause covers both halves of the old
-// reading at once: a mask test rejects an undeclared bit inside the carrier and
-// everything above it in the same expression, and a membership test does the
-// same for an enum.
+// A value INSIDE that width is valid even when the schema names no constant for
+// it and even when it carries an undeclared bit; only a value outside it is
+// malformed input. So an enum {RED=1, GREEN=2, BLUE=3} admits 5 and refuses 200,
+// and a bitfield declaring positions 0, 1 and 3 admits 4 -- the undeclared bit 2
+// -- and refuses 256. An undeclared bit is NOT masked away: masking would turn
+// malformed-looking input into a DECLARED combination and report it Ok.
 //
-// This reverses generator#482, which kept an undeclared bit that fit the backing
-// width on the argument that it is how a peer built from a newer schema carries
-// a flag this one has not got yet. §1 answers that directly: adding a flag -- or
-// a constant -- is a BREAKING schema change, and a receiver rejects the value
-// rather than storing something its declared type cannot represent.
+// This replaces the set/mask bound of generator#530, which implemented the
+// closed-type reading MESSAGE_SPEC carried for six days (doc PR #89, `a50db95`)
+// and doc PR #95 (`382159e`) withdrew. Both bounds are ordinary intervals now,
+// which is §1's own reason for the change: an array's elements are consumed
+// inside the corelib loop, so a bound must cross that channel as an interval,
+// and a width fits where a set does not.
 //
-// Two spellings, and the split is forced by the carrier corelib-ts hands over.
-// A NARROW bitfield tests `v > MASK` FIRST and the mask second, and the first
-// term is not redundant: JavaScript's `&` coerces its operands through ToInt32,
-// so `(2**40) & ~0b1011` is 0 and a bare mask test would ACCEPT 2^40. The same
-// term also answers the bigint the hook delivers above 2^53 (a bigint/number
-// relational comparison is legal JS), which is what makes `v as number` safe to
-// keep as the read. A WIDE bitfield tests the mask alone: bigint bitwise
-// arithmetic is arbitrary-precision, so no width term is reachable.
-func closedCond(v string, k ir.Kind, ref *ir.TypeRef) string {
+// Storage is still never the bound. A field whose declared positions are 0..3
+// does not become 0..2^53 valid because TypeScript holds it in a double, and
+// §1's fourth consequence names that case directly: a receiver that cannot hold
+// the field at exactly the declared width holds it wider and MUST then enforce
+// the width as an explicit check, because nothing about its storage will. The
+// comparison therefore runs on the value the hook delivered, ahead of the store.
+//
+// Both spellings are ONE relational test, and the bitfield needs no mask term any
+// more -- the ToInt32 corner that forced `v > MASK` beside `v & ~MASK` is gone
+// with the mask. The carrier still picks the literal: a NARROW bitfield compares
+// against a `number`, which also answers the bigint the hook delivers above 2^53
+// (a bigint/number relational comparison is legal JS), and that is what keeps
+// `v as number` safe as the read. A WIDE bitfield -- a flag at position 31 or
+// above -- reads `BigInt(v)`, so its bound is a bigint literal; the only implied
+// width that reaches it is u32, because a position at 32 or above implies the u64
+// the accumulator already is and carries no guard at all.
+func declaredWidthCond(v string, k ir.Kind, ref *ir.TypeRef) string {
 	switch k {
 	case ir.KindEnum:
-		vals, ok := ir.EnumValues(ref)
-		if !ok || len(vals) == 0 {
+		lo, hi, ok := ir.EnumWidthRange(ref)
+		if !ok {
 			return ""
 		}
-		if ir.EnumContiguous(ref) {
-			return fmt.Sprintf("%s < %d || %s > %d", v, vals[0], v, vals[len(vals)-1])
-		}
-		terms := make([]string, len(vals))
-		for i, x := range vals {
-			terms[i] = fmt.Sprintf("%s !== %d", v, x)
-		}
-		return strings.Join(terms, " && ")
+		return fmt.Sprintf("%s < %d || %s > %d", v, lo, v, hi)
 	case ir.KindBitfield:
-		mask, ok := ir.BitfieldMask(ref)
-		if !ok || mask == ^uint64(0) {
+		hi, ok := ir.BitfieldWidthMax(ref)
+		if !ok {
 			return ""
 		}
 		if wideBitfield(ref) {
-			return fmt.Sprintf("(%s & ~0x%xn) !== 0n", v, mask)
+			return fmt.Sprintf("%s > %dn", v, hi)
 		}
-		if mask == 0 {
-			return fmt.Sprintf("%s !== 0", v)
-		}
-		return fmt.Sprintf("%s > %d || (%s & ~0x%x) !== 0", v, mask, v, mask)
+		return fmt.Sprintf("%s > %d", v, hi)
 	}
 	return ""
+}
+
+// declaredWidthWhat names the breached declaration in the InvalidMsg text, so
+// the message says which declaration implied the width that was breached.
+func declaredWidthWhat(k ir.Kind) string {
+	if k == ir.KindEnum {
+		return "enum width"
+	}
+	return "bitfield width"
 }
 
 func nativeArrayElem(k ir.Kind) bool {
