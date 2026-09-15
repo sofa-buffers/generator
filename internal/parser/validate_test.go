@@ -185,7 +185,7 @@ func TestNegativeCases(t *testing.T) {
 			// sets bits no flag declares. What the message names is the undeclared
 			// BIT, because the authoring bound is the declared mask (0b101 — bit 1
 			// is not declared), not the width.
-			name:   "array-of-bitfield element mask past the declared backing width",
+			name:   "array-of-bitfield element mask past the declared mask AND the implied width",
 			src:    "version: 1\nmessages:\n  M:\n    payload:\n      a: {id: 0, type: array, items: {type: bitfield, count: 2, bits: {A: {pos: 0}, C: {pos: 2}}}, default: [1000]}\n",
 			expect: "element mask 1000 sets bit 3, which no flag declares (the declared mask is 0x5)",
 		},

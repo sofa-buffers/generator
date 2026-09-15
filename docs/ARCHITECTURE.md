@@ -243,15 +243,16 @@ validator must reproduce all of `schema/README.md` §Validation. Checklist:
    check, enum membership, and — for a
    `bitfield` element, the only place a bitfield default is written as a *number*
    rather than a set of per-flag booleans — a non-negative integer or quoted
-   **decimal** string that fits the bitfield's own backing width, i.e. the
-   smallest unsigned type covering its highest declared `pos`, §10. That width is
-   the **intersection** across targets, not a universal: six backends narrow a
-   bitfield's storage that way (c, cpp, rust, go, zig, csharp) and five carry it
-   at full width (java, kotlin, typescript, python, dart), and one definition has
-   to generate for all eleven. Both the width and the exact 64-bit top are
-   generator-side — the width is sibling-dependent, and 2^64−1 is not
-   representable as an IEEE-754 double — so the shipped JSON Schema states only
-   the non-negative/decimal half; `schema/README.md` §8.1 has the full rule).
+   **decimal** string within the bitfield's **declared mask**, one bit per
+   declared `pos`. That mask is a schema-AUTHORING bound and narrower than the
+   wire one: §1 admits every value inside the width the highest declared `pos`
+   implies, undeclared bits and all, while a `default` is what absence
+   reconstructs (§2), so one carrying an undeclared bit would pin the field at a
+   combination the schema gives no name to. Both the mask and the exact 64-bit top
+   are generator-side — the mask is sibling-dependent and has gaps, so no
+   `maximum` expresses it, and 2^64−1 is not representable as an IEEE-754 double —
+   so the shipped JSON Schema states only the non-negative/decimal half;
+   `schema/README.md` §8.1 has the full rule).
    A `u64`/`i64` element runs the **same** rule as a `u64`/`i64` *field* default,
    from the same helper (`int64Verdict`), so the two cannot drift: an integer, or
    a quoted **decimal** string for a value past the double-safe range, exact-range
@@ -4883,16 +4884,25 @@ A reimplementation is **conformant** when it reproduces these gates:
    truncation explains no rejection.
 
    It is wired in `rust` (all four config combos), `zig`, `go`, `csharp`, `java`,
-   `kotlin`, `dart`, `typescript` and `python` — all six positions, no declension
-   in any of the nine — and in all four `cpp` legs, replacing the narrower
-   generator#513 block that pinned the bitfield array element at its storage repr.
-   The two `corelib: c-cpp` legs run it in full: the bound is a width and that
-   backend stores both kinds at exactly the implied width, so the destination size
-   the C entry point already carries IS the §1 bound and nothing has to cross the
-   interface. `cpp` runs the table on BOTH decode surfaces — `streamdecode` feeds
-   one byte per call, which is what proves a verdict does not depend on the
-   chunking. On `zig` it must run in the `--release=fast` harness the suite ships:
-   before the guard existed the same bytes ABORTED a Debug build and were silently
+   `kotlin`, `dart`, `typescript`, `python` and `c` — all six positions, no
+   declension in any of the ten — and in all four `cpp` legs, replacing the
+   narrower generator#513 block that pinned the bitfield array element at its
+   storage repr. The two `corelib: c-cpp` legs run it in full: the bound is a
+   width and that backend stores both kinds at exactly the implied width, so the
+   destination size the C entry point already carries IS the §1 bound and nothing
+   has to cross the interface. `c` is that same corelib seen from its own object
+   API, and the one backend that emits no inline guard for either kind: the enum
+   is backed by the smallest signed C type its constants fit and the bitfield by
+   the smallest unsigned one its highest `pos` fits, so the descriptor hands
+   `sofab_istream_read_field` a destination whose SIZE is the §1 bound and
+   `istream.c`'s `_FITS_SIGNED_CHECK` / `_FITS_UNSIGNED_CHECK` refuse the rest —
+   which makes the leg a check on the descriptor the generator emits. Its enum
+   MATRIX row, the one cell both C++ legs decline, compiles and answers here:
+   the row is a plain `int8_t[3]` the descriptor describes like any other.
+   `cpp` and `c` run the table on BOTH decode surfaces — `streamdecode` feeds one
+   byte per call, which is what proves a verdict does not depend on the chunking.
+   On `zig` it must run in the `--release=fast` harness the suite ships: before
+   the guard existed the same bytes ABORTED a Debug build and were silently
    truncated by the release one (generator#517), so a Debug-only case would have
    reported a crash rather than a verdict. `python` runs it on BOTH engines: the
    element bound the accelerator applies is C code and the pure one's is not, so a
