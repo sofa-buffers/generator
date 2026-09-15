@@ -1322,7 +1322,7 @@ func (g *gen) emitVisitor(f *jfile, name string, fields []*ir.Field) {
 				// A primitive row is placed as a right-sized (capped) array and parked
 				// in its cursor, so the element fill neither re-reads it out of the
 				// List nor boxes a value into one.
-				base := primArrayBase(fr.innerElem)
+				base := primArrayBase(fr.innerElem, fr.innerRef)
 				// Sized at exactly the wire count, once: the guard above has just
 				// bounded it against the row's schema count or against the cap
 				// (ARCHITECTURE §9.5, shape A). The wire already said how big the row
@@ -1388,12 +1388,13 @@ func (g *gen) emitVisitor(f *jfile, name string, fields []*ir.Field) {
 				if guard == "" {
 					panic("java: native array with neither a schema count nor a cap -- every target has a finite default (§9.5)")
 				}
-				alloc := target + " = new " + primArrayBase(fld.Elem) + "[count]"
+				alloc := target + " = new " + primArrayBase(fld.Elem, fld.ElemRef) + "[count]"
 				if bulkCapable(fld) {
-					// A long-backed field IS the bulk destination; a narrowed one is
-					// filled through the scratch and reduced into the field by
-					// arrayBulkEnd. Either way the field is allocated here, so the
-					// per-element arm stays the fallback for a decoder that declines.
+					// The field's own array IS the bulk destination, at whatever width
+					// it was declared: the corelib writes the elements into it and
+					// bounds them by that width. It is allocated here either way, so
+					// the per-element arm stays the fallback for a decoder that
+					// declines the offer.
 					alloc = "abulk = " + alloc
 				}
 				arms = append(arms, jcase(fld.ID, arm+alloc))
@@ -1482,7 +1483,7 @@ func primArrayBasesUsed(fs []frame) []string {
 			// A native-matrix ROW is a primitive array too (List<long[]>), sized by
 			// the same arrayBegin and indexed by the same ai as a top-level one.
 			if fr.kind == fkNativeMat && primitiveArrayElem(fr.innerElem) &&
-				primArrayBase(fr.innerElem) == order && !seen[order] {
+				primArrayBase(fr.innerElem, fr.innerRef) == order && !seen[order] {
 				seen[order] = true
 				out = append(out, order)
 				continue
@@ -1491,7 +1492,7 @@ func primArrayBasesUsed(fs []frame) []string {
 				continue
 			}
 			for _, fld := range fr.fields {
-				if fld.Kind == ir.KindArray && primitiveArrayElem(fld.Elem) && primArrayBase(fld.Elem) == order && !seen[order] {
+				if fld.Kind == ir.KindArray && primitiveArrayElem(fld.Elem) && primArrayBase(fld.Elem, fld.ElemRef) == order && !seen[order] {
 					seen[order] = true
 					out = append(out, order)
 				}
@@ -1513,7 +1514,7 @@ func primRowBasesUsed(fs []frame) []string {
 	for _, order := range primBaseOrder {
 		for _, fr := range fs {
 			if fr.kind == fkNativeMat && primitiveArrayElem(fr.innerElem) &&
-				primArrayBase(fr.innerElem) == order && !seen[order] {
+				primArrayBase(fr.innerElem, fr.innerRef) == order && !seen[order] {
 				seen[order] = true
 				out = append(out, order)
 			}
@@ -1600,9 +1601,8 @@ func fillTargetsFor(fs []frame, cb string) map[*frame]map[int64]int {
 // schema bound or the cap before it is allocated from, so the untrusted-count
 // objection that once restricted this to SCHEMA-BOUNDED arrays (#96) is answered
 // by the check rather than by the reservation (ARCHITECTURE §9.5, shape A). That
-// leaves out boolean arrays (a List), fp arrays (the offer is integer-only),
-// matrix rows (whose destination is a row cursor, not a field) and the enum and
-// bitfield kinds (bulkCapable says why).
+// leaves out boolean arrays (a List), fp arrays (the offer is integer-only) and
+// matrix rows (whose destination is a row cursor, not a field).
 func hasBulk(fs []frame) bool {
 	for i := range fs {
 		fr := &fs[i]
@@ -1620,36 +1620,47 @@ func hasBulk(fs []frame) bool {
 
 // bulkCapable reports whether a field is one of those arrays.
 //
-// An `enum` or `bitfield` element is NOT, however wide the array it lands in.
 // The only bound the offer can carry is the destination array's WIDTH -- handing
-// back a short[] says "the elements are declared 16 bits wide" -- and Java holds
-// both kinds in a long[], whose width IS the accumulator's, so the offer would
-// state no bound at all. The one that binds them is the width their DECLARATION
-// implies (MESSAGE_SPEC §1), which the destination never carries. Taking the
-// offer would therefore hand the decoder an array with nothing to say about the
-// elements and bypass the element callback that does carry the real bound: the
-// elements would land unchecked, and the guard in the fill arm would be dead
-// code (measured -- the arm existed and never ran). Declining routes them through
-// widthThrow, one element at a time, so an over-width value is refused where it
-// arrives rather than after the whole array has landed. Validating in
-// arrayBulkEnd instead was the alternative and is weaker: it cannot report the
-// value at all when the array is cut short behind it (generator#516).
+// back a short[] says "these elements are declared 16 bits wide", and the corelib
+// then refuses a value that does not fit (IStream.narrowU16 / narrowI16, on both
+// the element loop and the byte-at-a-time path). So the test is one question: does
+// the primitive primArrayBase picked STATE the width the schema declared? For
+// every integer element it does, the two composite kinds included -- primArrayBase
+// derives an enum's and a bitfield's from the declaration (MESSAGE_SPEC §1), so an
+// enum over {0,1,2,3,4} hands back a byte[] and the corelib bounds its elements at
+// i8 exactly as it bounds an array<i8>. Where that implied width is the
+// accumulator's own -- an enum needing i64, a bitfield whose highest `pos` is 32 or
+// above -- long[] states 64 bits, which is again the declared width, and there is
+// no bound for the offer to lose: widthThrow emits nothing for those, because no
+// value arriving in a 64-bit accumulator can breach them. That is the same
+// position u64 and i64 have always been in.
 //
-// It is a correctness-over-throughput trade, and it was MEASURED rather than
-// asserted: tests/bench's vehicletelemetry row declares two such arrays
-// (gear_history, array<enum> count 8, and wheel_faults, array<bitfield> count 4)
-// and both are populated by the bench payload, so the row prices exactly this
-// decision. Same corelib checkout, origin/main vs this rule: decode 30891 ->
-// 32187 Ir/op, +1296 (+4.2%); encode 17006 -> 17012, i.e. held. Kotlin, which
-// declines the same offer for the same reason, pays +2.8%.
+// Both kinds were declined outright while they had no declared width to state
+// (generator#530's withdrawn closed-set rule): the offer had to be refused because
+// a long[] said nothing about an i8-wide field, and the elements were routed
+// through widthThrow one at a time. Giving them the narrow destination answers the
+// objection at its root -- the destination now carries the bound -- rather than
+// trading it for throughput.
+//
+// The per-element arms keep their widthThrow either way. They are the fallback for
+// a corelib that declines the offer (Visitor.arrayBulk defaults to null), so the
+// bound holds at this position whichever path the elements take.
+//
+// fp elements are the one remaining no: they arrive through the decoder's fixlen
+// loop, which the offer does not cover.
+//
+// What it is worth was MEASURED, not asserted. tests/bench's vehicletelemetry row
+// declares two such arrays (gear_history, array<enum> count 8, and wheel_faults,
+// array<bitfield> count 4) and the bench payload populates both, so the row prices
+// exactly this decision. Same corelib checkout, declining vs this: decode 32207 ->
+// 31503 Ir/op, -704 (-2.2%); encode 17007 both ways, i.e. held. That is a little
+// over half of the +4.2% the decline cost when the rule landed; the rest is the
+// guards at the ten non-array positions, which stay.
 func bulkCapable(fld *ir.Field) bool {
 	if fld.Kind != ir.KindArray || !primitiveArrayElem(fld.Elem) {
 		return false
 	}
-	if fld.Elem == ir.KindEnum || fld.Elem == ir.KindBitfield {
-		return false
-	}
-	switch primArrayBase(fld.Elem) {
+	switch primArrayBase(fld.Elem, fld.ElemRef) {
 	case "byte", "short", "int", "long":
 		return true
 	}
@@ -1775,9 +1786,9 @@ func (g *gen) emitArrayFillArm(f *jfile, fs []frame, cb string) {
 				// Fill the row through the cursor arrayBegin parked. The row was sized
 				// at exactly the announced count, so there is no growth and no
 				// reference to write back into the List (§9.5, shape A).
-				cur := rowCursor(primArrayBase(fr.innerElem))
+				cur := rowCursor(primArrayBase(fr.innerElem, fr.innerRef))
 				arms = append(arms, arm{ids[-1], fmt.Sprintf("%s%s[ai++] = %svalue",
-					widthThrow(fr.innerElem, fr.innerRef, fr.loc+" element"), cur, primArrayCast(fr.innerElem))})
+					widthThrow(fr.innerElem, fr.innerRef, fr.loc+" element"), cur, primArrayCast(fr.innerElem, fr.innerRef))})
 				continue
 			}
 			// A boxed row (boolean): the row arrayBegin PLACED at the element id, not
@@ -1807,7 +1818,7 @@ func (g *gen) emitArrayFillArm(f *jfile, fs []frame, cb string) {
 			// run past the end and nothing has to grow: no doubling, no copies, and
 			// no reference store into the message object per element.
 			arms = append(arms, arm{code, widthThrow(fld.Elem, fld.ElemRef, fld.Name+" element") +
-				target + "[ai++] = " + primArrayCast(fld.Elem) + "value"})
+				target + "[ai++] = " + primArrayCast(fld.Elem, fld.ElemRef) + "value"})
 		}
 	}
 	f.line("        // An element of the array arrayBegin armed: its destination is already")

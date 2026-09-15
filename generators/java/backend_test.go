@@ -64,7 +64,9 @@ func TestJavaStructural(t *testing.T) {
 		"public long someu64 = 0xFFFFFFFFFFFFFFFFL;",                                    // a u64 default is a compile-time constant, not a runtime parse (#479)
 		"public int[] someuintarray = new int[]{0, 1, 1000, -1};",                       // primitive array (was List<Long>)
 		"public float[] somefloatarray = new float[]{0.0f, -1.5f, 3.25f};",              // primitive fp array
-		"public long[] someenumarray = new long[]{2L, 1L, 0L};",                         // declared default, NOT padded to count (count is a capacity)
+		"public byte[] someenumarray = new byte[]{(byte) 2, (byte) 1, (byte) 0};",       // an enum array is backed by the width its declaration implies (§1): {0,1,2} is an i8
+		"public byte[] somebitfieldarray = Seq.EMPTY_BYTES;",                            // and a bitfield by its highest `pos`: 1 is a u8
+		"abulk = m.someenumarray = new byte[count];",                                    // the destination states i8, so the corelib's bulk offer carries the bound
 		"os.writeArrayUnsigned(15, this.someuintarray);",                                // direct write, no box, no trim: the wire count IS the length
 		"private static final int[] _arrdef_someuintarray = new int[]{0, 1, 1000, -1};", // omit-default hoisted to a static (#146)
 		"if (!java.util.Arrays.equals(this.someuintarray, _arrdef_someuintarray)) {",    // guard reads the static -- no per-encode new long[] (#146)
@@ -451,13 +453,11 @@ messages:
 		// A boolean array is a List: clearing it is decoding into it too, so the
 		// kind test fronts the clear as well. boolean maps to the UNSIGNED kind.
 		`case 3: if (kind != ArrayKind.UNSIGNED) break; if (count > 2) throw Sofab.invalid("ba: array count above schema capacity 2"); askip = 0; afill = count; atgt = 2; m.ba.clear(); break;`,
-		// enum elements ride the SIGNED wire type -- and NOT the bulk offer: an
-		// enum is bound by the width its DECLARATION implies, which the offer's
-		// only bound (the destination array's width, a long[] here) cannot state,
-		// so the elements come back through the element callback that carries it
-		// (§1, generator#516). The destination is still allocated at the wire
-		// count; only `abulk =` is gone.
-		`case 4: if (kind != ArrayKind.SIGNED) break; if (count > 2) throw Sofab.invalid("ea: array count above schema capacity 2"); askip = 0; afill = count; atgt = 2; m.ea = new long[count]; break;`,
+		// enum elements ride the SIGNED wire type, and they ride the bulk offer
+		// like every other integer element: an enum is bound by the width its
+		// DECLARATION implies (§1), {A:0, B:1} implies an i8, and a byte[]
+		// destination is exactly how the offer states that bound.
+		`case 4: if (kind != ArrayKind.SIGNED) break; if (count > 2) throw Sofab.invalid("ea: array count above schema capacity 2"); askip = 0; afill = count; atgt = 2; abulk = m.ea = new byte[count]; break;`,
 		// A count-less array has no schema bound, so the target's finite default
 		// cap governs it (§9.5, generator#385) -- checked, like a schema bound,
 		// BEHIND the kind test, and it is that check which lets the destination be
@@ -694,8 +694,8 @@ messages:
 		"public float[] ff32 = Seq.EMPTY_FLOATS;",
 		"public double[] ff64 = Seq.EMPTY_DOUBLES;",
 		"public List<Boolean> fb = new ArrayList<>();",
-		"public long[] fe = Seq.EMPTY_LONGS;",  // enum -> long[]
-		"public long[] fbf = Seq.EMPTY_LONGS;", // bitfield -> long[]
+		"public byte[] fe = Seq.EMPTY_BYTES;",  // enum -> the width its constants imply (i8)
+		"public byte[] fbf = Seq.EMPTY_BYTES;", // bitfield -> the width its highest `pos` implies (u8)
 		// --- count:N with a short schema default: as written, no tail padding.
 		"public int[] pu = new int[]{1, 2};",
 		"public List<Boolean> pb = new ArrayList<>(List.of(true, true));",
@@ -1889,8 +1889,13 @@ func TestJavaBitfieldIsJSONUnsigned(t *testing.T) {
 	for _, want := range []string{
 		"b.append(Long.toUnsignedString(o.somebitfield));",
 		"o.somebitfield = Long.parseUnsignedLong(e.getAsString());",
-		"b.append(Long.toUnsignedString(o.somebitfieldarray[_i0]));",
-		"o.somebitfieldarray[_k0] = Long.parseUnsignedLong(_a0.get(_k0).getAsString());",
+		// The array is backed by the width the declaration implies (flagA/flagB at
+		// pos 0 and 1, i.e. a u8), so the element is stored as RAW BITS and the
+		// JSON writer masks it back to the value first -- exactly what an
+		// array<u8> does, and the reason the mask may not be dropped: a u8-wide
+		// bitfield carrying bit 7 is stored negative and denotes 128.
+		"b.append(Long.toUnsignedString((o.somebitfieldarray[_i0] & 0xFFL)));",
+		"o.somebitfieldarray[_k0] = (byte) Long.parseUnsignedLong(_a0.get(_k0).getAsString());",
 	} {
 		if !strings.Contains(ex, want) {
 			t.Errorf("Json.java missing %q:\n%s", want, ex)
@@ -2019,8 +2024,9 @@ messages:
 
 // TestJavaBitfieldArrayDefaultIsALegalLongLiteral: the same rule one level in.
 //
-// An ARRAY of bitfield lowers to a Java `long[]` (primArrayBase puts bitfield on
-// the long base), and its default is rendered element by element by
+// An ARRAY of a bitfield declaring pos 63 lowers to a Java `long[]`: the width
+// its declaration implies is u64, which is the accumulator's own. Its default is
+// rendered element by element by
 // javaPrimElemLit -- which special-cased only ir.KindU64 and let a bitfield
 // element fall through to a bare decimal. A default element with bit 63 set
 // therefore emitted `new long[]{0x1L, 9223372036854775808L}`, which javac 25.0.3
@@ -2362,10 +2368,14 @@ messages:
 // UNSIGNED type holding its highest declared `pos`. Here that is i8 (−128..127)
 // for {0, 1, 2, 10} and u8 (0..255) for positions 0, 1 and 3.
 //
-// The bound is not the integer the target stores the field in: Java keeps both
-// in a `long`, which is §1's fourth consequence — a receiver that cannot hold
-// the field at exactly the declared width holds it wider and MUST enforce the
-// width as an explicit check, because nothing about its storage will.
+// The bound is not the integer the target stores the field in. Java keeps every
+// SCALAR-family position in a `long`, which is §1's fourth consequence — a
+// receiver that cannot hold the field at exactly the declared width holds it
+// wider and MUST enforce the width as an explicit check, because nothing about
+// its storage will. The two ARRAY positions do hold it at the declared width
+// (`byte[]` here), and the guard is emitted there all the same: it is the
+// fallback for a corelib that declines the bulk offer, and a store that happens
+// to be narrow enough is never what satisfies the rule.
 //
 // All six positions are pinned by name — scalar, native array element, struct
 // member, struct-array element member, union member, matrix row element — for
@@ -2382,8 +2392,8 @@ func TestJavaEnumAndBitfieldWidthBoundAtEverySixPositions(t *testing.T) {
 		// 2. native array element — in the armed-fill arm, which is only reached
 		// while arrayBegin has this array armed, so a bare scalar at an array id
 		// stays a §7.3 skip rather than becoming a spurious INVALID.
-		enRej + `"ea element: value outside declared enum width"); m.ea[ai++] = value;`,
-		bfRej + `"bfa element: value outside declared bitfield width"); m.bfa[ai++] = value;`,
+		enRej + `"ea element: value outside declared enum width"); m.ea[ai++] = (byte) value;`,
+		bfRej + `"bfa element: value outside declared bitfield width"); m.bfa[ai++] = (byte) value;`,
 		// 3. struct member
 		`case 0: ` + enRej + `"se: value outside declared enum width"); m.st.se = value; break;`,
 		`case 1: ` + bfRej + `"sbf: value outside declared bitfield width"); m.st.sbf = value; break;`,
@@ -2394,23 +2404,28 @@ func TestJavaEnumAndBitfieldWidthBoundAtEverySixPositions(t *testing.T) {
 		`case 0: ` + enRej + `"ue: value outside declared enum width"); m.un.ue = value; break;`,
 		`case 1: ` + bfRej + `"ubf: value outside declared bitfield width"); m.un.ubf = value; break;`,
 		// 6. matrix row element — the row cursor, not a field.
-		enRej + `"Root_mat element: value outside declared enum width"); _arowLong[ai++] = value;`,
-		bfRej + `"Root_mbf element: value outside declared bitfield width"); _arowLong[ai++] = value;`,
+		enRej + `"Root_mat element: value outside declared enum width"); _arowByte[ai++] = (byte) value;`,
+		bfRej + `"Root_mbf element: value outside declared bitfield width"); _arowByte[ai++] = (byte) value;`,
 	} {
 		if !strings.Contains(m, want) {
 			t.Errorf("Closed.java: an enum/bitfield position stores without its §1 width bound, missing %q:\n%s", want, m)
 		}
 	}
-	// The bulk offer is still declined for both kinds. The bound is an interval
-	// now, but it is the width the DECLARATION implies, not the width of the
-	// destination array — Java's is `long[]`, i.e. the accumulator itself — so
-	// taking the offer would route the elements past the callback carrying the
-	// real bound. The destination is still allocated at the wire count.
-	if strings.Contains(m, "abulk") {
-		t.Errorf("a message whose only arrays are enum/bitfield arrays must make no bulk offer:\n%s", m)
+	// The two ARRAY positions also ride the bulk offer, and that is not a hole in
+	// the twelve stores above: the destination is a `byte[]`, which states the i8
+	// and u8 the declarations imply, and the corelib refuses an element that does
+	// not fit it (IStream.narrowI8 / narrowU8). The guards above stay put as the
+	// fallback for a corelib that declines the offer.
+	if !strings.Contains(m, "abulk = m.ea = new byte[count]; break;") {
+		t.Errorf("an enum array must offer its narrow destination in bulk:\n%s", m)
 	}
-	if !strings.Contains(m, "m.ea = new long[count]; break;") {
-		t.Errorf("declining the offer must not change how the destination is sized:\n%s", m)
+	if !strings.Contains(m, "abulk = m.bfa = new byte[count]; break;") {
+		t.Errorf("a bitfield array must offer its narrow destination in bulk:\n%s", m)
+	}
+	// A matrix ROW is never the bulk destination -- it is a row cursor, not a
+	// field -- so its elements keep coming through the guarded arm above.
+	if strings.Contains(m, "abulk = _arowByte") {
+		t.Errorf("a matrix row must not be offered in bulk:\n%s", m)
 	}
 	// No bare store may remain on any of the twelve paths.
 	for _, bad := range []string{
@@ -2492,5 +2507,115 @@ func TestJavaWidthAdmitsUndeclaredValues(t *testing.T) {
 	}
 	if !strings.Contains(m, "~0xffL") {
 		t.Errorf("the bitfield width mask is missing:\n%s", m)
+	}
+}
+
+// An enum/bitfield ARRAY is backed by the Java primitive whose width its
+// DECLARATION implies (MESSAGE_SPEC §1), exactly as an array<i8> is backed by a
+// byte[] and an array<u8> by the same byte[] holding raw bits. Under the
+// withdrawn closed-set rule neither kind had a declared width, so both sat on
+// `long[]` — eight bytes for an element the schema bounds at one.
+//
+// Pinned per implied width, on both sides of every step, because the mapping is
+// derived rather than named: an enum by the smallest SIGNED type holding every
+// constant, a bitfield by the smallest UNSIGNED type holding its highest `pos`.
+// The schema validator caps enum constants at signed 32 bits, so i64 is
+// unreachable from a declaration and the enum table stops at int.
+//
+// The bulk decision is pinned in the same table, because it follows from exactly
+// this mapping: the offer's only bound is the destination's width, so it may be
+// taken wherever that width IS the declared one — which, now that the two kinds
+// have one, is every integer element.
+func TestJavaEnumBitfieldArrayElementWidth(t *testing.T) {
+	for _, tc := range []struct {
+		name, decl, want string
+		bulk             bool
+	}{
+		// enum: the extremes decide, so one constant at the edge of a width is
+		// enough to take the array up to it.
+		{"enum_i8", `{ type: enum, count: 4, enum: { A: -128, B: 127 } }`, "byte", true},
+		{"enum_i16", `{ type: enum, count: 4, enum: { A: 0, B: 128 } }`, "short", true},
+		{"enum_i16_low", `{ type: enum, count: 4, enum: { A: -129, B: 0 } }`, "short", true},
+		{"enum_i32", `{ type: enum, count: 4, enum: { A: 0, B: 32768 } }`, "int", true},
+		{"enum_i32_max", `{ type: enum, count: 4, enum: { A: 0, B: 2147483647 } }`, "int", true},
+		// bitfield: the highest declared position decides.
+		{"bf_u8", `{ type: bitfield, count: 4, bits: { A: { pos: 0 }, H: { pos: 7 } } }`, "byte", true},
+		{"bf_u16", `{ type: bitfield, count: 4, bits: { A: { pos: 0 }, H: { pos: 8 } } }`, "short", true},
+		{"bf_u32", `{ type: bitfield, count: 4, bits: { A: { pos: 0 }, H: { pos: 16 } } }`, "int", true},
+		// u64 is the accumulator's own width: `long[]` states it, and there is no
+		// bound left for the offer to lose — the position array<u64> is in.
+		{"bf_u64", `{ type: bitfield, count: 4, bits: { A: { pos: 0 }, H: { pos: 32 } } }`, "long", true},
+		{"bf_u64_top", `{ type: bitfield, count: 4, bits: { A: { pos: 0 }, H: { pos: 63 } } }`, "long", true},
+		// The references the derivation has to match, narrow and wide.
+		{"i8_ref", `{ type: i8, count: 4 }`, "byte", true},
+		{"u8_ref", `{ type: u8, count: 4 }`, "byte", true},
+		{"u64_ref", `{ type: u64, count: 4 }`, "long", true},
+		// fp is the one integer-array offer still declined: those elements arrive
+		// through the decoder's fixlen loop, which the offer does not cover.
+		{"fp32_ref", `{ type: fp32, count: 4 }`, "float", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			m := genJavaFromYAML(t, "version: 1\nmessages:\n  W:\n    payload:\n"+
+				"      a: { id: 0, type: array, items: "+tc.decl+" }\n",
+				map[string]any{})["src/main/java/message/W.java"]
+			if want := "public " + tc.want + "[] a = "; !strings.Contains(m, want) {
+				t.Errorf("the field is not backed by %s[]; missing %q:\n%s", tc.want, want, m)
+			}
+			alloc := "m.a = new " + tc.want + "[count]"
+			if tc.bulk {
+				if !strings.Contains(m, "abulk = "+alloc) {
+					t.Errorf("a %s[] destination states the declared width, so the bulk offer must be taken:\n%s", tc.want, m)
+				}
+			} else {
+				if strings.Contains(m, "abulk") {
+					t.Errorf("the bulk offer must not be made for a %s[] destination:\n%s", tc.want, m)
+				}
+				if !strings.Contains(m, alloc) {
+					t.Errorf("declining the offer must not change how the destination is sized:\n%s", m)
+				}
+			}
+		})
+	}
+}
+
+// The unsigned bargain, one level in: a narrowed BITFIELD array holds the
+// declared width's RAW BITS, so an element with the top bit of that width set
+// reads back negative and has to be zero-extended wherever it leaves the field
+// as a VALUE. That is exactly what an array<u8> already does, and an ENUM array
+// is the signed counterpart that needs nothing, exactly like an array<i8>.
+func TestJavaNarrowBitfieldArrayIsWidenedForJSON(t *testing.T) {
+	files := genJavaFromYAML(t, "version: 1\nmessages:\n  W:\n    payload:\n"+
+		"      bf:   { id: 0, type: array, items: { type: bitfield, count: 4, bits: { A: { pos: 0 }, H: { pos: 7 } } } }\n"+
+		"      bf16: { id: 1, type: array, items: { type: bitfield, count: 4, bits: { A: { pos: 0 }, H: { pos: 8 } } } }\n"+
+		"      wide: { id: 2, type: array, items: { type: bitfield, count: 4, bits: { A: { pos: 0 }, H: { pos: 63 } } } }\n"+
+		"      en:   { id: 3, type: array, items: { type: enum, count: 4, enum: { A: 0, B: 1 } } }\n"+
+		"      u8:   { id: 4, type: array, items: { type: u8, count: 4 } }\n",
+		map[string]any{"emit": "project"})
+	j := files["src/main/java/message/Json.java"]
+	if j == "" {
+		t.Fatal("no Json.java generated")
+	}
+	for _, want := range []string{
+		// A u8-wide bitfield element of 200 is stored as -56 and denotes 200.
+		"b.append(Long.toUnsignedString((o.bf[_i0] & 0xFFL)));",
+		"b.append(Long.toUnsignedString((o.bf16[_i0] & 0xFFFFL)));",
+		// The u8 array this is modelled on, so the comparison is on the record.
+		"b.append(Long.toUnsignedString((o.u8[_i0] & 0xFFL)));",
+		// A long-backed bitfield already holds the value's own bits.
+		"b.append(Long.toUnsignedString(o.wide[_i0]));",
+		// An enum width is SIGNED: the narrowing was exact, so nothing is masked.
+		"b.append(o.en[_i0]);",
+		// And back in: the JSON carries the value, the field holds the bits.
+		"o.bf[_k0] = (byte) Long.parseUnsignedLong(_a0.get(_k0).getAsString());",
+		"o.en[_k0] = (byte) _a0.get(_k0).getAsLong();",
+	} {
+		if !strings.Contains(j, want) {
+			t.Errorf("Json.java missing %q:\n%s", want, j)
+		}
+	}
+	// The mask may not leak onto the signed side: that would turn an enum's -1
+	// into 4294967295 on the way out.
+	if strings.Contains(j, "o.en[_i0] & 0x") {
+		t.Errorf("an enum array element must not be masked -- its width is signed:\n%s", j)
 	}
 }

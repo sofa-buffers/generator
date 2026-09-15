@@ -580,7 +580,7 @@ func (g *gen) emitResetField(f *jfile, fld *ir.Field) {
 				f.line("        else %s = %s.clone();", acc, d)
 				return
 			}
-			f.line("        %s = %s;", acc, emptyPrimConst(fld.Elem))
+			f.line("        %s = %s;", acc, emptyPrimConst(fld.Elem, fld.ElemRef))
 			return
 		}
 		// List-backed: the boolean array (which may carry a materialized default) and
@@ -601,7 +601,9 @@ func (g *gen) emitResetField(f *jfile, fld *ir.Field) {
 
 // emptyPrimConst is the shared zero-length primitive-array constant backing a
 // dynamic (count-less, default-less) array field — the same value javaInit gives it.
-func emptyPrimConst(elem ir.Kind) string { return emptyPrimFor(primArrayBase(elem)) }
+func emptyPrimConst(elem ir.Kind, ref *ir.TypeRef) string {
+	return emptyPrimFor(primArrayBase(elem, ref))
+}
 
 func (g *gen) emitMarshal(f *jfile, fld *ir.Field) {
 	acc := "this." + javaIdent(fld.Name)
@@ -863,7 +865,7 @@ func (g *gen) marshalArray(f *jfile, ind, idExpr, val string, elem ir.Kind, ref 
 			// unboxed, with no conversion temporary. Otherwise as the boxed native
 			// row below -- a single count-prefixed value with no frame of its own, so
 			// the interior/last rule lands on the WRITE rather than on a closer.
-			f.line("%s    if (%s == null) %s = %s;", ind, ev, ev, emptyPrimConst(items.Elem))
+			f.line("%s    if (%s == null) %s = %s;", ind, ev, ev, emptyPrimConst(items.Elem, items.ElemRef))
 			f.line("%s    if (%s.length != 0 || %s) {", ind, ev, lastElemExpr(iv, lv))
 			g.marshalArray(f, ind+"        ", iv, ev, items.Elem, items.ElemRef, items.ElemItems, depth+1, "")
 			f.line("%s    }", ind)

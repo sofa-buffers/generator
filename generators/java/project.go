@@ -359,7 +359,7 @@ func (g *gen) jsonToArray(f *jfile, ind, val string, elem ir.Kind, ref *ir.TypeR
 		// A narrowed UNSIGNED element is stored as raw bits, so JSON -- which
 		// carries the VALUE -- has to widen it back. Signed widths narrowed
 		// exactly and need nothing; so does a long-backed one.
-		el = primArrayWiden(elem, el)
+		el = primArrayWiden(elem, ref, el)
 	}
 	f.line("%s{ b.append('['); for (int %s = 0; %s < %s; %s++) { if (%s>0) b.append(',');", ind, iv, iv, bound, iv, iv)
 	switch elem {
@@ -438,10 +438,10 @@ func (g *gen) jsonFromArray(f *jfile, ind, target, src string, elem ir.Kind, ref
 		default: // u8/u16/u32, i8..i64, enum
 			getter = fmt.Sprintf("%s.get(%s).getAsLong()", av, kv)
 		}
-		f.line("%sJsonArray %s = %s; %s = new %s[%s.size()];", ind, av, src, target, primArrayBase(elem), av)
+		f.line("%sJsonArray %s = %s; %s = new %s[%s.size()];", ind, av, src, target, primArrayBase(elem, ref), av)
 		// The cast is the same narrowing the decoder does: JSON states the value,
 		// the field holds the declared width's bits.
-		f.line("%sfor (int %s = 0; %s < %s.length; %s++) %s[%s] = %s%s;", ind, kv, kv, target, kv, target, kv, primArrayCast(elem), getter)
+		f.line("%sfor (int %s = 0; %s < %s.length; %s++) %s[%s] = %s%s;", ind, kv, kv, target, kv, target, kv, primArrayCast(elem, ref), getter)
 		return
 	}
 	ev := fmt.Sprintf("_e%d", depth)
@@ -467,7 +467,7 @@ func (g *gen) jsonFromArray(f *jfile, ind, target, src string, elem ir.Kind, ref
 		if primitiveArrayElem(items.Elem) {
 			// A primitive inner row is a primitive array; the prim branch above
 			// allocates it to the JSON array's length, so it only needs declaring.
-			f.line("%s    %s[] %s;", ind, primArrayBase(items.Elem), v)
+			f.line("%s    %s[] %s;", ind, primArrayBase(items.Elem, items.ElemRef), v)
 			g.jsonFromArray(f, ind+"    ", v, ev+".getAsJsonArray()", items.Elem, items.ElemRef, items.ElemItems, depth+1, true)
 			f.line("%s    %s.add(%s);", ind, target, v)
 			break

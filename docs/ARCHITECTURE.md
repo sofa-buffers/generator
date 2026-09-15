@@ -755,13 +755,13 @@ route by `(scope, id)` and are forward-compatible (skip unknown ids).
    chunk boundary anywhere inside the array is invisible. **`count` is untrusted**
    (the wire's claim, bounded only by the format ceiling), so the offer is made
    only for arrays the schema already bounds with a `count: N`; an unbounded one
-   keeps the capped-reservation, grow-as-you-go fill (#96). The offer is also
-   **not made for an `enum` or `bitfield` element**: the only bound it can carry
-   is the destination array's width, and neither target holds those two at the
-   width their declaration implies — an enum array is 32 or 64 bits wide and a
-   bitfield array 64 whatever the schema says — so the offer would state a bound
-   the field does not have. Those elements go back through the per-element arm
-   that states the real one (generator#516; see "Decode verdict").
+   keeps the capped-reservation, grow-as-you-go fill (#96). On `java` the offer
+   covers **every** integer element, `enum` and `bitfield` included: those two are
+   backed by the primitive whose width their declaration implies (MESSAGE_SPEC
+   §1), so the destination states the declared width exactly as it does for a
+   `u8`, and the corelib enforces it. `kotlin` still declines for both kinds,
+   because it holds them wider than the declaration (generator#516; see
+   "Decode verdict").
 
    **The destination's width is a bound**, which is why the return type is
    `Object` rather than four overloads: handing back a narrower array than
@@ -1845,35 +1845,57 @@ beside the `count`, wrapper-element-id and `maxlen` guards already there.
     reason one level down and emits no guard at all: its descriptor carries the
     storage width, which for these two kinds is the implied width, and the C
     runtime answers `INVALID` at the store.
-  - **A bulk element offer is DECLINED for both kinds** (`java`, `kotlin`,
-    `typescript`). Those corelibs let a visitor hand back a primitive array and
-    have the decoder write the elements straight into it, skipping the element
-    callback. On `java` and `kotlin` the only bound that path can carry is the
-    DESTINATION array's width — handing back a `short[]` says "these elements are
-    declared 16 bits wide" — and both hold an enum array at 32 or 64 bits and a
-    bitfield array at 64 whatever the declaration says, so the offer would state
-    32 or 64 bits for a field bounded at `i8` or `u8`. Declining puts the elements
-    back through the callback that carries the real bound, one at a time, so an
-    over-width value is refused where it arrives — including when the array is cut
-    short behind it, which a scan in `arrayBulkEnd` could not report at all.
-    Nothing else changes: the destination is still allocated at the wire count and
-    every other integer array keeps the fast path. `typescript` declines for a
-    different reason now that the bound is an interval: an `ArrayTarget`'s
-    `min`/`max` could state it, but neither destination is the plain `number[]`
-    the hand-off fills — an enum array is typed as its enum and a wide bitfield
-    array holds bigints. Offering it there is a separate change with its own
-    measurement to make.
+  - **A bulk element offer is a question about the DESTINATION's width** (`java`,
+    `kotlin`, `typescript`). Those corelibs let a visitor hand back a primitive
+    array and have the decoder write the elements straight into it, skipping the
+    element callback. On `java` and `kotlin` the only bound that path can carry is
+    the destination array's width — handing back a `short[]` says "these elements
+    are declared 16 bits wide" — so the offer may be taken exactly where the
+    destination IS the declared width, and must be declined where it is wider.
+
+    **`java` gives both kinds the narrow destination and takes the offer.** An
+    `array<enum>` over `{0,1,2,3,4}` is a `byte[]` and an `array<bitfield>` whose
+    highest `pos` is 4 is a `byte[]`, derived by `ir.EnumWidthRange` /
+    `ir.BitfieldWidthMax`, so the destination states `i8` and `u8` and
+    `IStream`'s `narrowI8`/`narrowU8` refuse an element past it with
+    `INVALID_MSG` — on the element loop and on the byte-at-a-time path both, so a
+    chunk boundary does not change the verdict. Where the implied width is the
+    accumulator's own (a bitfield whose highest `pos` is 32 or above) the
+    destination is a `long[]`, which is again the declared width and carries no
+    bound to lose — the position `array<u64>` has always been in. The generated
+    per-element guard stays emitted behind the offer, because `Visitor.arrayBulk`
+    defaults to `null`: a corelib that declines it fills the same array through
+    the callback, and the bound holds either way. The two ARRAY cells of this
+    rule therefore exercise the corelib's half on `java`, and the other ten
+    exercise generated code.
+
+    **`kotlin` still declines for both kinds**, because it does not hold them at
+    the implied width: an enum array is 32 bits wide and a bitfield array 64
+    whatever the declaration says, so the offer would state 32 or 64 bits for a
+    field bounded at `i8` or `u8`. Declining puts the elements back through the
+    callback that carries the real bound, one at a time, so an over-width value is
+    refused where it arrives — including when the array is cut short behind it,
+    which a scan in `arrayBulkEnd` could not report at all. `typescript` declines
+    for a third reason: an `ArrayTarget`'s `min`/`max` could state the interval,
+    but neither destination is the plain `number[]` the hand-off fills — an enum
+    array is typed as its enum and a wide bitfield array holds bigints. Offering
+    it there is a separate change with its own measurement to make.
 
     **What the decline costs is measured, not asserted.** `tests/bench`'s
     `vehicletelemetry` row declares two such arrays (`gear_history`,
     `array<enum>` `count: 8`, and `wheel_faults`, `array<bitfield>` `count: 4`)
     and the bench payload populates both, so the row prices this decision
-    directly. Against the same corelib checkouts, decode goes 30891 → 32187 Ir/op
-    on `java` (**+4.2 %**) and 32743 → 33674 on `kotlin` (**+2.8 %**); encode
-    holds on both. The targets that keep the element callback anyway pay only for
-    the comparison itself, which under a width bound is one or two relational
-    tests — where the withdrawn reading needed a membership chain over the
-    constants or a mask of the declared bits.
+    directly. Against the same corelib checkouts, decode went 30891 → 32187 Ir/op
+    on `java` (**+4.2 %**) and 32743 → 33674 on `kotlin` (**+2.8 %**) when both
+    declined; encode held on both. Narrowing `java`'s destination gave a little
+    over half of that back — 32207 → 31503 Ir/op, **−2.2 %**, same corelib
+    checkout, encode unchanged at 17007 — so the row settles ~2 % above where it
+    sat before the rule, which is what the guards at the ten non-array positions
+    and the narrowing casts cost. `kotlin` still pays its full 2.8 %. The targets
+    that keep the element
+    callback anyway pay only for the comparison itself, which under a width bound
+    is one or two relational tests — where the withdrawn reading needed a
+    membership chain over the constants or a mask of the declared bits.
   - **Rollout.** All eleven backends enforce the bound. Ten emit it: `rust` (all
     four config combos), `zig`, `go`, `cpp` (both corelibs, both storage modes),
     `csharp`, `java`, `kotlin`, `dart`, `typescript` and `python`. `c` enforces it
@@ -3572,9 +3594,11 @@ that same number anyway. Three things are worth recording about the conversion:
   native integer array is now sized that way, so the offer reaches the unbounded
   ones too — the untrusted-count objection is answered by the check rather than by
   the reservation. (It later narrowed again on a different axis: an `enum` or
-  `bitfield` element declines it, because the only bound the offer carries is the
-  destination array's width and neither target holds those two at the width their
-  declaration implies — generator#516.)
+  `bitfield` element declined it, because the only bound the offer carries is the
+  destination array's width and neither target held those two at the width their
+  declaration implies — generator#516. `java` answered that at the root instead
+  and now backs both kinds at the implied width, so its offer covers them again;
+  `kotlin` still declines.)
 
 One call site survives the conversion as a no-op: Zig's dynamic slices still store
 through `sofab.arrays.putGrowing`, whose growth branch is now unreachable (the

@@ -152,8 +152,17 @@ func primitiveArrayElem(k ir.Kind) bool {
 
 // primArrayBase is the Java primitive element type backing a primitive array:
 // the narrowest one that holds the declared width's BITS, float/double for the fp
-// kinds, and long for the kinds with no declared narrow width (u64/i64, and enum
-// and bitfield, whose width is the named type's business).
+// kinds, and long for the 64-bit widths, whose bits are the accumulator's own.
+//
+// An `enum` and a `bitfield` carry a declared width like every other integer
+// element — the one their DECLARATION implies (MESSAGE_SPEC §1): for an enum the
+// smallest SIGNED type holding every constant, for a bitfield the smallest
+// UNSIGNED type holding its highest `pos`. That is what `ref` is for, and it is
+// why an array of an enum over {0,1,2,3,4} lands in a `byte[]` exactly as an
+// `array<i8>` does. Both kinds sat on the long base while the withdrawn
+// closed-set reading (generator#530) left them with no declared width at all;
+// under §1 they have one, and holding a one-byte element in eight bytes is the
+// same waste here as it is for a `u8`.
 //
 // A SCALAR field still maps to `long` — Java has no unsigned types, and widening
 // one value costs nothing. An ARRAY is the case where it costs: at 8 bytes an
@@ -170,7 +179,7 @@ func primitiveArrayElem(k ir.Kind) bool {
 // same bargain protobuf-java strikes for `uint32`, and the only alternative that
 // stays value-preserving is to widen every unsigned array one step (u8 -> short,
 // u32 -> long), which gives up most of what the change is for.
-func primArrayBase(k ir.Kind) string {
+func primArrayBase(k ir.Kind, ref *ir.TypeRef) string {
 	switch k {
 	case ir.KindFP32:
 		return "float"
@@ -182,9 +191,32 @@ func primArrayBase(k ir.Kind) string {
 		return "short"
 	case ir.KindU32, ir.KindI32:
 		return "int"
-	default: // u64, i64, enum, bitfield
-		return "long"
+	case ir.KindEnum:
+		// ok == false says the implied width IS the accumulator's, i.e. i64.
+		if _, hi, ok := ir.EnumWidthRange(ref); ok {
+			return primBaseHolding(uint64(hi))
+		}
+	case ir.KindBitfield:
+		if hi, ok := ir.BitfieldWidthMax(ref); ok {
+			return primBaseHolding(hi)
+		}
 	}
+	return "long" // u64, i64, and the two kinds whose declaration implies 64 bits
+}
+
+// primBaseHolding is the narrowest Java primitive whose BITS hold an inclusive
+// maximum of hi — the same rule the fixed kinds above are spelled out with,
+// applied to a width that is derived rather than named. An enum's 127 and a
+// bitfield's 255 both land on `byte`, which is the point: the two kinds differ in
+// how that byte is read back as a VALUE (primArrayWiden), never in how wide it is.
+func primBaseHolding(hi uint64) string {
+	switch {
+	case hi <= 0xFF:
+		return "byte"
+	case hi <= 0xFFFF:
+		return "short"
+	}
+	return "int"
 }
 
 // emptyPrimFor is the corelib's shared zero-length constant for a primitive
@@ -212,8 +244,8 @@ func emptyPrimFor(base string) string {
 // width guard runs FIRST and rejects anything the cast would lose, so the cast
 // only ever drops bits that were already proven to be sign extension (signed) or
 // zero (unsigned).
-func primArrayCast(k ir.Kind) string {
-	switch primArrayBase(k) {
+func primArrayCast(k ir.Kind, ref *ir.TypeRef) string {
+	switch primArrayBase(k, ref) {
 	case "byte":
 		return "(byte) "
 	case "short":
@@ -228,16 +260,33 @@ func primArrayCast(k ir.Kind) string {
 // stands for: a no-op for a signed width (the narrowing was exact) and a mask for
 // an unsigned one (the storage holds raw bits). Used wherever an element leaves
 // the field as a number rather than as wire bytes -- the JSON writer.
-func primArrayWiden(k ir.Kind, expr string) string {
+//
+// A `bitfield` is an UNSIGNED width (MESSAGE_SPEC §1), so a narrowed one needs
+// the mask for exactly the reason a `u8` does: a bitfield over positions 0..7
+// whose element carries bit 7 is stored as a negative byte and is the value 128.
+// An `enum` is a SIGNED width, so its narrowing is exact and it needs nothing --
+// the same split as i8 against u8, one level in.
+func primArrayWiden(k ir.Kind, ref *ir.TypeRef, expr string) string {
 	switch k {
 	case ir.KindU8:
-		return "(" + expr + " & 0xFFL)"
+		return maskTo(expr, 0xFF)
 	case ir.KindU16:
-		return "(" + expr + " & 0xFFFFL)"
+		return maskTo(expr, 0xFFFF)
 	case ir.KindU32:
-		return "(" + expr + " & 0xFFFFFFFFL)"
+		return maskTo(expr, 0xFFFFFFFF)
+	case ir.KindBitfield:
+		// Only where the storage is actually narrower than the accumulator; a
+		// long-backed bitfield already holds the value's own bits.
+		if hi, ok := ir.BitfieldWidthMax(ref); ok {
+			return maskTo(expr, hi)
+		}
 	}
 	return expr
+}
+
+// maskTo zero-extends a narrowed unsigned element back to the value it denotes.
+func maskTo(expr string, hi uint64) string {
+	return fmt.Sprintf("(%s & 0x%XL)", expr, hi)
 }
 
 // javaPrimArrayLiteral renders a primitive array field's schema default as a
@@ -256,10 +305,10 @@ func (g *gen) javaPrimArrayLiteral(f *ir.Field) (string, bool) {
 	if !ok {
 		return "", false
 	}
-	base := primArrayBase(f.Elem)
+	base := primArrayBase(f.Elem, f.ElemRef)
 	parts := make([]string, 0, len(vals))
 	for _, v := range vals {
-		parts = append(parts, javaPrimElemLit(f.Elem, v))
+		parts = append(parts, javaPrimElemLit(f.Elem, f.ElemRef, v))
 	}
 	return fmt.Sprintf("new %s[]{%s}", base, strings.Join(parts, ", ")), true
 }
@@ -271,8 +320,8 @@ func (g *gen) javaPrimArrayLiteral(f *ir.Field) (string, bool) {
 // bits (a u8 default of 200 is written `(byte) -56`, and reads back as 200 through
 // Byte.toUnsignedInt) -- so the literal is emitted already reduced rather than as
 // a cast expression a reader would have to evaluate.
-func javaPrimElemLit(elem ir.Kind, v any) string {
-	switch primArrayBase(elem) {
+func javaPrimElemLit(elem ir.Kind, ref *ir.TypeRef, v any) string {
+	switch primArrayBase(elem, ref) {
 	case "float":
 		return floatLit(v) + "f"
 	case "double":
@@ -307,7 +356,7 @@ func javaPrimElemLit(elem ir.Kind, v any) string {
 		// to the compiler to complain rather than emitting something invented.
 		return scalarLit(v)
 	}
-	switch primArrayBase(elem) {
+	switch primArrayBase(elem, ref) {
 	case "byte":
 		return fmt.Sprintf("(byte) %d", int8(n))
 	case "short":
@@ -337,7 +386,7 @@ func (g *gen) javaType(f *ir.Field) string {
 		return g.typeName(f.Ref.Key)
 	case ir.KindArray:
 		if primitiveArrayElem(f.Elem) {
-			return primArrayBase(f.Elem) + "[]"
+			return primArrayBase(f.Elem, f.ElemRef) + "[]"
 		}
 		return "List<" + g.javaArrayElemType(f.Elem, f.ElemRef, f.ElemItems) + ">"
 	}
@@ -373,7 +422,7 @@ func (g *gen) javaArrayElemType(elem ir.Kind, ref *ir.TypeRef, items *ir.ArrayEl
 		return g.typeName(ref.Key)
 	case ir.KindArray:
 		if primitiveArrayElem(items.Elem) {
-			return primArrayBase(items.Elem) + "[]"
+			return primArrayBase(items.Elem, items.ElemRef) + "[]"
 		}
 		return "List<" + g.javaArrayElemType(items.Elem, items.ElemRef, items.ElemItems) + ">"
 	default: // integers, enum, bitfield
@@ -394,7 +443,7 @@ func (g *gen) javaInit(f *ir.Field) string {
 			if lit, ok := g.javaPrimArrayLiteral(f); ok {
 				return " = " + lit
 			}
-			return " = " + emptyPrimFor(primArrayBase(f.Elem))
+			return " = " + emptyPrimFor(primArrayBase(f.Elem, f.ElemRef))
 		}
 		if nativeArrayElem(f.Elem) { // boolean array (stays boxed List<Boolean>)
 			if lit, ok := g.javaNativeArrayLiteral(f); ok {
