@@ -285,7 +285,7 @@ jobs:
       - uses: actions/setup-java@v6
         with:
           distribution: temurin
-          java-version: "21"
+          java-version: "21.0.12+101.0.LTS"
       - uses: gradle/actions/setup-gradle@v6
       - uses: ./.github/actions/corelib-refs
       - name: Kotlin backend — generate, build, round-trip, conformance
