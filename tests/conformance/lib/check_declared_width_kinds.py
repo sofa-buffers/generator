@@ -151,6 +151,10 @@ import sys
 
 MESSAGE = "closed"
 
+# Handed to a harness as its chunk size to find out whether it reads the argument
+# at all. Deliberately unparseable as an integer in every target language.
+NOT_A_SIZE = "notasize"
+
 # The declared sets. Gapped on purpose; see the module docstring.
 ENUM_CONSTS = {"A": 0, "B": 1, "C": 2, "Z": 10}
 BIT_POS = {"A": 0, "B": 1, "D": 3}
@@ -627,7 +631,8 @@ def main():
         # No sizes given: the harness reads no size argument and drives its own
         # fixed split -- one byte per feed throughout this family. Passing widths
         # it would ignore is worse than not sweeping at all, because the summary
-        # would then claim a sweep that never happened.
+        # would then claim a sweep that never happened. That is enforced below,
+        # once the table exists to probe with, rather than left to the caller.
         splits = [int(x) for x in raw] or [None]
 
     if not args.label:
@@ -637,6 +642,31 @@ def main():
 
     msg = [args.message] if args.message else []
     table = build_table(live, masked)
+
+    # The rule above -- pass sizes only to a harness that reads them -- was stated
+    # and not enforced, which leaves exactly the hole it exists to close: a harness
+    # that IGNORES the argument decodes identically at every rung, and the summary
+    # line then reports a sweep that never happened. Read as coverage, it is worse
+    # than the single split it replaced.
+    #
+    # Probe it once, with a size no harness can parse. One that reads the argument
+    # must fail on it; one that never looks at it decodes as usual. A harness that
+    # swallows the parse error and falls back to a default reads as "ignores it"
+    # here, which is the safe direction: the sweep is refused rather than claimed.
+    if splits != [None]:
+        probe_wire = next((w for _, w, e, _, _ in table if e == "accept"), None)
+        if probe_wire is not None:
+            prc, _, _ = run(harness + [args.stream_verb] + msg + [NOT_A_SIZE],
+                            args.cwd, probe_wire)
+            if prc == 0:
+                die("--stream-sizes was given, but the %r verb ignores the chunk "
+                    "size: handed %r as the size it decoded normally, so every "
+                    "rung of the sweep feeds the same bytes the same way and the "
+                    "summary would claim a sweep that never happened. Either make "
+                    "the harness read the argument after the message name (see "
+                    "the java and kotlin harnesses), or drop --stream-sizes and "
+                    "let it drive its own split."
+                    % (args.stream_verb, NOT_A_SIZE))
 
     def where(size):
         if size is None:

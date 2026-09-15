@@ -1654,8 +1654,9 @@ func hasBulk(fs []frame) bool {
 // array<bitfield> count 4) and the bench payload populates both, so the row prices
 // exactly this decision. Same corelib checkout, declining vs this: decode 32207 ->
 // 31503 Ir/op, -704 (-2.2%); encode 17007 both ways, i.e. held. That is a little
-// over half of the +4.2% the decline cost when the rule landed; the rest is the
-// guards at the ten non-array positions, which stay.
+// over half of the +4.2% the decline cost when the rule landed. What the rest is
+// has not been measured -- the guards at the ten non-array positions and the
+// narrowing conversions both sit in that path, and nothing here tells them apart.
 func bulkCapable(fld *ir.Field) bool {
 	if fld.Kind != ir.KindArray || !primitiveArrayElem(fld.Elem) {
 		return false

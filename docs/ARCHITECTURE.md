@@ -1911,9 +1911,11 @@ beside the `count`, wrapper-element-id and `maxlen` guards already there.
     on `java` (**+4.2 %**) and 32743 → 33674 on `kotlin` (**+2.8 %**) when both
     declined; encode held on both. Narrowing the destination gave most of that
     back — `java` 32207 → 31503, **−2.2 %**, encode unchanged at 17007; `kotlin`
-    33683 → 33033, **−1.9 %**, encode 17201 both ways — so each row settles ~1 %
-    above where it sat before the rule, which is what the guards at the ten
-    non-array positions and the narrowing conversions cost. The targets that keep
+    33683 → 33033, **−1.9 %**, encode 17201 both ways — leaving `java` **+2.0 %**
+    and `kotlin` **+0.9 %** against where each sat before the rule. What that
+    residue is has not been attributed: the guards at the ten non-array positions
+    and the narrowing conversions are the candidates, and no measurement here
+    separates them. The targets that keep
     the element callback anyway pay only for the comparison itself, which under a
     width bound is one or two relational tests — where the withdrawn reading
     needed a membership chain over the constants or a mask of the declared bits.
