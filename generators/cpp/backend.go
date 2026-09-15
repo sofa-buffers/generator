@@ -1415,23 +1415,29 @@ func (g *gen) emitDeserialize(f *hfile, fld *ir.Field) {
 			f.line("            sofab::%s(is, %s%s);", fn, acc, args)
 		}
 	case ir.KindEnum, ir.KindBitfield:
-		// An `enum` and a `bitfield` are CLOSED (MESSAGE_SPEC §1): what binds is
-		// the SET of constants / the MASK of declared positions, and a wire value
-		// outside it is INVALID (§7.1) exactly as an over-width integer is. So
-		// these two take the very shape the narrow-integer arm above takes — a
-		// 64-bit temporary, the comparison, then the narrowing cast — and for the
+		// An `enum` and a `bitfield` are bound by the WIDTH their declaration
+		// implies (MESSAGE_SPEC §1) — the smallest signed type holding every
+		// constant, the smallest unsigned type holding the highest `pos` — and a
+		// wire value outside it is INVALID (§7.1) exactly as an over-width integer
+		// is. So these two take the very shape the narrow-integer arm above takes —
+		// a 64-bit temporary, the comparison, then the narrowing cast — and for the
 		// same reason: the cast IS the mask the rule forbids, so the check has to
 		// precede it, and it has to see the raw value to make it.
 		//
 		// corelib-c-cpp cannot: its read binds a target by ADDRESS and the C
 		// runtime fills it after the callback returns, so a local temporary would
-		// dangle and the value is never visible to generated code. The only bound
-		// that hook carries is sizeof(destination) — SOFAB_ISTREAM_OPT_* is wire
-		// type, fixlen subtype and string termination, and nothing else — so that
-		// leg keeps binding the member directly and the set half stays unenforced
-		// there; closing it needs a set/mask parameter on
-		// sofab_istream_read_field. An enum binds the enum's underlying-typed
-		// storage, a bitfield's member is already an integral type.
+		// dangle and the value is never visible to generated code. That leg keeps
+		// binding the member directly, and the only bound sofab_istream_read_field
+		// carries is sizeof(destination) — SOFAB_ISTREAM_OPT_* is wire type, fixlen
+		// subtype and string termination and nothing else. Under the WIDTH rule
+		// that is enough: this backend stores both kinds at exactly the width the
+		// declaration implies (enumBacking / bitfieldBacking derive it from the
+		// same declarations ir.EnumWidthRange and ir.BitfieldWidthMax do), so the
+		// destination size the C runtime refuses an over-range value against IS the
+		// declared width. It was not enough under the withdrawn set/mask bound,
+		// which no destination size can express. An enum binds the enum's
+		// underlying-typed storage, a bitfield's member is already an integral
+		// type.
 		if g.clib {
 			if fld.Kind == ir.KindEnum {
 				f.line("            is.read(reinterpret_cast<%s &>(%s));", enumBacking(fld.Ref.Target), acc)
@@ -1447,11 +1453,12 @@ func (g *gen) emitDeserialize(f *hfile, fld *ir.Field) {
 		// `if (is.read(_v))`, not a bare read: a contradicting tag is a §7.3 skip,
 		// and the arm must then store nothing. The unconditional store this
 		// replaced wrote the zero-initialized temporary into the member instead.
-		if cond := cppClosedCond(fld.Kind, fld.Ref, "_v"); cond != "" {
+		if cond := cppDeclaredWidthCond(fld.Kind, fld.Ref, "_v"); cond != "" {
 			f.line("            { %s _v; if (is.read(_v)) { if (%s) { is.invalidate(); return; } %s = static_cast<%s>(_v); } }", tmp, cond, acc, dst)
 		} else {
-			// A bitfield declaring all 64 positions: every value is a declared
-			// combination, so the comparison would be a tautology.
+			// A bitfield whose highest declared `pos` is 32 or above implies a u64,
+			// which IS the accumulator the value arrives in, so nothing reachable
+			// can breach the bound and the comparison would be dead code.
 			f.line("            { %s _v; if (is.read(_v)) { %s = static_cast<%s>(_v); } }", tmp, acc, dst)
 		}
 	case ir.KindArray:
@@ -1549,17 +1556,12 @@ func (g *gen) nativeArrayRead(f *hfile, ind, target string, elem ir.Kind, ref *i
 	// longer decode empty (#112).
 	// The element-width bound rides along on this leg (generator#279): the
 	// declared width is a validity bound (§1/§7.1) and readArray enforces it, but
-	// only once armed -- unarmed it runs the unbounded decode, which masks.
+	// only once armed -- unarmed it runs the unbounded decode, which masks. An
+	// `enum` and a `bitfield` ride the same argument, their bound being the width
+	// their declaration implies (§1), so nothing follows the call: the interval
+	// states that bound whole, where the withdrawn set/mask bound needed a second
+	// pass over the destination to close the gap the hull left open.
 	fn, args := g.cppArrayCall(count, hasCount, g.cppElemBound(elem, ref))
-	// A CLOSED element whose declared set is not an interval needs the scan
-	// behind the call; see cppElemScan for why the gate on the return is what
-	// makes it safe on a decode that resumes across fed chunks.
-	if scan := g.cppElemScan(ind+"    ", target, elem, ref, depth); scan != "" {
-		f.line("%sif (sofab::%s(is, %s%s)) {", ind, fn, target, args)
-		f.line("%s", scan)
-		f.line("%s}", ind)
-		return
-	}
 	f.line("%ssofab::%s(is, %s%s);", ind, fn, target, args)
 }
 
@@ -1603,17 +1605,10 @@ func (g *gen) deserializeArray(f *hfile, ind, target string, elem ir.Kind, ref *
 			f.line("%s{ sofabgen::RawArray<%s, %s> %s{&%s}; is.readArray(%s, _count, %d); }",
 				ind, g.cppArrayContainer(elem, ref, items, count, elemMaxHas, elemMax), bk, tv, target, tv, cap)
 		} else {
+			// The implied-width interval rides in as the element bound and is the
+			// whole of the rule for this position, so nothing follows the read -- see
+			// nativeArrayRead, which says the same for the numeric and bitfield legs.
 			fn, args := g.cppArrayCall(count, hasCount, g.cppElemBound(elem, ref))
-			// The scan reads the MEMBER, not the RawArray view: the view exists
-			// only so the corelib can bind the scoped-enum elements through their
-			// backing integer, and the values it wrote are the member's own.
-			if scan := g.cppElemScan(ind+"    ", target, elem, ref, depth); scan != "" {
-				f.line("%s{ sofabgen::RawArray<%s, %s> %s{&%s}; if (sofab::%s(is, %s%s)) {",
-					ind, g.cppArrayContainer(elem, ref, items, count, elemMaxHas, elemMax), bk, tv, target, fn, tv, args)
-				f.line("%s", scan)
-				f.line("%s} }", ind)
-				break
-			}
 			f.line("%s{ sofabgen::RawArray<%s, %s> %s{&%s}; sofab::%s(is, %s%s); }",
 				ind, g.cppArrayContainer(elem, ref, items, count, elemMaxHas, elemMax), bk, tv, target, fn, tv, args)
 		}
@@ -1672,7 +1667,7 @@ func (g *gen) deserializeArray(f *hfile, ind, target string, elem ir.Kind, ref *
 		}
 	case ir.KindStruct, ir.KindUnion:
 		cont := g.cppArrayContainer(elem, ref, items, count, elemMaxHas, elemMax)
-		g.deserializeSeqInto(f, ind, target, g.typeName(ref.Key), count, cap, -1, nil, rv, cont, depth)
+		g.deserializeSeqInto(f, ind, target, g.typeName(ref.Key), count, cap, -1, nil, rv, cont)
 	case ir.KindArray:
 		cont := g.cppArrayContainer(elem, ref, items, count, elemMaxHas, elemMax)
 		// A row of native scalars IS readable by the corelib: MessageSeq/
@@ -1700,7 +1695,7 @@ func (g *gen) deserializeArray(f *hfile, ind, target string, elem ir.Kind, ref *
 			if items.HasCount {
 				rowCount = items.Count
 			}
-			g.deserializeSeqInto(f, ind, target, inner, count, cap, rowCount, items, rv, cont, depth)
+			g.deserializeSeqInto(f, ind, target, inner, count, cap, rowCount, items, rv, cont)
 			return
 		}
 		g.deserializeRowSeq(f, ind, target, items, count, cap, rv, cont, depth)
@@ -1834,8 +1829,7 @@ func (g *gen) deserializeRowSeq(f *hfile, ind, target string, items *ir.ArrayEle
 // The two are separate arguments because they are separate facts: "this is not a
 // row" and "this row has no declared count" both used to arrive as
 // elemCount == 0, and the second needs a receiver cap where the first needs
-// nothing. row also carries the row ELEMENT's kind, which is what the closed-set
-// scan below is built from.
+// nothing.
 //
 // A GROWABLE row publishes no capacity of its own, so one of those two numbers is
 // the only ceiling it has: without it a MessageSeq would size the row straight
@@ -1843,7 +1837,7 @@ func (g *gen) deserializeRowSeq(f *hfile, ind, target string, items *ir.ArrayEle
 // and both corelibs now refuse such a read rather than reading the omission as
 // unlimited (corelib-c-cpp#159, corelib-cpp#124). An INLINE row needs none of
 // this -- its capacity is the bound.
-func (g *gen) deserializeSeqInto(f *hfile, ind, target, elemType string, count, cap, elemCount int64, row *ir.ArrayElem, rv, container string, depth int) {
+func (g *gen) deserializeSeqInto(f *hfile, ind, target, elemType string, count, cap, elemCount int64, row *ir.ArrayElem, rv, container string) {
 	if g.clib {
 		if strings.HasPrefix(container, "sofab::InlineVector") {
 			// The inline container's capacity IS the schema `count`, so the
@@ -1874,68 +1868,37 @@ func (g *gen) deserializeSeqInto(f *hfile, ind, target, elemType string, count, 
 	// first is absent (§6.2.1). Without it an unbounded array of objects grew to
 	// whatever id the wire named -- the amplification a wrapper array's missing
 	// count header leaves open (MESSAGE_SPEC §5.1).
+	//
+	// A MATRIX ROW whose element is an `enum` or a `bitfield` -- the sixth
+	// position, array<array<enum|bitfield>> -- carries no bound of its own, and
+	// cannot: sofab::MessageSeq places the row and reads it with sofab::readArray
+	// itself, passing no element bound, and corelib-cpp offers none to pass. What
+	// that costs under the WIDTH rule is one row of the shared fixture and no
+	// more. The row is a container of the kind's backing integer, which this
+	// backend picks at exactly the width the declaration implies (§1), so every
+	// value INSIDE the bound decodes and keeps its value; only a value PAST it is
+	// wrong, and wrong in the way §7 forbids in terms -- "never silently truncated
+	// to the bound, and never silently masked" -- because readArray's unbounded
+	// static_cast has already made 256 into a one-byte row 0 before any generated
+	// line could look. It is reported as unenforced (the conformance suite's
+	// --storage-masked declension) rather than papered over with a rescan of the
+	// destination, which would only ever re-test values the cast already put back
+	// inside the bound.
 	g.emitSeqRead(f, ind, fmt.Sprintf("sofab::MessageSeq<%s> %s; %s.out = &%s; %s.cap = %d;%s%s", container, rv, rv, target, rv, cap,
 		g.cppSeqIndexCap(rv, cap), g.cppSeqRowCaps(rv, elemType, elemCount, row != nil)),
-		fmt.Sprintf("sofab::read(is, %s)", rv), g.cppRowScan(ind, target, row, depth))
-}
-
-// cppRowScan renders the closed-set re-check for a MATRIX row element -- the
-// sixth position, array<array<enum|bitfield>> -- or "" where the row element
-// declares no closed set.
-//
-// The row never reaches generated code element by element: sofab::MessageSeq
-// places the row and reads it with sofab::readArray itself, and it passes no
-// element bound at all, so nothing about the row's values was enforced before
-// this. That is the stronger half of the violation MESSAGE_SPEC §7 names -- a
-// value outside the bound is "never silently truncated to the bound, and never
-// silently masked" -- and it was measured: a bitfield row declaring positions
-// 0, 1 and 3 took 4 as [[4]] and 1000 as [[232]], both with an Ok verdict.
-//
-// The gate is the outer read's own return, exactly as it is for a flat array
-// (cppElemScan): is.read() on a collector reports false while the sequence is cut
-// short -- "a sequence cut short is NOT consumed" -- and true only once the
-// sequence closed, so the scan runs on rows that are all complete, never on a
-// tail one feed has not delivered yet. A §7.3 skip also returns false, and there
-// the destination was never written.
-//
-// What it still cannot reach is a value the ROW's own storage narrows before
-// generated code sees it: the row is a container of the bitfield's backing
-// integer, and sofab::readArray fills it with an unbounded static_cast, so 256
-// into a one-byte row is 0 -- a declared combination -- by the time the scan
-// looks. Closing that needs an element bound on sofab::MessageSeq, which
-// corelib-cpp does not carry; it is reported as unenforced rather than papered
-// over. The values BELOW the narrowing are all reached: the undeclared 4 and the
-// masked-but-still-undeclared 232 are both refused.
-func (g *gen) cppRowScan(ind, target string, row *ir.ArrayElem, depth int) string {
-	if row == nil {
-		return ""
-	}
-	inner := g.cppElemScan(ind+"        ", fmt.Sprintf("_sr%d", depth), row.Elem, row.ElemRef, depth)
-	if inner == "" {
-		return ""
-	}
-	return fmt.Sprintf("%s    for (auto &_sr%d : %s) {\n%s\n%s    }", ind, depth, target, inner, ind)
+		fmt.Sprintf("sofab::read(is, %s)", rv))
 }
 
 // emitSeqRead writes one wrapper-array read: the collector declaration and the
 // read itself.
 //
-// Nothing follows the read any more. A declared `count: N` is a CAPACITY, not a
-// length (MESSAGE_SPEC §3): the array's length is *highest present id + 1*
-// (§5.1), which the collector's placement already establishes, and N never adds
-// an element the wire did not carry. The refill this used to emit was the decode
+// Nothing follows the read. A declared `count: N` is a CAPACITY, not a length
+// (MESSAGE_SPEC §3): the array's length is *highest present id + 1* (§5.1),
+// which the collector's placement already establishes, and N never adds an
+// element the wire did not carry. The refill this used to emit was the decode
 // half of the superseded trim/fill pair — it turned ["a"] into ["a", "", ""] on
 // a count: 3 field, which is a different value.
-//
-// scan, where a row element is a CLOSED kind, is the re-check that runs on the
-// destination once the read reports the whole sequence arrived; see cppRowScan.
-func (g *gen) emitSeqRead(f *hfile, ind, decl, readCall string, scan ...string) {
-	if len(scan) > 0 && scan[0] != "" {
-		f.line("%s{ %s if (%s) {", ind, decl, readCall)
-		f.line("%s", scan[0])
-		f.line("%s} }", ind)
-		return
-	}
+func (g *gen) emitSeqRead(f *hfile, ind, decl, readCall string) {
 	f.line("%s{ %s %s; }", ind, decl, readCall)
 }
 
