@@ -4605,8 +4605,13 @@ A reimplementation is **conformant** when it reproduces these gates:
    own: `go`, `zig` (#293) and `typescript` compare verdicts across splits over
    their own fixtures; `rust`, `cpp`, `kotlin` and `c` feed a streaming
    round-trip. Adopting this driver there means giving their `streamdecode` the
-   chunk-size argument the four have (`tests/matrix/streamdecode_test.go` records
-   which backends carry it).
+   chunk-size argument (`tests/matrix/streamdecode_test.go` records which
+   backends carry it — `kotlin` gained one for the declared-width sweep, so it is
+   the next candidate). Its fixtures are the suite's own, and none of them is an
+   enum or bitfield array carrying an over-width element, which is why the
+   declared-width driver replays its own table rather than handing fixtures here:
+   this driver was built for accepting shapes and reaches four suites, and the
+   width rule's rejecting rows have to hold in all eleven.
 
    *Fixlen-array subtype* (`tests/conformance/lib/check_fixlen_array_subtype.py`):
    CORELIB_PLAN §4.8.1 fixes the fixlen-array decode order in five steps, and the
@@ -4930,8 +4935,37 @@ A reimplementation is **conformant** when it reproduces these gates:
    which makes the leg a check on the descriptor the generator emits. Its enum
    MATRIX row, the one cell both C++ legs decline, compiles and answers here:
    the row is a plain `int8_t[3]` the descriptor describes like any other.
-   `cpp` and `c` run the table on BOTH decode surfaces — `streamdecode` feeds one
-   byte per call, which is what proves a verdict does not depend on the chunking.
+   **Every row runs again, cut into chunks.** The one-shot verb hands the whole
+   message over at once, so it can only exercise a bound reached in one pass —
+   and that is not where every bound lives. Once an enum or bitfield ARRAY is
+   stored at the width its declaration implies (`java`, `kotlin`), the bound is
+   the corelib narrowing into that destination, reached from its BULK element
+   offer; a bulk fill RESUMES, with a half-arrived element sitting in the
+   decoder's accumulator until its last byte turns up, and an accumulator that is
+   not carried, a narrowing taken on a partial value or a bulk cursor rewound by
+   a suspend is invisible while the message arrives whole. CORELIB_PLAN §5.2
+   makes the outcome computable at any byte boundary and §5.2.3 fixes the verdict
+   precedence, so `--stream-verb` replays the WHOLE table through the harness's
+   streaming surface and requires the same verdict through the same category
+   channel, and for an accepted row the same leaf value and the same decoded
+   object. The rejecting rows are the half that needed it: an over-width element
+   split across a feed boundary must still be `INVALID`, and a driver that
+   replays only well-formed fixtures — as `check_chunk_invariance.py` does — can
+   never see that.
+
+   `--stream-sizes` sweeps several widths, passed to the harness as the argument
+   after the message name (`0` = the whole buffer in one feed, the degenerate
+   split, which separates "the streaming path is wrong" from "it is wrong *when
+   it suspends*"). It is given only where the harness actually reads that
+   argument — `java`, `kotlin`, `csharp`, `dart`, `python` (see
+   `tests/matrix/streamdecode_test.go`) — because a harness that ignores it would
+   let the summary claim a sweep that never happened; the other six are invoked
+   bare and drive their own fixed split, one byte per feed. A suite with no
+   streaming surface at all would decline by name with `--no-stream REASON`,
+   printed in the summary line, and the driver REFUSES to run with neither flag,
+   so the leg cannot go missing in silence. No suite declines today: all eleven
+   carry `streamdecode`. This is also why the `cpp` and `c` legs no longer loop
+   the table over two surfaces — one run now covers both.
    On `zig` it must run in the `--release=fast` harness the suite ships: before
    the guard existed the same bytes ABORTED a Debug build and were silently
    truncated by the release one (generator#517), so a Debug-only case would have

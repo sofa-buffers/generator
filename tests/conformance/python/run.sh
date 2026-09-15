@@ -1013,7 +1013,10 @@ for ENGINE in $ENGINES; do
     if [ "$ENGINE" = python ]; then export SOFAB_PUREPYTHON=1; else unset SOFAB_PUREPYTHON || true; fi
     require_engine "$ENGINE"
     python3 "$ROOT/tests/conformance/lib/check_declared_width_kinds.py" "python/$ENGINE" \
-        --cwd "$WORK/closedproj" --invalid-pattern 'SofaDecodeError' -- python3 harness.py
+        --cwd "$WORK/closedproj" --invalid-pattern 'SofaDecodeError' \
+        --stream-verb streamdecode --stream-sizes 1,2,3,0 \
+        --stream-invalid-pattern 'decode failed: INVALID|SofaDecodeError' \
+        -- python3 harness.py
 done
 unset SOFAB_PUREPYTHON || true
 # MESSAGE_SPEC §7.4 -- a field id REPEATED inside one scope (generator#523). The

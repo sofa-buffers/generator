@@ -879,7 +879,8 @@ python3 "$ROOT/tests/conformance/lib/check_declared_width_kinds.py" --emit-schem
 sed -i "s#\${SOFAB_GO_CORELIB}#$CORELIB#" "$WORK/closed/go.mod"
 ( cd "$WORK/closed" && GOFLAGS=-mod=mod go mod tidy >/dev/null 2>&1 && go build ./... )
 python3 "$ROOT/tests/conformance/lib/check_declared_width_kinds.py" "go" \
-    --cwd "$WORK/closed" --invalid-pattern 'invalid message' -- go run ./harness
+    --cwd "$WORK/closed" --invalid-pattern 'invalid message' \
+    --stream-verb streamdecode -- go run ./harness
 
 # The verdict must not depend on the chunking either (CORELIB_PLAN S6.4 / S7.2
 # item 4: a chunk boundary MUST NOT affect the outcome). Every malformed fixture

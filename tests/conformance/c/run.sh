@@ -739,16 +739,10 @@ python3 "$ROOT/tests/conformance/lib/check_declared_width_kinds.py" --emit-schem
 ( cd "$ROOT" && go run ./cmd/sofabgen --config "$WORK/proj.yaml" --lang c \
     --in "$WORK/closed.yaml" --out "$WORK/closed" )
 make -C "$WORK/closed" SOFAB_C_CORELIB="$CORELIB" >/dev/null
-for surface in decode streamdecode; do
-    if [ "$surface" = decode ]; then
-        CW_OPT=--status-verb; CW_VAL=status
-    else
-        CW_OPT=--invalid-pattern; CW_VAL='decode error: INVALID'
-    fi
-    python3 "$ROOT/tests/conformance/lib/check_declared_width_kinds.py" "c/$surface" \
-        --verb "$surface" "$CW_OPT" "$CW_VAL" \
-        -- "$WORK/closed/harness/harness"
-done
+python3 "$ROOT/tests/conformance/lib/check_declared_width_kinds.py" "c" \
+    --status-verb status \
+    --stream-verb streamdecode --stream-invalid-pattern 'decode error: INVALID' \
+    -- "$WORK/closed/harness/harness"
 
 echo "==> shared-vector decode conformance (skip matrix)"
 # generator#444: each vector's DENSE bytes fed into a message that declares u64

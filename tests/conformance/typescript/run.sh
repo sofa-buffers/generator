@@ -1085,7 +1085,9 @@ python3 "$ROOT/tests/conformance/lib/check_declared_width_kinds.py" --emit-schem
 gen "$WORK/closed.yaml" "$WORK/closed"
 ln -s "$WORK/ex/node_modules" "$WORK/closed/node_modules"
 python3 "$ROOT/tests/conformance/lib/check_declared_width_kinds.py" "typescript" \
-    --cwd "$WORK/closed" --status-verb status -- npx tsx harness.ts
+    --cwd "$WORK/closed" --status-verb status \
+    --stream-verb streamdecode --stream-invalid-pattern 'INVALID_MSG' \
+    -- npx tsx harness.ts
 # MESSAGE_SPEC §7.4 -- a field id REPEATED inside one scope (generator#523). The
 # rule has two halves and this checks BOTH on one message: a re-opened SEQUENCE
 # continues its scope, so struct/union members MERGE and unrecurring children are

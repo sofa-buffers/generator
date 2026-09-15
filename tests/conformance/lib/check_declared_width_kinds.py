@@ -8,6 +8,8 @@ Usage:
                         [--status-complete NAME] [--invalid-pattern REGEX]
                         [--no-values] [--skip-positions LIST]
                         [--storage-masked LIST]
+                        (--stream-verb VERB [--stream-sizes LIST]
+                         [--stream-invalid-pattern REGEX] | --no-stream REASON)
                         -- <harness argv...>
 
 MESSAGE_SPEC §1 (doc `382159e`, PR #95) binds both leaf types to the WIDTH their
@@ -95,6 +97,43 @@ INVALID). An accepted row additionally asserts the decoded VALUE, so a decoder
 that passes by refusing everything fails the accepting half and one that passes
 by keeping everything fails the refusing half.
 
+## Every row again, cut into chunks
+
+The one-shot verb hands the whole message over at once, so it can only ever
+exercise a bound that is reached in one pass. That is not where every bound
+lives: once an array element is stored at the width it declares, the bound is
+the corelib narrowing into that destination, reached from its BULK element
+offer -- and a bulk fill RESUMES, with a half-arrived element sitting in the
+decoder's accumulator until its last byte turns up. An accumulator that is not
+carried, a narrowing taken on a partial value, a bulk cursor rewound by a
+suspend: none of it is visible while the message arrives in one piece.
+
+CORELIB_PLAN §5.2 makes the decode outcome computable at ANY byte boundary and
+§5.2.3 fixes the verdict precedence, so the property is:
+
+    the verdict AND the decoded value do not depend on where the chunks were cut
+
+`--stream-verb` replays EVERY row of the table through the harness's streaming
+surface and asserts exactly that -- the same verdict, through the same category
+channel, and for an accepted row the same leaf value and the same decoded
+object as the one-shot leg produced. The rejecting rows are the half this is
+really for: an over-width element split across a feed boundary must still be
+INVALID, and a driver that only replays well-formed fixtures cannot see it.
+
+`--stream-sizes` sweeps several chunk widths, passed to the harness as the
+argument after the message name (`0` = the whole buffer in one feed, the
+degenerate split, which separates "the streaming path is wrong" from "it is
+wrong WHEN IT SUSPENDS"). Give it only where the harness actually reads that
+argument: a harness that ignores it drives its own fixed split -- one byte per
+feed throughout this family -- and sweeping widths it never honours would
+report coverage it did not have. Omit the flag there and the streaming verb is
+invoked bare, once per row, on whatever split the harness itself uses.
+
+A suite whose harness has no streaming surface at all declines with
+`--no-stream REASON`, and the reason prints in the final line. One of the two
+flags is REQUIRED: a suite must say which, so the leg can never go missing in
+silence.
+
 The accepted rows include the ZERO value of both kinds and, for the bitfield,
 every declared combination -- §1 is explicit that all of them are valid, and a
 mask check written as `v == 0 or v == one_declared_flag` would pass a
@@ -103,7 +142,9 @@ single-flag probe.
 
 import argparse
 import base64
+import concurrent.futures
 import json
+import os
 import re
 import subprocess
 import sys
@@ -491,6 +532,10 @@ def main():
     ap.add_argument("--no-values", action="store_true")
     ap.add_argument("--skip-positions", default="")
     ap.add_argument("--storage-masked", default="")
+    ap.add_argument("--stream-verb", default=None)
+    ap.add_argument("--stream-sizes", default="")
+    ap.add_argument("--stream-invalid-pattern", default=None)
+    ap.add_argument("--no-stream", default=None)
 
     argv = sys.argv[1:]
     if "--" in argv:
@@ -546,6 +591,45 @@ def main():
             "safety-checked abort would score as a correct INVALID")
     invalid_re = re.compile(args.invalid_pattern) if args.invalid_pattern else None
 
+    # The chunked replay is declared the same way: a suite either names its
+    # streaming verb or says why it has none, and the declension prints. Leaving
+    # both out would let the leg go missing in silence, which is the failure mode
+    # every declension in this driver exists to rule out.
+    if args.stream_verb and args.no_stream:
+        die("--stream-verb and --no-stream are mutually exclusive: a suite either "
+            "replays the table through its streaming surface or says why it cannot")
+    if not args.stream_verb and not args.no_stream:
+        die("neither --stream-verb nor --no-stream was given; the chunked replay "
+            "would then be missing in silence. Name the harness's streaming verb, "
+            "or decline it with --no-stream '<reason>'.")
+    splits = []
+    stream_re = None
+    if args.stream_verb:
+        # A rejecting row needs a CATEGORY on this leg too, and --status-verb
+        # cannot serve it: that verb runs the ONE-SHOT decoder, so using it here
+        # would assert the one-shot verdict twice and the chunked one never.
+        pattern = args.stream_invalid_pattern or args.invalid_pattern
+        if not pattern:
+            die("--stream-verb needs a category channel for its rejecting rows: "
+                "give --stream-invalid-pattern, or --invalid-pattern, which it "
+                "falls back to. --status-verb cannot serve this leg -- it runs the "
+                "one-shot decoder, and would assert that verdict twice while "
+                "asserting the chunked one never")
+        stream_re = re.compile(pattern)
+        raw = [x.strip() for x in args.stream_sizes.split(",") if x.strip()]
+        for item in raw:
+            if not item.isdigit():
+                die("--stream-sizes: %r is not a chunk size (0 = the whole buffer "
+                    "in one feed)" % item)
+        if raw and not args.message:
+            die("--stream-sizes passes the size as the argument AFTER the message "
+                "name, so --message may not be empty")
+        # No sizes given: the harness reads no size argument and drives its own
+        # fixed split -- one byte per feed throughout this family. Passing widths
+        # it would ignore is worse than not sweeping at all, because the summary
+        # would then claim a sweep that never happened.
+        splits = [int(x) for x in raw] or [None]
+
     if not args.label:
         die("no label given (the suite name this run is reported under)")
     if not harness:
@@ -554,9 +638,67 @@ def main():
     msg = [args.message] if args.message else []
     table = build_table(live, masked)
 
+    def where(size):
+        if size is None:
+            return "the harness's own split"
+        return "the whole buffer in one feed" if size == 0 else "%d-byte chunks" % size
+
+    # `None` is a legitimate split (the harness's own), so the one-shot leg needs
+    # a marker of its own rather than sharing it.
+    one_shot_leg = object()
+
+    def tag(size):
+        if size is one_shot_leg:
+            return ""
+        return " through %s at %s" % (args.stream_verb, where(size))
+
+    # Every harness invocation this run makes, collected BEFORE any of them runs.
+    # Process startup dominates -- a JVM, a `dotnet` host or an `npx tsx` costs
+    # far more than decoding nine bytes -- and the runs are independent, so a
+    # pool turns minutes into seconds. Results are keyed and judged in TABLE
+    # order afterwards, so which failure is reported never depends on which
+    # process happened to finish first.
+    jobs = []
     for name, wire, expect, value, why in table:
-        rc, out, err = run(harness + [args.verb] + msg, args.cwd, wire)
+        jobs.append(((name, "verb", None), harness + [args.verb] + msg, wire))
+        if args.status_verb:
+            jobs.append(((name, "status", None),
+                         harness + [args.status_verb] + msg, wire))
+        for size in splits:
+            jobs.append(((name, "stream", size),
+                         harness + [args.stream_verb] + msg
+                         + ([] if size is None else [str(size)]), wire))
+    with concurrent.futures.ThreadPoolExecutor(
+            max_workers=min(8, os.cpu_count() or 2)) as pool:
+        done = dict(zip([j[0] for j in jobs],
+                        pool.map(lambda j: run(j[1], args.cwd, j[2]), jobs)))
+
+    def check_value(name, out, value, why, wire, size):
+        """Assert the row's leaf in a harness's printed JSON; return the object."""
+        obj = decoded_json(out)
+        if obj is None:
+            die("[%s] %s%s -- the harness printed no JSON object; got:\n%s"
+                % (args.label, name, tag(size), out.strip()))
+        leaf, want, depth = value
+        got = find_leaf(obj, leaf)
+        if got is None:
+            die("[%s] %s%s -- the harness printed no %r; got:\n%s"
+                % (args.label, name, tag(size), leaf, out.strip()))
+        got = unwrap(got, depth, "[%s] %s%s" % (args.label, name, tag(size)))
+        if isinstance(got, str):
+            try:
+                got = int(got, 0)
+            except ValueError:
+                pass
+        if isinstance(got, bool) or not isinstance(got, (int, float)) or int(got) != want:
+            die("[%s] %s%s decoded, but %s is %r -- want %d (%s); bytes: %s"
+                % (args.label, name, tag(size), leaf, got, want, why, wire.hex()))
+        return obj
+
+    for name, wire, expect, value, why in table:
+        rc, out, err = done[(name, "verb", None)]
         text = (out + err).strip()
+        one_shot = None
 
         if expect == "invalid":
             if rc == 0:
@@ -569,45 +711,70 @@ def main():
                     "or a safety-checked abort would read the same. rc=%d, output:\n%s"
                     % (args.label, name, args.invalid_pattern, rc, text))
             if args.status_verb:
-                _, sout, serr = run(harness + [args.status_verb] + msg,
-                                    args.cwd, wire)
+                _, sout, serr = done[(name, "status", None)]
                 got = (sout.strip().splitlines() or [""])[0]
                 if got != args.status_invalid:
                     die("[%s] %s -- must be %s, got %r%s"
                         % (args.label, name, args.status_invalid, got,
                            ("\n" + serr.strip()) if serr.strip() else ""))
-            continue
+        else:
+            if rc != 0:
+                die("[%s] %s must DECODE -- %s; rc=%d:\n%s"
+                    % (args.label, name, why, rc, text))
+            if args.status_verb:
+                _, sout, serr = done[(name, "status", None)]
+                got = (sout.strip().splitlines() or [""])[0]
+                if got != args.status_complete:
+                    die("[%s] %s -- must decode %s, got %r%s"
+                        % (args.label, name, args.status_complete, got,
+                           ("\n" + serr.strip()) if serr.strip() else ""))
+            if not args.no_values:
+                one_shot = check_value(name, out, value, why, wire, one_shot_leg)
 
-        if rc != 0:
-            die("[%s] %s must DECODE -- %s; rc=%d:\n%s"
-                % (args.label, name, why, rc, text))
-        if args.status_verb:
-            _, sout, serr = run(harness + [args.status_verb] + msg, args.cwd, wire)
-            got = (sout.strip().splitlines() or [""])[0]
-            if got != args.status_complete:
-                die("[%s] %s -- must decode %s, got %r%s"
-                    % (args.label, name, args.status_complete, got,
-                       ("\n" + serr.strip()) if serr.strip() else ""))
-        if args.no_values:
-            continue
-        obj = decoded_json(out)
-        if obj is None:
-            die("[%s] %s -- the harness printed no JSON object; got:\n%s"
-                % (args.label, name, out.strip()))
-        leaf, want, depth = value
-        got = find_leaf(obj, leaf)
-        if got is None:
-            die("[%s] %s -- the harness printed no %r; got:\n%s"
-                % (args.label, name, leaf, out.strip()))
-        got = unwrap(got, depth, "[%s] %s" % (args.label, name))
-        if isinstance(got, str):
-            try:
-                got = int(got, 0)
-            except ValueError:
-                pass
-        if isinstance(got, bool) or not isinstance(got, (int, float)) or int(got) != want:
-            die("[%s] %s decoded, but %s is %r -- want %d (%s); bytes: %s"
-                % (args.label, name, leaf, got, want, why, wire.hex()))
+        # ...and the same bytes again, cut into chunks. The verdict and the value
+        # must be the ones above at EVERY split: where an array element is stored
+        # at its declared width the bound is the corelib narrowing into that
+        # destination, reached from a bulk fill that suspends and resumes, and a
+        # message that arrives in one piece never makes it do either.
+        for size in splits:
+            src, sout, serr = done[(name, "stream", size)]
+            stext = (sout + serr).strip()
+            if expect == "invalid":
+                if src == 0:
+                    die("[%s] %s must be INVALID%s as well -- %s; the one-shot "
+                        "`%s` refused it and the chunked decode accepted it, so "
+                        "the verdict depends on where the bytes were cut "
+                        "(CORELIB_PLAN §5.2). bytes: %s\n%s"
+                        % (args.label, name, tag(size), why, args.verb,
+                           wire.hex(), stext))
+                if not stream_re.search(stext):
+                    die("[%s] %s was refused%s, but not as INVALID: nothing in "
+                        "the harness's output matches %r, so a panic, an assertion "
+                        "failure or a safety-checked abort would read the same. "
+                        "rc=%d, output:\n%s"
+                        % (args.label, name, tag(size),
+                           args.stream_invalid_pattern or args.invalid_pattern,
+                           src, stext))
+                continue
+            if src != 0:
+                die("[%s] %s must DECODE%s as well -- %s; the one-shot `%s` "
+                    "accepted it. rc=%d, bytes: %s\n%s"
+                    % (args.label, name, tag(size), why, args.verb, src,
+                       wire.hex(), stext))
+            if args.no_values:
+                continue
+            chunked = check_value(name, sout, value, why, wire, size)
+            if one_shot is not None and chunked != one_shot:
+                # The verdict agreeing while the MESSAGE does not is the resume
+                # bug a leaf-only assertion cannot see: a decoder that comes back
+                # from a suspend in the wrong field keeps the row's own value and
+                # loses something beside it.
+                die("[%s] %s decoded%s and its %s is right, but the decoded "
+                    "MESSAGE is not the one `%s` produced from the same bytes "
+                    "(CORELIB_PLAN §5.2/§6.0).\n  one-shot: %s\n  chunked : %s"
+                    % (args.label, name, tag(size), value[0], args.verb,
+                       json.dumps(one_shot, sort_keys=True),
+                       json.dumps(chunked, sort_keys=True)))
 
     note = ""
     if skip:
@@ -615,10 +782,16 @@ def main():
     if masked:
         note += "; storage-masked (the beyond-storage value never reaches "
         note += "generated code): " + spell(masked)
+    if args.no_stream:
+        note += "; chunked replay DECLINED: " + args.no_stream
+    else:
+        note += "; %d chunked replays through %s [%s]" % (
+            len(table) * len(splits), args.stream_verb,
+            ", ".join("the harness's own split (one byte per feed)" if s is None
+                      else "whole" if s == 0 else str(s) for s in splits))
     print("==> [%s] enum/bitfield declared width: %d rows over %d cell(s) OK%s"
           % (args.label, len(table), len(live), note))
     return 0
-
 
 if __name__ == "__main__":
     sys.exit(main())

@@ -830,7 +830,9 @@ python3 "$ROOT/tests/conformance/lib/check_declared_width_kinds.py" --emit-schem
 ( cd "$ROOT" && go run ./cmd/sofabgen --config "$WORK/cfg.yaml" --lang csharp --in "$WORK/closed.yaml" --out "$WORK/closed" )
 ( cd "$WORK/closed" && dotnet build -v q >/dev/null )
 python3 "$ROOT/tests/conformance/lib/check_declared_width_kinds.py" "csharp" \
-    --invalid-pattern 'InvalidMessage' -- dotnet "$WORK/closed/bin/Debug/net9.0/harness.dll"
+    --invalid-pattern 'InvalidMessage' \
+    --stream-verb streamdecode --stream-sizes 1,2,3,0 \
+    -- dotnet "$WORK/closed/bin/Debug/net9.0/harness.dll"
 
 # CORELIB_PLAN S7.2 item 8 -- the shared file's `sequence_growth` block
 # (generator#449). A wrapper array carries no element count: its length is
