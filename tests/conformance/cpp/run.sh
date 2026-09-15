@@ -686,29 +686,37 @@ run_variant() {
     # width, so the destination SIZE -- the only bound the C entry point
     # sofab_istream_read_field carries, its option word being wire type, fixlen
     # subtype and string termination -- IS the S1 bound on the c-cpp leg. Nothing
-    # about a set or a mask has to cross that interface any more, and the leg that
-    # used to be declined in full now runs every cell the pure one does, and one
-    # more.
+    # about a set or a mask has to cross that interface any more, and the legs that
+    # used to be declined in full now run every cell the pure ones do, with none of
+    # them masked.
     #
-    # TWO DECLENSIONS, both corelib limits and neither a relaxed rule. Each is
-    # named per (position, kind), so what is declined is one cell and not one
-    # position:
+    # ONE DECLENSION is left, a corelib limit and not a relaxed rule. It is named
+    # per (position, kind), so what is declined is one cell and not one position:
     #
-    #   --skip-positions matrix:enum, on BOTH legs. array<array<enum>> does not
-    #   COMPILE on either C++ corelib: the row reaches sofab::readArray as a span
-    #   of the scoped enum and hits "Unsupported span element type in
-    #   IStream::read()" (corelib-cpp/include/sofab/sofab.hpp). Pre-existing and
-    #   unrelated to this rule -- reproduced identically on origin/main -- but a
-    #   shape that does not compile cannot be declared in the harness's schema
-    #   either.
-    #
-    #   --storage-masked matrix:bitfield, on the PURE leg only. sofab::MessageSeq
+    #   --storage-masked matrix:bitfield, on the PURE legs only. sofab::MessageSeq
     #   places the row and reads it with an unbounded sofab::readArray, passing no
     #   element bound and offering none to pass, so 256 into a one-byte row is 0 --
     #   an in-width value -- before any generated line could look. Only the
     #   over-width rows are dropped; the undeclared-bit row is an accepting one and
     #   still runs, with its value asserted. corelib-c-cpp needs no such declension
     #   because its row destination carries its size into the read.
+    #
+    # matrix:enum used to be declined here as well, on BOTH legs, because
+    # array<array<enum>> reached sofab::readArray as a span of the scoped enum and
+    # failed to compile ("Unsupported span element type in IStream::read()"). That
+    # is over: generator#531 routes an enum matrix row through a generated row
+    # collector that wraps the element vector in sofabgen::RawArray and calls
+    # readArray with an explicit sofab::ElemBound, so the shape both builds and
+    # carries the S1 bound. Measured on all four legs before the cell was put back:
+    # every configuration compiles, and every configuration rejects the over- and
+    # under-width matrix enum rows. The bitfield twin is NOT on that path -- it is
+    # a plain integer row and still goes through sofab::MessageSeq -- which is why
+    # exactly one of the two matrix cells is still masked on the pure legs.
+    #
+    # Cells covered per leg (six positions x two kinds = 12):
+    #   c-cpp-dynamic, c-cpp-static : 12/12, 108 rows, nothing declined.
+    #   cpp, cpp-static             : 12/12, 106 rows; the two over-width
+    #                                 matrix:bitfield rows are storage-masked.
     #
     # The c-cpp leg's category channel is the harness's own "decode error", not the
     # named verdict the pure leg matches: sofab::Result on that wrapper carries no
@@ -720,7 +728,7 @@ run_variant() {
     echo "==> [$label] enum/bitfield: the declared width is the bound (S1, generator#516)"
     { echo "version: 1"; echo "messages:"; } > "$WORK/closed-$label.yaml"
     python3 "$ROOT/tests/conformance/lib/check_declared_width_kinds.py" --emit-schema \
-        --skip-positions matrix:enum >> "$WORK/closed-$label.yaml"
+        >> "$WORK/closed-$label.yaml"
     ( cd "$ROOT" && go run ./cmd/sofabgen --config "$WORK/cfg-$label.yaml" --lang cpp \
         --in "$WORK/closed-$label.yaml" --out "$WORK/closed-$label" )
     make -C "$WORK/closed-$label" "$@" >/dev/null
@@ -733,7 +741,7 @@ run_variant() {
     fi
     python3 "$ROOT/tests/conformance/lib/check_declared_width_kinds.py" "$label" \
         --invalid-pattern "$CLOSED_PATTERN" \
-        --skip-positions matrix:enum --storage-masked "$CLOSED_MASKED" \
+        --storage-masked "$CLOSED_MASKED" \
         --stream-verb streamdecode \
         -- "$WORK/closed-$label/harness/harness"
 

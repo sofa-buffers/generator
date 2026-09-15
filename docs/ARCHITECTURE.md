@@ -4911,20 +4911,23 @@ A reimplementation is **conformant** when it reproduces these gates:
    array positions, so a suite that probes only the scalar cannot see a fix that
    covered a third of the job.
 
-   Two declensions exist, both **by name** rather than by silence, both stating a
-   corelib limit rather than relaxing the rule, and both spelled per
+   Two declension forms exist, both **by name** rather than by silence, both
+   stating a corelib limit rather than relaxing the rule, and both spelled per
    `position:kind` cell so a target declines exactly what it cannot reach:
    `--skip-positions` drops a cell the target cannot express at all, and leaves it
    out of `--emit-schema` too, since a harness for a shape that does not build
    cannot be built; `--storage-masked` drops the beyond-width row alone, where the
    corelib narrows the element before generated code can see it. `cpp` is the only
-   target that declines anything, and only on its pure-corelib legs:
-   `--storage-masked matrix:bitfield`, because `sofab::MessageSeq` reads the row
-   with an unbounded cast. It also still passes `--skip-positions matrix:enum`,
-   which predates generator#531 — that fix routed an enum row through the
-   generated row collector and `sofabgen::RawArray`, and the shape both compiles
-   and enforces the bound now, so that cell is declined more broadly than the
-   target still requires. What the one real declension leaves open is listed under
+   target that declines anything, it declines exactly one cell, and only on its
+   pure-corelib legs: `--storage-masked matrix:bitfield`, because
+   `sofab::MessageSeq` reads the row with an unbounded cast. No target skips a
+   position any more. `--skip-positions matrix:enum` used to stand on all four
+   `cpp` legs, for a shape that did not compile; generator#531 routed an enum row
+   through the generated row collector and `sofabgen::RawArray`, and the cell was
+   re-measured on each leg — it builds and enforces the bound everywhere — so the
+   skip is gone and all four legs now cover 12/12 cells: 108 rows on the two
+   `c-cpp` legs, 106 on the two pure ones, the two missing rows being the masked
+   `matrix:bitfield` pair. What that one declension leaves open is listed under
    "Decode verdict" above.
 
    A rejecting row is asserted by exit status AND by a category channel — either
