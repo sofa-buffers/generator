@@ -989,7 +989,12 @@ func TestKotlinProjectMode(t *testing.T) {
 	// print is the only way a suite sees the terminal guard at all.
 	for _, want := range []string{
 		"val dec = M.decoder()",
-		"dec.feed(one)",
+		// The chunk width is an argument: one split only shows the decoder resumed
+		// once, and a sweep is what turns that into "where the cut lands does not
+		// matter" (CORELIB_PLAN §5.2). `0` means the whole buffer in one feed.
+		"val csz = if (args.size > 2) args[2].toInt() else 1",
+		"val step = if (csz > 0) csz else maxOf(input.size, 1)",
+		"dec.feed(input.copyOfRange(off, end))",
 		"dec.finish()",
 		"val fin = try { dec.finish(); \"RETURNED\" }",
 		"catch (fe: SofabException) { fe.error.name }",

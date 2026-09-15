@@ -925,6 +925,7 @@ python3 "$ROOT/tests/conformance/lib/check_declared_width_kinds.py" --emit-schem
 build "$WORK/closed.yaml" "$WORK/closed"
 python3 "$ROOT/tests/conformance/lib/check_declared_width_kinds.py" "dart" \
     --status-verb trydecode --invalid-pattern 'decode failed: invalid' \
+    --stream-verb streamdecode --stream-sizes 1,2,3,0 \
     -- "$WORK/closed/harness"
 # MESSAGE_SPEC §7.4 -- a field id REPEATED inside one scope (generator#523). The
 # rule has two halves and this checks BOTH on one message: a re-opened SEQUENCE

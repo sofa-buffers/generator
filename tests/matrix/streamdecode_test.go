@@ -97,17 +97,23 @@ func TestEveryHarnessEmitsStreamDecode(t *testing.T) {
 // a half-read varint, a payload accumulator that is not carried, a scope stack
 // that unwinds one level too far. `0` feeds the whole message in one call.
 //
-// Four entries, not eleven, and that is deliberate — generator#413 scopes the
-// sweep to the suites that had NO chunked check at all. The other seven already
-// run one of their own (go/zig/typescript compare verdicts across splits;
-// rust/cpp/kotlin/c feed a streaming round-trip), and their `streamdecode` keeps
-// the one-byte default. Adding a target here is what wires it into
-// tests/conformance/lib/check_chunk_invariance.py.
+// Five entries, not eleven, and that is deliberate. generator#413 scoped the
+// sweep to the four suites that had NO chunked check at all; generator#516 added
+// kotlin, because that is one of the two backends where an enum or bitfield
+// ARRAY is stored at the width its declaration implies and filled in BULK by the
+// corelib — so the §1 width bound is applied by a fill that suspends mid-element,
+// and a single split width is thin evidence for a bound that lives there. The
+// remaining six already run a chunked check of their own (go/zig/typescript
+// compare verdicts across splits; rust/cpp/c feed a streaming round-trip) and
+// their `streamdecode` keeps the one-byte default, which
+// tests/conformance/lib/check_declared_width_kinds.py drives them at. Adding a
+// target here is what lets a driver sweep several widths on it.
 var chunkSizeBackends = map[string]string{
 	"java":   "int csz = args.length > 2 ? Integer.parseInt(args[2]) : 1;",
 	"csharp": "var csz = args.Length > 2 ? int.Parse(args[2]) : 1;",
 	"python": "csz = int(sys.argv[3]) if len(sys.argv) > 3 else 1",
 	"dart":   "final csz = args.length > 2 ? int.parse(args[2]) : 1;",
+	"kotlin": "val csz = if (args.size > 2) args[2].toInt() else 1",
 }
 
 func TestChunkSizeArgumentWhereTheSweepRuns(t *testing.T) {
@@ -134,7 +140,7 @@ func TestChunkSizeArgumentWhereTheSweepRuns(t *testing.T) {
 		}
 		if !found {
 			t.Errorf("%s: harness must parse a chunk-size argument (%q) — without it "+
-				"check_chunk_invariance.py can only ever feed one split width", lang, want)
+				"a driver can only ever feed one split width", lang, want)
 		}
 	}
 }

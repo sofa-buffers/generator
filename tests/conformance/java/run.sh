@@ -885,7 +885,9 @@ echo "==> enum/bitfield: bounded by the width the declaration implies (S1, gener
 python3 "$ROOT/tests/conformance/lib/check_declared_width_kinds.py" --emit-schema >> "$WORK/closed.yaml"
 build "$WORK/closed.yaml" "$WORK/closed"
 python3 "$ROOT/tests/conformance/lib/check_declared_width_kinds.py" "java" \
-    --invalid-pattern 'INVALID_MSG' -- java -jar "$WORK/closed/target/harness.jar"
+    --invalid-pattern 'INVALID_MSG' \
+    --stream-verb streamdecode --stream-sizes 1,2,3,0 \
+    -- java -jar "$WORK/closed/target/harness.jar"
 
 # CORELIB_PLAN S7.2 item 8 -- the shared file's `sequence_growth` block
 # (generator#449). A wrapper array carries no element count: its length is

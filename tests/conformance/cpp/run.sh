@@ -731,12 +731,11 @@ run_variant() {
         CLOSED_PATTERN='decode error'
         CLOSED_MASKED=''
     fi
-    for surface in decode streamdecode; do
-        python3 "$ROOT/tests/conformance/lib/check_declared_width_kinds.py" "$label/$surface" \
-            --verb "$surface" --invalid-pattern "$CLOSED_PATTERN" \
-            --skip-positions matrix:enum --storage-masked "$CLOSED_MASKED" \
-            -- "$WORK/closed-$label/harness/harness"
-    done
+    python3 "$ROOT/tests/conformance/lib/check_declared_width_kinds.py" "$label" \
+        --invalid-pattern "$CLOSED_PATTERN" \
+        --skip-positions matrix:enum --storage-masked "$CLOSED_MASKED" \
+        --stream-verb streamdecode \
+        -- "$WORK/closed-$label/harness/harness"
 
     echo "==> [$label] shared-vector byte-exact conformance"
     ( cd "$ROOT" && go run ./cmd/sofabgen --config "$WORK/cfg-$label.yaml" --lang cpp --in "$WORK/conf.yaml" --out "$WORK/conf-$label" )

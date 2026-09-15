@@ -201,11 +201,24 @@ func (g *gen) mainHarness(s *ir.Schema) []byte {
 		// An INCOMPLETE per feed is the normal verdict for a chunk that ended
 		// mid-field: it says the BYTES ended there, not that the message is bad.
 		// Only finish() decides on the message as a whole.
-		f.line("                    val one = ByteArray(1)")
+		// The chunk SIZE is an argument, defaulting to 1. A single split width
+		// only shows that the decoder resumed once; sweeping several is what turns
+		// that into "where the cut lands does not matter", which is the property
+		// CORELIB_PLAN §5.2/§6.0 actually claims. `0` feeds the whole message in
+		// one go -- the degenerate split, which separates "the streaming path is
+		// wrong" from "it is wrong when it suspends". It matters most for an enum
+		// or bitfield ARRAY: its elements are stored at the width the declaration
+		// implies and filled in BULK by the corelib, so the width bound is applied
+		// by a fill that suspends mid-element, and no unchunked feed makes it.
+		// tests/conformance/lib/check_declared_width_kinds.py drives the sweep.
+		f.line("                    val csz = if (args.size > 2) args[2].toInt() else 1")
+		f.line("                    val step = if (csz > 0) csz else maxOf(input.size, 1)")
 		f.line("                    val back = try {")
-		f.line("                        for (b in input) {")
-		f.line("                            one[0] = b")
-		f.line("                            dec.feed(one)")
+		f.line("                        var off = 0")
+		f.line("                        while (off < input.size) {")
+		f.line("                            val end = minOf(off + step, input.size)")
+		f.line("                            dec.feed(input.copyOfRange(off, end))")
+		f.line("                            off = end")
 		f.line("                        }")
 		f.line("                        dec.finish()")
 		f.line("                    } catch (e: Exception) {")

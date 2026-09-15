@@ -763,7 +763,9 @@ echo "==> enum/bitfield: bounded by the width the declaration implies (S1, gener
 python3 "$ROOT/tests/conformance/lib/check_declared_width_kinds.py" --emit-schema >> "$WORK/closed.yaml"
 build "$WORK/closed.yaml" "$WORK/closed"
 python3 "$ROOT/tests/conformance/lib/check_declared_width_kinds.py" "kotlin" \
-    --invalid-pattern 'INVALID_MSG' -- "$WORK/closed/build/install/harness/bin/harness"
+    --invalid-pattern 'INVALID_MSG' \
+    --stream-verb streamdecode --stream-sizes 1,2,3,0 \
+    -- "$WORK/closed/build/install/harness/bin/harness"
 
 # Invalid UTF-8 in a MATERIALIZED string is INVALID (MESSAGE_SPEC S8): a Kotlin
 # String is a S6.4.1 Unicode type, so the strict path is the only non-mutating
