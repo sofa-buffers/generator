@@ -871,12 +871,15 @@ echo "==> declared-width reject OK (scalar and array element)"
 # decoder still carrying the withdrawn set/mask bound fails exactly the two rows
 # that tell the rules apart.
 #
-# Java keeps both kinds in a `long`, i.e. at the accumulator's own width, and had
-# no bound at all: 2^40 into a bitfield declaring bits 0, 1 and 3 -- a u8 --
-# decoded and was kept verbatim at all twelve stores. The two array positions
-# additionally rode the corelib bulk offer, which states the DESTINATION's width
-# and so states nothing for a `long[]`; the offer is declined for both kinds now,
-# so the elements come back through the callback that carries the declared width.
+# Java keeps every SCALAR-family position in a `long`, i.e. at the accumulator's
+# own width, and had no bound at all: 2^40 into a bitfield declaring bits 0, 1
+# and 3 -- a u8 -- decoded and was kept verbatim at all twelve stores. The two
+# ARRAY positions are backed by the implied width itself (a `byte[]` for both
+# declarations here) and ride the corelib bulk offer, which states the
+# DESTINATION's width: the corelib refuses an element that does not fit it, so
+# these two cells exercise the corelib's half of the rule rather than a generated
+# guard. The generated guard is still emitted behind them, for a corelib that
+# declines the offer.
 echo "==> enum/bitfield: bounded by the width the declaration implies (S1, generator#516)"
 { echo "version: 1"; echo "messages:"; } > "$WORK/closed.yaml"
 python3 "$ROOT/tests/conformance/lib/check_declared_width_kinds.py" --emit-schema >> "$WORK/closed.yaml"
