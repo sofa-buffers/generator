@@ -1081,10 +1081,10 @@ python3 "$ROOT/tests/conformance/lib/check_growth.py" \
 # callback, so the bound runs on the raw accumulator ahead of any store.
 echo "==> enum/bitfield: the declared width binds (S1, generator#516)"
 { echo "version: 1"; echo "messages:"; } > "$WORK/closed.yaml"
-python3 "$ROOT/tests/conformance/lib/check_closed_kinds.py" --emit-schema >> "$WORK/closed.yaml"
+python3 "$ROOT/tests/conformance/lib/check_declared_width_kinds.py" --emit-schema >> "$WORK/closed.yaml"
 gen "$WORK/closed.yaml" "$WORK/closed"
 ln -s "$WORK/ex/node_modules" "$WORK/closed/node_modules"
-python3 "$ROOT/tests/conformance/lib/check_closed_kinds.py" "typescript" \
+python3 "$ROOT/tests/conformance/lib/check_declared_width_kinds.py" "typescript" \
     --cwd "$WORK/closed" --status-verb status -- npx tsx harness.ts
 # MESSAGE_SPEC §7.4 -- a field id REPEATED inside one scope (generator#523). The
 # rule has two halves and this checks BOTH on one message: a re-opened SEQUENCE

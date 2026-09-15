@@ -1007,12 +1007,12 @@ unset SOFAB_PUREPYTHON || true
 # one engine leaves the other's half of the element bound unmeasured.
 echo "==> enum/bitfield: bounded by the width the declaration implies (S1, generator#516)"
 printf 'version: 1\nmessages:\n' > "$WORK/closed.yaml"
-python3 "$ROOT/tests/conformance/lib/check_closed_kinds.py" --emit-schema >> "$WORK/closed.yaml"
+python3 "$ROOT/tests/conformance/lib/check_declared_width_kinds.py" --emit-schema >> "$WORK/closed.yaml"
 ( cd "$ROOT" && go run ./cmd/sofabgen --config "$WORK/cfg.yaml" --lang python --in "$WORK/closed.yaml" --out "$WORK/closedproj" )
 for ENGINE in $ENGINES; do
     if [ "$ENGINE" = python ]; then export SOFAB_PUREPYTHON=1; else unset SOFAB_PUREPYTHON || true; fi
     require_engine "$ENGINE"
-    python3 "$ROOT/tests/conformance/lib/check_closed_kinds.py" "python/$ENGINE" \
+    python3 "$ROOT/tests/conformance/lib/check_declared_width_kinds.py" "python/$ENGINE" \
         --cwd "$WORK/closedproj" --invalid-pattern 'SofaDecodeError' -- python3 harness.py
 done
 unset SOFAB_PUREPYTHON || true

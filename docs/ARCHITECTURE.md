@@ -4895,7 +4895,7 @@ A reimplementation is **conformant** when it reproduces these gates:
    table is what it exists for. Each suite owns the generate-and-build either
    way: the cap is a generate-time config key, so what the driver is handed is a
    capped project's harness argv.
-   *Closed enum / bitfield* (`tests/conformance/lib/check_closed_kinds.py`):
+   *Closed enum / bitfield* (`tests/conformance/lib/check_declared_width_kinds.py`):
    MESSAGE_SPEC §1 closes both leaf types by what the schema **declares** — an
    enum by its set of constants, a bitfield by the mask of its declared `pos`
    bits — so a wire value outside that set is `INVALID` (§7.1) however
@@ -4923,15 +4923,17 @@ A reimplementation is **conformant** when it reproduces these gates:
    suite that probes only the scalar cannot see a fix that covered a third of the
    job.
 
-   Three declensions exist, all **by name** rather than by silence, all stating a
-   corelib limit rather than relaxing the rule, and all spelled per
+   Two declensions exist, both **by name** rather than by silence, both stating a
+   corelib limit rather than relaxing the rule, and both spelled per
    `position:kind` cell so a target declines exactly what it cannot reach:
    `--skip-positions` drops a cell the target cannot express at all, and leaves it
    out of `--emit-schema` too, since a harness for a shape that does not build
-   cannot be built; `--hull-only` drops the undeclared-inside-the-hull row alone,
-   for a bound that has to travel through a hook carrying an INTERVAL and nothing
-   else; `--storage-masked` drops the beyond-storage row alone, where the corelib
-   narrows the element before generated code can see it. `cpp` is the only target
+   cannot be built; `--storage-masked` drops the beyond-storage row alone, where
+   the corelib narrows the element before generated code can see it. A third,
+   `--hull-only`, existed only while the bound was a SET: the hull was the most of
+   a set that an INTERVAL-carrying hook could take. The declared width IS an
+   interval, so every hook carries the whole bound and the declension was removed
+   with the set. `cpp` is the only target
    that declines anything: `--skip-positions matrix:enum` because
    `array<array<enum>>` does not compile on either C++ corelib, and
    `--storage-masked matrix:bitfield` because `sofab::MessageSeq` reads the row

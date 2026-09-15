@@ -2,12 +2,12 @@
 """An `enum` and a `bitfield` are bound by the WIDTH their declaration implies (generator#516).
 
 Usage:
-  check_closed_kinds.py --emit-schema
-  check_closed_kinds.py <label> [--message NAME] [--cwd DIR] [--verb VERB]
+  check_declared_width_kinds.py --emit-schema
+  check_declared_width_kinds.py <label> [--message NAME] [--cwd DIR] [--verb VERB]
                         [--status-verb VERB] [--status-invalid NAME]
                         [--status-complete NAME] [--invalid-pattern REGEX]
                         [--no-values] [--skip-positions LIST]
-                        [--hull-only LIST] [--storage-masked LIST]
+                        [--storage-masked LIST]
                         -- <harness argv...>
 
 MESSAGE_SPEC §1 (doc `382159e`, PR #95) binds both leaf types to the WIDTH their
@@ -23,10 +23,10 @@ declaration implies:
     away, because masking would turn malformed-looking input into a DECLARED
     combination and report it Ok.
 
-This REPLACES the closed-set reading MESSAGE_SPEC carried for six days (doc PR
+This REPLACED the closed-set reading MESSAGE_SPEC carried for six days (doc PR
 #89, `a50db95`), under which an enum was bound by its set of constants and a
-bitfield by the mask of its declared bits. A suite whose backend has not migrated
-yet passes `--legacy-closed-set` and runs the old tables instead.
+bitfield by the mask of its declared bits. Every backend in the family now emits
+the width bound, so only the width tables below remain.
 
 ## Why the definitions here are GAPPED
 
@@ -61,7 +61,7 @@ positions and a second pair for the two array positions, so a fix that covers
 only the scalar is a third of the job and a suite that probes only the scalar
 cannot see the difference.
 
-## The three declensions, weakest last
+## The two declensions, weaker last
 
 Each is spelled as a comma-separated list whose items are a POSITION (both kinds)
 or a `position:kind` pair, so a suite declines exactly the cell it cannot reach
@@ -73,11 +73,6 @@ a decision on the record, never a silence.
     for the shape cannot declare it either (`array<array<enum>>` does not compile
     on either C++ corelib: the row reaches sofab::readArray as a span of scoped
     enums and hits its "Unsupported span element type" static_assert).
-  * `--hull-only` -- LEGACY ONLY. The set bound had to travel through a corelib
-    hook carrying an INTERVAL and nothing else, so the hull of the declaration was
-    the most of the set that fit, and the GAP row was dropped. Under the width
-    rule the bound IS an interval, every hook can carry it, and the gap row is an
-    accepting one -- so the flag is refused rather than silently taken.
   * `--storage-masked` -- the corelib narrows the element to the receiver's
     storage BEFORE generated code can see it, so a value past that storage has
     already become a declared one by the time anything may test it (corelib-cpp's
@@ -186,36 +181,6 @@ BIT_REJECTS = (
      "clause, so no separate width term is needed"),
 )
 
-# --- the withdrawn closed-set rule, kept for the not-yet-migrated backends ----
-#
-# MESSAGE_SPEC carried this reading for six days (doc PR #89, `a50db95`) and PR
-# #95 withdrew it. A suite passes `--legacy-closed-set` while its backend still
-# emits the set/mask bound; the flag and this block go when the last one
-# migrates (generator#516 follow-up).
-LEGACY_ENUM_OK = (0, 2, 10)
-LEGACY_BIT_OK = (0, 3, 8, 11)
-LEGACY_ENUM_REJECTS = (
-    ("undeclared", ENUM_GAP, "hull",
-     "inside the declared hull 0..10 and not one of the constants -- an interval "
-     "bound keeps it, and MUST NOT"),
-    ("below_hull", ENUM_LOW, None,
-     "BELOW every declared constant, and expressible because an enum array travels "
-     "as a SIGNED array -- a bound that lost its lower half, or a hook handed only "
-     "an elem_max, keeps it while every other row here still passes"),
-    ("beyond_storage", ENUM_WIDE, "masked",
-     "past the narrow signed integer a footprint target stores the enum in; keeping "
-     "it masked is the older defect, keeping it at all is this one"),
-)
-LEGACY_BIT_REJECTS = (
-    ("undeclared", BIT_GAP, "hull",
-     "bit 2, which no flag declares, inside the byte the field is stored in -- the "
-     "mask is NOT every bit up to the highest declared one"),
-    ("beyond_storage", BIT_WIDE, "masked",
-     "past that byte; a mask test on the raw carrier refuses it with the same "
-     "clause, so no separate width term is needed"),
-)
-
-
 def die(msg):
     print("FAIL: " + msg)
     sys.exit(1)
@@ -255,6 +220,9 @@ def bits_yaml():
 def emit_schema(live) -> int:
     """Print the `closed` message, for appending to a conformance schema.
 
+    The message keeps the name `closed`: it is what every harness in the family
+    names, and the rule it probes changed, not the shape.
+
     A cell a suite declined with --skip-positions is not DECLARED either: a
     target that cannot express the shape at all -- `array<array<enum>>` does not
     compile on either C++ corelib -- could not build a harness for a schema that
@@ -267,12 +235,13 @@ def emit_schema(live) -> int:
 
     def on(pos, kind):
         return (pos, kind) in live
-    print("# closed -- the closed-enum / closed-bitfield message (MESSAGE_SPEC §1,")
-    print("# generator#516), printed by tests/conformance/lib/check_closed_kinds.py so")
-    print("# the ids, the declared constants and the declared positions the fixtures")
-    print("# probe have exactly one definition between them. The sets are GAPPED, which")
-    print("# under the width rule is what the ACCEPTING rows are made of: the value")
-    print("# between the constants, and the bit no flag declares, both MUST decode.")
+    print("# closed -- the enum / bitfield declared-width message (MESSAGE_SPEC §1,")
+    print("# generator#516), printed by")
+    print("# tests/conformance/lib/check_declared_width_kinds.py so the ids, the declared")
+    print("# constants and the declared positions the fixtures probe have exactly one")
+    print("# definition between them. The declarations are GAPPED, which under the width")
+    print("# rule is what the ACCEPTING rows are made of: the value between the")
+    print("# constants, and the bit no flag declares, both MUST decode.")
     print("  %s:" % MESSAGE)
     print("    payload:")
     if on("scalar", "enum"):
@@ -402,23 +371,16 @@ WHY = {
 }
 
 
-def build_table(live, hull=frozenset(), masked=frozenset(), legacy=False):
+def build_table(live, masked=frozenset()):
     """The rows to run, one per (position, kind, value).
 
-    `live` is the set of (position, kind) cells still in play; `hull` and
-    `masked` are the two weaker declensions, and each drops exactly ONE rejecting
-    row from the cell it names -- see the module docstring for what each one
-    means and why the rest of the cell still runs.
-
-    `legacy` selects the withdrawn closed-set tables, for a backend that has not
-    migrated to the width rule yet.
+    `live` is the set of (position, kind) cells still in play; `masked` is the
+    weaker declension, and it drops exactly ONE rejecting row from the cell it
+    names -- see the module docstring for what it means and why the rest of the
+    cell still runs.
     """
-    if legacy:
-        kinds = (("enum", LEGACY_ENUM_OK, LEGACY_ENUM_REJECTS),
-                 ("bitfield", LEGACY_BIT_OK, LEGACY_BIT_REJECTS))
-    else:
-        kinds = (("enum", ENUM_OK, ENUM_REJECTS),
-                 ("bitfield", BIT_OK, BIT_REJECTS))
+    kinds = (("enum", ENUM_OK, ENUM_REJECTS),
+             ("bitfield", BIT_OK, BIT_REJECTS))
     rows = []
     for pos in POSITIONS:
         for kind, oks, rejects in kinds:
@@ -430,8 +392,6 @@ def build_table(live, hull=frozenset(), masked=frozenset(), legacy=False):
                              (leaf, v, depth),
                              "%s carrying the DECLARED %s value %d" % (WHY[pos], kind, v)))
             for name, v, declension, why in rejects:
-                if declension == "hull" and (pos, kind) in hull:
-                    continue
                 if declension == "masked" and (pos, kind) in masked:
                     continue
                 rows.append(("%s_%s_%s" % (pos, kind, name), build(v), "invalid",
@@ -530,11 +490,7 @@ def main():
     ap.add_argument("--invalid-pattern", default=None)
     ap.add_argument("--no-values", action="store_true")
     ap.add_argument("--skip-positions", default="")
-    ap.add_argument("--hull-only", default="")
     ap.add_argument("--storage-masked", default="")
-    # Temporary, for a backend still emitting the withdrawn closed-set bound.
-    # Removed together with the LEGACY_* tables when the last one migrates.
-    ap.add_argument("--legacy-closed-set", action="store_true")
 
     argv = sys.argv[1:]
     if "--" in argv:
@@ -576,13 +532,11 @@ def main():
 
     if not live:
         die("--skip-positions declined every position; there is nothing left to check")
-    hull = named("--hull-only", args.hull_only)
     masked = named("--storage-masked", args.storage_masked)
-    for flag, cells in (("--hull-only", hull), ("--storage-masked", masked)):
-        both = cells & skip
-        if both:
-            die("%s names %s, which --skip-positions already declined"
-                % (flag, spell(both)))
+    both = masked & skip
+    if both:
+        die("--storage-masked names %s, which --skip-positions already declined"
+            % spell(both))
     # One of the two category channels is REQUIRED on a rejecting row: exit
     # status alone scores a panic or a process abort as a correct INVALID, which
     # is the failure this rule's zig half existed to remove (generator#517).
@@ -597,17 +551,8 @@ def main():
     if not harness:
         die("no harness argv given (put it after `--`)")
 
-    # `--hull-only` only ever dropped the gap row, and under the width rule that
-    # row is an ACCEPTING one -- there is nothing left for the declension to
-    # decline. Taking it silently would let a suite believe it had declined
-    # something.
-    if hull and not args.legacy_closed_set:
-        die("--hull-only is meaningless under the width rule: the bound is an "
-            "interval, which every corelib hook can already carry, so no row "
-            "needs the hull declension. Drop the flag.")
-
     msg = [args.message] if args.message else []
-    table = build_table(live, hull, masked, args.legacy_closed_set)
+    table = build_table(live, masked)
 
     for name, wire, expect, value, why in table:
         rc, out, err = run(harness + [args.verb] + msg, args.cwd, wire)
@@ -667,12 +612,10 @@ def main():
     note = ""
     if skip:
         note += "; declined: " + spell(skip)
-    if hull:
-        note += "; hull-only (the gap stays unenforced): " + spell(hull)
     if masked:
         note += "; storage-masked (the beyond-storage value never reaches "
         note += "generated code): " + spell(masked)
-    print("==> [%s] closed enum/bitfield: %d rows over %d cell(s) OK%s"
+    print("==> [%s] enum/bitfield declared width: %d rows over %d cell(s) OK%s"
           % (args.label, len(table), len(live), note))
     return 0
 

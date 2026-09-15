@@ -686,12 +686,13 @@ func (v *validator) checkBitfieldField(f map[string]any, loc string) {
 // validateBitfieldDef validates a bitfield and enforces uniquePositions (§6).
 //
 // It returns the DECLARED MASK — one bit set per valid declared `pos`, 0 when the
-// definition declares none. Only the array-element default check uses it, and it
-// is the mask rather than the highest position because MESSAGE_SPEC §1 bounds a
-// bitfield by the mask and not by an interval: positions 0, 1 and 3 give
-// 0b1011, so bit 2 is undeclared and 4 is not a value of this type. It mirrors
-// ir.BitfieldMask, which is what the backends emit the decode comparison from.
-// Every other caller ignores the result.
+// definition declares none. Only the array-element default check uses it, to
+// refuse an AUTHORED default that names a bit no flag declares: positions 0, 1
+// and 3 give 0b1011, so a default of 4 sets bit 2, which the schema gives the
+// author no way to name or read back. That is a schema-authoring check and not
+// the wire bound — MESSAGE_SPEC §1 bounds a decoded bitfield by the WIDTH its
+// highest `pos` implies (ir.BitfieldWidthMax), so 4 is a value every decoder in
+// the family accepts. Every other caller ignores the result.
 func (v *validator) validateBitfieldDef(node any, loc string) uint64 {
 	var mask uint64
 	m, ok := node.(map[string]any)
@@ -1038,11 +1039,12 @@ func (v *validator) checkMaskElem(el any, mask uint64, loc string) {
 		v.add(loc, "element mask %s must not be negative (a bitfield is unsigned)", n.String())
 		return
 	}
-	// The closed comparison, on the value itself: v &^ mask, exactly what every
-	// generated decoder emits for a wire value at this element (ir.BitfieldMask).
-	// big.Int rather than uint64 because a spelling past 2^64 has already been
-	// accepted as a number by this point, and AndNot answers it without a second
-	// range test — every bit above 63 is undeclared by construction.
+	// The declared-mask comparison, on the value itself: v &^ mask. It bounds an
+	// authored default only — the decode bound is the implied width — so it is
+	// taken here and nowhere a wire value travels. big.Int rather than uint64
+	// because a spelling past 2^64 has already been accepted as a number by this
+	// point, and AndNot answers it without a second range test — every bit above
+	// 63 is undeclared by construction.
 	if surplus := new(big.Int).AndNot(n, maskBig(mask)); surplus.Sign() != 0 {
 		if mask == 0 {
 			// No flag was declared (an empty or malformed `bits` map, which has an
@@ -1052,8 +1054,8 @@ func (v *validator) checkMaskElem(el any, mask uint64, loc string) {
 			return
 		}
 		v.add(loc, "element mask %s sets bit %d, which no flag declares (the declared mask is %#x); "+
-			"a bitfield is closed by the positions it declares (MESSAGE_SPEC §1), so a value outside the mask "+
-			"is one every conformant decoder refuses", n.String(), lowestSetBit(surplus), mask)
+			"a default names a combination of DECLARED flags, and this schema offers no name for that bit",
+			n.String(), lowestSetBit(surplus), mask)
 	}
 }
 

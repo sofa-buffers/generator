@@ -921,9 +921,9 @@ python3 "$ROOT/tests/conformance/lib/check_chunk_invariance.py" "Dart" \
 # is declined here.
 echo "==> enum/bitfield: bounded by the width the declaration implies (S1, generator#516)"
 printf 'version: 1\nmessages:\n' > "$WORK/closed.yaml"
-python3 "$ROOT/tests/conformance/lib/check_closed_kinds.py" --emit-schema >> "$WORK/closed.yaml"
+python3 "$ROOT/tests/conformance/lib/check_declared_width_kinds.py" --emit-schema >> "$WORK/closed.yaml"
 build "$WORK/closed.yaml" "$WORK/closed"
-python3 "$ROOT/tests/conformance/lib/check_closed_kinds.py" "dart" \
+python3 "$ROOT/tests/conformance/lib/check_declared_width_kinds.py" "dart" \
     --status-verb trydecode --invalid-pattern 'decode failed: invalid' \
     -- "$WORK/closed/harness"
 # MESSAGE_SPEC §7.4 -- a field id REPEATED inside one scope (generator#523). The
