@@ -451,11 +451,12 @@ messages:
 		// A boolean array is a List: clearing it is decoding into it too, so the
 		// kind test fronts the clear as well. boolean maps to the UNSIGNED kind.
 		`case 3: if (kind != ArrayKind.UNSIGNED) break; if (count > 2) throw Sofab.invalid("ba: array count above schema capacity 2"); askip = 0; afill = count; atgt = 2; m.ba.clear(); break;`,
-		// enum elements ride the SIGNED wire type -- and NOT the bulk offer: a
-		// closed kind's bound is the declared set, which the offer's only bound
-		// (the destination array's width) cannot state, so the elements come back
-		// through the element callback that carries it (§1, generator#516). The
-		// destination is still allocated at the wire count; only `abulk =` is gone.
+		// enum elements ride the SIGNED wire type -- and NOT the bulk offer: an
+		// enum is bound by the width its DECLARATION implies, which the offer's
+		// only bound (the destination array's width, a long[] here) cannot state,
+		// so the elements come back through the element callback that carries it
+		// (§1, generator#516). The destination is still allocated at the wire
+		// count; only `abulk =` is gone.
 		`case 4: if (kind != ArrayKind.SIGNED) break; if (count > 2) throw Sofab.invalid("ea: array count above schema capacity 2"); askip = 0; afill = count; atgt = 2; m.ea = new long[count]; break;`,
 		// A count-less array has no schema bound, so the target's finite default
 		// cap governs it (§9.5, generator#385) -- checked, like a schema bound,
@@ -2397,7 +2398,7 @@ func TestJavaEnumAndBitfieldWidthBoundAtEverySixPositions(t *testing.T) {
 		bfRej + `"Root_mbf element: value outside declared bitfield width"); _arowLong[ai++] = value;`,
 	} {
 		if !strings.Contains(m, want) {
-			t.Errorf("Closed.java: a closed-kind position stores without its §1 bound, missing %q:\n%s", want, m)
+			t.Errorf("Closed.java: an enum/bitfield position stores without its §1 width bound, missing %q:\n%s", want, m)
 		}
 	}
 	// The bulk offer is still declined for both kinds. The bound is an interval
@@ -2419,7 +2420,7 @@ func TestJavaEnumAndBitfieldWidthBoundAtEverySixPositions(t *testing.T) {
 		"case 1: m.un.ubf = value; break;",
 	} {
 		if strings.Contains(m, bad) {
-			t.Errorf("Closed.java still stores a closed kind unguarded (%q):\n%s", bad, m)
+			t.Errorf("Closed.java still stores an enum/bitfield unguarded (%q):\n%s", bad, m)
 		}
 	}
 }

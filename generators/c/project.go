@@ -577,9 +577,9 @@ func scalarCType(f *ir.Field) string {
 	case ir.KindI8, ir.KindI16, ir.KindI32, ir.KindI64:
 		return intC(f.Kind)
 	case ir.KindEnum:
-		return enumC(f.Ref.Target)
+		return enumC(f.Ref)
 	case ir.KindBitfield:
-		return bitfieldC(f.Ref.Target)
+		return bitfieldC(f.Ref)
 	}
 	return "long long"
 }
