@@ -875,9 +875,9 @@ echo "==> declared-width reject OK (scalar and array element)"
 # so the elements come back through the callback that carries the real bound.
 echo "==> enum/bitfield: bounded by the width the declaration implies (S1, generator#516)"
 { echo "version: 1"; echo "messages:"; } > "$WORK/closed.yaml"
-python3 "$ROOT/tests/conformance/lib/check_closed_kinds.py" --emit-schema >> "$WORK/closed.yaml"
+python3 "$ROOT/tests/conformance/lib/check_declared_width_kinds.py" --emit-schema >> "$WORK/closed.yaml"
 build "$WORK/closed.yaml" "$WORK/closed"
-python3 "$ROOT/tests/conformance/lib/check_closed_kinds.py" "java" \
+python3 "$ROOT/tests/conformance/lib/check_declared_width_kinds.py" "java" \
     --invalid-pattern 'INVALID_MSG' -- java -jar "$WORK/closed/target/harness.jar"
 
 # CORELIB_PLAN S7.2 item 8 -- the shared file's `sequence_growth` block

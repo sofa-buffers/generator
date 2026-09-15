@@ -869,9 +869,9 @@ echo "==> declared-width reject OK"
 # a Debug-only case would report a crash rather than a decode outcome.
 echo "==> enum/bitfield bound by the width their declaration implies (S1, generator#516)"
 { echo "version: 1"; echo "messages:"; } > "$WORK/closed.yaml"
-python3 "$ROOT/tests/conformance/lib/check_closed_kinds.py" --emit-schema >> "$WORK/closed.yaml"
+python3 "$ROOT/tests/conformance/lib/check_declared_width_kinds.py" --emit-schema >> "$WORK/closed.yaml"
 zig_build "$WORK/closed.yaml" "$WORK/closed"
-python3 "$ROOT/tests/conformance/lib/check_closed_kinds.py" "zig" \
+python3 "$ROOT/tests/conformance/lib/check_declared_width_kinds.py" "zig" \
     --invalid-pattern 'InvalidMessage' -- "$WORK/closed/zig-out/bin/harness"
 
 # CORELIB_PLAN S7.2 item 8 -- the shared file's `sequence_growth` block

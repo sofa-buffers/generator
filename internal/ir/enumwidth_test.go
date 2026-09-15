@@ -2,6 +2,25 @@ package ir
 
 import "testing"
 
+// The two declaration shapes the width rule reads. They live here because the
+// width is the only thing the IR derives from a declared constant set or a
+// declared position set.
+func enumRef(vals ...int64) *TypeRef {
+	nt := &NamedType{Category: CatEnum, Name: "E", Key: "enum/E"}
+	for _, v := range vals {
+		nt.Consts = append(nt.Consts, &EnumConst{Name: "C", Value: v})
+	}
+	return &TypeRef{Key: nt.Key, Target: nt}
+}
+
+func bitRef(pos ...int64) *TypeRef {
+	nt := &NamedType{Category: CatBitfield, Name: "F", Key: "bitfield/F"}
+	for _, p := range pos {
+		nt.Flags = append(nt.Flags, &BitfieldFlag{Name: "A", Pos: p})
+	}
+	return &TypeRef{Key: nt.Key, Target: nt}
+}
+
 // The width an enum declares is the smallest SIGNED type holding every constant
 // (MESSAGE_SPEC §1). The examples are the spec's own: {RED=1, GREEN=2, BLUE=3}
 // is bounded as an i8, {1, 2, 300} as an i16.

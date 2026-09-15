@@ -719,7 +719,7 @@ run_variant() {
     # cannot explain a rejection either.
     echo "==> [$label] enum/bitfield: the declared width is the bound (S1, generator#516)"
     { echo "version: 1"; echo "messages:"; } > "$WORK/closed-$label.yaml"
-    python3 "$ROOT/tests/conformance/lib/check_closed_kinds.py" --emit-schema \
+    python3 "$ROOT/tests/conformance/lib/check_declared_width_kinds.py" --emit-schema \
         --skip-positions matrix:enum >> "$WORK/closed-$label.yaml"
     ( cd "$ROOT" && go run ./cmd/sofabgen --config "$WORK/cfg-$label.yaml" --lang cpp \
         --in "$WORK/closed-$label.yaml" --out "$WORK/closed-$label" )
@@ -732,7 +732,7 @@ run_variant() {
         CLOSED_MASKED=''
     fi
     for surface in decode streamdecode; do
-        python3 "$ROOT/tests/conformance/lib/check_closed_kinds.py" "$label/$surface" \
+        python3 "$ROOT/tests/conformance/lib/check_declared_width_kinds.py" "$label/$surface" \
             --verb "$surface" --invalid-pattern "$CLOSED_PATTERN" \
             --skip-positions matrix:enum --storage-masked "$CLOSED_MASKED" \
             -- "$WORK/closed-$label/harness/harness"

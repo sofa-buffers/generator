@@ -754,9 +754,9 @@ echo "==> declared-width reject OK (scalar and array element)"
 # the offer states the DESTINATION's width and the bound is the declaration's.
 echo "==> enum/bitfield: bounded by the width the declaration implies (S1, generator#516)"
 { echo "version: 1"; echo "messages:"; } > "$WORK/closed.yaml"
-python3 "$ROOT/tests/conformance/lib/check_closed_kinds.py" --emit-schema >> "$WORK/closed.yaml"
+python3 "$ROOT/tests/conformance/lib/check_declared_width_kinds.py" --emit-schema >> "$WORK/closed.yaml"
 build "$WORK/closed.yaml" "$WORK/closed"
-python3 "$ROOT/tests/conformance/lib/check_closed_kinds.py" "kotlin" \
+python3 "$ROOT/tests/conformance/lib/check_declared_width_kinds.py" "kotlin" \
     --invalid-pattern 'INVALID_MSG' -- "$WORK/closed/build/install/harness/bin/harness"
 
 # Invalid UTF-8 in a MATERIALIZED string is INVALID (MESSAGE_SPEC S8): a Kotlin

@@ -17,11 +17,10 @@ package ir
 // 64-bit kinds return ok == false: their range IS the delivery type's, so no
 // reachable value can breach it and a backend must emit no guard for them.
 //
-// Enum and bitfield kinds are deliberately not covered, because a width is the
-// wrong question for them: MESSAGE_SPEC §1 binds both to the SET the schema
-// declares, not to the range of whatever integer a target stores them in. Their
-// bound lives in closed.go — EnumValues and BitfieldMask — and a backend emits
-// that check in the same store arm, ahead of the same narrowing cast.
+// Enum and bitfield kinds answer false here, because their width is not a
+// property of the Kind: it is implied by what the schema declares. EnumWidthRange
+// and BitfieldWidthMax below derive it from the declaration, and a backend emits
+// that guard in the same store arm, ahead of the same narrowing cast.
 func NarrowRange(k Kind) (lo, hi int64, ok bool) {
 	switch k {
 	case KindU8:
@@ -56,12 +55,12 @@ func IsNarrow(k Kind) bool {
 // even when it carries an undeclared bit; a value outside it is malformed input
 // and MUST be reported INVALID (§7.1), exactly as an over-width `i8` is.
 //
-// This REPLACES the set/mask bound of closed.go, which implemented the reading
-// MESSAGE_SPEC carried for six days (PR #89, doc `a50db95`) and PR #95 withdrew.
-// Both bounds are now ordinary intervals, which is what §1 gives as the reason
-// for the change: an array's elements are consumed inside the corelib loop, so a
-// bound must cross that channel as an interval, and a width fits where a set
-// does not.
+// This REPLACED a set/mask bound — an enum closed by its constants, a bitfield by
+// the mask of its declared bits — which MESSAGE_SPEC carried for six days (PR #89,
+// doc `a50db95`) and PR #95 withdrew. Both bounds are now ordinary intervals,
+// which is what §1 gives as the reason for the change: an array's elements are
+// consumed inside the corelib loop, so a bound must cross that channel as an
+// interval, and a width fits where a set does not.
 //
 // ok is false where no reachable value can breach the bound — an enum needing
 // the full i64 and a bitfield needing the full u64 — because the value arrives
@@ -79,13 +78,20 @@ func IsNarrow(k Kind) bool {
 // An enum declaring no constant at all yields the narrowest signed width: there
 // is no constant to widen it, and i8 is what the declaration implies.
 func EnumWidthRange(ref *TypeRef) (lo, hi int64, ok bool) {
-	vals, isEnum := EnumValues(ref)
-	if !isEnum {
+	if ref == nil || ref.Target == nil || ref.Target.Category != CatEnum {
 		return 0, 0, false
 	}
+	// Seeded at zero rather than at the first constant, which is also what makes
+	// the no-constant case fall out: every signed width contains 0, so folding it
+	// into the span can never widen the answer.
 	var min, max int64
-	if len(vals) > 0 {
-		min, max = vals[0], vals[len(vals)-1] // EnumValues sorts ascending
+	for _, c := range ref.Target.Consts {
+		if c.Value < min {
+			min = c.Value
+		}
+		if c.Value > max {
+			max = c.Value
+		}
 	}
 	for _, k := range []Kind{KindI8, KindI16, KindI32} {
 		wlo, whi, _ := NarrowRange(k)
