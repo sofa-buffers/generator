@@ -1149,7 +1149,9 @@ func hasBulk(fs []frame) bool {
 // Same machine, same corelib checkout (corelib-kotlin-mp b1a2f8a), declining vs
 // this: decode 33683 -> 33033 Ir/op, -650 (-1.9%); encode 17201 both ways, i.e.
 // held exactly. That is about 70% of the +931 the decline cost when the rule
-// landed; the rest is the guards at the ten non-array positions, which stay.
+// landed. What the rest is has not been measured -- the guards at the ten
+// non-array positions and the narrowing conversions both sit in that path, and
+// nothing here tells them apart.
 func bulkCapable(fld *ir.Field) bool {
 	if fld.Kind != ir.KindArray || !nativeArrayElem(fld.Elem) {
 		return false
