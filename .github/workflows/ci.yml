@@ -257,7 +257,7 @@ jobs:
       - uses: actions/setup-java@v6
         with:
           distribution: temurin
-          java-version: "17"
+          java-version: "17.0.20+101"
       - uses: ./.github/actions/corelib-refs
       - name: Java backend — generate, build, round-trip, conformance
         run: ./tests/conformance/java/run.sh
