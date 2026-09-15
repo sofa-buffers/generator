@@ -1267,6 +1267,36 @@ func (g *gen) serializeArray(f *hfile, ind, idExpr, val string, elem ir.Kind, re
 		// length (§3), so padding the temp out to N would put N elements on the
 		// wire for a shorter value. The temp takes the member's own container form,
 		// so the heap-free profile stays heap-free here too.
+		//
+		// The temp itself cannot be dropped from here. Both corelibs dispatch
+		// write() on `std::is_integral_v<value_type>`; a container of the scoped
+		// enum fails that and lands on "Unsupported span element type in
+		// OStream::write()". Converting while writing -- no temp at all -- is a
+		// corelib overload, not a generator change.
+		//
+		// Nor may the temp be replaced by a span over the member's own storage.
+		// The bytes are right and the types are not: reading an enum object
+		// through its backing type is outside what [basic.lval] allows, whose
+		// exemption covers `char`, `unsigned char` and `std::byte` -- and §1
+		// makes an enum's backing the smallest SIGNED type that holds its
+		// constants, so the 8-bit case is `signed char`, which is not on that
+		// list, and the 16/32/64-bit ones are not char types at all. The decode
+		// arm does carry that cast, in sofabgen::RawArray, because decode has no
+		// other destination (see emitRawArrayHelper: c-cpp fills by address after
+		// the callback returns, cpp resumes into what it was handed). Encode has
+		// one -- this temp -- so the same cast is not justified on this side.
+		//
+		// Sizing the temp inline from `count` where the MEMBER is heap-backed
+		// would drop the allocation, and is wrong for a different reason:
+		// InlineVector::resize clamps to its capacity, so a value holding more
+		// than `count` elements -- which a std::vector member accepts, and which
+		// this encoder emits today as an over-count array for the receiver to
+		// reject (§7.1) -- would instead be silently truncated to `count` and
+		// accepted. Guarding the inline path with a length test keeps the
+		// semantics, and was measured: it buys 0.3-0.6% of encode and costs
+		// +56 bytes of .text on both ARM targets of the one footprint row that
+		// reaches it, which is the wrong direction on the axis that row exists
+		// to protect.
 		f.line("%s{ %s %s; %s.resize(%s.size()); for (std::size_t %s = 0; %s < %s.size(); ++%s) %s[%s] = static_cast<%s>(%s[%s]); (void)os.write(%s, %s); }",
 			ind, g.nativeTemp(enumBacking(ref.Target), count), tv, tv, val, iv, iv, val, iv, tv, iv, enumBacking(ref.Target), val, iv, idExpr, tv)
 	case ir.KindBool:
