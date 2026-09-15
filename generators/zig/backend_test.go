@@ -1403,25 +1403,14 @@ messages:
 	}
 }
 
-// generator#516 + #517 are one missing guard seen from two sides. MESSAGE_SPEC
-// §1 closes an `enum` by the SET of constants the schema declares and a
-// `bitfield` by the MASK of the positions it declares — neither bound is a width
-// and neither is the backing integer — and until this landed all twelve
-// enum/bitfield stores reached a bare `@intCast` with no comparison in front of
-// them. The two build modes then disagreed about the same bytes: a Debug harness
-// aborted with "integer does not fit in destination type" (#517) while the
-// --release=fast build the conformance suite ships stored the truncated value
-// and reported Ok. The guard makes it one verdict, INVALID, in both.
-//
-// All six positions are pinned by name — scalar, native array element, struct
-// member, struct-array element member, union member, matrix row element — for
-// both kinds. Four of them share one match arm per kind, which is exactly why
-// "the arm is shared" is not worth trusting after the next refactor. The enum is
-// GAPPED ({0,1,2,10}, so 5 must be refused although the hull holds it) and so is
-// the bitfield (pos 0, 1 and 3, mask 0b1011, so 4 must be refused although the
-// u8 member holds it).
-func TestZigClosedEnumAndBitfieldRejectAtEverySixPositions(t *testing.T) {
-	s := buildSchema(t, `
+// widthSixSrc declares an `enum` and a `bitfield` at all SIX positions a value
+// can land in, and both definitions are GAPPED on purpose: the enum declares
+// {0, 1, 2, 10}, so 5 sits inside the implied width and is not a constant, and
+// the bitfield declares positions 0, 1 and 3, so 4 sets a bit no flag declares.
+// Both of those values are VALID under the width rule and were INVALID under the
+// withdrawn closed-set one, which is what makes a gapped definition the shape
+// that tells the two rules apart.
+const widthSixSrc = `
 version: 1
 messages:
   Closed:
@@ -1454,14 +1443,32 @@ messages:
           ubf: { id: 1, type: bitfield, bits: { A: { pos: 0 }, B: { pos: 1 }, D: { pos: 3 } } }
       mat: { id: 7, type: array, items: { type: array, count: 2, items: { type: enum, count: 3, enum: { A: 0, B: 1, C: 2, Z: 10 } } } }
       mbf: { id: 8, type: array, items: { type: array, count: 2, items: { type: bitfield, count: 3, bits: { A: { pos: 0 }, B: { pos: 1 }, D: { pos: 3 } } } } }
-`)
+`
+
+// generator#516 + #517 are one missing guard seen from two sides. MESSAGE_SPEC
+// §1 binds an `enum` to the width of the smallest SIGNED type holding every
+// declared constant and a `bitfield` to the width of the smallest UNSIGNED type
+// holding its highest declared `pos` — here i8 (−128..127) for {0, 1, 2, 10} and
+// u8 (0..255) for positions 0, 1 and 3. Until generator#516 all twelve
+// enum/bitfield stores reached a bare `@intCast` with no comparison in front of
+// them, and the two build modes then disagreed about the same bytes: a Debug
+// harness aborted with "integer does not fit in destination type" (#517) while
+// the --release=fast build the conformance suite ships stored the truncated value
+// and reported Ok. The guard makes it one verdict, INVALID, in both.
+//
+// All six positions are pinned by name — scalar, native array element, struct
+// member, struct-array element member, union member, matrix row element — for
+// both kinds. Four of them share one match arm per kind, which is exactly why
+// "the arm is shared" is not worth trusting after the next refactor.
+func TestZigEnumAndBitfieldWidthBoundAtEverySixPositions(t *testing.T) {
+	s := buildSchema(t, widthSixSrc)
 	files, err := (&Backend{}).Generate(s, map[string]any{})
 	if err != nil {
 		t.Fatalf("generate: %v", err)
 	}
 	m := string(files[0].Content)
-	const enRej = "switch (value) { 0, 1, 2, 10 => {}, else => { self.inv = true; return; } } "
-	const bfRej = "if ((value & ~@as(u64, 0xb)) != 0) { self.inv = true; return; } "
+	const enRej = "if (value < -128 or value > 127) { self.inv = true; return; } "
+	const bfRej = "if (value > 255) { self.inv = true; return; } "
 	const fill = "if (self.afill != 0) { self.afill -= 1; "
 	for _, want := range []string{
 		// 1. scalar
@@ -1485,14 +1492,16 @@ messages:
 		".root_mbf => { " + fill + bfRej,
 	} {
 		if !strings.Contains(m, want) {
-			t.Errorf("message.zig: a closed-kind position stores without its guard, missing %q:\n%s", want, m)
+			t.Errorf("message.zig: an enum/bitfield position stores without its §1 width bound, missing %q:\n%s", want, m)
 		}
 	}
-	// Storage did not widen with the bound: §1 grants the narrow member as a MAY
-	// precisely because every valid value is a declared one.
+	// Storage is not the bound, in either direction: the member stays the
+	// narrowest integer holding the declared constants/positions — §1 leaves the
+	// carrier to the target — and the guard on the raw accumulator is what
+	// enforces the declared width ahead of the @intCast into it.
 	for _, want := range []string{"en: i8 = 0,", "bf: u8 = 0,"} {
 		if !strings.Contains(m, want) {
-			t.Errorf("message.zig: the closed bound must not widen storage, missing %q:\n%s", want, m)
+			t.Errorf("message.zig: the §1 width bound must not widen storage, missing %q:\n%s", want, m)
 		}
 	}
 	// No bare @intCast may remain on these paths: every one of the twelve is now
@@ -1505,31 +1514,69 @@ messages:
 		"1 => self.m.un.ubf = @intCast(value),",
 	} {
 		if strings.Contains(m, bad) {
-			t.Errorf("message.zig still stores a closed kind through a bare @intCast (%q):\n%s", bad, m)
+			t.Errorf("message.zig still stores an enum/bitfield through a bare @intCast (%q):\n%s", bad, m)
 		}
 	}
 }
 
-// A bitfield declaring all 64 positions has mask u64::MAX, so the mask test is a
-// tautology and is elided — the one case where "no guard" stays right under the
-// closed rule, and the reason closedGuard answers "" rather than always emitting.
-func TestZigAllBitsDeclaredBitfieldNeedsNoGuard(t *testing.T) {
+// The elisions under the width rule: a guard is emitted only where the implied
+// width is NARROWER than the 64-bit accumulator the value arrives in. A bitfield
+// whose highest declared position is 63 implies u64 — the accumulator's own
+// width — so nothing reachable can breach it and the clause would be dead code.
+//
+// Note what is NOT an elision any more: whether an enum's constants are
+// contiguous no longer matters at all. The width is derived from the extremes, so
+// {0,1,2} and {0,1,2,10} produce the identical i8 guard, and the membership
+// `switch` a gapped set used to need is gone.
+func TestZigEnumBitfieldWidthElisions(t *testing.T) {
 	var bits []string
 	for i := 0; i < 64; i++ {
 		bits = append(bits, fmt.Sprintf("F%d: { pos: %d }", i, i))
 	}
 	s := buildSchema(t, "version: 1\nmessages:\n  W:\n    payload:\n"+
-		"      f: { id: 0, type: bitfield, bits: { "+strings.Join(bits, ", ")+" } }\n")
+		"      f: { id: 0, type: bitfield, bits: { "+strings.Join(bits, ", ")+" } }\n"+
+		"      e: { id: 1, type: enum, enum: { R: 0, G: 1, B: 2 } }\n")
 	files, err := (&Backend{}).Generate(s, map[string]any{})
 	if err != nil {
 		t.Fatalf("generate: %v", err)
 	}
 	m := string(files[0].Content)
 	if !strings.Contains(m, "0 => self.m.f = value,") {
-		t.Errorf("an all-bits-declared bitfield must store unguarded:\n%s", m)
+		t.Errorf("a bitfield implying the full u64 width must store unguarded:\n%s", m)
 	}
-	if strings.Contains(m, "0xffffffffffffffff") {
-		t.Errorf("a tautological mask guard was emitted:\n%s", m)
+	if strings.Contains(m, "0xffffffffffffffff") || strings.Contains(m, "18446744073709551615") {
+		t.Errorf("a tautological u64 guard was emitted:\n%s", m)
+	}
+	// {R:0, G:1, B:2} implies i8, NOT the 0..2 hull of its constants: 5 is a
+	// valid wire value for this field and must decode.
+	if !strings.Contains(m, "1 => { if (value < -128 or value > 127) { self.inv = true; return; } self.m.e = @intCast(value); },") {
+		t.Errorf("a contiguous enum must take the implied i8 width, not its constant hull:\n%s", m)
+	}
+}
+
+// The behavioural difference the width rule makes, stated as the values
+// themselves: a gapped enum admits a value between its constants, and a bitfield
+// admits an undeclared bit — both INVALID under the withdrawn closed-set rule of
+// generator#530. Pinned on the emitted bound so a silent reversion is loud.
+func TestZigWidthAdmitsUndeclaredValues(t *testing.T) {
+	s := buildSchema(t, widthSixSrc)
+	files, err := (&Backend{}).Generate(s, map[string]any{})
+	if err != nil {
+		t.Fatalf("generate: %v", err)
+	}
+	m := string(files[0].Content)
+	// enum {0,1,2,10}: the guard must admit 5 — i.e. be the i8 interval, never a
+	// membership switch over the constants.
+	if strings.Contains(m, "switch (value) { 0, 1, 2, 10 =>") {
+		t.Errorf("the withdrawn membership switch over enum constants was emitted:\n%s", m)
+	}
+	// bitfield pos{0,1,3}: the guard must admit 4 — i.e. bound the WIDTH (255),
+	// never the flag mask (0xb).
+	if strings.Contains(m, "~@as(u64, 0xb)") {
+		t.Errorf("the withdrawn flag-mask guard was emitted:\n%s", m)
+	}
+	if !strings.Contains(m, "if (value > 255) { self.inv = true; return; } ") {
+		t.Errorf("the bitfield width bound is missing:\n%s", m)
 	}
 }
 

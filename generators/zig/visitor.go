@@ -2,7 +2,6 @@ package zig
 
 import (
 	"fmt"
-	"strconv"
 	"strings"
 
 	"github.com/sofa-buffers/generator/internal/ir"
@@ -315,17 +314,18 @@ func (g *gen) putCall(fr frame, fld *ir.Field, guard, val string) string {
 //
 // The cast is only ever reached for a value that FITS, because widthGuard runs
 // first at every store it can be reached from. What the schema declares is what
-// binds — a WIDTH for an integer, the SET of constants or the MASK of declared
-// positions for an enum or a bitfield (MESSAGE_SPEC §1/§7.1, documentation#32) —
-// and an out-of-range value is rejected as INVALID before the store, because
-// `@truncate` here would be exactly the masking §7.1 forbids.
+// binds, and every declaration binds a WIDTH (MESSAGE_SPEC §1/§7.1,
+// documentation#32) — for an integer the one it names, for an enum or a bitfield
+// the one its constants or its highest `pos` imply — and an out-of-range value is
+// rejected as INVALID before the store, because `@truncate` here would be exactly
+// the masking §7.1 forbids.
 //
 // `@intCast` rather than `@truncate` makes that contract explicit: it is checked
 // in safe build modes, so a guard that ever failed to precede a store is a panic
 // in Debug/ReleaseSafe rather than a silently masked value. That is not a
 // theoretical property. Until generator#516 the enum and bitfield stores reached
 // this cast with no guard at all, and the two build modes disagreed about what
-// an out-of-set value did: a Debug harness aborted with "integer does not fit in
+// an over-width value did: a Debug harness aborted with "integer does not fit in
 // destination type" while the --release=fast build the conformance suite ships
 // stored the truncated value and reported Ok (generator#517). One missing guard,
 // two defects; the guard is the fix for both.
@@ -336,22 +336,6 @@ func storeCast(dest string, value string) string {
 	return "@intCast(" + value + ")"
 }
 
-// widthGuard renders the §7.1 rejection for a store into a destination the
-// schema declares as Kind k — with ref carrying the named type when k is a
-// composite one — or "" when nothing reachable can breach the bound: the 64-bit
-// kinds, whose range IS the accumulator the value arrives in, and a bitfield
-// declaring all 64 positions. `self.inv` is the same sticky INVALID flag the
-// over-count and over-index guards set, surfaced by decode() as
-// error.InvalidMessage.
-//
-// The unsigned side needs no negative term: sofab.Unsigned is a u64.
-//
-// For an `enum` and a `bitfield` the declaration is a SET, not a width, and
-// closedGuard states it — see there. Both run on the raw accumulator, ahead of
-// the narrowing @intCast, which is what makes one clause enough: a value the
-// schema does not declare is rejected whether it would have fitted the backing
-// integer or not.
-//
 // guardedStore wraps a scalar store arm in the block a guard needs. Zig prong
 // bodies are expressions, so a guarded store becomes `{ if (...) {...} store; }`
 // while an unguarded one stays the bare expression it was.
@@ -362,62 +346,86 @@ func guardedStore(guard, stmt string) string {
 	return "{ " + guard + stmt + "; }"
 }
 
+// widthGuard renders the §7.1 rejection for a store into a destination the
+// schema declares as Kind k — with ref carrying the named type when k is a
+// composite one — or "" when nothing reachable can breach the bound: a kind
+// whose declared width IS the 64-bit accumulator the value arrives in. `self.inv`
+// is the same sticky INVALID flag the over-count and over-index guards set,
+// surfaced by decode() as error.InvalidMessage.
+//
+// The unsigned side needs no negative term: sofab.Unsigned is a u64.
+//
+// An `enum` and a `bitfield` declare their width indirectly, and
+// declaredWidthGuard derives it — see there. Every one of these guards runs on
+// the RAW accumulator, ahead of the narrowing @intCast, which is what makes one
+// clause enough: an over-width value is rejected before the cast that would
+// otherwise have masked it into range.
 func widthGuard(k ir.Kind, ref *ir.TypeRef) string {
 	lo, hi, ok := ir.NarrowRange(k)
 	if !ok {
-		return closedGuard(k, ref)
+		return declaredWidthGuard(k, ref)
 	}
 	if lo < 0 {
-		return fmt.Sprintf("if (value < %d or value > %d) { self.inv = true; return; } ", lo, hi)
+		return fmt.Sprintf("if (value < %d or value > %d) %s", lo, hi, invReject)
 	}
-	return fmt.Sprintf("if (value > %d) { self.inv = true; return; } ", hi)
+	return fmt.Sprintf("if (value > %d) %s", hi, invReject)
 }
 
-// closedGuard renders the rejection for the two CLOSED kinds, MESSAGE_SPEC §1:
-// an `enum` is bound by the set of constants the schema declares, a `bitfield`
-// by the mask of the positions it declares. A wire value outside that set is
-// malformed input, exactly as an over-width integer is, and gets the same sticky
-// self.inv.
+// invReject is the rejection tail every §7.1 guard shares: flag the message
+// INVALID and leave the callback without storing.
+const invReject = "{ self.inv = true; return; } "
+
+// declaredWidthGuard renders the rejection for an `enum` and a `bitfield`,
+// MESSAGE_SPEC §1: each is bound by the WIDTH its declaration IMPLIES — for an
+// enum the smallest SIGNED type holding every declared constant, for a bitfield
+// the smallest UNSIGNED type holding its highest declared `pos`. It answers ""
+// for every other kind (widthGuard owns those) and wherever the implied width is
+// the 64-bit accumulator itself, where the comparison would be dead code.
 //
-// Storage is never the bound. enumBacking / bitfieldBacking still pick the
-// smallest integer that holds the declared constants/positions — §1 grants that
-// as a MAY and a footprint target takes it — but a bitfield whose declared
-// positions are 0, 1 and 3 rejects 4 even though its u8 member would hold it,
-// and an enum declaring {0, 1, 2, 10} rejects 5. The mask is not "every bit up
-// to the highest declared one".
+// A value INSIDE that width is valid even when the schema names no constant for
+// it and even when it carries an undeclared bit; only a value outside it is
+// malformed input. So an enum declaring {0, 1, 2, 10} admits 5 and refuses 128,
+// and a bitfield declaring positions 0, 1 and 3 admits 4 — the undeclared bit 2 —
+// and refuses 256. An undeclared bit is NOT masked away: masking would turn
+// malformed-looking input into a DECLARED combination and report it Ok.
 //
-// The forms: a contiguous constant set is a two-sided comparison, a gapped one a
-// switch whose else prong rejects (cheaper to read and to compile than a chain
-// of `and`s once the set grows), and a bitfield one `&`-test against the
-// complement of its mask. That last one runs on the u64 accumulator, so it also
-// rejects everything above the backing width — no separate width term is needed,
-// and it is the reason a bitfield declaring all 64 positions gets no guard at
-// all rather than a tautology.
-func closedGuard(k ir.Kind, ref *ir.TypeRef) string {
-	const reject = "{ self.inv = true; return; } "
+// This replaces the set/mask bound of generator#530, which implemented the
+// closed-type reading MESSAGE_SPEC carried for six days (doc PR #89, `a50db95`)
+// and doc PR #95 (`382159e`) withdrew. Both bounds are ordinary intervals now,
+// which is §1's own reason for the change: an array's elements are consumed
+// inside the corelib loop, so a bound must cross that channel as an interval,
+// and a width fits where a set does not. For zig it also costs less — the
+// membership `switch` a gapped enum needed collapses to the same two-sided
+// comparison every narrow integer already emits.
+//
+// Storage is still not the bound, and the direction matters here: enumBacking /
+// bitfieldBacking pick the smallest integer holding the declared
+// constants/positions, which for an enum is the SAME width §1 implies but for a
+// bitfield can be NARROWER (positions 0, 1 and 3 give a `u8` member, and u8 is
+// also the implied width — but an enum whose constants are {0, 1, 2, 10} gets an
+// `i8` member and an i8 bound alike). §1's fourth consequence covers the general
+// case either way: a receiver that cannot hold the field at exactly the declared
+// width holds it wider and MUST then enforce the width as an explicit check. The
+// comparison therefore runs on the raw accumulator, ahead of the @intCast — a
+// cast that is only ever reached by a value that fits.
+//
+// The bitfield side is spelled as a plain `>` rather than java's mask of the
+// width: `value` arrives as an unsigned sofab.Unsigned here, so there is no sign
+// bit to fold in and one comparison says it all.
+func declaredWidthGuard(k ir.Kind, ref *ir.TypeRef) string {
 	switch k {
 	case ir.KindEnum:
-		vals, ok := ir.EnumValues(ref)
-		if !ok || len(vals) == 0 {
+		lo, hi, ok := ir.EnumWidthRange(ref)
+		if !ok {
 			return ""
 		}
-		if ir.EnumContiguous(ref) {
-			return fmt.Sprintf("if (value < %d or value > %d) %s", vals[0], vals[len(vals)-1], reject)
-		}
-		pats := make([]string, len(vals))
-		for i, v := range vals {
-			pats[i] = strconv.FormatInt(v, 10)
-		}
-		return fmt.Sprintf("switch (value) { %s => {}, else => %s} ", strings.Join(pats, ", "), reject)
+		return fmt.Sprintf("if (value < %d or value > %d) %s", lo, hi, invReject)
 	case ir.KindBitfield:
-		mask, ok := ir.BitfieldMask(ref)
-		if !ok || mask == ^uint64(0) {
+		hi, ok := ir.BitfieldWidthMax(ref)
+		if !ok {
 			return ""
 		}
-		if mask == 0 {
-			return fmt.Sprintf("if (value != 0) %s", reject)
-		}
-		return fmt.Sprintf("if ((value & ~@as(u64, 0x%x)) != 0) %s", mask, reject)
+		return fmt.Sprintf("if (value > %d) %s", hi, invReject)
 	}
 	return ""
 }
