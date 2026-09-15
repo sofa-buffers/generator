@@ -280,13 +280,14 @@ func widthCond(k ir.Kind) string {
 // and a width fits where a set does not.
 //
 // Storage is still never the bound, and both comparisons run on the RAW carrier,
-// ahead of `fromWire`'s narrowing. Kotlin holds an enum in an `Int`, which the
-// parser's "enum value out of signed 32-bit range" rule makes exactly wide
-// enough -- the implied width is at most i32, so the guard in front of
-// `.toInt()` always covers it. A bitfield is held in a `ULong`, wider than any
-// implied width, which is §1's fourth consequence: a receiver that cannot hold
-// the field at exactly the declared width holds it wider and MUST then enforce
-// the width as an explicit check, because nothing about its storage will.
+// ahead of `fromWire`'s narrowing. A SCALAR enum is held in an `Int` and a scalar
+// bitfield in a `ULong`, each wider than the implied width can be, which is §1's
+// fourth consequence: a receiver that cannot hold the field at exactly the
+// declared width holds it wider and MUST then enforce the width as an explicit
+// check, because nothing about its storage will. An ARRAY element is held at
+// exactly the declared width (primArrayType), and the clause is emitted there all
+// the same -- it is the fallback for a corelib that declines the bulk offer, and
+// what makes both paths reject the same values.
 func declaredWidthCond(k ir.Kind, ref *ir.TypeRef) string {
 	switch k {
 	case ir.KindEnum:
@@ -1008,7 +1009,7 @@ func (g *gen) emitArrayBegin(f *kfile, fs []frame, limArr, hasArray bool) {
 			// callback, and the reservation is sized from it, so there is no earlier
 			// call to hang it on.
 			body := guard + armFill(fs, fr, nil)
-			arrType := primArrayType(fr.innerElem)
+			arrType := primArrayType(fr.innerElem, fr.innerRef)
 			// Sized at exactly the wire count, once: the guard above bounded it
 			// (§9.5, shape A). The wire already said how big the row is.
 			f.line("            %d -> if (kind == ArrayKind.%s) { %s%s = Seq.reserveRow%s(%s, id, count, %s, MAX_DYN_ARRAY_COUNT); %s = id }",
@@ -1051,7 +1052,7 @@ func (g *gen) emitArrayBegin(f *kfile, fs []frame, limArr, hasArray bool) {
 			// elements, so there is nothing to materialize at [M, N).
 			target := fr.path + "." + ktIdent(fld.Name)
 			body := guard + armFill(fs, fr, fld)
-			arrType := primArrayType(fld.Elem)
+			arrType := primArrayType(fld.Elem, fld.ElemRef)
 			// Allocated at exactly the wire count, once (ARCHITECTURE §9.5, shape
 			// A): the guard above has already bounded that count against the
 			// schema capacity or the configured cap. Growing into it from a capped
@@ -1065,7 +1066,7 @@ func (g *gen) emitArrayBegin(f *kfile, fs []frame, limArr, hasArray bool) {
 				// Its element WIDTH is what tells the decoder the declared width, so
 				// the §7.1 check and the narrowing happen in the pass that decodes.
 				// The per-element arms stay the fallback for a decoder that declines.
-				body += fmt.Sprintf("; abulk = %s", bulkView(fld.Elem, target))
+				body += fmt.Sprintf("; abulk = %s", signedArrayView(arrType, target))
 			}
 			arms = append(arms, fmt.Sprintf("%d -> if (kind == ArrayKind.%s) { %s }", fld.ID, arrayWireKind(fld.Elem), body))
 		}
@@ -1077,25 +1078,6 @@ func (g *gen) emitArrayBegin(f *kfile, fs []frame, limArr, hasArray bool) {
 	f.line("        }")
 	f.line("    }")
 	f.blank()
-}
-
-// bulkView is the signed array the corelib's bulk offer is handed for a
-// destination of element kind k. Kotlin's unsigned arrays are inline classes
-// over their signed peers, so `asByteArray()` and friends are the SAME backing
-// array under another type -- the decoder fills the field itself, with no copy
-// and no second pass.
-func bulkView(k ir.Kind, target string) string {
-	switch k {
-	case ir.KindU8:
-		return target + ".asByteArray()"
-	case ir.KindU16:
-		return target + ".asShortArray()"
-	case ir.KindU32:
-		return target + ".asIntArray()"
-	case ir.KindU64, ir.KindBitfield:
-		return target + ".asLongArray()"
-	}
-	return target
 }
 
 // hasBulk reports whether the message has any array the corelib's bulk offer can
@@ -1125,31 +1107,56 @@ func hasBulk(fs []frame) bool {
 
 // bulkCapable reports whether a field is one of those arrays.
 //
-// An `enum` or `bitfield` element is NOT. The only bound the offer can carry is
-// the destination array's WIDTH -- handing back a `ShortArray` says "the elements
-// are declared 16 bits wide" -- and that is the width of the STORAGE, not the one
-// the declaration implies (MESSAGE_SPEC §1). An enum array is an `IntArray` and a
-// bitfield array a `ULongArray` whatever the declaration, so the offer would
-// state 32 or 64 bits for a field bounded at i8 or u8. Taking it bypasses the
-// element callback that carries the real bound, and it did: the guard emitted in
-// the fill arm for an enum array was dead code, and the only rejection at that
-// position came from the corelib's "array element wider than its destination".
-// Declining routes the elements back through widthThrow, one at a time, so an
-// over-width value is refused where it arrives rather than after the whole array
-// has landed (generator#516).
+// The only bound the offer can carry is the destination array's WIDTH -- handing
+// back a `ShortArray` says "these elements are declared 16 bits wide" -- and the
+// corelib then refuses a value that does not fit (IStream's narrowI16/narrowU16,
+// on the element loop and on the byte-at-a-time path alike). So the test is one
+// question: does the array primArrayType picked STATE the width the schema
+// declared? For every integer element it does, the two composite kinds included --
+// primArrayType derives an enum's and a bitfield's from the declaration
+// (MESSAGE_SPEC §1), so an enum over {0,1,2,3,4} hands back a `ByteArray` and the
+// corelib bounds its elements at i8 exactly as it bounds an `array<i8>`. Where
+// that implied width is the accumulator's own -- an enum needing i64, a bitfield
+// whose highest `pos` is 32 or above -- `LongArray`/`ULongArray` states 64 bits,
+// which is again the declared width, and there is no bound left for the offer to
+// lose: widthThrow emits nothing for those either.
 //
-// MEASURED on tests/bench's vehicletelemetry row, which declares and populates
-// both shapes (gear_history, array<enum> count 8; wheel_faults, array<bitfield>
-// count 4). Same corelib checkout, origin/main vs this rule: decode 32743 ->
-// 33674 Ir/op, +931 (+2.8%); encode 17200 -> 17199, i.e. held. Java's twin of
-// this decision costs +4.2% on the same row.
+// The SIGNEDNESS travels with the array kind, not with the destination: the
+// destination is always a signed array (signedArrayView reinterprets an unsigned
+// one), and the corelib picks narrowU* or narrowI* off the header's ArrayKind,
+// which arrayWireKind derives from the same declaration. A bitfield array is
+// UNSIGNED and lands in a `ByteArray` bounded 0..255; an enum array is SIGNED and
+// lands in one bounded -128..127. That is the precedent `array<u8>` against
+// `array<i8>` already set, one level in.
+//
+// Both kinds were declined outright while they had no declared width to state
+// (generator#530's withdrawn closed-set rule): the offer had to be refused
+// because an `IntArray` or a `ULongArray` said nothing about an i8-wide field,
+// and the guard emitted in the fill arm behind it was dead code. Giving them the
+// narrow destination answers that objection at its root -- the destination now
+// carries the bound -- rather than trading the bound for throughput.
+//
+// The per-element arms keep their widthThrow either way. They are the fallback
+// for a corelib that declines the offer (Visitor.arrayBulk defaults to null), so
+// the bound holds at this position whichever path the elements take.
+//
+// fp and boolean elements are the remaining no: the offer is integer-only, and a
+// boolean array is not an integer destination.
+//
+// What it is worth was MEASURED, not asserted. tests/bench's vehicletelemetry row
+// declares and populates both shapes (gear_history, array<enum> count 8;
+// wheel_faults, array<bitfield> count 4), so it prices exactly this decision.
+// Same machine, same corelib checkout (corelib-kotlin-mp b1a2f8a), declining vs
+// this: decode 33683 -> 33033 Ir/op, -650 (-1.9%); encode 17201 both ways, i.e.
+// held exactly. That is about 70% of the +931 the decline cost when the rule
+// landed; the rest is the guards at the ten non-array positions, which stay.
 func bulkCapable(fld *ir.Field) bool {
-	if fld.Kind != ir.KindArray {
+	if fld.Kind != ir.KindArray || !nativeArrayElem(fld.Elem) {
 		return false
 	}
-	switch fld.Elem {
-	case ir.KindU8, ir.KindU16, ir.KindU32, ir.KindU64,
-		ir.KindI8, ir.KindI16, ir.KindI32, ir.KindI64:
+	switch primArrayType(fld.Elem, fld.ElemRef) {
+	case "UByteArray", "UShortArray", "UIntArray", "ULongArray",
+		"ByteArray", "ShortArray", "IntArray", "LongArray":
 		return true
 	}
 	return false
@@ -1162,11 +1169,12 @@ func bulkCapable(fld *ir.Field) bool {
 // arrayBegin has resolved and sized the destination, so the offer is a field
 // read -- not a third walk over (scope, id) -- and the decoder then writes the
 // elements straight into the field's own array. The array's WIDTH is what tells
-// the decoder the declared width: handing back a `ByteArray` says "u8/i8
+// the decoder the declared width: handing back a `ByteArray` says "8-bit
 // elements", and a value that does not fit is INVALID (§7.1) rather than
-// truncated, checked in the same pass that decodes. So all arrayBulkEnd has left
-// to do is clear the fill counter, which no element callback was there to count
-// down.
+// truncated, checked in the same pass that decodes. An enum and a bitfield state
+// their width here like any other element, the one their declaration implies
+// (bulkCapable says how). So all arrayBulkEnd has left to do is clear the fill
+// counter, which no element callback was there to count down.
 func (g *gen) emitBulkCbs(f *kfile, fs []frame) {
 	if !hasBulk(fs) {
 		return
@@ -1397,13 +1405,13 @@ func (g *gen) emitArrayFillArm(f *kfile, fs []frame, cb string) {
 			// Fill the row through the cursor arrayBegin parked. The row was sized
 			// at exactly the announced count, so there is no growth and no
 			// reference to write back into the list (§9.5, shape A).
-			cur := rowCursor(primArrayType(fr.innerElem))
+			cur := rowCursor(primArrayType(fr.innerElem, fr.innerRef))
 			guard := ""
 			if cb == "unsigned" || cb == "signed" {
 				guard = widthThrow(fr.innerElem, fr.innerRef, locName(fr.loc)+" element")
 			}
 			arms = append(arms, arm{ids[-1], fmt.Sprintf("%s%s[ai] = %s; ai++",
-				guard, cur, elemStore(fr.innerElem, cb))})
+				guard, cur, elemStore(fr.innerElem, fr.innerRef, cb))})
 			continue
 		}
 		for _, fld := range fr.fields {
@@ -1421,7 +1429,7 @@ func (g *gen) emitArrayFillArm(f *kfile, fs []frame, cb string) {
 			// the schema capacity or the configured cap (§9.5, shape A), so nothing
 			// here can run past the end and nothing has to grow.
 			arms = append(arms, arm{code, fmt.Sprintf("%s%s[ai] = %s; ai++",
-				guard, target, elemStore(fld.Elem, cb))})
+				guard, target, elemStore(fld.Elem, fld.ElemRef, cb))})
 		}
 	}
 	f.line("        // An element of the array arrayBegin armed: its destination is already")
@@ -1438,16 +1446,23 @@ func (g *gen) emitArrayFillArm(f *kfile, fs []frame, cb string) {
 	f.line("        }")
 }
 
-// elemStore narrows a delivered element into the array's element type. `bool` is
-// the one kind whose storage is not an integer of the declared width.
-func elemStore(k ir.Kind, cb string) string {
+// elemStore narrows a delivered element into the array's element type -- which
+// for an enum and a bitfield is the type their declared width implies, so the
+// conversion is picked for that WIDTH (an enum implying i8 takes `.toByte()`, a
+// bitfield implying u8 `.toUByte()`) rather than for the kind. `bool` is the one
+// kind whose storage is not an integer of the declared width.
+//
+// This is the fallback path: the elements take it only when the corelib declines
+// the bulk offer, which fills the same array itself. The widthThrow in front of
+// the store is what makes the two paths agree on the bound.
+func elemStore(k ir.Kind, ref *ir.TypeRef, cb string) string {
 	if cb == "fp32" || cb == "fp64" {
 		return "value"
 	}
 	if k == ir.KindBool {
 		return "value != 0L"
 	}
-	return fromWire(k, "value")
+	return fromWire(arrayElemKind(primArrayType(k, ref)), "value")
 }
 
 // frameWhen emits `<idx> -> when (id) { <arms> }`.
@@ -1466,7 +1481,7 @@ func primArrayTypesUsed(fs []frame) []string {
 	var out []string
 	for _, order := range primBaseOrder {
 		for _, fr := range fs {
-			if fr.kind == fkNativeMat && primArrayType(fr.innerElem) == order && !seen[order] {
+			if fr.kind == fkNativeMat && primArrayType(fr.innerElem, fr.innerRef) == order && !seen[order] {
 				seen[order] = true
 				out = append(out, order)
 				continue
@@ -1475,7 +1490,7 @@ func primArrayTypesUsed(fs []frame) []string {
 				continue
 			}
 			for _, fld := range fr.fields {
-				if fld.Kind == ir.KindArray && nativeArrayElem(fld.Elem) && primArrayType(fld.Elem) == order && !seen[order] {
+				if fld.Kind == ir.KindArray && nativeArrayElem(fld.Elem) && primArrayType(fld.Elem, fld.ElemRef) == order && !seen[order] {
 					seen[order] = true
 					out = append(out, order)
 				}
@@ -1492,7 +1507,7 @@ func primRowTypesUsed(fs []frame) []string {
 	var out []string
 	for _, order := range primBaseOrder {
 		for _, fr := range fs {
-			if fr.kind == fkNativeMat && primArrayType(fr.innerElem) == order && !seen[order] {
+			if fr.kind == fkNativeMat && primArrayType(fr.innerElem, fr.innerRef) == order && !seen[order] {
 				seen[order] = true
 				out = append(out, order)
 			}

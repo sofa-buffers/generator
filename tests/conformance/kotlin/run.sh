@@ -747,11 +747,17 @@ echo "==> declared-width reject OK (scalar and array element)"
 #
 # Kotlin is the target that had a bound already, and it was the wrong one: an
 # enum was checked against the signed 32-bit range -- the WIRE TYPE's ceiling,
-# which happens to coincide with the `Int` the member is held in -- so 1000 into
-# an enum declaring {0,1,2,10} decoded and was kept, and a bitfield had no check
-# at all. Its enum ARRAY guard was dead code besides: the corelib bulk offer
-# bypassed the callback, and the offer is declined for both kinds now, because
-# the offer states the DESTINATION's width and the bound is the declaration's.
+# which happens to coincide with the `Int` a SCALAR enum is held in -- so 1000
+# into an enum declaring {0,1,2,10} decoded and was kept, and a bitfield had no
+# check at all. Its enum ARRAY guard was dead code besides, the corelib bulk
+# offer having bypassed the callback.
+#
+# The two ARRAY positions are backed by the implied width itself now (a
+# `ByteArray` for the enum here, a `UByteArray` for the bitfield) and ride that
+# same bulk offer, which states the DESTINATION's width: the corelib refuses an
+# element that does not fit it, so these two cells exercise the corelib's half of
+# the rule rather than a generated guard. The generated guard is still emitted
+# behind them, for a corelib that declines the offer.
 echo "==> enum/bitfield: bounded by the width the declaration implies (S1, generator#516)"
 { echo "version: 1"; echo "messages:"; } > "$WORK/closed.yaml"
 python3 "$ROOT/tests/conformance/lib/check_declared_width_kinds.py" --emit-schema >> "$WORK/closed.yaml"

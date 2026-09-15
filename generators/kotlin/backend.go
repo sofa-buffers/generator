@@ -636,7 +636,7 @@ func (g *gen) emitResetField(f *kfile, fld *ir.Field) {
 				f.line("        %s = %s.copyOf()", acc, arrDefName(fld))
 				return
 			}
-			f.line("        %s = %s", acc, emptyArrayExpr(primArrayType(fld.Elem)))
+			f.line("        %s = %s", acc, emptyArrayExpr(primArrayType(fld.Elem, fld.ElemRef)))
 			return
 		}
 		// A wrapper array's declared per-element default is not materialised, so
@@ -710,7 +710,7 @@ func (g *gen) emitMarshalArray(f *kfile, fld *ir.Field, acc string) {
 	// N -- and against the empty array when no default is declared.
 	if nativeArrayElem(fld.Elem) {
 		f.line("        if (%s) {", g.ktWritesExpr(fld))
-		f.line("            %s", arrayWriteCall(fld.Elem, itoa64(fld.ID), acc))
+		f.line("            %s", arrayWriteCall(fld.Elem, fld.ElemRef, itoa64(fld.ID), acc))
 		f.line("        }")
 		return
 	}
@@ -787,7 +787,7 @@ func (g *gen) marshalArray(f *kfile, ind, idExpr, val string, elem ir.Kind, ref 
 	iv := fmt.Sprintf("_i%d", depth)
 	ev := fmt.Sprintf("_e%d", depth)
 	if nativeArrayElem(elem) {
-		f.line("%s%s", ind, arrayWriteCall(elem, idExpr, val))
+		f.line("%s%s", ind, arrayWriteCall(elem, ref, idExpr, val))
 		return
 	}
 	lv := g.elemLoopList(f, ind, val, "MutableList<"+g.ktArrayElemType(elem, ref, items)+">")
