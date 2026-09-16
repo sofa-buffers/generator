@@ -78,7 +78,7 @@ jobs:
 
       - uses: actions/setup-java@v6
         if: matrix.row == 'java'
-        with: { distribution: temurin, java-version: "17.0.20+101" }
+        with: { distribution: temurin, java-version: "25.0.4+101.0.LTS" }
 
       - uses: actions/setup-dotnet@v6
         if: matrix.row == 'csharp'
