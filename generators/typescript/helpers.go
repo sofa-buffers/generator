@@ -437,12 +437,10 @@ func (g *gen) tsType(f *ir.Field) string {
 // does not repay itself over the 2..8 element arrays the bench schema declares; the
 // 64-bit mapping was the worse half per element, and `int64: long` / `number` keep
 // Long, which has no typed counterpart, so they could not follow anyway. A typed
-// member also cannot grow, which a `count: N` capacity needs, and cannot take
-// corelib-ts's arrayBulk hand-off (ArrayTarget.out is a plain number[]).
+// member also cannot grow, which a `count: N` capacity needs.
 //
 // Unmeasured: a LONG narrow-integer array, which no bench schema has. Pricing that
-// needs the schema AND a typed-capable ArrayTarget together — see
-// sofa-buffers/generator#549.
+// needs such a schema first — see sofa-buffers/generator#549.
 func (g *gen) tsArrayType(elem ir.Kind, ref *ir.TypeRef, items *ir.ArrayElem) string {
 	switch elem {
 	case ir.KindString:
