@@ -82,7 +82,7 @@ jobs:
 
       - uses: actions/setup-dotnet@v6
         if: matrix.row == 'csharp'
-        with: { dotnet-version: "9.0.x" }
+        with: { dotnet-version: "10.0.401" }
 
       - uses: dart-lang/setup-dart@v1
         if: matrix.row == 'dart'

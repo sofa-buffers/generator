@@ -231,7 +231,7 @@ jobs:
           go-version: "1.27"
       - uses: actions/setup-dotnet@v6
         with:
-          dotnet-version: "9.0.x"
+          dotnet-version: "10.0.401"
       - uses: ./.github/actions/corelib-refs
       - name: C# backend — generate, build, round-trip, conformance
         run: ./tests/conformance/csharp/run.sh
