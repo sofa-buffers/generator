@@ -426,6 +426,23 @@ func (g *gen) tsType(f *ir.Field) string {
 
 // tsArrayType returns the `T[]` member type for an array element, recursing for
 // nested arrays (array-of-array -> T[][]).
+//
+// Integer arrays stay `number[]` (`bigint[]` / `Long[]` at 64 bits) instead of
+// mapping to Int8Array..BigUint64Array because the typed containers were measured
+// and lost. A prototype backing every integer array with its exact-width typed
+// container, on byte-identical wire, regressed all six halves of the three ts bench
+// rows: ts-bigint +0.802% encode / +0.753% decode, ts-long +0.757% / +0.498%,
+// ts-number +0.726% / +0.478% — each outside the 0.3% hysteresis band. V8 already
+// holds these as PACKED_SMI_ELEMENTS, and an ArrayBuffer plus its own allocation
+// does not repay itself over the 2..8 element arrays the bench schema declares; the
+// 64-bit mapping was the worse half per element, and `int64: long` / `number` keep
+// Long, which has no typed counterpart, so they could not follow anyway. A typed
+// member also cannot grow, which a `count: N` capacity needs, and cannot take
+// corelib-ts's arrayBulk hand-off (ArrayTarget.out is a plain number[]).
+//
+// Unmeasured: a LONG narrow-integer array, which no bench schema has. Pricing that
+// needs the schema AND a typed-capable ArrayTarget together — see
+// sofa-buffers/generator#549.
 func (g *gen) tsArrayType(elem ir.Kind, ref *ir.TypeRef, items *ir.ArrayElem) string {
 	switch elem {
 	case ir.KindString:
