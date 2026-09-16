@@ -860,8 +860,10 @@ func TestCppNativeArrayWritesEveryElement(t *testing.T) {
 				// Numeric + float fields hand the container over whole.
 				"(void)os.write(0, u32s);",
 				"(void)os.write(1, f32s);",
-				// An enum value-converts through a native temp, element for element.
-				"(void)os.write(2, _t0); }",
+				// An enum array hands its container over whole too: both corelibs
+				// take a container of scoped enums since corelib-cpp#138 /
+				// corelib-c-cpp#166, converting per element as they encode.
+				"(void)os.write(2, ens);",
 			}
 			// A boolean array's element is std::uint8_t on BOTH legs, so the member
 			// already holds the wire bytes and is handed over whole -- no temp.
@@ -936,7 +938,7 @@ func TestCppDynamicArrayNotTrimmed(t *testing.T) {
 	for _, want := range []string{
 		"(void)os.write(0, dyn);",
 		"(void)os.write(1, dynf);",
-		"(void)os.write(2, _t0); }",
+		"(void)os.write(2, dynen);",
 		"(void)os.write(3, dynbl);", // bool elements ARE the wire bytes -- no temp
 		"(void)os.write(4, fixed);", // the counted one no longer trims either
 	} {
@@ -2115,24 +2117,33 @@ func TestCppNativeCountArrayCarriesALength(t *testing.T) {
 		})
 	}
 
-	// The encode temp an enum array converts through must not touch a heap on the
-	// heap-free profile, and must be the VALUE's length -- never the schema count,
-	// which would put N elements on the wire for a shorter value.
+	// An enum array is written straight from its member, on BOTH profiles: no
+	// converted temporary, no allocation on the heap-free one, and nothing that
+	// could put the schema `count` on the wire in place of the value's length.
+	//
+	// Until corelib-cpp#138 / corelib-c-cpp#166 the container had to be converted
+	// first, because both corelibs dispatched write() on std::is_integral_v and a
+	// scoped enum failed it. They take the container itself now and convert per
+	// element as they encode, so the temp is gone (generator#548) -- and this
+	// asserts its absence, since a reintroduced one would be invisible on the wire
+	// and only show up as an allocation.
 	enumSrc := "version: 1\nmessages:\n  M:\n    payload:\n" +
 		"      cols: { id: 0, type: array, items: { type: enum, count: 3, enum: { A: 0, B: 1 } } }\n"
-	fixedEnum, err := genHeader(t, enumSrc, "m.hpp", map[string]any{"corelib": "c-cpp"})
-	if err != nil {
-		t.Fatalf("generate enum fixed: %v", err)
-	}
-	if !strings.Contains(fixedEnum, "{ sofab::InlineVector<std::int8_t, 3> _t0; _t0.resize(cols.size());") {
-		t.Errorf("the heap-free enum encode temp must be inline and value-length:\n%s", fixedEnum)
-	}
-	heapEnum, err := genHeader(t, enumSrc, "m.hpp", map[string]any{})
-	if err != nil {
-		t.Fatalf("generate enum heap: %v", err)
-	}
-	if !strings.Contains(heapEnum, "{ std::vector<std::int8_t> _t0; _t0.resize(cols.size());") {
-		t.Errorf("the heap enum encode temp must be value-length:\n%s", heapEnum)
+	for _, corelib := range []string{"c-cpp", "cpp"} {
+		cfg := map[string]any{}
+		if corelib == "c-cpp" {
+			cfg["corelib"] = corelib
+		}
+		h, err := genHeader(t, enumSrc, "m.hpp", cfg)
+		if err != nil {
+			t.Fatalf("generate enum (%s): %v", corelib, err)
+		}
+		if !strings.Contains(h, "(void)os.write(0, cols);") {
+			t.Errorf("[%s] an enum array must be written straight from its member:\n%s", corelib, h)
+		}
+		if strings.Contains(h, "_t0.resize(cols.size())") {
+			t.Errorf("[%s] the withdrawn enum encode temporary is back:\n%s", corelib, h)
+		}
 	}
 }
 
