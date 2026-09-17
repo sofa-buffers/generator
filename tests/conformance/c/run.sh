@@ -572,12 +572,13 @@ echo "==> corpus + realworld: every definition compiles"
 # BIG descriptor profile so wide field ids (up to 2^31-1) fit the descriptor.
 for def in "$ROOT"/tests/matrix/corpus/defs/*.yaml "$ROOT"/examples/messages/realworld/vehicle_telemetry.yaml; do
     name=$(basename "$def" .yaml)
-    # no_maxlen and seq_elements_dyn are deliberately-unbounded schemas (dynamic-path
-    # coverage for heap targets); the heapless C target requires bounds on every
-    # field, so neither is a valid C input — the negative test below asserts
-    # no_maxlen is rejected. Their bounded counterparts (seq_elements, nested_rows)
-    # are compiled here, so the C target keeps its wrapper-element coverage.
-    case "$name" in no_maxlen | seq_elements_dyn) continue ;; esac
+    # no_maxlen, seq_elements_dyn and array_lengths_dyn are deliberately-unbounded
+    # schemas (dynamic-path coverage for heap targets); the heapless C target
+    # requires bounds on every field, so none is a valid C input — the negative
+    # test below asserts no_maxlen is rejected. Their bounded counterparts
+    # (seq_elements, nested_rows, array_lengths) are compiled here, so the C
+    # target keeps its wrapper-element and array-length coverage.
+    case "$name" in no_maxlen | seq_elements_dyn | array_lengths_dyn) continue ;; esac
     ( cd "$ROOT" && go run ./cmd/sofabgen --lang c --in "$def" --out "$WORK/corpus/$name" >/dev/null )
     for c in "$WORK"/corpus/"$name"/*.c; do
         # -Werror, because the defects this loop exists to catch are DIAGNOSTICS,

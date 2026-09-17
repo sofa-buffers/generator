@@ -109,7 +109,13 @@ func (g *gen) storage(recv string, f *ir.Field) string {
 // nested inside a wrapper array is NOT covered — its rows have no field of their
 // own to hang the companion on. See ARCHITECTURE §9.3 (decode families).
 func fp32RawCompanion(f *ir.Field) bool {
-	return f.Kind == ir.KindFP32 || (f.Kind == ir.KindArray && f.Elem == ir.KindFP32)
+	// SCALARS only. An fp32 ARRAY is a `Float32Array`, which already holds the
+	// wire words: the decoder writes them through `bits` over its own buffer and
+	// the encoder copies them straight back out (corelib-ts), so the payload is
+	// bit-exact with nothing captured, compared or re-attached beside it. A
+	// scalar has nowhere to keep the bits but a companion -- a JS number is a
+	// double, and widening an fp32 signaling NaN into one quiets it (§4.6/§6.5).
+	return f.Kind == ir.KindFP32
 }
 
 // fp32RawName is the property name of a field's fp32 raw-bits companion. The
@@ -202,8 +208,7 @@ type helperUse struct {
 	overIdxArr  bool // count-bearing wrapper array -> import SofabError for the over-index reject (generator#142)
 	maxlenField bool // bounded string/blob (scalar or wrapper element) -> import SofabError for the over-maxlen reject (MESSAGE_SPEC §7.1)
 	narrowInt   bool // narrow integer destination (scalar or native array element) -> import SofabError for the over-width reject (MESSAGE_SPEC §7.1, generator#266)
-	fp32Raw     bool // fp32 scalar field -> emit _fp32FromRaw (the §4.6 bit-exact scalar channel, generator#235)
-	fp32ArrRaw  bool // native fp32 array field -> emit _fp32ArrayRaw (its array half)
+	fp32Raw     bool // fp32 SCALAR field -> emit _fp32Raw (the §4.6 bit-exact channel, generator#235)
 }
 
 // arrayOverIndexed reports whether an array field (recursively through nested
@@ -282,18 +287,16 @@ func (g *gen) scanHelpers(s *ir.Schema) helperUse {
 			if fld.Kind == ir.KindArray && arrayHasNarrowInt(fld.Elem, fld.ElemItems) {
 				use.narrowInt = true
 			}
-			// The fp32 raw-bits channel (§4.6): the scalar half widens the wire bytes
-			// through _fp32FromRaw, the array half re-renders them through
-			// _fp32ArrayRaw. Each helper is emitted only where its position occurs.
+			// The fp32 raw-bits channel (§4.6) is a SCALAR-only concern now. A JS
+			// number is a double and cannot carry an fp32 signaling NaN's payload,
+			// so a scalar keeps the four wire bytes beside the value, rendered from
+			// the 32-bit word the hook hands over. An fp32 ARRAY needs none of it:
+			// its member is a `Float32Array`, which holds the wire words themselves
+			// -- the decoder writes them through `bits` over that buffer and the
+			// encoder copies them straight back out, so the payload is bit-exact
+			// with nothing captured beside the numbers.
 			if fld.Kind == ir.KindFP32 {
 				use.fp32Raw = true
-			}
-			if fld.Kind == ir.KindArray && fld.Elem == ir.KindFP32 {
-				// The array half re-renders through _fp32ArrayRaw on encode and widens
-				// each element through the scalar helper _fp32FromRaw on decode, so an
-				// fp32 ARRAY needs both halves even when the schema has no fp32 scalar.
-				use.fp32Raw = true
-				use.fp32ArrRaw = true
 			}
 			if fld.Kind == ir.KindArray && nativeArrayElem(fld.Elem) {
 				// A `count: N` native array decodes with the over-count reject, which
@@ -424,49 +427,52 @@ func (g *gen) tsType(f *ir.Field) string {
 	return "unknown"
 }
 
-// tsArrayType returns the `T[]` member type for an array element, recursing for
-// nested arrays (array-of-array -> T[][]).
+// tsArrayType returns the member type for an array field, recursing for nested
+// arrays (array-of-array -> T[][]).
 //
-// Integer arrays stay `number[]` (`bigint[]` / `Long[]` at 64 bits) instead of
-// mapping to Int8Array..BigUint64Array because the typed containers were measured
-// and lost. A prototype backing every integer array with its exact-width typed
-// container, on byte-identical wire, regressed all six halves of the three ts bench
-// rows: ts-bigint +0.802% encode / +0.753% decode, ts-long +0.757% / +0.498%,
-// ts-number +0.726% / +0.478% — each outside the 0.3% hysteresis band. V8 already
-// holds these as PACKED_SMI_ELEMENTS, and an ArrayBuffer plus its own allocation
-// does not repay itself over the 2..8 element arrays the bench schema declares; the
-// 64-bit mapping was the worse half per element, and `int64: long` / `number` keep
-// Long, which has no typed counterpart, so they could not follow anyway. A typed
-// member also cannot grow, which a `count: N` capacity needs.
+// Every NUMERIC array is its exact-width typed container: u8..i32 map to
+// Uint8Array..Int32Array, fp32/fp64 to Float32Array/Float64Array, boolean to a
+// Uint8Array (§4.4 gives it no width of its own -- it is the u8 the wire carries),
+// an enum to a branded view of the width its constants imply and a bitfield to the
+// unsigned width its highest declared `pos` implies. At 64 bits the carrier follows
+// the `int64` mode: `bigint` takes BigUint64Array/BigInt64Array, `long` and `number`
+// keep `Long[]`, whose two 32-bit halves are the whole point of those modes.
 //
-// Unmeasured: a LONG narrow-integer array, which no bench schema has. Pricing that
-// needs such a schema first — see sofa-buffers/generator#549.
+// The container IS the decode destination and the encode source: the corelib fills
+// it and reads it without the generator ever touching an element, so no conversion
+// pass, no per-element range check and no widening copy is generated
+// (corelib-ts#177, #181). Only the leaf kinds that are not numbers -- string, blob,
+// struct, union -- stay ordinary arrays, and a WRAPPER array of those keeps its
+// `T[]` outer container.
 func (g *gen) tsArrayType(elem ir.Kind, ref *ir.TypeRef, items *ir.ArrayElem) string {
 	switch elem {
 	case ir.KindString:
 		return "string[]"
 	case ir.KindBlob:
 		return "Uint8Array[]"
+	case ir.KindStruct, ir.KindUnion:
+		return g.typeName(ref.Key) + "[]"
+	case ir.KindArray:
+		return g.tsArrayType(items.Elem, items.ElemRef, items.ElemItems) + "[]"
+	case ir.KindEnum:
+		// The carrier is the declared width, and the ELEMENT still reads as the
+		// enum: the alias intersects the typed array with an index signature, so
+		// `m.modes[0]` is `Mode` and not `number`, while the storage stays a plain
+		// `Int8Array` the codec fills without touching an element.
+		return enumArrayAlias(g.typeName(ref.Key))
 	case ir.KindU64, ir.KindI64:
 		if g.longArrays() {
 			return "Long[]"
 		}
-		return "bigint[]"
-	case ir.KindBool:
-		return "boolean[]"
-	case ir.KindEnum, ir.KindStruct, ir.KindUnion:
-		return g.typeName(ref.Key) + "[]"
-	case ir.KindArray:
-		return g.tsArrayType(items.Elem, items.ElemRef, items.ElemItems) + "[]"
-	case ir.KindBitfield:
-		if wideBitfield(ref) {
-			return "bigint[]"
-		}
-		return "number[]"
-	default: // integers
-		return "number[]"
 	}
+	if t := g.tsTypedArray(elem, ref); t != "" {
+		return t
+	}
+	return "number[]"
 }
+
+// enumArrayAlias names the emitted type alias for an array of one enum.
+func enumArrayAlias(enumName string) string { return enumName + "Array" }
 
 func (g *gen) tsDefault(f *ir.Field) string {
 	switch f.Kind {
@@ -546,8 +552,18 @@ func (g *gen) tsDefault(f *ir.Field) string {
 		// rather than being padded out to N. That is also what the field's omit test
 		// compares against, and what an absent field decodes back to.
 		if nativeArrayElem(f.Elem) {
+			carrier := g.tsTypedArray(f.Elem, f.ElemRef)
 			if lit, ok := g.nativeArrayDefault(f); ok {
+				if carrier != "" {
+					// The declared default, materialised in the member's own
+					// container. `count` is a CAPACITY, so the literal stands as
+					// written and is never padded out to N (§3).
+					return fmt.Sprintf("new %s(%s)", carrier, lit)
+				}
 				return lit
+			}
+			if carrier != "" {
+				return fmt.Sprintf("new %s(0)", carrier)
 			}
 		}
 		return "[]"
@@ -588,18 +604,22 @@ func (g *gen) nativeArrayDefault(f *ir.Field) (string, bool) {
 				parts[i] = scalarLit(v) + "n"
 			}
 		case ir.KindBool:
+			// The member is a Uint8Array carrying §4.4's canonical 0/1, so the
+			// default is written in that form and needs no conversion to become one.
 			if b, ok := v.(bool); ok && b {
-				parts[i] = "true"
+				parts[i] = "1"
 			} else {
-				parts[i] = "false"
+				parts[i] = "0"
 			}
 		case ir.KindFP32, ir.KindFP64:
 			parts[i] = fmt.Sprintf("%v", v)
 		case ir.KindEnum:
-			parts[i] = fmt.Sprintf("(%s as %s)", scalarLit(v), g.typeName(f.ElemRef.Key))
+			// No cast: the container takes numbers, and the enum type is carried by
+			// the member's alias rather than by each element literal.
+			parts[i] = scalarLit(v)
 		case ir.KindBitfield:
 			parts[i] = scalarLit(v)
-			if wideBitfield(f.ElemRef) {
+			if bigTyped(g.tsTypedArray(f.Elem, f.ElemRef)) {
 				parts[i] += "n"
 			}
 		default: // u8/u16/u32, i8/i16/i32
@@ -797,19 +817,35 @@ func (g *gen) tsArrayToJSON(val string, elem ir.Kind, ref *ir.TypeRef, items *ir
 		if g.longArrays() {
 			return fmt.Sprintf("%s.map((%s) => %s.toString(%t))", val, x, x, elem == ir.KindI64)
 		}
-		return fmt.Sprintf("%s.map((%s) => %s.toString())", val, x, x)
+		// A BigUint64Array's elements are `bigint`, which JSON cannot carry --
+		// the same decimal-string spelling the 64-bit scalars use. `Array.from`
+		// with a mapper does the widening and the conversion in one pass.
+		return fmt.Sprintf("Array.from(%s, (%s) => %s.toString())", val, x, x)
 	case ir.KindBitfield:
-		if wideBitfield(ref) {
-			return fmt.Sprintf("%s.map((%s) => %s.toString())", val, x, x)
+		if bigTyped(g.tsTypedArray(elem, ref)) {
+			return fmt.Sprintf("Array.from(%s, (%s) => %s.toString())", val, x, x)
 		}
-		return val
+		return fmt.Sprintf("Array.from(%s)", val)
+	case ir.KindBool:
+		// The member holds 0/1 bytes (§4.4's canonical form); JSON wants booleans.
+		return fmt.Sprintf("Array.from(%s, (%s) => %s !== 0)", val, x, x)
 	case ir.KindBlob:
 		return fmt.Sprintf("%s.map((%s) => Array.from(%s))", val, x, x)
 	case ir.KindStruct, ir.KindUnion:
 		return fmt.Sprintf("%s.map((%s) => %s.toJSON())", val, x, x)
 	case ir.KindArray:
 		return fmt.Sprintf("%s.map((%s) => %s)", val, x, g.tsArrayToJSON(x, items.Elem, items.ElemRef, items.ElemItems, depth+1))
+	case ir.KindEnum:
+		// A numeric enum IS a number on the wire and in JSON, so only the container
+		// has to be widened.
+		return fmt.Sprintf("Array.from(%s)", val)
 	default:
+		// `JSON.stringify` renders a typed array as an OBJECT (`{"0":9,...}`), not
+		// an array, so the widening is not cosmetic: without it the emitted JSON is
+		// a different document. `map` alone would hand back a typed array again.
+		if g.tsTypedArray(elem, ref) != "" {
+			return fmt.Sprintf("Array.from(%s)", val)
+		}
 		return val
 	}
 }
@@ -860,25 +896,139 @@ func (g *gen) tsArrayFromJSON(src string, elem ir.Kind, ref *ir.TypeRef, items *
 	x := fmt.Sprintf("_x%d", depth)
 	switch elem {
 	case ir.KindU64, ir.KindI64:
-		return fmt.Sprintf("(%s as (string | number)[]).map((%s) => BigInt(%s))", src, x, x)
+		if g.longArrays() {
+			return fmt.Sprintf("(%s as (string | number)[]).map((%s) => BigInt(%s))", src, x, x)
+		}
+		return fmt.Sprintf("new %s((%s as (string | number)[]).map((%s) => BigInt(%s)))",
+			g.tsTypedArray(elem, ref), src, x, x)
 	case ir.KindBlob:
 		return fmt.Sprintf("(%s as number[][]).map((%s) => new Uint8Array(%s))", src, x, x)
 	case ir.KindStruct, ir.KindUnion:
 		return fmt.Sprintf("(%s as Record<string, unknown>[]).map((%s) => %s.fromJSON(%s))", src, x, g.typeName(ref.Key), x)
 	case ir.KindEnum:
-		return fmt.Sprintf("%s as %s[]", src, g.typeName(ref.Key))
+		return fmt.Sprintf("new %s(%s as number[]) as %s",
+			g.tsTypedArray(elem, ref), src, enumArrayAlias(g.typeName(ref.Key)))
 	case ir.KindArray:
 		return fmt.Sprintf("(%s as unknown[]).map((%s) => %s)", src, x, g.tsArrayFromJSON(x, items.Elem, items.ElemRef, items.ElemItems, depth+1))
 	case ir.KindBitfield:
-		if wideBitfield(ref) {
-			return fmt.Sprintf("(%s as (string | number)[]).map((%s) => BigInt(%s))", src, x, x)
+		if t := g.tsTypedArray(elem, ref); bigTyped(t) {
+			return fmt.Sprintf("new %s((%s as (string | number)[]).map((%s) => BigInt(%s)))", t, src, x, x)
 		}
-		return fmt.Sprintf("%s as number[]", src)
+		return fmt.Sprintf("new %s(%s as number[])", g.tsTypedArray(elem, ref), src)
 	case ir.KindBool:
-		return fmt.Sprintf("%s as boolean[]", src)
+		return fmt.Sprintf("Uint8Array.from(%s as boolean[], (%s) => (%s ? 1 : 0))", src, x, x)
 	case ir.KindString:
 		return fmt.Sprintf("%s as string[]", src)
 	default:
+		// JSON carries a plain array; the member is the typed one. The constructor
+		// is also the one place a value outside the declared width becomes visible
+		// to whoever wrote the JSON — it coerces, exactly as an assignment to the
+		// member would.
+		if t := g.tsTypedArray(elem, ref); t != "" {
+			return fmt.Sprintf("new %s(%s as number[])", t, src)
+		}
 		return fmt.Sprintf("%s as number[]", src)
 	}
+}
+
+// --- typed array carriers ---------------------------------------------------
+
+// tsTypedArray names the typed array a native array element is HELD in, "" for
+// an element that has no typed carrier.
+//
+// Every native kind has one, which is the point: the member IS the decode
+// destination and the encode source, so nothing is converted on either side and
+// no element is ever touched by generated code. What varies is only which
+// container, and that follows the width the schema declares.
+//
+//	u8..u32 / i8..i32   the exact width
+//	u64 / i64           BigUint64Array / BigInt64Array -- but only under
+//	                    `int64: bigint`; see below
+//	fp32 / fp64         Float32Array / Float64Array
+//	boolean             Uint8Array, as the scalar is (§1: a boolean travels as an
+//	                    unsigned integer, and the corelib normalizes every
+//	                    non-zero to 1 while filling -- §4.4)
+//	enum                the smallest SIGNED width holding every constant (§1)
+//	bitfield            the smallest UNSIGNED width holding the highest `pos` (§1)
+//
+// **64-bit is the one place a typed carrier is not automatically the better
+// one, so it follows the `int64` mode instead of overriding it.** Filling a
+// `BigUint64Array` costs nothing (the corelib writes the two 32-bit halves
+// through a view over its buffer), but READING one element yields a fresh
+// `bigint` — and `int64: long` exists precisely to keep `bigint` out of the
+// caller's hot path. So `bigint` mode gets the typed array, which is strictly
+// better than the `bigint[]` it replaces; `long` and `number` keep `Long[]`, the
+// one member in the emitted surface that is deliberately not a typed array.
+func (g *gen) tsTypedArray(elem ir.Kind, ref *ir.TypeRef) string {
+	switch elem {
+	case ir.KindU8:
+		return "Uint8Array"
+	case ir.KindU16:
+		return "Uint16Array"
+	case ir.KindU32:
+		return "Uint32Array"
+	case ir.KindI8:
+		return "Int8Array"
+	case ir.KindI16:
+		return "Int16Array"
+	case ir.KindI32:
+		return "Int32Array"
+	case ir.KindBool:
+		return "Uint8Array"
+	case ir.KindFP32:
+		return "Float32Array"
+	case ir.KindFP64:
+		return "Float64Array"
+	case ir.KindU64:
+		if g.longArrays() {
+			return ""
+		}
+		return "BigUint64Array"
+	case ir.KindI64:
+		if g.longArrays() {
+			return ""
+		}
+		return "BigInt64Array"
+	case ir.KindEnum:
+		return signedCarrier(ir.EnumWidthRange(ref))
+	case ir.KindBitfield:
+		return unsignedCarrier(ir.BitfieldWidthMax(ref))
+	}
+	return ""
+}
+
+// signedCarrier / unsignedCarrier turn the declared width an `enum` or a
+// `bitfield` implies into the container that holds exactly it. `ok == false` is
+// the accumulator's own width: i64 for an enum (unreachable — the schema caps a
+// constant at signed 32-bit) and u64 for a bitfield, which `pos: 63` does reach.
+func signedCarrier(lo, hi int64, ok bool) string {
+	if !ok {
+		return "BigInt64Array"
+	}
+	switch hi {
+	case 127:
+		return "Int8Array"
+	case 32767:
+		return "Int16Array"
+	}
+	return "Int32Array"
+}
+
+func unsignedCarrier(hi uint64, ok bool) string {
+	if !ok {
+		return "BigUint64Array"
+	}
+	switch hi {
+	case 0xff:
+		return "Uint8Array"
+	case 0xffff:
+		return "Uint16Array"
+	}
+	return "Uint32Array"
+}
+
+// bigTyped reports whether a carrier holds `bigint` elements, which changes how
+// a default, a JSON value and an omission test are spelled.
+func bigTyped(carrier string) bool {
+	return carrier == "BigUint64Array" || carrier == "BigInt64Array"
 }

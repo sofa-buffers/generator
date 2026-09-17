@@ -194,28 +194,22 @@ func (g *gen) emitVisitor(f *tsfile, name string, fields []*ir.Field) {
 			f.line("  private %s = 0;", sc.ix)
 		}
 		if sc.row != "" {
-			f.line("  private %s: %s = [];", sc.row, g.matRowType(sc))
+			f.line("  private %s: %s = %s;", sc.row, g.matRowType(sc),
+				g.emptyRegisterLit(sc.elemItems.Elem, sc.elemItems.ElemRef, g.matRowType(sc)))
 		}
 		if sc.seq != "" {
 			f.line("  private %s: %s | null = null;", sc.seq, g.seqClass(sc.elem))
 		}
 	}
-	if anyBulk(scopes) {
-		// ONE target for the whole visitor, re-pointed per array: the corelib holds
-		// it only for that array's lifetime, so a fresh object per array would be an
-		// allocation with nothing to show for it.
-		f.line("  private readonly _bt: ArrayTarget = { out: [], min: 0, max: 0 };")
-	}
+	g.emitBulkState(f, g.bulkNeedsOf(scopes))
 	for _, sc := range scopes {
 		for _, x := range sc.fields {
 			if x.Kind != ir.KindArray || !nativeArrayElem(x.Elem) {
 				continue
 			}
-			f.line("  private %s: %s = [];", arrayDst(sc, x), g.tsArrayType(x.Elem, x.ElemRef, x.ElemItems))
-			if x.Elem == ir.KindFP32 && fp32RawCompanion(x) {
-				f.line("  private %s: Uint8Array | null = null;", fp32RawScratch(sc, x))
-				f.line("  private %s = false;", fp32RawSeen(sc, x))
-			}
+			f.line("  private %s: %s = %s;", arrayDst(sc, x),
+				g.tsArrayType(x.Elem, x.ElemRef, x.ElemItems),
+				g.emptyRegisterLit(x.Elem, x.ElemRef, g.tsArrayType(x.Elem, x.ElemRef, x.ElemItems)))
 		}
 	}
 	f.line("  constructor(readonly o: %s, readonly a: PayloadAcc) {}", name)
@@ -246,6 +240,7 @@ func (g *gen) scopeSwitch(f *tsfile, sig string, arms map[int][]string, scopes [
 	// own location test, which is cheaper than a switch and keeps the common
 	// leaf-message shape (no nesting) exactly as monomorphic as it was.
 	if len(arms) == 1 {
+		done := false
 		for _, sc := range scopes {
 			body, ok := arms[sc.id]
 			if !ok {
@@ -255,8 +250,14 @@ func (g *gen) scopeSwitch(f *tsfile, sig string, arms map[int][]string, scopes [
 			for _, ln := range body {
 				f.line("%s", ln)
 			}
+			done = endsWithReturn(body)
 		}
-		if tail != "" {
+		// ...unless the one arm already left. A bare scope arm that ends in
+		// `return _t;` -- which is every arrayBulk arm for a matrix row -- would
+		// otherwise be followed by an unreachable `return null;`: legal under the
+		// emitted tsconfig, but an error for a consumer building with
+		// `allowUnreachableCode: false` or linting `no-unreachable`.
+		if tail != "" && !done {
 			f.line("    return%s;", tail)
 		}
 	} else {
@@ -290,7 +291,8 @@ func endsWithReturn(body []string) bool {
 	if len(body) == 0 {
 		return false
 	}
-	return strings.HasSuffix(strings.TrimSpace(body[len(body)-1]), "return true;")
+	last := strings.TrimSpace(body[len(body)-1])
+	return strings.HasPrefix(last, "return ") && strings.HasSuffix(last, ";")
 }
 
 // idSwitch renders the inner dispatch of one object scope: a switch on the field
@@ -767,21 +769,258 @@ func (g *gen) emitPayloadCb(f *tsfile, scopes []*tsScope, cb string) {
 
 // --- native arrays ----------------------------------------------------------
 
-// emitArrayCbs writes arrayBegin, the four element callbacks and arrayEnd.
+// corelib-ts#177 made the bulk hand-off the ONLY way an array's elements reach a
+// visitor: `Visitor.arrayUnsigned` / `arraySigned` / `arrayFp32` / `arrayFp64` are
+// gone, and `arrayBulk` answers with the destination the decoder then fills
+// itself, one write per element and no callback at all. Declining (returning
+// `null`, or declaring no hook) is the §6.7.2 `skip` intent: the elements are
+// walked over and never decoded into existence.
 //
-// The over-count verdict is taken in arrayBegin, at the COUNT WORD, before a
-// single element arrives: that is what keeps an over-count array INVALID rather
-// than INCOMPLETE when the message is truncated inside it (§5.2, F-0032), and it
-// costs nothing -- the corelib hands the declared count in.
+// So there is no longer a threshold to weigh, and no "eligible" subset: a
+// generated class wants every one of its declared arrays, so it offers a
+// destination for every one of them. What varies per element kind is only WHICH
+// destination, and whether the member the schema declares can BE that destination
+// or has to be filled from a scratch one afterwards.
+//
+//	u8..u32, i8..i32     values  -- the member array itself
+//	enum, narrow bitfield values  -- the member array itself
+//	u64/i64 (long modes) longs   -- the member Long[] itself
+//	u64/i64 (bigint)     values  -- scratch, then one BigInt per element
+//	bool                 values  -- scratch, then Boolean per element
+//	wide bitfield        values  -- scratch, then one BigInt per element
+//	fp32                 bits    -- scratch, read back through a Float32Array view
+//	fp64                 f64     -- scratch, copied into the member number[]
+//
+// The member types are unchanged, which is the point: generator#549 measured
+// typed-array MEMBERS as a loss and as a breaking change to every generated class,
+// and that verdict stands. The destination shape and the member type are separate
+// decisions, and only the destination moves here.
+
+// emptyArrayLit / newArrayDecl / newArrayExpr spell "an array of this element
+// kind" for the two member shapes: a plain `[]`, whose type has to be written out
+// because an empty literal is `never[]`, and a typed array, which carries its own
+// type and takes the length in the constructor.
+// emptyRegisterLit is emptyArrayLit with the member's own type asserted on, for
+// the private registers whose declared type is the enum alias.
+func (g *gen) emptyRegisterLit(elem ir.Kind, ref *ir.TypeRef, typ string) string {
+	if elem == ir.KindEnum {
+		return fmt.Sprintf("new %s(0) as %s", g.tsTypedArray(elem, ref), typ)
+	}
+	return g.emptyArrayLit(elem, ref)
+}
+
+func (g *gen) emptyArrayLit(elem ir.Kind, ref *ir.TypeRef) string {
+	if t := g.tsTypedArray(elem, ref); t != "" {
+		return fmt.Sprintf("new %s(0)", t)
+	}
+	return "[]"
+}
+
+func (g *gen) newArrayDecl(elem ir.Kind, ref *ir.TypeRef, typ string) string {
+	if g.tsTypedArray(elem, ref) != "" {
+		return "" // `new Uint16Array(count)` carries its own type
+	}
+	return ": " + typ
+}
+
+// newArrayExpr builds the destination at the WIRE count, which arrayBegin has
+// already measured against the schema capacity or the receiver cap on the line
+// before -- so a forged count never reaches an allocation (§6.2.1).
+//
+// An enum's container takes numbers, so the member's alias is asserted once here
+// rather than carried by every element.
+func (g *gen) newArrayExpr(elem ir.Kind, ref *ir.TypeRef, typ string) string {
+	t := g.tsTypedArray(elem, ref)
+	if t == "" {
+		return "[]"
+	}
+	if elem == ir.KindEnum {
+		return fmt.Sprintf("new %s(count) as %s", t, typ)
+	}
+	return fmt.Sprintf("new %s(count)", t)
+}
+
+// bulkShape names the ArrayTarget destination one element kind is filled through.
+//
+// Every native array is a TYPED ARRAY on the message object, so in every case the
+// member IS the destination and the corelib fills it in place: nothing is copied
+// out afterwards, nothing is converted, and generated code never touches an
+// element. What differs is only which of the corelib's five shapes carries it.
+type bulkShape int
+
+const (
+	// IntegerArrayTarget.typed -- every integer width, including the 64-bit pair
+	// (filled through the halves of its own buffer), an `enum` at the signed width
+	// its constants imply and a `bitfield` at the unsigned width its highest `pos`
+	// implies (§1).
+	shTyped bulkShape = iota
+	// BoolArrayTarget.bool -- one byte per element, and the only integer shape
+	// with no bound: §4.4 gives a boolean none, and the corelib normalizes every
+	// non-zero to 1 while filling rather than masking it (256 would become 0).
+	shBool
+	// FloatArrayTarget.bits over the Float32Array member's OWN buffer. Not `f32`:
+	// that destination stores values, and an fp32 signaling NaN cannot survive
+	// being widened to a double and narrowed back (§4.6/§6.5). The words land
+	// exactly and reading the member still gives the values -- one buffer, both.
+	shBits
+	// FloatArrayTarget.f64 -- a double carries all 64 bits, payload NaNs included,
+	// so there is nothing a bits channel would add.
+	shF64
+	// IntegerArrayTarget.longs -- `Long[]` under `int64: long`/`number`, the one
+	// member that is deliberately not a typed array (see tsTypedArray).
+	shLongs
+)
+
+// bulkPlan is what the two hooks need to know about one native array.
+type bulkPlan struct {
+	kind     string      // ArrayKind arm name, for the §7.3 contradiction test
+	shape    bulkShape   // which destination
+	elemKind ir.Kind     // the element kind this plan was made for
+	elemRef  *ir.TypeRef // its named type, for an enum or a bitfield
+}
+
+// planBulk picks the destination for one native array element kind.
+//
+// There is no residue and no second pass anywhere in here, and that is the point
+// of the mapping: every bound this format has is a WIDTH (§1 included, since the
+// closed-set reading was withdrawn), a width is an interval, an interval travels
+// with the destination, and the container the member is held in enforces the same
+// width a second time for free. So the decoder compares once while filling and
+// generated code compares nothing at all.
+func (g *gen) planBulk(elem ir.Kind, ref *ir.TypeRef) bulkPlan {
+	p := bulkPlan{kind: tsArrayKind(elem), elemKind: elem, elemRef: ref}
+	switch elem {
+	case ir.KindBool:
+		p.shape = shBool
+	case ir.KindFP32:
+		p.shape = shBits
+	case ir.KindFP64:
+		p.shape = shF64
+	case ir.KindU64, ir.KindI64:
+		if g.longArrays() {
+			p.shape = shLongs
+		} else {
+			p.shape = shTyped
+		}
+	default:
+		p.shape = shTyped
+	}
+	return p
+}
+
+// elemBound is the element interval the hand-off carries, as the four unsigned
+// 32-bit halves IntegerArrayTarget states it in (two's complement for a signed
+// array). It is the SCHEMA's bound, so its violation is INVALID (§7.1).
+func (g *gen) elemBound(elem ir.Kind, ref *ir.TypeRef) [4]uint32 {
+	switch elem {
+	case ir.KindU64:
+		return boundHalves(0, -1)
+	case ir.KindI64:
+		return [4]uint32{0, 0x80000000, 0xffffffff, 0x7fffffff}
+	case ir.KindEnum:
+		// The width the declaration implies, and the WHOLE rule (§1): an undeclared
+		// value inside it is valid, so there is no set to re-check.
+		if lo, hi, ok := ir.EnumWidthRange(ref); ok {
+			return boundHalves(lo, hi)
+		}
+		return [4]uint32{0, 0x80000000, 0xffffffff, 0x7fffffff}
+	case ir.KindBitfield:
+		// The same one width down. An undeclared BIT inside it is valid.
+		if hi, ok := ir.BitfieldWidthMax(ref); ok {
+			return [4]uint32{0, 0, uint32(hi), uint32(hi >> 32)}
+		}
+		return boundHalves(0, -1)
+	}
+	if lo, hi, ok := ir.NarrowRange(elem); ok {
+		return boundHalves(lo, hi)
+	}
+	return boundHalves(0, -1)
+}
+
+// boundHalves splits a declared interval into the four halves, hi == -1 meaning
+// the widest unsigned value (0xffffffff_ffffffff, which no int64 can name).
+func boundHalves(lo, hi int64) [4]uint32 {
+	h := uint64(hi)
+	if hi == -1 {
+		h = ^uint64(0)
+	}
+	l := uint64(lo)
+	return [4]uint32{uint32(l), uint32(l >> 32), uint32(h), uint32(h >> 32)}
+}
+
+// bulkNeeds records which reusable target objects a visitor class declares.
+type bulkNeeds struct{ typed, bool_, bits, f64, longs bool }
+
+func (g *gen) bulkNeedsOf(scopes []*tsScope) bulkNeeds {
+	var n bulkNeeds
+	add := func(p bulkPlan) {
+		switch p.shape {
+		case shTyped:
+			n.typed = true
+		case shBool:
+			n.bool_ = true
+		case shBits:
+			n.bits = true
+		case shF64:
+			n.f64 = true
+		case shLongs:
+			n.longs = true
+		}
+	}
+	for _, sc := range scopes {
+		if sc.isArr {
+			if sc.row != "" {
+				add(g.planBulk(sc.elemItems.Elem, sc.elemItems.ElemRef))
+			}
+			continue
+		}
+		for _, x := range sc.fields {
+			if x.Kind == ir.KindArray && nativeArrayElem(x.Elem) {
+				add(g.planBulk(x.Elem, x.ElemRef))
+			}
+		}
+	}
+	return n
+}
+
+// emitBulkState declares the reusable target objects.
+//
+// ONE per destination shape for the whole visitor, re-pointed per array rather
+// than rebuilt: the corelib holds a target only for that array's lifetime, and
+// arrays never overlap -- an array's elements all arrive before anything else is
+// delivered -- so one of each is enough and a fresh one per array would be an
+// allocation with nothing to show for it. The shapes are kept APART rather than
+// sharing one object with several optional slots, because the corelib refuses a
+// target naming more than one destination (§6.3).
+//
+// There are no scratch buffers here any more, and that is the whole change: with
+// the member itself as the destination there is nothing to fill on the way to it.
+func (g *gen) emitBulkState(f *tsfile, n bulkNeeds) {
+	if n.typed {
+		f.line("  private readonly _tt: IntegerArrayTarget = { typed: new Uint8Array(0), minLo: 0, minHi: 0, maxLo: 0, maxHi: 0 };")
+	}
+	if n.longs {
+		f.line("  private readonly _tl: IntegerArrayTarget = { longs: [], minLo: 0, minHi: 0, maxLo: 0, maxHi: 0 };")
+	}
+	if n.bool_ {
+		f.line("  private readonly _tq: BoolArrayTarget = { bool: new Uint8Array(0) };")
+	}
+	if n.bits {
+		f.line("  private readonly _tb: FloatArrayTarget = { bits: new Uint32Array(0) };")
+	}
+	if n.f64 {
+		f.line("  private readonly _td: FloatArrayTarget = { f64: new Float64Array(0) };")
+	}
+}
+
 func (g *gen) emitArrayCbs(f *tsfile, scopes []*tsScope) {
-	begin, end := map[int][]string{}, map[int][]string{}
-	uns, sig, f32, f64 := map[int][]string{}, map[int][]string{}, map[int][]string{}, map[int][]string{}
+	begin, bulk := map[int][]string{}, map[int][]string{}
 
 	for _, sc := range scopes {
 		if sc.isArr {
 			// A native matrix row: the array header arrives at THIS scope keyed by
-			// the row index, so the row is reserved here and the elements land in
-			// the row register the begin arm just set.
+			// the row index, so the row is reserved here and handed over as this
+			// row's destination.
 			if sc.row == "" {
 				continue
 			}
@@ -795,25 +1034,21 @@ func (g *gen) emitArrayCbs(f *tsfile, scopes []*tsScope) {
 			if bound := g.arrayCountBound(capOf(sc.elemItems.HasCount, sc.elemItems.Count), sc.loc+" element"); bound != "" {
 				b = append(b, "    "+strings.TrimSuffix(bound, " "))
 			}
-			b = append(b, "    while (_t.length <= id) _t.push([]);",
-				fmt.Sprintf("    const _r: %s = []; _t[id] = _r; this.%s = _r;", g.matRowType(sc), sc.row))
+			b = append(b, fmt.Sprintf("    while (_t.length <= id) _t.push(%s);",
+				g.emptyArrayLit(sc.elemItems.Elem, sc.elemItems.ElemRef)),
+				fmt.Sprintf("    const _r%s = %s; _t[id] = _r; this.%s = _r;",
+					g.newArrayDecl(sc.elemItems.Elem, sc.elemItems.ElemRef, g.matRowType(sc)),
+					g.newArrayExpr(sc.elemItems.Elem, sc.elemItems.ElemRef, g.matRowType(sc)), sc.row))
 			begin[sc.id] = b
-			conv, dst := g.elemConv(sc.elemItems.Elem, sc.elemItems.ElemRef)
-			line := g.rowElemLine(sc, conv)
-			switch dst {
-			case "unsigned":
-				uns[sc.id] = line
-			case "signed":
-				sig[sc.id] = line
-			case "fp32":
-				f32[sc.id] = line
-			case "fp64":
-				f64[sc.id] = line
-			}
+
+			p := g.planBulk(sc.elemItems.Elem, sc.elemItems.ElemRef)
+			bulk[sc.id] = append(
+				[]string{fmt.Sprintf("    if (kind !== ArrayKind.%s) return null;", p.kind)},
+				g.bulkOffer(p, "this."+sc.row, "    ")...)
 			continue
 		}
 
-		var ib, ie, iu, is, i32, i64 []string
+		var ib, ibk []string
 		for _, x := range sc.fields {
 			if x.Kind != ir.KindArray || !nativeArrayElem(x.Elem) {
 				continue
@@ -831,56 +1066,26 @@ func (g *gen) emitArrayCbs(f *tsfile, scopes []*tsScope) {
 			b := fmt.Sprintf("    case %d: { ", x.ID)
 			b += fmt.Sprintf("if (kind !== ArrayKind.%s) break; ", tsArrayKind(x.Elem))
 			b += g.arrayCountBound(cap, x.Name)
-			// Built once, assigned to the field AND kept in the register the element
-			// arms read. A re-opened array id replaces (§7.4), so both are rebuilt.
-			b += fmt.Sprintf("const _d: %s = []; %s = _d; this.%s = _d; ",
-				g.tsArrayType(x.Elem, x.ElemRef, x.ElemItems), acc, arrayDst(sc, x))
-			if x.Elem == ir.KindFP32 && fp32RawCompanion(x) {
-				// A re-opened array id REPLACES (§7.4), so the companion is reset here
-				// too. Sized from the announced count, which the guard above has
-				// already bounded, so an over-count header cannot size this.
-				b += fmt.Sprintf("%s = null; this.%s = new Uint8Array(count * 4); this.%s = false; ",
-					g.fp32RawStorage(sc.path, x), fp32RawScratch(sc, x), fp32RawSeen(sc, x))
-			}
+			// Built once, assigned to the field AND kept in the register the offer
+			// and the arrayEnd pass read. A re-opened array id replaces (§7.4), so
+			// both are rebuilt.
+			b += fmt.Sprintf("const _d%s = %s; %s = _d; this.%s = _d; ",
+				g.newArrayDecl(x.Elem, x.ElemRef, g.tsArrayType(x.Elem, x.ElemRef, x.ElemItems)),
+				g.newArrayExpr(x.Elem, x.ElemRef, g.tsArrayType(x.Elem, x.ElemRef, x.ElemItems)),
+				acc, arrayDst(sc, x))
 			b += "break; }"
 			ib = append(ib, b)
 
-			if x.Elem == ir.KindFP32 && fp32RawCompanion(x) {
-				ie = append(ie, fmt.Sprintf("    case %d: %s = this.%s ? this.%s : null; this.%s = null; break;",
-					x.ID, g.fp32RawStorage(sc.path, x), fp32RawSeen(sc, x), fp32RawScratch(sc, x), fp32RawScratch(sc, x)))
-			}
-
-			conv, dst := g.elemConv(x.Elem, x.ElemRef)
-			var line string
-			if ei, ec, ecast, ewhat := g.guardedElem(x.Elem, x.ElemRef); ec != "" {
-				// The element's declaration binds it too -- its declared width for an
-				// integer (§7.1), the width an `enum` or a `bitfield` declaration
-				// implies (§1) -- and it is checked as each element arrives, so a
-				// truncation behind a rejected element cannot downgrade the verdict
-				// (§5.2).
-				// `_e` IS the store value: re-deriving it from `v` would run the same
-				// conversion a second time, per element.
-				_ = conv
-				line = fmt.Sprintf("    case %d: { const _e = %s; if (%s) throw new SofabError(SofabErrorCode.InvalidMsg, %q); this.%s[i] = _e%s; break; }",
-					x.ID, ei, ec, fmt.Sprintf("%s: value outside declared %s", x.Name, ewhat), arrayDst(sc, x), ecast)
-			} else if x.Elem == ir.KindFP32 && fp32RawCompanion(x) {
-				line = fmt.Sprintf("    case %d: { this.%s[i] = v; const _r = this.%s; if (_r !== null && (i + 1) * 4 <= _r.length) _fp32RawInto(_r, i * 4, bits); if (Number.isNaN(v)) this.%s = true; break; }",
-					x.ID, arrayDst(sc, x), fp32RawScratch(sc, x), fp32RawSeen(sc, x))
-			} else {
-				line = fmt.Sprintf("    case %d: this.%s[i] = %s; break;", x.ID, arrayDst(sc, x), conv)
-			}
-			switch dst {
-			case "unsigned":
-				iu = append(iu, line)
-			case "signed":
-				is = append(is, line)
-			case "fp32":
-				i32 = append(i32, line)
-			case "fp64":
-				i64 = append(i64, line)
-			}
-			// No fill-to-count on arrayEnd: a declared `count: N` is a CAPACITY, not
-			// a length (MESSAGE_SPEC §3), so the wire count IS the array's length.
+			p := g.planBulk(x.Elem, x.ElemRef)
+			arm := []string{fmt.Sprintf("    case %d: {", x.ID),
+				fmt.Sprintf("      if (kind !== ArrayKind.%s) break;", p.kind)}
+			arm = append(arm, g.bulkOffer(p, "this."+arrayDst(sc, x), "      ")...)
+			arm = append(arm, "    }")
+			ibk = append(ibk, arm...)
+			// No arrayEnd arm, for any kind: the member IS the destination, so there
+			// is nothing to copy out and nothing the interval could not state. And no
+			// fill-to-count either -- a declared `count: N` is a CAPACITY, not a
+			// length (MESSAGE_SPEC §3), so the wire count IS the array's length.
 		}
 		put := func(m map[int][]string, ids []string) {
 			if body := idSwitch(ids); body != nil {
@@ -888,121 +1093,48 @@ func (g *gen) emitArrayCbs(f *tsfile, scopes []*tsScope) {
 			}
 		}
 		put(begin, ib)
-		put(end, ie)
-		put(uns, iu)
-		put(sig, is)
-		put(f32, i32)
-		put(f64, i64)
+		put(bulk, ibk)
 	}
 
 	g.scopeSwitch(f, "arrayBegin(id: number, kind: ArrayKind, count: number): void", begin, scopes, "")
-	g.emitArrayBulk(f, scopes)
-	g.scopeSwitch(f, "arrayUnsigned(id: number, i: number, v: number | bigint, lo: number, hi: number): void", uns, scopes, "")
-	g.scopeSwitch(f, "arraySigned(id: number, i: number, v: number | bigint, lo: number, hi: number): void", sig, scopes, "")
-	g.scopeSwitch(f, "arrayFp32(id: number, i: number, v: number, bits: number): void", f32, scopes, "")
-	g.scopeSwitch(f, "arrayFp64(id: number, i: number, v: number): void", f64, scopes, "")
-	g.scopeSwitch(f, "arrayEnd(id: number): void", end, scopes, "")
+	g.scopeSwitch(f, "arrayBulk(id: number, kind: ArrayKind, count: number): ArrayTarget | null", bulk, scopes, " null")
 }
 
-// emitArrayBulk writes the bulk destination hand-off.
-//
-// The corelib calls it right after arrayBegin, which has already built the
-// destination and put it in this field's register — so all this does is point the
-// shared target at that register and state the element's declared bounds. The
-// decoder then fills it directly and the element callback never fires for this
-// array (measured: 2361 → 1721 Ir per element, −27%).
-//
-// The per-element arms stay emitted regardless. They are what runs for an array
-// the hand-off declines, and what runs against a corelib that predates it — which
-// is what makes taking it additive rather than a version bump.
-func (g *gen) emitArrayBulk(f *tsfile, scopes []*tsScope) {
-	arms := map[int][]string{}
-	for _, sc := range scopes {
-		if sc.isArr {
-			continue
-		}
-		var ids []string
-		for _, x := range sc.fields {
-			if x.Kind != ir.KindArray || !nativeArrayElem(x.Elem) || !bulkEligible(x) {
-				continue
-			}
-			lo, hi, _ := ir.NarrowRange(x.Elem)
-			// The kind test is the same §7.3 guard arrayBegin takes: a contradicting
-			// header is not this field's array, so it gets neither this field's
-			// destination nor this field's bounds.
-			ids = append(ids, fmt.Sprintf(
-				"    case %d: { if (kind !== ArrayKind.%s) break; const _t = this._bt; _t.out = this.%s; _t.min = %d; _t.max = %d; return _t; }",
-				x.ID, tsArrayKind(x.Elem), arrayDst(sc, x), lo, hi))
-		}
-		if body := idSwitch(ids); body != nil {
-			arms[sc.id] = body
-		}
+// bulkOffer renders the body of one arrayBulk arm: point the shape's target at
+// the member, state the element interval where the shape carries one, and hand it
+// over. Three or four lines, and no arm anywhere that reads or writes an element.
+func (g *gen) bulkOffer(p bulkPlan, dst, ind string) []string {
+	var out []string
+	line := func(s string, a ...any) { out = append(out, ind+fmt.Sprintf(s, a...)) }
+	switch p.shape {
+	case shTyped:
+		// The member itself, at its declared width. The bound still travels and is
+		// still compared: a typed store MASKS, and §7.1 forbids masking an
+		// over-width element away rather than refusing it.
+		line("const _t = this._tt; _t.typed = %s;", dst)
+	case shLongs:
+		line("const _t = this._tl; _t.longs = %s;", dst)
+	case shBool:
+		// No bound: §4.4 gives a boolean none, and the corelib normalizes every
+		// non-zero to 1 while filling.
+		line("const _t = this._tq; _t.bool = %s;", dst)
+	case shBits:
+		// A Uint32Array over the Float32Array member's OWN buffer: the decoder
+		// writes the wire words, which is what keeps a signaling NaN's payload
+		// (§4.6/§6.5), and the same bytes read back as the values. One view object
+		// per array -- the member is a different array each time, so there is
+		// nothing to cache.
+		line("const _m = %s; const _t = this._tb;", dst)
+		line("_t.bits = new Uint32Array(_m.buffer, _m.byteOffset, _m.length);")
+	case shF64:
+		line("const _t = this._td; _t.f64 = %s;", dst)
 	}
-	g.scopeSwitch(f, "arrayBulk(id: number, kind: ArrayKind, count: number): ArrayTarget | null", arms, scopes, " null")
-}
-
-// rowElemLine renders a native matrix row's element store: straight into the row
-// register arrayBegin set, with the element's declared-width verdict (§7.1) taken
-// as each element arrives.
-func (g *gen) rowElemLine(sc *tsScope, conv string) []string {
-	if ei, ec, ecast, ewhat := g.guardedElem(sc.elemItems.Elem, sc.elemItems.ElemRef); ec != "" {
-		// As in the flat arm above: `_e` is the store value, not merely the value
-		// the verdict was taken on.
-		return []string{
-			fmt.Sprintf("    const _e = %s; if (%s) throw new SofabError(SofabErrorCode.InvalidMsg, %q);",
-				ei, ec, fmt.Sprintf("%s element: value outside declared %s", sc.loc, ewhat)),
-			fmt.Sprintf("    this.%s[i] = _e%s;", sc.row, ecast),
-		}
+	if p.shape == shTyped || p.shape == shLongs {
+		bd := g.elemBound(p.elemKind, p.elemRef)
+		line("_t.minLo = %d; _t.minHi = %d; _t.maxLo = %d; _t.maxHi = %d;", bd[0], bd[1], bd[2], bd[3])
 	}
-	return []string{fmt.Sprintf("    this.%s[i] = %s;", sc.row, conv)}
-}
-
-// guardedElem is `guarded` for a native array ELEMENT: the same declaration, the
-// same clause, read into `_e` instead of `_v`. The element positions are two of
-// the six an enum or a bitfield lands in, and they take the same verdict as the
-// other four (generator#516).
-func (g *gen) guardedElem(elem ir.Kind, ref *ir.TypeRef) (init, cond, cast, what string) {
-	init, cond, cast, what = g.guarded(elem, ref)
-	return init, strings.ReplaceAll(cond, "_v", "_e"), cast, what
-}
-
-// elemConv gives a native array element's store expression and which element
-// callback delivers it.
-func (g *gen) elemConv(elem ir.Kind, ref *ir.TypeRef) (string, string) {
-	switch elem {
-	case ir.KindBool:
-		return "Boolean(v)", "unsigned"
-	case ir.KindBitfield:
-		if wideBitfield(ref) {
-			return "BigInt(v)", "unsigned"
-		}
-		return "Number(v)", "unsigned"
-	case ir.KindU8, ir.KindU16, ir.KindU32:
-		return "Number(v)", "unsigned"
-	case ir.KindU64:
-		return g.big64Arr(), "unsigned"
-	case ir.KindI8, ir.KindI16, ir.KindI32:
-		return "Number(v)", "signed"
-	case ir.KindEnum:
-		return fmt.Sprintf("Number(v) as %s", g.typeName(ref.Key)), "signed"
-	case ir.KindI64:
-		return g.big64Arr(), "signed"
-	case ir.KindFP32:
-		return "v", "fp32"
-	case ir.KindFP64:
-		return "v", "fp64"
-	}
-	return "v", "unsigned"
-}
-
-// big64Arr is the 64-bit ELEMENT store. Long-backed arrays take the wire halves
-// directly (no bigint per element, which is the whole point of the Long modes);
-// under `int64: bigint` the hook's own number-first value converts.
-func (g *gen) big64Arr() string {
-	if g.longArrays() {
-		return "Long.fromBits(lo, hi)"
-	}
-	return "typeof v === \"bigint\" ? v : BigInt(v)"
+	line("return _t;")
+	return out
 }
 
 // matRowType / arrElemType name the TypeScript element types the generated
@@ -1015,88 +1147,22 @@ func (g *gen) arrElemType(sc *tsScope) string {
 	return g.tsArrayType(sc.elem, sc.elemRef, sc.elemItems)
 }
 
-// bulkEligible reports whether a native array can be filled through the corelib's
-// bulk destination hand-off (Visitor.arrayBulk) instead of one callback per
-// element.
-//
-// Exactly the kinds that carry a DECLARED NARROW WIDTH qualify, and that is not a
-// coincidence: the hand-off's whole contract is that the consumer states the
-// element's bounds as an INTERVAL and the decoder applies them as it fills
-// (§7.1). A kind with no interval to state cannot use it, and a kind whose
-// destination is not a plain JS number (u64/i64 → bigint or Long, boolean, fp32
-// with its raw-bits companion) cannot be written into directly at all. Both
-// decline, and keep the element callbacks.
-//
-// `enum` and `bitfield` decline too, and their reason moved. Their bound is an
-// interval now — the width the declaration implies (MESSAGE_SPEC §1,
-// generator#516) — so an ArrayTarget could state it, but ir.NarrowRange answers
-// only for the integer kinds, and neither destination is the plain `number[]`
-// the hand-off fills: an enum array is typed as its enum and a wide bitfield
-// array holds bigints. Both keep the per-element callback that already carries
-// the verdict; offering them the hand-off is a separate change with its own
-// measurement to make, not a consequence of the bound becoming an interval.
-func bulkEligible(x *ir.Field) bool {
-	if _, _, ok := ir.NarrowRange(x.Elem); !ok {
-		return false
-	}
-	// ...and only where the array can be long enough to pay for the offer.
-	//
-	// corelib-ts gates the hand-off at BULK_MIN elements because the offer is a
-	// call out to the visitor and costs more than a short array's fill saves. A
-	// declared `count` is a CAPACITY, so an array declared below that threshold can
-	// never reach it on the wire — the offer would be made, refused by the corelib,
-	// and paid for anyway on every message. Leaving the arm out is the same verdict
-	// taken statically, where it costs nothing at all. An array the schema leaves
-	// open keeps its arm: only the wire knows how long it is, and the corelib's own
-	// gate decides per message.
-	if !x.HasCount {
-		return true
-	}
-	return x.Count >= tsBulkMin
-}
-
-// tsBulkMin mirrors corelib-ts's BULK_MIN. It is a threshold, not a contract: if
-// the two drift, the corelib still refuses the short arrays this lets through, and
-// the only cost is the offer nobody wanted.
-const tsBulkMin = 16
-
-// anyBulk reports whether any scope of the tree has an array the hand-off covers.
-func anyBulk(scopes []*tsScope) bool {
-	for _, sc := range scopes {
-		for _, x := range sc.fields {
-			if x.Kind == ir.KindArray && nativeArrayElem(x.Elem) && bulkEligible(x) {
-				return true
-			}
-		}
-	}
-	return false
-}
-
 // arrayDst names the visitor-private register that holds a native array's
 // destination for the duration of its element run.
 //
-// The element callbacks are the hottest sites in a decode -- one per element, and
-// an array is the only field that produces more than one -- so reaching the
-// destination through `this.o.<field>` there costs two property loads per element
-// for a value that cannot change while the run lasts. arrayBegin already builds
-// that array; keeping it is free, and the element arm then does one load.
+// arrayBegin builds that array and two later hooks need it again: arrayBulk hands
+// it (or the scratch that fills it) to the decoder, and arrayEnd copies out of
+// that scratch. Reaching it through `this.o.<field>` walks the whole nested path
+// each time, for a value that cannot change while the array lasts; keeping the
+// register is free, and each hook then does one load. It carried more weight
+// still when an element callback read it per element -- that callback is gone
+// (corelib-ts#177) and the register is not, because the per-ARRAY hooks want it.
 //
 // It is the same register the nested matrix rows already use (`_rowN`), applied
 // one level up. Scoped by location as well as name: the same field name may occur
 // in two scopes of one tree.
 func arrayDst(sc *tsScope, f *ir.Field) string {
 	return fmt.Sprintf("_a%d%s", sc.id, exported(f.Name))
-}
-
-// fp32RawScratch / fp32RawSeen name the visitor-private slots that assemble an
-// fp32 array's raw companion. Scoped by location as well as name: the same field
-// name may occur in two scopes of one tree.
-func fp32RawScratch(sc *tsScope, f *ir.Field) string {
-	return fmt.Sprintf("_raw%d%s", sc.id, exported(f.Name))
-}
-
-func fp32RawSeen(sc *tsScope, f *ir.Field) string {
-	return fmt.Sprintf("_rawNaN%d%s", sc.id, exported(f.Name))
 }
 
 // --- shared -----------------------------------------------------------------
@@ -1224,10 +1290,11 @@ func nativeArrayElem(k ir.Kind) bool {
 func tsArrayKind(elem ir.Kind) string {
 	switch elem {
 	// An ENUM is signed on the wire -- serialize writes it with writeSignedArray,
-	// and its elements arrive on arraySigned. Classifying it as Unsigned here made
-	// arrayBegin reject every enum array as a §7.3 contradiction, so its count
-	// bound never ran and a re-opened id merged into the old value instead of
-	// replacing it (§7.4), while the elements still landed through arraySigned.
+	// and the corelib announces its header as ArrayKind.Signed. Classifying it as
+	// Unsigned here made arrayBegin reject every enum array as a §7.3
+	// contradiction, so its count bound never ran and a re-opened id merged into
+	// the old value instead of replacing it (§7.4) -- while the elements, routed
+	// by kind and not by that arm, still arrived.
 	case ir.KindI8, ir.KindI16, ir.KindI32, ir.KindI64, ir.KindEnum:
 		return "Signed"
 	case ir.KindFP32:
@@ -1335,73 +1402,6 @@ function _fp32RawInto(out: Uint8Array, off: number, bits: number): void {
 function _fp32Raw(bits: number): Uint8Array {
   const out = new Uint8Array(4);
   _fp32RawInto(out, 0, bits);
-  return out;
-}`
-
-// fp32RawHelper is the scalar half of the fp32 raw-bits channel (MESSAGE_SPEC
-// §4.6, generator#235). A JS number is a 64-bit double, and widening an fp32
-// SIGNALING NaN into one quiets it (0x7F800001 -> 0x7FC00001), so the number
-// alone can never re-encode that field bit-for-bit. Decode therefore reads the
-// four wire bytes (Cursor.readFp32Raw) and widens them here for the value
-// consumer, keeping a copy of the bytes only when the value is a NaN. Every
-// non-NaN fp32 narrows back to its own bits exactly, so nothing else needs them.
-// Emitted only when the schema has an fp32 scalar field.
-const fp32RawHelper = `// Shared 4-byte scratch word for the fp32 raw-bytes path below: widening an
-// fp32's wire bytes allocates nothing per decode.
-const _fp32Buf = new ArrayBuffer(4);
-const _fp32Bytes = new Uint8Array(_fp32Buf);
-const _fp32View = new DataView(_fp32Buf);
-
-// _fp32FromRaw widens the four little-endian wire bytes at raw[off] to a JS
-// number. A signaling NaN quiets in the widening (0x7F800001 -> 0x7FC00001),
-// which is exactly why the caller keeps the bytes beside the number.
-function _fp32FromRaw(raw: Uint8Array, off: number): number {
-  _fp32Bytes[0] = raw[off]!;
-  _fp32Bytes[1] = raw[off + 1]!;
-  _fp32Bytes[2] = raw[off + 2]!;
-  _fp32Bytes[3] = raw[off + 3]!;
-  return _fp32View.getFloat32(0, true);
-}`
-
-// fp32ArrayRawHelper is the array half of the same channel: it renders an fp32
-// array's wire payload from the value, substituting the captured wire bytes ONLY
-// for an element that is still the NaN it decoded as. An element the caller has
-// changed since -- and any element whose captured bytes are not themselves a NaN
-// -- re-renders from its number, so a hand-set value is never overwritten by a
-// stale capture. Emitted only when the schema has a native fp32 array field.
-const fp32ArrayRawHelper = `// _fp32RawFrom narrows v to fp32 and writes its four little-endian wire bytes to
-// out[off], through the same shared scratch word _fp32FromRaw reads back.
-function _fp32RawFrom(out: Uint8Array, off: number, v: number): void {
-  _fp32View.setFloat32(0, v, true);
-  out[off] = _fp32Bytes[0]!;
-  out[off + 1] = _fp32Bytes[1]!;
-  out[off + 2] = _fp32Bytes[2]!;
-  out[off + 3] = _fp32Bytes[3]!;
-}
-
-// _fp32ArrayRaw renders an fp32 array's wire payload (count * 4 little-endian
-// bytes) from vals, keeping the captured wire bits of every element that is
-// STILL the NaN it decoded as. An element the caller has changed since
-// re-renders from its number, so a hand-set value never loses to a stale
-// capture: only the bits a JS number cannot carry come from ` + "`raw`" + `.
-//
-// Both directions go through the module-level 4-byte scratch (_fp32FromRaw /
-// _fp32RawFrom) rather than a DataView built over the payload: this runs on
-// every encode of an fp32 array that decoded with a NaN, and the two DataViews
-// it used to construct per call are a heavyweight allocation apiece.
-function _fp32ArrayRaw(vals: readonly number[], raw: Uint8Array): Uint8Array {
-  const out = new Uint8Array(vals.length * 4);
-  for (let i = 0, o = 0; i < vals.length; i++, o += 4) {
-    const v = vals[i]!;
-    if (Number.isNaN(v) && o + 4 <= raw.length && Number.isNaN(_fp32FromRaw(raw, o))) {
-      out[o] = raw[o]!;
-      out[o + 1] = raw[o + 1]!;
-      out[o + 2] = raw[o + 2]!;
-      out[o + 3] = raw[o + 3]!;
-    } else {
-      _fp32RawFrom(out, o, v);
-    }
-  }
   return out;
 }`
 

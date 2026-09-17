@@ -1,0 +1,38 @@
+# The count-LESS half of array_lengths.yaml: one unbounded native array per
+# element kind.
+#
+# Split out for the reason seq_elements_dyn.yaml is split out of
+# seq_elements.yaml — an array the schema leaves open cannot be expressed on the
+# fixed-storage targets at all (c, cpp with `corelib: c-cpp`, rust with
+# `corelib: rs-no-std`), which require a bound on every array and string. Those
+# suites skip this file by name, exactly as they skip no_maxlen.yaml.
+#
+# The variable here is the missing `count`, and only that: an unbounded array is
+# a different arm in every backend — its length is decided by the wire rather
+# than the schema, so the receiver cap governs where a capacity would, and the
+# destination is sized from a number the message supplied. Nothing in the repo
+# declared one carrying real elements before generator#550.
+version: 1
+$defs:
+  enum:
+    Grade: { LOW: 0, MID: 1, HIGH: 2, TOP: 10 }
+  bitfield:
+    Marks: { A: { pos: 0 }, B: { pos: 1 }, D: { pos: 3 } }
+    Wide:  { A: { pos: 0 }, B: { pos: 40 }, D: { pos: 63 } }
+messages:
+  ArrayLengthsDyn:
+    payload:
+      d_u8:   { id: 0,  type: array, items: { type: u8 } }
+      d_u16:  { id: 1,  type: array, items: { type: u16 } }
+      d_u32:  { id: 2,  type: array, items: { type: u32 } }
+      d_u64:  { id: 3,  type: array, items: { type: u64 } }
+      d_i8:   { id: 4,  type: array, items: { type: i8 } }
+      d_i16:  { id: 5,  type: array, items: { type: i16 } }
+      d_i32:  { id: 6,  type: array, items: { type: i32 } }
+      d_i64:  { id: 7,  type: array, items: { type: i64 } }
+      d_fp32: { id: 8,  type: array, items: { type: fp32 } }
+      d_fp64: { id: 9,  type: array, items: { type: fp64 } }
+      d_bool: { id: 10, type: array, items: { type: boolean } }
+      d_enum: { id: 11, type: array, items: { type: enum, enum: { $ref: '#/$defs/enum/Grade' } } }
+      d_bits: { id: 12, type: array, items: { type: bitfield, bits: { $ref: '#/$defs/bitfield/Marks' } } }
+      d_wide: { id: 13, type: array, items: { type: bitfield, bits: { $ref: '#/$defs/bitfield/Wide' } } }

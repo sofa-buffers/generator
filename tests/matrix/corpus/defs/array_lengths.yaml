@@ -1,0 +1,59 @@
+# Native arrays past the lengths the rest of the corpus declares, for every
+# element kind (generator#550).
+#
+# Every other native array in this repo is short and bounded: example.yaml
+# declares count 2..8, tests/bench's vehicle_telemetry 4 and 8, and arrays.yaml
+# 1..3. Nothing declared a capacity of 16 or more, and nothing declared an
+# unbounded one. That is not a cosmetic hole. A length decides which arm of a
+# codec runs -- an inline buffer against a heap one, a drain loop against a
+# resumable tail, a bulk hand-off against a per-element callback -- and the
+# TypeScript backend shipped a decode arm reachable only from `count >= 16`
+# which did not compile, invisible to eleven green suites because not one of
+# them ever generated it.
+#
+# So each kind appears twice: bounded at a capacity above that threshold, and
+# left open, where only the wire knows the length. The `enum` and the `bitfield`
+# are GAPPED, for the reason tests/conformance/lib/check_closed_kinds.py gives:
+# a contiguous declaration makes a closed set look like an interval, and a codec
+# that carries one interval per array destination is where the temptation to
+# widen it to the hull actually lives.
+#
+# The round trip over these shapes -- every length from 0 to the capacity, on
+# both decode surfaces -- is tests/conformance/lib/check_array_lengths.py, which
+# prints its own schema. This file is the COMPILE half, and every backend really
+# does build it: everything here is bounded.
+#
+# The count-LESS half lives in array_lengths_dyn.yaml, split out for the reason
+# seq_elements_dyn.yaml is: an unbounded array cannot be expressed on the
+# fixed-storage targets at all (c, cpp with `corelib: c-cpp`, rust with
+# `corelib: rs-no-std`), which require a bound on every array. Everything here is
+# bounded, so every backend really does build it.
+version: 1
+$defs:
+  enum:
+    Grade: { LOW: 0, MID: 1, HIGH: 2, TOP: 10 }
+  bitfield:
+    Marks: { A: { pos: 0 }, B: { pos: 1 }, D: { pos: 3 } }
+    Wide:  { A: { pos: 0 }, B: { pos: 40 }, D: { pos: 63 } }
+messages:
+  ArrayLengths:
+    payload:
+      b_u8:   { id: 0,  type: array, items: { type: u8, count: 24 } }
+      b_u16:  { id: 2,  type: array, items: { type: u16, count: 24 } }
+      b_u32:  { id: 4,  type: array, items: { type: u32, count: 24 } }
+      b_u64:  { id: 6,  type: array, items: { type: u64, count: 24 } }
+      b_i8:   { id: 8,  type: array, items: { type: i8, count: 24 } }
+      b_i16:  { id: 10, type: array, items: { type: i16, count: 24 } }
+      b_i32:  { id: 12, type: array, items: { type: i32, count: 24 } }
+      b_i64:  { id: 14, type: array, items: { type: i64, count: 24 } }
+      b_fp32: { id: 16, type: array, items: { type: fp32, count: 24 } }
+      b_fp64: { id: 18, type: array, items: { type: fp64, count: 24 } }
+      b_bool: { id: 20, type: array, items: { type: boolean, count: 24 } }
+      b_enum: { id: 22, type: array, items: { type: enum, count: 24, enum: { $ref: '#/$defs/enum/Grade' } } }
+      b_bits: { id: 24, type: array, items: { type: bitfield, count: 24, bits: { $ref: '#/$defs/bitfield/Marks' } } }
+      # Position 63: past a signed 64-bit carrier and past a double, so the
+      # widest bitfield spelling every backend has to represent exactly.
+      b_wide: { id: 26, type: array, items: { type: bitfield, count: 24, bits: { $ref: '#/$defs/bitfield/Wide' } } }
+      # A native matrix past the same threshold: the row is its own array, with
+      # its own count word and its own destination.
+      rows:   { id: 28, type: array, items: { type: array, count: 4, items: { type: u16, count: 24 } } }
