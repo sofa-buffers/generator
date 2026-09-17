@@ -176,7 +176,8 @@ func (g *gen) module(s *ir.Schema) []byte {
 var corelibNames = []string{
 	"OStream", "WireType", "FixlenSubtype", "ArrayKind", "DecodeStatus",
 	"Long", "SofabError", "SofabErrorCode", "elementsEqual",
-	"Visitor", "ArrayTarget", "IStream", "PayloadAcc", "decodeUtf8", "StringSeq", "BlobSeq",
+	"Visitor", "ArrayTarget", "IntegerArrayTarget", "FloatArrayTarget", "BoolArrayTarget",
+	"IStream", "PayloadAcc", "decodeUtf8", "StringSeq", "BlobSeq",
 }
 
 // usedImports selects the corelib names a rendered module actually references.
@@ -246,14 +247,8 @@ func (g *gen) moduleBody(f *tsfile, s *ir.Schema) {
 		f.line("%s", longArrEqHelper)
 		f.blank()
 	}
-	if use.fp32Raw || use.fp32ArrRaw {
-		f.line("%s", fp32RawHelper)
-		f.blank()
+	if use.fp32Raw {
 		f.line("%s", fp32BitsHelper)
-		f.blank()
-	}
-	if use.fp32ArrRaw {
-		f.line("%s", fp32ArrayRawHelper)
 		f.blank()
 	}
 
@@ -364,12 +359,26 @@ func decodesAnyField(s *ir.Schema) bool {
 }
 
 func (g *gen) emitEnum(f *tsfile, nt *ir.NamedType) {
-	f.line("export enum %s {", g.typeName(nt.Key))
+	name := g.typeName(nt.Key)
+	f.line("export enum %s {", name)
 	for _, c := range nt.Consts {
 		f.emitDoc("  ", c.Description)
 		f.line("  %s = %d,", exported(c.Name), c.Value)
 	}
 	f.line("}")
+	f.blank()
+
+	// An array of this enum is held in the typed array its DECLARED WIDTH names
+	// (§1), so the codec fills the member itself and never touches an element.
+	// A typed array's elements are `number`, though, and the enum type is what a
+	// caller works with -- so the alias intersects the two: the storage stays a
+	// plain `Int8Array`, and `m.modes[0]` still reads as `%s`.
+	carrier := signedCarrier(ir.EnumWidthRange(&ir.TypeRef{Key: nt.Key, Target: nt}))
+	f.line("/**")
+	f.line(" * An array of {@link %s}: the exact-width storage its declaration implies,", name)
+	f.line(" * with the enum type kept on the elements.")
+	f.line(" */")
+	f.line("export type %s = %s & { [index: number]: %s };", enumArrayAlias(name), carrier, name)
 	f.blank()
 }
 
@@ -764,22 +773,12 @@ func (g *gen) emitMarshalArray(f *tsfile, fld *ir.Field, acc string) {
 		} else {
 			f.line("    if (%s.length !== 0) {", acc)
 		}
-		if fld.Elem == ir.KindFP32 {
-			// The array half of the §4.6 raw channel (generator#235). The omission
-			// test above is untouched — the raw payload takes no part in deciding
-			// presence — and inside it the captured wire bytes only supply the bits a
-			// JS number cannot carry: _fp32ArrayRaw re-renders every element from its
-			// number except the ones that are still the NaN they decoded as. With no
-			// capture (a fresh or hand-built value) the plain writer runs, unchanged.
-			raw := g.fp32RawStorage("this", fld)
-			f.line("      if (%s !== null) {", raw)
-			f.line("        os.writeFp32ArrayRaw(%d, _fp32ArrayRaw(%s, %s));", fld.ID, acc, raw)
-			f.line("      } else {")
-			g.marshalArray(f, "        ", fmt.Sprintf("%d", fld.ID), acc, fld.Elem, fld.ElemRef, fld.ElemItems, 0, "")
-			f.line("      }")
-			f.line("    }")
-			return
-		}
+		// No raw-bits branch for an fp32 array any more: the member is a
+		// `Float32Array` and HOLDS the wire words, so `writeFp32Array` copies them
+		// rather than reading each element as a double -- which is what quieted a
+		// signaling NaN (§4.6/§6.5). Bit-exact for every value, with nothing
+		// captured beside the numbers and nothing to re-attach. The SCALAR half
+		// stays: a JS number has nowhere to keep the bits.
 		g.marshalArray(f, "      ", fmt.Sprintf("%d", fld.ID), acc, fld.Elem, fld.ElemRef, fld.ElemItems, 0, "")
 		f.line("    }")
 		return
@@ -876,7 +875,9 @@ func (g *gen) marshalArray(f *tsfile, ind, idExpr, val string, elem ir.Kind, ref
 	case ir.KindEnum:
 		f.line("%sos.writeSignedArray(%s, %s);", ind, idExpr, val)
 	case ir.KindBool:
-		f.line("%sos.writeUnsignedArray(%s, %s.map((%s) => (%s ? 1 : 0)));", ind, idExpr, val, ev, ev)
+		// No map: the member is a `Uint8Array` already holding §4.4's canonical
+		// 0/1, which is exactly what the writer takes.
+		f.line("%sos.writeUnsignedArray(%s, %s);", ind, idExpr, val)
 	case ir.KindBitfield:
 		f.line("%sos.writeUnsignedArray(%s, %s);", ind, idExpr, val)
 	case ir.KindFP32:

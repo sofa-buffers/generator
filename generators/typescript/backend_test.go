@@ -95,9 +95,9 @@ func TestTSWireTypeGuard(t *testing.T) {
 	for _, want := range []string{
 		// fp32/fp64/string/blob all ride WireType.Fixlen, so an ARRAY of them is
 		// separated only by the announced element kind.
-		`case 5: { if (kind !== ArrayKind.Unsigned) break; if (count > MAX_DYN_ARRAY_COUNT) throw new SofabError(SofabErrorCode.LimitExceeded, "f: array count above configured limit " + MAX_DYN_ARRAY_COUNT); const _d: number[] = []; this.o.f = _d; this._a0F = _d; break; }`,
-		`case 6: { if (kind !== ArrayKind.Signed) break; if (count > MAX_DYN_ARRAY_COUNT) throw new SofabError(SofabErrorCode.LimitExceeded, "g: array count above configured limit " + MAX_DYN_ARRAY_COUNT); const _d: number[] = []; this.o.g = _d; this._a0G = _d; break; }`,
-		`case 7: { if (kind !== ArrayKind.Fp64) break; if (count > MAX_DYN_ARRAY_COUNT) throw new SofabError(SofabErrorCode.LimitExceeded, "h: array count above configured limit " + MAX_DYN_ARRAY_COUNT); const _d: number[] = []; this.o.h = _d; this._a0H = _d; break; }`,
+		`case 5: { if (kind !== ArrayKind.Unsigned) break; if (count > MAX_DYN_ARRAY_COUNT) throw new SofabError(SofabErrorCode.LimitExceeded, "f: array count above configured limit " + MAX_DYN_ARRAY_COUNT); const _d = new Uint32Array(count); this.o.f = _d; this._a0F = _d; break; }`,
+		`case 6: { if (kind !== ArrayKind.Signed) break; if (count > MAX_DYN_ARRAY_COUNT) throw new SofabError(SofabErrorCode.LimitExceeded, "g: array count above configured limit " + MAX_DYN_ARRAY_COUNT); const _d = new Int16Array(count); this.o.g = _d; this._a0G = _d; break; }`,
+		`case 7: { if (kind !== ArrayKind.Fp64) break; if (count > MAX_DYN_ARRAY_COUNT) throw new SofabError(SofabErrorCode.LimitExceeded, "h: array count above configured limit " + MAX_DYN_ARRAY_COUNT); const _d = new Float64Array(count); this.o.h = _d; this._a0H = _d; break; }`,
 		// ...and a fixlen SCALAR is separated by the announced subtype, which is
 		// what the collector of a string wrapper array tests for its elements.
 		"  fixlenBegin(id: number, sub: FixlenSubtype, total: number): void {",
@@ -224,13 +224,20 @@ func TestTSHeaderBoundReject(t *testing.T) {
 	// the element width bound: a property of the element TYPE, not of the array
 	// length, taken as each element arrives so a truncation behind an out-of-range
 	// element cannot downgrade the verdict (§7.1).
-	if !strings.Contains(mod, `case 2: { if (kind !== ArrayKind.Unsigned) break; if (count > MAX_DYN_ARRAY_COUNT) throw new SofabError(SofabErrorCode.LimitExceeded, "da: array count above configured limit " + MAX_DYN_ARRAY_COUNT); const _d: number[] = []; this.o.da = _d; this._a0Da = _d; break; }`) {
+	if !strings.Contains(mod, `case 2: { if (kind !== ArrayKind.Unsigned) break; if (count > MAX_DYN_ARRAY_COUNT) throw new SofabError(SofabErrorCode.LimitExceeded, "da: array count above configured limit " + MAX_DYN_ARRAY_COUNT); const _d = new Uint32Array(count); this.o.da = _d; this._a0Da = _d; break; }`) {
 		t.Errorf("a dynamic array must carry the cap, never a schema count:\n%s", mod)
 	}
 	if strings.Contains(mod, `"da: array count above schema capacity`) {
 		t.Errorf("a dynamic array must not gain a schema count bound:\n%s", mod)
 	}
-	if !strings.Contains(mod, `case 2: { const _e = v as number; if (_e > 4294967295) throw new SofabError(SofabErrorCode.InvalidMsg, "da: value outside declared width u32"); this._a0Da[i] = _e; break; }`) {
+	// ...and the element's declared width rides with the DESTINATION now
+	// (corelib-ts#177): the hand-off states the interval as four 32-bit halves and
+	// the decoder compares every element against it as it fills, which is the same
+	// "taken as the element arrives" the per-element callback used to give and is
+	// what keeps a truncation behind an out-of-range element from downgrading the
+	// verdict (§7.1, §5.2).
+	if !strings.Contains(mod, `const _t = this._tt; _t.typed = this._a0Da;
+      _t.minLo = 0; _t.minHi = 0; _t.maxLo = 4294967295; _t.maxHi = 0;`) {
 		t.Errorf("a dynamic array must still bound each element's declared width:\n%s", mod)
 	}
 	// The harness exposes a `status` mode surfacing the §7 outcome so INVALID vs
@@ -343,7 +350,7 @@ func TestTSMaxlenReject(t *testing.T) {
 func TestTSStructural(t *testing.T) {
 	mod := genTS(t)
 	for _, want := range []string{
-		`import { OStream, FixlenSubtype, ArrayKind, DecodeStatus, SofabError, SofabErrorCode, elementsEqual, Visitor, IStream, PayloadAcc, decodeUtf8, StringSeq, BlobSeq, decode as _decode } from "@sofa-buffers/corelib";`, // FixlenSubtype: fixlen §7.3 guard; SofabError: over-count reject (generator#100); the rest is the generated layer's support, owned by the corelib (corelib-ts#151/#161)
+		`import { OStream, FixlenSubtype, ArrayKind, DecodeStatus, SofabError, SofabErrorCode, elementsEqual, Visitor, ArrayTarget, IntegerArrayTarget, FloatArrayTarget, BoolArrayTarget, IStream, PayloadAcc, decodeUtf8, StringSeq, BlobSeq, decode as _decode } from "@sofa-buffers/corelib";`, // FixlenSubtype: fixlen §7.3 guard; SofabError: over-count reject (generator#100); ArrayTarget and its two shapes: the array hand-off, the only way elements are delivered (corelib-ts#177); the rest is the generated layer's support, owned by the corelib (corelib-ts#151/#161)
 		"export class Myfirstmessage {",
 		"serialize(os: OStream): void {",
 		// decode(bytes) is the corelib's one-shot decode driving THIS type's flat
@@ -577,7 +584,7 @@ func genTSWith(t *testing.T, src string, cfg map[string]any) string {
 func TestTSInt64Long(t *testing.T) {
 	mod := genTSWith(t, int64Def, map[string]any{"int64": "long"})
 	for _, want := range []string{
-		`import { OStream, ArrayKind, DecodeStatus, Long, SofabError, SofabErrorCode, elementsEqual, Visitor, IStream, PayloadAcc, decode as _decode } from "@sofa-buffers/corelib";`,
+		`import { OStream, ArrayKind, DecodeStatus, Long, SofabError, SofabErrorCode, elementsEqual, Visitor, ArrayTarget, IntegerArrayTarget, IStream, PayloadAcc, decode as _decode } from "@sofa-buffers/corelib";`,
 		// Long[] backing field + accessor pair; setter converts once. `count: 8` is a
 		// CAPACITY, not a length (§3), so a fresh us is the EMPTY array — not 8
 		// Long zeros.
@@ -604,8 +611,11 @@ func TestTSInt64Long(t *testing.T) {
 		// the count word (generator#100), and a wire count below it is simply the
 		// array's length — nothing is filled in.
 		`case 0: { if (kind !== ArrayKind.Unsigned) break; if (count > 8) throw new SofabError(SofabErrorCode.InvalidMsg, "us: array count above schema capacity 8"); const _d: Long[] = []; this.o["_us"] = _d; this._a0Us = _d; break; }`,
-		`case 0: this._a0Us[i] = Long.fromBits(lo, hi); break;`,
-		`case 1: this._a0Is[i] = Long.fromBits(lo, hi); break;`,
+		// ...and the elements arrive through the bulk hand-off, into the `longs`
+		// destination: a Long per element and no bigint materialised anywhere, which
+		// is the whole point of this mode (corelib-ts#177).
+		"const _t = this._tl; _t.longs = this._a0Us;",
+		"const _t = this._tl; _t.longs = this._a0Is;",
 		// toJSON prints via Long.toString with the schema signedness.
 		`"us": this._us.map((_x0) => _x0.toString(false)),`,
 		`"is": this._is.map((_x0) => _x0.toString(true)),`,
@@ -638,7 +648,7 @@ func TestTSInt64Long(t *testing.T) {
 		// from the root and covered every field alike (#344, #335).
 		"class _MVis implements Visitor {",
 		"  unsigned(id: number, v: number | bigint, lo: number, hi: number): void {",
-		"  arrayUnsigned(id: number, i: number, v: number | bigint, lo: number, hi: number): void {",
+		"  arrayBulk(id: number, kind: ArrayKind, count: number): ArrayTarget | null {",
 		"  sequenceBegin(id: number): boolean {",
 		// JSON keeps the decimal-string form, with the schema's signedness.
 		`"u": this._u.toString(false),`,
@@ -666,21 +676,22 @@ func TestTSInt64Long(t *testing.T) {
 	}
 }
 
-// The Long channel is a TRADE, so the backend takes it only where the schema says
-// it pays: every integer value on the push path becomes a Long, which a 64-bit
-// destination wants and a narrow one does not (generator#344, corelib-ts#146).
-// Measured break-even and the threshold: see longsThreshold.
-// TestTSArrayBulkIsOfferedOnlyWhereItPays pins both halves of the bulk
-// destination hand-off (corelib-ts BULK_MIN): which arrays get an `arrayBulk` arm,
-// and which deliberately do not.
+// TestTSArrayBulkCoversEveryArrayKind pins the array hand-off, which is the ONLY
+// way an array's elements reach a visitor (corelib-ts#177): the per-element
+// `arrayUnsigned` / `arraySigned` / `arrayFp32` / `arrayFp64` callbacks no longer
+// exist, and an array whose offer is declined is walked over and never decoded.
 //
-// The offer is a call out to the visitor and costs ~1300 Ir per array; the fill it
-// enables saves ~435-730 Ir per element. So it pays from a handful of elements up
-// and loses below that — measured on a message whose arrays are all four elements
-// long, offering unconditionally cost +7572 Ir and returned 1740. A declared
-// `count` is a CAPACITY, so an array declared under the threshold can never reach
-// it on the wire and the arm is left out statically.
-func TestTSArrayBulkIsOfferedOnlyWhereItPays(t *testing.T) {
+// So there is no threshold and no eligible subset any more. Every declared native
+// array gets an arm, whatever its element kind and however short it is: the
+// hand-off's fixed cost is ~600 Ir and is paid ONCE per array, tail elements
+// included, so four elements at the end of a 37-byte message cost 578 Ir against
+// the 563 the removed callbacks cost, and everything longer is a win (-21.8% on
+// `array<u16>`, -60.6% on `array<fp64>`). Leaving an arm out would not save that
+// call; it would lose the elements.
+//
+// What varies per kind is only WHICH destination, and the test states one row per
+// kind because each row is a different fill loop in the corelib.
+func TestTSArrayBulkCoversEveryArrayKind(t *testing.T) {
 	mod := genTSWith(t, `
 version: 1
 $defs:
@@ -696,51 +707,69 @@ messages:
       flags: { id: 4, type: array, items: { type: boolean, count: 64 } }
       mode:  { id: 5, type: array, items: { type: enum, count: 64, enum: { $ref: "#/$defs/enum/Mode" } } }
       fp:    { id: 6, type: array, items: { type: fp32, count: 64 } }
+      dbl:   { id: 7, type: array, items: { type: fp64, count: 64 } }
 `, map[string]any{})
 
 	for _, want := range []string{
-		// A schema-bounded array at or above the threshold, and an array the schema
-		// left open (only the wire knows its length, so the corelib's own gate
-		// decides per message).
-		`case 0: { if (kind !== ArrayKind.Unsigned) break; const _t = this._bt; _t.out = this._a0Big; _t.min = 0; _t.max = 4294967295; return _t; }`,
-		`case 1: { if (kind !== ArrayKind.Signed) break; const _t = this._bt; _t.out = this._a0Open; _t.min = -32768; _t.max = 32767; return _t; }`,
-		// ONE target for the whole visitor, re-pointed per array.
-		"  private readonly _bt: ArrayTarget = { out: [], min: 0, max: 0 };",
-		// The element arms stay, for the arrays that decline and for a corelib that
-		// predates the hook. That is what makes taking it additive.
-		`case 2: { const _e = v as number; if (_e > 65535) throw new SofabError(SofabErrorCode.InvalidMsg, "small: value outside declared width u16"); this._a0Small[i] = _e; break; }`,
+		// Every integer width, the 64-bit pair included, hands the MEMBER over as
+		// `typed`: it is the destination, so nothing is copied out afterwards.
+		"const _t = this._tt; _t.typed = this._a0Big;\n      _t.minLo = 0; _t.minHi = 0; _t.maxLo = 4294967295; _t.maxHi = 0;",
+		"const _t = this._tt; _t.typed = this._a0Open;\n      _t.minLo = 4294934528; _t.minHi = 4294967295; _t.maxLo = 32767; _t.maxHi = 0;",
+		"const _t = this._tt; _t.typed = this._a0Small;\n      _t.minLo = 0; _t.minHi = 0; _t.maxLo = 65535; _t.maxHi = 0;",
+		// u64 under the default mode is a BigUint64Array, which the corelib fills
+		// through the halves of its own buffer — no `bigint` per element.
+		"const _t = this._tt; _t.typed = this._a0Wide;\n      _t.minLo = 0; _t.minHi = 0; _t.maxLo = 4294967295; _t.maxHi = 4294967295;",
+		// An enum takes the interval its DECLARED WIDTH implies (§1): Mode's {0,1}
+		// fit an i8, so -128..127 — never the 0..1 hull of the constants.
+		"const _t = this._tt; _t.typed = this._a0Mode;\n      _t.minLo = 4294967168; _t.minHi = 4294967295; _t.maxLo = 127; _t.maxHi = 0;",
+		// A boolean has NO bound (§4.4), so its target carries none: the corelib
+		// normalizes every non-zero to 1 rather than masking it.
+		"const _t = this._tq; _t.bool = this._a0Flags;",
+		// fp32 takes the wire WORDS through a view over the member's own buffer —
+		// `f32` would store values and quiet a signaling NaN (§4.6/§6.5).
+		"const _m = this._a0Fp; const _t = this._tb;",
+		"_t.bits = new Uint32Array(_m.buffer, _m.byteOffset, _m.length);",
+		// fp64 needs no such channel: a double carries all 64 bits.
+		"const _t = this._td; _t.f64 = this._a0Dbl;",
+		// One target object per shape, re-pointed per array.
+		"  private readonly _tt: IntegerArrayTarget = { typed: new Uint8Array(0), minLo: 0, minHi: 0, maxLo: 0, maxHi: 0 };",
+		"  private readonly _tq: BoolArrayTarget = { bool: new Uint8Array(0) };",
+		"  private readonly _tb: FloatArrayTarget = { bits: new Uint32Array(0) };",
+		"  private readonly _td: FloatArrayTarget = { f64: new Float64Array(0) };",
 	} {
 		if !strings.Contains(mod, want) {
 			t.Errorf("message.ts missing %q:\n%s", want, mod)
 		}
 	}
-	// No arm for: an array declared too short to pay; a destination that is not a
-	// plain JS number (u64 -> bigint, boolean); or an `enum`/`bitfield`. Their
-	// bound is the width their declaration implies (MESSAGE_SPEC §1,
-	// generator#516), which an ArrayTarget's `min`/`max` pair COULD now state —
-	// but neither destination is the plain `number[]` the hand-off fills (an enum
-	// array is typed as its enum, a wide bitfield array holds bigints), so both
-	// keep the per-element callback that already carries the verdict.
-	// fp32/fp64 are never offered one by the corelib at all.
-	for _, id := range []string{"case 2: { if (kind", "case 3: { if (kind", "case 4: { if (kind", "case 5: { if (kind", "case 6: { if (kind"} {
-		if strings.Contains(mod, id+" !== ArrayKind.Unsigned) break; const _t") ||
-			strings.Contains(mod, id+" !== ArrayKind.Signed) break; const _t") ||
-			strings.Contains(mod, id+" !== ArrayKind.Fp32) break; const _t") {
-			t.Errorf("%s must not be offered a bulk destination:\n%s", id, mod)
+	// Every one of the eight is offered a destination.
+	for id := 0; id <= 7; id++ {
+		if !strings.Contains(mod, fmt.Sprintf("    case %d: {\n      if (kind !== ArrayKind.", id)) {
+			t.Errorf("array id %d must be offered a bulk destination:\n%s", id, mod)
 		}
 	}
-	// ...and a schema whose arrays ALL fall below the threshold emits no hook at
-	// all, so nothing pays the call.
-	short := genTSWith(t, `
+	// ...and NOTHING is left behind it. The per-element callbacks are gone
+	// (corelib-ts#177), and so is every pass that used to copy a scratch out or
+	// convert an element: with the member as the destination there is nothing to
+	// copy and nothing to convert.
+	for _, gone := range []string{
+		"arrayUnsigned", "arraySigned", "arrayFp32(", "arrayFp64(", "arrayEnd",
+		"_bv", "_bn", "Boolean(_s[", "BigInt(_v)", "_fp32RawInto",
+	} {
+		if strings.Contains(mod, gone) {
+			t.Errorf("no array path may still emit %q — the member IS the destination:\n%s", gone, mod)
+		}
+	}
+	// A schema with no native array emits neither hook nor target.
+	none := genTSWith(t, `
 version: 1
 messages:
-  S:
+  N:
     payload:
-      a: { id: 0, type: array, items: { type: u16, count: 4 } }
-      b: { id: 1, type: array, items: { type: u32, count: 8 } }
+      a: { id: 0, type: u32 }
+      b: { id: 1, type: array, items: { type: string, count: 4, maxlen: 8 } }
 `, map[string]any{})
-	if strings.Contains(short, "arrayBulk") || strings.Contains(short, "ArrayTarget") {
-		t.Errorf("a schema of short arrays must emit no bulk hook:\n%s", short)
+	if strings.Contains(none, "arrayBulk") || strings.Contains(none, "ArrayTarget") {
+		t.Errorf("a schema with no native array must emit no bulk hook:\n%s", none)
 	}
 }
 
@@ -788,7 +817,9 @@ messages:
 			// A 64-bit destination is built from the halves: no bigint on the path
 			// the Long mode exists to keep bigint-free, and no flag to reach it.
 			`case 0: this.o["_u"] = Long.fromBits(lo, hi); break;`,
-			`case 1: this._a0A[i] = Long.fromBits(lo, hi); break;`,
+			// The array's elements take the same halves, through the hand-off's
+			// `longs` destination -- one Long per element, no bigint (corelib-ts#177).
+			"const _t = this._tl; _t.longs = this._a0A;",
 			// ...and a narrow one in the SAME message reads the number-first value
 			// directly, which is what it costs now that it is not paying for the
 			// 64-bit fields' channel.
@@ -833,9 +864,10 @@ func TestTSBenchStreamWorkload(t *testing.T) {
 func TestTSInt64Number(t *testing.T) {
 	mod := genTSWith(t, int64Def, map[string]any{"int64": "number"})
 	for _, want := range []string{
-		// Arrays are Long-backed exactly as in long mode, and take the wire halves.
+		// Arrays are Long-backed exactly as in long mode, and take the wire halves
+		// through the hand-off's `longs` destination.
 		"os.writeUnsignedArrayLong(0, this._us);",
-		`case 0: this._a0Us[i] = Long.fromBits(lo, hi); break;`,
+		"const _t = this._tl; _t.longs = this._a0Us;",
 		// Scalars are plain numbers: number default, !== 0 guard, Number() decode.
 		"u: number = 0;",
 		"i: number = -7;",
@@ -971,32 +1003,33 @@ func TestTSCompactArrayKeepsItsTail(t *testing.T) {
 		"os.writeSignedArray(2, this.fi16);",
 		"os.writeFp32Array(3, this.ffp32);",
 		"os.writeFp64Array(4, this.ffp64);",
-		"os.writeUnsignedArray(6, this.fbool.map((_e0) => (_e0 ? 1 : 0)));",
+		"os.writeUnsignedArray(6, this.fbool);",
 		"os.writeSignedArray(8, this.fenum);",
 		"os.writeUnsignedArray(9, this.fbits);",
 		// Decode: the M elements that arrived ARE the value, taken as they come --
 		// no fill-to-count on arrayEnd. The over-count reject stays and is taken at
 		// the count word, where `count` still bounds M (generator#100).
-		`case 0: { if (kind !== ArrayKind.Unsigned) break; if (count > 5) throw new SofabError(SofabErrorCode.InvalidMsg, "fu32: array count above schema capacity 5"); const _d: number[] = []; this.o.fu32 = _d; this._a0Fu32 = _d; break; }`,
-		`case 4: { if (kind !== ArrayKind.Fp64) break; if (count > 3) throw new SofabError(SofabErrorCode.InvalidMsg, "ffp64: array count above schema capacity 3"); const _d: number[] = []; this.o.ffp64 = _d; this._a0Ffp64 = _d; break; }`,
-		`case 6: this._a0Fbool[i] = Boolean(v); break;`,
+		`case 0: { if (kind !== ArrayKind.Unsigned) break; if (count > 5) throw new SofabError(SofabErrorCode.InvalidMsg, "fu32: array count above schema capacity 5"); const _d = new Uint32Array(count); this.o.fu32 = _d; this._a0Fu32 = _d; break; }`,
+		`case 4: { if (kind !== ArrayKind.Fp64) break; if (count > 3) throw new SofabError(SofabErrorCode.InvalidMsg, "ffp64: array count above schema capacity 3"); const _d = new Float64Array(count); this.o.ffp64 = _d; this._a0Ffp64 = _d; break; }`,
+		// A boolean array is a `Uint8Array` holding §4.4's canonical 0/1, handed to
+		// the corelib's own `bool` destination -- which carries NO bound, because
+		// §4.4 gives a boolean none, and normalizes every non-zero to 1 rather than
+		// masking it (256 would otherwise become 0, turning true into false).
+		"const _t = this._tq; _t.bool = this._a0Fbool;",
 		// An ENUM array is SIGNED on the wire (serialize writes writeSignedArray),
 		// so its header must be recognised as such -- classifying it as unsigned
 		// made arrayBegin skip every enum array as a §7.3 contradiction, losing the
 		// count bound and the §7.4 replace while the elements still arrived.
-		`case 8: { if (kind !== ArrayKind.Signed) break; if (count > 2) throw new SofabError(SofabErrorCode.InvalidMsg, "fenum: array count above schema capacity 2"); const _d: EnumMode[] = []; this.o.fenum = _d; this._a0Fenum = _d; break; }`,
-		// The element store carries the declared-WIDTH verdict (§1, generator#516):
-		// an `enum` is bound by the smallest SIGNED type holding every declared
-		// constant, so a value outside it is INVALID before the cast that would
-		// have kept it. Mode declares {0, 1}, which implies an i8 -- the bound is
-		// the width, never the hull of the constants.
-		`case 8: { const _e = Number(v); if (_e < -128 || _e > 127) throw new SofabError(SofabErrorCode.InvalidMsg, "fenum: value outside declared enum width"); this._a0Fenum[i] = _e as EnumMode; break; }`,
-		// ...and the bitfield element is bound by the smallest UNSIGNED type
-		// holding its highest declared `pos`. Flags declares only `ready` at
-		// position 0, which implies a u8: bit 1 is undeclared and VALID, 256 is
-		// not. One relational test, which also answers the bigint the hook
-		// delivers above 2^53.
-		`case 9: { const _e = v as number; if (_e > 255) throw new SofabError(SofabErrorCode.InvalidMsg, "fbits: value outside declared bitfield width"); this._a0Fbits[i] = _e; break; }`,
+		`case 8: { if (kind !== ArrayKind.Signed) break; if (count > 2) throw new SofabError(SofabErrorCode.InvalidMsg, "fenum: array count above schema capacity 2"); const _d = new Int8Array(count) as EnumModeArray; this.o.fenum = _d; this._a0Fenum = _d; break; }`,
+		// The declared-WIDTH verdict (§1, generator#516) travels whole: Mode's
+		// {0, 1} imply an i8, so the interval is -128..127, and the interval is the
+		// ENTIRE rule -- no arrayEnd re-check is emitted, because an undeclared
+		// value inside the width is valid.
+		"const _t = this._tt; _t.typed = this._a0Fenum;\n          _t.minLo = 4294967168; _t.minHi = 4294967295; _t.maxLo = 127; _t.maxHi = 0;",
+		// A bitfield takes the smallest UNSIGNED type holding its highest declared
+		// `pos`: Flags declares only `ready` at 0, which implies a u8. Bit 1 is
+		// undeclared and valid; 256 is not.
+		"const _t = this._tt; _t.typed = this._a0Fbits;\n          _t.minLo = 0; _t.minHi = 0; _t.maxLo = 255; _t.maxHi = 0;",
 	} {
 		if !strings.Contains(mod, want) {
 			t.Errorf("fixed-count message.ts missing %q", want)
@@ -1017,7 +1050,7 @@ func TestTSCompactArrayKeepsItsTail(t *testing.T) {
 	for _, want := range []string{
 		"os.writeUnsignedArray(1, this.du32);",
 		"os.writeFp64Array(5, this.dfp64);",
-		"os.writeUnsignedArray(7, this.dbool.map((_e0) => (_e0 ? 1 : 0)));",
+		"os.writeUnsignedArray(7, this.dbool);",
 		// A nested native row is written under the positional guard: an interior
 		// empty row is not written at all, the last one always is.
 		"      if (_e0.length !== 0 || _i0 === _a0.length - 1) {\n        os.writeUnsignedArray(_i0, _e0);\n      }\n",
@@ -1062,14 +1095,14 @@ func TestTSCountIsACapacityNotADefaultLength(t *testing.T) {
 	mod := genTSWith(t, fixedDefaultDef, map[string]any{})
 	for _, want := range []string{
 		// No schema default -> the empty array, whatever the count.
-		"none: number[] = [];",
-		"ff: number[] = [];",
-		"fe: EnumMode[] = [];",
+		"none: Uint32Array = new Uint32Array(0);",
+		"ff: Float64Array = new Float64Array(0);",
+		"fe: EnumModeArray = new Int8Array(0);",
 		// A schema default stands exactly as written — not padded out to N.
-		"short: number[] = [1, 2];",
-		"fb: boolean[] = [true];",
-		"fu64: bigint[] = [1n];",
-		"exact: number[] = [1, 2, 3];",
+		"short: Uint32Array = new Uint32Array([1, 2]);",
+		"fb: Uint8Array = new Uint8Array([1]);",
+		"fu64: BigUint64Array = new BigUint64Array([1n]);",
+		"exact: Uint32Array = new Uint32Array([1, 2, 3]);",
 		// The omit guard reads that same unpadded default; a count:N array with no
 		// default is omitted only when it is EMPTY.
 		"if (this.none.length !== 0) {",
@@ -1098,8 +1131,8 @@ func TestTSCountIsACapacityNotADefaultLength(t *testing.T) {
 	// The dynamic controls are unchanged — which is the point: the two kinds now
 	// read identically.
 	for _, want := range []string{
-		"dyn: number[] = [];",      // no default -> empty
-		"dynd: number[] = [1, 2];", // declared default kept verbatim
+		"dyn: Uint32Array = new Uint32Array(0);",       // no default -> empty
+		"dynd: Uint32Array = new Uint32Array([1, 2]);", // declared default kept verbatim
 		"dstrs: string[] = [];",
 	} {
 		if !strings.Contains(mod, want) {
@@ -1289,12 +1322,19 @@ func TestTSInt64Default(t *testing.T) {
 	for _, cfg := range []map[string]any{{}, {"int64": "bigint"}} {
 		mod := genTSWith(t, int64Def, cfg)
 		for _, want := range []string{
-			`import { OStream, ArrayKind, DecodeStatus, SofabError, SofabErrorCode, elementsEqual, Visitor, IStream, PayloadAcc, decode as _decode } from "@sofa-buffers/corelib";`,
+			`import { OStream, ArrayKind, DecodeStatus, SofabError, SofabErrorCode, elementsEqual, Visitor, ArrayTarget, IntegerArrayTarget, IStream, PayloadAcc, decode as _decode } from "@sofa-buffers/corelib";`,
 			// count: 8 is a CAPACITY, so a fresh array is empty (§3, af536c4).
-			"us: bigint[] = [];",
+			"us: BigUint64Array = new BigUint64Array(0);",
 			// ...and the value goes out whole, the wire count being its length.
 			"os.writeUnsignedArray(0, this.us);",
-			`case 0: this._a0Us[i] = typeof v === "bigint" ? v : BigInt(v); break;`,
+			// The member IS the destination: a BigUint64Array is handed straight to
+			// the corelib, which fills it through a 32-bit halves view without ever
+			// materialising a bigint (corelib-ts#181). No conversion pass follows.
+			"const _t = this._tt; _t.typed = this._a0Us;",
+			"_t.minLo = 0; _t.minHi = 0; _t.maxLo = 4294967295; _t.maxHi = 4294967295;",
+			// JSON is the one place a bigint still has to be built, because that is
+			// what the JSON text carries.
+			`if ("us" in d) o.us = new BigUint64Array((d["us"] as (string | number)[]).map((_x0) => BigInt(_x0)));`,
 			"u: bigint = 0n;",
 		} {
 			if !strings.Contains(mod, want) {
@@ -1479,8 +1519,8 @@ messages:
 		// A native ROW is placed by id too. The id-blind append was unreachable
 		// while every row was written, and an interior gap makes it reachable,
 		// shifting every later row down one index.
-		"    while (_t.length <= id) _t.push([]);\n" +
-			"    const _r: number[] = []; _t[id] = _r; this._row6 = _r;",
+		"    while (_t.length <= id) _t.push(new Uint32Array(0));\n" +
+			"    const _r = new Uint32Array(count); _t[id] = _r; this._row6 = _r;",
 		// ...including a WRAPPER row, whose own collector is bound to the row the
 		// placement just made — a re-opened row index replaces (§7.4).
 		"        const _e: string[] = []; _t[id] = _e;\n" +
@@ -1540,10 +1580,10 @@ messages:
 
 	for _, want := range []string{
 		"strs: string[] = [];",
-		"nums: number[] = [];",
+		"nums: Uint32Array = new Uint32Array(0);",
 		"blobs: Uint8Array[] = [];",
 		"objs: VecObjsElem[] = [];",
-		"rows: number[][] = [];",
+		"rows: Uint32Array[] = [];",
 		// The count-less controls, unchanged — the point being that both kinds now
 		// read identically.
 		"dstrs: string[] = [];",
@@ -1732,7 +1772,7 @@ messages:
 	}
 	// A NATIVE row needs no collector at all: its elements arrive on the array
 	// hooks in the row scope, and the row register carries the destination.
-	if !strings.Contains(mod, "const _r: number[] = []; _t[id] = _r; this._row11 = _r;") {
+	if !strings.Contains(mod, "const _r = new Uint32Array(count); _t[id] = _r; this._row11 = _r;") {
 		t.Errorf("a native row must be held in a row register:\n%s", mod)
 	}
 	// The generated collectors this replaced are gone: the corelib owns the leaf
@@ -1757,78 +1797,57 @@ messages:
       st:   { id: 6, type: struct, fields: { inner: { id: 0, type: fp32 }, innera: { id: 1, type: array, items: { type: fp32, count: 2 } } } }
 `
 
-// TestTSFp32SignalingNaNRawChannel pins the fix for generator#235: a JS number is
-// a 64-bit double, so widening an fp32 SIGNALING NaN into one quiets it
-// (0x7F800001 -> 0x7FC00001) and the field can never be re-encoded bit-for-bit
-// (MESSAGE_SPEC §4.6). The generated code must therefore drive corelib-ts's raw
-// channel — Cursor.readFp32Raw / readFp32ArrayRaw on the way in, and
-// OStream.writeFixlen(subtype fp32) / writeFp32ArrayRaw on the way out — at BOTH
-// fp32 positions: the scalar field and the native fp32 array's elements.
+// TestTSFp32SignalingNaNRawChannel pins the §4.6 bit-exact channel, and above all
+// WHERE it still exists: at the fp32 SCALAR, and nowhere else.
 //
-// Measured before the fix, scalar and array alike: in 02 20 0100807f -> out
-// 02 20 0100c07f. TypeScript was the last of the 13 drivers to quiet it.
+// A JS number is a 64-bit double, and widening an fp32 signaling NaN into one
+// quiets it (0x7F800001 -> 0x7FC00001), so a scalar that stored only the number
+// could never re-emit those bits — it keeps the wire bytes beside the value.
+//
+// An fp32 ARRAY needs none of that any more, and the member is why: a
+// `Float32Array` HOLDS the wire words. The decoder writes them through `bits` over
+// that same buffer and the encoder copies them straight back out, so the payload
+// is bit-exact by construction — with nothing captured, nothing compared and
+// nothing to re-attach.
 func TestTSFp32SignalingNaNRawChannel(t *testing.T) {
 	mod := genTSWith(t, fp32RawDef, map[string]any{})
 	for _, want := range []string{
-		// The raw-bits companion sits beside the value, per fp32 position, in
+		// The companion sits beside the value at every SCALAR fp32 position, in
 		// messages and in named types alike.
 		"f32Fp32Raw: Uint8Array | null = null;",
 		"f32dFp32Raw: Uint8Array | null = null;",
-		"faFp32Raw: Uint8Array | null = null;",
-		"daFp32Raw: Uint8Array | null = null;",
 		"innerFp32Raw: Uint8Array | null = null;",
-		"inneraFp32Raw: Uint8Array | null = null;",
-
-		// Scalar decode: the four wire bytes, widened for the value consumer, and
-		// COPIED — readFp32Raw hands back a view aliasing the decoder's buffer,
-		// valid only until it is reused (readBlob's contract), and the object
-		// outlives one feed. The bytes are kept only for a NaN, and the assignment
-		// is unconditional so a re-opened id (§7.4) drops an earlier capture.
 		`case 0: { this.o.f32 = v; this.o.f32Fp32Raw = Number.isNaN(v) ? _fp32Raw(bits) : null; break; }`,
-		`case 0: { this.o.st.inner = v; this.o.st.innerFp32Raw = Number.isNaN(v) ? _fp32Raw(bits) : null; break; }`,
-		// Scalar encode: the captured bytes go out verbatim. corelib-ts 0.9.0 has no
-		// writeFp32Raw by design — writeFixlen with subtype fp32 emits the identical
-		// fixlenHead(id, 4, Fp32) + 4 bytes.
 		"if (Number.isNaN(this.f32) && this.f32Fp32Raw !== null && this.f32Fp32Raw.length === 4) {",
 		"os.writeFixlen(0, this.f32Fp32Raw, FixlenSubtype.Fp32);",
-		"os.writeFp32(0, this.f32);", // the number path survives for every non-NaN
-
-		// Array decode: the companion is sized at the COUNT WORD, from a count the
-		// over-count reject has already bounded, then filled element by element and
-		// kept at arrayEnd only when some element was a NaN.
-		`case 2: { if (kind !== ArrayKind.Fp32) break; if (count > 3) throw new SofabError(SofabErrorCode.InvalidMsg, "fa: array count above schema capacity 3"); const _d: number[] = []; this.o.fa = _d; this._a0Fa = _d; this.o.faFp32Raw = null; this._raw0Fa = new Uint8Array(count * 4); this._rawNaN0Fa = false; break; }`,
-		"case 2: { this._a0Fa[i] = v; const _r = this._raw0Fa; if (_r !== null && (i + 1) * 4 <= _r.length) _fp32RawInto(_r, i * 4, bits); if (Number.isNaN(v)) this._rawNaN0Fa = true; break; }",
-		"case 2: this.o.faFp32Raw = this._rawNaN0Fa ? this._raw0Fa : null; this._raw0Fa = null; break;",
-		// dynamic array: no schema count, but the same companion machinery
-		`case 3: { if (kind !== ArrayKind.Fp32) break; if (count > MAX_DYN_ARRAY_COUNT) throw new SofabError(SofabErrorCode.LimitExceeded, "da: array count above configured limit " + MAX_DYN_ARRAY_COUNT); const _d: number[] = []; this.o.da = _d; this._a0Da = _d; this.o.daFp32Raw = null;`,
-		// Array encode: the payload is re-rendered from the value, taking captured
-		// bits only for an element that is still the NaN it decoded as.
-		"os.writeFp32ArrayRaw(2, _fp32ArrayRaw(this.fa, this.faFp32Raw));",
-		"os.writeFp32Array(2, this.fa);", // no capture -> the plain writer, unchanged
-
-		// Both helpers, emitted because both positions occur.
-		"function _fp32FromRaw(raw: Uint8Array, off: number): number {",
-		"function _fp32ArrayRaw(vals: readonly number[], raw: Uint8Array): Uint8Array {",
+		"os.writeFp32(0, this.f32);",
+		// The ARRAY is a Float32Array and goes out through the plain writer, which
+		// copies its words — one call, no branch, no captured payload.
+		"fa: Float32Array = new Float32Array(0);",
+		"os.writeFp32Array(2, this.fa);",
+		// ...and comes back through `bits` over its own buffer, which is what keeps
+		// the payload: `f32` would store values and quiet the NaN on the way in.
+		"const _m = this._a0Fa; const _t = this._tb;",
+		"_t.bits = new Uint32Array(_m.buffer, _m.byteOffset, _m.length);",
+		// fp64 is untouched throughout: a double IS an fp64.
+		"case 4: this.o.f64 = v; break;",
+		"d64: Float64Array = new Float64Array(0);",
+		"const _t = this._td; _t.f64 = this._a0D64;",
+		"os.writeFp64Array(5, this.d64);",
+		"function _fp32Raw(bits: number): Uint8Array {",
 	} {
 		if !strings.Contains(mod, want) {
 			t.Errorf("fp32 raw channel missing %q:\n%s", want, mod)
 		}
 	}
-
-	// The quieting readers must be gone from the fp32 paths entirely — this is the
-	// defect itself, not a style point. (fp64 keeps its own readers; they are
-	// spelled differently and are asserted below.)
-	// The value alone must never be the only thing kept: `bits` is the 32-bit wire
-	// word the hook carries, and the companion is built from it.
-	if !strings.Contains(mod, "function _fp32Raw(bits: number): Uint8Array {") {
-		t.Errorf("the fp32 companion must be built from the hook's wire word:\n%s", mod)
-	}
-
-	// fp64 is untouched: a JS number IS an fp64, so its NaN payload round-trips
-	// through the plain readers. Widening the fix to fp64 would be pure cost.
-	for _, want := range []string{"case 4: this.o.f64 = v; break;", "case 5: this._a0D64[i] = v; break;", "os.writeFp64(4, this.f64);", "os.writeFp64Array(5, this.d64);"} {
-		if !strings.Contains(mod, want) {
-			t.Errorf("fp64 must keep the plain number path, missing %q:\n%s", want, mod)
+	// No ARRAY carries a companion any more, at any position — and none of the
+	// machinery that maintained one survives.
+	for _, gone := range []string{
+		"faFp32Raw", "daFp32Raw", "inneraFp32Raw",
+		"_fp32ArrayRaw", "_fp32RawFrom", "writeFp32ArrayRaw",
+	} {
+		if strings.Contains(mod, gone) {
+			t.Errorf("an fp32 ARRAY must carry no raw companion (%q):\n%s", gone, mod)
 		}
 	}
 	if strings.Contains(mod, "f64Fp32Raw") || strings.Contains(mod, "d64Fp32Raw") {
@@ -1836,14 +1855,6 @@ func TestTSFp32SignalingNaNRawChannel(t *testing.T) {
 	}
 }
 
-// TestTSFp32RawDoesNotMoveTheOmissionTest is the other half of generator#235, and
-// the mistake it guards is the one that reproduces most easily: reading "the field
-// carried raw bytes" as "the field was present". It is not. MESSAGE_SPEC §2 decides
-// presence from the VALUE alone — emit iff it differs from its default — and a
-// signaling NaN is ≠ 0 as a value anyway, so it goes out on the value test alone.
-// Widening the guard to `this.f32 !== 0 || this.f32Fp32Raw !== null` re-emits an
-// input that carried an explicit +0.0 instead of normalizing it away, which is a
-// divergence from all 12 other drivers.
 func TestTSFp32RawDoesNotMoveTheOmissionTest(t *testing.T) {
 	mod := genTSWith(t, fp32RawDef, map[string]any{})
 	for _, want := range []string{
@@ -1879,25 +1890,33 @@ func TestTSFp32RawDoesNotMoveTheOmissionTest(t *testing.T) {
 	}
 }
 
-// TestTSFp32RawHelpersOnlyWhereNeeded: the two helpers are module-level, so an
-// unconditional emit would put dead code in every module. Each is emitted only
-// where its position actually occurs.
+// TestTSFp32RawHelpersOnlyWhereNeeded: the helpers are module-level, so an
+// unconditional emit would put dead code in every module. They are emitted only
+// where the SCALAR position occurs — which, since an fp32 array became a
+// `Float32Array` that holds its own wire words, is the only position left that
+// needs them.
 func TestTSFp32RawHelpersOnlyWhereNeeded(t *testing.T) {
 	scalarOnly := genTSWith(t, "version: 1\nmessages:\n  m:\n    payload:\n      a: { id: 0, type: fp32 }\n", map[string]any{})
-	if !strings.Contains(scalarOnly, "function _fp32FromRaw(") {
-		t.Errorf("an fp32 scalar needs _fp32FromRaw:\n%s", scalarOnly)
+	if !strings.Contains(scalarOnly, "function _fp32Raw(") {
+		t.Errorf("an fp32 scalar needs _fp32Raw:\n%s", scalarOnly)
+	}
+	// ...and only that one. The widening half (_fp32FromRaw and its 4-byte
+	// scratch) lost its last caller when the array companion went: the fp32 hook
+	// hands the 32-bit wire word over directly, so nothing ever reconstructs a
+	// value FROM captured bytes.
+	if strings.Contains(scalarOnly, "_fp32FromRaw") || strings.Contains(scalarOnly, "_fp32View") {
+		t.Errorf("the widening half of the fp32 channel has no caller and must not be emitted:\n%s", scalarOnly)
 	}
 	if strings.Contains(scalarOnly, "function _fp32ArrayRaw(") {
 		t.Errorf("no fp32 array -> no _fp32ArrayRaw:\n%s", scalarOnly)
 	}
+	// An fp32 ARRAY needs NEITHER helper, which is the change: its member is a
+	// `Float32Array` and holds the wire words, so nothing is widened, captured or
+	// re-rendered. A module whose only fp32 position is an array must name the
+	// channel nowhere at all.
 	arrayOnly := genTSWith(t, "version: 1\nmessages:\n  m:\n    payload:\n      a: { id: 0, type: array, items: { type: fp32 } }\n", map[string]any{})
-	if !strings.Contains(arrayOnly, "function _fp32ArrayRaw(") {
-		t.Errorf("an fp32 array needs _fp32ArrayRaw:\n%s", arrayOnly)
-	}
-	// The array half needs the scalar half too: decode widens each element through
-	// the shared 4-byte scratch rather than a DataView built per read (#339).
-	if !strings.Contains(arrayOnly, "function _fp32FromRaw(") {
-		t.Errorf("an fp32 array widens through _fp32FromRaw:\n%s", arrayOnly)
+	if strings.Contains(arrayOnly, "_fp32") {
+		t.Errorf("an fp32 array needs no raw helper at all:\n%s", arrayOnly)
 	}
 	none := genTSWith(t, "version: 1\nmessages:\n  m:\n    payload:\n      a: { id: 0, type: fp64 }\n      b: { id: 1, type: array, items: { type: fp64 } }\n", map[string]any{})
 	if strings.Contains(none, "_fp32") {
@@ -1934,10 +1953,12 @@ messages:
 		`case 2: { const _v = v as number; if (_v > 4294967295) throw new SofabError(SofabErrorCode.InvalidMsg, "c_u32: value outside declared width u32"); this.o.c_u32 = _v; break; }`,
 		`case 4: { const _v = v as number; if (_v < -128 || _v > 127) throw new SofabError(SofabErrorCode.InvalidMsg, "e_i8: value outside declared width i8"); this.o.e_i8 = _v; break; }`,
 		`case 6: { const _v = v as number; if (_v < -2147483648 || _v > 2147483647) throw new SofabError(SofabErrorCode.InvalidMsg, "g_i32: value outside declared width i32"); this.o.g_i32 = _v; break; }`,
-		// The array element bound lands on the element that carries the value, as
-		// it arrives, which is what keeps INVALID ahead of a truncation right
-		// behind it (#267, #339).
-		`case 8: { const _e = v as number; if (_e > 255) throw new SofabError(SofabErrorCode.InvalidMsg, "arr_u8: value outside declared width u8"); this._a0ArrU8[i] = _e; break; }`,
+		// The array element bound travels WITH the destination and the decoder
+		// compares every element against it as it fills (corelib-ts#177). That is
+		// still "as it arrives", which is what keeps INVALID ahead of a truncation
+		// right behind it (#267, #339) -- the verdict is taken on the element's own
+		// bytes, by the only code that sees them.
+		"const _t = this._tt; _t.typed = this._a0ArrU8;\n      _t.minLo = 0; _t.minHi = 0; _t.maxLo = 255; _t.maxHi = 0;",
 	} {
 		if !strings.Contains(got, want) {
 			t.Errorf("message.ts missing width guard %q:\n%s", want, got)
@@ -1955,20 +1976,15 @@ messages:
 	}
 }
 
-// An fp32 ARRAY's raw-bits companion has to be assembled on the visitor path too
-// (generator#300 / #235). A JS number is a 64-bit double and widening an fp32
-// SIGNALING NaN into one sets the quiet bit, so the value alone cannot round-trip
-// the element -- the cursor path keeps the whole payload via readFp32ArrayRaw,
-// and before this the visitor kept nothing at all: it took `arrayFp32(id, i, v)`
-// without the `raw` parameter its own class enables with `fp32Raw = true`.
+// An fp32 ARRAY round-trips bit-exactly with no companion at all — the change
+// this test used to guard the other side of.
 //
-// Measured with Crucible's chunk-invariance oracle over the checked-in corpora:
-// 60 mismatches across corpus/structured + corpus/regression went to 0, all of
-// them fp32 NaN bit patterns quieted by the chunked path.
-//
-// The buffer is the WHOLE payload, not just the NaN slots. A bit-exact consumer
-// reads the companion for every element once it exists (Crucible's materialized
-// walk does exactly that), so a partially filled buffer reports zeros as values.
+// It once asserted that the visitor assembled a raw-bytes payload element by
+// element, because a `number[]` member could not hold an fp32 signaling NaN's
+// payload (a JS number is a double, and widening quiets it). The member is a
+// `Float32Array` now and HOLDS the wire words, so the decoder writes them through
+// `bits` over that buffer and the encoder copies them straight back: the array IS
+// the payload in both directions.
 func TestTypescriptStreamFp32ArrayKeepsRawBits(t *testing.T) {
 	out := genTSWith(t, `
 version: 1
@@ -1979,54 +1995,38 @@ messages:
       b: { id: 1, type: array, items: { type: fp64, count: 4 } }
 `, map[string]any{})
 
-	// The callback must ACCEPT the wire word -- without the parameter the corelib's
-	// 4th argument is silently dropped and everything below is unreachable. It is a
-	// 32-bit NUMBER, not a byte view: a number costs nothing to pass, where the
-	// view it replaced was an allocation per element and a borrowed slice §6.7
-	// forbids.
-	if !strings.Contains(out, "arrayFp32(id: number, i: number, v: number, bits: number): void") {
-		t.Error("arrayFp32 must take the element's wire word")
+	// The member holds the words...
+	if !strings.Contains(out, "a: Float32Array = new Float32Array(0);") {
+		t.Errorf("an fp32 array must be held in a Float32Array:\n%s", out)
 	}
-	// ...store it at the element's own offset...
-	if !strings.Contains(out, "_fp32RawInto(_r, i * 4, bits)") {
-		t.Error("the element's wire bytes must land at i*4 in the companion")
+	// ...the decoder writes them there, through a view over that same buffer...
+	for _, want := range []string{
+		"const _m = this._a0A; const _t = this._tb;",
+		"_t.bits = new Uint32Array(_m.buffer, _m.byteOffset, _m.length);",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("the fp32 array must be filled through its own buffer, missing %q:\n%s", want, out)
+		}
 	}
-	// ...and the companion must be decided at arrayEnd, kept only when some
-	// element was a NaN -- which is what the cursor path does after its read.
-	if !strings.Contains(out, "arrayEnd(id: number): void") {
-		t.Error("missing arrayEnd, where the companion is decided")
+	// ...and `f32` must NOT be used: it stores values, and storing a widened
+	// signaling NaN back into a Float32Array cannot recover the payload.
+	if strings.Contains(out, "_t.f32 =") {
+		t.Errorf("an fp32 array must not be filled through the value destination:\n%s", out)
 	}
-	if !strings.Contains(out, "this.o.aFp32Raw = this._rawNaN0A ? this._raw0A : null;") {
-		t.Error("arrayEnd must keep the payload only when an element was NaN")
+	// Nothing is captured, scanned or re-attached any more.
+	for _, gone := range []string{
+		"aFp32Raw", "bFp32Raw", "_fp32RawInto", "_fp32ArrayRaw", "Number.isNaN", "arrayEnd",
+	} {
+		if strings.Contains(out, gone) {
+			t.Errorf("the fp32 array companion machinery must be gone (%q):\n%s", gone, out)
+		}
 	}
-	// A re-opened array id REPLACES (§7.4), so arrayBegin resets the companion;
-	// otherwise a second occurrence inherits the first's bytes.
-	if !strings.Contains(out, "this.o.aFp32Raw = null; this._raw0A = new Uint8Array(count * 4);") {
-		t.Error("arrayBegin must reset the companion and size the scratch from the count")
-	}
-	// fp64 needs none of this -- a double holds all 64 bits verbatim -- so it must
-	// not grow a companion, a scratch slot, or an arrayEnd arm.
-	if strings.Contains(out, "_raw0B") || strings.Contains(out, "bFp32Raw") {
-		t.Error("an fp64 array must not get an fp32 raw companion")
-	}
-	if strings.Contains(out, "case 1: this.o.bFp32Raw") {
-		t.Error("fp64 must not appear in arrayEnd")
+	// fp64 keeps the plain value destination: a double carries all 64 bits.
+	if !strings.Contains(out, "const _t = this._td; _t.f64 = this._a0B;") {
+		t.Errorf("an fp64 array must take the f64 destination:\n%s", out)
 	}
 }
 
-// A bounded wrapper-array ELEMENT must carry its maxlen into the reader, exactly
-// as a scalar string/blob already did (generator#300 / #267).
-//
-// readString()/readBlob() read the payload before returning, so a post-read
-// length check cannot fire for an element that never fully arrives: the reader
-// raises INCOMPLETE first and the verdict is lost, while §5.2 makes INVALID
-// dominate because the violation is established by the length word alone.
-//
-// Measured with Crucible's chunk-invariance oracle over 5637 truncations of the
-// checked-in corpora (every proper prefix -- a whole-message INCOMPLETE is by
-// definition a truncation, which is the shape this defect needs): 3290 mismatches
-// went to 122, and every one of the 3168 that disappeared was a string-array
-// element over its maxlen.
 func TestTypescriptWrapperElementMaxlenGoesIntoTheReader(t *testing.T) {
 	out := genTSWith(t, `
 version: 1
@@ -2205,22 +2205,34 @@ messages:
 `
 	got := genTSWith(t, src, map[string]any{})
 	for _, want := range []string{
-		// The guard fires on the element that carries the value, as it arrives —
-		// not on the finished row. A scan of the row could not reject an element a
-		// truncation stops the row from ever completing (§5.2.3).
-		"        const _e = v as number; if (_e > 255) throw new SofabError(SofabErrorCode.InvalidMsg, \"urows element: value outside declared width u8\");\n" +
-			"        this._row1[i] = _e;",
-		"    const _e = v as number; if (_e < -128 || _e > 127) throw new SofabError(SofabErrorCode.InvalidMsg, \"irows element: value outside declared width i8\");\n" +
-			"    this._row2[i] = _e;",
+		// The bound travels with the ROW's own destination and the decoder compares
+		// every element against it as it fills (corelib-ts#177) — not on the finished
+		// row. A scan of the row could not reject an element a truncation stops the
+		// row from ever completing (§5.2.3).
+		"const _t = this._tt; _t.typed = this._row1;\n        _t.minLo = 0; _t.minHi = 0; _t.maxLo = 255; _t.maxHi = 0;",
+		// A signed width travels as its two's-complement halves: i8's -128 is
+		// 0xffffff80 : 0xffffffff.
+		"const _t = this._tt; _t.typed = this._row2;\n        _t.minLo = 4294967168; _t.minHi = 4294967295; _t.maxLo = 127; _t.maxHi = 0;",
 	} {
 		if !strings.Contains(got, want) {
 			t.Errorf("message.ts missing nested-row width guard %q:\n%s", want, got)
 		}
 	}
-	// u64 has nothing narrower than the wire to check, so the store stays a plain
-	// conversion — a guard here would be dead code on every element.
-	if !strings.Contains(got, `this._row3[i] = typeof v === "bigint" ? v : BigInt(v);`) {
-		t.Errorf("a u64 row must keep the bare conversion:\n%s", got)
+	// u64 has nothing narrower than the wire to bound, so its interval is the whole
+	// unsigned domain; under `int64: bigint` the row IS a BigUint64Array, which the
+	// decoder fills through a 32-bit halves view -- no bigint is built, and no
+	// conversion pass follows the row.
+	for _, want := range []string{
+		"private _row3: BigUint64Array = new BigUint64Array(0);",
+		"const _r = new BigUint64Array(count); _t[id] = _r; this._row3 = _r;",
+		"const _t = this._tt; _t.typed = this._row3;\n        _t.minLo = 0; _t.minHi = 0; _t.maxLo = 4294967295; _t.maxHi = 4294967295;",
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("a u64 row must be a BigUint64Array destination: missing %q\n%s", want, got)
+		}
+	}
+	if strings.Contains(got, `_e = typeof _v === "bigint"`) {
+		t.Errorf("a typed 64-bit row must not convert element by element:\n%s", got)
 	}
 }
 
@@ -2498,8 +2510,11 @@ func TestTSWideBitfieldIsBigint(t *testing.T) {
 		// Storage, default and the default comparison that reads it.
 		"w: bigint = 9223372036854775808n;",
 		"n: number = 0;",
-		"wa: bigint[] = [];",
-		"na: number[] = [];",
+		"wa: BigUint64Array = new BigUint64Array(0);",
+		// A bitfield ARRAY takes the same carrier the width implies: Wide declares
+		// bit 63, so the elements need 64 bits; Narrow's highest position is 30, so
+		// a Uint32Array holds every reachable value.
+		"na: Uint32Array = new Uint32Array(0);",
 		"if (!(this.w === 9223372036854775808n)) return false;",
 		// JSON: a bigint is not JSON-able, so it prints as a decimal string and
 		// reads back through BigInt() -- exactly what u64 does.
@@ -2507,8 +2522,8 @@ func TestTSWideBitfieldIsBigint(t *testing.T) {
 		`"n": this.n,`,
 		`if ("w" in d) o.w = BigInt(d["w"] as string | number);`,
 		`if ("n" in d) o.n = d["n"] as number;`,
-		`o.wa = (d["wa"] as (string | number)[]).map((_x0) => BigInt(_x0));`,
-		`o.na = d["na"] as number[];`,
+		`if ("wa" in d) o.wa = new BigUint64Array((d["wa"] as (string | number)[]).map((_x0) => BigInt(_x0)));`,
+		`if ("na" in d) o.na = new Uint32Array(d["na"] as number[]);`,
 		// Decode: the unsigned callback delivers a number below 2^53 and a bigint
 		// above, so the wide store normalises instead of rounding through Number().
 		// `w` declares bit 63, which implies the full u64 -- the accumulator's own
@@ -2617,10 +2632,14 @@ func TestTSEnumAndBitfieldWidthBoundAtEverySixPositions(t *testing.T) {
 		// 1. scalar, in the flat root visitor.
 		`case 0: { ` + enRej + `"en: value outside declared enum width"); this.o.en = _v as ClosedEn; break; }`,
 		`case 1: { ` + bfRej + `"bf: value outside declared bitfield width"); this.o.bf = _v; break; }`,
-		// 2. native array element. `+"`_e`"+`, and behind the destination register
-		// arrayBegin set, so a bare scalar at an array id stays a §7.3 skip.
-		`case 2: { const _e = Number(v); if (_e < -128 || _e > 127) throw new SofabError(SofabErrorCode.InvalidMsg, "ea: value outside declared enum width"); this._a0Ea[i] = _e as ClosedEaElem; break; }`,
-		`case 3: { const _e = v as number; if (_e > 255) throw new SofabError(SofabErrorCode.InvalidMsg, "bfa: value outside declared bitfield width"); this._a0Bfa[i] = _e; break; }`,
+		// 2. native array element. One interval and nothing else: an enum's {0,1,2,10}
+		// imply an i8, a bitfield's positions {0,1,3} a u8. The hand-off carries the
+		// bound whole and the decoder compares every element against it, so there is
+		// no second half to take when the array ends -- an undeclared value inside
+		// the width is VALID (§1), and the set it is not a member of stopped being
+		// the bound.
+		"const _t = this._tt; _t.typed = this._a0Ea;\n          _t.minLo = 4294967168; _t.minHi = 4294967295; _t.maxLo = 127; _t.maxHi = 0;",
+		"const _t = this._tt; _t.typed = this._a0Bfa;\n          _t.minLo = 0; _t.minHi = 0; _t.maxLo = 255; _t.maxHi = 0;",
 		// 3. struct member — both surfaces: the standalone class visitor...
 		`case 0: { ` + enRej + `"se: value outside declared enum width"); this.o.se = _v as ClosedStSe; break; }`,
 		`case 1: { ` + bfRej + `"sbf: value outside declared bitfield width"); this.o.sbf = _v; break; }`,
@@ -2634,19 +2653,19 @@ func TestTSEnumAndBitfieldWidthBoundAtEverySixPositions(t *testing.T) {
 		`case 0: { ` + enRej + `"ue: value outside declared enum width"); this.o.un.ue = _v as ClosedUnUe; break; }`,
 		`case 1: { ` + bfRej + `"ubf: value outside declared bitfield width"); this.o.un.ubf = _v; break; }`,
 		// 6. matrix row element — the row register, not a field id.
-		`const _e = Number(v); if (_e < -128 || _e > 127) throw new SofabError(SofabErrorCode.InvalidMsg, "mat element: value outside declared enum width");`,
-		`const _e = v as number; if (_e > 255) throw new SofabError(SofabErrorCode.InvalidMsg, "mbf element: value outside declared bitfield width");`,
+		"const _t = this._tt; _t.typed = this._row5;\n        _t.minLo = 4294967168; _t.minHi = 4294967295; _t.maxLo = 127; _t.maxHi = 0;",
+		"const _t = this._tt; _t.typed = this._row6;\n        _t.minLo = 0; _t.minHi = 0; _t.maxLo = 255; _t.maxHi = 0;",
 	} {
 		if !strings.Contains(mod, want) {
 			t.Errorf("Closed message.ts: an enum/bitfield position stores without its §1 bound, missing %q", want)
 		}
 	}
-	// The bulk hand-off stays declined for both kinds. The bound is an interval
-	// now, so an ArrayTarget's min/max pair COULD state it — but the destinations
-	// are not the plain `+"`number[]`"+` the hand-off fills (an enum array is typed as its
-	// enum), and offering it is a separate change with its own measurement.
-	if strings.Contains(mod, "arrayBulk") {
-		t.Errorf("a message whose only arrays are enum/bitfield arrays must make no bulk offer:\n%s", mod)
+	// The hand-off is taken for both closed kinds, because there is no longer an
+	// alternative: declining does not fall back to a per-element callback, it walks
+	// the elements over and decodes none of them (corelib-ts#177). What the interval
+	// cannot state is re-checked, not given up -- the loops asserted above.
+	if !strings.Contains(mod, "arrayBulk") {
+		t.Errorf("a closed-kind array must still take the hand-off, or its elements are lost:\n%s", mod)
 	}
 	for _, bad := range []string{
 		"this.o.en = Number(v) as ClosedEn;",
@@ -2725,7 +2744,14 @@ func TestTSWidthAdmitsUndeclaredValues(t *testing.T) {
 			t.Errorf("the withdrawn flag-mask guard was emitted (%q):\n%s", bad, mod)
 		}
 	}
-	if !strings.Contains(mod, "_v > 255") || !strings.Contains(mod, "_e > 255") {
-		t.Errorf("the bitfield width bound is missing at the scalar or element store:\n%s", mod)
+	// A SCALAR store still compares in generated code; an ARRAY element does not
+	// exist as a store at all any more -- the bound travels with the destination
+	// the hand-off returns (corelib-ts#177) and the decoder compares it while it
+	// fills. Both spellings are the same u8: 0..255.
+	if !strings.Contains(mod, "_v > 255") {
+		t.Errorf("the bitfield width bound is missing at the scalar store:\n%s", mod)
+	}
+	if !strings.Contains(mod, "_t.minLo = 0; _t.minHi = 0; _t.maxLo = 255; _t.maxHi = 0;") {
+		t.Errorf("the bitfield width bound is missing from the array destination:\n%s", mod)
 	}
 }

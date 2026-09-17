@@ -1033,31 +1033,115 @@ points worth recording:
   2^53-1, and every narrow width tops out at 2^32-1, so such a value throws before
   it can be stored. Where no guard follows (a `bitfield`, an `enum`) the conversion
   stays.
-- **A native array is filled through a destination, not element by element.** The
-  element callbacks were the single largest item in what the move cost: measured
-  against the withdrawn cursor, a `u32` element read in bulk cost 177 Ir and
-  1067 Ir through `arrayUnsigned`. corelib-ts's `Visitor.arrayBulk`
-  (corelib-ts#163) is the `arrayBulk` hand-off this section already describes for
-  Java and Kotlin, ported: generated code points one reused `ArrayTarget` at the
-  destination `arrayBegin` just built and states the element's declared width, and
-  the decoder fills it with no element callback at all — 425 434 → 280 215 Ir/op
-  on a 200-element array, −34.1 %.
-  **Gated twice, and both gates are load-bearing.** The offer is itself a call
-  (~1300 Ir per array, against ~435–730 Ir saved per element), so the corelib
-  refuses below `BULK_MIN = 16` elements, and the generator does not emit an arm at
-  all for an array whose declared `count` — a capacity, hence an upper bound — can
-  never reach it. Without the second gate a message of four-element arrays paid
-  +7572 Ir to be told no; with both it pays +1850 (+0.24 %) for the branch, and
-  emits no hook when nothing in the schema qualifies. An arm is offered only where
-  a **declared narrow width** exists, which is exactly where the elements are plain
-  JS numbers *and* there are bounds to state: `u64`/`i64` (bigint/Long), `boolean`,
-  `enum` and `bitfield` (whose bound is an interval an `ArrayTarget` could state,
-  but whose destination is not the plain `number[]` the hand-off fills — an enum
-  array is typed as its enum and a wide bitfield array holds bigints;
-  MESSAGE_SPEC §1, generator#516) and the floats all
-  keep the element callbacks. Those arms stay emitted
-  regardless: they are what runs for a declined array and against a corelib that
-  predates the hook, which is what makes taking it additive.
+- **A native array is filled through a destination, and that is the only way its
+  elements arrive.** corelib-ts#177 removed `Visitor.arrayUnsigned`, `arraySigned`,
+  `arrayFp32` and `arrayFp64` outright: `arrayBulk(id, kind, count)` returns the
+  destination the decoder then fills directly, and returning `null` — or declaring
+  no hook — walks the elements over without decoding them, the `skip` half of
+  §6.7.2's two intents. Measured on that hand-off, 1000-element arrays, against the
+  callbacks it replaced: `array<u16>` 235 433 → 184 023 Ir/op (−21.8 %),
+  `array<u64>` into a `Long[]` 576 206 → 429 113 (−25.5 %), `array<fp64>` 93 520 →
+  36 893 (−60.5 %).
+  **There is no threshold and no eligible subset.** The fixed cost — the offer, the
+  target's resolution, the bound's validation — is ~600 Ir and is paid ONCE per
+  array, tail elements included, so four elements at the end of a 37-byte message
+  cost 578 Ir against the 563 the callbacks cost, and everything longer is the
+  table above. What a withheld arm would save is therefore nothing, and what it
+  loses is the elements — silently, since TypeScript permits extra members on a
+  class that implements an interface, so a stale per-element method compiles and is
+  simply never called. Every declared native array gets an arm.
+  **The member IS the destination, because the member is a typed array**
+  (generator#550, corelib-ts#181). `u8`..`i32` are held as `Uint8Array`..`Int32Array`,
+  `fp32`/`fp64` as `Float32Array`/`Float64Array`, a `boolean` array as a `Uint8Array`
+  — §4.4 gives it no width of its own, so it is the `u8` the wire carries — an
+  `enum` as the signed width its constants imply and a `bitfield` as the unsigned
+  width its highest `pos` implies (§1). At 64 bits the carrier follows the `int64`
+  mode: `bigint` takes `BigUint64Array`/`BigInt64Array`, which the corelib fills
+  through a 32-bit halves view over the same buffer and so materialises no `bigint`
+  at all; `long` and `number` keep `Long[]`, whose two 32-bit halves are the whole
+  point of those modes, and take the `longs` destination. `arrayBulk` therefore
+  points a reusable target at the member and returns — three or four lines per arm —
+  and **no `arrayEnd` hook is generated at all**: there is no scratch to copy out,
+  no widening pass, no per-element range check and no closed-kind residue. An `fp32`
+  array is offered `bits` over its own buffer rather than `f32`, because `f32`
+  stores *values* and widening an fp32 signaling NaN to a double quiets it
+  (§4.6/§6.5); the words land exactly and the same bytes read back as the values,
+  which is what reinterpreting them is. That also retires the fp32 **array**
+  raw-bits companion and its two encode helpers: the member holds the wire words, so
+  `writeFp32Array` copies them straight out. The scalar half stays — a JS number has
+  nowhere to keep the bits.
+  **Measured, against the same code with `number[]` members and the same hand-off.**
+  Both variants over `vehicle_telemetry` on one corelib, byte-identical wire and
+  identical decoded JSON, with only the container differing — every native array's
+  capacity raised together so the length is the variable:
+
+  | elements/array | decode | encode |
+  |---|---|---|
+  | 4 | +1.94 % | −1.82 % |
+  | 16 | +1.08 % | −6.46 % |
+  | 64 | +0.26 % | −15.55 % |
+  | 256 | −1.84 % | −23.89 % |
+
+  Encode wins everywhere and the margin grows with length: a typed source states its
+  element width, so the writer reserves from the width instead of the wire-maximum
+  ten bytes per element. Decode is the side that pays at the short end — the
+  destination is an `ArrayBuffer` allocation where a plain array was a JSArray
+  (`new Uint16Array(0)` 732 Ir against `[]` 211) — and that cost is fixed per
+  array, so it is level by ~64 elements and ahead by 256. So the container is a
+  round-trip win from 16 elements up and a wash below that;
+  what makes it right at 4 elements is not the Ir column but what the table cannot
+  show: the conversions, the widening passes and the fp32 companion that stop being
+  generated at all, and a member that is the width the schema declared.
+  **This replaced no working number.** generator#549 measured a typed mapping as a
+  loss on all three ts rows, but that reading is not comparable to this one: it
+  predates corelib-ts#177, so both of its sides wrote elements one at a time. The
+  committed `results.txt` ts cells are likewise not a "before" for decode — they were
+  taken against a corelib that has since deleted the per-element callbacks the
+  generator on `main` still calls, and that pairing today decodes every native array
+  of capacity < 16 as EMPTY, silently and with status Complete (generator#550).
+  **One thing that was tried and did not pay.** corelib-ts fills every width through
+  ONE loop whose single store site now sees `Uint8Array` through `Int32Array`. In
+  isolation that is a cliff — six widths through one site measured 699 Ir/element
+  against 205 for the same loop with one width, worse than the `number[]` it
+  replaced — so the loop was split into six arms differing only in the map at the
+  store. On a message declaring all six widths it measured **1.7 % worse**
+  (789 314 against 776 378 Ir/op) and was reverted: inside the real fill the longer
+  dispatch chain costs more than the monomorphic stores return. Recorded because the
+  isolated number is convincing and wrong, and the next reader will find it again.
+  **What this costs.** A typed destination is sized from the count word before a
+  single element byte is read, so for an *unbounded* array at the default cap a
+  six-byte message can ask for an allocation that is then discarded as INCOMPLETE.
+  The count is bounded first (the schema `count`, else `max_dyn_array_count`), so
+  this is not the unbounded eager allocation §6.2.1 is about; the lever is the cap,
+  not the destination. And an element-bound violation is now the corelib's message —
+  `array 0: element 1 outside the schema bound` — where a generated per-element
+  guard named the field: the verdict, the code and the timing are identical, the
+  field name is not, and it cannot be recovered without re-checking in generated
+  code what the fill already checked.
+  **The encoder stops converting too.** A `Uint16Array` is written by
+  `writeUnsignedArray` as-is: no `.map()` to widen a `boolean[]` into 0/1, no
+  per-element range check before the writer's own, and the corelib infers the source
+  width from the container instead of being told. Masking is the *user's* problem at
+  that point — `a[0] = 70000` on a `Uint16Array` is their store, not ours — while on
+  the DECODE side the bound still travels and is still compared, because §7.1 forbids
+  masking an over-width wire element away instead of refusing it.
+  **Every bound is an interval, an `enum` and a `bitfield` included.** §1 binds both
+  by the WIDTH their declaration implies — the smallest signed type holding every
+  constant, the smallest unsigned type holding the highest `pos`, derived by
+  `ir.EnumWidthRange` / `ir.BitfieldWidthMax`. So the hand-off carries the whole
+  rule and there is nothing left to re-check when the array ends: a value inside the
+  width that names no constant, or sets no declared bit, is valid. That is §1's own
+  reason for the change — an array's elements are consumed inside the corelib loop,
+  so a bound has to cross that channel as an interval, and a width fits where a set
+  does not. It is also what makes the typed member exact rather than approximate:
+  the container the enum array is held in *is* that interval, so the same width is
+  enforced a second time for free.
+  **An enum array keeps its type.** A typed array's elements read as `number`, so
+  each enum emits a branded alias beside it —
+  `export type ModeArray = Int8Array & { [index: number]: Mode };` — and the member
+  is declared as that. The storage stays a plain `Int8Array` the codec fills without
+  touching an element; `m.modes[0]` still reads as `Mode`.
+
 - **Only the leaf wrapper-array collectors come from the corelib.** `StringSeq` and
   `BlobSeq` own the index rules, both bounds, the payload join and the strict UTF-8
   decode for a `string`/`blob` element (ARCHITECTURE §8). A *framed* element — a
@@ -1885,11 +1969,12 @@ beside the `count`, wrapper-element-id and `maxlen` guards already there.
     directly: a `UNSIGNED` array into a `ByteArray` destination accepts 255 and
     refuses 256, a `SIGNED` one accepts −128 and refuses 128.
 
-    `typescript` still declines, for a third reason: an `ArrayTarget`'s
-    `min`/`max` could state the interval, but neither destination is the plain
-    `number[]` the hand-off fills — an enum array is typed as its enum and a wide
-    bitfield array holds bigints. Offering it there is a separate change with its
-    own measurement to make.
+    `typescript` no longer declines (generator#550). Its members became typed
+    arrays, so an enum array is held at the signed width its constants imply and a
+    bitfield array at the unsigned width its highest `pos` implies — the same two
+    facts `java` and `csharp` narrow to — and the member itself is the destination.
+    The `ArrayTarget`'s four bound halves carry the interval, the fill compares it,
+    and the container enforces the same width a second time for free.
 
     **`csharp` narrows the same two destinations and the enforcement does NOT
     move**, which is what makes the two facts independent. Its array fields are
@@ -5002,6 +5087,54 @@ A reimplementation is **conformant** when it reproduces these gates:
    `cpp`, `dart` and `python` arm carry the whole width, so an out-of-range element
    is refused where it arrives rather than after the array has landed, and there
    is nothing left for a post-hoc scan to reach.
+   *Native array lengths* (`tests/conformance/lib/check_array_lengths.py`): a
+   native array round-trips at every length, for every element kind
+   (generator#550).
+
+   The gap it closes was a hole in the CORPUS, not in any assertion.
+   `examples/messages/example.yaml` — the schema every conformance suite builds —
+   declares its native arrays at `count: 2`..`count: 8`, `tests/bench`'s
+   `vehicle_telemetry` at 4 and 8, and `arrays.yaml` at 1..3. Nothing in the repo
+   declared a native array of capacity 16 or more, and nothing declared an
+   unbounded one carrying real elements. generator#550 is what that cost: the
+   TypeScript backend emitted a decode arm reachable only from `count >= 16`, it
+   did not compile, and eleven green suites could not see it because not one of
+   them ever generated it.
+
+   A length is not a cosmetic parameter of an array. It decides which arm of a
+   codec runs — a drain loop against a resumable tail, an inline buffer against a
+   heap one, a bulk hand-off against a per-element callback — so the lengths
+   straddle the boundaries codecs put thresholds on: 0, 1, 2, 15, 16, 17 and the
+   declared capacity of 64 for the bounded field, and 0, 1, 3 and 257 for the
+   unbounded one beside it. The driver prints its own schema, so the capacity it
+   fills to and the capacity the schema declares have one definition.
+
+   Every element kind the format has, twice (bounded and unbounded): `u8`..`u64`,
+   `i8`..`i64`, `fp32`, `fp64`, `boolean`, a GAPPED `enum`, a GAPPED narrow
+   `bitfield` and a `bitfield` declaring position 63. Each is a different
+   destination in a codec that fills arrays in bulk, and a backend can get one
+   right and the next one wrong.
+
+   What makes it more than a longer round trip is that **one message per round
+   carries every field at once**. A scratch buffer, a target object or a count
+   register that one array leaves dirty for the next is invisible to a suite that
+   decodes them apart, and that shared state is exactly what a bulk hand-off
+   introduces. Both decode surfaces are run where the harness has a chunked one,
+   since a 257-element array drip-fed one byte per call makes every element a
+   suspend/resume boundary. `--skip-kinds` declines a kind by name, and prints
+   itself in the final line.
+
+   Wired in `typescript` (the default mode plus both `int64` Long modes, where a
+   64-bit array is a different destination entirely). The COMPILE half is
+   `tests/matrix/corpus/defs/array_lengths.yaml`, which declares the same shapes
+   statically so every backend generates and builds them whether or not its suite
+   runs the driver yet — and its count-LESS twin `array_lengths_dyn.yaml`, split
+   out for the reason `seq_elements_dyn.yaml` is: an unbounded array cannot be
+   expressed on the fixed-storage targets at all (`c`, `cpp` with `corelib: c-cpp`,
+   `rust` with `corelib: rs-no-std`), which require a bound on every array. Those
+   three legs skip the dyn file by name and compile the bounded one, so the
+   family-wide claim is about the bounded half and says so.
+
 2. **Round-trip harness** — `emit: project` builds the generated code against the
    real corelib and round-trips canonical JSON through encode→decode for every
    field kind (`tests/conformance/<lang>/run.sh`). Each harness also feeds one

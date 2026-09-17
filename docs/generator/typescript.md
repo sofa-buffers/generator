@@ -18,9 +18,9 @@ wire-identical** — this only changes what the generated API hands you.
 
 | mode | `u64`/`i64` scalar | `u64`/`i64` array |
 |---|---|---|
-| `bigint` | `bigint` | `bigint[]` |
-| `long` | corelib `Long`, via a get/set accessor pair | `Long`-backed |
-| `number` | `number` | `Long`-backed |
+| `bigint` | `bigint` | `BigUint64Array` / `BigInt64Array` |
+| `long` | corelib `Long`, via a get/set accessor pair | `Long[]` |
+| `number` | `number` | `Long[]` |
 
 **`bigint`** — exact, and the plainest to use: values are ordinary `bigint`
 literals (`123n`). The cost is that every 64-bit value allocates a `bigint`
@@ -38,6 +38,48 @@ values fit JavaScript's ±2⁵³ safe-integer range. A value outside it is silen
 imprecise, not rejected. Choose it only when the schema's 64-bit fields are known
 to carry small values — timestamps in milliseconds, counters — and the ergonomics
 of a plain number are worth the guarantee.
+
+## Arrays
+
+Every array of a **numeric** element is a typed array — the exact width the
+schema declares — and that array is what the codec reads and writes directly. No
+copy, no conversion and no per-element range check sits between it and the wire.
+
+| element | member type |
+|---|---|
+| `u8` `u16` `u32` | `Uint8Array` `Uint16Array` `Uint32Array` |
+| `i8` `i16` `i32` | `Int8Array` `Int16Array` `Int32Array` |
+| `u64` `i64` | per [`int64`](#int64): `BigUint64Array` / `BigInt64Array`, else `Long[]` |
+| `fp32` `fp64` | `Float32Array` `Float64Array` |
+| `boolean` | `Uint8Array` — `0` or `1`, the byte the wire carries |
+| `enum` | `<EnumName>Array`, see below |
+| `bitfield` | the unsigned width its highest `pos` implies (`Uint8Array`..`BigUint64Array`) |
+| `string` `blob` | `string[]` `Uint8Array[]` |
+| struct, union | `<TypeName>[]` |
+| array | the element's own container, in a `[]` (`Uint32Array[]`) |
+
+An **enum** array keeps the enum type on its elements. Each enum gets a companion
+alias beside it:
+
+```ts
+export enum Mode { Off = 0, Active = 1 }
+export type ModeArray = Int8Array & { [index: number]: Mode };
+```
+
+so the storage is a plain `Int8Array` and `m.modes[0]` still reads as `Mode`.
+
+Three consequences worth knowing:
+
+- **A typed array has a fixed length.** `push` does not exist; build the value
+  with `new Uint16Array(n)`, `Uint16Array.from([...])` or `.set()`. A schema
+  `count: N` is a *capacity*, so a shorter array is legal — it is not padded.
+- **A typed array masks on store.** `a[0] = 70000` on a `Uint16Array` silently
+  stores `4464`. That is JavaScript's rule for the container you asked for; the
+  generator adds no check in front of it. Decoding is unaffected: an over-width
+  element on the wire is rejected as `InvalidMsg`, never masked.
+- **`toJSON` emits plain JSON arrays** and `fromJSON` builds the typed container
+  back, so JSON round-trips are unchanged. A 64-bit array prints as decimal
+  strings, as a 64-bit scalar does under `int64: bigint`.
 
 ## Bitfields
 

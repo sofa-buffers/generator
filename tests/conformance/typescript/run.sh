@@ -1088,6 +1088,47 @@ python3 "$ROOT/tests/conformance/lib/check_declared_width_kinds.py" "typescript"
     --cwd "$WORK/closed" --status-verb status \
     --stream-verb streamdecode --stream-invalid-pattern 'INVALID_MSG' \
     -- npx tsx harness.ts
+
+# Native arrays at every length, for every element kind (generator#550). The
+# array hand-off (corelib-ts#177) is the ONLY way an array's elements reach a
+# visitor here -- the per-element callbacks are gone -- so an array kind the
+# generated visitor fails to offer a destination for decodes as EMPTY rather
+# than failing to compile, at every position, silently.
+#
+# Nothing in this suite reached that before. example.yaml declares its native
+# arrays at count 2..8, and the shared vectors carry no long array at all, so
+# every array the suite decoded was short, bounded and of one of five kinds.
+#
+# The shared driver prints its own schema and fills EVERY field of one message
+# per round, which is what makes the shared destinations assertable: a scratch
+# buffer, a target object or a count register that one array leaves dirty for
+# the next is invisible to a suite that decodes them apart.
+#
+# Both decode surfaces, because `streamdecode` drips the message in ONE BYTE per
+# feed -- so every element of a 257-element array becomes a suspend/resume
+# boundary, which is the half of the fill that can actually be wrong.
+echo "==> native arrays round-trip at every length, for every element kind (generator#550)"
+printf 'version: 1\nmessages:\n' > "$WORK/arrlen.yaml"
+python3 "$ROOT/tests/conformance/lib/check_array_lengths.py" --emit-schema >> "$WORK/arrlen.yaml"
+gen "$WORK/arrlen.yaml" "$WORK/arrlen"
+ln -s "$WORK/ex/node_modules" "$WORK/arrlen/node_modules"
+( cd "$WORK/arrlen" && npx tsc --noEmit )
+for surface in decode streamdecode; do
+    python3 "$ROOT/tests/conformance/lib/check_array_lengths.py" "typescript" \
+        --cwd "$WORK/arrlen" --verb "$surface" -- npx tsx harness.ts
+done
+# ...and the same shapes under the two Long modes, where a 64-bit array is a
+# `Long[]` rather than a `bigint[]` and therefore takes a different destination
+# entirely (`longs`, no bigint materialised at all). The mode changes every
+# 64-bit position, so a round trip in the default mode speaks for neither.
+for mode in long number; do
+    gen "$WORK/arrlen.yaml" "$WORK/arrlen-$mode" "$WORK/cfg_$mode.yaml"
+    ln -s "$WORK/ex/node_modules" "$WORK/arrlen-$mode/node_modules"
+    ( cd "$WORK/arrlen-$mode" && npx tsc --noEmit )
+    python3 "$ROOT/tests/conformance/lib/check_array_lengths.py" "typescript int64: $mode" \
+        --cwd "$WORK/arrlen-$mode" -- npx tsx harness.ts
+done
+
 # MESSAGE_SPEC §7.4 -- a field id REPEATED inside one scope (generator#523). The
 # rule has two halves and this checks BOTH on one message: a re-opened SEQUENCE
 # continues its scope, so struct/union members MERGE and unrecurring children are

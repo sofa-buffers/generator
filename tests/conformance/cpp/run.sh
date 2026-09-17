@@ -768,16 +768,17 @@ run_variant() {
 
     echo "==> [$label] corpus + realworld: every definition compiles"
     for def in "$ROOT"/tests/matrix/corpus/defs/*.yaml "$ROOT"/examples/messages/realworld/vehicle_telemetry.yaml; do
-        # no_maxlen.yaml and seq_elements_dyn.yaml exist to exercise genuinely
-        # unbounded fields — unbounded string/blob, and the count-less wrapper
-        # arrays that must never be narrowed or refilled. The embedded profile
+        # no_maxlen.yaml, seq_elements_dyn.yaml and array_lengths_dyn.yaml exist to
+        # exercise genuinely unbounded fields — unbounded string/blob, the
+        # count-less wrapper arrays that must never be narrowed or refilled, and a
+        # count-less NATIVE array of every element kind. The embedded profile
         # rejects those by design — in both storage modes — so they are not
         # definitions this leg can compile, and skipping them is the honest
         # outcome rather than a bound invented for the test. Their bounded
-        # counterparts (seq_elements, nested_rows) do compile here, so this leg
-        # keeps its wrapper-element coverage.
+        # counterparts (seq_elements, nested_rows, array_lengths) do compile here,
+        # so this leg keeps its wrapper-element and array-length coverage.
         case "$corelib:$(basename "$def")" in
-        c-cpp:no_maxlen.yaml | c-cpp:seq_elements_dyn.yaml) continue ;;
+        c-cpp:no_maxlen.yaml | c-cpp:seq_elements_dyn.yaml | c-cpp:array_lengths_dyn.yaml) continue ;;
         esac
         name=$(basename "$def" .yaml)
         ( cd "$ROOT" && go run ./cmd/sofabgen --config "$WORK/cfg-corpus-$label.yaml" --lang cpp --in "$def" --out "$WORK/corpus-$label/$name" >/dev/null )
