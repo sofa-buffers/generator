@@ -203,6 +203,11 @@ def _as_float(v):
     return None
 
 
+def die(msg: str) -> None:
+    sys.stderr.write(f"check_array_lengths: {msg}\n")
+    raise SystemExit(2)
+
+
 def run(argv, stdin_bytes, cwd):
     return subprocess.run(argv, input=stdin_bytes, cwd=cwd,
                           stdout=subprocess.PIPE, stderr=subprocess.PIPE)
@@ -217,8 +222,23 @@ def main() -> int:
     ap.add_argument("--message", default=MESSAGE)
     ap.add_argument("--skip-kinds", default="")
     ap.add_argument("--max-dyn", type=int, default=0)
-    ap.add_argument("harness", nargs="*")
-    args = ap.parse_args()
+    # The harness argv is split off BY HAND at `--`, as every other driver in
+    # this directory does. Leaving it to argparse's own `--` handling is what
+    # broke CI: whether the separator survives into a trailing nargs="*" differs
+    # between Python versions, so the same command line parsed here and failed
+    # on the runner.
+    argv = sys.argv[1:]
+    emit_only = "--emit-schema" in argv and "--" not in argv
+    if "--" in argv:
+        sep = argv.index("--")
+        args = ap.parse_args(argv[:sep])
+        harness = argv[sep + 1:]
+    else:
+        args = ap.parse_args(argv)
+        harness = []
+    if not emit_only and not harness:
+        die("no harness argv given (put it after `--`)")
+    args.harness = harness
 
     skipped = [k.strip() for k in args.skip_kinds.split(",") if k.strip()]
     for k in skipped:
