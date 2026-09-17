@@ -48,8 +48,9 @@ if [ -n "$ALT_CORELIB" ]; then
 fi
 
 # The heapless C target has no allow_dynamic escape and rejects unbounded fields
-# (generator#104): no_maxlen and seq_elements_dyn are deliberately-unbounded
-# schemas (skipped, not C inputs), and example.yaml's intentionally-dynamic
+# (generator#104): no_maxlen, seq_elements_dyn and array_lengths_dyn are
+# deliberately-unbounded schemas (skipped, not C inputs), and example.yaml's
+# intentionally-dynamic
 # `somemap` gets an explicit capacity — same handling as tests/conformance/c/run.sh. `count` never reaches
 # the wire, so the generated wire bytes are unchanged.
 if [ "$LANG_KEY" = "c" ] || [ "$ALT_CORELIB" = "c-cpp" ] || [ "$ALT_CORELIB" = "rs-no-std" ]; then
@@ -67,7 +68,7 @@ for def in $DEFS; do
     src="$def"
     if [ "$LANG_KEY" = "c" ]; then
         case "$name" in
-            no_maxlen | seq_elements_dyn) continue ;;
+            no_maxlen | seq_elements_dyn | array_lengths_dyn) continue ;;
             example)   src="$C_EXAMPLE" ;;
         esac
     fi
@@ -77,7 +78,7 @@ for def in $DEFS; do
         alt_src="$def"
         if [ "$ALT_CORELIB" = "c-cpp" ] || [ "$ALT_CORELIB" = "rs-no-std" ]; then
             case "$name" in
-                no_maxlen | seq_elements_dyn) continue ;;
+                no_maxlen | seq_elements_dyn | array_lengths_dyn) continue ;;
                 example)   alt_src="$C_EXAMPLE" ;;
             esac
         fi
