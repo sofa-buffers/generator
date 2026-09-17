@@ -16,7 +16,16 @@
 #
 # Numbers shift when anything below shifts. Check here FIRST: if the header is
 # unchanged and a number moved, the generator caused it.
-# corelib:   c-cpp 3aa3435 | cpp 28f85f9 | cs 0d9491f | dart 4381848 | go 79e23ac | java 61a3117 | kotlin-mp b1a2f8a | py e91366d | rs 6b0183e | rs-no-std 2d5f5cf | ts ce565bb | zig aa8dd09
+#
+# The ts-* DECODE cells are not continuous with their previous values (generator
+# #554). Their predecessors were taken at corelib ts ce565bb, before corelib-ts
+# #177 made the array hand-off the only way elements are delivered; between the
+# two readings the generator on main stopped decoding native arrays against the
+# shipped corelib at all -- under capacity 16 it dropped every element silently,
+# over it the decode threw (generator#550). So the older decode numbers describe
+# work that was not being done, and the movement here is not a regression to
+# attribute. The encode cells ARE comparable and fell ~2.4%.
+# corelib:   c-cpp 3aa3435 | cpp 28f85f9 | cs 0d9491f | dart 4381848 | go 79e23ac | java 61a3117 | kotlin-mp b1a2f8a | py e91366d | rs 6b0183e | rs-no-std 2d5f5cf | ts ae21b5c | zig aa8dd09
 #
 ## instruction cost
 row                profile    method    encode_ir/op  decode_ir/op
@@ -39,9 +48,9 @@ rust-rs-no-std     footprint  toggle    8078          29998
 rust-rs-no-std-dyn footprint  toggle    8280          38452
 rust-rs-static     maxspeed   toggle    8120          16564
 rust-rs-unbounded  maxspeed   toggle    6762          21091
-ts-bigint          maxspeed   subtract  605081        768394
-ts-long            maxspeed   subtract  597309        771956
-ts-number          maxspeed   subtract  614802        767552
+ts-bigint          maxspeed   subtract  590531        806955
+ts-long            maxspeed   subtract  582977        801426
+ts-number          maxspeed   subtract  599253        796949
 zig                maxspeed   toggle    9929          22495
 zig-unbounded      maxspeed   toggle    7837          18799
 
