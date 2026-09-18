@@ -1296,9 +1296,8 @@ func (g *gen) emitPayloadVisit(f *zfile, fs []frame, name string, kind ir.Kind, 
 //
 // Validate-then-copy rather than copy-then-validate: an invalid payload is
 // never allocated, and the validator reads the bytes where they already are
-// instead of re-reading the copy it just stored (measured in the arena's zig
-// row, +0.6 % on the 434-byte round trip). What is returned is still the
-// message's own copy (CORELIB_PLAN §6.7.1, generator#412) on both paths:
+// instead of re-reading the copy it just stored. What is returned is still
+// the message's own copy (CORELIB_PLAN §6.7.1, generator#412) on both paths:
 //
 //   - a payload that arrived WHOLE is validated in the chunk and then copied
 //     with one alloc.dupe -- the copy PayloadAcc.take would have made;
