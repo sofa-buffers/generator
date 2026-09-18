@@ -1142,8 +1142,19 @@ func (g *gen) emitPayloadVisit(f *zfile, fs []frame, name string, kind ir.Kind, 
 	// after the id has matched and after the arm's own bound has been decided
 	// (generator#432); `_take` is the schema-bounded entry point and
 	// `_takeCapped` carries the receiver cap into the corelib comparison.
-	bindTake := "const chunk = self._take(total, offset, _chunk) orelse return;"
-	bindCapped := fmt.Sprintf("const chunk = self._takeCapped(total, offset, _chunk, %s) orelse return;", capName)
+	//
+	// A `string` arm binds through the _takeStr pair instead (emitTakeStr): the
+	// same two entry points, but with strict UTF-8 decided on the SOURCE bytes
+	// before the copy rather than on the copy afterwards.
+	takeFn, cappedFn := "_take", "_takeCapped"
+	if kind == ir.KindString {
+		takeFn, cappedFn = "_takeStr", "_takeStrCapped"
+	}
+	bindTake := fmt.Sprintf("const chunk = self.%s(total, offset, _chunk) orelse return;", takeFn)
+	bindCapped := fmt.Sprintf("const chunk = self.%s(total, offset, _chunk, %s) orelse return;", cappedFn, capName)
+	// Which binds this callback actually emits, so emitTakeStr writes only
+	// the helpers something calls.
+	usedTake, usedCapped := false, false
 	type frameArms struct {
 		fr   frame
 		arms []string // fkStruct: "id => body" lines
@@ -1154,16 +1165,20 @@ func (g *gen) emitPayloadVisit(f *zfile, fs []frame, name string, kind ir.Kind, 
 	// UTF-8. Zig's string is a `[]const u8` byte container (the bytes are the
 	// message's own since CORELIB_PLAN §6.7.1 / generator#412), so the corelib
 	// exposes `utf8Valid(bytes)` and generated code emits an UNCONDITIONAL call to
-	// it at the materialization site — the SOFAB_STRICT_UTF8 gate lives inside the
-	// primitive (folds to true when compiled off), so this code is identical across
-	// build configs. Invalid UTF-8 is the INVALID outcome (self.inv). `blob` is
-	// opaque bytes and is stored verbatim. Skipped fields hit the switch `else`
-	// arms and are never validated (§6.4). mat() wraps only the materialization.
-	mat := func(store string) string {
-		if kind != ir.KindString {
-			return store
+	// it inside the string bind (_takeStr / _takeStrCapped, see emitTakeStr) --
+	// the SOFAB_STRICT_UTF8 gate lives inside the primitive (folds to true when
+	// compiled off), so this code is identical across build configs. Invalid
+	// UTF-8 is the INVALID outcome (self.inv) and the bind returns null, so the
+	// arm's store never runs. `blob` is opaque bytes and is stored verbatim.
+	// Skipped fields hit the switch `else` arms and never reach a bind, so they
+	// are never validated (§6.4).
+	bind := func(capped bool) string {
+		if capped {
+			usedCapped = true
+			return bindCapped
 		}
-		return "if (!sofab.utf8Valid(chunk)) { self.inv = true; } else { " + store + " }"
+		usedTake = true
+		return bindTake
 	}
 	for _, fr := range fs {
 		if fr.kind == fkSeqArr && fr.elemKind == kind {
@@ -1186,13 +1201,9 @@ func (g *gen) emitPayloadVisit(f *zfile, fs []frame, name string, kind ir.Kind, 
 			// is compared by the corelib at the announced length and nothing is
 			// buffered for a payload it refuses -- generated code adds no length
 			// test of its own (CORELIB_PLAN §6.2.1, generator#432).
-			bind := bindTake
-			if active && fr.elemDynLen {
-				bind = bindCapped
-			}
-			// For a string element the materialization is UTF-8-validated (mat);
-			// blob is stored verbatim.
-			body := "{ " + bind + " " + mat(set+";") + " }"
+			// A string element is UTF-8-validated inside its bind; blob is
+			// stored verbatim.
+			body := "{ " + bind(active && fr.elemDynLen) + " " + set + "; }"
 			// Bounded element (schema maxlen): a wire byte length above the maxlen
 			// is malformed input, rejected as INVALID before the payload is taken,
 			// never truncated (MESSAGE_SPEC §7.1). A validity bound is generated
@@ -1228,17 +1239,17 @@ func (g *gen) emitPayloadVisit(f *zfile, fs []frame, name string, kind ir.Kind, 
 				// is taken, never truncated (MESSAGE_SPEC §7.1). A validity bound is
 				// generated code's own, decided on the announced `total`, and only a
 				// field that clears it reaches the uncapped `_take`. A string is then
-				// UTF-8-validated at the store (mat); blob is stored verbatim.
-				fa.arms = append(fa.arms, fmt.Sprintf("%d => if (total > %d) { self.inv = true; } else { %s %s },", fld.ID, fld.Maxlen, bindTake, mat(store)))
+				// UTF-8-validated inside its bind; blob is stored verbatim.
+				fa.arms = append(fa.arms, fmt.Sprintf("%d => if (total > %d) { self.inv = true; } else { %s %s },", fld.ID, fld.Maxlen, bind(false), store))
 			case active:
 				// Unbounded scalar under a configured cap (#102): the number rides
 				// the corelib call, which compares it at the announced length and
 				// buffers nothing for a payload it refuses. One implementation of
 				// the rule, and it sits at the length header rather than after a
 				// materializing call (CORELIB_PLAN §6.2.1, generator#432).
-				fa.arms = append(fa.arms, fmt.Sprintf("%d => { %s %s },", fld.ID, bindCapped, mat(store)))
+				fa.arms = append(fa.arms, fmt.Sprintf("%d => { %s %s },", fld.ID, bind(true), store))
 			default:
-				fa.arms = append(fa.arms, fmt.Sprintf("%d => { %s %s },", fld.ID, bindTake, mat(store)))
+				fa.arms = append(fa.arms, fmt.Sprintf("%d => { %s %s },", fld.ID, bind(false), store))
 			}
 		}
 		if len(fa.arms) > 0 {
@@ -1274,6 +1285,65 @@ func (g *gen) emitPayloadVisit(f *zfile, fs []frame, name string, kind ir.Kind, 
 	f.line("            else => {},")
 	f.line("        }")
 	f.line("    }")
+	if kind == ir.KindString {
+		g.emitTakeStr(f, name, usedTake, usedCapped)
+	}
+}
+
+// emitTakeStr emits the string binds: _take / _takeCapped with strict UTF-8
+// (MESSAGE_SPEC §8, CORELIB_PLAN §6.4) folded in, decided on the SOURCE bytes
+// before they are copied.
+//
+// Validate-then-copy rather than copy-then-validate: an invalid payload is
+// never allocated, and the validator reads the bytes where they already are
+// instead of re-reading the copy it just stored (measured in the arena's zig
+// row, +0.6 % on the 434-byte round trip). What is returned is still the
+// message's own copy (CORELIB_PLAN §6.7.1, generator#412) on both paths:
+//
+//   - a payload that arrived WHOLE is validated in the chunk and then copied
+//     with one alloc.dupe -- the copy PayloadAcc.take would have made;
+//   - a payload that arrived SPLIT only exists contiguously once
+//     PayloadAcc.push has stitched it, into its own allocation; there is no
+//     source slice to validate first, so that path validates the stitched
+//     result, exactly as before.
+//
+// The whole-chunk decision is the one PayloadAcc.push documents for a caller
+// that handles the whole-payload case itself; the stitch stays the
+// corelib's. The capped form puts the receiver cap in front through
+// PayloadAcc.beginCapped -- the corelib's comparison, the same one
+// takeCapped makes, so generated code still emits no length test of its own
+// (CORELIB_PLAN §6.2.1) and an over-cap payload is refused before a byte is
+// read, validated or copied.
+func (g *gen) emitTakeStr(f *zfile, name string, usedTake, usedCapped bool) {
+	if !usedTake && !usedCapped {
+		return
+	}
+	f.blank()
+	f.line("    /// _take for a `string`: strict UTF-8 is decided on the SOURCE bytes")
+	f.line("    /// before they are copied, so an invalid payload is never allocated and")
+	f.line("    /// the validator does not re-read a copy it just stored. Invalid UTF-8")
+	f.line("    /// is INVALID and returns null. A payload split across feed chunks is")
+	f.line("    /// stitched first -- it has no contiguous source until then.")
+	f.line("    fn _takeStr(self: *_dec_%s, total: usize, offset: usize, chunk: []const u8) ?[]const u8 {", name)
+	f.line("        if (offset == 0 and chunk.len >= total) {")
+	f.line("            const src = chunk[0..total];")
+	f.line("            if (!sofab.utf8Valid(src)) { self.inv = true; return null; }")
+	f.line("            return self.alloc.dupe(u8, src) catch { self.inv = true; return null; };")
+	f.line("        }")
+	f.line("        const p = (self.acc.push(self.alloc, total, offset, chunk) catch { self.inv = true; return null; }) orelse return null;")
+	f.line("        if (!sofab.utf8Valid(p)) { self.inv = true; return null; }")
+	f.line("        return p;")
+	f.line("    }")
+	if usedCapped {
+		f.blank()
+		f.line("    /// _takeStr for a string the schema leaves unbounded: the receiver cap")
+		f.line("    /// is compared at the ANNOUNCED length, on every chunk, before a byte is")
+		f.line("    /// read, validated or copied -- the comparison _takeCapped makes.")
+		f.line("    fn _takeStrCapped(self: *_dec_%s, total: usize, offset: usize, chunk: []const u8, cap: usize) ?[]const u8 {", name)
+		f.line("        self.acc.beginCapped(total, cap) catch { self.lim = true; return null; };")
+		f.line("        return self._takeStr(total, offset, chunk);")
+		f.line("    }")
+	}
 }
 
 // emitArrayBegin emits the arrayBegin callback: reset the element fill index,
