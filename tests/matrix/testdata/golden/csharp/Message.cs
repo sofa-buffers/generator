@@ -38,14 +38,18 @@ public sealed class Scalars {
         return true;
     }
     public const int MaxSize = 49;
-    // Per-thread scratch buffer: Encode() serialises into it and returns an
-    // exact-size copy, so the worst-case buffer is not re-allocated (and
-    // zeroed) on every call. Do not call Encode() reentrantly from a
-    // Serialize() override on the same thread.
+    // Per-thread scratch buffer and encoder: Encode() serialises into the
+    // buffer and returns an exact-size copy, so neither the worst-case
+    // buffer nor the encoder's fixed state is re-allocated (and zeroed) on
+    // every call; Reset drops any state a previous, failed Encode() left.
+    // Do not call Encode() reentrantly from a Serialize() override on the
+    // same thread.
     [ThreadStatic] private static byte[] _encScratch;
+    [ThreadStatic] private static OStream _encStream;
     public byte[] Encode() {
         var buf = _encScratch ??= new byte[MaxSize];
-        var os = new OStream(buf);
+        var os = _encStream;
+        if (os == null) { _encStream = os = new OStream(buf); } else { os.Reset(buf, 0); }
         Serialize(os);
         var outp = new byte[os.BytesUsed];
         Array.Copy(buf, outp, os.BytesUsed);

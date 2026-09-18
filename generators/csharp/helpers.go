@@ -233,6 +233,12 @@ func numCsType(k ir.Kind) string {
 	return "byte"
 }
 
+// presizeMaxCount is the largest schema `count` a List<T> field is presized to.
+// 64 references are 512 bytes of backing array: small enough to pay on every
+// construction of an empty message, large enough for the counts real schemas
+// declare for wrapper arrays.
+const presizeMaxCount = 64
+
 // csInit returns the field initializer (" = ...") or "" for plain default.
 func (g *gen) csInit(f *ir.Field) string {
 	switch f.Kind {
@@ -257,6 +263,15 @@ func (g *gen) csInit(f *ir.Field) string {
 		// wire and never adds elements, so a fresh count:N array is the empty array —
 		// which is also what its omit test compares against and what an absent field
 		// decodes back to.
+		//
+		// A small bound still sizes the list's CAPACITY (`new(N)`): Count stays 0,
+		// but decoding up to N elements never grows the backing array, which
+		// otherwise takes 4 -> 8 -> ... resizes per decode. Above presizeMaxCount the
+		// list starts at the default capacity, so a large declared bound never costs
+		// its full backing array on every construction of an empty message.
+		if f.HasCount && f.Count > 0 && f.Count <= presizeMaxCount {
+			return fmt.Sprintf(" = new(%d)", f.Count)
+		}
 		return " = new()"
 	case ir.KindString:
 		if s, ok := f.Default.(string); ok {

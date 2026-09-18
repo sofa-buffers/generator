@@ -337,9 +337,18 @@ func TestCsStructural(t *testing.T) {
 		// Reassembly of a split payload and the strict UTF-8 verdict are the
 		// corelib's (corelib-cs#92): the value comes back on the chunk that
 		// completes it, invalid UTF-8 as INVALID (issue #85).
-		"private readonly PayloadAcc pay = new PayloadAcc();",
-		"string _s = pay.String(total, offset, data, chunkOffset, chunkLength, _cap);",
-		"byte[] _b = pay.Blob(total, offset, data, chunkOffset, chunkLength, _cap);",
+		// The accumulator is created only for a payload split across feeds; one
+		// that arrives whole takes PayloadAcc's own one-chunk branch inline, cap
+		// check first.
+		"private PayloadAcc pay;",
+		"if (offset == 0 && chunkLength >= total) { _s = global::sofab.Utf8.Decode(data, chunkOffset, total); }",
+		"else _s = (pay ??= new PayloadAcc()).String(total, offset, data, chunkOffset, chunkLength, _cap);",
+		"if (offset == 0 && chunkLength >= total) { _b = new byte[total]; Array.Copy(data, chunkOffset, _b, 0, total); }",
+		"else _b = (pay ??= new PayloadAcc()).Blob(total, offset, data, chunkOffset, chunkLength, _cap);",
+		// Encode() reuses a per-thread encoder; Reset drops whatever a previous,
+		// failed Encode() left open.
+		"[ThreadStatic] private static OStream _encStream;",
+		"if (os == null) { _encStream = os = new OStream(buf); } else { os.Reset(buf, 0); }",
 		// over-count scalar array rejected as INVALID before the (untrusted-count) allocation (#100)
 		"if (count > 4) throw new SofabException(SofabError.InvalidMessage, \"someuintarray: array count above schema capacity 4\"); ",
 	} {
@@ -450,7 +459,8 @@ messages:
 		// corelib-cs#101). The number is still this layer's -- passed per call,
 		// never held by the corelib and with no omitted-argument "unlimited".
 		"case (Root, 0): _cap = MaxDynStringLen; break;",
-		"string _s = pay.String(total, offset, data, chunkOffset, chunkLength, _cap);",
+		"else _s = (pay ??= new PayloadAcc()).String(total, offset, data, chunkOffset, chunkLength, _cap);",
+		"PayloadAcc.CheckStringLength(total, _cap); _s = global::sofab.Utf8.Decode(data, chunkOffset, total);",
 	} {
 		if !strings.Contains(m, want) {
 			t.Errorf("Message.cs missing %q", want)
@@ -514,6 +524,9 @@ messages:
       fp:   { id: 7, type: array, items: { type: bitfield, count: 2, bits: { $ref: "#/$defs/bitfield/Perm" } } }
       fxd:  { id: 8, type: array, items: { type: u32, count: 5 }, default: [1, 2] }
       strs: { id: 9, type: array, items: { type: string, count: 2, maxlen: 8 } }
+      big:  { id: 10, type: array, items: { type: string, count: 65, maxlen: 8 } }
+      edge: { id: 11, type: array, items: { type: string, count: 64, maxlen: 8 } }
+      free: { id: 12, type: array, items: { type: string, maxlen: 8 } }
 `
 	m := buildModule(t, []byte(src), "capacity.yaml", map[string]any{})
 
@@ -541,9 +554,15 @@ messages:
 		// default shorter than N stands exactly as written (never tail-padded).
 		"public uint[] fx = Array.Empty<uint>();",
 		"public double[] ff64 = Array.Empty<double>();",
-		"public List<bool> fb = new();",
+		// ...but a small bound sizes the List's CAPACITY, so decoding up to N
+		// elements never regrows it. Count is still 0.
+		"public List<bool> fb = new(3);",
 		"public byte[] fp = Array.Empty<byte>();",
-		"public List<string> strs = new();",
+		"public List<string> strs = new(2);",
+		"public List<string> edge = new(64);",
+		// Above presizeMaxCount, and without a count, the default capacity.
+		"public List<string> big = new();",
+		"public List<string> free = new();",
 		"public float[] ff32 = new float[]{1.5f};",
 		"public sbyte[] fe = new sbyte[]{2};",
 		"public uint[] fxd = new uint[]{1, 2};",
@@ -889,10 +908,11 @@ messages:
 			t.Errorf("String() missing destination arm %q:\n%s", want, fn)
 		}
 	}
-	// The guard precedes the accumulator, which is where the buffering and the
-	// UTF-8 verdict both happen, so a skipped payload is neither validated nor
+	// The guard precedes both paths that take the payload -- the inline
+	// whole-payload decode and the accumulator -- which is where the buffering
+	// and the UTF-8 verdict happen, so a skipped payload is neither validated nor
 	// able to leave bytes behind for a later declared field to inherit.
-	for _, after := range []string{"pay.String("} {
+	for _, after := range []string{"Utf8.Decode(", "PayloadAcc()).String("} {
 		if i := strings.Index(fn, after); i < 0 || guardEnd > i {
 			t.Errorf("String(): the destination guard must precede %q:\n%s", after, fn)
 		}
@@ -962,7 +982,8 @@ messages:
 	for _, want := range []string{
 		`case (Root, 0): if (total > 16) throw new SofabException(SofabError.InvalidMessage, "b: blob length above schema maxlen 16"); _cap = 16; break;`,
 		"case (Root, 1): _cap = MaxDynBlobLen; break;",
-		"byte[] _b = pay.Blob(total, offset, data, chunkOffset, chunkLength, _cap);",
+		"_b = new byte[total]; Array.Copy(data, chunkOffset, _b, 0, total);",
+		"else _b = (pay ??= new PayloadAcc()).Blob(total, offset, data, chunkOffset, chunkLength, _cap);",
 	} {
 		if !strings.Contains(fn, want) {
 			t.Errorf("Blob() missing %q:\n%s", want, fn)
@@ -975,8 +996,10 @@ messages:
 		t.Errorf("a string id must not be a blob destination:\n%s", fn)
 	}
 	// The whole point: nothing is sized from the wire or copied before the gate.
-	if i := strings.Index(fn, "pay.Blob("); i < 0 || guardEnd > i {
-		t.Errorf("Blob(): the destination guard must precede the accumulator:\n%s", fn)
+	for _, after := range []string{"new byte[total]", "PayloadAcc()).Blob("} {
+		if i := strings.Index(fn, after); i < 0 || guardEnd > i {
+			t.Errorf("Blob(): the destination guard must precede %q:\n%s", after, fn)
+		}
 	}
 	// The maxlen reject is destination-scoped by BEING one of the guard's arms,
 	// so it sits inside the guard and ahead of the accumulator.
@@ -1601,7 +1624,7 @@ messages:
 		"public uint[] b32 = Array.Empty<uint>();", "public enum MB32Elem : uint {",
 		"public ulong[] b64 = Array.Empty<ulong>();", "public enum MB64Elem : ulong {",
 		// The boolean array keeps the List: no width is shared with its member.
-		"public List<bool> bl = new();",
+		"public List<bool> bl = new(4);",
 		// A declared default is the bare number at that width — no `(MEdElem)`
 		// cast in front of it — and the omit-compare static matches it exactly.
 		"public short[] ed = new short[]{-200, 200};",
@@ -1617,7 +1640,7 @@ messages:
 		`case (Root, 6): if (afill == 0) break; afill--; if (value > 4294967295) throw new SofabException(SofabError.InvalidMessage, "b32 element: value outside declared bitfield width"); m.b32[ai++] = (uint)value; break;`,
 		// A matrix ROW is unchanged: the corelib hands its elements over one at a
 		// time into a List that grows, so it keeps the named type and the bridge.
-		"public List<List<MMatElemElem>> mat = new();",
+		"public List<List<MMatElemElem>> mat = new(2);",
 		"os.WriteArraySigned(_i0, Array.ConvertAll(this.mat[_i0].ToArray(), _x => (sbyte)_x));",
 	} {
 		if !strings.Contains(m, want) {
