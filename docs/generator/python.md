@@ -67,13 +67,15 @@ A message that never completes therefore shows only the part the visitor handled
 Nothing is lost: a decode short of COMPLETE has no finished message to report, and
 both refusals still surface as `SofaDecodeError` / `SofaIncompleteError`.
 
-Which fields go which way follows from the schema, not from a setting: `u64`,
-`i64`, `fp32`, `fp64`, `boolean`, `string`, `blob` and native arrays with a
-declared `count` of at most 32 ride the table; the narrower integers, `enum` and
-`bitfield` (whose declared width the table cannot carry), arrays the schema leaves
-unbounded or declares longer than that, and arrays of strings, blobs, structs,
-unions or arrays stay on the visitor. A class with fewer than three table-carried
-fields uses none at all.
+Which fields go which way follows from the schema, not from a setting. Every
+scalar rides the table — the narrow integers, `enum` and `bitfield` included,
+whose declared width the table states and the decoder checks — as do `string`,
+`blob`, native arrays with a declared `count` of at most 32, and whole nested
+structs and unions. What stays on the visitor is an array the schema leaves
+unbounded or declares longer than 32, an array of strings, blobs, structs, unions
+or arrays, and any struct or union that contains one. A class with fewer than
+three table-carried fields uses none at all; a class the table covers completely
+needs no visitor behaviour at all.
 
 The array limit is a cost, not a rule: an array on the table is written element by
 element into slots and then built into the list your dataclass holds, so past a

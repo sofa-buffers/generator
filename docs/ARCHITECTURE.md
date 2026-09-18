@@ -3842,31 +3842,33 @@ Measured, `tests/bench` on `vehicle_telemetry`, same corelib-py build both sides
 
 Encode is untouched — corelib-py has no encode-side table.
 
-**Two rules decide what the table may carry**, and both are about a verdict it
-cannot reach, not about taste:
+**What the table carries** is everything the schema declares, except two shapes
+it has no entry for:
 
-1. **A field whose value needs a WIDTH check stays on the visitor.** An entry
-   carries a declared width for an *array's elements* (`elem_min`/`elem_max`,
-   applied by the decoder at each element) but none for a scalar: `words[at] =
-   value` is the whole store. Taking that verdict afterwards, in `scatter()`,
-   would put it behind a truncation §5.2 says it outranks — a `scatter` runs only
-   for a decode that already completed. So `u8..u32`, `i8..i32` and every
-   `enum`/`bitfield` narrower than the 64-bit slot keep the guarded store in the
-   typed hook. `u64`, `i64`, both floats, `boolean` (§4.4: no width at all),
-   `string`, `blob` and every **counted** native array go on the table; an array
-   the schema leaves unbounded does not, because its destination would be sized
-   by the wire (§6.6).
+* a **wrapper-sequence array** (elements of `string`, `blob`, `struct`, `union`
+  or `array`), whose elements are per-index scopes rather than values;
+* an array the schema leaves **unbounded**, whose destination would be as many
+  slots as the wire asks for — which §6.6 forbids — and one whose declared count
+  is over 32, which is a cost limit rather than a rule (below).
 
-2. **A scope is entered by the table only if its parent binds everything.** The
-   decoder descends into a bound sequence by itself and tells the visitor nothing
-   (corelib-py#146), so the visitor's `_c` still names the parent while the walk
-   is inside the child. An id the child's table does not name — an *unknown* id,
-   which is what forward compatibility delivers — is then offered to the visitor
-   under the parent's location, where an arm would store someone else's value. A
-   parent that binds everything it declares has no arms at all, and its
-   `on_field` is one unconditional decline. So a message of nothing but scalars
-   and structs binds its whole tree; one wrapper array anywhere in a scope stops
-   the descent below it, and that scope's own leaves are bound alone.
+Every declared WIDTH rides the entry: `max_value` / `min_value` for a scalar
+(corelib-py#149), `elem_max` / `elem_min` for an array's elements, `maxlen` for a
+string or blob, `cap` for an array's count. The decoder applies each at the value,
+before the store, which is where §7.1 has to be applied for a truncation behind an
+out-of-width value to be INVALID rather than INCOMPLETE (§5.2). So generated code
+carries no width comparison at all for a bound field, and `on_schema_bound` is not
+asked for one either.
+
+**A nested scope is entered when its own subtree is bindable**, and its table is
+then `closed`. The decoder descends into a bound sequence by itself and tells the
+visitor nothing (corelib-py#146), so while the walk is inside the child the
+visitor's `_c` still names the parent — and an id the child does not name would be
+offered to it under the PARENT's location, where an arm would store someone else's
+value. `Binding(closed=True)` (corelib-py#150) is what makes that impossible: a
+closed table skips what it does not name, sequence and all, exactly as a decoder
+with no visitor does. A scope that still holds an unbindable field cannot be
+closed, so the table does not descend into it; a class the table covers **whole**
+emits a handler with no hooks at all — storage, `destinations()`, `scatter()`.
 
 Two cost thresholds, both measured rather than assumed:
 
@@ -3882,11 +3884,6 @@ Two cost thresholds, both measured rather than assumed:
   +32% at 512, +69% at 4096; with it absent, the prefill alone is +1.7% at 32 and
   +147% at 4096. Nothing else has that shape: a bound string or blob is one object
   in the list and the scatter moves the reference.
-
-Both rules are limits of what a table can *say* today, not of the wire format.
-corelib-py#149 (a declared width on a scalar entry) and corelib-py#150 (a child
-table that declines what it does not name) would lift them, and between them they
-would put every narrow scalar and the nested scopes on the table too.
 
 #### 9.5.2 Rust: why the cap stays in the generated visitor
 
