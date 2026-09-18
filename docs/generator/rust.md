@@ -60,6 +60,11 @@ Two things worth knowing before switching it off under `corelib: rs`:
 - **Unbounded fields are unaffected.** They stay in `String` / `Vec`, so the
   switch applies per field wherever a bound exists and static storage can be
   turned on without changing the schema.
+- **A fully bounded schema decodes without the heap.** The decoder's own
+  scope stack is a fixed array sized from the schema's nesting depth on every
+  `std` build, so with no unbounded field left a `try_decode` allocates
+  nothing. (A `Decoder` fed in chunks still reassembles a string or blob split
+  across two feeds in a heap buffer.)
 
 This is the Rust analogue of the C++ [`allow_dynamic`](cpp.md#allow_dynamic),
 and behaves the same way.

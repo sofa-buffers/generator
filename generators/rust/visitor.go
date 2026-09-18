@@ -58,6 +58,12 @@ type frame struct {
 	// native array (generator#216 / F-0032), which is what keeps the row's fill
 	// inside its declared capacity on both profiles.
 	ecap int64
+	// depth is the number of sequences the decoder has entered to reach this
+	// frame: 0 for the root, parent + 1 for a struct/union field, a wrapper array
+	// and a wrapper element alike, since each is one sequence_begin further down.
+	// A native row opens no sequence (array_begin), so it adds no frame and no
+	// depth. The std decode stack is sized from the maximum (stdStackCap).
+	depth int
 }
 
 // capOf maps a schema fixed-count bound to a frame's cap: N when the array
@@ -469,18 +475,18 @@ func isNativeArrayElem(k ir.Kind) bool {
 func (g *gen) frames(m *ir.Message) []frame {
 	var out []frame
 	nix := 0 // running number of element-index slots handed out (see frame.ixVar)
-	var walkFields func(loc, path string, fields []*ir.Field)
-	var addArray func(loc, path string, elem ir.Kind, ref *ir.TypeRef, items *ir.ArrayElem, elemMaxHas bool, elemMax int64, cap int64)
+	var walkFields func(depth int, loc, path string, fields []*ir.Field)
+	var addArray func(depth int, loc, path string, elem ir.Kind, ref *ir.TypeRef, items *ir.ArrayElem, elemMaxHas bool, elemMax int64, cap int64)
 
-	walkFields = func(loc, path string, fields []*ir.Field) {
-		out = append(out, frame{loc: loc, path: path, kind: fkStruct, fields: fields})
+	walkFields = func(depth int, loc, path string, fields []*ir.Field) {
+		out = append(out, frame{loc: loc, path: path, kind: fkStruct, fields: fields, depth: depth})
 		for _, fld := range fields {
 			switch {
 			case fld.Kind == ir.KindStruct || fld.Kind == ir.KindUnion:
 				cl := loc + "_" + fld.Name
-				walkFields(cl, path+"."+rustIdent(fld.Name), fld.Ref.Target.Fields)
+				walkFields(depth+1, cl, path+"."+rustIdent(fld.Name), fld.Ref.Target.Fields)
 			case fld.Kind == ir.KindArray && isWrapperElem(fld.Elem):
-				addArray(loc+"_"+fld.Name, path+"."+rustIdent(fld.Name), fld.Elem, fld.ElemRef, fld.ElemItems, fld.ElemMaxHas, fld.ElemMax, capOf(fld.HasCount, fld.Count))
+				addArray(depth+1, loc+"_"+fld.Name, path+"."+rustIdent(fld.Name), fld.Elem, fld.ElemRef, fld.ElemItems, fld.ElemMaxHas, fld.ElemMax, capOf(fld.HasCount, fld.Count))
 			}
 		}
 	}
@@ -489,10 +495,10 @@ func (g *gen) frames(m *ir.Message) []frame {
 	// (loc, path) and whose element is (elem, ref, items). elemMaxHas is the
 	// string/blob element's maxlen presence (unused for other element kinds); cap
 	// is the array's schema fixed-count bound (-1 == dynamic).
-	addArray = func(loc, path string, elem ir.Kind, ref *ir.TypeRef, items *ir.ArrayElem, elemMaxHas bool, elemMax int64, cap int64) {
+	addArray = func(depth int, loc, path string, elem ir.Kind, ref *ir.TypeRef, items *ir.ArrayElem, elemMaxHas bool, elemMax int64, cap int64) {
 		switch elem {
 		case ir.KindString, ir.KindBlob:
-			out = append(out, frame{loc: loc, path: path, kind: fkSeqArr, elemKind: elem, elemDyn: !elemMaxHas, cap: cap, emax: boundOf(elemMaxHas, elemMax)})
+			out = append(out, frame{loc: loc, path: path, kind: fkSeqArr, elemKind: elem, elemDyn: !elemMaxHas, cap: cap, emax: boundOf(elemMaxHas, elemMax), depth: depth})
 		case ir.KindStruct, ir.KindUnion:
 			el := loc + "_e"
 			// The element id IS the array index (§5.1), so the element location
@@ -502,8 +508,8 @@ func (g *gen) frames(m *ir.Message) []frame {
 			// instead of merging into the first (§7.4). generator#247.
 			ix := fmt.Sprintf("_ix%d", nix)
 			nix++
-			out = append(out, frame{loc: loc, path: path, kind: fkStructArr, elemLoc: el, cap: cap, ixVar: ix})
-			walkFields(el, fmt.Sprintf("%s[self.%s]", path, ix), ref.Target.Fields)
+			out = append(out, frame{loc: loc, path: path, kind: fkStructArr, elemLoc: el, cap: cap, ixVar: ix, depth: depth})
+			walkFields(depth+1, el, fmt.Sprintf("%s[self.%s]", path, ix), ref.Target.Fields)
 		case ir.KindArray:
 			// The element is an inner array (items). A native inner row is handled by
 			// a single wrapper frame (array_begin opens the row the id names, elements
@@ -516,16 +522,16 @@ func (g *gen) frames(m *ir.Message) []frame {
 			ix := fmt.Sprintf("_ix%d", nix)
 			nix++
 			if isNativeArrayElem(items.Elem) {
-				out = append(out, frame{loc: loc, path: path, kind: fkNestedNative, elemKind: items.Elem, elemRef: items.ElemRef, elemDyn: !items.HasCount, cap: cap, ixVar: ix, ecap: boundOf(items.HasCount, items.Count)})
+				out = append(out, frame{loc: loc, path: path, kind: fkNestedNative, elemKind: items.Elem, elemRef: items.ElemRef, elemDyn: !items.HasCount, cap: cap, ixVar: ix, ecap: boundOf(items.HasCount, items.Count), depth: depth})
 			} else {
 				el := loc + "_e"
-				out = append(out, frame{loc: loc, path: path, kind: fkArrArr, elemLoc: el, cap: cap, ixVar: ix})
-				addArray(el, fmt.Sprintf("%s[self.%s]", path, ix), items.Elem, items.ElemRef, items.ElemItems, items.ElemMaxHas, items.ElemMax, capOf(items.HasCount, items.Count))
+				out = append(out, frame{loc: loc, path: path, kind: fkArrArr, elemLoc: el, cap: cap, ixVar: ix, depth: depth})
+				addArray(depth+1, el, fmt.Sprintf("%s[self.%s]", path, ix), items.Elem, items.ElemRef, items.ElemItems, items.ElemMaxHas, items.ElemMax, capOf(items.HasCount, items.Count))
 			}
 		}
 	}
 
-	walkFields("Root", "self.m", m.Fields)
+	walkFields(0, "Root", "self.m", m.Fields)
 	return out
 }
 
@@ -930,6 +936,9 @@ func (g *gen) emitVisitor(f *rfile, name string, fields []*ir.Field) {
 	if stackCap < 4 {
 		stackCap = 4
 	}
+	if !g.noStd {
+		stackCap = stdStackCap(fs)
+	}
 	// The sticky lim flag exists only when a receiver-side decode limit is
 	// active (generator#102) — std profile only, so the no_std inits never carry it.
 	limInit := ""
@@ -953,7 +962,7 @@ func (g *gen) emitVisitor(f *rfile, name string, fields []*ir.Field) {
 	if needAcc {
 		accInit = ", acc: " + accNew
 	}
-	vInit := fmt.Sprintf("let mut v = V { m: &mut m, stack: Vec::new(), cur: _Loc::Root, dead: 0%s, err: false, inv: false%s%s };", accInit, limInit, askipInit)
+	vInit := fmt.Sprintf("let mut v = V { m: &mut m, stack: [_Loc::Root; %d], sp: 0, cur: _Loc::Root, dead: 0%s, err: false, inv: false%s%s };", stackCap, accInit, limInit, askipInit)
 	if g.noStd {
 		vInit = fmt.Sprintf("let mut v = V { m: &mut m, stack: heapless::Vec::new(), cur: _Loc::Root, dead: 0%s, err: false, inv: false%s };", accInit, askipInit)
 	}
@@ -1160,7 +1169,9 @@ func (g *gen) emitVisitor(f *rfile, name string, fields []*ir.Field) {
 		// Heap-free: bounded location stack.
 		f.line("    stack: heapless::Vec<_Loc, %d>,", stackCap)
 	} else {
-		f.line("    stack: Vec<_Loc>,")
+		// Fixed, sized from the schema (stdStackCap): no heap allocation per decode.
+		f.line("    stack: [_Loc; %d],", stackCap)
+		f.line("    sp: usize,")
 	}
 	f.line("    cur: _Loc,")
 	f.line("    dead: u16, // depth of the skipped subtree cur sits in (see sequence_begin)")
@@ -1361,7 +1372,7 @@ func (g *gen) emitVisitor(f *rfile, name string, fields []*ir.Field) {
 			f.line("        match (self.cur, id) {")
 			for _, fr := range fs {
 				if fr.kind == fkSeqArr && fr.elemKind == ir.KindString {
-					f.line("            (_Loc::%s, _) => { %s%s %s[id as usize] = _s; }", fr.loc, g.overIndexGuard(fr.cap), g.seqElemGrow(fr.path), fr.path)
+					f.line("            (_Loc::%s, _) => { %s%s%s %s[id as usize] = _s; }", fr.loc, g.overIndexGuard(fr.cap), g.seqArrPresize(fr), g.seqElemGrow(fr.path), fr.path)
 				}
 				for _, fld := range fr.fields {
 					if fld.Kind == ir.KindString {
@@ -1426,7 +1437,7 @@ func (g *gen) emitVisitor(f *rfile, name string, fields []*ir.Field) {
 			f.line("        match (self.cur, id) {")
 			for _, fr := range fs {
 				if fr.kind == fkSeqArr && fr.elemKind == ir.KindBlob {
-					f.line("            (_Loc::%s, _) => { %s%s %s[id as usize] = _b; }", fr.loc, g.overIndexGuard(fr.cap), g.seqElemGrow(fr.path), fr.path)
+					f.line("            (_Loc::%s, _) => { %s%s%s %s[id as usize] = _b; }", fr.loc, g.overIndexGuard(fr.cap), g.seqArrPresize(fr), g.seqElemGrow(fr.path), fr.path)
 				}
 				for _, fld := range fr.fields {
 					if fld.Kind == ir.KindBlob {
@@ -1657,7 +1668,13 @@ func (g *gen) emitVisitor(f *rfile, name string, fields []*ir.Field) {
 			// subtree so a scope that was never stacked can never be popped into.
 			f.line("        if self.stack.push(self.cur).is_err() { self.err = true; self.dead = self.dead.saturating_add(1); self.cur = _Loc::Dead; return; }")
 		} else {
-			f.line("        %s", g.pushStmt("self.stack", "self.cur"))
+			// The std stack is a fixed array of stdStackCap entries, and the same
+			// argument holds: only an over-index / over-cap wrapper element (inv or
+			// lim already set, and both dominate err at every verdict) can push
+			// past a chain of live scopes. The overflow is handled exactly like
+			// no_std's -- reported, and entered as a skipped subtree -- rather than
+			// indexing out of bounds.
+			f.line("        if let Some(_slot) = self.stack.get_mut(self.sp) { *_slot = self.cur; self.sp += 1; } else { self.err = true; self.dead = self.dead.saturating_add(1); self.cur = _Loc::Dead; return; }")
 		}
 		if len(arms) == 0 {
 			// The message declares no sequence at all, so every sequence that arrives
@@ -1681,7 +1698,11 @@ func (g *gen) emitVisitor(f *rfile, name string, fields []*ir.Field) {
 		// already been placed. A declared `count: N` is a capacity, so there is no
 		// fill-to-N -- filling would turn the M elements the wire carried into N,
 		// which is a different value.
-		f.line("        self.cur = self.stack.pop().unwrap_or(_Loc::Root);")
+		if g.noStd {
+			f.line("        self.cur = self.stack.pop().unwrap_or(_Loc::Root);")
+		} else {
+			f.line("        self.cur = if self.sp > 0 { self.sp -= 1; self.stack[self.sp] } else { _Loc::Root };")
+		}
 		f.line("    }")
 	}
 
@@ -2208,7 +2229,7 @@ func (g *gen) rowStore(fr frame, val string) string {
 	return fmt.Sprintf("if let Some(_r) = %s.get_mut(self.%s) { %s }", fr.path, fr.ixVar, g.pushFieldStmt("_r", val))
 }
 
-// pushExpr / pushStmt handle the heapless-vs-heap container push: under
+// pushExpr / pushFieldStmt handle the heapless-vs-heap container push: under
 // no_std push returns a Result that must be consumed (let _ = ...); the std path
 // uses a bare Vec push. A grown-into row is `Default::default()` on both, which
 // is the empty container whichever one the profile chose.
@@ -2219,17 +2240,6 @@ func (g *gen) pushExpr(target, val string) string {
 	return fmt.Sprintf("%s.push(%s)", target, val)
 }
 
-// pushStmt is the DECODER's own stack push, which follows the environment: a
-// bounded heapless stack under no_std, a heap Vec otherwise. Static field
-// storage does not change it -- staticStore is about message fields, and the
-// decoder's scratch is free to stay on the heap where there is one.
-func (g *gen) pushStmt(target, val string) string {
-	if g.noStd {
-		return fmt.Sprintf("let _ = %s.push(%s);", target, val)
-	}
-	return fmt.Sprintf("%s.push(%s);", target, val)
-}
-
 // pushFieldStmt is the same for a MESSAGE container, which follows the storage
 // axis instead. The Result-consuming form is also correct for a Vec (push
 // returns unit), so one form serves the mixed case a per-field bound produces.
@@ -2238,6 +2248,41 @@ func (g *gen) pushFieldStmt(target, val string) string {
 		return fmt.Sprintf("let _ = %s.push(%s);", target, val)
 	}
 	return fmt.Sprintf("%s.push(%s);", target, val)
+}
+
+// seqArrPresize emits the one-time sizing of a dynamic string/blob wrapper
+// array's Vec, placed between the over-index guard and seqElemGrow:
+// `if <v>.capacity() == 0 { <v>.reserve_exact(N); }`.
+//
+// seqElemGrow places element `id` by pushing defaults up to it, and a Vec grown
+// by push from empty allocates capacity 4 and reallocates to 8 at the 5th
+// element: a malloc plus a realloc (and a copy of four Strings) for a `count: 5`
+// array. A native array avoids that with reserveCount at its array_begin, where
+// the wire count is known; a wrapper array has no count header -- its length is
+// the highest element id + 1 (MESSAGE_SPEC §5.1) and is only known at the end.
+// What IS known is the schema `count` N, which the over-index guard in front of
+// this has just enforced (id < N), so N is the most this Vec can ever hold. It
+// is reserved once, on the first element to arrive: `capacity() == 0` is true
+// exactly then, because sequence_begin's clear() keeps the capacity, so a
+// repeated array wrapper (§7.4) does not reserve again.
+//
+// Only for a schema `count` -- a count-less array's MAX_DYN_ARRAY_COUNT is a
+// refusal threshold, not a size hint (see reserveCount) -- and clamped at
+// reserveCap like every other pre-size, so a huge declared count cannot turn a
+// single element into a huge allocation. Only on the dynamic std path
+// (!fixedFields): a heapless::Vec has its capacity inline and no reserve_exact.
+func (g *gen) seqArrPresize(fr frame) string {
+	if g.fixedFields() || fr.cap <= 0 {
+		return ""
+	}
+	n := fr.cap
+	if n > g.reserveCap {
+		n = g.reserveCap
+	}
+	if n <= 0 {
+		return ""
+	}
+	return fmt.Sprintf("if %s.capacity() == 0 { %s.reserve_exact(%d); } ", fr.path, fr.path, n)
 }
 
 // seqElemGrow emits the id-indexed growth prefix for a wrapper-sequence string/
@@ -2283,7 +2328,10 @@ func (g *gen) visitorState(stackCap int, needAcc bool, accType, accNew string, a
 	if g.noStd {
 		out = append(out, vField{"stack", fmt.Sprintf("heapless::Vec<_Loc, %d>", stackCap), "heapless::Vec::new()", false})
 	} else {
-		out = append(out, vField{"stack", "Vec<_Loc>", "Vec::new()", false})
+		// A fixed array of a Copy type: copied in and out of V like the flags.
+		out = append(out,
+			vField{"stack", fmt.Sprintf("[_Loc; %d]", stackCap), fmt.Sprintf("[_Loc::Root; %d]", stackCap), true},
+			vField{"sp", "usize", "0", true})
 	}
 	out = append(out,
 		vField{"cur", "_Loc", "_Loc::Root", true},
@@ -2311,4 +2359,27 @@ func (g *gen) visitorState(stackCap int, needAcc bool, accType, accNew string, a
 		out = append(out, vField{ix, "usize", "0", true})
 	}
 	return out
+}
+
+// stdStackCap sizes the std decoder's location stack: the deepest frame's depth
+// plus one. The stack holds one entry per live scope entered (dead levels are
+// counted in `dead`, generator#283), so with cur on a frame of depth d it holds d
+// entries, and a sequence_begin there pushes the d+1st -- whether it descends
+// into a deeper frame or into a skipped subtree (Dead). The deepest frame's
+// unknown child is therefore the longest chain a well-formed message can build.
+//
+// It used to be a Vec<_Loc>, which allocated at the first sequence_begin of
+// EVERY decode -- the one allocation left in an allow_dynamic: false decode,
+// which otherwise touches no heap. The bound is static, so the array costs
+// nothing a Vec did not. The no_std profile keeps its heapless::Vec sized from
+// the frame count (a looser bound, unchanged so the bare-metal footprint does not
+// move).
+func stdStackCap(fs []frame) int {
+	d := 0
+	for _, fr := range fs {
+		if fr.depth > d {
+			d = fr.depth
+		}
+	}
+	return d + 1
 }
