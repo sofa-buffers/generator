@@ -1,7 +1,0 @@
-# Corelib branches this branch is developed against (docs/CI.md).
-# Delete before merging: every entry pins a corelib to unmerged code.
-#
-# Generated Go code passes sofab.WithMaxDepth, which only exists on
-# corelib-go#143's branch. lang-go stays red against corelib main until that
-# PR merges; then drop this line (docs/CI.md "Merge order").
-SOFAB_CORELIB_GO_REF=perf/arena-regression-2026-09
