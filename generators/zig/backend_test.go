@@ -98,9 +98,10 @@ func TestZigStructural(t *testing.T) {
 		// pinned here.
 		"/// stitched item overwrites it. And decode() copies too, though it could",
 		// Bounded string: over-maxlen -> INVALID (§7.1), decided on the announced
-		// `total` BEFORE the payload is taken; then strict UTF-8 -> INVALID (issue
-		// #85); else stored, out of the copy _take made.
-		"11 => if (total > 50) { self.inv = true; } else { const chunk = self._take(total, offset, _chunk) orelse return; if (!sofab.utf8Valid(chunk)) { self.inv = true; } else { self.m.somestring = chunk; } },",
+		// `total` BEFORE the payload is taken; then the string bind, which
+		// decides strict UTF-8 -> INVALID (issue #85) and hands back the copy;
+		// else stored.
+		"11 => if (total > 50) { self.inv = true; } else { const chunk = self._takeStr(total, offset, _chunk) orelse return; self.m.somestring = chunk; },",
 		"/// Unsigned 8-bit integer", // descriptions as doc comments
 	} {
 		if !strings.Contains(m, want) {
@@ -216,9 +217,9 @@ messages:
 	for _, want := range []string{
 		// The count:N over-index guard (#142) wraps the maxlen:16 over-length
 		// element reject (MESSAGE_SPEC §7.1); both flag self.inv before sofab.arrays.setElem grows.
-		`.root_bs => if (id >= 4) { self.inv = true; } else if (total > 16) { self.inv = true; } else { const chunk = self._take(total, offset, _chunk) orelse return; if (!sofab.utf8Valid(chunk)) { self.inv = true; } else { sofab.arrays.setElem`, // string element: strict UTF-8 wraps the store
-		`.root_bb => if (id >= 3) { self.inv = true; } else if (total > 16) { self.inv = true; } else { const chunk = self._take(total, offset, _chunk) orelse return; sofab.arrays.setElem`,                                                          // blob element: opaque, stored verbatim
-		".root_bp => blk: {\n                if (id >= 2) { self.inv = true; break :blk .dead; }\n",                                                                                                                                                   // bounded struct: rejected BEFORE the gap-fill grows
+		`.root_bs => if (id >= 4) { self.inv = true; } else if (total > 16) { self.inv = true; } else { const chunk = self._takeStr(total, offset, _chunk) orelse return; sofab.arrays.setElem`, // string element: strict UTF-8 inside the string bind
+		`.root_bb => if (id >= 3) { self.inv = true; } else if (total > 16) { self.inv = true; } else { const chunk = self._take(total, offset, _chunk) orelse return; sofab.arrays.setElem`,    // blob element: opaque, stored verbatim
+		".root_bp => blk: {\n                if (id >= 2) { self.inv = true; break :blk .dead; }\n",                                                                                             // bounded struct: rejected BEFORE the gap-fill grows
 		`if (v.inv) return error.InvalidMessage;`, // surfaced as INVALID
 	} {
 		if !strings.Contains(m, want) {
@@ -233,9 +234,9 @@ messages:
 	// the index to setElemCapped, which refuses before it grows the destination,
 	// the length to _takeCapped, which refuses before it buffers a byte
 	// (CORELIB_PLAN §6.2.1, generator#432) -- so no guard is emitted in front of
-	// either. Its store stays strict-UTF-8-wrapped (issue #85), a string element
-	// being materialized.
-	if !strings.Contains(m, `.root_ds => { const chunk = self._takeCapped(total, offset, _chunk, max_dyn_string_len) orelse return; if (!sofab.utf8Valid(chunk)) { self.inv = true; } else { sofab.arrays.setElemCapped([]const u8, self.alloc, &(self.m.ds), id, "", chunk, max_dyn_array_count) catch { self.lim = true; }; } },`) {
+	// either. Its bind is the string one, which decides strict UTF-8 (issue
+	// #85) before the element is materialized.
+	if !strings.Contains(m, `.root_ds => { const chunk = self._takeStrCapped(total, offset, _chunk, max_dyn_string_len) orelse return; sofab.arrays.setElemCapped([]const u8, self.alloc, &(self.m.ds), id, "", chunk, max_dyn_array_count) catch { self.lim = true; }; },`) {
 		t.Errorf("a dynamic wrapper array must cap its element index:\n%s", m)
 	}
 	// And the rule has ONE implementation (§6.2.1): with the cap passed in, the
@@ -269,13 +270,13 @@ messages:
 	m := string(files[0].Content)
 	for _, want := range []string{
 		// Bounded scalar string and blob: reject over-maxlen before storing.
-		`0 => if (total > 8) { self.inv = true; } else { const chunk = self._take(total, offset, _chunk) orelse return; if (!sofab.utf8Valid(chunk)) { self.inv = true; } else { self.m.bs = chunk; } },`, // string: strict UTF-8 wraps the store
-		`1 => if (total > 8) { self.inv = true; } else { const chunk = self._take(total, offset, _chunk) orelse return; self.m.bb = chunk; },`,                                                            // blob: opaque, verbatim
+		`0 => if (total > 8) { self.inv = true; } else { const chunk = self._takeStr(total, offset, _chunk) orelse return; self.m.bs = chunk; },`, // string: strict UTF-8 inside the bind
+		`1 => if (total > 8) { self.inv = true; } else { const chunk = self._take(total, offset, _chunk) orelse return; self.m.bb = chunk; },`,    // blob: opaque, verbatim
 		// Bounded wrapper string element in an UNCOUNTED array: maxlen guard, then
-		// the schema-bounded bind, then strict UTF-8, wrapping the placement --
-		// which carries the array's receiver cap on the element index as an
-		// argument (CORELIB_PLAN §6.2.1).
-		`if (total > 5) { self.inv = true; } else { const chunk = self._take(total, offset, _chunk) orelse return; if (!sofab.utf8Valid(chunk)) { self.inv = true; } else { sofab.arrays.setElemCapped([]const u8, self.alloc, &(self.m.ws), id, "", chunk, max_dyn_array_count) catch { self.lim = true; }; } }`,
+		// the schema-bounded string bind (strict UTF-8 inside it), then the
+		// placement -- which carries the array's receiver cap on the element
+		// index as an argument (CORELIB_PLAN §6.2.1).
+		`if (total > 5) { self.inv = true; } else { const chunk = self._takeStr(total, offset, _chunk) orelse return; sofab.arrays.setElemCapped([]const u8, self.alloc, &(self.m.ws), id, "", chunk, max_dyn_array_count) catch { self.lim = true; }; }`,
 		// Surfaced as INVALID.
 		`if (v.inv) return error.InvalidMessage;`,
 	} {
@@ -284,15 +285,15 @@ messages:
 		}
 	}
 	// The unbounded scalar string (no maxlen, no configured limit) has no length
-	// guard, but its store is still strict-UTF-8-wrapped (issue #85): invalid
+	// guard, but it still binds through the string bind (issue #85): invalid
 	// UTF-8 is INVALID (self.inv), never lossy — applies to unbounded strings too.
-	if !strings.Contains(m, `if (!sofab.utf8Valid(chunk)) { self.inv = true; } else { self.m.us = chunk; }`) {
+	if !strings.Contains(m, `3 => { const chunk = self._takeStrCapped(total, offset, _chunk, max_dyn_string_len) orelse return; self.m.us = chunk; },`) {
 		t.Errorf("unbounded string must store straight through (utf8-checked):\n%s", m)
 	}
 	// What it does carry is the receiver cap, at the target's finite default
 	// (§9.5, generator#385) -- a separate bound with a separate verdict: over the
 	// cap is self.lim (LimitExceeded), never self.inv.
-	if !strings.Contains(m, "3 => { const chunk = self._takeCapped(total, offset, _chunk, max_dyn_string_len) orelse return;") {
+	if !strings.Contains(m, "3 => { const chunk = self._takeStrCapped(total, offset, _chunk, max_dyn_string_len) orelse return;") {
 		t.Errorf("unbounded string must carry the default receiver cap:\n%s", m)
 	}
 	// ...and no schema maxlen guard, which is what the 8 above would be.
@@ -485,12 +486,15 @@ messages:
 		// Unbounded fields are guarded at the count/length header, before the
 		// field's storage is taken.
 		"1 => if (kind == .unsigned) { self.m.arr = sofab.arrays.allocNCapped(u64, self.alloc, count, max_dyn_array_count) catch { self.lim = true; self.an = 0; return; }; },",
-		"0 => { const chunk = self._takeCapped(total, offset, _chunk, max_dyn_string_len) orelse return; if (!sofab.utf8Valid(chunk)) { self.inv = true; } else { self.m.s = chunk; } },",
+		"0 => { const chunk = self._takeStrCapped(total, offset, _chunk, max_dyn_string_len) orelse return; self.m.s = chunk; },",
 		// The length cap rides the corelib bind for the same reason the count cap
 		// rides allocNCapped: it is compared at the announced length, before a byte
 		// is copied or appended, and generated code emits no test of its own
 		// (CORELIB_PLAN §6.2.1, generator#432).
 		"return self.acc.takeCapped(self.alloc, total, offset, chunk, false, cap) catch |e| {",
+		// The string form compares the same two numbers through the corelib's
+		// beginCapped, ahead of the UTF-8 verdict and the copy.
+		"self.acc.beginCapped(total, cap) catch { self.lim = true; return null; };",
 		// InvalidMessage (generator#100) takes precedence over LimitExceeded.
 		"if (v.inv) return error.InvalidMessage;",
 		"if (v.lim) return error.LimitExceeded;",
@@ -510,9 +514,12 @@ messages:
 	if strings.Contains(m, "max_dyn_blob_len") {
 		t.Error("inert blob limit must not be emitted (no unbounded blob)")
 	}
-	// Exactly the two unbounded fields are guarded (bounded barr is not).
-	if got := strings.Count(m, "self.lim = true"); got != 2 {
-		t.Errorf("want exactly 2 limit guards, got %d", got)
+	// Exactly the two unbounded fields are guarded (bounded barr is not): the
+	// array at allocNCapped, the string length in its bind. The length cap's
+	// LimitExceeded maps to lim in both bind forms, _takeCapped (blob) and
+	// _takeStrCapped (string), hence three sites for two guards.
+	if got := strings.Count(m, "self.lim = true"); got != 3 {
+		t.Errorf("want exactly 3 limit-flag sites (2 guards), got %d", got)
 	}
 	// One implementation of the length cap, and it is not a generated comparison
 	// in the payload callback (CORELIB_PLAN §6.2.1). A `total > max_dyn_*` test
@@ -1823,7 +1830,7 @@ messages:
 		// payload it refuses is never buffered even when the callback is reached
 		// without the length-word hook in front of it (generator#432); the index
 		// cap rides the placement.
-		`.root_dstrs => { const chunk = self._takeCapped(total, offset, _chunk, max_dyn_string_len) orelse return; if (!sofab.utf8Valid(chunk)) { self.inv = true; } else { sofab.arrays.setElemCapped([]const u8, self.alloc, &(self.m.dstrs), id, "", chunk, max_dyn_array_count) catch { self.lim = true; }; } },`,
+		`.root_dstrs => { const chunk = self._takeStrCapped(total, offset, _chunk, max_dyn_string_len) orelse return; sofab.arrays.setElemCapped([]const u8, self.alloc, &(self.m.dstrs), id, "", chunk, max_dyn_array_count) catch { self.lim = true; }; },`,
 		`.root_dblbs => { const chunk = self._takeCapped(total, offset, _chunk, max_dyn_blob_len) orelse return; sofab.arrays.setElemCapped([]const u8, self.alloc, &(self.m.dblbs), id, "", chunk, max_dyn_array_count) catch { self.lim = true; }; },`,
 		// sequenceBegin: the cap goes into the growth, and the refusal breaks to
 		// the dead scope.
@@ -1936,5 +1943,94 @@ messages:
 	// field, chosen by whether the schema declared one.
 	if strings.Contains(hook, "2 => if (total > max_dyn_string_len)") {
 		t.Errorf("a maxlen-bounded field must not also carry the receiver cap:\n%s", hook)
+	}
+}
+
+// TestZigStringValidateBeforeCopy pins the ORDER inside the string bind:
+// strict UTF-8 (MESSAGE_SPEC §8, CORELIB_PLAN §6.4) is decided on the source
+// slice of a whole payload BEFORE it is copied, so an invalid string is never
+// allocated and the validator does not re-read the copy. The split path has no
+// contiguous source until the corelib stitches it, so it validates the stitched
+// result. Blob stays on the plain bind with no UTF-8 call anywhere near it, and
+// the capped string form keeps the receiver cap as the corelib's comparison,
+// ahead of both the verdict and the copy (CORELIB_PLAN §6.2.1).
+func TestZigStringValidateBeforeCopy(t *testing.T) {
+	s := buildSchema(t, `
+version: 1
+messages:
+  m:
+    payload:
+      bs: { id: 0, type: string, maxlen: 8 }
+      us: { id: 1, type: string }
+      bb: { id: 2, type: blob, maxlen: 8 }
+`)
+	files, err := (&Backend{}).Generate(s, map[string]any{})
+	if err != nil {
+		t.Fatalf("generate: %v", err)
+	}
+	m := string(files[0].Content)
+	takeStr := strings.Join([]string{
+		"    fn _takeStr(self: *_dec_M, total: usize, offset: usize, chunk: []const u8) ?[]const u8 {",
+		"        if (offset == 0 and chunk.len >= total) {",
+		"            const src = chunk[0..total];",
+		"            if (!sofab.utf8Valid(src)) { self.inv = true; return null; }",
+		"            return self.alloc.dupe(u8, src) catch { self.inv = true; return null; };",
+		"        }",
+		"        const p = (self.acc.push(self.alloc, total, offset, chunk) catch { self.inv = true; return null; }) orelse return null;",
+		"        if (!sofab.utf8Valid(p)) { self.inv = true; return null; }",
+		"        return p;",
+		"    }",
+	}, "\n")
+	if !strings.Contains(m, takeStr) {
+		t.Errorf("_takeStr must validate the source before it copies:\n%s", m)
+	}
+	takeStrCapped := strings.Join([]string{
+		"    fn _takeStrCapped(self: *_dec_M, total: usize, offset: usize, chunk: []const u8, cap: usize) ?[]const u8 {",
+		"        self.acc.beginCapped(total, cap) catch { self.lim = true; return null; };",
+		"        return self._takeStr(total, offset, chunk);",
+		"    }",
+	}, "\n")
+	if !strings.Contains(m, takeStrCapped) {
+		t.Errorf("_takeStrCapped must refuse over-cap through the corelib before the string bind:\n%s", m)
+	}
+	// The arms carry no UTF-8 code of their own any more: every utf8Valid call
+	// in the file is one of the two inside _takeStr.
+	if got := strings.Count(m, "sofab.utf8Valid("); got != 2 {
+		t.Errorf("want utf8Valid only inside _takeStr (2 calls), got %d:\n%s", got, m)
+	}
+	blob := m[strings.Index(m, "pub fn blob("):]
+	blob = blob[:strings.Index(blob, "\n    }")]
+	if !strings.Contains(blob, "2 => if (total > 8) { self.inv = true; } else { const chunk = self._take(total, offset, _chunk) orelse return; self.m.bb = chunk; },") {
+		t.Errorf("blob must stay on the plain _take bind, stored verbatim:\n%s", blob)
+	}
+}
+
+// TestZigStringBindOnlyWhenUsed: the string binds are emitted only for a
+// decoder whose string() callback calls them, and the capped one only when an
+// unbounded string rides a receiver cap.
+func TestZigStringBindOnlyWhenUsed(t *testing.T) {
+	s := buildSchema(t, `
+version: 1
+messages:
+  b:
+    payload:
+      bb: { id: 0, type: blob }
+  s:
+    payload:
+      bs: { id: 0, type: string, maxlen: 8 }
+`)
+	files, err := (&Backend{}).Generate(s, map[string]any{})
+	if err != nil {
+		t.Fatalf("generate: %v", err)
+	}
+	m := string(files[0].Content)
+	if strings.Contains(m, "fn _takeStr(self: *_dec_B,") || strings.Contains(m, "fn _takeStrCapped(self: *_dec_B,") {
+		t.Errorf("a decoder without strings must not emit the string binds:\n%s", m)
+	}
+	if !strings.Contains(m, "fn _takeStr(self: *_dec_S,") {
+		t.Errorf("a decoder with a bounded string must emit _takeStr:\n%s", m)
+	}
+	if strings.Contains(m, "fn _takeStrCapped(self: *_dec_S,") {
+		t.Errorf("a decoder whose only string is schema-bounded must not emit _takeStrCapped:\n%s", m)
 	}
 }

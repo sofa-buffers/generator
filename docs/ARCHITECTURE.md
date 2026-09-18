@@ -2682,8 +2682,13 @@ the generator carries responsibility:
 - **Codegen-materialized byte-container target (Zig)** — the destination is a
   `[]const u8` byte container (holding the message's own bytes since §6.7.1 /
   generator#412), so the corelib exposes a `utf8Valid(bytes)` primitive and the
-  generator emits an **unconditional** call at the materialization site
-  (`!sofab.utf8Valid(chunk) → self.inv`); the `SOFAB_STRICT_UTF8` gate lives
+  generator emits an **unconditional** call inside the string bind every storing
+  arm goes through (`_takeStr`/`_takeStrCapped`: `!sofab.utf8Valid(src) →
+  self.inv`, bind returns null, the store never runs). A payload that arrived
+  whole is validated in the source chunk **before** it is copied, so an invalid
+  string is never allocated and the validator does not re-read the copy; a
+  payload split across feed chunks is validated once `PayloadAcc.push` has
+  stitched it. The `SOFAB_STRICT_UTF8` gate lives
   inside the primitive (folds to `true` when compiled off), so generated code is
   identical across build configs and flipping the flag never regenerates it.
   `blob` elements are stored verbatim — the wrap is emitted only for `string`.
