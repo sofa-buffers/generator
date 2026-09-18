@@ -110,7 +110,7 @@ mod scalars_dec {
     pub fn decode(data: &[u8]) -> Scalars {
         let mut m = Scalars::default();
         {
-            let mut v = V { m: &mut m, stack: Vec::new(), cur: _Loc::Root, dead: 0, err: false, inv: false, askip: 0 };
+            let mut v = V { m: &mut m, stack: [_Loc::Root; 1], sp: 0, cur: _Loc::Root, dead: 0, err: false, inv: false, askip: 0 };
             let mut is = IStream::new();
             let _ = is.feed(data, &mut v);
         }
@@ -123,7 +123,7 @@ mod scalars_dec {
         let invalid;
         let fed;
         {
-            let mut v = V { m: &mut m, stack: Vec::new(), cur: _Loc::Root, dead: 0, err: false, inv: false, askip: 0 };
+            let mut v = V { m: &mut m, stack: [_Loc::Root; 1], sp: 0, cur: _Loc::Root, dead: 0, err: false, inv: false, askip: 0 };
             let mut is = IStream::new();
             fed = is.feed(data, &mut v);
             overflow = v.err;
@@ -164,7 +164,8 @@ mod scalars_dec {
     pub struct Decoder {
         m: Scalars,
         is: IStream,
-        stack: Vec<_Loc>,
+        stack: [_Loc; 1],
+        sp: usize,
         cur: _Loc,
         dead: u16,
         err: bool,
@@ -174,7 +175,7 @@ mod scalars_dec {
 
     impl Decoder {
         pub fn new() -> Self {
-            Self { m: Scalars::default(), is: IStream::new(), stack: Vec::new(), cur: _Loc::Root, dead: 0, err: false, inv: false, askip: 0 }
+            Self { m: Scalars::default(), is: IStream::new(), stack: [_Loc::Root; 1], sp: 0, cur: _Loc::Root, dead: 0, err: false, inv: false, askip: 0 }
         }
 
         /// Feed the next chunk. `Ok(Status::Complete)` if it ended on a field
@@ -183,11 +184,12 @@ mod scalars_dec {
         /// these bytes were. `Err` is a refusal, and it is terminal.
         pub fn feed(&mut self, chunk: &[u8]) -> Result<sofab::Status, sofab::Error> {
             let fed = {
-                let mut v = V { m: &mut self.m, stack: core::mem::take(&mut self.stack), cur: self.cur, dead: self.dead, err: self.err, inv: self.inv, askip: self.askip };
+                let mut v = V { m: &mut self.m, stack: self.stack, sp: self.sp, cur: self.cur, dead: self.dead, err: self.err, inv: self.inv, askip: self.askip };
                 let r = self.is.feed(chunk, &mut v);
                 // `..` covers `m`, ending its borrow before the write-back.
-                let V { stack, cur, dead, err, inv, askip, .. } = v;
+                let V { stack, sp, cur, dead, err, inv, askip, .. } = v;
                 self.stack = stack;
+                self.sp = sp;
                 self.cur = cur;
                 self.dead = dead;
                 self.err = err;
@@ -231,7 +233,8 @@ enum _Loc {
 
 struct V<'a> {
     m: &'a mut Scalars,
-    stack: Vec<_Loc>,
+    stack: [_Loc; 1],
+    sp: usize,
     cur: _Loc,
     dead: u16, // depth of the skipped subtree cur sits in (see sequence_begin)
     err: bool,
@@ -289,13 +292,13 @@ impl<'a> Visitor for V<'a> {
     fn sequence_begin(&mut self, _id: Id) {
         // Inside a skipped subtree: count the level and stay Dead.
         if self.cur == _Loc::Dead { self.dead = self.dead.saturating_add(1); return; }
-        self.stack.push(self.cur);
+        if let Some(_slot) = self.stack.get_mut(self.sp) { *_slot = self.cur; self.sp += 1; } else { self.err = true; self.dead = self.dead.saturating_add(1); self.cur = _Loc::Dead; return; }
         self.cur = _Loc::Dead;
     }
     fn sequence_end(&mut self) {
         // Closing a level of a skipped subtree: nothing was stacked for it.
         if self.dead > 0 { self.dead -= 1; return; }
-        self.cur = self.stack.pop().unwrap_or(_Loc::Root);
+        self.cur = if self.sp > 0 { self.sp -= 1; self.stack[self.sp] } else { _Loc::Root };
     }
 }
 }

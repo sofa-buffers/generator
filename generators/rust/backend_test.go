@@ -2425,11 +2425,11 @@ messages:
 		want := "    fn sequence_begin(&mut self, _id: Id) {\n" +
 			"        // Inside a skipped subtree: count the level and stay Dead.\n" +
 			"        if self.cur == _Loc::Dead { self.dead = self.dead.saturating_add(1); return; }\n" +
-			"        self.stack.push(self.cur);\n" +
+			"        if let Some(_slot) = self.stack.get_mut(self.sp) { *_slot = self.cur; self.sp += 1; } else { self.err = true; self.dead = self.dead.saturating_add(1); self.cur = _Loc::Dead; return; }\n" +
 			"        self.cur = _Loc::Dead;\n" +
 			"    }"
 		if cfg["corelib"] == "rs-no-std" {
-			want = strings.Replace(want, "        self.stack.push(self.cur);\n",
+			want = strings.Replace(want, "        if let Some(_slot) = self.stack.get_mut(self.sp) { *_slot = self.cur; self.sp += 1; } else { self.err = true; self.dead = self.dead.saturating_add(1); self.cur = _Loc::Dead; return; }\n",
 				"        if self.stack.push(self.cur).is_err() { self.err = true; self.dead = self.dead.saturating_add(1); self.cur = _Loc::Dead; return; }\n", 1)
 		}
 		if !strings.Contains(got, want) {
@@ -2478,10 +2478,13 @@ messages:
 			t.Errorf("(%v) a sequence opened inside a skipped subtree must be counted, not stacked:\n%s", cfg, got)
 		}
 		// ... so nothing may be popped for it either.
+		pop := "        self.cur = if self.sp > 0 { self.sp -= 1; self.stack[self.sp] } else { _Loc::Root };"
+		if cfg["corelib"] == "rs-no-std" {
+			pop = "        self.cur = self.stack.pop().unwrap_or(_Loc::Root);"
+		}
 		if !strings.Contains(got, "    fn sequence_end(&mut self) {\n"+
 			"        // Closing a level of a skipped subtree: nothing was stacked for it.\n"+
-			"        if self.dead > 0 { self.dead -= 1; return; }\n"+
-			"        self.cur = self.stack.pop().unwrap_or(_Loc::Root);") {
+			"        if self.dead > 0 { self.dead -= 1; return; }\n"+pop) {
 			t.Errorf("(%v) sequence_end must unwind the counted levels before popping:\n%s", cfg, got)
 		}
 	}
@@ -2517,10 +2520,11 @@ func TestRustStaticStorageOnStd(t *testing.T) {
 		"pub someblob: heapless::Vec<u8, 16>,",
 		"pub someuintarray: heapless::Vec<u32, 4>,",
 		"pub somestringarray: heapless::Vec<heapless::String<16>, 5>,",
-		// Still a std crate: serde derived unconditionally, decoder scratch on the
-		// heap. staticStore governs message fields, not the environment.
+		// Still a std crate: serde derived unconditionally. staticStore governs
+		// message fields, not the environment; the decode stack is a fixed array
+		// on std whatever the storage (TestRustStdDecodeStackIsFixed).
 		"#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]",
-		"stack: Vec<_Loc>,",
+		"stack: [_Loc; ",
 		// A fixed-capacity destination is filled in place and its overflow is
 		// reported, rather than being moved into as an owned String.
 		"self.err = true;",
@@ -3295,5 +3299,87 @@ func scanForArmedRejects(t *testing.T, module string) {
 	// module it no longer understands.
 	if disarms == 0 {
 		t.Errorf("no disarming reject found at all — the scan is keyed on a spelling the backend no longer emits:\n%s", module)
+	}
+}
+
+// TestRustStdDecodeStackIsFixed: on std the decoder's scope stack is a fixed
+// `[_Loc; D+1]` (D = the deepest frame's depth), not a Vec that allocates at the
+// first sequence_begin of every decode. The size is counted the way the decoder
+// pushes -- one level per sequence_begin that enters a live scope: a struct/union
+// field, a wrapper array, a wrapper element; a native row opens no sequence -- so
+// each schema below adds one of those kinds on top of the last. One too few
+// answers BufferFull on the longest well-formed chain, which
+// tests/conformance/rust/decode_stack_depth.rs runs; this pins the arithmetic.
+func TestRustStdDecodeStackIsFixed(t *testing.T) {
+	for _, tc := range []struct {
+		name, payload string
+		want          int
+	}{
+		{"scalars only", `      a: { id: 0, type: u32 }`, 1},
+		{"native row adds nothing", `      mat: { id: 0, type: array, items: { type: array, count: 2, items: { type: u32, count: 3 } } }`, 2},
+		{"string array", `      s: { id: 0, type: array, items: { type: string, count: 3, maxlen: 8 } }`, 2},
+		{"struct in struct", `      a: { id: 0, type: struct, fields: { b: { id: 0, type: struct, fields: { v: { id: 0, type: u32 } } } } }`, 3},
+		{"struct element", `      o: { id: 0, type: array, items: { type: struct, count: 2, fields: { v: { id: 0, type: u32 } } } }`, 3},
+		{"union arm in struct element", `      o: { id: 0, type: array, items: { type: struct, count: 2, fields: { u: { id: 0, type: union, default_id: 0, oneof: { x: { id: 0, type: u32 }, y: { id: 1, type: struct, fields: { v: { id: 0, type: u32 } } } } } } } }`, 5},
+		{"wrapper rows of strings", `      r: { id: 0, type: array, items: { type: array, count: 2, items: { type: string, count: 3, maxlen: 8 } } }`, 3},
+		{"wrapper rows of wrapper rows of blobs", `      r: { id: 0, type: array, items: { type: array, count: 2, items: { type: array, count: 2, items: { type: blob, count: 2, maxlen: 8 } } } }`, 4},
+	} {
+		src := "version: 1\nmessages:\n  probe:\n    payload:\n" + tc.payload + "\n"
+		for _, cfg := range []map[string]any{{"corelib": "rs"}, {"corelib": "rs", "allow_dynamic": false}, {"corelib": "rs-no-std", "no_std": false}} {
+			got := moduleFromYAML(t, src, cfg)
+			for _, want := range []string{
+				fmt.Sprintf("    stack: [_Loc; %d],\n    sp: usize,\n", tc.want),         // V
+				fmt.Sprintf("        stack: [_Loc; %d],\n        sp: usize,\n", tc.want), // Decoder
+				fmt.Sprintf("stack: [_Loc::Root; %d], sp: 0,", tc.want),                  // every init
+				"stack: self.stack, sp: self.sp,",                                        // copied, not mem::take'n
+				"if let Some(_slot) = self.stack.get_mut(self.sp) { *_slot = self.cur; self.sp += 1; } else { self.err = true; self.dead = self.dead.saturating_add(1); self.cur = _Loc::Dead; return; }",
+				"self.cur = if self.sp > 0 { self.sp -= 1; self.stack[self.sp] } else { _Loc::Root };",
+			} {
+				if !strings.Contains(got, want) {
+					t.Errorf("%s (%v): missing %q:\n%s", tc.name, cfg, want, got)
+				}
+			}
+			if strings.Contains(got, "Vec<_Loc>") || strings.Contains(got, "self.stack.push(") {
+				t.Errorf("%s (%v): the std decode stack must not be a Vec", tc.name, cfg)
+			}
+		}
+		// no_std keeps its heapless stack sized from the frame count: the
+		// bare-metal footprint does not move.
+		got := moduleFromYAML(t, src, map[string]any{"corelib": "rs-no-std"})
+		if !strings.Contains(got, "stack: heapless::Vec<_Loc,") || strings.Contains(got, "sp: usize") {
+			t.Errorf("%s: no_std must keep its heapless::Vec stack:\n%s", tc.name, got)
+		}
+	}
+}
+
+// TestRustWrapperStringArrayNoPresize: a string/blob wrapper array on growable
+// storage grows by push to what the message carries. It is NOT reserved to its
+// schema `count` up front: `count` is a capacity (MESSAGE_SPEC §5.1), so doing
+// that would allocate the declared worst case on every decode -- up to
+// max_dyn_array_count elements for one element on the wire -- which is what
+// allow_dynamic: true exists to avoid.
+func TestRustWrapperStringArrayNoPresize(t *testing.T) {
+	const src = `
+version: 1
+messages:
+  m:
+    payload:
+      bs:  { id: 0, type: array, items: { type: string, count: 5, maxlen: 16 } }
+      bb:  { id: 1, type: array, items: { type: blob,   count: 3, maxlen: 16 } }
+      big: { id: 2, type: array, items: { type: string, count: 100000, maxlen: 4 } }
+`
+	m := moduleFromYAML(t, src, map[string]any{"corelib": "rs"})
+	for _, want := range []string{
+		"(_Loc::Root_bs, _) => { if id as usize >= 5 { self.inv = true; return; } while self.m.bs.len() <= id as usize",
+		"(_Loc::Root_bb, _) => { if id as usize >= 3 { self.inv = true; return; } while self.m.bb.len() <= id as usize",
+	} {
+		if !strings.Contains(m, want) {
+			t.Errorf("std dynamic message.rs missing %q:\n%s", want, m)
+		}
+	}
+	for _, f := range []string{"bs", "bb", "big"} {
+		if strings.Contains(m, "self.m."+f+".reserve") {
+			t.Errorf("wrapper array %s must grow to what the message carries, not reserve its schema count:\n%s", f, m)
+		}
 	}
 }
