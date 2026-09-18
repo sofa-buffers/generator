@@ -255,6 +255,8 @@ func (g *gen) header(m *ir.Message) []byte {
 	// header this list stops naming is one the corpus proves is not needed.
 	f.line("#include <span>")
 	f.line("#include <cstddef>")
+	// <utility> backs the std::move in decode().
+	f.line("#include <utility>")
 	f.line("#include %q", "sofab/sofab.hpp")
 	f.blank()
 	f.line("static_assert(sofab::API_VERSION == 1,")
@@ -765,7 +767,13 @@ func (g *gen) emitStruct(f *hfile, name, summary string, fields []*ir.Field, isM
 		f.line("    static %s decode(const std::uint8_t *data, std::size_t len) {", name)
 		f.line("        sofab::IStreamObject<%s> in%s;", name, g.istreamLimits())
 		f.line("        in.feed(data, len);")
-		f.line("        return *in;")
+		// Move, not copy: `in` is a local that dies on return, and NRVO cannot
+		// apply to *in (it names a member of that local, not the local itself).
+		// Returning *in copy-constructed every std::string/std::vector of the
+		// message -- a second allocation per container on every decode, on top of
+		// the one the decode made. On the fixed profile (inline FixedString /
+		// InlineVector storage) the move is the same memcpy the copy was.
+		f.line("        return std::move(*in);")
 		f.line("    }")
 		f.blank()
 		// Fallible decode: surfaces the corelib's accept/reject decision. feed()
