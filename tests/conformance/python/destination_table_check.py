@@ -44,7 +44,15 @@ four of them are cases the round-trip suites cannot reach at all.
      duplicate name means the later module-level assignment wins -- so one scope
      would decode into the other's destination, silently.
 
-  H. The same message fed one byte at a time lands identically -- the table's
+  H. A field inside a WRAPPER-ARRAY element whose id the root's table also names
+     stays in the element. The table is suppressed for the duration of a scope the
+     visitor entered, and the element declares a nested struct before that field,
+     so this is the shape that catches the suppression being lifted one scope too
+     early -- which it was, in corelib-py's pure engine (corelib-py#152): the
+     element's value landed in the message's own field and the element kept the
+     default.
+
+  I. The same message fed one byte at a time lands identically -- the table's
      resume path crosses chunk boundaries inside a bound value.
 
 Usage: destination_table_check.py <project-dir> <native|python>
@@ -152,13 +160,23 @@ def main(argv):
     m = message.E.decode(o.encode())
     check("G/colliding scope names stay apart", (m.dup.inner.k, m.dup_inner.k), (11, 22))
 
-    # --- H: the same message, one byte per feed ------------------------------
+    # --- H: an element field whose id the root table also names ---------------
+    o = message.E()
+    o.ratio = 1.5
+    row = message.ERowsElem()
+    row.when.k = 99
+    row.ratio = 42.25
+    o.rows = [row]
+    m = message.E.decode(o.encode())
+    check("H/element field stays in the element", (m.ratio, m.rows[0].ratio), (1.5, 42.25))
+
+    # --- I: the same message, one byte per feed ------------------------------
     full = wire(repeated)
     dec = message.E.decoder()
     st = None
     for i in range(len(full)):
         st = dec.feed(full[i:i + 1])
-    check("H/streamed one byte at a time",
+    check("I/streamed one byte at a time",
           (st is message.Status.COMPLETE, dec.message.tag, dec.message.name, dec.message.nums),
           (True, 2, "second", [4]))
 
@@ -166,9 +184,9 @@ def main(argv):
         for f in failures:
             print("FAIL: [%s] %s" % (want_engine, f), file=sys.stderr)
         return 1
-    print("   [%s] destination table: 8 cases (nested unknown id, empty vs absent, "
-          "§7.4 x3, §7.3 skip, refused decode, colliding scope names, byte-at-a-time)"
-          % want_engine)
+    print("   [%s] destination table: 9 cases (nested unknown id, empty vs absent, "
+          "§7.4 x3, §7.3 skip, refused decode, colliding scope names, element id vs "
+          "root id, byte-at-a-time)" % want_engine)
     return 0
 
 

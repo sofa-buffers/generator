@@ -2,7 +2,7 @@
 from __future__ import annotations
 from dataclasses import dataclass, field
 from enum import IntEnum, IntFlag
-from sofab import Binding, Decoder, Encoder, Field, FixlenSubtype, SofaDecodeError, SofaIncompleteError, Status, Visitor
+from sofab import Decoder, Encoder, SofaDecodeError, SofaIncompleteError, Status, Visitor
 
 # Bytes of reassembly space, derived from the schema and the decode limits.
 #
@@ -223,12 +223,15 @@ class _StreamDecoder:
 # What is not here is on the visitor below: a value whose declared width an
 # entry cannot carry (u8..u32, i8..i32, a narrow enum/bitfield), an array the
 # schema leaves unbounded, and every wrapper-sequence array.
-_BIND_Scalars = (Binding()
-    .unsigned(2, at=0, count_at=1)
-    .signed(4, at=2, count_at=3)
-    .float32(5, at=4, count_at=5)
-    .float64(6, at=6, count_at=7)
-    .boolean(7, at=8, count_at=9)
+_BIND_Scalars = (Binding(closed=True)
+    .unsigned(0, at=0, count_at=1, max_value=255)
+    .unsigned(1, at=2, count_at=3, max_value=255)
+    .unsigned(2, at=4, count_at=5)
+    .signed(3, at=6, count_at=7, min_value=-128, max_value=127)
+    .signed(4, at=8, count_at=9)
+    .float32(5, at=10, count_at=11)
+    .float64(6, at=12, count_at=13)
+    .boolean(7, at=14, count_at=15)
 )
 _W_Scalars = _BIND_Scalars.tree_words_required
 _O_Scalars = _BIND_Scalars.tree_objects_required
@@ -238,25 +241,18 @@ _O_Scalars = _BIND_Scalars.tree_objects_required
 # array replaces the default, and a zero count slot could not say so.
 _FILL_Scalars = b"\xff" * (_W_Scalars * 8)
 
-# Dispatch locations for Scalars: one per sequence-framed scope in its tree.
-# A field id is only unique WITHIN a scope -- a nested sequence opens a fresh
-# id space -- so the visitor below keys every hook on (location, id).
-# A scope the table enters has no location here: the decoder walks it without
-# this visitor, so nothing ever dispatches against it.
-_L_Scalars = 0
-
 class _ScalarsVisitor(Visitor):
-    """Flat decode visitor for :class:`Scalars`.
+    """Decode handler for :class:`Scalars`: a destination table and nothing else.
 
-    corelib-py's visitor is flat -- one object receives every callback at every
-    depth -- so the current scope is tracked here, in ``_c``, over the stack
-    ``_s`` that ``on_sequence_begin`` / ``on_sequence_end`` maintain.
+    Every id this schema declares is on the table, so the decoder writes each
+    value straight into a slot and calls nothing here. An id the schema does
+    not declare is skipped by the codec -- the table is ``closed`` -- which is
+    also what keeps an unknown id inside a nested scope from being mistaken
+    for a field of the scope around it.
     """
 
     def __init__(self, o: Scalars) -> None:
         self._o = o
-        self._c = _L_Scalars
-        self._s: list[int] = []
         self._w = bytearray(_FILL_Scalars)
         self._ob: list = []
         # Typed views over the one buffer: no copy, no second buffer.
@@ -270,8 +266,10 @@ class _ScalarsVisitor(Visitor):
         Asked once, when the Decoder is built, so nothing the wire says can
         change it. A field the table names is written straight into its slot
         and NO hook fires for it -- not the typed one, not ``on_field``, not
-        ``on_schema_bound``, whose bound rides the entry instead. Everything
-        the table does not name reaches the hooks below unchanged.
+        ``on_schema_bound``, whose bound rides the entry instead.
+
+        The table is ``closed``, so an id it does not name is skipped by the
+        codec: nothing reaches this class at all.
         """
         return (_BIND_Scalars, self._w, self._ob)
 
@@ -286,57 +284,12 @@ class _ScalarsVisitor(Visitor):
         U = self._vu
         S = self._vs
         F = self._vf
-        if U[1] != _ABSENT: m.u64max = U[0]
-        if U[3] != _ABSENT: m.i64min = S[2]
-        if U[5] != _ABSENT: m.f32 = F[4]
-        if U[7] != _ABSENT: m.f64 = F[6]
-        if U[9] != _ABSENT: m.flag = U[8] != 0
-
-    def on_sequence_begin(self, fid: int) -> bool:
-        return False
-
-    def on_sequence_end(self) -> None:
-        if self._s:
-            self._c = self._s.pop()
-
-    def on_unsigned(self, fid: int, value: int) -> None:
-        c = self._c
-        if c == _L_Scalars:
-            if fid == 0:
-                if value > 255:
-                    raise SofaDecodeError("u8min: value outside declared width u8")
-                self._o.u8min = value
-            elif fid == 1:
-                if value > 255:
-                    raise SofaDecodeError("u8max: value outside declared width u8")
-                self._o.u8max = value
-
-    def on_signed(self, fid: int, value: int) -> None:
-        c = self._c
-        if c == _L_Scalars:
-            if fid == 3:
-                if value < -128 or value > 127:
-                    raise SofaDecodeError("i8min: value outside declared width i8")
-                self._o.i8min = value
-
-    def on_field(self, fld: Field) -> bool:
-        """Accept or decline a field at its HEADER, before its value is read.
-
-        An id is declined when the header's wire type -- or, for a fixlen one,
-        its subtype -- is not the one its declared type maps to. Such a field is
-        SKIPPED, exactly like an unknown id, so neither the bound
-        ``on_schema_bound`` declares nor a receiver-side cap may reach it.
-
-        An id this scope does not declare AT ALL is declined for the same
-        reason: it is not a field this handler reads, so it is walked rather
-        than materialized, and no receiver cap may reach it. A decode that
-        steps over an over-cap field it does not want stays COMPLETE.
-        """
-        c = self._c
-        if c == _L_Scalars:
-            if fld.id not in {0, 1, 3}:
-                return False  # not one of this scope's own ids: walked, not read
-            if fld.subtype is not None and fld.subtype >= FixlenSubtype.STRING:
-                return False  # a string/blob payload here is not this scope's: skip it, never materialize it (S6.4.5)
-        return True
+        if U[1] != _ABSENT: m.u8min = U[0]
+        if U[3] != _ABSENT: m.u8max = U[2]
+        if U[5] != _ABSENT: m.u64max = U[4]
+        if U[7] != _ABSENT: m.i8min = S[6]
+        if U[9] != _ABSENT: m.i64min = S[8]
+        if U[11] != _ABSENT: m.f32 = F[10]
+        if U[13] != _ABSENT: m.f64 = F[12]
+        if U[15] != _ABSENT: m.flag = U[14] != 0
 

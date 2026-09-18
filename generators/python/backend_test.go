@@ -80,7 +80,7 @@ func TestPythonStructural(t *testing.T) {
 		// carries, the declaration IS the entry -- `cap` on an array, `maxlen` on
 		// a string/blob -- and no hook is asked for it; what still reaches
 		// on_schema_bound is everything the table cannot carry.
-		"    .unsigned_array(15, at=12, cap=4, count_at=16, elem_max=4294967295)",
+		"    .unsigned_array(15, at=28, cap=4, count_at=32, elem_max=4294967295)",
 		"    def on_schema_bound(self, fid: int, n: int, wt, st) -> int:",
 		"            return 16  # somestringarray: schema element maxlen",
 	} {
@@ -912,19 +912,24 @@ messages:
 		// unknown id, ahead of the bound the entry declares. fp32/fp64/string/blob
 		// all share FIXLEN and a fixlen array shares ARRAY_FIXLEN, so the binder
 		// method is what separates them.
-		"    .float32(3, at=2, count_at=3)",
-		"    .float64(4, at=4, count_at=5)",
-		"    .string(5, at=0, maxlen=8, count_at=6)",
-		"    .bytes(6, at=1, maxlen=8, count_at=7)",
-		"    .unsigned_array(8, at=8, cap=2, count_at=10, elem_max=4294967295)",
-		"    .signed_array(9, at=11, cap=2, count_at=13, elem_min=-2147483648, elem_max=2147483647)",
-		"    .float32_array(10, at=14, cap=2, count_at=16)",
+		"    .float32(3, at=6, count_at=7)",
+		"    .float64(4, at=8, count_at=9)",
+		"    .string(5, at=0, maxlen=8, count_at=10)",
+		"    .bytes(6, at=1, maxlen=8, count_at=11)",
+		"    .unsigned_array(8, at=14, cap=2, count_at=16, elem_max=4294967295)",
+		"    .signed_array(9, at=17, cap=2, count_at=19, elem_min=-2147483648, elem_max=2147483647)",
+		"    .float32_array(10, at=20, cap=2, count_at=22)",
+		// Every scalar states its declared width on the entry, narrow ones
+		// included, and the struct's own subtree is bindable so the table
+		// descends into it with a closed child table.
+		"    .unsigned(0, at=0, count_at=1, max_value=255)",
+		"    .signed(1, at=2, count_at=3, min_value=-2147483648, max_value=2147483647)",
+		"    .sequence(7, child=_BIND_M_h)",
+		"_BIND_M_h = (Binding(closed=True)",
 		// What the table cannot carry keeps the hook the corelib routes its wire
 		// type to -- that routing IS the §7.3 dispatch -- and, where the header
-		// needs testing, the on_field decline. Here that is the two narrow
-		// integers, the struct's own scope, and the wrapper array of strings.
-		"    def on_unsigned(self, fid: int, value: int) -> None:",
-		"    def on_signed(self, fid: int, value: int) -> None:",
+		// needs testing, the on_field decline. Here that is the wrapper array of
+		// strings, and nothing else.
 		"    def on_string(self, fid: int, value: str) -> None:",
 		"if fld.subtype != FixlenSubtype.STRING:",
 		// An unmatched sequence is declined, which skips its whole subtree.
@@ -935,8 +940,13 @@ messages:
 		}
 	}
 	// The hooks the table emptied are not emitted at all: an override that can
-	// never be reached would cost a Python call per field for nothing.
+	// never be reached would cost a Python call per field for nothing. Scoped to
+	// the MESSAGE's visitor -- the inline struct keeps a visitor of its own, for
+	// decoding that type standalone.
+	mvis := mod[strings.Index(mod, "class _MVisitor("):]
 	for _, gone := range []string{
+		"    def on_unsigned(self, fid: int, value: int) -> None:",
+		"    def on_signed(self, fid: int, value: int) -> None:",
 		"    def on_float32(self, fid: int, value: float) -> None:",
 		"    def on_float64(self, fid: int, value: float) -> None:",
 		"    def on_bytes(self, fid: int, value: bytes) -> None:",
@@ -945,8 +955,8 @@ messages:
 		"    def on_float32_array(self, fid: int, value: list[float]) -> None:",
 		"    def on_array_begin(self, fid: int, wtype: WireType, count: int):",
 	} {
-		if strings.Contains(mod, gone) {
-			t.Errorf("a hook the destination table emptied must not be emitted: %q\n%s", gone, mod)
+		if strings.Contains(mvis, gone) {
+			t.Errorf("a hook the destination table emptied must not be emitted: %q\n%s", gone, mvis)
 		}
 	}
 	// No skip plumbing survives beyond the §7.3 decline: the corelib does the
@@ -1608,38 +1618,30 @@ messages:
       arr_u8: { id: 8, type: array, items: { type: u8, count: 4 } }
 `
 	got := string(genPy(t, schema(t, src), map[string]any{})["message.py"])
+	// The width is DECLARED on the entry and checked by the decoder at the value,
+	// before the store -- which is where it has to be: a §7.1 rejection outranks a
+	// truncation behind it (§5.2), so it cannot wait for the message to complete.
 	for _, want := range []string{
-		"                if value > 255:\n" +
-			`                    raise SofaDecodeError("a_u8: value outside declared width u8")` +
-			"\n                self._o.a_u8 = value",
-		"                if value > 4294967295:\n" +
-			`                    raise SofaDecodeError("c_u32: value outside declared width u32")` +
-			"\n                self._o.c_u32 = value",
-		"                if value < -128 or value > 127:\n" +
-			`                    raise SofaDecodeError("e_i8: value outside declared width i8")` +
-			"\n                self._o.e_i8 = value",
-		"                if value < -2147483648 or value > 2147483647:\n" +
-			`                    raise SofaDecodeError("g_i32: value outside declared width i32")` +
-			"\n                self._o.g_i32 = value",
+		"    .unsigned(0, at=0, count_at=1, max_value=255)",
+		"    .unsigned(2, at=2, count_at=3, max_value=4294967295)",
+		"    .signed(4, at=6, count_at=7, min_value=-128, max_value=127)",
+		"    .signed(6, at=8, count_at=9, min_value=-2147483648, max_value=2147483647)",
 		// An ARRAY's elements are bounded one step earlier, at the count header: the
 		// pair is handed to the decoder, which applies it as each element is read.
 		// A scan of the assembled list would come too late to reject an element a
 		// truncation stops the array from ever completing (§5.2). Here the array is
 		// on the destination table, so the pair rides its entry.
-		"    .unsigned_array(8, at=4, cap=4, count_at=8, elem_max=255)",
+		"    .unsigned_array(8, at=12, cap=4, count_at=16, elem_max=255)",
 	} {
 		if !strings.Contains(got, want) {
 			t.Errorf("message.py missing width guard %q:\n%s", want, got)
 		}
 	}
-	// A 64-bit destination has no width to guard, which is exactly what lets the
-	// destination table carry it: the store is `words[at] = value` and there is no
-	// verdict to lose. The narrow ones above stay on the visitor for the opposite
-	// reason -- an entry carries no scalar width, and taking that verdict after the
-	// decode would put it behind a truncation §5.2 says it outranks.
+	// A 64-bit destination has no width to state: the slot IS the declared width,
+	// so its entry carries neither bound and nothing is compared per value.
 	for _, want := range []string{
-		"    .unsigned(3, at=0, count_at=1)",
-		"    .signed(7, at=2, count_at=3)",
+		"    .unsigned(3, at=4, count_at=5)",
+		"    .signed(7, at=10, count_at=11)",
 	} {
 		if !strings.Contains(got, want) {
 			t.Errorf("message.py: a 64-bit destination must store unguarded (%q):\n%s", want, got)
@@ -2090,15 +2092,24 @@ func TestPythonBitfieldIsIntFlagAndEnumIsIntEnum(t *testing.T) {
 //
 // All six positions are pinned by name -- scalar, native array element, struct
 // member, struct-array element member, union member, matrix row element -- for
-// both kinds. Four of the six share one emitted arm per kind and appear twice
-// besides (the standalone per-class visitor and the flat root visitor), which is
-// exactly why "the arm is shared" is not worth trusting after the next refactor.
+// both kinds, and each is pinned WHERE IT NOW LIVES rather than by shape:
 //
-// The two ELEMENT positions are pinned at on_array_begin rather than at the
-// store: a width is an interval, so it crosses the corelib's element channel
-// whole, and the decoder applies it AT each element -- the only place that can
-// refuse an element a truncation stops the array from ever completing (§5.2's
-// INVALID over INCOMPLETE).
+//   - a scalar, a struct member and a union member are on the destination table,
+//     where the entry states the width and the decoder checks it at the value
+//     (`min_value`/`max_value`, corelib-py#149);
+//   - a native array's elements are stated at on_array_begin or on the array's
+//     entry, as the interval the decoder applies AT each element;
+//   - a struct-ARRAY element member and a matrix row stay in the typed hook: a
+//     wrapper array's elements are per-index scopes the table cannot enter.
+//
+// Two of them appear twice besides (the standalone per-class visitor and the flat
+// root visitor), which is exactly why "the arm is shared" is not worth trusting
+// after the next refactor.
+//
+// Every element position is bound AT the element rather than after the fact,
+// because a width is an interval and crosses the corelib's element channel whole
+// -- the only place that can refuse an element a truncation stops the array from
+// ever completing (§5.2's INVALID over INCOMPLETE).
 func TestPythonEnumAndBitfieldWidthBoundAtEverySixPositions(t *testing.T) {
 	mod := string(genPy(t, schema(t, widthSixSrc), map[string]any{})["message.py"])
 	// The bitfield test is a MASK of the width, the same single operation the
@@ -2107,31 +2118,32 @@ func TestPythonEnumAndBitfieldWidthBoundAtEverySixPositions(t *testing.T) {
 	const bfRej = "                if (value & ~0xff) != 0:\n                    raise SofaDecodeError(%q)\n                %s = value\n"
 	const enRej = "                if value < -128 or value > 127:\n                    raise SofaDecodeError(%q)\n                %s = value\n"
 	for _, want := range []string{
-		// 1. scalar, in the flat root visitor.
-		fmt.Sprintf(enRej, "en: value outside declared enum width", "self._o.en"),
-		fmt.Sprintf(bfRej, "bf: value outside declared bitfield width", "self._o.bf"),
-		// 2. native array element -- stated once, at the header, as the interval
-		// the decoder applies to every element. BOTH sides of the enum width: an
-		// enum array travels as WT_ARRAY_SIGNED, so a negative element is
-		// expressible on the wire and -129 must be refused as surely as 128. A
-		// bitfield array is WT_ARRAY_UNSIGNED, whose own floor is 0, so its
-		// interval states the ceiling alone.
-		"            if fid == 2:\n                return (None, -128, 127)\n            elif fid == 3:\n                return (None, None, 255)\n",
-		// 3. struct member -- both surfaces: the standalone class visitor...
-		fmt.Sprintf(enRej, "se: value outside declared enum width", "self._o.se"),
-		fmt.Sprintf(bfRej, "sbf: value outside declared bitfield width", "self._o.sbf"),
-		// ...and the flat root visitor's frame for the same member.
-		fmt.Sprintf(enRej, "se: value outside declared enum width", "self._o.st.se"),
-		fmt.Sprintf(bfRej, "sbf: value outside declared bitfield width", "self._o.st.sbf"),
+		// 1. scalar -- on the message's table, as the width the decoder checks at
+		// the value.
+		"    .signed(0, at=0, count_at=1, min_value=-128, max_value=127)",
+		"    .unsigned(1, at=2, count_at=3, max_value=255)",
+		// 2. native array element -- stated once, as the interval the decoder
+		// applies to every element; on the array's own entry now that the array
+		// is on the table. BOTH sides of the enum width: an enum array travels as
+		// WT_ARRAY_SIGNED, so a negative element is expressible on the wire and
+		// -129 must be refused as surely as 128. A bitfield array is
+		// WT_ARRAY_UNSIGNED, whose own floor is 0, so its interval states the
+		// ceiling alone.
+		"    .signed_array(2, at=4, cap=4, count_at=8, elem_min=-128, elem_max=127)",
+		"    .unsigned_array(3, at=9, cap=4, count_at=13, elem_max=255)",
+		// 3. struct member -- the scope is bindable whole, so the member's width
+		// is on the struct's own (closed) table, reached from the message's.
+		"_BIND_Closed_st = (Binding(closed=True)\n    .signed(0, at=14, count_at=15, min_value=-128, max_value=127)\n    .unsigned(1, at=16, count_at=17, max_value=255)\n",
+		"    .sequence(4, child=_BIND_Closed_st)",
 		// 4. struct-array element member.
 		fmt.Sprintf(enRej, "se: value outside declared enum width", "self._o.sa[self._ix2].se"),
 		fmt.Sprintf(bfRej, "sbf: value outside declared bitfield width", "self._o.sa[self._ix2].sbf"),
-		// 5. union member.
-		fmt.Sprintf(enRej, "ue: value outside declared enum width", "self._o.un.ue"),
-		fmt.Sprintf(bfRej, "ubf: value outside declared bitfield width", "self._o.un.ubf"),
+		// 5. union member -- same shape as the struct's.
+		"_BIND_Closed_un = (Binding(closed=True)\n    .signed(0, at=18, count_at=19, min_value=-128, max_value=127)\n    .unsigned(1, at=20, count_at=21, max_value=255)\n",
+		"    .sequence(6, child=_BIND_Closed_un)",
 		// 6. matrix row element -- a row scope keyed by row index, so its interval
 		// is the scope's whole arm rather than one keyed by a field id.
-		"        elif c == _L_Closed_mat:\n            return (None, -128, 127)\n",
+		"        if c == _L_Closed_mat:\n            return (None, -128, 127)\n",
 		"        elif c == _L_Closed_mbf:\n            return (None, None, 255)\n",
 	} {
 		if !strings.Contains(mod, want) {
@@ -2149,16 +2161,9 @@ func TestPythonEnumAndBitfieldWidthBoundAtEverySixPositions(t *testing.T) {
 		}
 	}
 	// The element positions carry NO scan of the assembled list. It was only ever
-	// there to close the gap a hull left open, and a width has no gap -- so the
-	// array stores straight through and the pure-Python per-element pass is gone.
-	for _, want := range []string{
-		"            if fid == 2:\n                self._o.ea = value\n",
-		"            if fid == 3:\n                self._o.bfa = value\n",
-	} {
-		if !strings.Contains(mod, want) {
-			t.Errorf("Closed message.py: an enum/bitfield array must store straight through, missing %q", want)
-		}
-	}
+	// there to close the gap a hull left open, and a width has no gap -- so an
+	// array is moved whole (by the table here) and the pure-Python per-element
+	// pass is gone.
 	if strings.Contains(mod, "for _v in value") {
 		t.Errorf("Closed message.py still scans an enum/bitfield array element by element:\n%s", mod)
 	}
@@ -2208,8 +2213,8 @@ func TestPythonEnumBitfieldWidthElisions(t *testing.T) {
 		"      fa: { id: 1, type: array, items: { type: bitfield, count: 2, bits: { "+strings.Join(bits, ", ")+" } } }\n"+
 		"      e: { id: 2, type: enum, enum: { R: 0, G: 1, B: 2 }, default: 0 }\n"),
 		map[string]any{})["message.py"])
-	if !strings.Contains(mod, "            if fid == 0:\n                self._o.f = value\n") {
-		t.Errorf("a bitfield implying the full u64 width must store unguarded:\n%s", mod)
+	if !strings.Contains(mod, "    .unsigned(0, at=0, count_at=1)\n") {
+		t.Errorf("a bitfield implying the full u64 width must bind with no width stated:\n%s", mod)
 	}
 	if strings.Contains(mod, "0xffffffffffffffff") {
 		t.Errorf("a tautological width-mask guard was emitted:\n%s", mod)
@@ -2219,8 +2224,7 @@ func TestPythonEnumBitfieldWidthElisions(t *testing.T) {
 	}
 	// {R:0, G:1, B:2} implies i8, NOT the 0..2 hull of its constants: 5 is a valid
 	// wire value for this field and must decode.
-	if !strings.Contains(mod, "                if value < -128 or value > 127:\n"+
-		"                    raise SofaDecodeError(\"e: value outside declared enum width\")\n") {
+	if !strings.Contains(mod, "    .signed(2, at=5, count_at=6, min_value=-128, max_value=127)") {
 		t.Errorf("a contiguous enum must take the implied i8 width, not its constant hull:\n%s", mod)
 	}
 }
@@ -2236,6 +2240,9 @@ func TestPythonBitfieldSpanningBit63IsUnguarded(t *testing.T) {
 		"      g:  { id: 0, type: bitfield, bits: { LOW: { pos: 0 }, HIGH: { pos: 63 } } }\n"+
 		"      ga: { id: 1, type: array, items: { type: bitfield, count: 2, bits: { LOW: { pos: 0 }, HIGH: { pos: 63 } } } }\n"),
 		map[string]any{})["message.py"])
+	// Two bindable fields is under pyBindMin, so this class emits no destination
+	// table at all and the stores stay in the typed hook -- which is the surface
+	// this test has always pinned.
 	for _, want := range []string{
 		"            if fid == 0:\n                self._o.g = value\n",
 		"            if fid == 1:\n                self._o.ga = value\n",

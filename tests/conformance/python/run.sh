@@ -1062,7 +1062,10 @@ if [ "$NATIVE" = yes ]; then require_engine native; else require_engine python; 
 # table is emitted at all (three is the floor); and a pair of scopes whose PATHS
 # spell the same name -- `dup.inner` and the sibling `dup_inner` -- because a scope
 # name is what both the dispatch location and the table are named after, and a
-# duplicate would hand two scopes one Binding.
+# duplicate would hand two scopes one Binding; and a wrapper array whose ELEMENT
+# declares a nested struct at a low id followed by a field whose id the ROOT table
+# also names, which is the one shape that catches a codec restoring the enclosing
+# table too early (corelib-py#152).
 echo "==> destination table: the same message the visitor would have built (generator#561)"
 cat > "$WORK/table.yaml" <<'YAML'
 version: 1
@@ -1076,6 +1079,15 @@ messages:
       nums:  { id: 7, type: array, items: { type: u32, count: 4 }, default: [9, 9, 9] }
       dup:   { id: 8, type: struct, fields: { inner: { id: 0, type: struct, fields: { k: { id: 0, type: u64 } } } } }
       dup_inner: { id: 9, type: struct, fields: { k: { id: 0, type: u64 } } }
+      rows:
+        id: 10
+        type: array
+        items:
+          type: struct
+          count: 4
+          fields:
+            when:  { id: 1, type: struct, fields: { k: { id: 0, type: u64 } } }
+            ratio: { id: 4, type: fp64 }
 YAML
 ( cd "$ROOT" && go run ./cmd/sofabgen --config "$WORK/cfg.yaml" --lang python --in "$WORK/table.yaml" --out "$WORK/table" >/dev/null )
 grep -q "destinations" "$WORK/table/message.py" || {

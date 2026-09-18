@@ -36,32 +36,27 @@ import (
 //
 // Two rules decide, and both are about a verdict the table cannot reach:
 //
-//  1. A field whose value needs a WIDTH check stays on the visitor. An entry
-//     carries a declared width for an ARRAY's elements (elem_min / elem_max,
-//     which the decoder applies AT each element) but none for a scalar:
-//     `words[at] = value` is the whole store. Generated code cannot take that
-//     verdict afterwards either -- a §7.1 rejection has to outrank a truncation
-//     that follows it (MESSAGE_SPEC §5.2), and a check run at scatter time runs
-//     only for a decode that already completed. So u8..u32, i8..i32 and every
-//     `enum`/`bitfield` narrower than the 64-bit accumulator keep their store in
-//     the typed hook, where storeValue guards them.
+//  1. A SHAPE the table has no entry for: a wrapper-sequence array (its elements
+//     are per-index scopes), and an array the schema leaves unbounded (its
+//     destination would be `count` slots chosen by the WIRE, which §6.6 forbids).
+//     Both stay on the visitor.
 //
-//  2. A scope is entered by the table only if every field of its PARENT is bound
-//     too. The decoder descends into a bound sequence by itself and tells the
-//     visitor nothing (corelib-py#146), so the visitor's `_c` still names the
-//     parent scope while the walk is inside the child. Any id the child's table
-//     does not name -- an UNKNOWN id, which is what forward compatibility
-//     delivers -- is then offered to the visitor under the PARENT's location,
-//     and an arm there would store someone else's value into this scope's field.
-//     A parent that binds everything it declares has no arms at all and its
-//     `on_field` declines every id that reaches it, so the misroute cannot
-//     happen. Hence: a message with one wrapper array binds its own scalars and
-//     no nested scope; a message of nothing but scalars and structs binds its
-//     whole tree.
+//  2. A scope is entered only when its WHOLE subtree is bindable, and its table
+//     is then `closed`. The decoder descends into a bound sequence by itself and
+//     tells the visitor nothing (corelib-py#146), so while the walk is inside the
+//     child the visitor's `_c` still names the parent -- and an id the child does
+//     not name would be offered to it under the PARENT's location, where an arm
+//     would store someone else's value. `Binding(closed=True)` (corelib-py#150)
+//     is what makes that impossible: an id a closed table does not name is
+//     skipped by the codec, sequence and all, exactly as a decoder with no
+//     visitor skips it. A scope that still has an unbindable field cannot be
+//     closed, so the table does not descend into it at all.
 //
-// Neither rule is a limit of the wire format; both are limits of what a table
-// can say today. corelib-py#149 (a declared width on a scalar entry) and #150 (a
-// child table that declines what it does not name) would lift them.
+// Everything else is on the table, including every narrow width: an entry states
+// it (`max_value` / `min_value`, corelib-py#149) and the decoder checks it at the
+// value, before the store -- so a message truncated behind an out-of-width value
+// is INVALID and not INCOMPLETE, which is what kept these kinds on the visitor
+// until the corelib could say it.
 
 // pyBindMin is the number of rows below which a class is left entirely on the
 // visitor.
@@ -129,6 +124,7 @@ type bindRow struct {
 // bindTable is one Binding object: a class's own, or a nested scope's.
 type bindTable struct {
 	name    string // module-level python name
+	closed  bool   // an id this table does not name is skipped by the codec
 	rows    []bindRow
 	seqRows []string // `.sequence(id, child=...)`, rendered after the child exists
 }
@@ -144,6 +140,9 @@ type bindPlan struct {
 	needF   bool // ... a double view
 	needObj bool // the table names a string/blob slot
 	rows    int  // rows over the whole tree, against pyBindMin
+	// closed says the ROOT table carries every id its scope declares, so the
+	// visitor is never called at all -- not even to decline an unknown id.
+	closed bool
 }
 
 type idSet map[int64]bool
@@ -187,8 +186,10 @@ func (a *slotAlloc) object() int64      { at := a.objects; a.objects++; return a
 // would carry too little to pay for itself.
 func (g *gen) buildBindPlan(name string, scopes []*pyScope) *bindPlan {
 	p := &bindPlan{name: name, boundSc: map[int]bool{}, boundFd: map[int]idSet{}}
-	descend := g.fullyBindable(scopes, scopes[0], map[int]bool{})
-	g.bindScope(p, &slotAlloc{}, scopes, scopes[0], "m", descend)
+	// A table is CLOSED when its scope needs nothing from the visitor, which is
+	// the same question that decides whether a parent may descend into it.
+	p.closed = g.bindableSubtree(scopes, scopes[0], map[int]bool{})
+	g.bindScope(p, &slotAlloc{}, scopes, scopes[0], "m")
 	// The root is the visitor's OWN location -- it is never entered by the table,
 	// and the fields it does not bind still dispatch there.
 	delete(p.boundSc, scopes[0].id)
@@ -198,15 +199,17 @@ func (g *gen) buildBindPlan(name string, scopes []*pyScope) *bindPlan {
 	return p
 }
 
-// fullyBindable reports whether every field of `sc` can go in the table --
-// recursively, so a struct field counts only when its own scope does too. It
-// decides rule 2 above: only a scope whose parent binds EVERYTHING may itself be
-// entered by the table.
+// bindableSubtree reports whether every field of `sc` can go in the table --
+// recursively, so a struct field counts only when its own scope does too.
+//
+// It decides rule 2 above twice over: a scope is DESCENDED INTO only when it
+// answers true, and the table of a scope that answers true is `closed`, because
+// closed is exactly the promise that nothing inside it needs the visitor.
 //
 // `seen` breaks the cycle a recursive schema makes (a struct reaching itself); a
 // scope still being decided is taken as bindable, which is the answer the fixed
 // point settles on for a cycle that is otherwise clean.
-func (g *gen) fullyBindable(scopes []*pyScope, sc *pyScope, seen map[int]bool) bool {
+func (g *gen) bindableSubtree(scopes []*pyScope, sc *pyScope, seen map[int]bool) bool {
 	if sc.isArr {
 		return false // a wrapper array's elements are per-index scopes
 	}
@@ -218,7 +221,7 @@ func (g *gen) fullyBindable(scopes []*pyScope, sc *pyScope, seen map[int]bool) b
 		switch fld.Kind {
 		case ir.KindStruct, ir.KindUnion:
 			child, ok := sc.seqChild[fld.ID]
-			if !ok || !g.fullyBindable(scopes, scopes[child], seen) {
+			if !ok || !g.bindableSubtree(scopes, scopes[child], seen) {
 				return false
 			}
 		default:
@@ -231,12 +234,12 @@ func (g *gen) fullyBindable(scopes []*pyScope, sc *pyScope, seen map[int]bool) b
 }
 
 // bindScope renders one table: a row per bindable field, plus a `sequence` row
-// per struct/union child when `descend` says the whole tree is bound.
+// per struct/union child whose OWN subtree is bindable.
 //
 // `path` is the scatter's name for the object this scope's values land on -- "m"
 // for the message itself, "m.captured_at" for a nested struct.
 func (g *gen) bindScope(p *bindPlan, alloc *slotAlloc, scopes []*pyScope,
-	sc *pyScope, path string, descend bool) {
+	sc *pyScope, path string) {
 
 	// Named after the scope, not after the path: two different paths can spell
 	// one name (a field `a` whose struct has a field `b`, beside a sibling field
@@ -244,7 +247,7 @@ func (g *gen) bindScope(p *bindPlan, alloc *slotAlloc, scopes []*pyScope,
 	// Deriving it here rather than rebuilding it is what keeps the two in step: a
 	// duplicate table name would hand both scopes the SAME Binding, so one would
 	// decode into the other's slots and the other into none.
-	t := &bindTable{name: bindTableName(sc)}
+	t := &bindTable{name: bindTableName(sc), closed: g.bindableSubtree(scopes, sc, map[int]bool{})}
 	p.tables = append(p.tables, t)
 	p.boundSc[sc.id] = true
 	ids := idSet{}
@@ -254,10 +257,13 @@ func (g *gen) bindScope(p *bindPlan, alloc *slotAlloc, scopes []*pyScope,
 		dest := path + "." + pyIdent(fld.Name)
 		if fld.Kind == ir.KindStruct || fld.Kind == ir.KindUnion {
 			child, ok := sc.seqChild[fld.ID]
-			if !descend || !ok {
+			// Only into a subtree that needs nothing from the visitor: its table
+			// is then closed, so an id it does not name is skipped by the codec
+			// rather than offered to the visitor under THIS scope's location.
+			if !ok || !g.bindableSubtree(scopes, scopes[child], map[int]bool{}) {
 				continue
 			}
-			g.bindScope(p, alloc, scopes, scopes[child], dest, descend)
+			g.bindScope(p, alloc, scopes, scopes[child], dest)
 			// No count slot: every member carries its own arrival, and the
 			// dataclass already holds a default-constructed sub-object for a
 			// struct that never arrives at all.
@@ -278,7 +284,7 @@ func (g *gen) bindScope(p *bindPlan, alloc *slotAlloc, scopes []*pyScope,
 			p.needObj = true
 		case ir.KindFP32, ir.KindFP64:
 			p.needF = true
-		case ir.KindI64, ir.KindEnum:
+		case ir.KindI8, ir.KindI16, ir.KindI32, ir.KindI64, ir.KindEnum:
 			p.needS = true
 		case ir.KindArray:
 			switch pyBindArrayMethod(fld.Elem) {
@@ -301,17 +307,8 @@ func bindTableName(sc *pyScope) string {
 // the visitor's own store applies -- see the two rules at the top of this file.
 func bindable(fld *ir.Field) bool {
 	switch fld.Kind {
-	case ir.KindString, ir.KindBlob, ir.KindBool, ir.KindU64, ir.KindI64,
-		ir.KindFP32, ir.KindFP64:
-		return true
-	case ir.KindEnum:
-		// Bindable only where the implied width IS the slot: a narrower one is a
-		// §7.1 verdict per value, which an entry cannot take.
-		_, _, narrow := ir.EnumWidthRange(fld.Ref)
-		return !narrow
-	case ir.KindBitfield:
-		_, narrow := ir.BitfieldWidthMax(fld.Ref)
-		return !narrow
+	case ir.KindStruct, ir.KindUnion:
+		return false // decided per scope, not per field: see bindableSubtree
 	case ir.KindArray:
 		// A wrapper array's elements are sequence-framed, and an array the
 		// schema leaves unbounded has no destination to declare: the slots are
@@ -320,7 +317,9 @@ func bindable(fld *ir.Field) bool {
 		// see pyBindArrayMax.
 		return isNativeArrayElem(fld.Elem) && fld.HasCount && fld.Count <= pyBindArrayMax
 	}
-	return false // u8..u32 / i8..i32: a declared width no entry carries
+	// Every scalar kind, narrow ones included: the entry states the declared
+	// width and the decoder checks it at the value (corelib-py#149).
+	return true
 }
 
 // bindRowFor allocates the field's slots and renders both halves of its row: the
@@ -355,13 +354,14 @@ func bindRowFor(fld *ir.Field, alloc *slotAlloc, dest string) bindRow {
 		at := alloc.word(1)
 		r.cnt = alloc.word(1)
 		r.method, r.expr = bindScalarMethod(fld), ""
-		r.args = fmt.Sprintf("%d, at=%d, count_at=%d", fld.ID, at, r.cnt)
+		r.args = fmt.Sprintf("%d, at=%d, count_at=%d%s",
+			fld.ID, at, r.cnt, bindScalarWidth(fld))
 		switch fld.Kind {
 		case ir.KindBool:
 			// §4.4: a boolean has no width -- every non-zero reads as true --
 			// and `bool` is what the typed hook stores.
 			r.expr = fmt.Sprintf("U[%d] != 0", at)
-		case ir.KindI64, ir.KindEnum:
+		case ir.KindI8, ir.KindI16, ir.KindI32, ir.KindI64, ir.KindEnum:
 			r.expr = fmt.Sprintf("S[%d]", at)
 		case ir.KindFP32, ir.KindFP64:
 			r.expr = fmt.Sprintf("F[%d]", at)
@@ -378,7 +378,7 @@ func bindScalarMethod(fld *ir.Field) string {
 	switch fld.Kind {
 	case ir.KindBool:
 		return "boolean"
-	case ir.KindI64, ir.KindEnum:
+	case ir.KindI8, ir.KindI16, ir.KindI32, ir.KindI64, ir.KindEnum:
 		return "signed"
 	case ir.KindFP32:
 		return "float32"
@@ -386,6 +386,46 @@ func bindScalarMethod(fld *ir.Field) string {
 		return "float64"
 	}
 	return "unsigned"
+}
+
+// bindScalarWidth renders the declared width as the scalar binder's keyword
+// arguments -- the same bound storeValue used to raise on, moved into the entry
+// where the decoder applies it at the value (corelib-py#149).
+//
+// The width is the declared one for an integer, and the one the declaration
+// IMPLIES for an `enum` or a `bitfield` (MESSAGE_SPEC §1): the smallest signed
+// type holding every constant, the smallest unsigned type holding the highest
+// `pos`. Empty where the implied width IS the 64-bit slot the value lands in,
+// and for a boolean, which §4.4 gives no width at all, and for the floats.
+func bindScalarWidth(fld *ir.Field) string {
+	switch fld.Kind {
+	case ir.KindBool, ir.KindFP32, ir.KindFP64:
+		return ""
+	case ir.KindEnum:
+		lo, hi, ok := ir.EnumWidthRange(fld.Ref)
+		if !ok {
+			return ""
+		}
+		return fmt.Sprintf(", min_value=%d, max_value=%d", lo, hi)
+	case ir.KindBitfield:
+		// One-sided: a bitfield rides the unsigned wire type, whose floor is 0.
+		// Stated as the width's maximum rather than as the mask the hook used --
+		// the two refuse exactly the same values, since a mask of a width IS the
+		// range [0, width max].
+		hi, ok := ir.BitfieldWidthMax(fld.Ref)
+		if !ok {
+			return ""
+		}
+		return fmt.Sprintf(", max_value=%d", hi)
+	}
+	lo, hi, ok := ir.NarrowRange(fld.Kind)
+	if !ok {
+		return "" // u64 / i64: the slot IS the declared width
+	}
+	if lo < 0 {
+		return fmt.Sprintf(", min_value=%d, max_value=%d", lo, hi)
+	}
+	return fmt.Sprintf(", max_value=%d", hi)
 }
 
 // pyBindArrayMethod names the binder for a native array of `elem` -- the same
@@ -479,7 +519,15 @@ func (g *gen) emitBindTables(f *pyfile, p *bindPlan) {
 }
 
 func emitOneTable(f *pyfile, t *bindTable) {
-	f.line("%s = (Binding()", t.name)
+	if t.closed {
+		// Everything this scope declares is on the table, so an id that is not
+		// on it is one the schema does not name: the codec skips it -- sequence
+		// and all -- instead of offering it to a visitor that is not tracking
+		// this scope (corelib-py#150).
+		f.line("%s = (Binding(closed=True)", t.name)
+	} else {
+		f.line("%s = (Binding()", t.name)
+	}
 	for _, r := range t.rows {
 		f.line("    .%s(%s)", r.method, r.args)
 	}
@@ -518,8 +566,14 @@ func (g *gen) emitBindStorage(f *pyfile, p *bindPlan) {
 	f.line("        Asked once, when the Decoder is built, so nothing the wire says can")
 	f.line("        change it. A field the table names is written straight into its slot")
 	f.line("        and NO hook fires for it -- not the typed one, not ``on_field``, not")
-	f.line("        ``on_schema_bound``, whose bound rides the entry instead. Everything")
-	f.line("        the table does not name reaches the hooks below unchanged.")
+	f.line("        ``on_schema_bound``, whose bound rides the entry instead.")
+	if p.closed {
+		f.line("")
+		f.line("        The table is ``closed``, so an id it does not name is skipped by the")
+		f.line("        codec: nothing reaches this class at all.")
+	} else {
+		f.line("        Everything the table does not name reaches the hooks below unchanged.")
+	}
 	f.line(`        """`)
 	f.line("        return (%s, self._w, self._ob)", p.tables[0].name)
 	f.blank()
