@@ -129,13 +129,21 @@ func (g *gen) harness(s *ir.Schema) []byte {
 		f.line("          final st = dec.feed(input.sublist(off, end));")
 		f.line("          if (st != sofab.DecodeStatus.complete &&")
 		f.line("              st != sofab.DecodeStatus.incomplete) {")
-		f.line("            stderr.writeln('decode failed: ${st.name}');")
+		// A refusal is terminal and the corelib latches it. The error line names
+		// what asking again answers -- an empty feed, `[refeed=X]`, which must
+		// repeat the refusal -- and what finish() does, `[finish=null]`, or
+		// `RETURNED` if it handed back a message from a decoder that refused one.
+		// tests/conformance/dart/run.sh reads both.
+		f.line("            final re = dec.feed(const <int>[]);")
+		f.line("            final fin = dec.finish() == null ? 'null' : 'RETURNED';")
+		f.line("            stderr.writeln(")
+		f.line("                'decode failed: ${st.name} [refeed=${re.name}] [finish=$fin]');")
 		f.line("            exit(1);")
 		f.line("          }")
 		f.line("        }")
 		f.line("        final obj = dec.finish();")
 		f.line("        if (obj == null) {")
-		f.line("          stderr.writeln('decode failed: ${dec.status.name}');")
+		f.line("          stderr.writeln('decode failed: ${dec.feed(const <int>[]).name}');")
 		f.line("          exit(1);")
 		f.line("        }")
 		f.line("        stdout.writeln(jsonEncode(_toJson%s(obj)));", mt)

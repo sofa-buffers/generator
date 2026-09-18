@@ -1244,7 +1244,7 @@ backends must surface it explicitly:
   `Result<sofab::Status, sofab::Error>` — mid-stream it holds no framing and has
   no verdict to give.
 
-#### The stream answers once: `feed` is the only channel (generator#461, #541)
+#### The stream answers once: `feed` is the only channel (generator#461, #541, #555)
 
 A corelib's incremental decoder used to publish its outcome twice — as `feed`'s
 return value *and* through a status accessor on the stream (`IStream.Status` /
@@ -1315,10 +1315,24 @@ observable there only by asking again: `decoder.py` guards `feed` at its top wit
 `raise self._limit` and `return Status.INVALID`, and a further feed repeats the
 same answer without consuming a byte.
 
+**Dart came last, and without the flattening** (generator#555). It was outside
+both #463 and #541, so its generated `Decoder` kept `_st` and `get status` — the
+only backend of eleven that did. corelib-dart's `feed` never throws: it returns
+all four outcomes, and a refusal latches as `_terminal`/`_terminalStatus`,
+checked at the top of `feed` before a byte is looked at. So the copy never
+misreported a cap refusal as INCOMPLETE the way the six had. It was still a
+second place to ask, which CORELIB_PLAN §5.2.1 rules out ("any other surface
+holding a copy of the outcome"). `feed` now forwards `_d.feed(chunk)`, and
+`finish()` keeps its non-throwing `T?` shape by asking the same way the others do:
+`_d.feed(const <int>[]) == complete ? _out : null`. A caller who wants the reason
+for a `null` already has it as `feed`'s return value, and can ask again with an
+empty feed.
+
 **How the suites see it.** A reject vector exits non-zero whatever the generated
 layer did, so each harness **names what `finish` answered after the refusal** —
 `decode error: … [finish=<code>]`, and `[refeed=<code>]` in python, whose route is
-the return value. `RETURNED` is the failure marker: it means `finish` handed back
+the return value. Dart prints both — `decode failed: <status> [refeed=<status>]
+[finish=null]` — because its `finish` returns `T?` and so cannot name a code. `RETURNED` is the failure marker: it means `finish` handed back
 a message from a decoder that had refused one. Five suites read three fixtures
 each, covering both arrival routes — a corelib-raised malformation (a varint past
 the 64-bit bound), a generated-guard rejection (an over-count array or an
