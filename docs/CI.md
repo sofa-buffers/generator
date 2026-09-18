@@ -19,6 +19,21 @@ Each `lang-<x>` job is a thin wrapper around `tests/conformance/<x>/run.sh`. The
 script is the source of truth and runs the same way locally — that is deliberate:
 a red CI job must be reproducible with one command.
 
+### Backend tests that need a corelib
+
+Some Go tests beside a backend (`generators/{golang,python,c}/`) build and run
+generated code against a real corelib. They are gated on `SOFAB_<X>_CORELIB`
+(and the target toolchain) and **skip** without it, so `hermetic` stays free of
+corelibs and toolchains. The `lang-<x>` job is where they run: its `run.sh`
+calls `run_backend_tests` (`tests/conformance/lib/backend_tests.sh`), which runs
+the backend's **whole** test package with the corelib variable set, no `-run`
+filter, and fails on any `--- SKIP` — in a lang job nothing has a reason to
+skip. A new gated test is therefore covered the moment it is written; there is
+no allowlist to forget to extend.
+
+(`generators/dart`'s gated `TestConformance` only wraps `dart/run.sh` itself,
+so `lang-dart` already is that test.)
+
 `lang-c` and `lang-cpp` additionally need the **ASan runtime** (`libasan`) on the
 image: their decode-ownership check is built with `-fsanitize=address`, because a
 freed buffer usually still reads back the bytes that were in it and a plain value

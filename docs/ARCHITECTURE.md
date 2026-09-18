@@ -5519,7 +5519,10 @@ A reimplementation is **conformant** when it reproduces these gates:
    has no conformance step.
 7. **Hermetic unit layer** — Go unit tests beside the code:
    `internal/{parser,analysis,config,pipeline,ir}` and per-backend
-   `generators/*/backend_test.go` (plus gated corelib round-trip tests), and
+   `generators/*/backend_test.go` (plus corelib-gated tests: they skip in the
+   hermetic job and run — the whole package, unfiltered, with a skip counted
+   as a failure — in `lang-<x>` via `tests/conformance/lib/backend_tests.sh`;
+   docs/CI.md), and
    dedicated matrix suites for sparse omission (`omit_test.go`), shared refs
    (`refs_test.go`), the multi-file real-world example (`realworld_test.go`),
    ASCII output, and doc comments (§8).

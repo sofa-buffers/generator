@@ -10,6 +10,8 @@ set -eu
 . "$(dirname "$0")/../lib/corelib.sh"
 # Shared MAX_SIZE fill check (ARCHITECTURE §9.6).
 . "$(dirname "$0")/../lib/maxsize_fill.sh"
+# Every backend Go test, run against the corelib with no skips allowed.
+. "$(dirname "$0")/../lib/backend_tests.sh"
 
 ROOT=$(cd "$(dirname "$0")/../../.." && pwd)
 CORELIB="${1:-${SOFAB_GO_CORELIB:-}}"
@@ -1176,8 +1178,8 @@ GO
     || { echo "FAIL: a decoded field aliased the buffer it was decoded from"; exit 1; }
 echo "==> decode ownership OK"
 
-echo "==> shared-vector byte-exact conformance"
-( cd "$ROOT" && SOFAB_GO_CORELIB="$CORELIB" go test ./generators/golang/ -run "Conformance|Wire" -count=1 )
+echo "==> backend Go tests against the corelib (shared-vector byte-exact conformance, wire, round trip, ...)"
+run_backend_tests generators/golang SOFAB_GO_CORELIB "$CORELIB"
 
 # The encoder depth bound (sofab.WithMaxDepth) is a count the generator derives
 # from the IR; CI's plain `go test ./...` has no corelib and skips the check that
