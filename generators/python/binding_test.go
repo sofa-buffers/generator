@@ -39,6 +39,7 @@ messages:
       counted: { id: 11, type: array, items: { type: u16, count: 4 } }
       dyn:     { id: 12, type: array, items: { type: u16 } }
       wrapped: { id: 13, type: array, items: { type: string, count: 2 } }
+      wide:    { id: 14, type: array, items: { type: u8, count: 4096 } }
 `
 	mod := string(genPy(t, schema(t, src), map[string]any{})["message.py"])
 
@@ -80,6 +81,9 @@ messages:
 		".unsigned_array(12,",
 		// A wrapper array's elements are sequence-framed, per index.
 		"(13,",
+		// And one whose declared count is past pyBindArrayMax: a table
+		// materializes an array twice, so a big one is a measured loss.
+		".unsigned_array(14,",
 	} {
 		if strings.Contains(mod, gone) {
 			t.Errorf("the table must not carry %q:\n%s", gone, mod)
@@ -224,6 +228,47 @@ func TestPythonScatterRunsOnlyOnAComplete(t *testing.T) {
 	} {
 		if !strings.Contains(mod, want) {
 			t.Errorf("message.py missing %q:\n%s", want, mod)
+		}
+	}
+}
+
+// TestPythonScopeNamesAreUnique: a scope is named after the PATH that reaches it,
+// and two different paths can spell one name -- a field `a` whose struct has a
+// field `b`, beside a sibling field `a_b`. Both the dispatch location and the
+// destination table are named from it, and a duplicate is not a cosmetic clash:
+// the second module-level assignment wins, so two scopes would share one location
+// constant (and one Binding), and one of them would decode into the other's
+// destination with no error anywhere.
+//
+// Measured before the fix, on exactly this schema: `a.b` decoded the sibling's
+// values and the sibling decoded nothing -- on both engines, with and without a
+// destination table.
+func TestPythonScopeNamesAreUnique(t *testing.T) {
+	const src = `
+version: 1
+$defs:
+  struct:
+    Leaf: { p: { id: 0, type: u64 }, q: { id: 1, type: fp64 } }
+    Inner: { b: { id: 0, type: struct, fields: { $ref: '#/$defs/struct/Leaf' } } }
+messages:
+  M:
+    payload:
+      a:   { id: 0, type: struct, fields: { $ref: '#/$defs/struct/Inner' } }
+      a_b: { id: 1, type: struct, fields: { $ref: '#/$defs/struct/Leaf' } }
+      z:   { id: 2, type: u64 }
+`
+	mod := string(genPy(t, schema(t, src), map[string]any{})["message.py"])
+	for _, decl := range []string{"_BIND_M_a_b = ", "_BIND_M_a_b_2 = ", "_L_M_a_b = ", "_L_M_a_b_2 = "} {
+		if n := strings.Count(mod, decl); n > 1 {
+			t.Errorf("%q is declared %d times -- the later one wins and two scopes share it:\n%s",
+				decl, n, mod)
+		}
+	}
+	// Both halves of the pair exist, so the two scopes really are distinguished
+	// rather than one of them having been dropped.
+	for _, want := range []string{"_BIND_M_a_b = ", "_BIND_M_a_b_2 = "} {
+		if !strings.Contains(mod, want) {
+			t.Errorf("missing %q -- the colliding scopes must BOTH get a table:\n%s", want, mod)
 		}
 	}
 }

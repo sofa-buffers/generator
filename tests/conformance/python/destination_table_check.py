@@ -38,7 +38,13 @@ four of them are cases the round-trip suites cannot reach at all.
   F. A decode short of COMPLETE publishes NO table field: the scatter runs after
      the verdict, so a refused message cannot leave half a value on the object.
 
-  G. The same message fed one byte at a time lands identically -- the table's
+  G. Two scopes whose paths spell the same name (``dup.inner`` beside the sibling
+     ``dup_inner``) each decode into their own object. A scope is named after its
+     path, both the dispatch location and the table are named from it, and a
+     duplicate name means the later module-level assignment wins -- so one scope
+     would decode into the other's destination, silently.
+
+  H. The same message fed one byte at a time lands identically -- the table's
      resume path crosses chunk boundaries inside a bound value.
 
 Usage: destination_table_check.py <project-dir> <native|python>
@@ -139,13 +145,20 @@ def main(argv):
     check("F/refused decode publishes no table field",
           (st is message.Status.INCOMPLETE, dec.message.tag), (True, 0))
 
-    # --- G: the same message, one byte per feed ------------------------------
+    # --- G: two scopes whose paths spell one name ----------------------------
+    o = message.E()
+    o.dup.inner.k = 11
+    o.dup_inner.k = 22
+    m = message.E.decode(o.encode())
+    check("G/colliding scope names stay apart", (m.dup.inner.k, m.dup_inner.k), (11, 22))
+
+    # --- H: the same message, one byte per feed ------------------------------
     full = wire(repeated)
     dec = message.E.decoder()
     st = None
     for i in range(len(full)):
         st = dec.feed(full[i:i + 1])
-    check("G/streamed one byte at a time",
+    check("H/streamed one byte at a time",
           (st is message.Status.COMPLETE, dec.message.tag, dec.message.name, dec.message.nums),
           (True, 2, "second", [4]))
 
@@ -153,8 +166,9 @@ def main(argv):
         for f in failures:
             print("FAIL: [%s] %s" % (want_engine, f), file=sys.stderr)
         return 1
-    print("   [%s] destination table: 7 cases (nested unknown id, empty vs absent, "
-          "§7.4 x3, §7.3 skip, refused decode, byte-at-a-time)" % want_engine)
+    print("   [%s] destination table: 8 cases (nested unknown id, empty vs absent, "
+          "§7.4 x3, §7.3 skip, refused decode, colliding scope names, byte-at-a-time)"
+          % want_engine)
     return 0
 
 

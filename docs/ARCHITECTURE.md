@@ -3868,10 +3868,20 @@ cannot reach, not about taste:
    and structs binds its whole tree; one wrapper array anywhere in a scope stops
    the descent below it, and that scope's own leaves are bound alone.
 
-A class binding fewer than **three** fields emits no table at all: the words
-buffer, the objects list, the two views and the `scatter()` call cost about what
-two saved callbacks are worth (measured: +12.6% at one bound field, +2.4% at two,
-−2.5% at three, −20.4% at six).
+Two cost thresholds, both measured rather than assumed:
+
+* a class binding fewer than **three** fields emits no table at all — the words
+  buffer, the objects list, the two views and the `scatter()` call cost about what
+  two saved callbacks are worth (+12.6% at one bound field, +2.4% at two, −2.5% at
+  three, −20.4% at six);
+* a native array is bound only up to a declared **count of 32**. An array is the
+  one kind a table materializes twice — the decoder fills `count` slots and the
+  scatter builds the list out of them, where the typed hook receives the list the
+  corelib already built — and it costs those slots whether the array arrives or
+  not. Measured with the array on the wire: −9.9% at 8, −5.2% at 32, +0.6% at 64,
+  +32% at 512, +69% at 4096; with it absent, the prefill alone is +1.7% at 32 and
+  +147% at 4096. Nothing else has that shape: a bound string or blob is one object
+  in the list and the scatter moves the reference.
 
 Both rules are limits of what a table can *say* today, not of the wire format.
 corelib-py#149 (a declared width on a scalar entry) and corelib-py#150 (a child
