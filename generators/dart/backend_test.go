@@ -1561,3 +1561,33 @@ func TestDartWidthAdmitsUndeclaredValues(t *testing.T) {
 		t.Errorf("the bitfield width mask is missing:\n%s", got)
 	}
 }
+
+// TestDartDecoderAsksTheStreamForItsVerdict pins issue #555, the Dart half of
+// #541: the generated decoder remembers NOTHING about the outcome. corelib-dart's
+// Decoder already latches a refusal -- `if (_terminal) return _terminalStatus;`
+// at the top of feed, before a byte is looked at -- so a copy here could only
+// restate it, and CORELIB_PLAN §5.2.1 rules out any surface beside feed holding
+// one. finish therefore ASKS, with a zero-length feed.
+func TestDartDecoderAsksTheStreamForItsVerdict(t *testing.T) {
+	out := genFor(t, exampleDef, map[string]any{})
+	for _, want := range []string{
+		// feed forwards and nothing more.
+		"  sofab.DecodeStatus feed(List<int> chunk) => _d.feed(chunk);",
+		"  Myfirstmessage? finish() =>",
+		"      _d.feed(const <int>[]) == sofab.DecodeStatus.complete ? _out : null;",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("generated decoder missing %q (generator#555)", want)
+		}
+	}
+	for _, gone := range []string{
+		"sofab.DecodeStatus _st",
+		"_st = _d.feed",
+		"get status",
+		"dec.status",
+	} {
+		if strings.Contains(out, gone) {
+			t.Errorf("generated code still carries the removed status copy %q (generator#555)", gone)
+		}
+	}
+}

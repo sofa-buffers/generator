@@ -154,7 +154,8 @@ void main() {
     }
     final fin = dec.finish();
     if (fin == null) {
-      _fail('streaming decode(chunk=$chunkLen): ${dec.status.name}, '
+      _fail('streaming decode(chunk=$chunkLen): '
+          '${dec.feed(const <int>[]).name}, '
           'expected complete');
       continue;
     }

@@ -160,28 +160,22 @@ class ScalarsDecoder {
 
   final Scalars _out;
   late final sofab.Decoder _d;
-  sofab.DecodeStatus _st = sofab.DecodeStatus.complete;
 
   /// Feeds the next chunk, of any size. `complete` means the bytes ended on
   /// a field boundary, `incomplete` mid-field -- neither answers whether the
-  /// MESSAGE is done. `invalid` is terminal.
-  sofab.DecodeStatus feed(List<int> chunk) {
-    _st = _d.feed(chunk);
-    return status;
-  }
-
-  /// The outcome for everything fed so far, without feeding more.
-  sofab.DecodeStatus get status => _st;
+  /// MESSAGE is done. `invalid` and `limitExceeded` are terminal: every
+  /// later feed returns the same outcome without looking at a byte.
+  sofab.DecodeStatus feed(List<int> chunk) => _d.feed(chunk);
 
   /// The destination, holding whatever has been decoded so far.
   Scalars get message => _out;
 
   /// Takes the decoded message once the caller's framing says the input is
   /// over. Returns null if the stream ended mid-field or was rejected, so a
-  /// half-filled value is never mistaken for a whole one; read [status] for
-  /// which it was, or [message] to get it anyway.
+  /// half-filled value is never mistaken for a whole one; the outcome
+  /// [feed] returned says which it was, or read [message] to get it anyway.
   Scalars? finish() =>
-      status == sofab.DecodeStatus.complete ? _out : null;
+      _d.feed(const <int>[]) == sofab.DecodeStatus.complete ? _out : null;
 }
 
 class _ScalarsVisitor extends sofab.VisitorBase {
