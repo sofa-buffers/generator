@@ -1,8 +1,0 @@
-# Corelib branches this branch is developed against (docs/CI.md).
-# Delete before merging: every entry pins a corelib to unmerged code.
-#
-# Generated TypeScript fills an fp32 array through the `f32` destination, which
-# is bit-exact for a signaling NaN only from corelib-ts#188 (24437b9) on; against
-# corelib main the conformance fp32 NaN legs would see a quieted NaN. lang-typescript
-# stays pinned until that PR merges; then drop this line (docs/CI.md "Merge order").
-SOFAB_CORELIB_TS_REF=perf/arena-regression-2026-09
