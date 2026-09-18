@@ -45,3 +45,39 @@ d = Telemetry.decoder(reassembly=MAX_FIELD_SPAN + (1 << 20))
 The one-shot `Telemetry.decode(data)` needs neither: a message fed in a single
 call never touches the buffer, so it is built with `MAX_FIELD_SPAN` — the most a
 *truncated* message can leave behind.
+
+## When a streamed message fills in
+
+Part of a message is decoded through a *destination table*: the corelib writes
+those fields straight into storage the module owns, without a Python callback per
+field, and one pass moves them onto the dataclass. That pass runs when a decode
+**completes**.
+
+For `decode(data)` nothing is observable — it returns a finished message or
+raises. For the streaming reader it means `.message` fills in from two directions:
+
+```python
+d = Telemetry.decoder()
+d.feed(first)          # INCOMPLETE — fields the visitor handles are already there
+d.feed(rest)           # COMPLETE   — the table's fields land now, all at once
+d.message              # the whole message, either way
+```
+
+A message that never completes therefore shows only the part the visitor handled.
+Nothing is lost: a decode short of COMPLETE has no finished message to report, and
+both refusals still surface as `SofaDecodeError` / `SofaIncompleteError`.
+
+Which fields go which way follows from the schema, not from a setting. Every
+scalar rides the table — the narrow integers, `enum` and `bitfield` included,
+whose declared width the table states and the decoder checks — as do `string`,
+`blob`, native arrays with a declared `count` of at most 32, and whole nested
+structs and unions. What stays on the visitor is an array the schema leaves
+unbounded or declares longer than 32, an array of strings, blobs, structs, unions
+or arrays, and any struct or union that contains one. A class with fewer than
+three table-carried fields uses none at all; a class the table covers completely
+needs no visitor behaviour at all.
+
+The array limit is a cost, not a rule: an array on the table is written element by
+element into slots and then built into the list your dataclass holds, so past a
+few dozen elements the second pass costs more than the callback it saved — and the
+slots are reserved whether the array arrives or not.

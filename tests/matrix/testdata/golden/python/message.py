@@ -2,7 +2,7 @@
 from __future__ import annotations
 from dataclasses import dataclass, field
 from enum import IntEnum, IntFlag
-from sofab import Decoder, Encoder, Field, FixlenSubtype, SofaDecodeError, SofaIncompleteError, Status, Visitor
+from sofab import Binding, Decoder, Encoder, SofaDecodeError, SofaIncompleteError, Status, Visitor
 
 # Bytes of reassembly space, derived from the schema and the decode limits.
 #
@@ -130,8 +130,13 @@ class Scalars:
     def decoder(cls, reassembly: int = REASSEMBLY) -> _StreamDecoder:
         """The streaming reader: feed it chunks of any size.
 
-        The half-built message is on ``.message`` throughout; each ``feed``
-        returns the outcome for the bytes so far.
+        Each ``feed`` returns the outcome for the bytes so far, and
+        ``.message`` carries what has arrived.
+
+        The fields this class decodes through its destination table land
+        there in one pass, when a feed returns COMPLETE; the rest appear as
+        they arrive. So a half-built message shows part of itself, and a
+        finished one shows all of it.
 
         ``reassembly`` is where a construct split across two chunks is
         joined. The default holds this schema's largest single value plus
@@ -154,16 +159,27 @@ class Scalars:
         INCOMPLETE stays distinguishable from INVALID.
         """
         o = cls()
-        d = Decoder(visitor=_ScalarsVisitor(o), max_dyn_array_count=65536, max_dyn_string_len=1048576, max_dyn_blob_len=4194304,
+        v = _ScalarsVisitor(o)
+        d = Decoder(visitor=v, max_dyn_array_count=65536, max_dyn_string_len=1048576, max_dyn_blob_len=4194304,
                     reassembly=MAX_FIELD_SPAN)
         st = d.feed(data)
         if st is Status.INVALID:
             raise SofaDecodeError(d.error or "invalid message")
         if st is Status.INCOMPLETE:
             raise SofaIncompleteError(d.error or "truncated message")
+        # COMPLETE, so the destination table's slots are final: one pass
+        # moves them onto the message. It runs AFTER the two refusals, so
+        # a decode that did not complete builds nothing.
+        v.scatter()
         return o
 
 # --- decode ---------------------------------------------------------------
+
+# The slot value that says a field never arrived. Storage a destination table
+# writes into starts filled with it, and the decoder overwrites only what the
+# wire carried, so a slot still holding it is a field the message omitted --
+# which is how absence is reported without inventing a value for it.
+_ABSENT = 0xFFFFFFFFFFFFFFFF
 
 class _StreamDecoder:
     """Streaming reader: feed chunks, read the message when it is COMPLETE.
@@ -179,102 +195,101 @@ class _StreamDecoder:
     and feeding an empty chunk asks again.
     """
 
-    __slots__ = ("message", "_d")
+    __slots__ = ("message", "_d", "_v")
 
     def __init__(self, msg_cls, vis_cls, reassembly=REASSEMBLY) -> None:
         self.message = msg_cls()
-        self._d = Decoder(visitor=vis_cls(self.message), max_dyn_array_count=65536, max_dyn_string_len=1048576, max_dyn_blob_len=4194304,
+        self._v = vis_cls(self.message)
+        self._d = Decoder(visitor=self._v, max_dyn_array_count=65536, max_dyn_string_len=1048576, max_dyn_blob_len=4194304,
                           reassembly=reassembly)
 
     def feed(self, chunk) -> Status:
-        return self._d.feed(chunk)
+        st = self._d.feed(chunk)
+        if st is Status.COMPLETE:
+            # The fields the destination table carries land on the message
+            # here, in one pass, rather than one callback at a time during
+            # the walk. Everything the visitor handles is already on it.
+            self._v.scatter()
+        return st
 
     @property
     def error(self):
         return self._d.error
 
-# Dispatch locations for Scalars: one per sequence-framed scope in its tree.
-# A field id is only unique WITHIN a scope -- a nested sequence opens a fresh
-# id space -- so the visitor below keys every hook on (location, id).
-_L_Scalars = 0
+# Destination table for Scalars: where the decoder writes the fields it can place
+# without calling back into Python. Built once, at import -- a Binding is a
+# build-once artifact and every decoder over it reuses the compiled map.
+#
+# What is not here is on the visitor below: a value whose declared width an
+# entry cannot carry (u8..u32, i8..i32, a narrow enum/bitfield), an array the
+# schema leaves unbounded, and every wrapper-sequence array.
+_BIND_Scalars = (Binding(closed=True)
+    .unsigned(0, at=0, count_at=1, max_value=255)
+    .unsigned(1, at=2, count_at=3, max_value=255)
+    .unsigned(2, at=4, count_at=5)
+    .signed(3, at=6, count_at=7, min_value=-128, max_value=127)
+    .signed(4, at=8, count_at=9)
+    .float32(5, at=10, count_at=11)
+    .float64(6, at=12, count_at=13)
+    .boolean(7, at=14, count_at=15)
+)
+_W_Scalars = _BIND_Scalars.tree_words_required
+_O_Scalars = _BIND_Scalars.tree_objects_required
+# Every slot starts at ALL ONES, which no arrival can write: an array's count
+# slot holds its element count and every other kind's holds 1. That is what
+# tells a field that never arrived from one that arrived EMPTY -- an empty
+# array replaces the default, and a zero count slot could not say so.
+_FILL_Scalars = b"\xff" * (_W_Scalars * 8)
 
 class _ScalarsVisitor(Visitor):
-    """Flat decode visitor for :class:`Scalars`.
+    """Decode handler for :class:`Scalars`: a destination table and nothing else.
 
-    corelib-py's visitor is flat -- one object receives every callback at every
-    depth -- so the current scope is tracked here, in ``_c``, over the stack
-    ``_s`` that ``on_sequence_begin`` / ``on_sequence_end`` maintain.
+    Every id this schema declares is on the table, so the decoder writes each
+    value straight into a slot and calls nothing here. An id the schema does
+    not declare is skipped by the codec -- the table is ``closed`` -- which is
+    also what keeps an unknown id inside a nested scope from being mistaken
+    for a field of the scope around it.
     """
 
     def __init__(self, o: Scalars) -> None:
         self._o = o
-        self._c = _L_Scalars
-        self._s: list[int] = []
+        self._w = bytearray(_FILL_Scalars)
+        self._ob: list = []
+        # Typed views over the one buffer: no copy, no second buffer.
+        self._vu = memoryview(self._w).cast("Q")
+        self._vs = memoryview(self._w).cast("q")
+        self._vf = memoryview(self._w).cast("d")
 
-    def on_sequence_begin(self, fid: int) -> bool:
-        c = self._c
-        return False
+    def destinations(self):
+        """Where the decoder is to put the fields this table names.
 
-    def on_sequence_end(self) -> None:
-        if self._s:
-            self._c = self._s.pop()
+        Asked once, when the Decoder is built, so nothing the wire says can
+        change it. A field the table names is written straight into its slot
+        and NO hook fires for it -- not the typed one, not ``on_field``, not
+        ``on_schema_bound``, whose bound rides the entry instead.
 
-    def on_unsigned(self, fid: int, value: int) -> None:
-        c = self._c
-        if c == _L_Scalars:
-            if fid == 0:
-                if value > 255:
-                    raise SofaDecodeError("u8min: value outside declared width u8")
-                self._o.u8min = value
-            elif fid == 1:
-                if value > 255:
-                    raise SofaDecodeError("u8max: value outside declared width u8")
-                self._o.u8max = value
-            elif fid == 2:
-                self._o.u64max = value
-            elif fid == 7:
-                self._o.flag = bool(value)
-
-    def on_signed(self, fid: int, value: int) -> None:
-        c = self._c
-        if c == _L_Scalars:
-            if fid == 3:
-                if value < -128 or value > 127:
-                    raise SofaDecodeError("i8min: value outside declared width i8")
-                self._o.i8min = value
-            elif fid == 4:
-                self._o.i64min = value
-
-    def on_float32(self, fid: int, value: float) -> None:
-        c = self._c
-        if c == _L_Scalars:
-            if fid == 5:
-                self._o.f32 = value
-
-    def on_float64(self, fid: int, value: float) -> None:
-        c = self._c
-        if c == _L_Scalars:
-            if fid == 6:
-                self._o.f64 = value
-
-    def on_field(self, fld: Field) -> bool:
-        """Accept or decline a field at its HEADER, before its value is read.
-
-        An id is declined when the header's wire type -- or, for a fixlen one,
-        its subtype -- is not the one its declared type maps to. Such a field is
-        SKIPPED, exactly like an unknown id, so neither the bound
-        ``on_schema_bound`` declares nor a receiver-side cap may reach it.
-
-        An id this scope does not declare AT ALL is declined for the same
-        reason: it is not a field this handler reads, so it is walked rather
-        than materialized, and no receiver cap may reach it. A decode that
-        steps over an over-cap field it does not want stays COMPLETE.
+        The table is ``closed``, so an id it does not name is skipped by the
+        codec: nothing reaches this class at all.
         """
-        c = self._c
-        if c == _L_Scalars:
-            if fld.id not in {0, 1, 2, 3, 4, 5, 6, 7}:
-                return False  # an id this scope does not declare is walked, not read
-            if fld.subtype is not None and fld.subtype >= FixlenSubtype.STRING:
-                return False  # a string/blob payload here is not this scope's: skip it, never materialize it (S6.4.5)
-        return True
+        return (_BIND_Scalars, self._w, self._ob)
+
+    def scatter(self) -> None:
+        """Move the table's slots onto the message.
+
+        Called when the decode completes. A slot no field arrived in leaves
+        the dataclass default standing, which is how absence is reported
+        without inventing a sentinel value for it.
+        """
+        m = self._o
+        U = self._vu
+        S = self._vs
+        F = self._vf
+        if U[1] != _ABSENT: m.u8min = U[0]
+        if U[3] != _ABSENT: m.u8max = U[2]
+        if U[5] != _ABSENT: m.u64max = U[4]
+        if U[7] != _ABSENT: m.i8min = S[6]
+        if U[9] != _ABSENT: m.i64min = S[8]
+        if U[11] != _ABSENT: m.f32 = F[10]
+        if U[13] != _ABSENT: m.f64 = F[12]
+        if U[15] != _ABSENT: m.flag = U[14] != 0
 

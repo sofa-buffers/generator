@@ -205,7 +205,7 @@ func (g *gen) emitJSONCodec(f *dfile, typeName string, fields []*ir.Field) {
 	f.line("  final m = %s();", typeName)
 	for _, fld := range fields {
 		key := dartStringLit(fld.Name)
-		f.line("  if (j.containsKey(%s)) { m.%s = %s; }", key, dartIdent(fld.Name), g.jsonFrom(fld, "j["+key+"]"))
+		f.line("  if (j.containsKey(%s)) { %s }", key, g.jsonFromStmt(fld, "m."+dartIdent(fld.Name), "j["+key+"]"))
 	}
 	f.line("  return m;")
 	f.line("}")
@@ -244,41 +244,82 @@ func (g *gen) jsonTo(fld *ir.Field, acc string) string {
 			return u64ToJSON(acc)
 		}
 		return acc
-	case ir.KindU8, ir.KindU16, ir.KindU32,
-		ir.KindI8, ir.KindI16, ir.KindI32, ir.KindI64,
-		ir.KindEnum, ir.KindFP32, ir.KindFP64, ir.KindBool, ir.KindString:
-		return acc
-	case ir.KindBlob:
-		return acc + ".toList()"
+	case ir.KindString, ir.KindBlob:
+		return destToJSON(fld.Kind, fld.Kind, nil, acc)
 	case ir.KindStruct, ir.KindUnion:
 		return fmt.Sprintf("_toJson%s(%s)", g.typeName(fld.Ref.Key), acc)
 	case ir.KindArray:
+		if nativeArrayElem(fld.Elem) {
+			return destToJSON(ir.KindArray, fld.Elem, fld.ElemRef, acc)
+		}
 		return g.arrayElemToJSON(fld.Elem, fld.ElemRef, fld.ElemItems, acc)
 	}
 	return acc
 }
 
+// destToJSON is the JSON value of a destination `acc`: a string's text, a
+// blob's bytes, or the `length` elements in use of a native array (or matrix
+// row) of `elem` -- a bool array's as booleans, a u64 array's as decimal strings.
+func destToJSON(kind, elem ir.Kind, ref *ir.TypeRef, acc string) string {
+	switch {
+	case kind == ir.KindString:
+		return acc + ".toString()"
+	case kind == ir.KindBlob:
+		return acc + ".toBytes().toList()"
+	case elem == ir.KindBool:
+		return fmt.Sprintf("[for (var _k = 0; _k < %s.length; _k++) %s.storage[_k] != 0]", acc, acc)
+	case elem == ir.KindU64 || (elem == ir.KindBitfield && wideBitfield(ref)):
+		return fmt.Sprintf("[for (var _k = 0; _k < %s.length; _k++) %s]", acc, u64ToJSON(acc+".storage[_k]"))
+	}
+	return acc + ".toList()"
+}
+
 func (g *gen) arrayElemToJSON(elem ir.Kind, ref *ir.TypeRef, items *ir.ArrayElem, acc string) string {
 	switch elem {
-	case ir.KindU64:
-		return fmt.Sprintf("[for (final _x in %s) %s]", acc, u64ToJSON("_x"))
-	case ir.KindBitfield:
-		if wideBitfield(ref) {
-			return fmt.Sprintf("[for (final _x in %s) %s]", acc, u64ToJSON("_x"))
-		}
-		return acc
-	case ir.KindBlob:
-		return fmt.Sprintf("[for (final _x in %s) _x.toList()]", acc)
+	case ir.KindString, ir.KindBlob:
+		return fmt.Sprintf("[for (final _x in %s) %s]", acc, destToJSON(elem, elem, nil, "_x"))
 	case ir.KindStruct, ir.KindUnion:
 		return fmt.Sprintf("[for (final _x in %s) _toJson%s(_x)]", acc, g.typeName(ref.Key))
 	case ir.KindArray:
+		if nativeArrayElem(items.Elem) {
+			return fmt.Sprintf("[for (final _x in %s) %s]", acc, destToJSON(ir.KindArray, items.Elem, items.ElemRef, "_x"))
+		}
 		return fmt.Sprintf("[for (final _x in %s) %s]", acc, g.arrayElemToJSON(items.Elem, items.ElemRef, items.ElemItems, "_x"))
-	default: // int/enum/bool/fp/string pass through
-		return acc
 	}
+	return acc
 }
 
-// jsonFrom is the Dart expression building field `fld` from JSON accessor `jx`.
+// jsonFromStmt is the Dart statement setting field `acc` from JSON accessor
+// `jx`. A destination is filled in place (assign/assignString), since it is
+// `final`; every other field is assigned.
+func (g *gen) jsonFromStmt(fld *ir.Field, acc, jx string) string {
+	switch {
+	case fld.Kind == ir.KindString:
+		return fmt.Sprintf("%s.assignString(%s as String);", acc, jx)
+	case isDest(fld):
+		return fmt.Sprintf("%s.assign(%s);", acc, destElemsFromJSON(fld.Kind, fld.Elem, jx))
+	}
+	return fmt.Sprintf("%s = %s;", acc, g.jsonFrom(fld, jx))
+}
+
+// destElemsFromJSON is the element list a blob, native array or matrix row of
+// `elem` is filled from: bytes, integers (a bool as 0/1) or doubles.
+func destElemsFromJSON(kind, elem ir.Kind, jx string) string {
+	switch {
+	case kind == ir.KindBlob:
+		return fmt.Sprintf("<int>[for (final _b in (%s as List)) (_b as num).toInt()]", jx)
+	case elem == ir.KindBool:
+		return fmt.Sprintf("<int>[for (final _b in (%s as List)) (_b as bool) ? 1 : 0]", jx)
+	case elem == ir.KindFP32 || elem == ir.KindFP64:
+		return fmt.Sprintf("<double>[for (final _b in (%s as List)) (_b as num).toDouble()]", jx)
+	case elem == ir.KindU64 || elem == ir.KindBitfield:
+		return fmt.Sprintf("<int>[for (final _b in (%s as List)) %s]", jx, u64FromJSON("_b", true))
+	}
+	return fmt.Sprintf("<int>[for (final _b in (%s as List)) (_b as num).toInt()]", jx)
+}
+
+// jsonFrom is the Dart expression building a non-destination field `fld` from
+// JSON accessor `jx`.
 func (g *gen) jsonFrom(fld *ir.Field, jx string) string {
 	switch fld.Kind {
 	// A bitfield is a 64-bit UNSIGNED mask, so it reads the way u64 does. Its
@@ -294,10 +335,6 @@ func (g *gen) jsonFrom(fld *ir.Field, jx string) string {
 		return fmt.Sprintf("(%s as num).toDouble()", jx)
 	case ir.KindBool:
 		return fmt.Sprintf("%s as bool", jx)
-	case ir.KindString:
-		return fmt.Sprintf("%s as String", jx)
-	case ir.KindBlob:
-		return fmt.Sprintf("Uint8List.fromList([for (final _b in (%s as List)) (_b as num).toInt()])", jx)
 	case ir.KindStruct, ir.KindUnion:
 		return fmt.Sprintf("_fromJson%s(%s as Map<String, dynamic>)", g.typeName(fld.Ref.Key), jx)
 	case ir.KindArray:
@@ -307,24 +344,19 @@ func (g *gen) jsonFrom(fld *ir.Field, jx string) string {
 	return jx
 }
 
+// arrayElemFromJSON builds one element of a wrapper array from JSON local `jx`.
 func (g *gen) arrayElemFromJSON(elem ir.Kind, ref *ir.TypeRef, items *ir.ArrayElem, jx string) string {
 	switch elem {
-	// jx is the comprehension's own local (`_x` / `_y`), which promotes.
-	case ir.KindU64, ir.KindBitfield: // unsigned 64-bit, as in jsonFrom above
-		return u64FromJSON(jx, true)
-	case ir.KindU8, ir.KindU16, ir.KindU32, ir.KindI8, ir.KindI16, ir.KindI32, ir.KindI64, ir.KindEnum:
-		return fmt.Sprintf("(%s as num).toInt()", jx)
-	case ir.KindFP32, ir.KindFP64:
-		return fmt.Sprintf("(%s as num).toDouble()", jx)
-	case ir.KindBool:
-		return fmt.Sprintf("%s as bool", jx)
 	case ir.KindString:
-		return fmt.Sprintf("%s as String", jx)
+		return fmt.Sprintf("sofab.InlineString.of(%s as String)", jx)
 	case ir.KindBlob:
-		return fmt.Sprintf("Uint8List.fromList([for (final _b in (%s as List)) (_b as num).toInt()])", jx)
+		return fmt.Sprintf("sofab.InlineBytes.of(%s)", destElemsFromJSON(ir.KindBlob, elem, jx))
 	case ir.KindStruct, ir.KindUnion:
 		return fmt.Sprintf("_fromJson%s(%s as Map<String, dynamic>)", g.typeName(ref.Key), jx)
 	case ir.KindArray:
+		if nativeArrayElem(items.Elem) {
+			return fmt.Sprintf("%s.of(%s)", inlineArrayType(items.Elem), destElemsFromJSON(ir.KindArray, items.Elem, jx))
+		}
 		inner := g.dartArrayElemType(items.Elem, items.ElemRef, items.ElemItems)
 		return fmt.Sprintf("<%s>[for (final _y in (%s as List)) %s]", inner, jx, g.arrayElemFromJSON(items.Elem, items.ElemRef, items.ElemItems, "_y"))
 	}

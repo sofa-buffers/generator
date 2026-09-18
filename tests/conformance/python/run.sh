@@ -1049,4 +1049,59 @@ done
 unset SOFAB_PUREPYTHON || true
 if [ "$NATIVE" = yes ]; then require_engine native; else require_engine python; fi
 
+# The DESTINATION TABLE (ARCHITECTURE §9.5.1, generator#561): part of a class is
+# decoded through a corelib-py `Binding` instead of through the visitor's hooks,
+# and the two run in one decoder. A round-trip cannot see the difference -- which
+# is the point of the change and the reason it needs a check of its own.
+#
+# The schema is written here rather than reused, because the cases need a shape no
+# example carries: a struct whose member id COLLIDES with a message id (3), so an
+# unknown id inside a scope the table entered would land in the root's field if the
+# backend's descent rule ever slipped; an array with a non-empty DEFAULT, so an
+# empty one on the wire has something to replace; enough bindable fields that the
+# table is emitted at all (three is the floor); and a pair of scopes whose PATHS
+# spell the same name -- `dup.inner` and the sibling `dup_inner` -- because a scope
+# name is what both the dispatch location and the table are named after, and a
+# duplicate would hand two scopes one Binding; and a wrapper array whose ELEMENT
+# declares a nested struct at a low id followed by a field whose id the ROOT table
+# also names, which is the one shape that catches a codec restoring the enclosing
+# table too early (corelib-py#152).
+echo "==> destination table: the same message the visitor would have built (generator#561)"
+cat > "$WORK/table.yaml" <<'YAML'
+version: 1
+messages:
+  E:
+    payload:
+      tag:   { id: 3, type: u64 }
+      ratio: { id: 4, type: fp64 }
+      name:  { id: 5, type: string, maxlen: 16 }
+      inner: { id: 6, type: struct, fields: { a: { id: 3, type: u64 }, b: { id: 4, type: fp64 } } }
+      nums:  { id: 7, type: array, items: { type: u32, count: 4 }, default: [9, 9, 9] }
+      dup:   { id: 8, type: struct, fields: { inner: { id: 0, type: struct, fields: { k: { id: 0, type: u64 } } } } }
+      dup_inner: { id: 9, type: struct, fields: { k: { id: 0, type: u64 } } }
+      rows:
+        id: 10
+        type: array
+        items:
+          type: struct
+          count: 4
+          fields:
+            when:  { id: 1, type: struct, fields: { k: { id: 0, type: u64 } } }
+            ratio: { id: 4, type: fp64 }
+YAML
+( cd "$ROOT" && go run ./cmd/sofabgen --config "$WORK/cfg.yaml" --lang python --in "$WORK/table.yaml" --out "$WORK/table" >/dev/null )
+grep -q "destinations" "$WORK/table/message.py" || {
+    echo "FAIL: this schema must emit a destination table, or the check below proves nothing"; exit 1; }
+# BOTH engines: the accelerator carries its own copy of the mapped-field path
+# (_mapped_field in _speedups.pyx), so a pure-only run leaves the half that ships
+# in a wheel unmeasured.
+for ENGINE in $ENGINES; do
+    if [ "$ENGINE" = python ]; then export SOFAB_PUREPYTHON=1; else unset SOFAB_PUREPYTHON || true; fi
+    require_engine "$ENGINE"
+    python3 "$ROOT/tests/conformance/python/destination_table_check.py" "$WORK/table" "$ENGINE" \
+        || { echo "FAIL: [$ENGINE] the destination table did not build the message the visitor would have"; exit 1; }
+done
+unset SOFAB_PUREPYTHON || true
+if [ "$NATIVE" = yes ]; then require_engine native; else require_engine python; fi
+
 echo "PASS"

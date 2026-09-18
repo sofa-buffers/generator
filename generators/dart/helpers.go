@@ -172,8 +172,12 @@ func emitDoc(f *dfile, indent, text string) {
 // ---- type mapping ---------------------------------------------------------
 
 // dartType is the Dart storage type of a field. All integer widths map to `int`
-// (Dart has one 64-bit int), floats to `double`, blob to `Uint8List`, arrays to
-// `List<...>`, and composites to their generated class.
+// (Dart has one 64-bit int), floats to `double`, composites to their generated
+// class. Every field whose payload the codec writes in place -- a string, a blob,
+// a native array -- is one of corelib-dart's `Inline…` destinations: storage of a
+// fixed capacity plus the length in use (CORELIB_PLAN §6.6.3), which the codec
+// fills at the field header without a copy, a view or a per-message allocation.
+// A wrapper array is a List of its elements' types.
 func (g *gen) dartType(f *ir.Field) string {
 	switch f.Kind {
 	case ir.KindU8, ir.KindU16, ir.KindU32, ir.KindU64,
@@ -184,38 +188,60 @@ func (g *gen) dartType(f *ir.Field) string {
 	case ir.KindBool:
 		return "bool"
 	case ir.KindString:
-		return "String"
+		return "sofab.InlineString"
 	case ir.KindBlob:
-		return "Uint8List"
+		return "sofab.InlineBytes"
 	case ir.KindStruct, ir.KindUnion:
 		return g.typeName(f.Ref.Key)
 	case ir.KindArray:
+		if nativeArrayElem(f.Elem) {
+			return inlineArrayType(f.Elem)
+		}
 		return "List<" + g.dartArrayElemType(f.Elem, f.ElemRef, f.ElemItems) + ">"
 	}
 	return "Object?"
 }
 
-// dartArrayElemType is the Dart type of an array element, recursing for nested
-// arrays.
+// isDest reports whether a field is held in an `Inline…` destination: a
+// string, a blob or a native array. Such a field is `final` -- the codec writes
+// into its storage, and a caller changes the value through `assign` rather than
+// by replacing the object.
+func isDest(f *ir.Field) bool {
+	return f.Kind == ir.KindString || f.Kind == ir.KindBlob ||
+		(f.Kind == ir.KindArray && nativeArrayElem(f.Elem))
+}
+
+// inlineArrayType is the destination type of a native array (or matrix row) of
+// `elem`: every integer kind -- bool, enum and bitfield included -- decodes to
+// 64-bit elements, which is what both integer array wire types carry (§4.7).
+func inlineArrayType(elem ir.Kind) string {
+	switch elem {
+	case ir.KindFP32:
+		return "sofab.InlineFloat32Array"
+	case ir.KindFP64:
+		return "sofab.InlineFloat64Array"
+	}
+	return "sofab.InlineInt64Array"
+}
+
+// dartArrayElemType is the Dart type of a WRAPPER array's element, recursing for
+// nested arrays. A string/blob element and a native matrix row are destinations
+// the corelib collectors decode in place.
 func (g *gen) dartArrayElemType(elem ir.Kind, ref *ir.TypeRef, items *ir.ArrayElem) string {
 	switch elem {
 	case ir.KindString:
-		return "String"
+		return "sofab.InlineString"
 	case ir.KindBlob:
-		return "Uint8List"
-	case ir.KindBool:
-		return "bool"
-	case ir.KindFP32, ir.KindFP64:
-		return "double"
-	case ir.KindEnum, ir.KindBitfield:
-		return "int"
+		return "sofab.InlineBytes"
 	case ir.KindStruct, ir.KindUnion:
 		return g.typeName(ref.Key)
 	case ir.KindArray:
+		if nativeArrayElem(items.Elem) {
+			return inlineArrayType(items.Elem)
+		}
 		return "List<" + g.dartArrayElemType(items.Elem, items.ElemRef, items.ElemItems) + ">"
-	default: // numeric integer
-		return "int"
 	}
+	return inlineArrayType(elem)
 }
 
 // ---- field initializers (Dart requires non-nullable fields be initialized) --
@@ -224,27 +250,28 @@ func (g *gen) dartArrayElemType(elem ir.Kind, ref *ir.TypeRef, items *ir.ArrayEl
 // schema default (or the type-zero). Every field is initialized so a decoded-
 // from-omitted field reconstructs its default (sparse-canonical, MESSAGE_SPEC S2)
 // and marshal can compare against the same value.
+//
+// A destination is sized ONCE, here, to the schema bound -- the storage every
+// later decode into this object reuses (see initialCap for the exceptions).
 func (g *gen) dartInit(f *ir.Field) string {
 	switch f.Kind {
 	case ir.KindStruct, ir.KindUnion:
 		return " = " + g.typeName(f.Ref.Key) + "()"
 	case ir.KindArray:
-		if lit, ok := g.dartArrayLiteral(f); ok {
-			return " = " + lit
+		if nativeArrayElem(f.Elem) {
+			ctor := fmt.Sprintf("%s(%d%s)", inlineArrayType(f.Elem), initialCap(f), g.rangeArg(f.Elem, f.ElemRef))
+			if def, ok := defaultRef(f); ok {
+				return fmt.Sprintf(" = %s..assign(%s)", ctor, def)
+			}
+			return " = " + ctor
 		}
 		return " = <" + g.dartArrayElemType(f.Elem, f.ElemRef, f.ElemItems) + ">[]"
-	case ir.KindString:
-		if s, ok := f.Default.(string); ok {
-			return " = " + dartStringLit(s)
+	case ir.KindString, ir.KindBlob:
+		ctor := fmt.Sprintf("%s(%d)", g.dartType(f), initialCap(f))
+		if def, ok := defaultRef(f); ok {
+			return fmt.Sprintf(" = %s..assign(%s)", ctor, def)
 		}
-		return ` = ''`
-	case ir.KindBlob:
-		if s, ok := f.Default.(string); ok {
-			if raw, err := base64.StdEncoding.DecodeString(strings.Join(strings.Fields(s), "")); err == nil && len(raw) > 0 {
-				return fmt.Sprintf(" = Uint8List.fromList(<int>[%s])", byteList(raw))
-			}
-		}
-		return " = Uint8List(0)"
+		return " = " + ctor
 	case ir.KindBool:
 		if b, ok := f.Default.(bool); ok && b {
 			return " = true"
@@ -273,51 +300,210 @@ func (g *gen) dartInit(f *ir.Field) string {
 	}
 }
 
-// dartDefaultValue is the value a scalar/string/enum/bitfield field is compared
-// against for omission on marshal — exactly its initializer's RHS.
+// eagerDestBytes is the largest destination sized to its schema bound when the
+// object is built. Up to it, the one allocation at construction is the whole
+// cost: the header call just hands the storage over, and a reused object never
+// allocates again. Past it, sizing up front would make every fresh object --
+// every one-shot decode() -- zero the schema MAXIMUM whether the field is on the
+// wire or not (an `array<i32, count: 100000>` is 800 KB), so such a field starts
+// empty like an unbounded one and is grown to the count at its header.
+const eagerDestBytes = 1024
+
+// destBound is a destination field's schema bound -- `maxlen` for a string or
+// blob, `count` for a native array -- and whether the schema declares one.
+func destBound(f *ir.Field) (int64, bool) {
+	if f.Kind == ir.KindArray {
+		return f.Count, f.HasCount
+	}
+	return f.Maxlen, f.HasMaxlen
+}
+
+// destElemBytes is the storage one element of a destination field takes.
+func destElemBytes(f *ir.Field) int64 {
+	switch {
+	case f.Kind != ir.KindArray: // string / blob bytes
+		return 1
+	case f.Elem == ir.KindFP32:
+		return 4
+	}
+	return 8 // Int64List / Float64List
+}
+
+// eagerDest reports whether a destination is sized to its schema bound at
+// construction (see eagerDestBytes); false for an unbounded field and for one
+// whose bound is too large to pay for on every fresh object.
+func eagerDest(f *ir.Field) bool {
+	n, ok := destBound(f)
+	return ok && n*destElemBytes(f) <= eagerDestBytes
+}
+
+// initialCap is a destination's capacity at construction: its schema bound when
+// eagerDest, else 0 -- grown at the header, once the bound has been checked.
+func initialCap(f *ir.Field) int64 {
+	if eagerDest(f) {
+		n, _ := destBound(f)
+		return n
+	}
+	return 0
+}
+
+// rangeArg is the `range:` argument of an integer array destination: the
+// declared element width (or the one an enum/bitfield implies, MESSAGE_SPEC §1),
+// which the codec applies to every element as it is decoded -- on both decode
+// surfaces, and ahead of a truncated tail (§5.2, generator#267). "" where no
+// interval narrows the 64-bit element.
+func (g *gen) rangeArg(elem ir.Kind, ref *ir.TypeRef) string {
+	lo, hi, ok := elemRange(elem, ref)
+	if !ok {
+		return ""
+	}
+	return fmt.Sprintf(", range: const sofab.ElemRange(%d, %d)", lo, hi)
+}
+
+// dartDefaultValue is the value a scalar/enum/bitfield field is compared
+// against for omission on marshal -- exactly its initializer's RHS.
 func (g *gen) dartDefaultValue(f *ir.Field) string {
 	init := g.dartInit(f)
 	return strings.TrimPrefix(init, " = ")
 }
 
-// dartArrayLiteral renders a native scalar array field's schema default as a
-// Dart list literal; ("", false) for a wrapper-sequence array or an array with
-// no declared default.
+// defaultRef names the class-level typed list (defaultDecl) holding the declared
+// default of a destination field -- the one value its storage is filled from at
+// construction and on reset(), and compared against for omission. ("", false)
+// when no non-empty default is declared: an empty default is the destination's
+// zero state already.
+//
+// A typed list rather than a `const <int>[]` literal, because that is what makes
+// the fill cheap: `assign` copies it with setRange, which is a memmove between
+// two typed lists of one element type and an element-by-element walk from a
+// plain List -- once per defaulted field of every object built, the bench row's
+// struct-array elements included.
+func defaultRef(f *ir.Field) (string, bool) {
+	if !hasDestDefault(f) {
+		return "", false
+	}
+	return "_" + dartIdent(f.Name) + "Default", true
+}
+
+// defaultDecl is the static declaration defaultRef names.
+func (g *gen) defaultDecl(f *ir.Field) string {
+	ref, _ := defaultRef(f)
+	lit, _ := g.defaultLit(f)
+	t := storageType(f)
+	return fmt.Sprintf("static final %s %s = %s.fromList(%s);", t, ref, t, lit)
+}
+
+// hasDestDefault reports whether a destination field declares a non-empty
+// default (see defaultLit).
+func hasDestDefault(f *ir.Field) bool {
+	switch f.Kind {
+	case ir.KindString:
+		s, ok := f.Default.(string)
+		return ok && s != ""
+	case ir.KindBlob:
+		s, ok := f.Default.(string)
+		if !ok {
+			return false
+		}
+		raw, err := base64.StdEncoding.DecodeString(strings.Join(strings.Fields(s), ""))
+		return err == nil && len(raw) > 0
+	case ir.KindArray:
+		vals, ok := f.Default.([]any)
+		return nativeArrayElem(f.Elem) && ok && len(vals) > 0
+	}
+	return false
+}
+
+// defaultLit renders the declared default of a destination field -- a string, a
+// blob or a native array -- as the element literal defaultDecl builds its typed
+// list from: the UTF-8 bytes of a string, the bytes of a blob, the elements of an
+// array (a bool array's as 0/1, the integers it is stored as). ("", false)
+// exactly where hasDestDefault is false.
 //
 // It is NOT padded to a declared `count: N`: that is a capacity, not a length
 // (MESSAGE_SPEC §3), so the default stands exactly as written -- and so does the
 // value it is compared against, which is what keeps a length-N all-zero array
-// distinct from the empty one. A count:N array with no declared default starts
-// EMPTY, like every other array.
-func (g *gen) dartArrayLiteral(f *ir.Field) (string, bool) {
-	if !nativeArrayElem(f.Elem) {
-		return "", false
+// distinct from the empty one.
+//
+// An fp32 array's elements are written as the exact double of their fp32
+// rounding (fp32Lit), so the literal says precisely what the Float32List built
+// from it -- and every element decoded into the field -- holds.
+func (g *gen) defaultLit(f *ir.Field) (string, bool) {
+	switch f.Kind {
+	case ir.KindString:
+		s, ok := f.Default.(string)
+		if !ok || s == "" {
+			return "", false
+		}
+		return fmt.Sprintf("const <int>[%s]", byteList([]byte(s))), true
+	case ir.KindBlob:
+		s, ok := f.Default.(string)
+		if !ok {
+			return "", false
+		}
+		raw, err := base64.StdEncoding.DecodeString(strings.Join(strings.Fields(s), ""))
+		if err != nil || len(raw) == 0 {
+			return "", false
+		}
+		return fmt.Sprintf("const <int>[%s]", byteList(raw)), true
+	case ir.KindArray:
+		if !nativeArrayElem(f.Elem) {
+			return "", false
+		}
+		vals, ok := f.Default.([]any)
+		if !ok || len(vals) == 0 {
+			return "", false
+		}
+		parts := make([]string, len(vals))
+		for i, v := range vals {
+			parts[i] = g.elemLit(f.Elem, v)
+		}
+		if f.Elem == ir.KindFP32 || f.Elem == ir.KindFP64 {
+			return fmt.Sprintf("const <double>[%s]", strings.Join(parts, ", ")), true
+		}
+		return fmt.Sprintf("const <int>[%s]", strings.Join(parts, ", ")), true
 	}
-	et := g.dartArrayElemType(f.Elem, f.ElemRef, f.ElemItems)
-	vals, ok := f.Default.([]any)
-	if !ok {
-		return "", false
-	}
-	parts := make([]string, len(vals))
-	for i, v := range vals {
-		parts[i] = g.elemLit(f.Elem, v)
-	}
-	return fmt.Sprintf("<%s>[%s]", et, strings.Join(parts, ", ")), true
+	return "", false
 }
 
-// elemLit renders one native-array element value as a Dart literal.
+// elemLit renders one native-array element value as a Dart literal, as the
+// destination stores it: a bool as 0/1.
 func (g *gen) elemLit(elem ir.Kind, v any) string {
 	switch elem {
 	case ir.KindBool:
 		if b, ok := v.(bool); ok && b {
-			return "true"
+			return "1"
 		}
-		return "false"
-	case ir.KindFP32, ir.KindFP64:
+		return "0"
+	case ir.KindFP32:
+		return fp32Lit(v)
+	case ir.KindFP64:
 		return floatLit(v)
 	default: // integer / enum / bitfield
 		return scalarLit(v)
 	}
+}
+
+// fp32Lit renders v rounded to fp32, as the exact double that rounding yields:
+// what an InlineFloat32Array element reads back as, so the literal and the
+// stored element compare equal.
+func fp32Lit(v any) string {
+	var fv float64
+	switch x := v.(type) {
+	case float64:
+		fv = x
+	case int:
+		fv = float64(x)
+	case int64:
+		fv = float64(x)
+	default:
+		return "0.0"
+	}
+	s := strconv.FormatFloat(float64(float32(fv)), 'g', -1, 64)
+	if !strings.ContainsAny(s, ".eEn") {
+		s += ".0"
+	}
+	return s
 }
 
 func (g *gen) bitfieldDefault(f *ir.Field) uint64 {
@@ -453,32 +639,6 @@ func signedArrayElem(k ir.Kind) bool {
 // (numeric/enum/boolean/bitfield) rather than a wrapper sequence.
 func nativeArrayElem(k ir.Kind) bool {
 	return unsignedArrayElem(k) || signedArrayElem(k) || k == ir.KindFP32 || k == ir.KindFP64
-}
-
-// wireArrayKind is the corelib `sofab.ArrayKind` an array of `k` elements is
-// announced under at onArrayBegin: integers (and bool/enum/bitfield) as
-// unsigned/signed by the backing type's signedness, floats by element WIDTH --
-// `fp32` and `fp64` are two DISTINCT kinds, never one collapsed "fixlen".
-//
-// That split is what makes the schema `count` bound implementable in the order
-// MESSAGE_SPEC §7.3 requires (CORELIB_PLAN §4.8, generator#259 / Crucible
-// F-0042). A fixlen array carries its element count BEFORE its element subtype,
-// so a header hook fired between the two words could only report "some fixlen
-// array": a receiver bounding `count` there would measure an fp64 header against
-// a declared fp32[N], a field the subtype says was never this field's value at
-// all. corelib-dart therefore fires onArrayBegin PAST the fixlen_word carrying
-// the real subtype, and the generated arm keys on it.
-func wireArrayKind(k ir.Kind) string {
-	switch {
-	case k == ir.KindFP32:
-		return "fp32"
-	case k == ir.KindFP64:
-		return "fp64"
-	case signedArrayElem(k):
-		return "signed"
-	default: // unsigned numeric, bool, bitfield
-		return "unsigned"
-	}
 }
 
 // seqArrayElem: an array element that lowers to a wrapper sequence

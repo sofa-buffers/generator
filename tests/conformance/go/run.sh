@@ -1179,6 +1179,16 @@ echo "==> decode ownership OK"
 echo "==> shared-vector byte-exact conformance"
 ( cd "$ROOT" && SOFAB_GO_CORELIB="$CORELIB" go test ./generators/golang/ -run "Conformance|Wire" -count=1 )
 
+# The encoder depth bound (sofab.WithMaxDepth) is a count the generator derives
+# from the IR; CI's plain `go test ./...` has no corelib and skips the check that
+# the bound is tight (N passes, N-1 refuses), so run it here against the corelib.
+echo "==> encoder depth bound (WithMaxDepth N passes, N-1 refuses)"
+DEPTH_OUT=$( cd "$ROOT" && SOFAB_GO_CORELIB="$CORELIB" go test ./generators/golang/ -run "MaxDepth" -count=1 -v 2>&1 ) \
+    || { echo "$DEPTH_OUT"; echo "FAIL: encoder depth bound"; exit 1; }
+echo "$DEPTH_OUT" | grep -E '^--- '
+echo "$DEPTH_OUT" | grep -q -- '--- PASS: TestGoEncodeMaxDepthRoundTrip' \
+    || { echo "$DEPTH_OUT"; echo "FAIL: TestGoEncodeMaxDepthRoundTrip did not run"; exit 1; }
+
 # ...and the decode direction (generator#444): each vector's DENSE bytes fed into
 # a message that declares u64 on the anchors and nothing else, so every other
 # field on the wire is an unknown id or a MESSAGE_SPEC S7.3 wire-type mismatch

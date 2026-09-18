@@ -113,6 +113,21 @@ int main()
         mustMatch("one-shot try_decode", want, got);
     }
 
+    // ---- 1b. one-shot decode(), same oracle ----------------------------
+    // decode() returns the message it decoded into a local IStreamObject by
+    // MOVING it out (a copy would allocate every container twice). The value
+    // must outlive both that stream and the input buffer. Block 1 already
+    // proved this sample decodes, so a best-effort decode that silently failed
+    // would re-encode to something other than `want` here.
+    {
+        auto *buf = new std::uint8_t[want.size()];
+        std::memcpy(buf, want.data(), want.size());
+        const MSG_TYPE got = MSG_TYPE::decode(buf, want.size());
+        std::memset(buf, kScribble, want.size());
+        delete[] buf;
+        mustMatch("one-shot decode", want, got);
+    }
+
     // ---- 2. streaming, one heap block per chunk, freed on return ---------
     // §6.0: the borrow ends when feed returns. The sweep ends at a size that
     // carries the whole message, the only one guaranteed to deliver every
@@ -158,6 +173,6 @@ int main()
 
     if (g_failures > 0) { return 1; }
     std::printf("ownership: %zu bytes, decoded message owns them after the input was "
-                "scribbled and freed -- one-shot + 6 chunk sizes\n", want.size());
+                "scribbled and freed -- try_decode, decode + 6 chunk sizes\n", want.size());
     return 0;
 }

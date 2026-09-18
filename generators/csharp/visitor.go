@@ -2,6 +2,7 @@ package csharp
 
 import (
 	"fmt"
+	"strings"
 
 	"github.com/sofa-buffers/generator/internal/ir"
 )
@@ -452,7 +453,14 @@ func (g *gen) emitStringCb(f *cfile, fs []frame) {
 	// on the complete value -- a multi-byte sequence split across a feed is a
 	// well-formed prefix, not a defect (CORELIB_PLAN §6.4). It also compares
 	// `total` against _cap before it takes a byte (§6.2.1, corelib-cs#101).
-	f.line("        string _s = pay.String(total, offset, data, chunkOffset, chunkLength, _cap);")
+	// The payload that arrives whole -- the common case -- is decoded here, with
+	// the same cap check and the same Utf8.Decode PayloadAcc.String runs for it,
+	// so the accumulator is only created for a payload actually split across
+	// feeds (one allocation per decode saved). Utf8 is qualified: it is new to
+	// generated code, and a schema type named `utf8` would otherwise shadow it.
+	f.line("        string _s;")
+	f.line("        if (offset == 0 && chunkLength >= total) { %s_s = global::sofab.Utf8.Decode(data, chunkOffset, total); }", wholeCapCheck(arms, ir.KindString, "MaxDynStringLen"))
+	f.line("        else _s = (pay ??= new PayloadAcc()).String(total, offset, data, chunkOffset, chunkLength, _cap);")
 	f.line("        if (_s == null) return;   // payload incomplete: more chunks to come")
 	f.line("        switch ((cur, id)) {")
 	for _, fr := range fs {
@@ -509,7 +517,12 @@ func (g *gen) emitBlobCb(f *cfile, fs []frame) {
 	// PayloadAcc.Blob reassembles a split payload and hands back a copy the caller
 	// owns; it compares `total` against _cap before it takes a byte, at the length
 	// header, ahead of the allocation the cap exists to prevent (§6.2.1).
-	f.line("        byte[] _b = pay.Blob(total, offset, data, chunkOffset, chunkLength, _cap);")
+	// Whole-payload fast path, as in emitStringCb: PayloadAcc.Blob's own
+	// one-chunk branch (cap check, exact-size copy), inline, so the accumulator
+	// exists only for a split payload.
+	f.line("        byte[] _b;")
+	f.line("        if (offset == 0 && chunkLength >= total) { %s_b = new byte[total]; Array.Copy(data, chunkOffset, _b, 0, total); }", wholeCapCheck(arms, ir.KindBlob, "MaxDynBlobLen"))
+	f.line("        else _b = (pay ??= new PayloadAcc()).Blob(total, offset, data, chunkOffset, chunkLength, _cap);")
 	f.line("        if (_b == null) return;   // payload incomplete: more chunks to come")
 	f.line("        switch ((cur, id)) {")
 	for _, fr := range fs {
@@ -529,6 +542,25 @@ func (g *gen) emitBlobCb(f *cfile, fs []frame) {
 		}
 	}
 	f.line("        }")
+}
+
+// wholeCapCheck is the receiver-cap call the inline whole-payload path of the
+// String/Blob callback makes before it takes a byte: the check PayloadAcc runs at
+// the top of String/Blob, applied to `_cap` (§6.2.1). It is emitted only when
+// some arm hands over the configured constant. Where every destination is
+// schema-bounded, `_cap` is always the maxlen that arm has just enforced, so the
+// comparison could never fire -- and §6.2.1 keeps the cap off a field the schema
+// bounds, so it is not written there at all.
+func wholeCapCheck(arms []string, kind ir.Kind, constName string) string {
+	for _, a := range arms {
+		if strings.Contains(a, "_cap = "+constName+";") {
+			if kind == ir.KindBlob {
+				return "PayloadAcc.CheckBlobLength(total, _cap); "
+			}
+			return "PayloadAcc.CheckStringLength(total, _cap); "
+		}
+	}
+	return ""
 }
 
 // emitFixlenBegin latches every schema bound a fixlen field's LENGTH WORD already
@@ -806,7 +838,7 @@ func (g *gen) emitVisitor(f *cfile, name string, fields []*ir.Field) {
 	f.line("    private int[] stk = new int[16];   // sequence scope stack (unboxed, was Stack<int>)")
 	f.line("    private int sp = 0;")
 	if hasPayloadDest(fs) {
-		f.line("    private readonly PayloadAcc pay = new PayloadAcc(); // reassembles a string/blob payload split across feeds")
+		f.line("    private PayloadAcc pay;            // lazy: only a string/blob payload split across feeds needs it")
 	}
 	f.line("    public %sVisitor(%s msg) { m = msg; }", name, name)
 	for i, fr := range fs {

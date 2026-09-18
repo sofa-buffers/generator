@@ -9,33 +9,15 @@
 // then re-encodes and diffs. Comparing two decoders against each other cannot
 // see this -- both would read the same live buffer.
 //
-// KNOWN REACH -- do not read a pass as covering every field, and do not read the
-// header this file used to carry. It said corelib-dart hands the visitor a view
-// into the decode buffer, so that "this property lives entirely in the generated
-// destinations". That is no longer true: corelib-dart moved to the
-// caller-supplied-destination model (§6.6.3), so `onBytesDest` allocates the
-// storage and the decoder COPIES the payload into it -- its one-shot blob arm
-// says so and cites §6.7.1 by name. The property therefore holds TWICE over
-// here, and this file asserts the property, not either layer:
-//
-//   * Measured, on this branch. Mutating only the generated destination
-//     (`o.someblob = value` instead of `Uint8List.fromList(value)`) still
-//     PASSES; mutating only the corelib (its one-shot blob arm handing over
-//     `Uint8List.sublistView(_buf, start, start + length)` instead of copying)
-//     still PASSES; with BOTH mutations the one-shot leg goes RED with a byte
-//     diff at `someblob`. That is the correct shape for a property test -- one
-//     surviving copy anywhere means the message does own its bytes -- but it is
-//     also why a pass here is weaker evidence about any single layer than the
-//     go or zig ports' passes are about theirs.
-//   * Only a `Uint8List` destination can bite at all. A Dart `String` is
-//     immutable and is built out of the bytes by the corelib, so that copy is
-//     the language's; a pass says nothing about the string path.
-//   * The corelib allocates the container itself for an integer array
-//     (`Int64List(count)`) and an fp array (`Float32List`/`Float64List(count)`)
-//     on BOTH paths, so an array destination cannot alias: dropping a copy there
-//     passes this check. Those copies are still required -- which side allocates
-//     is the corelib's choice to change -- they are just pinned by inspection
-//     rather than by this test.
+// REACH. corelib-dart decodes into caller-supplied destinations (§6.6.3,
+// corelib-dart#96): at each string, blob and native-array header the generated
+// visitor hands over the object's own `Inline…` field, and the codec copies the
+// payload into its storage. So every payload kind this message carries -- the
+// strings and arrays included, not only the blobs -- lands in storage the
+// decoded object owns, and every one of them is covered by the scribble below.
+// The copy is the codec's (the destination is only ever written through its
+// storage); a pass therefore says the two layers together own the bytes, which
+// is the property, not either layer.
 //
 // CHUNK SIZE IS THE AXIS, not the entry point. A payload SPLIT across chunks is
 // reassembled into the corelib's own accumulator and copied out of it whether or
@@ -55,6 +37,7 @@ import 'dart:io';
 import 'dart:typed_data';
 
 import 'package:harness/message.dart';
+import 'package:sofa_buffers_corelib/sofa_buffers_corelib.dart' as sofab;
 
 /// Every chunk size but the last; `main` appends one at least as long as the
 /// whole message, because only a chunk that carries a payload whole reaches the
@@ -77,33 +60,40 @@ void _fail(String msg) {
 /// a string in a wrapper-array row, a struct-with-array's label, and the string
 /// key of a dynamic map row -- plus the native arrays, which are here so the
 /// wire carries them, not because they can alias.
-Myfirstmessage _sample() => Myfirstmessage()
-  ..somestring = 'héllo wörld payload'
-  ..someblob = Uint8List.fromList([1, 2, 3, 4, 5])
-  ..someuintarray = [9, 8, 7, 6]
-  ..somefloatarray = [1.5, -2.5, 3.5]
-  ..somestringarray = ['a', 'bb', 'ccc']
-  ..someblobarray = [
-    Uint8List.fromList([9, 9]),
-    Uint8List.fromList([8]),
-  ]
-  ..somestruct.nestedstring = 'nested payload'
-  ..someunion.option2 = 'union payload'
-  ..somestructwitharray.label = 'labelled'
-  ..someunionarray = [
-    MyfirstmessageSomeunionarrayElem()..asstring = 'row payload',
-  ]
-  ..somemap = [
-    MyfirstmessageSomemapElem()
-      ..key = 'first key'
-      ..value = 1,
-    MyfirstmessageSomemapElem()
-      ..key = 'second key'
-      ..value = 2,
-  ];
+Myfirstmessage _sample() {
+  final m = Myfirstmessage()
+    ..someuintarray.assign([9, 8, 7, 6])
+    ..somefloatarray.assign([1.5, -2.5, 3.5])
+    ..somestringarray = [
+      for (final s in ['a', 'bb', 'ccc']) sofab.InlineString.of(s),
+    ]
+    ..someblobarray = [
+      sofab.InlineBytes.of([9, 9]),
+      sofab.InlineBytes.of([8]),
+    ]
+    ..someunionarray = [
+      MyfirstmessageSomeunionarrayElem()..asstring.assignString('row payload'),
+    ]
+    ..somemap = [
+      MyfirstmessageSomemapElem()
+        ..key.assignString('first key')
+        ..value = 1,
+      MyfirstmessageSomemapElem()
+        ..key.assignString('second key')
+        ..value = 2,
+    ];
+  m.somestring.assignString('héllo wörld payload');
+  m.someblob.assign([1, 2, 3, 4, 5]);
+  m.somestruct.nestedstring.assignString('nested payload');
+  m.someunion.option2.assignString('union payload');
+  m.somestructwitharray.label.assignString('labelled');
+  return m;
+}
 
 String _hex(Uint8List b) =>
     b.map((x) => x.toRadixString(16).padLeft(2, '0')).join();
+
+String _hexOf(sofab.InlineBytes b) => _hex(b.toBytes());
 
 /// Re-encodes [got] and diffs it against [want]. A re-encode that THROWS is a
 /// failure of this check too, not an escaped exception: a scribbled destination
@@ -121,9 +111,9 @@ void _mustMatch(String what, Uint8List want, Myfirstmessage got) {
     _fail('$what: a decoded field aliased the buffer it was decoded from\n'
         '  want ${_hex(want)}\n  got  ${_hex(re)}\n'
         '  somestring = ${got.somestring}\n'
-        '  someblob   = ${_hex(got.someblob)}');
+        '  someblob   = ${_hexOf(got.someblob)}');
     for (var i = 0; i < got.someblobarray.length; i++) {
-      stderr.writeln('  someblobarray[$i] = ${_hex(got.someblobarray[i])}');
+      stderr.writeln('  someblobarray[$i] = ${_hexOf(got.someblobarray[i])}');
     }
   }
 }

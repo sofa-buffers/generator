@@ -4,26 +4,26 @@
 //
 // corelib-dart's decode model is the push child-visitor (like Go): a
 // `MessageVisitor` whose `onSequenceStart(id)` returns a child visitor for a
-// nested scope, and whose native arrays arrive whole through a distinct
-// `on*Array` callback. So the MESSAGE_SPEC §7.3/§7.4 wire-type dispatch is
-// settled structurally — a contradictory header (including an integer array at a
-// scalar id, or a fixlen subtype mismatch) lands in a different, unhandled
-// callback and evaporates; a re-opened struct scope descends into the existing
-// member (merge), while an array wrapper clears its list in `onSequenceStart`
-// (replace). No `askip` guard is needed.
+// nested scope, and which makes ONE call per field, at its header
+// (corelib-dart#96). A scalar arrives as its value; a string, a blob or a native
+// array is announced with its length or count and answered with the generated
+// object's own `Inline…` destination, which the codec fills in place -- no copy,
+// no view, nothing allocated per message. So the MESSAGE_SPEC §7.3/§7.4
+// wire-type dispatch is settled structurally — a contradictory header
+// (including an integer array at a scalar id, or a fixlen subtype mismatch)
+// lands in a different, unhandled callback and evaporates; a re-opened struct
+// scope descends into the existing member (merge), while an array wrapper clears
+// its list in `onSequenceStart` (replace). No `askip` guard is needed.
 //
-// The corelib's visitor callbacks return void, so a generated visitor cannot
-// signal INVALID mid-decode. The over-count (#100), over-index (#142) and
-// over-maxlen (S7.1) verdicts therefore ride a sticky `_inv` flag the visitor
-// sets and the generated `decode`/`tryDecode` converts to a terminal INVALID
-// after the corelib returns — the Rust/Zig "generated guard, sticky flag" model.
-// The receiver-side decode limits (#102) are enforced HERE, per field, at each
-// field's own count/length header (CORELIB_PLAN §6.2.1: "the numbers and the
-// allocation are not the codec's"). The corelib is handed none: a cap is the
-// `else` of the schema bound in the very header hook that already carries it,
-// reported as limitExceeded() rather than invalidate(), and a wrapper array's
-// two caps ride on the collector beside the schema bounds they are exclusive
-// with.
+// A schema-bound verdict (over-count #100, over-index #142, over-maxlen §7.1)
+// is raised from inside the callback through `invalidate()`, which the corelib
+// turns into a terminal INVALID. The receiver-side decode limits (#102) are
+// enforced HERE, per field, at each field's own count/length header
+// (CORELIB_PLAN §6.2.1: "the numbers and the allocation are not the codec's").
+// The corelib is handed none: a cap is the `else` of the schema bound in the
+// very header call that already carries it, reported as limitExceeded() rather
+// than invalidate(), and a wrapper array's two caps ride on the collector beside
+// the schema bounds they are exclusive with.
 //
 // Every encode buffer is allocated by the code emitted here, never by the
 // corelib (CORELIB_PLAN §5.1): generated code is the layer that knows the
@@ -32,7 +32,7 @@
 // unbounded one drains a fixed scratch into a caller-owned `BytesBuilder`,
 // because the configured ceiling is not a worst case and a buffer sized from it
 // would refuse a larger message the caller legitimately built. Symmetrically on
-// decode, every destination COPIES what the corelib hands it, so a decoded
+// decode, every payload lands in storage the generated object owns, so a decoded
 // message owns its bytes and outlives the buffer it came from.
 package dart
 
@@ -291,7 +291,16 @@ func (g *gen) emitClass(f *dfile, name, summary string, fields []*ir.Field, isMe
 		if fld.Deprecated {
 			f.line("  @Deprecated('retained for backward compatibility only')")
 		}
-		f.line("  %s %s%s;", g.dartType(fld), dartIdent(fld.Name), g.dartInit(fld))
+		// A destination is `final`: the codec writes into its storage, and a
+		// caller changes the value through assign()/assignString().
+		final := ""
+		if isDest(fld) {
+			final = "final "
+		}
+		f.line("  %s%s %s%s;", final, g.dartType(fld), dartIdent(fld.Name), g.dartInit(fld))
+		if hasDestDefault(fld) {
+			f.line("  %s", g.defaultDecl(fld))
+		}
 		if fld.Kind == ir.KindFP32 {
 			// Companion raw-bits slot: a Dart `double` cannot carry an fp32 NaN's
 			// payload/signaling bits (§4.6), so when decode delivers a NaN we keep the
@@ -330,6 +339,26 @@ func (g *gen) emitClass(f *dfile, name, summary string, fields []*ir.Field, isMe
 			f.line("  /// buffer from it.")
 			f.line("  static const int maxSize = %d;", ms.Size)
 		}
+		// Encode-side nesting bound (see seqDepth). Passed to the encoder encode()
+		// constructs, it sizes the corelib's held-back sequence run to the schema
+		// at construction (§6.6) instead of to MAX_DEPTH -- a few words rather than
+		// 1 KiB zeroed on every one-shot encode. A depth above the format's
+		// MAX_DEPTH, or a recursive type, passes no bound: the corelib default
+		// (maxDepth) then applies, exactly as before.
+		depthArg := ""
+		if depth, ok := seqDepth(fields, map[string]bool{}); ok && depth <= wireMaxDepth {
+			f.line("  /// Deepest sequence nesting [serialize] opens, derived from the schema: no")
+			f.line("  /// value of this message nests deeper, so [encode] builds its encoder for")
+			f.line("  /// exactly this depth.")
+			f.line("  static const int maxDepth = %d;", depth)
+			// The corelib takes depth 1..MAX_DEPTH, so a message that opens no
+			// sequence at all still passes 1: the bound is never reached either way.
+			if depth == 0 {
+				depthArg = ", depth: 1"
+			} else {
+				depthArg = ", depth: maxDepth"
+			}
+		}
 		// The encode buffer belongs to the CALLER (CORELIB_PLAN §5.1): the corelib
 		// writes into storage it is handed and never allocates, grows or replaces
 		// it, so the allocation is made HERE. Which shape that takes is a property
@@ -351,7 +380,7 @@ func (g *gen) emitClass(f *dfile, name, summary string, fields []*ir.Field, isMe
 			f.line("  /// handed back truncated.")
 			f.line("  Uint8List encode() {")
 			f.line("    final buf = Uint8List(maxSize);")
-			f.line("    final e = sofab.Encoder.overBuffer(buf);")
+			f.line("    final e = sofab.Encoder.overBuffer(buf%s);", depthArg)
 			f.line("    serialize(e);")
 			f.line("    e.flush();")
 			f.line("    return e.written;")
@@ -377,7 +406,7 @@ func (g *gen) emitClass(f *dfile, name, summary string, fields []*ir.Field, isMe
 			f.line("    final out = BytesBuilder(copy: true);")
 			f.line("    // copy: true because the sink is handed a VIEW the encoder overwrites")
 			f.line("    // the moment the callback returns.")
-			f.line("    final e = sofab.Encoder(out.add, buffer: Uint8List(%d));", dartScratchSize)
+			f.line("    final e = sofab.Encoder(out.add, buffer: Uint8List(%d)%s);", dartScratchSize, depthArg)
 			f.line("    serialize(e);")
 			f.line("    e.flush();")
 			f.line("    return out.toBytes();")
@@ -475,10 +504,12 @@ func visitorName(typeName string) string { return "_" + typeName + "Visitor" }
 // (The §7.4 sequence-start clear stays exactly as it was: a re-opened wrapper
 // must still replace, not append.)
 //
-// It works IN PLACE — a list is cleared and refilled rather than reallocated, so
-// a reused destination keeps its backing storage, which is the point of the
-// reuse entry point. Public: a caller driving the visitor itself needs the same
-// ability (corelib-cpp exposes `IStreamImpl::reset()` for exactly this).
+// It works IN PLACE — a destination's length is set back (or its default
+// assigned) and a list is cleared, never reallocated, so a reused object keeps
+// every byte of storage it has, which is the point of the reuse entry point: a
+// decode into it allocates nothing. Public: a caller driving the visitor itself
+// needs the same ability (corelib-cpp exposes `IStreamImpl::reset()` for exactly
+// this).
 func (g *gen) emitReset(f *dfile, fields []*ir.Field) {
 	f.line("  /// Restores every field to its declared default, in place.")
 	f.line("  ///")
@@ -488,10 +519,8 @@ func (g *gen) emitReset(f *dfile, fields []*ir.Field) {
 	f.line("  /// default. [tryDecode] does that for you; call this directly when driving")
 	f.line("  /// the decode visitor yourself, or to recycle an instance.")
 	f.line("  ///")
-	f.line("  /// Lists are cleared and refilled rather than replaced, so a reused")
-	f.line("  /// instance keeps its backing storage. (A list member assigned a")
-	f.line("  /// fixed-length list by the caller is the one exception -- see the fp32")
-	f.line("  /// array note in the generator docs.)")
+	f.line("  /// Strings, blobs and arrays keep their storage and lists their backing")
+	f.line("  /// store, so a reused instance decodes without allocating.")
 	f.line("  void reset() {")
 	for _, fld := range fields {
 		g.emitResetField(f, fld)
@@ -501,37 +530,30 @@ func (g *gen) emitReset(f *dfile, fields []*ir.Field) {
 
 func (g *gen) emitResetField(f *dfile, fld *ir.Field) {
 	acc := dartIdent(fld.Name)
-	switch fld.Kind {
-	case ir.KindStruct, ir.KindUnion:
+	switch {
+	case fld.Kind == ir.KindStruct || fld.Kind == ir.KindUnion:
 		// The member object survives; its own reset clears it recursively.
 		f.line("    %s.reset();", acc)
-	case ir.KindArray:
-		if fld.Elem == ir.KindFP32 {
-			// An fp32 array member holds a Float32List after decode (_f32copy, which
-			// keeps a signaling NaN's raw bits). That is FIXED-LENGTH, so clear() would
-			// throw — this one kind is reassigned instead of cleared.
-			f.line("    %s = %s;", acc, g.dartDefaultValue(fld))
+	case isDest(fld):
+		// The storage stays: only the length in use goes back, or the default is
+		// copied into it. A declared `count: N` adds nothing here: N is a
+		// CAPACITY, never a length (MESSAGE_SPEC §3), so a fresh count:N array
+		// holds no elements at all -- which is exactly what an absent field
+		// decodes back to.
+		if def, ok := defaultRef(fld); ok {
+			f.line("    %s.assign(%s);", acc, def)
 			return
 		}
-		// A `const` default literal is canonicalized once by the Dart compiler, so
-		// refilling allocates nothing.
-		if lit, ok := g.dartArrayLiteral(fld); ok {
-			f.line("    %s..clear()..addAll(const %s);", acc, lit)
-			return
-		}
-		// Every other array resets to EMPTY. A declared `count: N` adds nothing
-		// here: N is a CAPACITY, never a length (MESSAGE_SPEC §3), so a fresh
-		// count:N array holds no elements at all -- which is exactly what an absent
-		// field decodes back to, keeping tryDecode's reused destination and
-		// decode's fresh one in agreement.
+		f.line("    %s.length = 0;", acc)
+	case fld.Kind == ir.KindArray:
+		// A wrapper array resets to EMPTY, in place.
 		f.line("    %s.clear();", acc)
-	case ir.KindFP32:
+	case fld.Kind == ir.KindFP32:
 		// Drop any captured NaN wire bits with the value they belonged to (§4.6).
 		f.line("    %s = %s;", acc, g.dartDefaultValue(fld))
 		f.line("    %s = null;", fp32BitsField(fld.Name))
 	default:
-		// Scalars, strings and blobs are values: assignment IS the in-place reset
-		// (a Uint8List is fixed-length and cannot be cleared).
+		// Scalars are values: assignment IS the in-place reset.
 		f.line("    %s = %s;", acc, g.dartDefaultValue(fld))
 	}
 }
@@ -570,47 +592,54 @@ func (g *gen) emitIsDefault(f *dfile, fields []*ir.Field) {
 // i.e. the negation of emitMarshal's write guard for the same field.
 func (g *gen) fieldIsDefaultExpr(fld *ir.Field) string {
 	acc := dartIdent(fld.Name)
-	switch fld.Kind {
-	case ir.KindBlob:
-		if def, ok := g.blobDefaultLit(fld); ok {
-			return fmt.Sprintf("sofab.elementsEqual(%s, %s)", acc, def)
-		}
-		return fmt.Sprintf("%s.isEmpty", acc)
-	case ir.KindStruct, ir.KindUnion:
+	switch {
+	case fld.Kind == ir.KindStruct || fld.Kind == ir.KindUnion:
 		// Lazily framed: the frame survives iff the nested serialize wrote a child,
 		// which is exactly "the nested object is not default".
 		return fmt.Sprintf("%s._isDefault", acc)
-	case ir.KindArray:
-		return g.arrayIsDefaultExpr(fld, acc)
+	case isDest(fld):
+		return g.destIsDefaultExpr(fld, acc)
+	case fld.Kind == ir.KindArray:
+		// Wrapper array: the writer emits a child for every element it holds,
+		// because the LAST element is written whatever its value (§2) -- so "no
+		// child is written" is exactly "the array is empty", and the two cannot
+		// drift apart.
+		return fmt.Sprintf("%s.isEmpty", acc)
 	}
-	// Scalars, strings, enums, bitfields, bools and fp32/fp64: serialize writes iff
+	// Scalars, enums, bitfields, bools and fp32/fp64: serialize writes iff
 	// `acc != default`. An fp32 NaN never equals the default, so the captured raw
 	// bits ride along with a value that is already non-default.
 	return fmt.Sprintf("%s == %s", acc, g.dartDefaultValue(fld))
 }
 
-// arrayIsDefaultExpr mirrors emitMarshalArray. An array's declared `count: N` is
-// a CAPACITY, never a length (MESSAGE_SPEC §3), so it takes no part in this test:
-// the value is compared against the declared default exactly as written, with no
-// padding to N on either side, and against the empty collection when none is
-// declared. A count:N array is therefore default only when it is EMPTY -- an
-// all-zero N-element value is a length-N array, which differs from the empty one
-// and stays on the wire.
-func (g *gen) arrayIsDefaultExpr(fld *ir.Field, acc string) string {
-	if nativeArrayElem(fld.Elem) {
-		val := acc
-		if fld.Elem == ir.KindBool {
-			val = fmt.Sprintf("[for (final _b in %s) _b ? 1 : 0]", acc)
-		}
-		if def, ok := g.arrayDefaultLit(fld); ok {
-			return fmt.Sprintf("sofab.elementsEqual(%s, %s)", val, def)
-		}
-		return fmt.Sprintf("%s.isEmpty", acc)
+// destIsDefaultExpr is the default test of a destination field: its `length`
+// elements against the declared default, or `length == 0` when none is
+// declared. The storage beyond `length` is capacity and takes no part.
+//
+// A native array's declared `count: N` is a CAPACITY, never a length
+// (MESSAGE_SPEC §3), so it takes no part in this test either: the value is
+// compared against the declared default exactly as written. A count:N array is
+// therefore default only when it is EMPTY -- an all-zero N-element value is a
+// length-N array, which differs from the empty one and stays on the wire.
+func (g *gen) destIsDefaultExpr(fld *ir.Field, acc string) string {
+	return g.destDefaultTest(fld, acc, false)
+}
+
+// destDefaultTest is destIsDefaultExpr, or its negation -- serialize's write
+// guard -- when `differs` is set.
+func (g *gen) destDefaultTest(fld *ir.Field, acc string, differs bool) string {
+	not, cmp := "", "=="
+	if differs {
+		not, cmp = "!", "!="
 	}
-	// Wrapper array: the writer emits a child for every element it holds, because
-	// the LAST element is written whatever its value (§2) -- so "no child is
-	// written" is exactly "the array is empty", and the two cannot drift apart.
-	return fmt.Sprintf("%s.isEmpty", acc)
+	def, ok := defaultRef(fld)
+	if !ok {
+		return fmt.Sprintf("%s.length %s 0", acc, cmp)
+	}
+	if fld.Kind == ir.KindArray && fld.Elem == ir.KindBool {
+		return fmt.Sprintf("%s_boolsEq(%s.storage, %s.length, %s)", not, acc, acc, def)
+	}
+	return fmt.Sprintf("%s_prefixEq(%s.storage, %s.length, %s)", not, acc, acc, def)
 }
 
 // ---- serialize --------------------------------------------------------------
@@ -636,15 +665,11 @@ func (g *gen) emitMarshal(f *dfile, fld *ir.Field) {
 		return
 	case ir.KindFP64:
 		write = fmt.Sprintf("e.writeFp64(%d, %s);", fld.ID, acc)
-	case ir.KindString:
-		write = fmt.Sprintf("e.writeString(%d, %s);", fld.ID, acc)
-	case ir.KindBlob:
-		// A blob is a leaf: omit when equal to its default (empty if none).
-		if def, ok := g.blobDefaultLit(fld); ok {
-			f.line("    if (!sofab.elementsEqual(%s, %s)) { e.writeBlob(%d, %s); }", acc, def, fld.ID, acc)
-		} else {
-			f.line("    if (%s.isNotEmpty) { e.writeBlob(%d, %s); }", acc, fld.ID, acc)
-		}
+	case ir.KindString, ir.KindBlob:
+		// A leaf: omit when equal to its default (empty if none). The storage and
+		// its length go out as they are -- a string as the UTF-8 bytes it is held
+		// in, which the corelib validates, never transcoded through a String.
+		f.line("    if (%s) { %s }", g.destDefaultTest(fld, acc, true), g.writeDestStmt(fld.Kind, fld.Elem, fmt.Sprintf("%d", fld.ID), acc))
 		return
 	case ir.KindStruct, ir.KindUnion:
 		// MESSAGE_SPEC S2: the != default test is per field and a sequence is no
@@ -664,17 +689,6 @@ func (g *gen) emitMarshal(f *dfile, fld *ir.Field) {
 	f.line("    if (%s != %s) { %s }", acc, g.dartDefaultValue(fld), write)
 }
 
-// blobDefaultLit is the Uint8List literal a blob field is compared against for
-// omission when it has a non-empty schema default; ("", false) otherwise.
-func (g *gen) blobDefaultLit(f *ir.Field) (string, bool) {
-	init := g.dartInit(f)
-	rhs := strings.TrimPrefix(init, " = ")
-	if rhs == "Uint8List(0)" {
-		return "", false
-	}
-	return rhs, true
-}
-
 func (g *gen) emitMarshalArray(f *dfile, fld *ir.Field, acc string) {
 	// A native scalar array is a leaf field: omit when equal to its default, else
 	// when empty. A composite/dynamic-element array is a wrapper sequence: opened
@@ -688,15 +702,7 @@ func (g *gen) emitMarshalArray(f *dfile, fld *ir.Field, acc string) {
 	// element the list holds is then written; nothing is elided from the tail,
 	// because the wire count IS the array's length.
 	if nativeArrayElem(fld.Elem) {
-		val := acc
-		if fld.Elem == ir.KindBool {
-			val = fmt.Sprintf("[for (final _b in %s) _b ? 1 : 0]", acc)
-		}
-		if def, ok := g.arrayDefaultLit(fld); ok {
-			f.line("    if (!sofab.elementsEqual(%s, %s)) { %s }", val, def, g.writeArrayStmt(fld, val))
-		} else {
-			f.line("    if (%s.isNotEmpty) { %s }", acc, g.writeArrayStmt(fld, val))
-		}
+		f.line("    if (%s) { %s }", g.destDefaultTest(fld, acc, true), g.writeDestStmt(fld.Kind, fld.Elem, fmt.Sprintf("%d", fld.ID), acc))
 		return
 	}
 	// Wrapper sequence (string/blob/struct/union/nested array). The field-level
@@ -711,55 +717,103 @@ func (g *gen) emitMarshalArray(f *dfile, fld *ir.Field, acc string) {
 	g.marshalWrapperArray(f, "    ", fmt.Sprintf("%d", fld.ID), acc, fld.Elem, fld.ElemRef, fld.ElemItems, 0, "")
 }
 
-// writeArrayStmt is the corelib call writing native-array expression `val` as
-// field fld.ID (enum→signed, bool/bitfield→unsigned).
-func (g *gen) writeArrayStmt(fld *ir.Field, val string) string {
-	switch {
-	case unsignedArrayElem(fld.Elem):
-		return fmt.Sprintf("e.writeUnsignedArray(%d, %s);", fld.ID, val)
-	case signedArrayElem(fld.Elem):
-		return fmt.Sprintf("e.writeSignedArray(%d, %s);", fld.ID, val)
-	case fld.Elem == ir.KindFP32:
-		return fmt.Sprintf("e.writeFp32Array(%d, %s);", fld.ID, val)
-	default: // fp64
-		return fmt.Sprintf("e.writeFp64Array(%d, %s);", fld.ID, val)
-	}
-}
+// wireMaxDepth is the format's MAX_DEPTH (corelib-dart `maxDepth`, §4.9): the
+// most sequences an Encoder may hold open, and the largest `depth:` it accepts.
+// A schema bound above it is not passed -- the corelib would refuse the
+// argument, and the value anyway.
+const wireMaxDepth = 255
 
-// marshalArrayElemType is the Dart element type of a native array's MARSHAL wire
-// image, against which the omit-compare runs: a bool array is compared as its
-// 0/1 integer image, so its compare list is <int>, not <bool>.
-func (g *gen) marshalArrayElemType(elem ir.Kind) string {
-	if elem == ir.KindBool {
-		return "int"
-	}
-	return g.dartArrayElemType(elem, nil, nil)
-}
-
-// arrayDefaultLit is the full (untrimmed) default list literal a dynamic native
-// array's value is compared against for omission; ("", false) when no default.
-func (g *gen) arrayDefaultLit(f *ir.Field) (string, bool) {
-	vals, ok := f.Default.([]any)
-	if !ok {
-		return "", false
-	}
-	parts := make([]string, len(vals))
-	for i, v := range vals {
-		parts[i] = g.marshalElemLit(f.Elem, v)
-	}
-	return fmt.Sprintf("<%s>[%s]", g.marshalArrayElemType(f.Elem), strings.Join(parts, ", ")), true
-}
-
-// marshalElemLit renders a native-array default element as it appears in the
-// MARSHAL wire image (bool → 0/1 int), matching the trimmed/omit compare.
-func (g *gen) marshalElemLit(elem ir.Kind, v any) string {
-	if elem == ir.KindBool {
-		if b, ok := v.(bool); ok && b {
-			return "1"
+// seqDepth returns the deepest sequence nesting serialize opens under fields,
+// counted exactly as corelib-dart's Encoder counts open sequences: one per
+// beginSequenceLazy still unmatched by its endSequence/endSequenceKeep. It walks
+// the same shapes emitMarshal/marshalWrapperArray emit:
+//
+//   - a struct/union field opens one frame around its target's own fields;
+//   - a native array (scalar/enum/bool/bitfield/float) is one count-prefixed
+//     value and opens none;
+//   - every other array opens its wrapper, plus arrayDepth of its elements.
+//
+// ok is false when a type recurses into itself: its nesting would then depend
+// on the value, not the schema, and the caller passes no bound. The parser
+// rejects a circular $ref today, so this is a guard for the day it does not.
+// The count is an UPPER bound -- a lazy frame that stays contentless is still
+// counted, because the Encoder counts it while it is open. One short would make
+// a valid value throw invalidArgument, which the round-trip test pins.
+func seqDepth(fields []*ir.Field, onPath map[string]bool) (int, bool) {
+	best := 0
+	for _, fld := range fields {
+		d, ok := 0, true
+		switch fld.Kind {
+		case ir.KindStruct, ir.KindUnion:
+			d, ok = targetDepth(fld.Ref, onPath)
+			d++
+		case ir.KindArray:
+			d, ok = arrayDepth(fld.Elem, fld.ElemRef, fld.ElemItems, onPath)
 		}
-		return "0"
+		if !ok {
+			return 0, false
+		}
+		best = max(best, d)
 	}
-	return g.elemLit(elem, v)
+	return best, true
+}
+
+// targetDepth is seqDepth of a struct/union target's fields, reporting a
+// recursive back-edge as unbounded.
+func targetDepth(ref *ir.TypeRef, onPath map[string]bool) (int, bool) {
+	if ref == nil || ref.Target == nil {
+		return 0, true
+	}
+	key := ref.Target.Key
+	if onPath[key] {
+		return 0, false
+	}
+	onPath[key] = true
+	defer delete(onPath, key)
+	return seqDepth(ref.Target.Fields, onPath)
+}
+
+// arrayDepth is the nesting an array field or row with this element opens: 0
+// for a native element (no frame), else 1 for its wrapper plus what one element
+// nests -- nothing for a string/blob leaf, a per-element frame plus the target's
+// depth for a struct/union, and the inner array's own depth for a nested array.
+func arrayDepth(elem ir.Kind, ref *ir.TypeRef, items *ir.ArrayElem, onPath map[string]bool) (int, bool) {
+	if nativeArrayElem(elem) {
+		return 0, true
+	}
+	switch elem {
+	case ir.KindStruct, ir.KindUnion:
+		d, ok := targetDepth(ref, onPath)
+		return 2 + d, ok
+	case ir.KindArray:
+		d, ok := arrayDepth(items.Elem, items.ElemRef, items.ElemItems, onPath)
+		return 1 + d, ok
+	}
+	return 1, true // string / blob
+}
+
+// writeDestStmt is the corelib call writing destination `acc` -- a string, a
+// blob, or a native array / matrix row of `elem` -- as field `idExpr`: its
+// storage and the length in use, uncopied (enum→signed, bool/bitfield→unsigned).
+// A bool array is normalized to 0/1 in place first, so a decoded non-zero
+// element re-encodes canonically as `true`.
+func (g *gen) writeDestStmt(kind, elem ir.Kind, idExpr, acc string) string {
+	switch {
+	case kind == ir.KindString:
+		return fmt.Sprintf("e.writeStringUtf8(%s, %s.storage, %s.length);", idExpr, acc, acc)
+	case kind == ir.KindBlob:
+		return fmt.Sprintf("e.writeBlob(%s, %s.storage, %s.length);", idExpr, acc, acc)
+	case elem == ir.KindBool:
+		return fmt.Sprintf("e.writeUnsignedArray(%s, _bools01(%s), %s.length);", idExpr, acc, acc)
+	case unsignedArrayElem(elem):
+		return fmt.Sprintf("e.writeUnsignedArray(%s, %s.storage, %s.length);", idExpr, acc, acc)
+	case signedArrayElem(elem):
+		return fmt.Sprintf("e.writeSignedArray(%s, %s.storage, %s.length);", idExpr, acc, acc)
+	case elem == ir.KindFP32:
+		return fmt.Sprintf("e.writeFp32Array(%s, %s.storage, %s.length);", idExpr, acc, acc)
+	default: // fp64
+		return fmt.Sprintf("e.writeFp64Array(%s, %s.storage, %s.length);", idExpr, acc, acc)
+	}
 }
 
 // lastElemExpr is the "this element is the array's last" test, at loop position
@@ -825,12 +879,12 @@ func (g *gen) marshalWrapperArray(f *dfile, ind, idExpr, val string, elem ir.Kin
 		// §2, applied to an element. At the LAST index it is written whatever its
 		// value: see lastElemExpr.
 		f.line("%se.beginSequenceLazy(%s);", ind, idExpr)
-		f.line("%sfor (var %s = 0; %s < %s.length; %s++) { if (%s[%s].isNotEmpty || %s) e.writeString(%s, %s[%s]); }", ind, iv, iv, val, iv, val, iv, lastElemExpr(iv, val), iv, val, iv)
+		g.emitDestElemLoop(f, ind, iv, val, elem, elem)
 		emitSeqEnd(f, ind, keepIf)
 	case ir.KindBlob:
 		// A blob element is a leaf, exactly like the string element above.
 		f.line("%se.beginSequenceLazy(%s);", ind, idExpr)
-		f.line("%sfor (var %s = 0; %s < %s.length; %s++) { if (%s[%s].isNotEmpty || %s) e.writeBlob(%s, %s[%s]); }", ind, iv, iv, val, iv, val, iv, lastElemExpr(iv, val), iv, val, iv)
+		g.emitDestElemLoop(f, ind, iv, val, elem, elem)
 		emitSeqEnd(f, ind, keepIf)
 	case ir.KindStruct, ir.KindUnion:
 		// A sequence-form element obeys the SAME rule as the leaf elements above --
@@ -848,47 +902,43 @@ func (g *gen) marshalWrapperArray(f *dfile, ind, idExpr, val string, elem ir.Kin
 		emitSeqEnd(f, ind, keepIf)
 	case ir.KindArray:
 		f.line("%se.beginSequenceLazy(%s);", ind, idExpr)
-		f.line("%sfor (var %s = 0; %s < %s.length; %s++) {", ind, iv, iv, val, iv)
 		if nativeArrayElem(items.Elem) {
 			// A native row is a single count-prefixed value with no frame of its own,
 			// so the rule lands on the WRITE rather than on a closer: an interior row
 			// equal to the element default (the empty row) is not written at all, and
 			// the last row always is.
-			row := fmt.Sprintf("%s[%s]", val, iv)
-			if items.Elem == ir.KindBool {
-				row = fmt.Sprintf("[for (final _b in %s[%s]) _b ? 1 : 0]", val, iv)
-			}
-			f.line("%s  if (%s[%s].isNotEmpty || %s) %s", ind, val, iv, lastElemExpr(iv, val), g.writeRowStmt(items.Elem, iv, row))
-		} else {
-			// A wrapper row has its own frame, so it takes the closer instead -- the
-			// same interior/last choice, expressed the same way as for a struct
-			// element above.
-			g.marshalWrapperArray(f, ind+"  ", iv, fmt.Sprintf("%s[%s]", val, iv), items.Elem, items.ElemRef, items.ElemItems, depth+1, lastElemExpr(iv, val))
+			g.emitDestElemLoop(f, ind, iv, val, ir.KindArray, items.Elem)
+			emitSeqEnd(f, ind, keepIf)
+			return
 		}
+		// A wrapper row has its own frame, so it takes the closer instead -- the
+		// same interior/last choice, expressed the same way as for a struct
+		// element above.
+		f.line("%sfor (var %s = 0; %s < %s.length; %s++) {", ind, iv, iv, val, iv)
+		g.marshalWrapperArray(f, ind+"  ", iv, fmt.Sprintf("%s[%s]", val, iv), items.Elem, items.ElemRef, items.ElemItems, depth+1, lastElemExpr(iv, val))
 		f.line("%s}", ind)
 		emitSeqEnd(f, ind, keepIf)
 	}
 }
 
-// writeRowStmt writes one native-array row of a matrix as element `idExpr`.
-func (g *gen) writeRowStmt(elem ir.Kind, idExpr, val string) string {
-	switch {
-	case unsignedArrayElem(elem):
-		return fmt.Sprintf("e.writeUnsignedArray(%s, %s);", idExpr, val)
-	case signedArrayElem(elem):
-		return fmt.Sprintf("e.writeSignedArray(%s, %s);", idExpr, val)
-	case elem == ir.KindFP32:
-		return fmt.Sprintf("e.writeFp32Array(%s, %s);", idExpr, val)
-	default:
-		return fmt.Sprintf("e.writeFp64Array(%s, %s);", idExpr, val)
-	}
+// emitDestElemLoop writes every element of a wrapper array whose elements are
+// destinations -- strings, blobs, or native matrix rows of `elem` -- skipping an
+// interior element at its default (empty) and always writing the last one (see
+// lastElemExpr). The element is read into a local once, so its storage and
+// length are two field loads rather than two list indexings each.
+func (g *gen) emitDestElemLoop(f *dfile, ind, iv, val string, kind, elem ir.Kind) {
+	ev := "_e" + strings.TrimPrefix(iv, "_i")
+	f.line("%sfor (var %s = 0; %s < %s.length; %s++) {", ind, iv, iv, val, iv)
+	f.line("%s  final %s = %s[%s];", ind, ev, val, iv)
+	f.line("%s  if (%s.length != 0 || %s) %s", ind, ev, lastElemExpr(iv, val), g.writeDestStmt(kind, elem, iv, ev))
+	f.line("%s}", ind)
 }
 
 // emitStreamDecoder writes the public incremental decoder: a handle on the
 // corelib's resumable Decoder plus the destination it fills. The corelib
-// suspends and resumes at any byte boundary AND reassembles a string/blob
-// payload split across chunks into a fresh Uint8List of its own, so this class
-// carries no parse state and borrows nothing from the fed chunks. What was
+// suspends and resumes at any byte boundary AND writes a string/blob/array
+// payload split across chunks straight into the object's own destination, so
+// this class carries no parse state and borrows nothing from the fed chunks. What was
 // missing was reach: the generated visitor is library-private (PLAN S5.6).
 //
 // Top-level rather than nested, because Dart has no nested classes; the private
@@ -906,8 +956,10 @@ func (g *gen) emitStreamDecoder(f *dfile, name string) {
 	f.line("/// [finish] then gives the verdict for the message as a whole.")
 	f.line("///")
 	f.line("/// Nothing is borrowed from the chunks you feed: the corelib copies each")
-	f.line("/// string/blob payload into storage of its own before it reaches the")
-	f.line("/// destination, so a chunk may be reused as soon as [feed] returns.")
+	f.line("/// string, blob and array payload into the destination's own storage, so a")
+	f.line("/// chunk may be reused as soon as [feed] returns. A destination is complete")
+	f.line("/// once a feed reports `complete`; after `incomplete` or a refusal its")
+	f.line("/// contents are unspecified.")
 	f.line("class %sDecoder {", name)
 	f.line("  %sDecoder._(this._out) {", name)
 	f.line("    _d = sofab.Decoder(%s(_out));", visitorName(name))

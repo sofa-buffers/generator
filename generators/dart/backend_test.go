@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	"github.com/sofa-buffers/generator/internal/analysis"
+	"github.com/sofa-buffers/generator/internal/ir"
 	"github.com/sofa-buffers/generator/internal/model"
 	"github.com/sofa-buffers/generator/internal/parser"
 )
@@ -16,6 +17,22 @@ import (
 // genFor parses + analyzes a definition file, generates with cfg, and returns all
 // emitted files concatenated (path-delimited) for substring assertions.
 func genFor(t *testing.T, def string, cfg map[string]any) string {
+	t.Helper()
+	files, err := (&Backend{}).Generate(schemaFor(t, def), cfg)
+	if err != nil {
+		t.Fatalf("generate: %v", err)
+	}
+	var b strings.Builder
+	for _, f := range files {
+		b.WriteString("// === " + f.Path + " ===\n")
+		b.Write(f.Content)
+		b.WriteString("\n")
+	}
+	return b.String()
+}
+
+// schemaFor parses, validates and analyzes a definition file into the IR.
+func schemaFor(t *testing.T, def string) *ir.Schema {
 	t.Helper()
 	data, err := os.ReadFile(def)
 	if err != nil {
@@ -36,17 +53,7 @@ func genFor(t *testing.T, def string, cfg map[string]any) string {
 	if err := analysis.Analyze(s); err != nil {
 		t.Fatalf("analyze %s: %v", def, err)
 	}
-	files, err := (&Backend{}).Generate(s, cfg)
-	if err != nil {
-		t.Fatalf("generate: %v", err)
-	}
-	var b strings.Builder
-	for _, f := range files {
-		b.WriteString("// === " + f.Path + " ===\n")
-		b.Write(f.Content)
-		b.WriteString("\n")
-	}
-	return b.String()
+	return s
 }
 
 const exampleDef = "../../examples/messages/example.yaml"
@@ -59,10 +66,11 @@ func TestModuleShape(t *testing.T) {
 		"void serialize(sofab.Encoder e) {",
 		// example.yaml has an unbounded field, so encode() takes the scratch+sink
 		// arm (TestDartCallerOwnsTheEncodeBuffer covers both).
-		"final e = sofab.Encoder(out.add, buffer: Uint8List(512));",
+		"final e = sofab.Encoder(out.add, buffer: Uint8List(512), depth: maxDepth);",
+		"static const int maxDepth = 2;",
 		"static sofab.DecodeStatus tryDecode(Uint8List data, Myfirstmessage out) {",
 		"static Myfirstmessage decode(Uint8List data) {",
-		"class _MyfirstmessageVisitor extends sofab.VisitorBase {",
+		"class _MyfirstmessageVisitor extends sofab.MessageVisitor {",
 		"static const int maxSize =",
 	} {
 		if !strings.Contains(out, want) {
@@ -166,10 +174,15 @@ func TestResetRestoresDefaults(t *testing.T) {
 		// pay for it twice.
 		"    out.reset();\n    return _decodeInto(data, out);",
 		"    final m = Myfirstmessage();\n    _decodeInto(data, m);",
-		// Scalars/strings/blobs are values: assignment is the reset.
+		// Scalars are values: assignment is the reset.
 		"    someu8 = 7;",
-		"    somestring = '';",
-		"    someblob = Uint8List.fromList(<int>[72, 101, 108, 108, 111]);",
+		// A destination keeps its storage: the length goes back to 0, or the
+		// declared default is copied into it -- no reallocation, and none of the
+		// default either: it is a typed list built once per class, so the copy is
+		// a memmove.
+		"    somestring.length = 0;",
+		"    someblob.assign(_someblobDefault);",
+		"  static final Uint8List _someblobDefault = Uint8List.fromList(const <int>[72, 101, 108, 108, 111]);",
 		// fp32 drops the captured NaN wire bits with the value (S4.6).
 		"    somefp32 = 0.0;\n    somefp32Fp32Bits = null;",
 		// A nested struct/union is reset in place, recursively -- the nested case:
@@ -183,15 +196,16 @@ func TestResetRestoresDefaults(t *testing.T) {
 		"    somestringarray.clear();",
 		"    somestructarray.clear();",
 		"    somematrix.clear();",
-		// A native array with a declared default is cleared and refilled from a
-		// const literal: no reallocation of the list, none of the default either.
-		// The literal is the default EXACTLY as written, never padded out to N --
-		// someenumarray declares count: 4 with a 3-element default.
-		"    someuintarray..clear()..addAll(const <int>[0, 1, 1000, 4294967295]);",
-		"    someenumarray..clear()..addAll(const <int>[2, 1, 0]);",
-		// fp32 arrays are the one exception: decode installs a fixed-length
-		// Float32List (bit-exact NaN copy), which cannot be cleared.
-		"    somefloatarray = <double>[0.0, -1.5, 3.25];",
+		// A native array with a declared default is refilled from a const literal,
+		// in place. The literal is the default EXACTLY as written, never padded out
+		// to N -- someenumarray declares count: 4 with a 3-element default. An fp32
+		// array is no exception any more: its storage is the destination's own.
+		"    someuintarray.assign(_someuintarrayDefault);",
+		"  static final Int64List _someuintarrayDefault = Int64List.fromList(const <int>[0, 1, 1000, 4294967295]);",
+		"    someenumarray.assign(_someenumarrayDefault);",
+		"  static final Int64List _someenumarrayDefault = Int64List.fromList(const <int>[2, 1, 0]);",
+		"    somefloatarray.assign(_somefloatarrayDefault);",
+		"  static final Float32List _somefloatarrayDefault = Float32List.fromList(const <double>[0.0, -1.5, 3.25]);",
 	} {
 		if !strings.Contains(out, want) {
 			t.Errorf("reset() missing %q", want)
@@ -202,14 +216,15 @@ func TestResetRestoresDefaults(t *testing.T) {
 		t.Errorf("reset() on %d classes, serialize on %d: every object class needs both", got, want)
 	}
 	// The S7.4 replace-on-reopen clear stays where it was.
-	if !strings.Contains(out, "        o.somestringarray = <String>[];") {
+	if !strings.Contains(out, "        o.somestringarray.clear();\n        return sofab.StringSeq(o.somestringarray,") {
 		t.Error("the S7.4 sequence-start clear must remain in the visitor")
 	}
 }
 
 // TestResetIsInPlaceForReuse: reset must not hand the field a fresh container, or
-// the reuse entry point reallocates everything it was meant to recycle. A blob and
-// an fp32 array are the documented exceptions (both fixed-length in Dart).
+// the reuse entry point reallocates everything it was meant to recycle. A
+// destination keeps its storage (length back to 0, or the default assigned); a
+// wrapper list is cleared.
 func TestResetIsInPlaceForReuse(t *testing.T) {
 	def := filepath.Join(t.TempDir(), "reuse.yaml")
 	src := "version: 1\nmessages:\n  M:\n    payload:\n" +
@@ -225,10 +240,10 @@ func TestResetIsInPlaceForReuse(t *testing.T) {
 	for _, want := range []string{
 		// `names` is count:2 with no declared default, so it resets EMPTY -- a
 		// capacity adds no elements (§3). `nums` refills from its declared default,
-		// in place. `dyn` is count-less and has none: the bare clear.
+		// in place. `dyn` is count-less and has none: its length goes back to 0.
 		"    names.clear();",
-		"    nums..clear()..addAll(const <int>[1, 2, 3]);",
-		"    dyn.clear();",
+		"    nums.assign(_numsDefault);",
+		"    dyn.length = 0;",
 	} {
 		if !strings.Contains(body, want) {
 			t.Errorf("reset() body missing %q; got:\n%s", want, body)
@@ -266,9 +281,11 @@ func TestNestedRowClosesPositionally(t *testing.T) {
 // TestFp32SignalingNaNPreserved asserts the codegen shape that keeps an fp32
 // signaling/payload NaN bit-for-bit through decode -> re-encode (issue #226): a
 // Dart `double` quiets the NaN, so the generated code must route through
-// corelib-dart's raw-bits API (onFp32Bits / writeFp32Bits) for the scalar and a
-// bit-exact Float32List copy for the array. example.yaml has a scalar `somefp32`
-// (id 8) and a fixed-count fp32 array `somefloatarray` (id 17).
+// corelib-dart's raw-bits API (onFp32Bits / writeFp32Bits) for the scalar, and
+// the array lives in an InlineFloat32Array, whose Float32List storage the codec
+// copies the wire bytes into and writeFp32Array copies back out -- never widened
+// through a double. example.yaml has a scalar `somefp32` (id 8) and a
+// fixed-count fp32 array `somefloatarray` (id 17).
 func TestFp32SignalingNaNPreserved(t *testing.T) {
 	out := genFor(t, exampleDef, map[string]any{})
 	for _, want := range []string{
@@ -280,17 +297,18 @@ func TestFp32SignalingNaNPreserved(t *testing.T) {
 		"o.somefp32 = _f32FromBits(bits);",
 		"o.somefp32Fp32Bits = null;",
 		"if (somefp32.isNaN && somefp32Fp32Bits != null) { e.writeFp32Bits(8, somefp32Fp32Bits!); }",
-		// Array: a bit-exact Float32List copy, never a widening List<double>.from.
-		"o.somefloatarray = sofab.copyFp32(values, values.length);",
-		// exactly the wire count: `count: 3` is a capacity and adds no elements (§3)
-		"o.somefloatarray = sofab.copyFp32(values, values.length);",
+		// Array: decoded into and encoded from the raw fp32 storage.
+		"final sofab.InlineFloat32Array somefloatarray = sofab.InlineFloat32Array(3)",
+		"sofab.InlineFloat32Array? onFp32Array(int id, int count) {",
+		"        return o.somefloatarray;",
+		"e.writeFp32Array(17, somefloatarray.storage, somefloatarray.length);",
 	} {
 		if !strings.Contains(out, want) {
 			t.Errorf("fp32 sNaN codegen missing %q", want)
 		}
 	}
 	// The widening path the bug rode on must be gone for fp32 arrays.
-	if strings.Contains(out, "somefloatarray = List<double>.from(values)") {
+	if strings.Contains(out, "List<double>") {
 		t.Error("fp32 array still decoded via List<double>.from (quiets a signaling NaN)")
 	}
 }
@@ -346,84 +364,90 @@ func TestDartHarnessRejectsARoundedJSONNumber(t *testing.T) {
 	}
 }
 
+// methodBody returns the body of the generated override whose signature line
+// contains sig, within the class that starts at the first occurrence of cls ("" =
+// the first match anywhere); "" when no such override is emitted.
+func methodBody(out, cls, sig string) string {
+	if cls != "" {
+		i := strings.Index(out, cls)
+		if i < 0 {
+			return ""
+		}
+		out = out[i:]
+		if j := strings.Index(out[1:], "\nclass "); j >= 0 {
+			out = out[:j+1]
+		}
+	}
+	i := strings.Index(out, sig)
+	if i < 0 {
+		return ""
+	}
+	body := out[i:]
+	if j := strings.Index(body, "\n  }\n"); j >= 0 {
+		body = body[:j]
+	}
+	return body
+}
+
+// TestDartHeaderVisitorReject: every schema bound on an aggregate is judged in
+// the field's ONE header call, before the destination is handed over -- so a
+// field that is both over-bound and truncated is INVALID, not INCOMPLETE
+// (generator#216, §5.2) -- and the arm lives only in the call for the DECLARED
+// wire kind. corelib-dart picks the call from the wire kind, so a contradicting
+// array or fixlen subtype lands in a call with no arm for the id and is skipped,
+// never measured against this field's bound (§7.3, generator#224, generator#259
+// / F-0042): the gate the old header hooks had to spell out is structural.
 func TestDartHeaderVisitorReject(t *testing.T) {
 	out := genFor(t, exampleDef, map[string]any{})
-	for _, want := range []string{
-		"void onArrayBegin(int id, sofab.ArrayKind kind, int count) {",
-		"void onFixlenHeader(int id, int subtype, int length) {",
-		// Gated on the DECLARED element kind, exactly like the maxlen guard below
-		// (§7.3, generator#259) -- see TestDartArrayHeaderBoundIsKeyedByElementKind.
-		"if (kind == sofab.ArrayKind.unsigned && count > 4) invalidate();", // someuintarray, count 4
-		// Each maxlen guard is gated on the DECLARED fixlen subtype: onFixlenHeader
-		// fires for any subtype at a field id, and a contradicting one must be
-		// skipped, not measured against this field's bound (§7.3, generator#224).
-		"if (subtype == sofab.FixlenType.string && length > 50) invalidate();", // somestring
-		"if (subtype == sofab.FixlenType.blob && length > 16) invalidate();",   // someblob
+	for _, c := range []struct{ sig, arm string }{
+		{"sofab.InlineString? onString(int id, int length) {", "case 11:\n        if (length > 50) invalidate();\n        return o.somestring;"},
+		{"sofab.InlineBytes? onBlob(int id, int length) {", "case 12:\n        if (length > 16) invalidate();\n        return o.someblob;"},
+		{"sofab.InlineInt64Array? onUnsignedArray(int id, int count) {", "case 15:\n        if (count > 4) invalidate();\n        return o.someuintarray;"},
+		{"sofab.InlineInt64Array? onSignedArray(int id, int count) {", "case 16:\n        if (count > 5) invalidate();\n        return o.someintarray;"},
+		{"sofab.InlineFloat32Array? onFp32Array(int id, int count) {", "case 17:\n        if (count > 3) invalidate();\n        return o.somefloatarray;"},
 	} {
-		if !strings.Contains(out, want) {
-			t.Errorf("generated module missing header-visitor guard %q", want)
+		body := methodBody(out, "class _MyfirstmessageVisitor", c.sig)
+		if !strings.Contains(body, c.arm) {
+			t.Errorf("%s is missing the header arm %q:\n%s", c.sig, c.arm, body)
 		}
 	}
-	// The bound must never be enforced on length alone — an un-gated compare is
-	// exactly the generator#224 defect (an fp64 landing on a `maxlen: 4` blob was
-	// rejected as INVALID instead of skipped).
-	for _, notWant := range []string{
-		"if (length > 50) invalidate();",
-		"if (length > 16) invalidate();",
-		// ...and the array count bound is the same defect one hook over
-		// (generator#259 / F-0042): an un-gated compare measures a contradicting
-		// array kind against this field's N.
-		"if (count > 4) invalidate();",
-	} {
-		if strings.Contains(out, notWant) {
-			t.Errorf("header guard %q is not gated on the declared kind/subtype (generator#224, generator#259)", notWant)
+	// Each id is answered by exactly one call: someuintarray (15) is unsigned, so
+	// a signed or fixlen array at id 15 has no arm and is skipped.
+	for _, sig := range []string{"onSignedArray(int id", "onFp32Array(int id", "onFp64Array(int id", "onString(int id", "onBlob(int id"} {
+		if strings.Contains(methodBody(out, "class _MyfirstmessageVisitor", sig), "case 15:") {
+			t.Errorf("id 15 (array<u32>) answered in %s: a contradicting wire kind must be skipped (§7.3)", sig)
 		}
 	}
-	// A message with no bounded field must NOT override the header hooks, keeping
-	// the corelib's max-speed decode path (no per-scope dispatch cost). scalars.yaml
-	// is all fixed-width scalars — no count, no maxlen.
+	// A message with no aggregate field overrides none of the header calls: it
+	// inherits the corelib's default, which skips.
 	plain := genFor(t, "../../tests/matrix/corpus/defs/scalars.yaml", map[string]any{})
-	for _, notWant := range []string{"void onArrayBegin(", "void onFixlenHeader("} {
+	for _, notWant := range []string{"onString(", "onBlob(", "onUnsignedArray(", "onSignedArray(", "onFp32Array(", "onFp64Array(", "onSequenceStart("} {
 		if strings.Contains(plain, notWant) {
-			t.Errorf("a bound-free message must not override %q", notWant)
+			t.Errorf("a message without that field kind must not override %q", notWant)
 		}
 	}
 }
 
 // TestDartArrayElemBound covers generator#267's element position: an array
 // element outside its DECLARED WIDTH is INVALID (§7.1) and, established by its
-// own bytes, dominates a truncation behind it (§5.2). The `for (final _v in
-// values)` scan decides an array that arrives and never runs for one that does
-// not, so the bound also goes to the corelib as onArrayElemBound, which applies
-// it while the elements go past.
+// own bytes, dominates a truncation behind it (§5.2). The bound travels on the
+// destination (`range:`), and the codec applies it to every element as it is
+// decoded, on both surfaces -- so no scan over an assembled list is left to miss
+// the array that never completes.
 func TestDartArrayElemBound(t *testing.T) {
 	out := genFor(t, exampleDef, map[string]any{})
 	for _, want := range []string{
-		"sofab.ElemRange? onArrayElemBound(int id, sofab.ArrayKind kind) {",
-		// Gated on the declared element kind, like every other header-time bound
-		// (§7.3): the hook is asked per field id, and an array whose wire kind
-		// contradicts the declaration is skipped, never measured against this
-		// field's width.
-		"if (kind == sofab.ArrayKind.unsigned) {\n          return const sofab.ElemRange(0, 4294967295);\n        }",
-		"if (kind == sofab.ArrayKind.signed) {\n          return const sofab.ElemRange(-2147483648, 2147483647);\n        }",
-		// `const`, so answering costs no allocation.
-		"return const sofab.ElemRange(",
-		"return null;",
+		"final sofab.InlineInt64Array someuintarray = sofab.InlineInt64Array(4, range: const sofab.ElemRange(0, 4294967295))",
+		"final sofab.InlineInt64Array someintarray = sofab.InlineInt64Array(5, range: const sofab.ElemRange(-2147483648, 2147483647))",
 	} {
 		if !strings.Contains(out, want) {
 			t.Errorf("generated module missing element bound %q", want)
 		}
 	}
-	// The scan over the assembled list stays: it still bounds the elements
-	// against a corelib that does not know the callback, over a list in hand.
-	if !strings.Contains(out, "for (final _v in values)") {
-		t.Errorf("the assembled-list width scan must stay")
-	}
-	// A message with no narrowed array element must not override it at all —
-	// scalars.yaml has no arrays.
-	plain := genFor(t, "../../tests/matrix/corpus/defs/scalars.yaml", map[string]any{})
-	if strings.Contains(plain, "onArrayElemBound(") {
-		t.Errorf("a message with no narrowed array element must not override onArrayElemBound")
+	for _, gone := range []string{"for (final _v in values)", "onArrayElemBound("} {
+		if strings.Contains(out, gone) {
+			t.Errorf("the removed per-array scan/hook %q is still emitted", gone)
+		}
 	}
 }
 
@@ -440,10 +464,12 @@ func TestDecodeLimitsPlumbing(t *testing.T) {
 	}
 	for _, want := range []string{
 		"const int maxDynStringLen = 8;",
-		// the unbounded string and blob: policy, at the length word, gated on the
-		// declared subtype so a §7.3 mismatch is skipped rather than capped.
-		"case 0:\n        if (subtype == sofab.FixlenType.string && length > maxDynStringLen) limitExceeded();",
-		"case 1:\n        if (subtype == sofab.FixlenType.blob && length > maxDynBlobLen) limitExceeded();",
+		// the unbounded string and blob: policy, at the length word, and only then
+		// is the destination sized -- a hostile length never sizes anything.
+		"case 0:\n        if (length > maxDynStringLen) limitExceeded();\n        if (o.s.capacity < length) o.s.storage = Uint8List(length);\n        return o.s;",
+		"case 1:\n        if (length > maxDynBlobLen) limitExceeded();\n        if (o.b.capacity < length) o.b.storage = Uint8List(length);\n        return o.b;",
+		// an unbounded destination starts empty
+		"final sofab.InlineString s = sofab.InlineString(0);",
 		// the decode entry points drive the visitor and nothing else
 		"sofab.Decoder.decode(data, _DynVisitor(out));",
 	} {
@@ -474,8 +500,8 @@ func TestDartCapsTravelAsConfigured(t *testing.T) {
 		t.Errorf("the cap must be emitted AS CONFIGURED, unraised:\n%s", out)
 	}
 	for _, want := range []string{
-		"case 0:\n        if (kind == sofab.ArrayKind.unsigned && count > maxDynArrayCount) limitExceeded();",
-		"case 1:\n        if (kind == sofab.ArrayKind.signed && count > 100000) invalidate();",
+		"case 0:\n        if (count > maxDynArrayCount) limitExceeded();\n        if (o.a.capacity < count) o.a.storage = Int64List(count);\n        return o.a;",
+		"case 1:\n        if (count > 100000) invalidate();\n        if (o.b.capacity < count) o.b.storage = Int64List(count);\n        return o.b;",
 	} {
 		if !strings.Contains(out, want) {
 			t.Errorf("generated module missing %q:\n%s", want, out)
@@ -483,37 +509,60 @@ func TestDartCapsTravelAsConfigured(t *testing.T) {
 	}
 }
 
-// Rule 5 for Dart: corelib-dart's onBytesDest/onArrayDest defaults allocate a
-// destination sized from the wire, so a generated scope has to DECLINE every id
-// it does not bind or a §7.3-skipped field is materialized anyway — the one
-// shape no receiver cap ever covered, and the decoder now holds none.
+// TestDartDestinationSizing pins where a destination's storage comes from. A
+// small schema bound is allocated once, at construction, and the header call
+// only hands it over: a reused object never allocates again, and the codec
+// never grows anything. A bound too large to pay for on every fresh object
+// (eagerDestBytes) starts empty and gets storage of exactly the count at the
+// header -- after the bound check, so the count that sizes it has already been
+// accepted (ARCHITECTURE §9.5: allocated once, never grown element by element).
+func TestDartDestinationSizing(t *testing.T) {
+	src := "version: 1\nmessages:\n  M:\n    payload:\n" +
+		"      small: { id: 0, type: array, items: { type: u8, count: 128 } }\n" +
+		"      big:   { id: 1, type: array, items: { type: u8, count: 129 } }\n" +
+		"      s1k:   { id: 2, type: string, maxlen: 1024 }\n" +
+		"      s1k1:  { id: 3, type: blob, maxlen: 1025 }\n" +
+		"      f32:   { id: 4, type: array, items: { type: fp32, count: 256 } }\n"
+	out := genFor(t, writeDef(t, src), map[string]any{})
+	for _, want := range []string{
+		"final sofab.InlineInt64Array small = sofab.InlineInt64Array(128, range: const sofab.ElemRange(0, 255));",
+		"final sofab.InlineInt64Array big = sofab.InlineInt64Array(0, range: const sofab.ElemRange(0, 255));",
+		"final sofab.InlineString s1k = sofab.InlineString(1024);",
+		"final sofab.InlineBytes s1k1 = sofab.InlineBytes(0);",
+		"final sofab.InlineFloat32Array f32 = sofab.InlineFloat32Array(256);",
+		"case 0:\n        if (count > 128) invalidate();\n        return o.small;",
+		"case 1:\n        if (count > 129) invalidate();\n        if (o.big.capacity < count) o.big.storage = Int64List(count);\n        return o.big;",
+		"case 2:\n        if (length > 1024) invalidate();\n        return o.s1k;",
+		"case 3:\n        if (length > 1025) invalidate();\n        if (o.s1k1.capacity < length) o.s1k1.storage = Uint8List(length);\n        return o.s1k1;",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("generated module missing %q:\n%s", want, out)
+		}
+	}
+}
+
+// Rule 5 for Dart: an id a scope does not bind is SKIPPED, and a skipped field
+// allocates nothing (§6.2.1, §7.3). corelib-dart's header calls answer null by
+// default, so a scope that binds no field of a kind emits no override for it,
+// and a scope that binds some answers null for every other id.
 func TestDartDeclinesUnboundDestinations(t *testing.T) {
 	src := "version: 1\nmessages:\n  M:\n    payload:\n" +
 		"      s: { id: 0, type: string }\n" +
 		"      a: { id: 1, type: array, items: { type: u32 } }\n" +
 		"  N:\n    payload:\n      x: { id: 0, type: u32 }\n"
 	out := genFor(t, writeDef(t, src), map[string]any{})
-	for _, want := range []string{
-		"Uint8List? onBytesDest(int id, int subtype, int total) {",
-		"TypedData? onArrayDest(int id, sofab.ArrayKind kind, int count) {",
-		// a bound id keeps the corelib's exactly-sized destination...
-		"case 0:\n        if (subtype == sofab.FixlenType.string) return super.onBytesDest(id, subtype, total);\n        return null;",
-		"case 1:\n        if (kind == sofab.ArrayKind.unsigned) return super.onArrayDest(id, kind, count);\n        return null;",
+	for _, c := range []struct{ sig, want string }{
+		{"sofab.InlineString? onString(int id, int length) {", "    }\n    return null;"},
+		{"sofab.InlineInt64Array? onUnsignedArray(int id, int count) {", "    }\n    return null;"},
 	} {
-		if !strings.Contains(out, want) {
-			t.Errorf("generated module missing %q:\n%s", want, out)
+		if body := methodBody(out, "class _MVisitor", c.sig); !strings.Contains(body, c.want) {
+			t.Errorf("%s must answer null for an id it does not bind:\n%s", c.sig, body)
 		}
 	}
-	// ...and a scope that binds NOTHING of that shape still declines: the
-	// override is emitted with no switch at all, which is the case that would
-	// otherwise fall through to the allocating default.
 	nv := out[strings.Index(out, "class _NVisitor"):]
-	for _, want := range []string{
-		"Uint8List? onBytesDest(int id, int subtype, int total) {\n    return null;\n  }",
-		"TypedData? onArrayDest(int id, sofab.ArrayKind kind, int count) {\n    return null;\n  }",
-	} {
-		if !strings.Contains(nv, want) {
-			t.Errorf("a scope binding no payload must decline every destination, missing %q:\n%s", want, nv)
+	for _, notWant := range []string{"onString(", "onBlob(", "onUnsignedArray(", "onSignedArray(", "onFp32Array(", "onFp64Array(", "onSequenceStart("} {
+		if strings.Contains(nv, notWant) {
+			t.Errorf("a scope binding no such field must inherit the skipping default, not override %q:\n%s", notWant, nv)
 		}
 	}
 }
@@ -589,27 +638,30 @@ func TestDartCountIsACapacityNotALength(t *testing.T) {
 	out := genFor(t, writeDef(t, capDef), map[string]any{})
 
 	for _, want := range []string{
-		// Initializers: empty for every count:N array, wrapper and native alike.
+		// Initializers: empty for every count:N array, wrapper and native alike. A
+		// native array's N sizes its STORAGE -- the capacity the codec decodes into
+		// -- and its length starts at 0.
 		"  List<VecFixedElem> fixed = <VecFixedElem>[];",
-		"  List<String> fstrs = <String>[];",
-		"  List<Uint8List> fblobs = <Uint8List>[];",
-		"  List<int> fnums = <int>[];",
+		"  List<sofab.InlineString> fstrs = <sofab.InlineString>[];",
+		"  List<sofab.InlineBytes> fblobs = <sofab.InlineBytes>[];",
+		"  final sofab.InlineInt64Array fnums = sofab.InlineInt64Array(4, range: const sofab.ElemRange(0, 4294967295));",
 		// A declared default is materialized EXACTLY as written -- count: 4 with a
 		// 2-element default stays 2 elements long.
-		"  List<int> withdef = <int>[1, 2];",
+		"  final sofab.InlineInt64Array withdef = sofab.InlineInt64Array(4, range: const sofab.ElemRange(0, 4294967295))..assign(_withdefDefault);",
+		"  static final Int64List _withdefDefault = Int64List.fromList(const <int>[1, 2]);",
 		// reset() restores the same thing, in place.
 		"    fixed.clear();",
 		"    fstrs.clear();",
 		"    fblobs.clear();",
-		"    fnums.clear();",
-		"    withdef..clear()..addAll(const <int>[1, 2]);",
+		"    fnums.length = 0;",
+		"    withdef.assign(_withdefDefault);",
 		// The field omit test: emptiness, or an exact compare against the declared
-		// default -- neither side padded to N.
-		"    if (fnums.isNotEmpty) { e.writeUnsignedArray(4, fnums); }",
-		"    if (!sofab.elementsEqual(withdef, <int>[1, 2])) { e.writeUnsignedArray(5, withdef); }",
+		// default -- neither side padded to N, and only the `length` in use read.
+		"    if (fnums.length != 0) { e.writeUnsignedArray(4, fnums.storage, fnums.length); }",
+		"    if (!_prefixEq(withdef.storage, withdef.length, _withdefDefault)) { e.writeUnsignedArray(5, withdef.storage, withdef.length); }",
 		// ...and _isDefault is the exact negation of it.
-		"    if (!(fnums.isEmpty)) return false;",
-		"    if (!(sofab.elementsEqual(withdef, <int>[1, 2]))) return false;",
+		"    if (!(fnums.length == 0)) return false;",
+		"    if (!(_prefixEq(withdef.storage, withdef.length, _withdefDefault))) return false;",
 		// A wrapper array writes a child for every element it holds (the last one
 		// unconditionally), so "no child written" IS "empty" -- for count:N and
 		// count-less alike, no narrowing on either side.
@@ -629,8 +681,8 @@ func TestDartCountIsACapacityNotALength(t *testing.T) {
 	// trailing-run trim on encode and the fill-to-N on decode.
 	for _, notWant := range []string{
 		"<VecFixedElem>[VecFixedElem(),",
-		"<String>['', '',",
-		"<Uint8List>[Uint8List(0),",
+		"<sofab.InlineString>[sofab.InlineString(",
+		"<sofab.InlineBytes>[sofab.InlineBytes(",
 		"<int>[0, 0, 0, 0]",
 		"<int>[1, 2, 0, 0]",
 		"_trimLen(", "_trimInt(", "_trimF32(", "_trimF64(", "_padTo(",
@@ -656,8 +708,14 @@ func TestDartArrayElementSparsityIsPositional(t *testing.T) {
 		// Leaf elements: the omit test escapes at the last index. Unconditional now
 		// -- the count:N carve-out ("its length is N whatever the wire carries") is
 		// gone, so fstrs/fblobs carry the very same guard a count-less array does.
-		"for (var _i0 = 0; _i0 < fstrs.length; _i0++) { if (fstrs[_i0].isNotEmpty || _i0 == fstrs.length - 1) e.writeString(_i0, fstrs[_i0]); }",
-		"for (var _i0 = 0; _i0 < fblobs.length; _i0++) { if (fblobs[_i0].isNotEmpty || _i0 == fblobs.length - 1) e.writeBlob(_i0, fblobs[_i0]); }",
+		"    for (var _i0 = 0; _i0 < fstrs.length; _i0++) {\n" +
+			"      final _e0 = fstrs[_i0];\n" +
+			"      if (_e0.length != 0 || _i0 == fstrs.length - 1) e.writeStringUtf8(_i0, _e0.storage, _e0.length);\n" +
+			"    }",
+		"    for (var _i0 = 0; _i0 < fblobs.length; _i0++) {\n" +
+			"      final _e0 = fblobs[_i0];\n" +
+			"      if (_e0.length != 0 || _i0 == fblobs.length - 1) e.writeBlob(_i0, _e0.storage, _e0.length);\n" +
+			"    }",
 		// Sequence-form elements: the loop runs to length (no trailing elision) and
 		// the CLOSER decides -- dropping in the interior, keeping at the last index.
 		"    for (var _i0 = 0; _i0 < fixed.length; _i0++) {\n" +
@@ -669,11 +727,12 @@ func TestDartArrayElementSparsityIsPositional(t *testing.T) {
 			"      if (_i0 == dynamic_.length - 1) { e.endSequenceKeep(); } else { e.endSequence(); }\n" +
 			"    }",
 		// A NATIVE row has no frame of its own, so the rule lands on the write.
-		"      if (rows[_i0].isNotEmpty || _i0 == rows.length - 1) e.writeUnsignedArray(_i0, rows[_i0]);",
+		"      if (_e0.length != 0 || _i0 == rows.length - 1) e.writeUnsignedArray(_i0, _e0.storage, _e0.length);",
 		// A WRAPPER row has one, so it takes the closer -- and its own elements obey
 		// the same rule one level down.
 		"      if (_i0 == srows.length - 1) { e.endSequenceKeep(); } else { e.endSequence(); }",
-		"if (srows[_i0][_i1].isNotEmpty || _i1 == srows[_i0].length - 1) e.writeString(_i1, srows[_i0][_i1]);",
+		"        final _e1 = srows[_i0][_i1];\n" +
+			"        if (_e1.length != 0 || _i1 == srows[_i0].length - 1) e.writeStringUtf8(_i1, _e1.storage, _e1.length);",
 		// A sequence-typed FIELD still always drops.
 		"    e.endSequence();",
 	} {
@@ -687,8 +746,7 @@ func TestDartArrayElementSparsityIsPositional(t *testing.T) {
 	// omit test with no last-element escape (the old fixed-count trailing elision).
 	for _, notWant := range []string{
 		"serialize(e); e.endSequenceKeep();",
-		"if (fstrs[_i0].isNotEmpty) e.writeString",
-		"if (fblobs[_i0].isNotEmpty) e.writeBlob",
+		"if (_e0.length != 0) e.write",
 	} {
 		if strings.Contains(out, notWant) {
 			t.Errorf("superseded element rule still generated (%q):\n%s", notWant, out)
@@ -730,12 +788,11 @@ func TestDartCollectorsPlaceByIDAndAreBounded(t *testing.T) {
 		// which this backend used to drop on the floor, leaving the row's count
 		// header bounded by nothing but the decoder-wide cap that is now gone.
 		"sofab.IntMatrixSeq(o.rows, 3, false, 0, 4294967295, rcap: maxDynArrayCount, rowCount: 3, rowCap: maxDynArrayCount)",
-		"sofab.NestedSeq<String>(o.srows, 3, (p) => sofab.StringSeq(p, -1, 4, rcap: maxDynArrayCount, relemMax: 262144), rcap: maxDynArrayCount)",
-		// M elements arrived, M is the length: the count word is bounded, nothing
-		// is filled in behind it.
-		("        if (values.length > 4) { invalidate(); return; }\n" +
-			"        for (final _v in values) { if (_v < 0 || _v > 4294967295) { invalidate(); return; } }\n" +
-			"        o.fnums = List<int>.from(values);\n        return;"),
+		"sofab.NestedSeq<sofab.InlineString>(o.srows, 3, (p) => sofab.StringSeq(p, -1, 4, rcap: maxDynArrayCount, relemMax: 262144), rcap: maxDynArrayCount)",
+		// M elements arrived, M is the length: the count word is bounded at the
+		// header, and the codec sets the destination's length to exactly M --
+		// nothing is filled in behind it.
+		"      case 4:\n        if (count > 4) invalidate();\n        return o.fnums;",
 	} {
 		if !strings.Contains(out, want) {
 			t.Errorf("generated Dart missing %q:\n%s", want, out)
@@ -753,49 +810,47 @@ func TestDartCollectorsPlaceByIDAndAreBounded(t *testing.T) {
 	}
 }
 
-// An fp32 array binds through the bit-exact _f32copy, and its length is the WIRE
-// count -- a `count: N` is a capacity and pre-allocates nothing (§3). Pinned
-// separately because the fp32 path used to pass the schema N here, which was the
-// fill-to-N in disguise.
+// An fp32/fp64 array decodes into its own destination, and its LENGTH is the
+// WIRE count -- the codec sets it at the header. A `count: N` sizes the storage
+// (a capacity) and never the length (§3): a fresh count:3 array is empty. Pinned
+// separately because the fp32 path once passed the schema N as the length, which
+// was the fill-to-N in disguise.
 func TestDartFp32ArrayTakesTheWireLength(t *testing.T) {
 	src := "version: 1\nmessages:\n  vec:\n    payload:\n" +
 		"      f32s: { id: 0, type: array, items: { type: fp32, count: 3 } }\n" +
 		"      f64s: { id: 1, type: array, items: { type: fp64, count: 3 } }\n"
 	out := genFor(t, writeDef(t, src), map[string]any{})
 	for _, want := range []string{
-		"o.f32s = sofab.copyFp32(values, values.length);",
-		"o.f64s = List<double>.from(values);",
-		"  List<double> f32s = <double>[];",
-		"  List<double> f64s = <double>[];",
+		"  final sofab.InlineFloat32Array f32s = sofab.InlineFloat32Array(3);",
+		"  final sofab.InlineFloat64Array f64s = sofab.InlineFloat64Array(3);",
+		"      case 0:\n        if (count > 3) invalidate();\n        return o.f32s;",
+		"      case 1:\n        if (count > 3) invalidate();\n        return o.f64s;",
+		"    if (f32s.length != 0) { e.writeFp32Array(0, f32s.storage, f32s.length); }",
 	} {
 		if !strings.Contains(out, want) {
 			t.Errorf("generated Dart missing %q:\n%s", want, out)
 		}
 	}
-	if strings.Contains(out, "sofab.copyFp32(values, 3)") || strings.Contains(out, "_padTo(") {
+	if strings.Contains(out, "f32s.length = 3") || strings.Contains(out, "_padTo(") {
 		t.Errorf("an fp32/fp64 count:N array must not be pre-sized to N:\n%s", out)
 	}
 }
 
-// The array header hook carries the element KIND, and the schema `count` bound
-// sits INSIDE the test for the field's own declared kind (generator#259 /
-// Crucible F-0042, CORELIB_PLAN §4.8).
+// The schema `count` bound is keyed by the field's DECLARED element kind
+// (generator#259 / Crucible F-0042, CORELIB_PLAN §4.8).
 //
-// onArrayBegin fires for whatever array kind lands on a field id -- the corelib
-// reports what arrived but only the generated code knows what was DECLARED -- and
-// an array whose element kind contradicts the declaration was never this field's
+// An array whose element kind contradicts the declaration was never this field's
 // value (MESSAGE_SPEC §7.3). It is a skipped field, so its element count is not
-// this field's count and must not be measured against N. The two fp kinds are
-// therefore kept apart on the wire hook: a fixlen array's count word precedes its
-// fixlen_word, so a collapsed "fixlen" kind could not tell an fp64 header at a
-// declared fp32[N] slot from a real one, and the over-count bound would reject a
-// message that must be ACCEPTED (the driver: an fp64 array announcing 8 elements
-// arriving at `f32s`, declared `count: 3`).
+// this field's count and must not be measured against N -- the driver: an fp64
+// array announcing 8 elements arriving at `f32s`, declared `count: 3`, must be
+// SKIPPED and the message ACCEPTED.
 //
-// The skip needs no emitted code: the whole-array callbacks are kind-dispatched
-// by the corelib, so the contradicting array lands in a callback with no arm for
-// this id and evaporates -- leaving any correctly typed earlier occurrence of the
-// same id intact (§7.4).
+// corelib-dart makes that structural: it asks for a destination through a
+// different call per wire kind -- and for a fixlen array only past the
+// fixlen_word, so fp32 and fp64 are never one collapsed "fixlen" -- and each
+// field's arm sits in the call for its own declared kind. The contradicting
+// array reaches a call with no arm for the id, answers null, and evaporates,
+// leaving any correctly typed earlier occurrence of the same id intact (§7.4).
 func TestDartArrayHeaderBoundIsKeyedByElementKind(t *testing.T) {
 	src := "version: 1\nmessages:\n  vec:\n    payload:\n" +
 		"      f32s: { id: 0, type: array, items: { type: fp32, count: 3 } }\n" +
@@ -804,39 +859,27 @@ func TestDartArrayHeaderBoundIsKeyedByElementKind(t *testing.T) {
 		"      ss:   { id: 3, type: array, items: { type: i32, count: 9 } }\n"
 	out := genFor(t, writeDef(t, src), map[string]any{})
 
-	for _, want := range []string{
-		// The hook gained the kind parameter; the old two-argument override no
-		// longer overrides anything the corelib calls.
-		"  void onArrayBegin(int id, sofab.ArrayKind kind, int count) {",
-		// One arm per field, each testing ONLY its own declared element kind, with
-		// the bound behind that test. A declared fp32 appears under fp32 and a
-		// declared fp64 under fp64 -- never one shared "fixlen" arm.
-		"      case 0:\n        if (kind == sofab.ArrayKind.fp32 && count > 3) invalidate();\n        return;",
-		"      case 1:\n        if (kind == sofab.ArrayKind.fp64 && count > 5) invalidate();\n        return;",
-		// Integer arrays take the same shape -- there is no second wire word on
-		// that path, but the declared kind still gates the bound.
-		"      case 2:\n        if (kind == sofab.ArrayKind.unsigned && count > 7) invalidate();\n        return;",
-		"      case 3:\n        if (kind == sofab.ArrayKind.signed && count > 9) invalidate();\n        return;",
-	} {
-		if !strings.Contains(out, want) {
-			t.Errorf("generated Dart missing %q:\n%s", want, out)
+	calls := []struct{ sig, arm string }{
+		{"sofab.InlineFloat32Array? onFp32Array(int id, int count) {", "      case 0:\n        if (count > 3) invalidate();\n        return o.f32s;"},
+		{"sofab.InlineFloat64Array? onFp64Array(int id, int count) {", "      case 1:\n        if (count > 5) invalidate();\n        return o.f64s;"},
+		{"sofab.InlineInt64Array? onUnsignedArray(int id, int count) {", "      case 2:\n        if (count > 7) invalidate();\n        return o.us;"},
+		{"sofab.InlineInt64Array? onSignedArray(int id, int count) {", "      case 3:\n        if (count > 9) invalidate();\n        return o.ss;"},
+	}
+	for i, c := range calls {
+		body := methodBody(out, "class _VecVisitor", c.sig)
+		if !strings.Contains(body, c.arm) {
+			t.Errorf("%s is missing the arm %q:\n%s", c.sig, c.arm, body)
+		}
+		// ...and no other field's id: each call answers only its own kind.
+		for j := range calls {
+			if j != i && strings.Contains(body, fmt.Sprintf("case %d:", j)) {
+				t.Errorf("%s answers id %d, whose declared kind is another call's (§7.3):\n%s", c.sig, j, body)
+			}
 		}
 	}
-
-	for _, notWant := range []string{
-		// The pre-#259 arity: it compiles against nothing the corelib calls.
-		"void onArrayBegin(int id, int count)",
-		// A collapsed fixlen kind cannot separate the two fp slots at all.
-		"sofab.ArrayKind.fixlen",
-		// An un-gated bound rejects a header that §7.3 says to skip.
-		"if (count > 3) invalidate();",
-		"if (count > 5) invalidate();",
-		// The fp32 field's N must never be reachable from the fp64 arm (and back).
-		"if (kind == sofab.ArrayKind.fp64 && count > 3)",
-		"if (kind == sofab.ArrayKind.fp32 && count > 5)",
-	} {
+	for _, notWant := range []string{"onArrayBegin(", "sofab.ArrayKind"} {
 		if strings.Contains(out, notWant) {
-			t.Errorf("array header bound is not keyed by the declared element kind (%q):\n%s", notWant, out)
+			t.Errorf("the removed header hook %q is still emitted:\n%s", notWant, out)
 		}
 	}
 }
@@ -845,11 +888,10 @@ func TestDartArrayHeaderBoundIsKeyedByElementKind(t *testing.T) {
 // is MATERIALIZED — read into a declared destination — never on a payload the
 // decoder is skipping (CORELIB_PLAN §6.4, generator#257 / Crucible F-0038).
 //
-// corelib-dart used to hand the visitor a finished `String`, which forced it to
-// validate and transcode before the consumer could say whether it even wanted
-// the field. It now delivers raw wire bytes through `onStringBytes`, so the
-// generated arm resolves the destination first and only then checks and decodes.
-// A skipped field reaches no arm and is never inspected.
+// corelib-dart validates a string once its payload is whole, and only for a
+// destination the visitor handed over at the header. So the generated arm
+// resolves the destination and nothing else: no transcoding, no validation of
+// its own, and a field with no arm answers null and is never inspected.
 func TestDartSkippedStringIsNotValidated(t *testing.T) {
 	src := "version: 1\nmessages:\n  M:\n    payload:\n" +
 		"      s:  { id: 0, type: string, maxlen: 8 }\n" +
@@ -858,55 +900,39 @@ func TestDartSkippedStringIsNotValidated(t *testing.T) {
 		"      sa: { id: 3, type: array, items: { type: string, count: 4 } }\n"
 	out := genFor(t, writeDef(t, src), map[string]any{})
 
-	// The decoder's string entry point is the raw-bytes one; the transcoding
-	// `onString` override is gone.
-	if !strings.Contains(out, "void onStringBytes(int id, Uint8List bytes)") {
-		t.Errorf("the visitor must take raw wire bytes:\n%s", out)
-	}
-	if strings.Contains(out, "void onString(int id, String value)") {
-		t.Errorf("onString must no longer be overridden — it cannot resolve a destination first:\n%s", out)
-	}
-	// One strict corelib decode, inside the arm: valid bytes in, String out, null
-	// for anything malformed. The arm is braced because Dart switch cases share
-	// one scope.
+	body := methodBody(out, "class _MVisitor", "sofab.InlineString? onString(int id, int length) {")
 	for _, want := range []string{
-		"final s = sofab.decodeUtf8Strict(bytes);",
-		"if (s == null) { invalidate(); return; }",
-		"o.s = s;",
-		"o.u = s;",
+		// The maxlen bound reads the announced wire length, at the header.
+		"      case 0:\n        if (length > 8) invalidate();\n        return o.s;",
+		"      case 1:\n",
+		"        if (o.u.capacity < length) o.u.storage = Uint8List(length);\n        return o.u;",
+		"    return null;",
 	} {
-		if !strings.Contains(out, want) {
-			t.Errorf("generated Dart missing %q:\n%s", want, out)
+		if !strings.Contains(body, want) {
+			t.Errorf("onString missing %q:\n%s", want, body)
 		}
 	}
-	// The maxlen bound reads the wire length directly now — no re-encode.
-	if !strings.Contains(out, "if (bytes.length > 8) { invalidate(); return; }") {
-		t.Errorf("the maxlen bound must measure the raw wire bytes:\n%s", out)
-	}
-	// A blob carries no encoding: its arm must not validate.
-	if strings.Contains(out, "void onBlob(int id, Uint8List value)") &&
-		strings.Contains(out, "utf8Valid(value)") {
-		t.Errorf("blob must never be UTF-8-validated:\n%s", out)
+	// No generated validation or transcoding is left: the codec owns it.
+	for _, gone := range []string{"decodeUtf8Strict", "utf8Valid", "onStringBytes", "void onString(int id, String value)"} {
+		if strings.Contains(out, gone) {
+			t.Errorf("%q is still generated -- UTF-8 is the codec's now:\n%s", gone, out)
+		}
 	}
 }
 
 // TestDartStringFreeScopeSkipsStrings: the residual of #257 (generator#265 /
-// Crucible F-0038). #257 fixed the scopes that HAVE a string field; a scope with
-// none emitted no onStringBytes override at all and therefore inherited
-// sofab.MessageVisitor's default — which validates the payload as UTF-8 and
-// flags the decode INVALID. That default is right for a hand-written visitor
-// (it has no schema, so every string it is handed is one it wanted) and wrong
-// for generated code, where the id decides: an undeclared string is a skip whose
-// bytes are never inspected (CORELIB_PLAN §6.4, MESSAGE_SPEC §7.3).
-//
-// A lone continuation byte at an undeclared id — `4a 0a 8a` — therefore turned
-// an otherwise valid message INVALID in dart alone, on 12 implementations that
-// accept it. The fix is one shared base carrying the no-op, so the property
-// holds for every visitor by construction and not per emission site.
+// Crucible F-0038). A scope with no string field must skip a string at any id
+// without inspecting it: a lone continuation byte at an undeclared id — `4a 0a
+// 8a` — once turned an otherwise valid message INVALID in dart alone, on 12
+// implementations that accept it. corelib-dart's MessageVisitor now defaults
+// every aggregate and every sequence to "skip" (null), so a string-free scope
+// simply emits no onString override, and a sequence at a leaf element position
+// is never bound as that element (generator#272,
+// TestDartMistypedSequenceElementIsSkipped).
 func TestDartStringFreeScopeSkipsStrings(t *testing.T) {
 	// Nothing here declares a string: the top-level message, its nested struct,
 	// and every collector scope (blob array, struct array, native matrix) are all
-	// string-free — exactly the scopes that inherited the validating default.
+	// string-free.
 	src := "version: 1\nmessages:\n  M:\n    payload:\n" +
 		"      a:  { id: 0, type: u32 }\n" +
 		"      b:  { id: 1, type: blob, maxlen: 8 }\n" +
@@ -916,55 +942,41 @@ func TestDartStringFreeScopeSkipsStrings(t *testing.T) {
 		"      m:  { id: 5, type: array, items: { type: array, count: 2, items: { type: u32, count: 2 } } }\n"
 	out := genFor(t, writeDef(t, src), map[string]any{})
 
-	// The base is corelib-dart's sofab.VisitorBase (corelib-dart#65), so a copy of
-	// it may no longer be emitted.
-	if strings.Contains(out, "abstract class _Visitor") {
-		t.Errorf("the visitor base belongs to the corelib and must not be emitted:\n%s", out)
-	}
-	// Every generated visitor routes through it. Extending sofab.MessageVisitor
-	// directly is the defect: that is what re-inherits the validating onStringBytes
-	// default, and the DESCENDING onSequenceStart default one wire type over --
-	// which is what would let a sequence at a leaf element position bind its child
-	// as that element (generator#272, TestDartMistypedSequenceElementIsSkipped).
 	for _, decl := range []string{
-		"class _MVisitor extends sofab.VisitorBase {",
-		"class _MNVisitor extends sofab.VisitorBase {",
+		"class _MVisitor extends sofab.MessageVisitor {",
+		"class _MNVisitor extends sofab.MessageVisitor {",
 	} {
 		if !strings.Contains(out, decl) {
-			t.Errorf("missing %q — every visitor must extend the corelib base:\n%s", decl, out)
+			t.Errorf("missing %q:\n%s", decl, out)
 		}
 	}
-	if strings.Contains(out, "extends sofab.MessageVisitor") {
-		t.Errorf("no generated visitor may extend sofab.MessageVisitor directly:\n%s", out)
+	if strings.Contains(out, "onString(") || strings.Contains(out, "sofab.VisitorBase") {
+		t.Errorf("a string-free schema must inherit the skipping default:\n%s", out)
 	}
-	// A string-free module still must not validate, transcode or import for one.
 	if strings.Contains(out, "utf8Valid") || strings.Contains(out, "utf8.decode") {
 		t.Errorf("a string-free schema must never validate or transcode a string:\n%s", out)
 	}
 }
 
-// A string-declaring scope keeps its own arms and still falls through to the
-// base's no-op for every id it does not match — the switch has no default arm,
-// so an unmatched id leaves the method without inspecting the bytes.
+// A string-declaring scope keeps its own arms and answers null for every id it
+// does not match — the switch has no default arm, so an unmatched id falls out
+// of it to `return null` without inspecting the bytes.
 func TestDartStringScopeFallsThroughToSkip(t *testing.T) {
 	src := "version: 1\nmessages:\n  M:\n    payload:\n" +
 		"      s: { id: 0, type: string, maxlen: 8 }\n"
 	out := genFor(t, writeDef(t, src), map[string]any{})
-	if !strings.Contains(out, "class _MVisitor extends sofab.VisitorBase {") {
-		t.Errorf("a string-declaring visitor must extend the base too:\n%s", out)
+	body := methodBody(out, "class _MVisitor", "sofab.InlineString? onString(int id, int length) {\n    switch (id) {")
+	if body == "" {
+		t.Fatalf("expected an id switch in the string header call:\n%s", out)
 	}
-	i := strings.Index(out, "void onStringBytes(int id, Uint8List bytes) {\n    switch (id) {")
-	if i < 0 {
-		t.Fatalf("expected an id switch in the string destination override:\n%s", out)
-	}
-	if j := strings.Index(out[i:], "default:"); j >= 0 && j < strings.Index(out[i:], "\n  }") {
-		t.Errorf("the override must fall out of the switch for an unmatched id, not handle it:\n%s", out)
+	if strings.Contains(body, "default:") || !strings.HasSuffix(body, "    }\n    return null;") {
+		t.Errorf("the override must fall out of the switch to `return null` for an unmatched id:\n%s", body)
 	}
 }
 
-// No generated module carries the `dart:convert` import any more: the only thing
-// that ever needed it was `utf8.decode` in the string destinations, and those
-// call sofab.decodeUtf8Strict now. An import nothing uses is a `dart analyze`
+// No generated module carries the `dart:convert` import: a string is held as its
+// UTF-8 bytes, validated by the codec on decode and by writeStringUtf8 on encode,
+// so nothing generated transcodes. An import nothing uses is a `dart analyze`
 // warning, so the string-carrying schema is checked here beside the one without.
 func TestDartNoConvertImport(t *testing.T) {
 	for _, src := range []string{
@@ -1008,8 +1020,9 @@ messages:
 		"case 2:\n        if (value < 0 || value > 4294967295) { invalidate(); return; }\n        o.c_u32 = value;",
 		"case 4:\n        if (value < -128 || value > 127) { invalidate(); return; }\n        o.e_i8 = value;",
 		"case 6:\n        if (value < -2147483648 || value > 2147483647) { invalidate(); return; }\n        o.g_i32 = value;",
-		// The array arrives whole: one scan over the elements decides it.
-		"for (final _v in values) { if (_v < 0 || _v > 255) { invalidate(); return; } }",
+		// The array's elements are bounded by the codec, from the destination's
+		// declared range, as they are decoded.
+		"final sofab.InlineInt64Array arr_u8 = sofab.InlineInt64Array(4, range: const sofab.ElemRange(0, 255));",
 	} {
 		if !strings.Contains(got, want) {
 			t.Errorf("message.dart missing width guard %q:\n%s", want, got)
@@ -1032,9 +1045,9 @@ messages:
 // default, which returns `this`. A sequence at an element position therefore
 // descended into the collector itself and its child string bound as that element.
 //
-// The fix sits on the shared base beside the onStringBytes no-op — corelib-dart's
-// sofab.VisitorBase since corelib-dart#65 — so every collector inherits the skip
-// by construction, including ones added later.
+// The fix sits on the corelib's base: sofab.MessageVisitor's onSequenceStart
+// answers null (skip) since corelib-dart#96 (sofab.VisitorBase before it), so
+// every collector inherits the skip by construction, including ones added later.
 func TestDartMistypedSequenceElementIsSkipped(t *testing.T) {
 	got := genFor(t, writeDef(t, `
 version: 1
@@ -1045,8 +1058,11 @@ messages:
       blob_array:   { id: 201, type: array, items: { type: blob,   count: 5, maxlen: 64 } }
       obj_array:    { id: 202, type: array, items: { type: struct, count: 5, fields: { k: { id: 0, type: u32 } } } }
 `), map[string]any{})
-	if strings.Contains(got, "extends sofab.MessageVisitor") {
-		t.Errorf("every visitor must inherit the base's sequence skip, never MessageVisitor's descent:\n%s", got)
+	// The only generated visitor is the message's own, and it overrides
+	// onSequenceStart with arms for its declared sequences and `return null` for
+	// everything else.
+	if body := methodBody(got, "class _ProbeVisitor", "sofab.MessageVisitor? onSequenceStart(int id) {"); !strings.HasSuffix(body, "    }\n    return null;") {
+		t.Errorf("onSequenceStart must skip every sequence it does not bind:\n%s", body)
 	}
 	// The leaf collectors are corelib types since corelib-dart#74, and inherit the
 	// skip there; what this backend owes is handing the scope to one of them
@@ -1126,7 +1142,7 @@ func TestDartCallerOwnsTheEncodeBuffer(t *testing.T) {
 	for _, want := range []string{
 		"  static const int maxSize = 12;",
 		"    final buf = Uint8List(maxSize);",
-		"    final e = sofab.Encoder.overBuffer(buf);",
+		"    final e = sofab.Encoder.overBuffer(buf, depth: 1);",
 		"    return e.written;",
 	} {
 		if !strings.Contains(bounded, want) {
@@ -1148,7 +1164,7 @@ func TestDartCallerOwnsTheEncodeBuffer(t *testing.T) {
 		"  static const int maxSizeLimit = 2048;",
 		"  static const int maxSize = maxSizeLimit;",
 		"    final out = BytesBuilder(copy: true);",
-		"    final e = sofab.Encoder(out.add, buffer: Uint8List(512));",
+		"    final e = sofab.Encoder(out.add, buffer: Uint8List(512), depth: 1);",
 		"    e.flush();",
 		"    return out.toBytes();",
 	} {
@@ -1191,7 +1207,7 @@ func TestDartStructsGetNoEncodeEntryPoint(t *testing.T) {
 
 // TestDartNestedRowElemWidth is generator#330: a NESTED native row
 // (array<array<u8>>) got no element-width guard at all — the row was stored with
-// `List<int>.from(values)` and an over-width element went in unchecked.
+// `_i64List(values)` and an over-width element went in unchecked.
 // MESSAGE_SPEC §7.1 makes that INVALID, never a silent store.
 //
 // Unlike #267 this is an ABSENT bound rather than a late one, so it shows on a
@@ -1255,15 +1271,15 @@ messages:
 	}
 	// Array elements read the comprehension local: promoted, so no cast.
 	for _, want := range []string{
-		"for (final _x in (j['arr'] as List)) (_x is String ? BigInt.parse(_x) :",
-		"for (final _x in (j['rows'] as List)) <int>[for (final _y in (_x as List)) (_y is String ? BigInt.parse(_y) :",
+		"m.arr.assign(<int>[for (final _b in (j['arr'] as List)) (_b is String ? BigInt.parse(_b) :",
+		"for (final _x in (j['rows'] as List)) sofab.InlineInt64Array.of(<int>[for (final _b in (_x as List)) (_b is String ? BigInt.parse(_b) :",
 	} {
 		if !strings.Contains(got, want) {
 			t.Errorf("a u64 array element must NOT cast a promoted local (unnecessary_cast is fatal here); missing %q in:\n%s", want, got)
 		}
 	}
 	// The shape the analyzer rejects, in either nesting.
-	for _, gone := range []string{"BigInt.parse(_x as String)", "BigInt.parse(_y as String)"} {
+	for _, gone := range []string{"BigInt.parse(_b as String)", "BigInt.parse(_x as String)", "BigInt.parse(_y as String)"} {
 		if strings.Contains(got, gone) {
 			t.Errorf("emitted %q, which `dart analyze --fatal-warnings` rejects as unnecessary_cast:\n%s", gone, got)
 		}
@@ -1438,17 +1454,12 @@ func TestDartEnumAndBitfieldWidthBoundAtEverySixPositions(t *testing.T) {
 		bfRej + "o.sbf = value;",
 		enRej + "o.ue = value;",
 		bfRej + "o.ubf = value;",
-		// 2. native array element: the scan over the assembled list, which decides
-		// an array that ARRIVES...
-		"        for (final _v in values) { if (_v < -128 || _v > 127) { invalidate(); return; } }\n        o.ea = List<int>.from(values);",
-		"        for (final _v in values) { if ((_v & ~0xff) != 0) { invalidate(); return; } }\n        o.bfa = List<int>.from(values);",
-		// ...and the SAME interval at the header, which is what the decoder applies
-		// AT each element -- so a value outside the width is refused even when the
-		// array is cut short behind it (§5.2), which a scan of the assembled list
-		// cannot reach. Under the width rule the two state the same bound, so this
-		// position has nothing left unenforced.
-		"          return const sofab.ElemRange(-128, 127);",
-		"          return const sofab.ElemRange(0, 255);",
+		// 2. native array element: the interval rides on the destination, and the
+		// codec applies it AT each element as it is decoded -- so a value outside
+		// the width is refused whether the array completes or is cut short behind
+		// it (§5.2).
+		"final sofab.InlineInt64Array ea = sofab.InlineInt64Array(4, range: const sofab.ElemRange(-128, 127));",
+		"final sofab.InlineInt64Array bfa = sofab.InlineInt64Array(4, range: const sofab.ElemRange(0, 255));",
 		// 6. matrix row element. The row's values never reach the generated visitor
 		// -- sofab.IntMatrixSeq gathers them and places the finished row -- so the
 		// collector's own lo/hi pair is the whole bound, and an interval is exactly
@@ -1463,7 +1474,8 @@ func TestDartEnumAndBitfieldWidthBoundAtEverySixPositions(t *testing.T) {
 	for _, bad := range []string{
 		"      case 0:\n        o.en = value;",
 		"      case 1:\n        o.bf = value;",
-		"        o.ea = List<int>.from(values);\n        return;\n    }\n  }\n  @override\n  void onSignedArray",
+		"sofab.InlineInt64Array ea = sofab.InlineInt64Array(4);",
+		"sofab.InlineInt64Array bfa = sofab.InlineInt64Array(4);",
 		// The generated collector subclass the set/mask bound needed is gone: the
 		// bound travels through the corelib's own lo/hi pair now.
 		"extends sofab.IntMatrixSeq {",
@@ -1524,7 +1536,7 @@ func TestDartBitfieldSpanningBit63IsUnguarded(t *testing.T) {
 		map[string]any{})
 	for _, want := range []string{
 		"      case 0:\n        o.g = value;",
-		"        o.ga = List<int>.from(values);",
+		"final sofab.InlineInt64Array ga = sofab.InlineInt64Array(2);",
 	} {
 		if !strings.Contains(got, want) {
 			t.Errorf("a bitfield implying the full u64 width must store unguarded, missing %q:\n%s", want, got)
@@ -1533,7 +1545,7 @@ func TestDartBitfieldSpanningBit63IsUnguarded(t *testing.T) {
 	if strings.Contains(got, "0x8000000000000001") {
 		t.Errorf("the withdrawn flag-mask guard was emitted:\n%s", got)
 	}
-	if strings.Contains(got, "onArrayElemBound") {
+	if strings.Contains(got, "sofab.ElemRange(") {
 		t.Errorf("a u64-implying element width states no interval:\n%s", got)
 	}
 }

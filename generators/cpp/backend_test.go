@@ -1454,6 +1454,42 @@ func TestCppFixedProfileKeepsItsDecodeShape(t *testing.T) {
 	}
 }
 
+// TestCppDecodeMovesTheResultOut: decode() returns the message out of a local
+// IStreamObject that dies on return, so it must MOVE it. NRVO cannot apply to
+// *in (a member of that local, not the local itself); a plain `return *in;`
+// copy-constructs every std::string/std::vector of the message, allocating each
+// container a second time per decode. Every profile and storage mode emits the
+// same line, and <utility> is included for it rather than left to transitive
+// includes.
+func TestCppDecodeMovesTheResultOut(t *testing.T) {
+	src := "version: 1\nmessages:\n  m:\n    payload:\n" +
+		"      names: { id: 0, type: array, items: { type: string, count: 4, maxlen: 16 } }\n" +
+		"      tag:   { id: 1, type: i32, default: 3 }\n"
+	for _, tc := range []struct {
+		name string
+		cfg  map[string]any
+	}{
+		{"cpp", map[string]any{}},
+		{"cpp allow_dynamic=false", map[string]any{"allow_dynamic": false}},
+		{"c-cpp", map[string]any{"corelib": "c-cpp"}},
+		{"c-cpp allow_dynamic=true", map[string]any{"corelib": "c-cpp", "allow_dynamic": true}},
+	} {
+		h, err := genHeader(t, src, "m.hpp", tc.cfg)
+		if err != nil {
+			t.Fatalf("%s: generate: %v", tc.name, err)
+		}
+		if !strings.Contains(h, "        return std::move(*in);") {
+			t.Errorf("%s: decode must move the result out of its local stream:\n%s", tc.name, h)
+		}
+		if strings.Contains(h, "return *in;") {
+			t.Errorf("%s: decode must not copy the result out of its local stream:\n%s", tc.name, h)
+		}
+		if !strings.Contains(h, "#include <utility>") {
+			t.Errorf("%s: std::move needs <utility>:\n%s", tc.name, h)
+		}
+	}
+}
+
 // nestedWrapperRowsSrc is the shape of generator#250: a nested array whose ROW
 // is itself a wrapper sequence (string / blob / struct elements), at depth 2 and
 // depth 3, alongside a native-row control that must keep its existing lowering.

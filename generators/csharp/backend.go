@@ -199,14 +199,24 @@ func (g *gen) emitClass(f *cfile, name, summary string, fields []*ir.Field, isMe
 		} else {
 			f.line("    public const int MaxSize = %d;", ms.Size)
 		}
-		f.line("    // Per-thread scratch buffer: Encode() serialises into it and returns an")
-		f.line("    // exact-size copy, so the worst-case buffer is not re-allocated (and")
-		f.line("    // zeroed) on every call. Do not call Encode() reentrantly from a")
-		f.line("    // Serialize() override on the same thread.")
+		// The encoder is per-thread like the scratch buffer: an OStream carries
+		// its fixed state (the §6.6 open-sequence run, sized to MAX_DEPTH at
+		// construction, about 1 KB), and constructing one per message zeroes
+		// that on every call. Reset re-installs the buffer and drops whatever
+		// the previous message left open, including one abandoned by an
+		// exception, so a reused encoder starts every message clean.
+		f.line("    // Per-thread scratch buffer and encoder: Encode() serialises into the")
+		f.line("    // buffer and returns an exact-size copy, so neither the worst-case")
+		f.line("    // buffer nor the encoder's fixed state is re-allocated (and zeroed) on")
+		f.line("    // every call; Reset drops any state a previous, failed Encode() left.")
+		f.line("    // Do not call Encode() reentrantly from a Serialize() override on the")
+		f.line("    // same thread.")
 		f.line("    [ThreadStatic] private static byte[] _encScratch;")
+		f.line("    [ThreadStatic] private static OStream _encStream;")
 		f.line("    public byte[] Encode() {")
 		f.line("        var buf = _encScratch ??= new byte[MaxSize];")
-		f.line("        var os = new OStream(buf);")
+		f.line("        var os = _encStream;")
+		f.line("        if (os == null) { _encStream = os = new OStream(buf); } else { os.Reset(buf, 0); }")
 		f.line("        Serialize(os);")
 		f.line("        var outp = new byte[os.BytesUsed];")
 		f.line("        Array.Copy(buf, outp, os.BytesUsed);")
