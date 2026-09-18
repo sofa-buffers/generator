@@ -55,7 +55,36 @@ type pyScope struct {
 	child      int    // element scope id, -1 when the element is a value
 }
 
-type scopeSet struct{ scopes []*pyScope }
+type scopeSet struct {
+	scopes []*pyScope
+	// Every location name ever handed out. A scope is named after the PATH that
+	// reaches it, and two different paths can spell the same name: a field `a`
+	// holding a struct with a field `b` gives `_L_M_a_b`, and so does a sibling
+	// field named `a_b`. Both would then be emitted as module-level constants,
+	// the second binding would win, and the two scopes would dispatch against one
+	// id -- so one of them would take the other's values, with no error anywhere.
+	// Measured before this map existed, on a schema with exactly that pair: the
+	// nested struct decoded the sibling's values and the sibling decoded nothing.
+	// The same name is the destination table's too (binding.go derives it from
+	// this one), where a collision would hand two scopes the same Binding.
+	used map[string]bool
+}
+
+// uniq hands out a location name that no other scope in this tree has. The
+// suffix is only ever reached by a collision, so the common output is unchanged;
+// and because EVERY name goes through here, a suffix that happens to spell
+// another scope's name is disambiguated in its turn.
+func (ss *scopeSet) uniq(base string) string {
+	if ss.used == nil {
+		ss.used = map[string]bool{}
+	}
+	name := base
+	for i := 2; ss.used[name]; i++ {
+		name = fmt.Sprintf("%s_%d", base, i)
+	}
+	ss.used[name] = true
+	return name
+}
 
 // buildScopes walks a class's tree and assigns one scope per sequence-framed
 // location reachable from it, rooted at the class itself.
@@ -67,7 +96,7 @@ func (g *gen) buildScopes(typeName string, fields []*ir.Field) []*pyScope {
 
 func (ss *scopeSet) object(locName, path string, fields []*ir.Field) int {
 	sc := &pyScope{
-		id: len(ss.scopes), name: "_L_" + locName,
+		id: len(ss.scopes), name: ss.uniq("_L_" + locName),
 		fields: fields, path: path, seqChild: map[int64]int{}, child: -1,
 	}
 	ss.scopes = append(ss.scopes, sc)
@@ -97,7 +126,7 @@ func (ss *scopeSet) object(locName, path string, fields []*ir.Field) int {
 func (ss *scopeSet) array(locName, arrPath, loc string, elem ir.Kind, ref *ir.TypeRef,
 	items *ir.ArrayElem, cap int64, emHas bool, em int64) int {
 	sc := &pyScope{
-		id: len(ss.scopes), name: "_L_" + locName,
+		id: len(ss.scopes), name: ss.uniq("_L_" + locName),
 		isArr: true, arrPath: arrPath, elem: elem, elemRef: ref, elemItems: items,
 		cap: cap, elemMaxHas: emHas, elemMax: em, loc: loc, child: -1,
 	}

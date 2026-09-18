@@ -2,6 +2,7 @@ package python
 
 import (
 	"fmt"
+	"strings"
 
 	"github.com/sofa-buffers/generator/internal/ir"
 )
@@ -81,6 +82,36 @@ import (
 // it a class keeps today's shape exactly, table and scatter and all.
 const pyBindMin = 3
 
+// pyBindArrayMax is the largest declared element count a native array may have
+// and still go on the table.
+//
+// An array is the one kind a table materializes TWICE: the decoder writes every
+// element into a slot, and the scatter then builds the list the dataclass holds
+// out of those slots -- where the typed hook receives the list the corelib built
+// once, in one call. The destination also costs `count` slots whether the array
+// arrives or not, and the storage is prefilled per decode.
+//
+// So the trade turns with the count. Measured (Callgrind Ir/op, native engine,
+// one decode of a message with three u64 scalars beside one u8 array, once with
+// the array ON the wire and once absent):
+//
+//	cap    present: bound / on the visitor    absent: bound / on the visitor
+//	   8      26,583 / 29,505  (-9.9%)          23,272 / 22,586  (+3.0%)
+//	  16      27,396 / 29,879  (-8.3%)          23,275 / 22,586  (+3.0%)
+//	  32      29,060 / 30,645  (-5.2%)          23,285 / 22,892  (+1.7%)
+//	  64      32,441 / 32,253  (+0.6%)          23,445 / 22,647  (+3.5%)
+//	 512      88,679 / 67,189  (+32%)           24,757 / 23,203  (+6.7%)
+//	4096     544,496 / 322,369 (+69%)           56,755 / 22,956  (+147%)
+//
+// 32 is the last count that pays for a message carrying the array, and the price
+// of an absent one stays under 2% there. Past 64 the double materialization runs
+// away, and a large declared count would make every decode pay for a field the
+// message may not even hold.
+//
+// Nothing else has this shape: a bound string or blob lands as ONE object in the
+// objects list and the scatter moves the reference, and a scalar is one slot.
+const pyBindArrayMax = 32
+
 // bindAbsent is the sentinel every arrival test compares against -- a slot of
 // all ones, which no arrival can write: an array's count slot holds its element
 // count and every other kind's holds 1.
@@ -157,7 +188,7 @@ func (a *slotAlloc) object() int64      { at := a.objects; a.objects++; return a
 func (g *gen) buildBindPlan(name string, scopes []*pyScope) *bindPlan {
 	p := &bindPlan{name: name, boundSc: map[int]bool{}, boundFd: map[int]idSet{}}
 	descend := g.fullyBindable(scopes, scopes[0], map[int]bool{})
-	g.bindScope(p, &slotAlloc{}, scopes, scopes[0], "_BIND_"+name, "m", descend)
+	g.bindScope(p, &slotAlloc{}, scopes, scopes[0], "m", descend)
 	// The root is the visitor's OWN location -- it is never entered by the table,
 	// and the fields it does not bind still dispatch there.
 	delete(p.boundSc, scopes[0].id)
@@ -205,9 +236,15 @@ func (g *gen) fullyBindable(scopes []*pyScope, sc *pyScope, seen map[int]bool) b
 // `path` is the scatter's name for the object this scope's values land on -- "m"
 // for the message itself, "m.captured_at" for a nested struct.
 func (g *gen) bindScope(p *bindPlan, alloc *slotAlloc, scopes []*pyScope,
-	sc *pyScope, tableName, path string, descend bool) {
+	sc *pyScope, path string, descend bool) {
 
-	t := &bindTable{name: tableName}
+	// Named after the scope, not after the path: two different paths can spell
+	// one name (a field `a` whose struct has a field `b`, beside a sibling field
+	// `a_b`), and the scope tree has already made that unique -- see scopeSet.uniq.
+	// Deriving it here rather than rebuilding it is what keeps the two in step: a
+	// duplicate table name would hand both scopes the SAME Binding, so one would
+	// decode into the other's slots and the other into none.
+	t := &bindTable{name: bindTableName(sc)}
 	p.tables = append(p.tables, t)
 	p.boundSc[sc.id] = true
 	ids := idSet{}
@@ -220,13 +257,12 @@ func (g *gen) bindScope(p *bindPlan, alloc *slotAlloc, scopes []*pyScope,
 			if !descend || !ok {
 				continue
 			}
-			kid := tableName + "_" + pyIdent(fld.Name)
-			g.bindScope(p, alloc, scopes, scopes[child], kid, dest, descend)
+			g.bindScope(p, alloc, scopes, scopes[child], dest, descend)
 			// No count slot: every member carries its own arrival, and the
 			// dataclass already holds a default-constructed sub-object for a
 			// struct that never arrives at all.
 			t.seqRows = append(t.seqRows,
-				fmt.Sprintf(".sequence(%d, child=%s)", fld.ID, kid))
+				fmt.Sprintf(".sequence(%d, child=%s)", fld.ID, bindTableName(scopes[child])))
 			ids[fld.ID] = true
 			continue
 		}
@@ -255,6 +291,12 @@ func (g *gen) bindScope(p *bindPlan, alloc *slotAlloc, scopes []*pyScope,
 	}
 }
 
+// bindTableName is a scope's Binding, named after the scope's own unique
+// location name so no two scopes can ever share one table.
+func bindTableName(sc *pyScope) string {
+	return "_BIND_" + strings.TrimPrefix(sc.name, "_L_")
+}
+
 // bindable reports whether a table entry can carry this field with every rule
 // the visitor's own store applies -- see the two rules at the top of this file.
 func bindable(fld *ir.Field) bool {
@@ -274,7 +316,9 @@ func bindable(fld *ir.Field) bool {
 		// A wrapper array's elements are sequence-framed, and an array the
 		// schema leaves unbounded has no destination to declare: the slots are
 		// `cap` wide, and a count the WIRE chooses may not size storage (§6.6).
-		return isNativeArrayElem(fld.Elem) && fld.HasCount
+		// A large declared count is excluded on cost, not correctness --
+		// see pyBindArrayMax.
+		return isNativeArrayElem(fld.Elem) && fld.HasCount && fld.Count <= pyBindArrayMax
 	}
 	return false // u8..u32 / i8..i32: a declared width no entry carries
 }
