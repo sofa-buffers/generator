@@ -156,7 +156,14 @@ has an optional `summary` and a required `payload` (its top-level **id scope**).
 Every field requires **`id`** (0 … 2³¹−1) and **`type`**; common optional
 metadata is `description` and `deprecated`. **`unit` is allowed only on the ten
 numeric types** (`u8…u64`, `i8…i64`, `fp32`, `fp64`) — all other types reject
-it; floats additionally allow `decimals` 0–15. All identifiers match
+it; floats additionally allow `decimals` 0–15. An `array` field applies the same
+rule to its **leaf element type** (the innermost element under nested arrays):
+`unit` when the leaf is numeric, `decimals` when it is `fp32`/`fp64`, the value
+describing each element. Both gates enforce it — the JSON Schema through the
+recursive `numericLeafItems` / `floatLeafItems` definitions, the Go validator
+through `checkArrayMetadata` — and the model reads both keys before its type
+switch, so an array carries `Field.Unit` / `Field.Decimals` exactly like a scalar
+and every backend's generic `(unit: …)` rendering applies unchanged. All identifiers match
 `^[A-Za-z][A-Za-z0-9_]*$`; objects are **closed** (unknown keys are rejected).
 
 **Field types and their declaration keys:**

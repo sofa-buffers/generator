@@ -4,3 +4,5 @@ messages:
     summary: "A message exercising metadata."
     payload:
       weight: { id: 0, type: i16, unit: kg, description: "weight in kg", deprecated: true, default: 5 }
+      samples: { id: 1, type: array, unit: mV, decimals: 2, description: "cell voltages", items: { type: fp32, count: 4 } }
+      counts: { id: 2, type: array, unit: frames, items: { type: array, count: 2, items: { type: u32, count: 3 } } }

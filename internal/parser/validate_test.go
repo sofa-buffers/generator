@@ -671,6 +671,77 @@ func TestEveryArrayElemKindRejectsABogusDefault(t *testing.T) {
 	}
 }
 
+// TestArrayUnitAndDecimalsFollowTheLeafElement pins the array half of the
+// field-level metadata rule: `unit` describes each element, so it is accepted
+// exactly when the LEAF element type (the innermost one under nested arrays) is
+// one of the ten numeric types, and `decimals` exactly when that leaf is
+// fp32/fp64. Every element kind is tried both flat and one level nested, so a
+// kind added to arrayElem cannot slip past the rule unnoticed.
+func TestArrayUnitAndDecimalsFollowTheLeafElement(t *testing.T) {
+	items := map[string]string{
+		"u8": "{type: u8}", "u16": "{type: u16}", "u32": "{type: u32}", "u64": "{type: u64}",
+		"i8": "{type: i8}", "i16": "{type: i16}", "i32": "{type: i32}", "i64": "{type: i64}",
+		"fp32": "{type: fp32}", "fp64": "{type: fp64}",
+		"boolean":  "{type: boolean}",
+		"string":   "{type: string, maxlen: 8}",
+		"blob":     "{type: blob, maxlen: 8}",
+		"enum":     "{type: enum, enum: {A: 0}}",
+		"bitfield": "{type: bitfield, bits: {a: {pos: 0}}}",
+		"struct":   "{type: struct, fields: {x: {id: 0, type: u32}}}",
+		"union":    "{type: union, oneof: {p: {id: 0, type: u32}}}",
+	}
+	for _, kind := range arrayElem {
+		if kind == "array" {
+			continue // the nested shapes below cover it
+		}
+		leaf, ok := items[kind]
+		if !ok {
+			t.Fatalf("arrayElem gained %q with no items spelling in this test; add one", kind)
+		}
+		numeric := numericLeafTypes[kind]
+		float := kind == "fp32" || kind == "fp64"
+		for _, shape := range []struct{ name, items string }{
+			{"array<" + kind + ">", leaf},
+			{"array<array<" + kind + ">>", "{type: array, items: " + leaf + "}"},
+		} {
+			for _, meta := range []struct {
+				key, value string
+				allowed    bool
+			}{
+				{"unit", "kPa", numeric},
+				{"decimals", "2", float},
+			} {
+				src := "version: 1\nmessages:\n  M:\n    payload:\n" +
+					"      a: {id: 0, type: array, " + meta.key + ": " + meta.value + ", items: " + shape.items + "}\n"
+				errs := validateString(t, src)
+				switch {
+				case meta.allowed && errs != nil:
+					t.Errorf("%s with %s should validate, got:\n%s", shape.name, meta.key, errs.Error())
+				case !meta.allowed && errs == nil:
+					t.Errorf("%s with %s should be rejected", shape.name, meta.key)
+				case !meta.allowed && !strings.Contains(errs.Error(), meta.key+" is allowed only on an array whose leaf element type is"):
+					t.Errorf("%s with %s rejected for the wrong reason:\n%s", shape.name, meta.key, errs.Error())
+				}
+			}
+		}
+	}
+}
+
+// Both keys together, and the 0..15 range still applies to an array's decimals.
+func TestArrayDecimalsRangeAndCombinedMetadata(t *testing.T) {
+	ok := "version: 1\nmessages:\n  M:\n    payload:\n" +
+		"      a: {id: 0, type: array, unit: V, decimals: 3, items: {type: fp64, count: 4}}\n"
+	if errs := validateString(t, ok); errs != nil {
+		t.Fatalf("unit + decimals on an fp64 array should validate, got:\n%s", errs.Error())
+	}
+	bad := "version: 1\nmessages:\n  M:\n    payload:\n" +
+		"      a: {id: 0, type: array, decimals: 16, items: {type: fp32}}\n"
+	errs := validateString(t, bad)
+	if errs == nil || !strings.Contains(errs.Error(), "decimals must be an integer in 0..15") {
+		t.Fatalf("decimals 16 on an fp32 array should be rejected by the range check, got: %v", errs)
+	}
+}
+
 func TestUInt64MaxStringAccepted(t *testing.T) {
 	src := "version: 1\nmessages:\n  M:\n    payload:\n      a: {id: 0, type: u64, default: \"18446744073709551615\"}\n"
 	if errs := validateString(t, src); errs != nil {

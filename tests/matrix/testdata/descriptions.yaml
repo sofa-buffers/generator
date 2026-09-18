@@ -47,3 +47,10 @@ messages:
         type: u32
         description: "Altprüfsumme — nicht mehr verwenden"
         deprecated: true
+
+      cellVoltages:
+        id: 6
+        type: array
+        description: "Zellspannungen je Modul"
+        unit: "µV"
+        items: { type: u16, count: 4 }

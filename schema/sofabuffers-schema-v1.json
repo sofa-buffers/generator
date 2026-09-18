@@ -202,6 +202,35 @@
       ]
     },
 
+    "numericLeafItems": {
+      "type": "object",
+      "description": "An array element definition whose leaf element type is numeric: one of the ten integer/float types, or a nested array whose own leaf is. Gates 'unit' on an array field.",
+      "properties": {
+        "type": {
+          "enum": [
+            "u8", "u16", "u32", "u64",
+            "i8", "i16", "i32", "i64",
+            "fp32", "fp64",
+            "array"
+          ]
+        }
+      },
+      "required": ["type"],
+      "if": { "properties": { "type": { "const": "array" } } },
+      "then": { "properties": { "items": { "$ref": "#/$defs/numericLeafItems" } } }
+    },
+
+    "floatLeafItems": {
+      "type": "object",
+      "description": "An array element definition whose leaf element type is fp32 or fp64, possibly under nested arrays. Gates 'decimals' on an array field.",
+      "properties": {
+        "type": { "enum": ["fp32", "fp64", "array"] }
+      },
+      "required": ["type"],
+      "if": { "properties": { "type": { "const": "array" } } },
+      "then": { "properties": { "items": { "$ref": "#/$defs/floatLeafItems" } } }
+    },
+
     "enum": {
       "type": "object",
       "description": "Defines the allowed constants for enum type fields; keys are enum names.",
@@ -310,11 +339,11 @@
           "type": "integer",
           "minimum": 0,
           "maximum": 15,
-          "description": "Number of decimal places for floating-point numbers."
+          "description": "Number of decimal places for floating-point numbers. Allowed on fp32/fp64 fields and on array fields whose leaf element type is fp32/fp64."
         },
         "unit": {
           "type": "string",
-          "description": "Optional unit of measurement for numeric fields (e.g., 'kg', '°C')."
+          "description": "Optional unit of measurement for numeric fields (e.g., 'kg', '°C'). Also allowed on array fields whose leaf element type is numeric; it then describes each element."
         },
         "deprecated": {
           "type": "boolean",
@@ -644,12 +673,24 @@
                 "maxItems": { "$data": "1/items/count" }
               },
               "description": { },
+              "unit": { },
+              "decimals": { },
               "deprecated": { }
             },
             "required": ["items"],
             "additionalProperties": false,
 
             "allOf": [
+              {
+                "if": { "required": ["unit"] },
+                "then": { "properties": { "items": { "$ref": "#/$defs/numericLeafItems" } } }
+              },
+
+              {
+                "if": { "required": ["decimals"] },
+                "then": { "properties": { "items": { "$ref": "#/$defs/floatLeafItems" } } }
+              },
+
               {
                 "if": {
                   "properties": {

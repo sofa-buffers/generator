@@ -166,7 +166,7 @@ type Field struct {
 	Default   any   // typed per Kind (int64, float64, bool, string, []byte, []any); nil if absent
 	HasMaxlen bool  // string/blob
 	Maxlen    int64 // valid when HasMaxlen
-	Decimals  *int  // fp32/fp64
+	Decimals  *int  // fp32/fp64, or an array whose leaf element is fp32/fp64
 
 	// Array (Kind == KindArray):
 	Elem       Kind  // element kind
