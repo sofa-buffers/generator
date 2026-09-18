@@ -204,6 +204,14 @@ func (g *gen) emitVisitor(f *pyfile, name string, fields []*ir.Field) {
 	if g.bind != nil {
 		g.emitBindTables(f, g.bind)
 	}
+	// A closed table carries every id the schema declares for this class, at
+	// every depth, so the codec skips whatever is not on it and the visitor is
+	// never called: no dispatch, no locations, no scope stack -- the object
+	// exists to declare the destinations and to move them onto the message.
+	if g.bind != nil && g.bind.closed {
+		g.emitTableOnlyVisitor(f, name)
+		return
+	}
 	f.line("# Dispatch locations for %s: one per sequence-framed scope in its tree.", name)
 	f.line("# A field id is only unique WITHIN a scope -- a nested sequence opens a fresh")
 	f.line("# id space -- so the visitor below keys every hook on (location, id).")
@@ -258,6 +266,28 @@ func (g *gen) emitVisitor(f *pyfile, name string, fields []*ir.Field) {
 	}
 	g.emitOnField(f, scopes)
 	g.emitOnSchemaBound(f, scopes)
+}
+
+// emitTableOnlyVisitor writes the whole class for a schema the destination table
+// covers completely: the storage, the declaration, and the one pass that moves
+// the slots onto the message. Not one hook -- an id the closed table does not
+// name is skipped by the codec, sequence and all (corelib-py#150), so there is
+// nothing left for a hook to decide.
+func (g *gen) emitTableOnlyVisitor(f *pyfile, name string) {
+	f.line("class _%sVisitor(Visitor):", name)
+	f.line(`    """Decode handler for :class:`+"`"+`%s`+"`"+`: a destination table and nothing else.`, name)
+	f.line("")
+	f.line("    Every id this schema declares is on the table, so the decoder writes each")
+	f.line("    value straight into a slot and calls nothing here. An id the schema does")
+	f.line("    not declare is skipped by the codec -- the table is ``closed`` -- which is")
+	f.line("    also what keeps an unknown id inside a nested scope from being mistaken")
+	f.line("    for a field of the scope around it.")
+	f.line(`    """`)
+	f.line("")
+	f.line("    def __init__(self, o: %s) -> None:", name)
+	f.line("        self._o = o")
+	g.emitBindStorage(f, g.bind)
+	g.emitScatter(f, g.bind)
 }
 
 // emitSeqHooks writes on_sequence_begin / on_sequence_end.
