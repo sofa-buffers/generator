@@ -760,8 +760,11 @@ messages:
 		t.Error("inert blob limit must not be emitted (no unbounded blob)")
 	}
 	// The corelib is handed no cap at all -- neither entry point takes one.
+	// WithMaxDepth is not one: it bounds the ENCODER's nesting (the schema's
+	// static depth), and the decode entry points are checked separately below.
+	decodeSide := strings.ReplaceAll(msg, "sofab.WithMaxDepth(", "")
 	for _, notWant := range []string{"sofab.WithMax", "AcceptBytes(data, m,", "NewDecoder(m,"} {
-		if strings.Contains(msg, notWant) {
+		if strings.Contains(decodeSide, notWant) {
 			t.Errorf("the corelib must be handed no receiver cap (%q):\n%s", notWant, msg)
 		}
 	}
@@ -1141,7 +1144,8 @@ messages:
 	// applied on one path and not the other is no longer expressible: the old
 	// asymmetry risk was that the caps rode in as per-call options.
 	lim := genGo(t, s, map[string]any{"max_dyn_string_len": 4096})["vec.go"]
-	if strings.Contains(lim, "sofab.WithMax") {
+	// (sofab.WithMaxDepth is the encoder's nesting bound, not a receiver cap.)
+	if strings.Contains(strings.ReplaceAll(lim, "sofab.WithMaxDepth(", ""), "sofab.WithMax") {
 		t.Errorf("no receiver cap may reach the corelib (corelib-go#133):\n%s", lim)
 	}
 	if !strings.Contains(lim, "if total > MaxDynStringLen {\n\t\t\treturn sofab.ErrLimitExceeded\n\t\t}") {
@@ -1177,7 +1181,7 @@ messages:
 	for _, want := range []string{
 		"const BMaxSize = ",
 		"buf := make([]byte, BMaxSize)",
-		"e, err := sofab.NewEncoderBuffer(buf, 0)",
+		"e, err := sofab.NewEncoderBuffer(buf, 0, _BEncOpts...)",
 		"return e.Bytes(), nil",
 	} {
 		if !strings.Contains(bounded, want) {

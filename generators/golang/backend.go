@@ -1324,6 +1324,34 @@ func (g *gen) messageFile(m *ir.Message) []byte {
 	}
 	f.blank()
 
+	// Encode-side nesting bound (see seqDepth). It is what lets every Encoder
+	// this file constructs size its lazy-sequence id stack to the schema instead
+	// of to MaxDepth: up to a small inline capacity that stack then lives inside
+	// the Encoder, and a one-shot encode pays no separate allocation for it.
+	encOpts := ""
+	if depth, ok := seqDepth(m.Fields, map[string]bool{}); ok && depth <= wireMaxDepth {
+		optsVar := "_" + typeName + "EncOpts"
+		encOpts = ", " + optsVar + "..."
+		f.line("// %sMaxDepth is the deepest sequence nesting encoding this message opens,", typeName)
+		f.line("// derived from the schema: no value of it nests deeper.")
+		f.line("const %sMaxDepth = %d", typeName, depth)
+		f.blank()
+		// WithMaxDepth(0) means "no bound" (MaxDepth), so a message that opens no
+		// sequence at all still passes 1: the bound is never reached either way.
+		arg := typeName + "MaxDepth"
+		if depth == 0 {
+			arg = "1"
+			f.line("// %s bounds this message's encoders to one level: %sMaxDepth", optsVar, typeName)
+			f.line("// is 0, and WithMaxDepth(0) would mean no bound. It is package-level so")
+			f.line("// passing it allocates nothing per call.")
+		} else {
+			f.line("// %s bounds this message's encoders to %sMaxDepth. It is", optsVar, typeName)
+			f.line("// package-level so passing it allocates nothing per call.")
+		}
+		f.line("var %s = []sofab.Option{sofab.WithMaxDepth(%s)}", optsVar, arg)
+		f.blank()
+	}
+
 	// public Encode/Decode wrappers
 	if ms.Bounded {
 		// One exactly-sized buffer, allocated HERE: the corelib is handed storage
@@ -1339,7 +1367,7 @@ func (g *gen) messageFile(m *ir.Message) []byte {
 		f.line("// does not, and is reported rather than truncated.")
 		f.line("func (m *%s) Encode() ([]byte, error) {", typeName)
 		f.line("\tbuf := make([]byte, %sMaxSize)", typeName)
-		f.line("\te, err := sofab.NewEncoderBuffer(buf, 0)")
+		f.line("\te, err := sofab.NewEncoderBuffer(buf, 0%s)", encOpts)
 		f.line("\tif err != nil {")
 		f.line("\t\treturn nil, err")
 		f.line("\t}")
@@ -1367,7 +1395,7 @@ func (g *gen) messageFile(m *ir.Message) []byte {
 		f.line("\te, err := sofab.NewEncoderSink(scratch[:], 0, func(_ *sofab.Encoder, b []byte) error {")
 		f.line("\t\tout = append(out, b...)")
 		f.line("\t\treturn nil")
-		f.line("\t})")
+		f.line("\t}%s)", encOpts)
 		f.line("\tif err != nil {")
 		f.line("\t\treturn nil, err")
 		f.line("\t}")
@@ -1394,7 +1422,7 @@ func (g *gen) messageFile(m *ir.Message) []byte {
 	f.line("\te, err := sofab.NewEncoderSink(scratch[:], 0, func(_ *sofab.Encoder, b []byte) error {")
 	f.line("\t\t_, werr := w.Write(b)")
 	f.line("\t\treturn werr")
-	f.line("\t})")
+	f.line("\t}%s)", encOpts)
 	f.line("\tif err != nil {")
 	f.line("\t\treturn err")
 	f.line("\t}")
@@ -1460,6 +1488,79 @@ func (g *gen) messageFile(m *ir.Message) []byte {
 	f.line("\treturn m, nil")
 	f.line("}")
 	return f.bytes(g.banner, g.license)
+}
+
+// wireMaxDepth is the format's MAX_DEPTH (corelib-go sofab.MaxDepth, §4.9): the
+// most sequences an Encoder may hold open. A schema bound above it is not
+// passed -- the corelib would ignore it, and refuse the value anyway.
+const wireMaxDepth = 255
+
+// seqDepth returns the deepest sequence nesting Serialize opens under fields,
+// counted exactly as the corelib's Encoder counts open sequences: one per
+// WriteSequenceBeginLazy still unmatched by its WriteSequenceEnd. It walks the
+// same shapes marshalArray/emitMarshalField emit:
+//
+//   - a struct/union field opens one frame around its target's own fields;
+//   - a native array (scalar/enum/bool/bitfield/float) is one count-prefixed
+//     value and opens none;
+//   - every other array opens its wrapper, plus arrayDepth of its elements.
+//
+// ok is false when a type recurses into itself: its nesting would then depend
+// on the value, not the schema, and the caller passes no bound. The parser
+// rejects a circular $ref today, so this is a guard for the day it does not. The count is only
+// ever an UPPER bound -- lazy frames that stay contentless are still counted,
+// because the Encoder counts them while they are open.
+func seqDepth(fields []*ir.Field, onPath map[string]bool) (int, bool) {
+	best := 0
+	for _, fld := range fields {
+		d, ok := 0, true
+		switch fld.Kind {
+		case ir.KindStruct, ir.KindUnion:
+			d, ok = targetDepth(fld.Ref, onPath)
+			d++
+		case ir.KindArray:
+			d, ok = arrayDepth(fld.Elem, fld.ElemRef, fld.ElemItems, onPath)
+		}
+		if !ok {
+			return 0, false
+		}
+		best = max(best, d)
+	}
+	return best, true
+}
+
+// targetDepth is seqDepth of a struct/union target's fields, reporting a
+// recursive back-edge as unbounded.
+func targetDepth(ref *ir.TypeRef, onPath map[string]bool) (int, bool) {
+	if ref == nil || ref.Target == nil {
+		return 0, true
+	}
+	key := ref.Target.Key
+	if onPath[key] {
+		return 0, false
+	}
+	onPath[key] = true
+	defer delete(onPath, key)
+	return seqDepth(ref.Target.Fields, onPath)
+}
+
+// arrayDepth is the nesting an array field or row with this element opens: 0
+// for a native element (no frame), else 1 for its wrapper plus what one element
+// nests -- nothing for a string/blob leaf, a per-element frame plus the target's
+// depth for a struct/union, and the inner array's own depth for a nested array.
+func arrayDepth(elem ir.Kind, ref *ir.TypeRef, items *ir.ArrayElem, onPath map[string]bool) (int, bool) {
+	if isNativeArrayElem(elem) {
+		return 0, true
+	}
+	switch elem {
+	case ir.KindStruct, ir.KindUnion:
+		d, ok := targetDepth(ref, onPath)
+		return 2 + d, ok
+	case ir.KindArray:
+		d, ok := arrayDepth(items.Elem, items.ElemRef, items.ElemItems, onPath)
+		return 1 + d, ok
+	}
+	return 1, true // string / blob
 }
 
 // emitDefaults applies the schema defaults New<Msg> starts from. An array field

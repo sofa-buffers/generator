@@ -142,6 +142,15 @@ func NewScalars() *Scalars {
 // schema: no value of it can encode to more.
 const ScalarsMaxSize = 49
 
+// ScalarsMaxDepth is the deepest sequence nesting encoding this message opens,
+// derived from the schema: no value of it nests deeper.
+const ScalarsMaxDepth = 0
+
+// _ScalarsEncOpts bounds this message's encoders to one level: ScalarsMaxDepth
+// is 0, and WithMaxDepth(0) would mean no bound. It is package-level so
+// passing it allocates nothing per call.
+var _ScalarsEncOpts = []sofab.Option{sofab.WithMaxDepth(1)}
+
 // Encode serializes the message into a buffer this call allocates and owns.
 //
 // The buffer is exactly ScalarsMaxSize bytes -- the schema's worst case -- so a
@@ -149,7 +158,7 @@ const ScalarsMaxSize = 49
 // does not, and is reported rather than truncated.
 func (m *Scalars) Encode() ([]byte, error) {
 	buf := make([]byte, ScalarsMaxSize)
-	e, err := sofab.NewEncoderBuffer(buf, 0)
+	e, err := sofab.NewEncoderBuffer(buf, 0, _ScalarsEncOpts...)
 	if err != nil {
 		return nil, err
 	}
@@ -170,7 +179,7 @@ func (m *Scalars) EncodeTo(w io.Writer) error {
 	e, err := sofab.NewEncoderSink(scratch[:], 0, func(_ *sofab.Encoder, b []byte) error {
 		_, werr := w.Write(b)
 		return werr
-	})
+	}, _ScalarsEncOpts...)
 	if err != nil {
 		return err
 	}
