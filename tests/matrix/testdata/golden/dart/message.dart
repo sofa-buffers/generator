@@ -74,6 +74,10 @@ class Scalars {
   /// message can encode to more, which is why [encode] can size one exact
   /// buffer from it.
   static const int maxSize = 49;
+  /// Deepest sequence nesting [serialize] opens, derived from the schema: no
+  /// value of this message nests deeper, so [encode] builds its encoder for
+  /// exactly this depth.
+  static const int maxDepth = 0;
   /// Serializes this message into a buffer this call allocates and owns.
   ///
   /// The buffer is exactly [maxSize] bytes -- the schema's worst case -- so any
@@ -82,7 +86,7 @@ class Scalars {
   /// handed back truncated.
   Uint8List encode() {
     final buf = Uint8List(maxSize);
-    final e = sofab.Encoder.overBuffer(buf);
+    final e = sofab.Encoder.overBuffer(buf, depth: 1);
     serialize(e);
     e.flush();
     return e.written;

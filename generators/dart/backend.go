@@ -330,6 +330,26 @@ func (g *gen) emitClass(f *dfile, name, summary string, fields []*ir.Field, isMe
 			f.line("  /// buffer from it.")
 			f.line("  static const int maxSize = %d;", ms.Size)
 		}
+		// Encode-side nesting bound (see seqDepth). Passed to the encoder encode()
+		// constructs, it sizes the corelib's held-back sequence run to the schema
+		// at construction (§6.6) instead of to MAX_DEPTH -- a few words rather than
+		// 1 KiB zeroed on every one-shot encode. A depth above the format's
+		// MAX_DEPTH, or a recursive type, passes no bound: the corelib default
+		// (maxDepth) then applies, exactly as before.
+		depthArg := ""
+		if depth, ok := seqDepth(fields, map[string]bool{}); ok && depth <= wireMaxDepth {
+			f.line("  /// Deepest sequence nesting [serialize] opens, derived from the schema: no")
+			f.line("  /// value of this message nests deeper, so [encode] builds its encoder for")
+			f.line("  /// exactly this depth.")
+			f.line("  static const int maxDepth = %d;", depth)
+			// The corelib takes depth 1..MAX_DEPTH, so a message that opens no
+			// sequence at all still passes 1: the bound is never reached either way.
+			if depth == 0 {
+				depthArg = ", depth: 1"
+			} else {
+				depthArg = ", depth: maxDepth"
+			}
+		}
 		// The encode buffer belongs to the CALLER (CORELIB_PLAN §5.1): the corelib
 		// writes into storage it is handed and never allocates, grows or replaces
 		// it, so the allocation is made HERE. Which shape that takes is a property
@@ -351,7 +371,7 @@ func (g *gen) emitClass(f *dfile, name, summary string, fields []*ir.Field, isMe
 			f.line("  /// handed back truncated.")
 			f.line("  Uint8List encode() {")
 			f.line("    final buf = Uint8List(maxSize);")
-			f.line("    final e = sofab.Encoder.overBuffer(buf);")
+			f.line("    final e = sofab.Encoder.overBuffer(buf%s);", depthArg)
 			f.line("    serialize(e);")
 			f.line("    e.flush();")
 			f.line("    return e.written;")
@@ -377,7 +397,7 @@ func (g *gen) emitClass(f *dfile, name, summary string, fields []*ir.Field, isMe
 			f.line("    final out = BytesBuilder(copy: true);")
 			f.line("    // copy: true because the sink is handed a VIEW the encoder overwrites")
 			f.line("    // the moment the callback returns.")
-			f.line("    final e = sofab.Encoder(out.add, buffer: Uint8List(%d));", dartScratchSize)
+			f.line("    final e = sofab.Encoder(out.add, buffer: Uint8List(%d)%s);", dartScratchSize, depthArg)
 			f.line("    serialize(e);")
 			f.line("    e.flush();")
 			f.line("    return out.toBytes();")
@@ -709,6 +729,81 @@ func (g *gen) emitMarshalArray(f *dfile, fld *ir.Field, acc string) {
 	// differing from a non-empty default still reaches the wire as the empty
 	// wrapper, the only encoding of "explicitly empty" (MESSAGE_SPEC S2, S3).
 	g.marshalWrapperArray(f, "    ", fmt.Sprintf("%d", fld.ID), acc, fld.Elem, fld.ElemRef, fld.ElemItems, 0, "")
+}
+
+// wireMaxDepth is the format's MAX_DEPTH (corelib-dart `maxDepth`, §4.9): the
+// most sequences an Encoder may hold open, and the largest `depth:` it accepts.
+// A schema bound above it is not passed -- the corelib would refuse the
+// argument, and the value anyway.
+const wireMaxDepth = 255
+
+// seqDepth returns the deepest sequence nesting serialize opens under fields,
+// counted exactly as corelib-dart's Encoder counts open sequences: one per
+// beginSequenceLazy still unmatched by its endSequence/endSequenceKeep. It walks
+// the same shapes emitMarshal/marshalWrapperArray emit:
+//
+//   - a struct/union field opens one frame around its target's own fields;
+//   - a native array (scalar/enum/bool/bitfield/float) is one count-prefixed
+//     value and opens none;
+//   - every other array opens its wrapper, plus arrayDepth of its elements.
+//
+// ok is false when a type recurses into itself: its nesting would then depend
+// on the value, not the schema, and the caller passes no bound. The parser
+// rejects a circular $ref today, so this is a guard for the day it does not.
+// The count is an UPPER bound -- a lazy frame that stays contentless is still
+// counted, because the Encoder counts it while it is open. One short would make
+// a valid value throw invalidArgument, which the round-trip test pins.
+func seqDepth(fields []*ir.Field, onPath map[string]bool) (int, bool) {
+	best := 0
+	for _, fld := range fields {
+		d, ok := 0, true
+		switch fld.Kind {
+		case ir.KindStruct, ir.KindUnion:
+			d, ok = targetDepth(fld.Ref, onPath)
+			d++
+		case ir.KindArray:
+			d, ok = arrayDepth(fld.Elem, fld.ElemRef, fld.ElemItems, onPath)
+		}
+		if !ok {
+			return 0, false
+		}
+		best = max(best, d)
+	}
+	return best, true
+}
+
+// targetDepth is seqDepth of a struct/union target's fields, reporting a
+// recursive back-edge as unbounded.
+func targetDepth(ref *ir.TypeRef, onPath map[string]bool) (int, bool) {
+	if ref == nil || ref.Target == nil {
+		return 0, true
+	}
+	key := ref.Target.Key
+	if onPath[key] {
+		return 0, false
+	}
+	onPath[key] = true
+	defer delete(onPath, key)
+	return seqDepth(ref.Target.Fields, onPath)
+}
+
+// arrayDepth is the nesting an array field or row with this element opens: 0
+// for a native element (no frame), else 1 for its wrapper plus what one element
+// nests -- nothing for a string/blob leaf, a per-element frame plus the target's
+// depth for a struct/union, and the inner array's own depth for a nested array.
+func arrayDepth(elem ir.Kind, ref *ir.TypeRef, items *ir.ArrayElem, onPath map[string]bool) (int, bool) {
+	if nativeArrayElem(elem) {
+		return 0, true
+	}
+	switch elem {
+	case ir.KindStruct, ir.KindUnion:
+		d, ok := targetDepth(ref, onPath)
+		return 2 + d, ok
+	case ir.KindArray:
+		d, ok := arrayDepth(items.Elem, items.ElemRef, items.ElemItems, onPath)
+		return 1 + d, ok
+	}
+	return 1, true // string / blob
 }
 
 // writeArrayStmt is the corelib call writing native-array expression `val` as

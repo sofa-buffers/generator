@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	"github.com/sofa-buffers/generator/internal/analysis"
+	"github.com/sofa-buffers/generator/internal/ir"
 	"github.com/sofa-buffers/generator/internal/model"
 	"github.com/sofa-buffers/generator/internal/parser"
 )
@@ -16,6 +17,22 @@ import (
 // genFor parses + analyzes a definition file, generates with cfg, and returns all
 // emitted files concatenated (path-delimited) for substring assertions.
 func genFor(t *testing.T, def string, cfg map[string]any) string {
+	t.Helper()
+	files, err := (&Backend{}).Generate(schemaFor(t, def), cfg)
+	if err != nil {
+		t.Fatalf("generate: %v", err)
+	}
+	var b strings.Builder
+	for _, f := range files {
+		b.WriteString("// === " + f.Path + " ===\n")
+		b.Write(f.Content)
+		b.WriteString("\n")
+	}
+	return b.String()
+}
+
+// schemaFor parses, validates and analyzes a definition file into the IR.
+func schemaFor(t *testing.T, def string) *ir.Schema {
 	t.Helper()
 	data, err := os.ReadFile(def)
 	if err != nil {
@@ -36,17 +53,7 @@ func genFor(t *testing.T, def string, cfg map[string]any) string {
 	if err := analysis.Analyze(s); err != nil {
 		t.Fatalf("analyze %s: %v", def, err)
 	}
-	files, err := (&Backend{}).Generate(s, cfg)
-	if err != nil {
-		t.Fatalf("generate: %v", err)
-	}
-	var b strings.Builder
-	for _, f := range files {
-		b.WriteString("// === " + f.Path + " ===\n")
-		b.Write(f.Content)
-		b.WriteString("\n")
-	}
-	return b.String()
+	return s
 }
 
 const exampleDef = "../../examples/messages/example.yaml"
@@ -59,7 +66,8 @@ func TestModuleShape(t *testing.T) {
 		"void serialize(sofab.Encoder e) {",
 		// example.yaml has an unbounded field, so encode() takes the scratch+sink
 		// arm (TestDartCallerOwnsTheEncodeBuffer covers both).
-		"final e = sofab.Encoder(out.add, buffer: Uint8List(512));",
+		"final e = sofab.Encoder(out.add, buffer: Uint8List(512), depth: maxDepth);",
+		"static const int maxDepth = 2;",
 		"static sofab.DecodeStatus tryDecode(Uint8List data, Myfirstmessage out) {",
 		"static Myfirstmessage decode(Uint8List data) {",
 		"class _MyfirstmessageVisitor extends sofab.VisitorBase {",
@@ -735,7 +743,7 @@ func TestDartCollectorsPlaceByIDAndAreBounded(t *testing.T) {
 		// is filled in behind it.
 		("        if (values.length > 4) { invalidate(); return; }\n" +
 			"        for (final _v in values) { if (_v < 0 || _v > 4294967295) { invalidate(); return; } }\n" +
-			"        o.fnums = List<int>.from(values);\n        return;"),
+			"        o.fnums = _i64List(values);\n        return;"),
 	} {
 		if !strings.Contains(out, want) {
 			t.Errorf("generated Dart missing %q:\n%s", want, out)
@@ -1126,7 +1134,7 @@ func TestDartCallerOwnsTheEncodeBuffer(t *testing.T) {
 	for _, want := range []string{
 		"  static const int maxSize = 12;",
 		"    final buf = Uint8List(maxSize);",
-		"    final e = sofab.Encoder.overBuffer(buf);",
+		"    final e = sofab.Encoder.overBuffer(buf, depth: 1);",
 		"    return e.written;",
 	} {
 		if !strings.Contains(bounded, want) {
@@ -1148,7 +1156,7 @@ func TestDartCallerOwnsTheEncodeBuffer(t *testing.T) {
 		"  static const int maxSizeLimit = 2048;",
 		"  static const int maxSize = maxSizeLimit;",
 		"    final out = BytesBuilder(copy: true);",
-		"    final e = sofab.Encoder(out.add, buffer: Uint8List(512));",
+		"    final e = sofab.Encoder(out.add, buffer: Uint8List(512), depth: 1);",
 		"    e.flush();",
 		"    return out.toBytes();",
 	} {
@@ -1191,7 +1199,7 @@ func TestDartStructsGetNoEncodeEntryPoint(t *testing.T) {
 
 // TestDartNestedRowElemWidth is generator#330: a NESTED native row
 // (array<array<u8>>) got no element-width guard at all — the row was stored with
-// `List<int>.from(values)` and an over-width element went in unchecked.
+// `_i64List(values)` and an over-width element went in unchecked.
 // MESSAGE_SPEC §7.1 makes that INVALID, never a silent store.
 //
 // Unlike #267 this is an ABSENT bound rather than a late one, so it shows on a
@@ -1440,8 +1448,8 @@ func TestDartEnumAndBitfieldWidthBoundAtEverySixPositions(t *testing.T) {
 		bfRej + "o.ubf = value;",
 		// 2. native array element: the scan over the assembled list, which decides
 		// an array that ARRIVES...
-		"        for (final _v in values) { if (_v < -128 || _v > 127) { invalidate(); return; } }\n        o.ea = List<int>.from(values);",
-		"        for (final _v in values) { if ((_v & ~0xff) != 0) { invalidate(); return; } }\n        o.bfa = List<int>.from(values);",
+		"        for (final _v in values) { if (_v < -128 || _v > 127) { invalidate(); return; } }\n        o.ea = _i64List(values);",
+		"        for (final _v in values) { if ((_v & ~0xff) != 0) { invalidate(); return; } }\n        o.bfa = _i64List(values);",
 		// ...and the SAME interval at the header, which is what the decoder applies
 		// AT each element -- so a value outside the width is refused even when the
 		// array is cut short behind it (§5.2), which a scan of the assembled list
@@ -1463,7 +1471,7 @@ func TestDartEnumAndBitfieldWidthBoundAtEverySixPositions(t *testing.T) {
 	for _, bad := range []string{
 		"      case 0:\n        o.en = value;",
 		"      case 1:\n        o.bf = value;",
-		"        o.ea = List<int>.from(values);\n        return;\n    }\n  }\n  @override\n  void onSignedArray",
+		"        o.ea = _i64List(values);\n        return;\n    }\n  }\n  @override\n  void onSignedArray",
 		// The generated collector subclass the set/mask bound needed is gone: the
 		// bound travels through the corelib's own lo/hi pair now.
 		"extends sofab.IntMatrixSeq {",
@@ -1524,7 +1532,7 @@ func TestDartBitfieldSpanningBit63IsUnguarded(t *testing.T) {
 		map[string]any{})
 	for _, want := range []string{
 		"      case 0:\n        o.g = value;",
-		"        o.ga = List<int>.from(values);",
+		"        o.ga = _i64List(values);",
 	} {
 		if !strings.Contains(got, want) {
 			t.Errorf("a bitfield implying the full u64 width must store unguarded, missing %q:\n%s", want, got)

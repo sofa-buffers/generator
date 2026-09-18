@@ -483,13 +483,17 @@ func (g *gen) emitArrayDecode(fld *ir.Field, acc string, arm func(int64, string)
 			*arrBegin = append(*arrBegin, arm(fld.ID, hdr))
 		}
 	}
+	// An integer array is copied into the model's growable List<int> by the
+	// indexed _i64List (see emitPrelude), not List<int>.from: .from walks the
+	// Int64List through its iterator (moveNext/current per element), where an
+	// indexed loop over the concrete typed list is plain loads and stores.
 	switch {
 	case unsignedArrayElem(fld.Elem) && fld.Elem == ir.KindBool:
 		*uArr = append(*uArr, arm(fld.ID, guard+acc+" = [for (final _v in values) _v != 0];"))
 	case unsignedArrayElem(fld.Elem):
-		*uArr = append(*uArr, arm(fld.ID, guard+arrayWidthGuard(fld.Elem, fld.ElemRef)+acc+" = List<int>.from(values);"))
+		*uArr = append(*uArr, arm(fld.ID, guard+arrayWidthGuard(fld.Elem, fld.ElemRef)+acc+" = _i64List(values);"))
 	case signedArrayElem(fld.Elem):
-		*sArr = append(*sArr, arm(fld.ID, guard+arrayWidthGuard(fld.Elem, fld.ElemRef)+acc+" = List<int>.from(values);"))
+		*sArr = append(*sArr, arm(fld.ID, guard+arrayWidthGuard(fld.Elem, fld.ElemRef)+acc+" = _i64List(values);"))
 	case fld.Elem == ir.KindFP32:
 		// Bit-exact copy into a fresh Float32List of the WIRE count: a per-element
 		// widen through a double would quiet a signaling/payload NaN (MESSAGE_SPEC
@@ -638,6 +642,9 @@ func emitSwitchRet(f *dfile, sig string, arms []string, tail string) {
 type needs struct {
 	dec     bool
 	f32bits bool
+	// i64copy: some native integer array field (not bool) is decoded through
+	// onUnsignedArray/onSignedArray, whose arms copy with _i64List.
+	i64copy bool
 }
 
 func (g *gen) computeNeeds(s *ir.Schema) needs {
@@ -665,6 +672,9 @@ func (g *gen) scanField(fld *ir.Field, n *needs) {
 		n.f32bits = true
 	case ir.KindArray:
 		if nativeArrayElem(fld.Elem) {
+			if fld.Elem != ir.KindBool && (unsignedArrayElem(fld.Elem) || signedArrayElem(fld.Elem)) {
+				n.i64copy = true
+			}
 			return
 		}
 		g.scanArrayElem(fld.Elem, fld.ElemRef, fld.ElemItems, n)
@@ -705,6 +715,23 @@ func (g *gen) emitPrelude(f *dfile, s *ir.Schema) {
 		f.line("// access; the exact bits are kept alongside for a bit-for-bit re-encode.")
 		f.line("double _f32FromBits(int bits) =>")
 		f.line("    (ByteData(4)..setUint32(0, bits, Endian.little)).getFloat32(0, Endian.little);")
+		f.blank()
+	}
+	if n.i64copy {
+		// The model owns a growable List<int> (a caller may add to it), and the
+		// corelib's Int64List is only lent for the callback, so the arm must copy.
+		// Indexed rather than List<int>.from: .from goes through the typed list's
+		// iterator, one moveNext/current pair per element.
+		f.line("// Copies an integer array the decoder delivers into the model's growable")
+		f.line("// List<int>, by index rather than through the typed list's iterator.")
+		f.line("List<int> _i64List(Int64List v) {")
+		f.line("  final n = v.length;")
+		f.line("  final out = List<int>.filled(n, 0, growable: true);")
+		f.line("  for (var i = 0; i < n; i++) {")
+		f.line("    out[i] = v[i];")
+		f.line("  }")
+		f.line("  return out;")
+		f.line("}")
 		f.blank()
 	}
 }
