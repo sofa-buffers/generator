@@ -33,13 +33,14 @@ func TestDescriptionsBecomeDocComments(t *testing.T) {
 		"Δv: Geschwindigkeitsänderung",
 		"π-Verhältnis ≈ 3.14159",
 		"Bezeichnung des Pakets",
-		"Altprüfsumme", // deprecated field description
+		"Altprüfsumme",            // deprecated field description
+		"Zellspannungen je Modul", // array field description
 	}
 	// Fragments that must appear verbatim (UTF-8 fidelity) but may live on a
 	// block-comment / docstring continuation line without a per-line marker.
 	presenceOnly := []string{
 		"Enthält 温度", "🚗", "(naïve, café, façade)",
-		"(unit: °C)", "(unit: km/h)",
+		"(unit: °C)", "(unit: km/h)", "(unit: µV)", // µV: an array field (its elements)
 	}
 
 	for _, lang := range generator.Registered() {
@@ -70,7 +71,7 @@ func TestDescriptionsBecomeDocComments(t *testing.T) {
 				// comments: no comment-line requirement, and units get their own
 				// table column instead of an "(unit: …)" suffix. Only UTF-8
 				// fidelity is checked here.
-				for _, frag := range append([]string{"Enthält 温度", "🚗", "(naïve, café, façade)", "°C", "km/h"}, commentAnchors...) {
+				for _, frag := range append([]string{"Enthält 温度", "🚗", "(naïve, café, façade)", "°C", "km/h", "µV"}, commentAnchors...) {
 					if !strings.Contains(out, frag) {
 						t.Errorf("missing %q in generated docs (UTF-8 not preserved?)", frag)
 					}

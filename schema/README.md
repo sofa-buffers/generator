@@ -53,7 +53,7 @@ rejected rather than ignored.
 | `boolean` | optional `default` |
 | `string` | optional `maxlen`, optional `default` |
 | `blob` | optional `maxlen`; `default` is base64 |
-| `array` | `items: { type, count?, ... }`; element `type` ∈ numeric primitives, `string`, `blob`, **`enum` / `boolean` / `bitfield`**, or the composites **`struct` / `union` / `array`** (nested, recursive). `count` is the capacity and is **optional** (required only by no-heap targets, like `maxlen`); composite/enum/bitfield elements carry their own `fields` / `oneof` / `items` / `enum` / `bits`. `items.maxlen` only for string/blob elements |
+| `array` | `items: { type, count?, ... }`; element `type` ∈ numeric primitives, `string`, `blob`, **`enum` / `boolean` / `bitfield`**, or the composites **`struct` / `union` / `array`** (nested, recursive). `count` is the capacity and is **optional** (required only by no-heap targets, like `maxlen`); composite/enum/bitfield elements carry their own `fields` / `oneof` / `items` / `enum` / `bits`. `items.maxlen` only for string/blob elements. Optional `unit` / `decimals` on the field itself, gated by the leaf element type (see below) |
 | `enum` | inline map or `{ $ref }`; values are **signed 32-bit** and may be negative (signed zig-zag varint on the wire — see below); `default` must match a value |
 | `bitfield` | inline `bits` map or `{ $ref }`; each flag has `pos` 0–63 + optional `default` |
 | `struct` | nested; `fields:` inline or `{ $ref }`; recursive |
@@ -61,8 +61,13 @@ rejected rather than ignored.
 
 Common optional metadata on every field: `description`, `deprecated`. **`unit`
 is allowed only on the numeric types** (`u8…u64`, `i8…i64`, `fp32`, `fp64`);
-floats also allow `decimals`. Numeric value-range validation is left to the
-application, as in protobuf / FlatBuffers / Cap'n Proto.
+floats also allow `decimals`. An `array` field follows the same rule through its
+**leaf element type** — the innermost `items.type` under any nested arrays: it
+accepts `unit` when that leaf is numeric and `decimals` when it is `fp32`/`fp64`,
+and the value then describes each element (`array<array<u16>>` with `unit: mV`
+is a matrix of millivolts). An array of any other element type rejects both.
+Numeric value-range validation is left to the application, as in protobuf /
+FlatBuffers / Cap'n Proto.
 
 `string`/`blob` carry an optional **`maxlen`**. It is optional at the schema level,
 but **targets that cannot allocate dynamically (e.g. C `char s[N]`, `no_std` Rust)

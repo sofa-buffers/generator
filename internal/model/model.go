@@ -129,6 +129,12 @@ func (b *builder) buildField(name string, f map[string]any, parentKey string) *i
 	if s, ok := f["unit"].(string); ok {
 		fld.Unit = s
 	}
+	// decimals is valid on fp32/fp64 fields and on arrays whose leaf element
+	// is fp32/fp64; the validator enforces that, so read it for every kind.
+	if d, ok := asInt(f["decimals"]); ok {
+		di := int(d)
+		fld.Decimals = &di
+	}
 	if dep, ok := f["deprecated"].(bool); ok {
 		fld.Deprecated = dep
 	}
@@ -139,12 +145,6 @@ func (b *builder) buildField(name string, f map[string]any, parentKey string) *i
 	case "string", "blob":
 		if ml, ok := asInt(f["maxlen"]); ok {
 			fld.HasMaxlen, fld.Maxlen = true, ml
-		}
-		fld.Default = f["default"]
-	case "fp32", "fp64":
-		if d, ok := asInt(f["decimals"]); ok {
-			di := int(d)
-			fld.Decimals = &di
 		}
 		fld.Default = f["default"]
 	case "enum":

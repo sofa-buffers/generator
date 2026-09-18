@@ -268,7 +268,7 @@ func (v *validator) validateField(node any, loc string) *int64 {
 		v.closed(f, loc, "id", "type", "bits", "description", "deprecated")
 		v.checkBitfieldField(f, loc)
 	case "array":
-		v.closed(f, loc, "id", "type", "items", "default", "description", "deprecated")
+		v.closed(f, loc, "id", "type", "items", "default", "description", "decimals", "unit", "deprecated")
 		v.checkArrayField(f, loc)
 	case "struct":
 		v.closed(f, loc, "id", "type", "fields", "description", "deprecated")
@@ -754,6 +754,7 @@ func (v *validator) checkArrayField(f map[string]any, loc string) {
 		return
 	}
 	etyp, enumValues, bitMask := v.checkArrayItems(items, loc+"/items")
+	v.checkArrayMetadata(f, items, loc)
 
 	// array default: length <= count (capacity), plus per-element validation.
 	// Only NATIVE-element arrays carry a flat default.
@@ -782,6 +783,45 @@ func (v *validator) checkArrayField(f map[string]any, loc string) {
 		for i, el := range arr {
 			v.checkArrayElem(etyp, el, enumValues, bitMask, fmt.Sprintf("%s/default/%d", loc, i))
 		}
+	}
+}
+
+// checkArrayMetadata applies the field-level metadata rules to an array field's
+// LEAF element type -- the innermost element under any nested arrays, which is
+// what `unit` and `decimals` describe. `unit` needs a numeric leaf (u8..i64,
+// fp32, fp64), `decimals` an fp32/fp64 leaf, exactly as on a scalar field.
+func (v *validator) checkArrayMetadata(f, items map[string]any, loc string) {
+	_, hasUnit := f["unit"]
+	_, hasDecimals := f["decimals"]
+	if !hasUnit && !hasDecimals {
+		return
+	}
+	leaf := arrayLeafType(items)
+	if hasUnit && !numericLeafTypes[leaf] {
+		v.add(loc+"/unit", "unit is allowed only on an array whose leaf element type is numeric (u8..u64, i8..i64, fp32, fp64), not %q", leaf)
+	}
+	if hasDecimals {
+		if leaf != "fp32" && leaf != "fp64" {
+			v.add(loc+"/decimals", "decimals is allowed only on an array whose leaf element type is fp32 or fp64, not %q", leaf)
+		} else {
+			v.checkDecimals(f, loc)
+		}
+	}
+}
+
+// arrayLeafType follows nested `items` down to the innermost element type.
+// A malformed nesting yields "" (checkArrayItems reports that shape itself).
+func arrayLeafType(items map[string]any) string {
+	for {
+		etyp, _ := items["type"].(string)
+		if etyp != "array" {
+			return etyp
+		}
+		inner, ok := items["items"].(map[string]any)
+		if !ok {
+			return ""
+		}
+		items = inner
 	}
 }
 
@@ -1209,6 +1249,14 @@ var (
 // (README §8.4, generator#497).
 var wrapperArrayElem = map[string]bool{
 	"string": true, "blob": true, "struct": true, "union": true, "array": true,
+}
+
+// numericLeafTypes are the element types an array's `unit` may describe: the
+// same ten types that accept `unit` at field level.
+var numericLeafTypes = map[string]bool{
+	"u8": true, "u16": true, "u32": true, "u64": true,
+	"i8": true, "i16": true, "i32": true, "i64": true,
+	"fp32": true, "fp64": true,
 }
 
 var arrayElemTypes = func() map[string]bool {

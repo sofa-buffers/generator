@@ -125,7 +125,7 @@ A file must contain `$defs` and/or `messages`. Field **ids must be unique** with
 | `struct` | nested; `fields:` inline or `$ref`; **recursive** (structs in structs) |
 | `union` | `oneof:` inline or `$ref`; optional `default_id` |
 
-Common optional attributes on every field: `description`, `unit`, `deprecated`.
+Common optional attributes on every field: `description`, `deprecated`; `unit` on numeric fields and on arrays with a numeric leaf element, `decimals` on floats and on arrays with a float leaf element.
 
 > This table is a summary. The **authoritative** type rules, plus the validation
 > that the bare JSON Schema cannot express — the `$data` cross-field rules and the
