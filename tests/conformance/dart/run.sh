@@ -160,11 +160,10 @@ echo "==> encode-buffer ownership OK"
 
 # The decode side of the same ownership rule (CORELIB_PLAN §6.7 / §6.7.1,
 # generator#412): a decoded message must OWN its bytes, so the buffer it came
-# from may be reused or overwritten the moment the call returns. Here the
-# property holds twice over -- corelib-dart copies each payload into the
-# destination `onBytesDest` supplied, and the generated destination copies again
-# -- and the check asserts the property, not either layer; its header records
-# which mutations do and do not turn it red. The sweep runs chunk sizes up to one
+# from may be reused or overwritten the moment the call returns. corelib-dart
+# copies every payload -- string, blob and array -- into the Inline destination
+# the generated visitor hands over, which is the object's own storage; the check
+# asserts the property, not either layer. The sweep runs chunk sizes up to one
 # that carries the whole message: a payload split across chunks is reassembled
 # into the corelib's accumulator and copied out of it whether or not the
 # destination wanted a view, so small chunks alone cannot reach the branch where
@@ -267,11 +266,10 @@ done
 # surface only -- so nothing checked that the skipped decode left the declared
 # field at its default, and nothing ran on the chunked decoder at all.
 #
-# Nothing is gated: a Dart String is a S6.4.1 Unicode type. The corelib hands the
-# visitor RAW wire bytes (onStringBytes) instead of a finished String, so the
-# generated destination arm resolves the field first and only then validates and
-# transcodes -- which puts the read-vs-skip decision this driver pins squarely in
-# GENERATED code.
+# Nothing is gated: a Dart String is a S6.4.1 Unicode type. The generated visitor
+# answers the string's header call with its destination or null, and the codec
+# validates only a payload it was given a destination for -- which puts the
+# read-vs-skip decision this driver pins squarely in GENERATED code.
 #
 # The category rides the harness's own status line on both surfaces: `decode` and
 # `streamdecode` both print `decode failed: <DecodeStatus.name>`, so `invalid`
@@ -298,9 +296,9 @@ printf '\132\012\212'      > "$WORK/declared_bad_utf8.bin"
 # Over-count AND truncated: INVALID dominates INCOMPLETE (generator#216 / F-0032,
 # MESSAGE_SPEC S5.2). someuintarray declares count 4; a header announcing 6 elements
 # (> 4) followed by only 2 elements then EOF is BOTH schema-invalid and truncated.
-# The over-count is decided at the count word (onArrayBegin, before the truncation
-# check), so tryDecode MUST report INVALID -- the whole-slice values.length>4 guard
-# in onUnsignedArray never runs on a truncated array, so this pins the header hook.
+# The over-count is decided at the count word -- in the onUnsignedArray header
+# call, before the destination is handed over and before any element is read --
+# so tryDecode MUST report INVALID.
 # Wire: 7b (id 15 unsigned-array) 06 (count 6) 01 02 (2 of 6 elements) <EOF>.
 echo "==> over-count + truncation must be INVALID, not INCOMPLETE (generator#216)"
 ST=$(printf '\173\006\001\002' | "$H" trydecode myfirstmessage | sed -n 1p)
@@ -342,9 +340,8 @@ echo "==> over-index reject OK"
 # Crucible F-0043 width_elem_trunc). someuintarray (id 15) declares u32 elements;
 # an element carrying 2^32 is outside that width, which S7.1 makes INVALID, and it
 # is established by its own bytes -- so S5.2 keeps the verdict INVALID however
-# little of the array follows. The `for (final _v in values)` scan cannot fire for
-# an array that never assembles, so the bound is also declared to the corelib as
-# onArrayElemBound, which applies it while the elements go past.
+# little of the array follows. The bound rides on the field's InlineInt64Array
+# (`range:`), and the codec applies it while the elements go past.
 # Wire: 7b (id 15 unsigned-array) 04 (count 4) 80 80 80 80 10 (2^32) <EOF>.
 echo "==> over-width element + truncation must be INVALID (generator#267)"
 printf '\173\004\200\200\200\200\020' > "$WORK/overwidth_trunc.bin"
@@ -372,8 +369,8 @@ echo "==> over-maxlen reject OK"
 # Over-maxlen AND truncated: INVALID dominates INCOMPLETE (generator#216 / F-0032,
 # MESSAGE_SPEC S5.2), the string/blob analogue of the over-count ordering above.
 # someblob (id 12) declares maxlen 16; a length word of 17 (> 16) followed by only 1
-# payload byte then EOF is decided at the length word (onFixlenHeader, before the
-# payload take), so tryDecode MUST report INVALID.
+# payload byte then EOF is decided at the length word (the onBlob header call,
+# before the payload take), so tryDecode MUST report INVALID.
 # Wire: 62 (blob id 12) 8b 01 (fixlen word: len 17, blob subtype) 01 (1 of 17) <EOF>.
 echo "==> over-maxlen + truncation must be INVALID, not INCOMPLETE (generator#216)"
 ST=$(printf '\142\213\001\001' | "$H" trydecode myfirstmessage | sed -n 1p)
@@ -455,10 +452,10 @@ echo "$OUT" | grep -q '"somefp64":2.5' || { echo "FAIL: control must decode to 2
 echo "==> fixlen subtype skip OK"
 
 # Fixlen subtype mismatch AT A BOUNDED FIELD (generator#224, MESSAGE_SPEC S7.3):
-# onFixlenHeader fires for ANY fixlen subtype at a field id, so a maxlen guard that
-# compares length alone measures a CONTRADICTING value against this field's bound
-# and rejects it, where S7.3 requires it be skipped. The guard must be gated on the
-# declared subtype. someblob (id 12) declares maxlen 16: a 17-byte STRING at that id
+# a maxlen guard that fired for ANY fixlen subtype at a field id would measure a
+# CONTRADICTING value against this field's bound and reject it, where S7.3
+# requires it be skipped. corelib-dart asks for a string on onString and a blob on
+# onBlob, so the guard only ever sees its declared subtype. someblob (id 12) declares maxlen 16: a 17-byte STRING at that id
 # is a subtype mismatch (skip -> someblob keeps its "Hello" default), while a
 # 17-byte BLOB there is the genuine over-maxlen INVALID (asserted above).
 # Wire: 62 (id 12 fixlen) 8a 01 (fixlen word: len 17, subtype STRING) + 17 bytes.
@@ -603,8 +600,9 @@ echo "==> terminal-refusal guard OK"
 #
 # Four shapes, because a cap reaches four different pieces of machinery and a
 # decoder can get the category right in one and wrong in another: the count cap
-# in the generated onArrayBegin, the string and blob length caps in the generated
-# onFixlenHeader -- two separate numbers -- and the count-less WRAPPER array,
+# in the generated onUnsignedArray/onSignedArray header call, the string and blob
+# length caps in the generated onString/onBlob -- two separate numbers -- and the
+# count-less WRAPPER array,
 # where generated code compares nothing at all and the cap travels as
 # sofab.StringSeq's `rcap` for corelib-dart to judge.
 #
@@ -712,7 +710,7 @@ ST=$("$WORK/excl/harness" trydecode dyn < "$WORK/unbounded6.bin" | sed -n 1p)
     || { echo "FAIL: the unbounded sibling must still be capped at 4, as LIMITEXCEEDED, got $ST"; exit 1; }
 # A field the visitor SKIPS is never capped (S6.2.1: it allocates nothing). id 9
 # is declared nowhere, so an over-cap array there must stay COMPLETE -- and with
-# the generated onArrayDest declining it, nothing is even allocated for it.
+# the generated visitor answering null for it, nothing is even allocated for it.
 printf '\113\005\001\001\001\001\001' > "$WORK/skipcap.bin"
 "$WORK/dynlim/harness" decode dyn < "$WORK/skipcap.bin" >/dev/null \
     || { echo "FAIL: an over-cap array at an UNDECLARED id must be skipped, not capped"; exit 1; }
@@ -720,9 +718,10 @@ printf '\113\005\001\001\001\001\001' > "$WORK/skipcap.bin"
 # not reach: id 0 IS declared, but as array<u64> -- UNSIGNED. A SIGNED array
 # header (wire type 4) there was never this field's value, so it is skipped and
 # its count is measured against neither the schema bound nor the cap
-# (MESSAGE_SPEC S7.3, CORELIB_PLAN S6.2.1, generator#410). What pins it is the
-# kind test arrayCountHdrGuard emits AROUND the cap; with the cap unconditional,
-# these five elements answer limitExceeded instead of decoding.
+# (MESSAGE_SPEC S7.3, CORELIB_PLAN S6.2.1, generator#410). What pins it is that
+# the cap lives only in the onUnsignedArray arm; a signed array arrives on
+# onSignedArray, which has no arm for id 0 -- were the cap reached anyway, these
+# five elements would answer limitExceeded instead of decoding.
 printf '\004\005\000\000\000\000\000' > "$WORK/mistypedcap.bin"
 "$WORK/dynlim/harness" decode dyn < "$WORK/mistypedcap.bin" >/dev/null \
     || { echo "FAIL: an over-cap array whose wire KIND contradicts the declaration must be skipped, not capped"; exit 1; }
@@ -749,11 +748,11 @@ echo "==> cap exclusivity OK (bounded sibling decodes; unknown id, mis-typed kin
 # enforced at the count/length header -- before the allocation it is meant to
 # prevent -- for the same reason INVALID is decided there").
 #
-# This is what keeps Dart's scalar cap in the generated onFixlenHeader rather than
-# on the bytes: onStringBytes is handed an ASSEMBLED payload one callback later,
-# so a message ending right after an over-cap length word would never reach it and
-# the verdict would degrade from limitExceeded to incomplete -- with the announced
-# length buffered first. The harness prints the status name, so the two are told
+# This is what keeps Dart's scalar cap in the generated onString header call,
+# ahead of the destination it hands over: a check after the payload would never
+# run for a message ending right after an over-cap length word, and the verdict
+# would degrade from limitExceeded to incomplete -- with the announced length
+# allocated first. The harness prints the status name, so the two are told
 # apart by verdict and not merely by exit code.
 #
 # Wire: 02 (id 0, fixlen) a2 06 (fixlen_word = (100 << 3) | 2 -> a 100-byte
