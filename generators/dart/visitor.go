@@ -8,66 +8,45 @@ import (
 
 // ---- decode visitor -------------------------------------------------------
 
-// emitVisitor emits the push child-visitor for an object's id scope. Scalars
-// bind straight into a member; native arrays arrive whole and are copied
-// (exactly as long as the wire made them); nested structs/unions and every
-// wrapper-sequence array descend via onSequenceStart into a child visitor. A
-// struct/union descent returns the EXISTING member's visitor, so a re-opened
-// scope merges (MESSAGE_SPEC §7.4); an array wrapper clears its list first, so a
-// re-opened wrapper is replaced. Unhandled ids fall through: a leaf id lands in
-// an unarmed switch (no-op) and a sequence id returns null (skip), which is what
-// makes a contradictory wire type evaporate structurally (MESSAGE_SPEC §7.3).
+// emitVisitor emits the push child-visitor for an object's id scope, against
+// corelib-dart's one-call-per-field decode API (corelib-dart#96).
+//
+// Scalars arrive as values and bind straight into a member. Every aggregate --
+// a string, a blob, a native array -- is announced ONCE, at its header, with its
+// byte length or element count, and the arm answers with the member's `Inline…`
+// destination: the codec sets its `length` there and writes the payload into its
+// storage. Nothing is copied, no view is built, and nothing is called when the
+// field is whole, so there is nothing to allocate per message either.
+//
+// The header call is also where every bound on the field is judged, and the only
+// place: a schema `maxlen`/`count` is refused with invalidate(), a receiver cap
+// on a schema-unbounded field with limitExceeded() (CORELIB_PLAN §6.2.1) -- both
+// BEFORE the destination is handed over, which is the allocation they exist to
+// prevent, and both ahead of a truncated payload (MESSAGE_SPEC §5.2,
+// generator#216). The check precedes any sizing, so a hostile count can
+// never size a destination.
+//
+// MESSAGE_SPEC §7.3 needs no code. Which call fires is decided by the WIRE kind:
+// a field declared `array<u32>` that receives a signed array lands in
+// onSignedArray, which has no arm for its id, answers null, and the field is
+// skipped -- never measured against this field's bound (generator#224, #259 /
+// F-0042), never materialized, and for a string never UTF-8-validated
+// (generator#257, #265). A declared element width travels on the destination
+// itself (`range:`, see rangeArg) and is applied by the codec per element.
+//
+// Nested structs/unions and every wrapper-sequence array descend via
+// onSequenceStart into a child visitor. A struct/union descent returns the
+// EXISTING member's visitor, so a re-opened scope merges (§7.4); an array
+// wrapper clears its list first, so a re-opened wrapper is replaced.
 func (g *gen) emitVisitor(f *dfile, typeName string, fields []*ir.Field) {
-	var uns, sig, f32, f32bits, f64, str, blob []string
-	var uArr, sArr, f32Arr, f64Arr []string
+	var uns, sig, f32, f32bits, f64 []string
+	var str, blob, uArr, sArr, f32Arr, f64Arr []string
 	var seq []string
-	// HeaderVisitor hooks (corelib-dart onArrayBegin/onFixlenHeader): schema-bound
-	// rejects at the count/length word, BEFORE the corelib's truncation check, so a
-	// field that is BOTH over-bound and truncated is INVALID, not INCOMPLETE
-	// (generator#216 / F-0032, MESSAGE_SPEC §5.2). The whole-value guards below
-	// (onUnsignedArray/onString len checks) fire only once every element/byte has
-	// arrived, so a truncated over-bound field never reaches them — the header hook
-	// is what makes the over-bound win the tie. tryDecode already reads the sticky
-	// invalidate() latches the verdict inside the corelib, which stops there.
-	//
-	// Both hooks fire for ANY wire kind/subtype landing on a field id — the corelib
-	// resolves what arrived but cannot know what was DECLARED — so both arms gate
-	// their bound on the declared kind: a contradicting header is a §7.3 skip and
-	// must never be measured against this field's bound (generator#224 for
-	// onFixlenHeader, generator#259 / F-0042 for onArrayBegin).
-	var arrBegin, fixHdr []string
-	// onBytesDest / onArrayDest: the DESTINATION hooks, and the guard for the one
-	// shape a receiver cap never covered.
-	//
-	// corelib-dart's defaults allocate a destination sized from the wire count or
-	// length -- exactly right for a hand-written visitor that wants every field,
-	// and wrong for a schema-bound scope. MESSAGE_SPEC §7.3 makes an id this scope
-	// does not declare, or one whose wire kind contradicts what it declares, a
-	// SKIPPED field, and CORELIB_PLAN §6.2.1 says a skipped field is never capped
-	// *because* it allocates nothing. That is only true if the scope says so.
-	//
-	// So both are ALWAYS overridden, even by a scope with no array and no
-	// string/blob field: an id with no arm returns null and nothing is
-	// materialized at all -- not "at most N elements" but none, which is a
-	// tighter bound than any cap and the only one this shape has now that the
-	// decoder holds none (corelib-dart#88).
-	var arrDest, bytesDest []string
-	destArm := func(id int64, test, call string) string {
-		return fmt.Sprintf("      case %d:\n        if (%s) return super.%s;\n        return null;", id, test, call)
-	}
-	// onArrayElemBound (corelib-dart): the declared width of a native integer
-	// array's ELEMENTS, handed to the decoder so it can apply the bound while the
-	// elements go past. arrayWidthGuard below scans the assembled list, which is
-	// exact for an array that arrives — and never runs for one that does not, so
-	// a message cut short after an out-of-width element reported INCOMPLETE where
-	// §5.2 requires INVALID (generator#267, Crucible F-0043 width_elem_trunc).
-	// Same shape as the header hooks one level down.
-	var elemBound []string
 
 	arm := func(id int64, body string) string {
 		return fmt.Sprintf("      case %d:\n        %s\n        return;", id, body)
 	}
-	seqArm := func(id int64, body string) string {
+	retArm := func(id int64, body string) string {
 		return fmt.Sprintf("      case %d:\n        %s", id, body)
 	}
 
@@ -90,50 +69,38 @@ func (g *gen) emitVisitor(f *dfile, typeName string, fields []*ir.Field) {
 		case ir.KindFP64:
 			f64 = append(f64, arm(fld.ID, acc+" = value;"))
 		case ir.KindString:
-			// The corelib delivers RAW wire bytes and does not validate them: its
-			// cursor cannot tell a field this visitor binds from one it skips, and a
-			// skipped payload must never be inspected. So the destination is
-			// resolved first -- by reaching this arm at all -- and only then are the
-			// bytes checked and transcoded (CORELIB_PLAN §6.4, generator#257).
-			// Braced because Dart switch cases share one scope: two string fields
-			// in the same visitor would otherwise redeclare `s`.
-			body := "{\n          final s = sofab.decodeUtf8Strict(bytes);\n          " +
-				"if (s == null) { invalidate(); return; }\n          " +
-				acc + " = s;\n        }"
-			if fld.HasMaxlen {
-				// A wire byte length above the schema maxlen is malformed input
-				// (MESSAGE_SPEC §7.1) — reject as INVALID, never truncate. The raw
-				// bytes ARE the wire length, so this needs no re-encode.
-				body = fmt.Sprintf("if (bytes.length > %d) { invalidate(); return; }\n        %s", fld.Maxlen, body)
-			}
-			if hdr := g.maxlenHdrGuard("string", fld); hdr != "" {
-				fixHdr = append(fixHdr, arm(fld.ID, hdr))
-			}
-			bytesDest = append(bytesDest, destArm(fld.ID, "subtype == sofab.FixlenType.string", "onBytesDest(id, subtype, total)"))
-			str = append(str, arm(fld.ID, body))
+			// The codec validates the bytes as UTF-8 once they are whole, and only
+			// for a destination it was handed: a skipped string is never inspected
+			// (CORELIB_PLAN §6.4, generator#257).
+			str = append(str, retArm(fld.ID, g.destReturn(fld, acc, "length", g.limits.stringHas, g.elemMaxExpr(ir.KindString))))
 		case ir.KindBlob:
-			// value aliases the decode buffer — copy what we keep.
-			body := acc + " = Uint8List.fromList(value);"
-			if fld.HasMaxlen {
-				body = fmt.Sprintf("if (value.length > %d) { invalidate(); return; }\n        %s", fld.Maxlen, body)
-			}
-			if hdr := g.maxlenHdrGuard("blob", fld); hdr != "" {
-				fixHdr = append(fixHdr, arm(fld.ID, hdr))
-			}
-			bytesDest = append(bytesDest, destArm(fld.ID, "subtype == sofab.FixlenType.blob", "onBytesDest(id, subtype, total)"))
-			blob = append(blob, arm(fld.ID, body))
+			blob = append(blob, retArm(fld.ID, g.destReturn(fld, acc, "length", g.limits.blobHas, g.elemMaxExpr(ir.KindBlob))))
 		case ir.KindStruct, ir.KindUnion:
-			seq = append(seq, seqArm(fld.ID, fmt.Sprintf("return %s(%s);", visitorName(g.typeName(fld.Ref.Key)), acc)))
+			seq = append(seq, retArm(fld.ID, fmt.Sprintf("return %s(%s);", visitorName(g.typeName(fld.Ref.Key)), acc)))
 		case ir.KindArray:
-			if nativeArrayElem(fld.Elem) {
-				arrDest = append(arrDest, destArm(fld.ID,
-					"kind == sofab.ArrayKind."+wireArrayKind(fld.Elem), "onArrayDest(id, kind, count)"))
+			if !nativeArrayElem(fld.Elem) {
+				// Wrapper-sequence array: clear, then descend into a collector. The
+				// clear is §7.4 -- a later occurrence of the field replaces it whole --
+				// and keeps the list's backing store, where a fresh list would not.
+				coll := g.collector(acc, fld.Elem, fld.ElemRef, fld.ElemItems, capOf(fld.HasCount, fld.Count), emaxOf(fld.ElemMaxHas, fld.ElemMax))
+				seq = append(seq, retArm(fld.ID, fmt.Sprintf("%s.clear();\n        return %s;", acc, coll)))
+				continue
 			}
-			g.emitArrayDecode(fld, acc, arm, seqArm, &uArr, &sArr, &f32Arr, &f64Arr, &seq, &arrBegin, &elemBound)
+			a := retArm(fld.ID, g.destReturn(fld, acc, "count", g.limits.arrayHas, g.arrayCapExpr()))
+			switch {
+			case unsignedArrayElem(fld.Elem):
+				uArr = append(uArr, a)
+			case signedArrayElem(fld.Elem):
+				sArr = append(sArr, a)
+			case fld.Elem == ir.KindFP32:
+				f32Arr = append(f32Arr, a)
+			default:
+				f64Arr = append(f64Arr, a)
+			}
 		}
 	}
 
-	f.line("class %s extends %s {", visitorName(typeName), visitorBase)
+	f.line("class %s extends sofab.MessageVisitor {", visitorName(typeName))
 	f.line("  %s(this.o);", visitorName(typeName))
 	f.line("  final %s o;", typeName)
 	emitSwitch(f, "void onUnsigned(int id, int value)", uns)
@@ -143,132 +110,66 @@ func (g *gen) emitVisitor(f *dfile, typeName string, fields []*ir.Field) {
 	// is a NaN, carrying the raw 32 bits so a signaling/payload NaN survives §4.6.
 	emitSwitch(f, "void onFp32Bits(int id, int bits)", f32bits)
 	emitSwitch(f, "void onFp64(int id, double value)", f64)
-	// A scope with no string destination emits NOTHING here and inherits the
-	// no-op on sofab.VisitorBase, which is what makes an undeclared string a skip
-	// rather than a validated payload (generator#265). It must never fall through
-	// to sofab.MessageVisitor's validating default.
-	emitSwitch(f, "void onStringBytes(int id, Uint8List bytes)", str)
-	emitSwitch(f, "void onBlob(int id, Uint8List value)", blob)
-	emitSwitch(f, "void onUnsignedArray(int id, Int64List values)", uArr)
-	emitSwitch(f, "void onSignedArray(int id, Int64List values)", sArr)
-	emitSwitch(f, "void onFp32Array(int id, Float32List values)", f32Arr)
-	emitSwitch(f, "void onFp64Array(int id, Float64List values)", f64Arr)
-	// Header hooks fire at the count/length word before the truncation check
-	// (generator#216). Emitted only when a field declares a bound, so a type with
-	// none does not override them and the corelib's max-speed path is unchanged.
-	emitSwitch(f, "void onArrayBegin(int id, sofab.ArrayKind kind, int count)", arrBegin)
-	emitSwitch(f, "void onFixlenHeader(int id, int subtype, int length)", fixHdr)
-	// The element bound is asked once per array, at the count word, and applied
-	// by the decoder per element — the position arrayWidthGuard cannot reach for
-	// an array that never completes (generator#267).
-	emitSwitchRet(f, "sofab.ElemRange? onArrayElemBound(int id, sofab.ArrayKind kind)", elemBound, "return null;")
-	// Always emitted, arms or none: an id this scope does not bind gets NO
-	// destination, so a §7.3-skipped array or payload is never materialized.
-	emitDestSwitch(f, "Uint8List? onBytesDest(int id, int subtype, int total)", bytesDest)
-	emitDestSwitch(f, "TypedData? onArrayDest(int id, sofab.ArrayKind kind, int count)", arrDest)
-	// onSequenceStart is ALWAYS overridden: the base returns `this` (descend),
-	// which would misread an unknown nested sequence as this object's fields.
-	// Returning null skips any unhandled sequence (forward-compat + §7.3).
-	f.line("  @override")
-	f.line("  sofab.MessageVisitor? onSequenceStart(int id) {")
-	if len(seq) > 0 {
-		f.line("    switch (id) {")
-		for _, a := range seq {
-			f.line("%s", a)
-		}
-		f.line("    }")
-	}
-	f.line("    return null;")
-	f.line("  }")
+	// The aggregate header calls. A scope with no field of a kind emits nothing
+	// and inherits the corelib's default, which answers null: the field is
+	// skipped, so nothing is allocated for it and no bound applies (§6.2.1).
+	emitSwitchRet(f, "sofab.InlineString? onString(int id, int length)", str, "return null;")
+	emitSwitchRet(f, "sofab.InlineBytes? onBlob(int id, int length)", blob, "return null;")
+	emitSwitchRet(f, "sofab.InlineInt64Array? onUnsignedArray(int id, int count)", uArr, "return null;")
+	emitSwitchRet(f, "sofab.InlineInt64Array? onSignedArray(int id, int count)", sArr, "return null;")
+	emitSwitchRet(f, "sofab.InlineFloat32Array? onFp32Array(int id, int count)", f32Arr, "return null;")
+	emitSwitchRet(f, "sofab.InlineFloat64Array? onFp64Array(int id, int count)", f64Arr, "return null;")
+	// The corelib's onSequenceStart skips by default, so a scope that binds no
+	// sequence leaves it alone (forward-compat + §7.3).
+	emitSwitchRet(f, "sofab.MessageVisitor? onSequenceStart(int id)", seq, "return null;")
 	f.line("}")
 	f.blank()
 }
 
-// maxlenHdrGuard is the onFixlenHeader arm body rejecting a string/blob whose
-// wire byte length exceeds the schema maxlen as INVALID, at the length word
-// (generator#216). The bound is gated on the wire `subtype` matching the field's
-// declared one: onFixlenHeader fires for ANY fixlen subtype at a field id (the
-// corelib resolves the subtype but cannot know the DECLARED one — that is schema
-// knowledge only the generated code has), and a fixlen value whose subtype
-// contradicts the declaration must be SKIPPED, not measured against this field's
-// maxlen (MESSAGE_SPEC §7.3, generator#224). Without the gate an fp64 (8 bytes)
-// landing on a `blob` with `maxlen: 4` was rejected as INVALID instead of skipped.
-// The payload callbacks (onString/onBlob) are already subtype-dispatched by the
-// corelib, so only this pre-dispatch hook needs the explicit check.
-// TWO bounds land here and they are mutually exclusive by rule: a field the
-// schema bounds is governed by its own `maxlen` and is INVALID above it; a field
-// the schema leaves unbounded is governed by the receiver's configured cap and
-// is limitExceeded() above it (CORELIB_PLAN §6.2.1). The two categories must not
-// be folded -- a cap rejects well-formed bytes that decode under a looser cap --
-// and a cap must never reach a field the schema already bounds.
+// destReturn is the body of an aggregate header arm: judge the announced length
+// or count `n`, then hand over the destination `acc`.
 //
-// The corelib holds no cap of its own to fall back on any more
-// (corelib-dart#88): this arm is the whole receiver bound on a schema-unbounded
-// scalar string or blob. "" when the field has neither bound to state.
-func (g *gen) maxlenHdrGuard(sub string, fld *ir.Field) string {
-	if fld.HasMaxlen {
-		return fmt.Sprintf("if (subtype == sofab.FixlenType.%s && length > %d) invalidate();", sub, fld.Maxlen)
+// TWO bounds land here and they are mutually exclusive by rule (§6.2.1): a field
+// the schema bounds is governed by its own `maxlen`/`count` and is INVALID above
+// it (§7.1); a field the schema leaves unbounded is governed by the receiver's
+// configured cap and is limitExceeded() above it. The two categories must not be
+// folded -- a cap rejects well-formed bytes that decode under a looser cap -- and
+// a cap never reaches a field the schema already bounds.
+//
+// A destination sized to its bound at construction (eagerDest) is handed over as
+// it is. Any other gets storage of exactly the count when what it holds is
+// short -- allocated once, from a count that has just been checked, and never
+// grown element by element (ARCHITECTURE §9.5). The old contents are not kept:
+// the codec overwrites all `n` elements, so copying them over would be waste.
+func (g *gen) destReturn(fld *ir.Field, acc, n string, capLive bool, capExpr string) string {
+	size := fmt.Sprintf("if (%s.capacity < %s) %s.storage = %s(%s);\n        ", acc, n, acc, storageType(fld), n)
+	if bound, ok := destBound(fld); ok {
+		if eagerDest(fld) {
+			size = ""
+		}
+		return fmt.Sprintf("if (%s > %d) invalidate();\n        %sreturn %s;", n, bound, size, acc)
 	}
-	live := g.limits.stringHas
-	if fld.Kind == ir.KindBlob {
-		live = g.limits.blobHas
+	guard := ""
+	if capLive {
+		guard = fmt.Sprintf("if (%s > %s) limitExceeded();\n        ", n, capExpr)
 	}
-	if !live {
-		return ""
-	}
-	return fmt.Sprintf("if (subtype == sofab.FixlenType.%s && length > %s) limitExceeded();", sub, g.elemMaxExpr(fld.Kind))
+	return fmt.Sprintf("%s%sreturn %s;", guard, size, acc)
 }
 
-// arrayCountHdrGuard is the onArrayBegin arm body rejecting a native array whose
-// wire element count exceeds the schema `count` N as INVALID, at the array
-// header (generator#100 for the bound, generator#216 for moving it to the
-// header).
-//
-// The bound sits INSIDE the kind test, and that nesting is the whole point of
-// generator#259 / Crucible F-0042. onArrayBegin fires for ANY array kind landing
-// on this field id: the corelib reports the kind that arrived but cannot know
-// the DECLARED one, which is schema knowledge only the generated code has. An
-// array whose element kind contradicts the declaration was never this field's
-// value (MESSAGE_SPEC §7.3) — it is a skipped field, so its element count is not
-// this field's count and must not be measured against N. Bounding first would
-// turn a skippable contradiction into INVALID: an fp64 array header announcing 8
-// elements at a declared `fp32[5]` slot must be SKIPPED and the message
-// ACCEPTED, not rejected as over-count.
-//
-// That is also why `fp32` and `fp64` are separate kinds rather than one
-// "fixlen": a fixlen array's count word precedes its fixlen_word, so the hook
-// has to fire past the subtype (CORELIB_PLAN §4.8) for this test to be able to
-// distinguish them at all.
-//
-// The skip itself needs no code here. The whole-array callbacks
-// (onUnsignedArray/onSignedArray/onFp32Array/onFp64Array) are already
-// kind-dispatched by the corelib, so a contradicting array lands in a callback
-// with no arm for this id and evaporates — which also leaves a correctly typed
-// earlier occurrence of the same id intact (§7.4). This pre-dispatch hook is the
-// one place the kind has to be tested explicitly.
-// The receiver cap is the ELSE of that bound, in the same arm, inside the same
-// kind gate, and in the other category (§6.2.1): a schema-bounded array answers
-// INVALID and never sees a cap, a schema-unbounded one answers limitExceeded()
-// and has no other bound at all -- the corelib holds none (corelib-dart#88).
-func (g *gen) arrayCountHdrGuard(kind string, fld *ir.Field) string {
-	if fld.HasCount {
-		return fmt.Sprintf("if (kind == sofab.ArrayKind.%s && count > %d) invalidate();", kind, fld.Count)
+// storageType is the typed list a destination field's storage is.
+func storageType(fld *ir.Field) string {
+	if fld.Kind != ir.KindArray {
+		return "Uint8List"
 	}
-	if !g.limits.arrayHas {
-		return ""
+	switch fld.Elem {
+	case ir.KindFP32:
+		return "Float32List"
+	case ir.KindFP64:
+		return "Float64List"
 	}
-	return fmt.Sprintf("if (kind == sofab.ArrayKind.%s && count > %s) limitExceeded();", kind, g.arrayCapExpr())
+	return "Int64List"
 }
 
-// emitArrayDecode appends the decode arm(s) for an array field to the right
-// callback bucket. Native scalar arrays bind into the member (with an over-count
-// INVALID guard); wrapper-sequence arrays clear their list and descend into a
-// collector.
-//
-// The wire count M IS the array's length (MESSAGE_SPEC §3): the M elements that
-// arrived are the whole value, so they are taken exactly as they come. A
-// declared `count: N` is a CAPACITY -- it bounds M (the guard below) but never
-// adds elements, so there is nothing to fill in at [M, N).
 // widthGuard renders the §7.1 rejection for a scalar store into a destination
 // the schema declares with Kind k — and, for a composite kind, `ref` carries the
 // rest of that declaration. "" when nothing reachable can breach the bound: the
@@ -287,8 +188,9 @@ func (g *gen) arrayCountHdrGuard(kind string, fld *ir.Field) string {
 //
 // One clause serves four of the six positions a value lands in: this loop runs
 // once per message, struct and union visitor, so the message field, the struct
-// member, the struct-array element's member and the union member share it, and
-// arrayWidthGuard carries the same clause to the two element positions
+// member, the struct-array element's member and the union member share it. The
+// two element positions -- a native array and a matrix row -- carry the same
+// interval on their destination instead (elemRange), where the codec applies it
 // (generator#516).
 //
 // The `value < 0` term is not redundant on the unsigned WIDTH side: Dart's int
@@ -342,9 +244,9 @@ func widthCond(v string, k ir.Kind) string {
 // and doc PR #95 (`382159e`) withdrew. Both bounds are ordinary intervals now,
 // which is §1's own reason for the change: an array's elements are consumed
 // inside the corelib loop, so a bound must cross that channel as an interval,
-// and a width fits where a set does not. That is why every corelib hook below
-// carries the whole bound now, and why none of them needs a generated subclass
-// to state it.
+// and a width fits where a set does not. That is why an array destination's
+// `range:` carries the whole bound, and why no generated code has to state it
+// per element.
 //
 // Storage is still never the bound. Dart holds both kinds in its own `int`
 // whatever the schema declares, which is §1's fourth consequence directly: a
@@ -377,61 +279,12 @@ func declaredWidthCond(v string, k ir.Kind, ref *ir.TypeRef) string {
 	return ""
 }
 
-// arrayWidthGuard is the same bound for a native array's ELEMENTS. The corelib
-// hands the whole array over as a List<int>, so the raw values are still visible
-// and one scan decides the array.
-//
-// The scan is the second of two statements of ONE bound: elemBoundArm below
-// states the same interval at the element, for the array that never completes.
-func arrayWidthGuard(elem ir.Kind, ref *ir.TypeRef) string {
-	cond := widthCond("_v", elem)
-	if cond == "" {
-		cond = declaredWidthCond("_v", elem, ref)
-	}
-	if cond == "" {
-		return ""
-	}
-	return fmt.Sprintf("for (final _v in values) { if (%s) { invalidate(); return; } }\n        ", cond)
-}
-
-// elemBoundArm is the onArrayElemBound arm body declaring the range an element
-// of this array may take (MESSAGE_SPEC §7.1) — "" for u64/i64, bool, and an
-// enum or bitfield whose implied width is the accumulator, whose range is the
-// callback parameter's own.
-//
-// Emitted exactly where arrayWidthGuard is: the two are one bound at two times.
-// The guard scans the assembled list, which decides an array that ARRIVES; this
-// is what the decoder applies to one that does not, where the whole-array
-// callback never fires and the guard therefore never runs (generator#267).
-//
-// The two say the same thing for every kind, an `enum` and a `bitfield`
-// included: under MESSAGE_SPEC §1 their bound is the implied WIDTH, which is an
-// interval and fits sofab.ElemRange whole. So nothing is left unenforced at this
-// position — a value outside the range is refused whether the array completes or
-// is cut short behind the offending element (§5.2). The set/mask bound of
-// generator#530 could not cross this channel and left exactly that truncated
-// case to a comment.
-//
-// Gated on `kind` for the reason arrayCountHdrGuard is: the hook is asked per
-// field id, and an array whose wire element kind contradicts the declared one is
-// skipped under §7.3 — its elements were never this field's value.
-//
-// `const` so the range is a compile-time constant and the answer costs no
-// allocation, as corelib-dart's doc asks.
-func elemBoundArm(kind string, elem ir.Kind, ref *ir.TypeRef) string {
-	lo, hi, ok := elemRange(elem, ref)
-	if !ok {
-		return ""
-	}
-	return fmt.Sprintf("if (kind == sofab.ArrayKind.%s) {\n          return const sofab.ElemRange(%d, %d);\n        }", kind, lo, hi)
-}
-
 // elemRange is the inclusive INTERVAL an element may take: the declared width,
 // or the width an `enum`/`bitfield` declaration implies (MESSAGE_SPEC §1). It is
-// what onArrayElemBound and the matrix-row collector are handed — the two
-// corelib hooks here that carry an interval and can carry nothing else — and
-// under the width rule that is no longer weaker than the scan emitted beside it:
-// the two state the same range.
+// what an integer array destination's `range:` and the matrix-row collector
+// are handed -- the two places an element's bound crosses into the corelib,
+// which applies it to every element as it is decoded, on both decode surfaces
+// and ahead of a truncated tail (MESSAGE_SPEC §5.2, generator#267).
 //
 // ok is false where no interval narrows anything, and each case is a real one:
 // u64/i64 and bool, whose range IS the callback parameter's own, and an enum
@@ -459,58 +312,11 @@ func elemRange(k ir.Kind, ref *ir.TypeRef) (lo, hi int64, ok bool) {
 	return 0, 0, false
 }
 
-func (g *gen) emitArrayDecode(fld *ir.Field, acc string, arm func(int64, string) string, seqArm func(int64, string) string, uArr, sArr, f32Arr, f64Arr, seq, arrBegin, elemBound *[]string) {
-	if nativeArrayElem(fld.Elem) {
-		// Its own arm shape: the method answers with a value, so an arm that
-		// declares no range for the kind that arrived falls through to `return
-		// null` rather than to the bare `return;` the void callbacks use.
-		if b := elemBoundArm(wireArrayKind(fld.Elem), fld.Elem, fld.ElemRef); b != "" {
-			*elemBound = append(*elemBound, fmt.Sprintf("      case %d:\n        %s\n        return null;", fld.ID, b))
-		}
-	}
-	guard := ""
-	if fld.HasCount {
-		// A wire element count above the schema `count` is INVALID (MESSAGE_SPEC
-		// §3+§7): reject, never clamp (generator#100).
-		guard = fmt.Sprintf("if (values.length > %d) { invalidate(); return; }\n        ", fld.Count)
-	}
-	// Native arrays fire onArrayBegin at the array header; wrapper-sequence arrays
-	// descend via onSequenceStart (no header hook) and are bounded on the
-	// collector instead. So the header bound is only for the native kinds -- and
-	// an unbounded one carries the receiver cap there, in the schema bound's place.
-	if nativeArrayElem(fld.Elem) {
-		if hdr := g.arrayCountHdrGuard(wireArrayKind(fld.Elem), fld); hdr != "" {
-			*arrBegin = append(*arrBegin, arm(fld.ID, hdr))
-		}
-	}
-	// An integer array is copied into the model's growable List<int> by the
-	// indexed _i64List (see emitPrelude), not List<int>.from: .from walks the
-	// Int64List through its iterator (moveNext/current per element), where an
-	// indexed loop over the concrete typed list is plain loads and stores.
-	switch {
-	case unsignedArrayElem(fld.Elem) && fld.Elem == ir.KindBool:
-		*uArr = append(*uArr, arm(fld.ID, guard+acc+" = [for (final _v in values) _v != 0];"))
-	case unsignedArrayElem(fld.Elem):
-		*uArr = append(*uArr, arm(fld.ID, guard+arrayWidthGuard(fld.Elem, fld.ElemRef)+acc+" = _i64List(values);"))
-	case signedArrayElem(fld.Elem):
-		*sArr = append(*sArr, arm(fld.ID, guard+arrayWidthGuard(fld.Elem, fld.ElemRef)+acc+" = _i64List(values);"))
-	case fld.Elem == ir.KindFP32:
-		// Bit-exact copy into a fresh Float32List of the WIRE count: a per-element
-		// widen through a double would quiet a signaling/payload NaN (MESSAGE_SPEC
-		// S4.6). writeFp32Array re-emits a Float32List raw.
-		*f32Arr = append(*f32Arr, arm(fld.ID, fmt.Sprintf("%s%s = sofab.copyFp32(values, values.length);", guard, acc)))
-	case fld.Elem == ir.KindFP64:
-		*f64Arr = append(*f64Arr, arm(fld.ID, guard+acc+" = List<double>.from(values);"))
-	default: // wrapper-sequence array (string/blob/struct/union/nested)
-		et := g.dartArrayElemType(fld.Elem, fld.ElemRef, fld.ElemItems)
-		coll := g.collector(acc, fld.Elem, fld.ElemRef, fld.ElemItems, capOf(fld.HasCount, fld.Count), emaxOf(fld.ElemMaxHas, fld.ElemMax))
-		*seq = append(*seq, seqArm(fld.ID, fmt.Sprintf("%s = <%s>[];\n        return %s;", acc, et, coll)))
-	}
-}
-
 // collector returns the Dart expression constructing the MessageVisitor that
 // gathers a wrapper-sequence array's elements into the (freshly-cleared) list
-// `out`. It recurses for nested arrays.
+// `out`. It recurses for nested arrays. The string/blob and matrix collectors
+// decode each element straight into its slot of `out` -- an `Inline…`
+// destination, reused where it already holds enough storage.
 //
 // Every collector is handed BOTH bounds of every axis it has: the schema pair
 // (cap, emax / rowCount) and the receiver pair beside it (rcap, relemMax /
@@ -544,26 +350,22 @@ func (g *gen) collector(out string, elem ir.Kind, ref *ir.TypeRef, items *ir.Arr
 		if nativeArrayElem(items.Elem) {
 			// A matrix has TWO axes and therefore four bounds. cap/rcap bound the ROW
 			// ID; rowCount/rowCap bound a row's OWN element count, which the row
-			// announces as a real count header because a row IS a native array -- and
-			// which nothing bounded before: the inner `count:` was dropped on the
-			// floor here, and the decoder-wide cap that stood in for it is gone.
+			// announces as a real count header because a row IS a native array.
 			rows := fmt.Sprintf("%s, rowCount: %d, rowCap: %s", rcap, capOf(items.HasCount, items.Count), g.arrayCapExpr())
-			switch {
-			case items.Elem == ir.KindBool:
-				return fmt.Sprintf("sofab.BoolMatrixSeq(%s, %d%s)", out, cap, rows)
-			case items.Elem == ir.KindFP32 || items.Elem == ir.KindFP64:
-				return fmt.Sprintf("sofab.DoubleMatrixSeq(%s, %d, %v%s)", out, cap, items.Elem == ir.KindFP64, rows)
-			default:
-				// lo/hi bound a ROW's elements, and this pair is the ONLY bound the
-				// position has: a row's values never reach the generated visitor --
-				// sofab.IntMatrixSeq gathers them and places the finished row -- so
-				// there is no store here to guard. Under the width rule it carries the
-				// whole bound for an `enum` and a `bitfield` too (MESSAGE_SPEC §1),
-				// which the set/mask bound of generator#530 could not: that one needed
-				// a generated subclass of the collector to state itself at all.
-				_lo, _hi, _ := elemRange(items.Elem, items.ElemRef)
-				return fmt.Sprintf("sofab.IntMatrixSeq(%s, %d, %v, %d, %d%s)", out, cap, signedArrayElem(items.Elem), _lo, _hi, rows)
+			switch items.Elem {
+			case ir.KindFP32:
+				return fmt.Sprintf("sofab.Float32MatrixSeq(%s, %d%s)", out, cap, rows)
+			case ir.KindFP64:
+				return fmt.Sprintf("sofab.Float64MatrixSeq(%s, %d%s)", out, cap, rows)
 			}
+			// lo/hi bound a ROW's elements, and this pair is the ONLY bound the
+			// position has: a row's values never reach the generated visitor, so
+			// there is no store here to guard. Under the width rule it carries the
+			// whole bound for an `enum` and a `bitfield` too (MESSAGE_SPEC §1). A
+			// bool row has none -- any non-zero element is `true` (§4.4) -- and
+			// neither does a 64-bit one: equal lo/hi mean "nothing to check".
+			lo, hi, _ := elemRange(items.Elem, items.ElemRef)
+			return fmt.Sprintf("sofab.IntMatrixSeq(%s, %d, %v, %d, %d%s)", out, cap, signedArrayElem(items.Elem), lo, hi, rows)
 		}
 		// Array of wrapper arrays: each element opens a sequence collected into the
 		// inner list its element id names, by a recursively-built collector. The
@@ -596,25 +398,6 @@ func emitSwitch(f *dfile, sig string, arms []string) {
 	emitSwitchRet(f, sig, arms, "")
 }
 
-// emitDestSwitch is emitSwitchRet for the two DESTINATION hooks, with one
-// difference that is the whole point of it: it emits the override even when
-// there are no arms. A scope that binds no array and no payload must still
-// DECLINE every array and every payload, or corelib-dart's allocating default
-// stands and a skipped field is materialized from the wire (§6.2.1, §7.3).
-func emitDestSwitch(f *dfile, sig string, arms []string) {
-	f.line("  @override")
-	f.line("  %s {", sig)
-	if len(arms) > 0 {
-		f.line("    switch (id) {")
-		for _, a := range arms {
-			f.line("%s", a)
-		}
-		f.line("    }")
-	}
-	f.line("    return null;")
-	f.line("  }")
-}
-
 // emitSwitchRet is emitSwitch for a callback that answers with a value: `tail`
 // is what an id with no arm falls through to. "" for the void callbacks, whose
 // arms return on their own.
@@ -635,22 +418,25 @@ func emitSwitchRet(f *dfile, sig string, arms []string, tail string) {
 	f.line("  }")
 }
 
-// ---- shared prelude (helpers + collectors) --------------------------------
+// ---- shared prelude (helpers) ----------------------------------------------
 
-// needs records which prelude helpers and collector classes a schema actually
-// uses, so only those are emitted (clean output; nothing unused).
+// needs records which prelude helpers a schema actually uses, so only those are
+// emitted: `dart analyze --fatal-infos` is this backend's build gate and
+// rejects an unreferenced declaration.
 type needs struct {
-	dec     bool
 	f32bits bool
-	// i64copy: some native integer array field (not bool) is decoded through
-	// onUnsignedArray/onSignedArray, whose arms copy with _i64List.
-	i64copy bool
+	// bools: some bool array or bool matrix row is written, through _bools01.
+	bools bool
+	// boolDefault: some bool array declares a default, compared by _boolsEq.
+	boolDefault bool
+	// prefixEq: some string, blob or non-bool native array declares a default,
+	// compared by _prefixEq.
+	prefixEq bool
 }
 
 func (g *gen) computeNeeds(s *ir.Schema) needs {
 	var n needs
 	scan := func(fields []*ir.Field) {
-		n.dec = true
 		for _, fld := range fields {
 			g.scanField(fld, &n)
 		}
@@ -667,49 +453,42 @@ func (g *gen) computeNeeds(s *ir.Schema) needs {
 }
 
 func (g *gen) scanField(fld *ir.Field, n *needs) {
+	if _, ok := g.defaultLit(fld); ok {
+		if fld.Kind == ir.KindArray && fld.Elem == ir.KindBool {
+			n.boolDefault = true
+		} else {
+			n.prefixEq = true
+		}
+	}
 	switch fld.Kind {
 	case ir.KindFP32:
 		n.f32bits = true
 	case ir.KindArray:
-		if nativeArrayElem(fld.Elem) {
-			if fld.Elem != ir.KindBool && (unsignedArrayElem(fld.Elem) || signedArrayElem(fld.Elem)) {
-				n.i64copy = true
-			}
+		if fld.Elem == ir.KindBool {
+			n.bools = true
 			return
 		}
-		g.scanArrayElem(fld.Elem, fld.ElemRef, fld.ElemItems, n)
+		if !nativeArrayElem(fld.Elem) {
+			scanArrayElem(fld.Elem, fld.ElemItems, n)
+		}
 	}
 }
 
-// scanArrayElem descends a wrapper array's element type. It records nothing any
-// more -- which collector each level needs is the corelib's business since
-// corelib-dart#74 -- but the walk stays: an element that is itself an array can
-// bottom out at an fp32 scalar, and that still decides `f32bits`.
-func (g *gen) scanArrayElem(elem ir.Kind, ref *ir.TypeRef, items *ir.ArrayElem, n *needs) {
+// scanArrayElem descends a wrapper array's element type to the bool matrix row
+// it may bottom out at.
+func scanArrayElem(elem ir.Kind, items *ir.ArrayElem, n *needs) {
 	if elem != ir.KindArray {
 		return
 	}
-	if nativeArrayElem(items.Elem) {
+	if items.Elem == ir.KindBool {
+		n.bools = true
 		return
 	}
-	g.scanArrayElem(items.Elem, items.ElemRef, items.ElemItems, n)
+	scanArrayElem(items.Elem, items.ElemItems, n)
 }
-
-// visitorBase is what every generated visitor extends. The corelib hosts it
-// (corelib-dart#65): the class flips two sofab.MessageVisitor defaults that are
-// right for a hand-written visitor and wrong for a schema-bound one -- an id
-// this scope does not declare is skipped, not inspected, and a sub-sequence it
-// does not bind is skipped whole. Neither decision has a schema in it, so the
-// base is written once there rather than emitted into every module.
-const visitorBase = "sofab.VisitorBase"
 
 func (g *gen) emitPrelude(f *dfile, s *ir.Schema) {
 	n := g.computeNeeds(s)
-	if !n.dec && !g.limits.any() {
-		return
-	}
-	if n.dec {
-	}
 	if n.f32bits {
 		f.line("// Widen the 32 raw wire bits of an fp32 NaN to a display double for element")
 		f.line("// access; the exact bits are kept alongside for a bit-for-bit re-encode.")
@@ -717,20 +496,45 @@ func (g *gen) emitPrelude(f *dfile, s *ir.Schema) {
 		f.line("    (ByteData(4)..setUint32(0, bits, Endian.little)).getFloat32(0, Endian.little);")
 		f.blank()
 	}
-	if n.i64copy {
-		// The model owns a growable List<int> (a caller may add to it), and the
-		// corelib's Int64List is only lent for the callback, so the arm must copy.
-		// Indexed rather than List<int>.from: .from goes through the typed list's
-		// iterator, one moveNext/current pair per element.
-		f.line("// Copies an integer array the decoder delivers into the model's growable")
-		f.line("// List<int>, by index rather than through the typed list's iterator.")
-		f.line("List<int> _i64List(Int64List v) {")
-		f.line("  final n = v.length;")
-		f.line("  final out = List<int>.filled(n, 0, growable: true);")
+	if n.prefixEq {
+		// A destination's storage is its CAPACITY, so a default compare reads the
+		// first `length` elements -- no view, no copy.
+		f.line("// Whether the first [n] elements of [s] are exactly [d]: the default test of")
+		f.line("// a destination field, whose storage is sized to its capacity.")
+		f.line("bool _prefixEq<T>(List<T> s, int n, List<T> d) {")
+		f.line("  if (n != d.length) return false;")
 		f.line("  for (var i = 0; i < n; i++) {")
-		f.line("    out[i] = v[i];")
+		f.line("    if (s[i] != d[i]) return false;")
 		f.line("  }")
-		f.line("  return out;")
+		f.line("  return true;")
+		f.line("}")
+		f.blank()
+	}
+	if n.boolDefault {
+		f.line("// The default test of a bool array: its elements compared as booleans, since")
+		f.line("// any non-zero element decodes as `true`.")
+		f.line("bool _boolsEq(Int64List s, int n, List<int> d) {")
+		f.line("  if (n != d.length) return false;")
+		f.line("  for (var i = 0; i < n; i++) {")
+		f.line("    if ((s[i] != 0) != (d[i] != 0)) return false;")
+		f.line("  }")
+		f.line("  return true;")
+		f.line("}")
+		f.blank()
+	}
+	if n.bools {
+		// A bool array decodes into the 64-bit elements the wire carries, and any
+		// non-zero one is `true` (§4.4) -- so a decoded 5 is a `true` whose
+		// canonical encoding is 1. Normalizing in place keeps the value and makes
+		// the re-encode canonical without a copy.
+		f.line("// Normalizes a bool array to its canonical 0/1 elements in place (any")
+		f.line("// non-zero element is `true`) and returns its storage.")
+		f.line("Int64List _bools01(sofab.InlineInt64Array a) {")
+		f.line("  final s = a.storage;")
+		f.line("  for (var i = 0; i < a.length; i++) {")
+		f.line("    if (s[i] != 0) s[i] = 1;")
+		f.line("  }")
+		f.line("  return s;")
 		f.line("}")
 		f.blank()
 	}

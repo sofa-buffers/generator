@@ -40,10 +40,8 @@ class Scalars {
   /// default. [tryDecode] does that for you; call this directly when driving
   /// the decode visitor yourself, or to recycle an instance.
   ///
-  /// Lists are cleared and refilled rather than replaced, so a reused
-  /// instance keeps its backing storage. (A list member assigned a
-  /// fixed-length list by the caller is the one exception -- see the fp32
-  /// array note in the generator docs.)
+  /// Strings, blobs and arrays keep their storage and lists their backing
+  /// store, so a reused instance decodes without allocating.
   void reset() {
     u8min = 0;
     u8max = 255;
@@ -155,8 +153,10 @@ class Scalars {
 /// [finish] then gives the verdict for the message as a whole.
 ///
 /// Nothing is borrowed from the chunks you feed: the corelib copies each
-/// string/blob payload into storage of its own before it reaches the
-/// destination, so a chunk may be reused as soon as [feed] returns.
+/// string, blob and array payload into the destination's own storage, so a
+/// chunk may be reused as soon as [feed] returns. A destination is complete
+/// once a feed reports `complete`; after `incomplete` or a refusal its
+/// contents are unspecified.
 class ScalarsDecoder {
   ScalarsDecoder._(this._out) {
     _d = sofab.Decoder(_ScalarsVisitor(_out));
@@ -182,7 +182,7 @@ class ScalarsDecoder {
       _d.feed(const <int>[]) == sofab.DecodeStatus.complete ? _out : null;
 }
 
-class _ScalarsVisitor extends sofab.VisitorBase {
+class _ScalarsVisitor extends sofab.MessageVisitor {
   _ScalarsVisitor(this.o);
   final Scalars o;
   @override
@@ -241,18 +241,6 @@ class _ScalarsVisitor extends sofab.VisitorBase {
         o.f64 = value;
         return;
     }
-  }
-  @override
-  Uint8List? onBytesDest(int id, int subtype, int total) {
-    return null;
-  }
-  @override
-  TypedData? onArrayDest(int id, sofab.ArrayKind kind, int count) {
-    return null;
-  }
-  @override
-  sofab.MessageVisitor? onSequenceStart(int id) {
-    return null;
   }
 }
 
