@@ -168,6 +168,11 @@ messages:
 	if !strings.Contains(mod, "_BIND_M = (Binding(closed=True)") {
 		t.Errorf("a class the table covers whole must close its root table:\n%s", mod)
 	}
+	// Every table in this module is closed, so no `Binding()` appears anywhere --
+	// which is exactly the module the import used to be dropped from.
+	if !strings.Contains(mod, "from sofab import Binding, ") {
+		t.Errorf("a module whose every table is closed must still import Binding:\n%s", mod)
+	}
 	vis := mod[strings.Index(mod, "class _MVisitor("):]
 	for _, gone := range []string{
 		"def on_", "self._c", "self._s", "_L_M",

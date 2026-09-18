@@ -2,7 +2,7 @@
 from __future__ import annotations
 from dataclasses import dataclass, field
 from enum import IntEnum, IntFlag
-from sofab import Decoder, Encoder, SofaDecodeError, SofaIncompleteError, Status, Visitor
+from sofab import Binding, Decoder, Encoder, SofaDecodeError, SofaIncompleteError, Status, Visitor
 
 # Bytes of reassembly space, derived from the schema and the decode limits.
 #

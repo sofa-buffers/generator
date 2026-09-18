@@ -232,8 +232,11 @@ func (g *gen) module(s *ir.Schema) []byte {
 		names = append(names, "SofaLimitError")
 	}
 	// Binding is the destination table (binding.go); a schema whose fields the
-	// table cannot carry emits none and imports none.
-	if strings.Contains(decodeSection, "Binding()") {
+	// table cannot carry emits none and imports none. Matched on the call's
+	// opening parenthesis, not on `Binding()`: a module whose every table is
+	// closed spells each one `Binding(closed=True)`, and matching the empty call
+	// left exactly those modules without the import -- a NameError at import.
+	if strings.Contains(decodeSection, "(Binding(") {
 		names = append(names, "Binding")
 	}
 	// Field is the on_field argument, and WireType / FixlenSubtype are the tags
