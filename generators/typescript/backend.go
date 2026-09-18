@@ -165,8 +165,51 @@ func (g *gen) module(s *ir.Schema) []byte {
 	}
 	f.line("import { %s } from %q;", strings.Join(usedImports(body), ", "), corelibPkg)
 	f.blank()
+	if used := usedEmptyTyped(body); len(used) > 0 {
+		f.line("// Shared zero-length placeholders, one per typed-array type: an empty typed")
+		f.line("// array holds nothing and cannot be written through, so a single instance")
+		f.line("// serves every empty default, visitor register and target slot below.")
+		for _, t := range used {
+			f.line("const %s = new %s(0);", emptyTyped(t), t)
+		}
+		f.blank()
+	}
 	f.line("%s", body)
 	return f.bytes()
+}
+
+// typedArrayTypes is every typed-array constructor a generated member, register
+// or bulk target may be, in the order their shared empty instances are declared.
+var typedArrayTypes = []string{
+	"Uint8Array", "Int8Array", "Uint16Array", "Int16Array", "Uint32Array", "Int32Array",
+	"BigUint64Array", "BigInt64Array", "Float32Array", "Float64Array",
+}
+
+// emptyTyped names the module-level zero-length instance of typed-array type t.
+//
+// Every EMPTY typed array the generated code needs -- a native array member's
+// default when the schema declares none, a matrix row's padding, the visitor's
+// per-array registers and the initial slot of each reusable bulk target -- is
+// this one shared instance rather than a fresh `new T(0)`. That is sound because
+// a zero-length typed array has no element to write (an indexed store is out of
+// bounds and dropped) and cannot be resized, and because nothing generated
+// compares an array by identity: the omit test and isDefault go by length or
+// elementsEqual, and decode REPLACES a member (a fresh `new T(count)` at the wire
+// count) instead of filling the one it holds. A fresh instance per slot was about
+// 20 allocations per decode of a message with ten native arrays.
+func emptyTyped(t string) string { return "_E_" + t }
+
+// usedEmptyTyped lists the typed-array types whose shared empty instance the
+// rendered body references, so a module declares only what it uses (an unused
+// module-level const is a noUnusedLocals error).
+func usedEmptyTyped(body string) []string {
+	var out []string
+	for _, t := range typedArrayTypes {
+		if identUsed(body, emptyTyped(t)) {
+			out = append(out, t)
+		}
+	}
+	return out
 }
 
 // corelibNames is every name a generated module may take from the corelib, in

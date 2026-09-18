@@ -563,7 +563,9 @@ func (g *gen) tsDefault(f *ir.Field) string {
 				return lit
 			}
 			if carrier != "" {
-				return fmt.Sprintf("new %s(0)", carrier)
+				// The shared zero-length instance (emptyTyped): an empty typed
+				// array can hold nothing, so every message may point at one.
+				return emptyTyped(carrier)
 			}
 		}
 		return "[]"

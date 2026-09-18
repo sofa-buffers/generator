@@ -788,7 +788,7 @@ func (g *gen) emitPayloadCb(f *tsfile, scopes []*tsScope, cb string) {
 //	u64/i64 (bigint)     values  -- scratch, then one BigInt per element
 //	bool                 values  -- scratch, then Boolean per element
 //	wide bitfield        values  -- scratch, then one BigInt per element
-//	fp32                 bits    -- scratch, read back through a Float32Array view
+//	fp32                 f32     -- the member Float32Array itself
 //	fp64                 f64     -- scratch, copied into the member number[]
 //
 // The member types are unchanged, which is the point: generator#549 measured
@@ -802,16 +802,21 @@ func (g *gen) emitPayloadCb(f *tsfile, scopes []*tsScope, cb string) {
 // type and takes the length in the constructor.
 // emptyRegisterLit is emptyArrayLit with the member's own type asserted on, for
 // the private registers whose declared type is the enum alias.
+//
+// An empty typed array is the module's shared zero-length instance of that type
+// (emptyTyped), not a fresh one: these literals are placeholders that are
+// replaced before they are read, and a fresh one per slot was ~20 allocations
+// per decode of a message with ten native arrays.
 func (g *gen) emptyRegisterLit(elem ir.Kind, ref *ir.TypeRef, typ string) string {
 	if elem == ir.KindEnum {
-		return fmt.Sprintf("new %s(0) as %s", g.tsTypedArray(elem, ref), typ)
+		return fmt.Sprintf("%s as %s", emptyTyped(g.tsTypedArray(elem, ref)), typ)
 	}
 	return g.emptyArrayLit(elem, ref)
 }
 
 func (g *gen) emptyArrayLit(elem ir.Kind, ref *ir.TypeRef) string {
 	if t := g.tsTypedArray(elem, ref); t != "" {
-		return fmt.Sprintf("new %s(0)", t)
+		return emptyTyped(t)
 	}
 	return "[]"
 }
@@ -858,11 +863,13 @@ const (
 	// with no bound: §4.4 gives a boolean none, and the corelib normalizes every
 	// non-zero to 1 while filling rather than masking it (256 would become 0).
 	shBool
-	// FloatArrayTarget.bits over the Float32Array member's OWN buffer. Not `f32`:
-	// that destination stores values, and an fp32 signaling NaN cannot survive
-	// being widened to a double and narrowed back (§4.6/§6.5). The words land
-	// exactly and reading the member still gives the values -- one buffer, both.
-	shBits
+	// FloatArrayTarget.f32 -- the Float32Array member itself. The corelib stores
+	// every non-NaN as a value (an fp32 survives the double exactly) and a NaN by
+	// its wire WORD, so a signaling NaN keeps its payload (§4.6/§6.5) without the
+	// member's buffer being touched on the common path (corelib-ts#188). The
+	// `bits` view this replaced cost a Uint32Array per array per decode, and
+	// reading `.buffer` moves a small on-heap typed array's storage off the heap.
+	shF32
 	// FloatArrayTarget.f64 -- a double carries all 64 bits, payload NaNs included,
 	// so there is nothing a bits channel would add.
 	shF64
@@ -893,7 +900,7 @@ func (g *gen) planBulk(elem ir.Kind, ref *ir.TypeRef) bulkPlan {
 	case ir.KindBool:
 		p.shape = shBool
 	case ir.KindFP32:
-		p.shape = shBits
+		p.shape = shF32
 	case ir.KindFP64:
 		p.shape = shF64
 	case ir.KindU64, ir.KindI64:
@@ -949,7 +956,7 @@ func boundHalves(lo, hi int64) [4]uint32 {
 }
 
 // bulkNeeds records which reusable target objects a visitor class declares.
-type bulkNeeds struct{ typed, bool_, bits, f64, longs bool }
+type bulkNeeds struct{ typed, bool_, f32, f64, longs bool }
 
 func (g *gen) bulkNeedsOf(scopes []*tsScope) bulkNeeds {
 	var n bulkNeeds
@@ -959,8 +966,8 @@ func (g *gen) bulkNeedsOf(scopes []*tsScope) bulkNeeds {
 			n.typed = true
 		case shBool:
 			n.bool_ = true
-		case shBits:
-			n.bits = true
+		case shF32:
+			n.f32 = true
 		case shF64:
 			n.f64 = true
 		case shLongs:
@@ -995,21 +1002,23 @@ func (g *gen) bulkNeedsOf(scopes []*tsScope) bulkNeeds {
 //
 // There are no scratch buffers here any more, and that is the whole change: with
 // the member itself as the destination there is nothing to fill on the way to it.
+// The initial destinations are the module's shared zero-length instances: every
+// one is re-pointed at a member before the target is handed over.
 func (g *gen) emitBulkState(f *tsfile, n bulkNeeds) {
 	if n.typed {
-		f.line("  private readonly _tt: IntegerArrayTarget = { typed: new Uint8Array(0), minLo: 0, minHi: 0, maxLo: 0, maxHi: 0 };")
+		f.line("  private readonly _tt: IntegerArrayTarget = { typed: %s, minLo: 0, minHi: 0, maxLo: 0, maxHi: 0 };", emptyTyped("Uint8Array"))
 	}
 	if n.longs {
 		f.line("  private readonly _tl: IntegerArrayTarget = { longs: [], minLo: 0, minHi: 0, maxLo: 0, maxHi: 0 };")
 	}
 	if n.bool_ {
-		f.line("  private readonly _tq: BoolArrayTarget = { bool: new Uint8Array(0) };")
+		f.line("  private readonly _tq: BoolArrayTarget = { bool: %s };", emptyTyped("Uint8Array"))
 	}
-	if n.bits {
-		f.line("  private readonly _tb: FloatArrayTarget = { bits: new Uint32Array(0) };")
+	if n.f32 {
+		f.line("  private readonly _tf: FloatArrayTarget = { f32: %s };", emptyTyped("Float32Array"))
 	}
 	if n.f64 {
-		f.line("  private readonly _td: FloatArrayTarget = { f64: new Float64Array(0) };")
+		f.line("  private readonly _td: FloatArrayTarget = { f64: %s };", emptyTyped("Float64Array"))
 	}
 }
 
@@ -1118,14 +1127,10 @@ func (g *gen) bulkOffer(p bulkPlan, dst, ind string) []string {
 		// No bound: §4.4 gives a boolean none, and the corelib normalizes every
 		// non-zero to 1 while filling.
 		line("const _t = this._tq; _t.bool = %s;", dst)
-	case shBits:
-		// A Uint32Array over the Float32Array member's OWN buffer: the decoder
-		// writes the wire words, which is what keeps a signaling NaN's payload
-		// (§4.6/§6.5), and the same bytes read back as the values. One view object
-		// per array -- the member is a different array each time, so there is
-		// nothing to cache.
-		line("const _m = %s; const _t = this._tb;", dst)
-		line("_t.bits = new Uint32Array(_m.buffer, _m.byteOffset, _m.length);")
+	case shF32:
+		// The member itself. The corelib keeps a NaN by its wire word, so a
+		// signaling NaN's payload survives (§4.6/§6.5) with no view built here.
+		line("const _t = this._tf; _t.f32 = %s;", dst)
 	case shF64:
 		line("const _t = this._td; _t.f64 = %s;", dst)
 	}
