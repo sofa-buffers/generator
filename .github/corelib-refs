@@ -1,0 +1,7 @@
+# Corelib branches this branch is developed against (docs/CI.md).
+# Delete before merging: every entry pins a corelib to unmerged code.
+#
+# Generated Dart code passes `depth:` to the Encoder it builds, which only
+# exists on corelib-dart#96's branch. lang-dart stays red against corelib main
+# until that PR merges; then drop this line (docs/CI.md "Merge order").
+SOFAB_CORELIB_DART_REF=perf/arena-regression-2026-09
