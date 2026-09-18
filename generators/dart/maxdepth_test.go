@@ -116,9 +116,18 @@ func TestDartEncodeMaxDepth(t *testing.T) {
 // Gated on SOFAB_DART_CORELIB (a checkout whose Encoder takes `depth:`) and the
 // dart toolchain.
 func TestDartEncodeMaxDepthRoundTrip(t *testing.T) {
+	runDartDriver(t, deepSchema, dartDepthDriver, "depth round trip: PASS")
+}
+
+// runDartDriver generates `schema` into a scratch package named `rt`, adds
+// `driver` as bin/rt.dart and runs it against the corelib-dart checkout in
+// SOFAB_DART_CORELIB, failing unless its output contains `pass`. Skipped when
+// SOFAB_DART_CORELIB or the dart toolchain is missing.
+func runDartDriver(t *testing.T, schema, driver, pass string) {
+	t.Helper()
 	corelib := os.Getenv("SOFAB_DART_CORELIB")
 	if corelib == "" {
-		t.Skip("set SOFAB_DART_CORELIB to a corelib-dart checkout to run the depth round trip")
+		t.Skip("set SOFAB_DART_CORELIB to a corelib-dart checkout to run the Dart driver")
 	}
 	if _, err := exec.LookPath("dart"); err != nil {
 		t.Skip("dart toolchain not on PATH")
@@ -127,7 +136,7 @@ func TestDartEncodeMaxDepthRoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	files, err := (&Backend{}).Generate(schemaFor(t, writeDef(t, deepSchema)), map[string]any{})
+	files, err := (&Backend{}).Generate(schemaFor(t, writeDef(t, schema)), map[string]any{})
 	if err != nil {
 		t.Fatalf("generate: %v", err)
 	}
@@ -149,7 +158,7 @@ func TestDartEncodeMaxDepthRoundTrip(t *testing.T) {
 	if err := os.MkdirAll(filepath.Join(dir, "bin"), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(dir, "bin", "rt.dart"), []byte(dartDepthDriver), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(dir, "bin", "rt.dart"), []byte(driver), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	for _, args := range [][]string{{"pub", "get"}, {"run", "bin/rt.dart"}} {
@@ -159,8 +168,8 @@ func TestDartEncodeMaxDepthRoundTrip(t *testing.T) {
 		if err != nil {
 			t.Fatalf("dart %v: %v\n%s", args, err, out)
 		}
-		if args[0] == "run" && !strings.Contains(string(out), "depth round trip: PASS") {
-			t.Fatalf("driver did not report PASS:\n%s", out)
+		if args[0] == "run" && !strings.Contains(string(out), pass) {
+			t.Fatalf("driver did not report %q:\n%s", pass, out)
 		}
 	}
 }
@@ -170,20 +179,25 @@ import 'dart:typed_data';
 import 'package:sofa_buffers_corelib/sofa_buffers_corelib.dart' as sofab;
 import 'package:rt/message.dart';
 
+sofab.InlineBytes b(List<int> v) => sofab.InlineBytes.of(v);
+
+List<sofab.InlineString> strs(List<String> v) =>
+    [for (final s in v) sofab.InlineString.of(s)];
+
 StructMid mid() => StructMid()
   ..leaves = [
     StructLeaf()..n = 1,
     StructLeaf()
-      ..tags = ['a', 'bc']
+      ..tags = strs(['a', 'bc'])
       ..n = 2,
   ]
   ..cube = [
     [
-      [Uint8List.fromList([1])],
-      [Uint8List.fromList([2, 3]), Uint8List.fromList([4])],
+      [b([1])],
+      [b([2, 3]), b([4])],
     ],
     [
-      [Uint8List.fromList([5])],
+      [b([5])],
     ],
   ];
 
@@ -200,8 +214,8 @@ Deep deep() {
 
 Loose loose() => Loose()
   ..rows = [
-    ['a'],
-    ['', 'bc'],
+    strs(['a']),
+    strs(['', 'bc']),
   ];
 
 void fail(String why) {
