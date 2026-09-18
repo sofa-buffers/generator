@@ -725,17 +725,18 @@ messages:
 		// A boolean has NO bound (§4.4), so its target carries none: the corelib
 		// normalizes every non-zero to 1 rather than masking it.
 		"const _t = this._tq; _t.bool = this._a0Flags;",
-		// fp32 takes the wire WORDS through a view over the member's own buffer —
-		// `f32` would store values and quiet a signaling NaN (§4.6/§6.5).
-		"const _m = this._a0Fp; const _t = this._tb;",
-		"_t.bits = new Uint32Array(_m.buffer, _m.byteOffset, _m.length);",
+		// fp32 takes the member itself through `f32`: the corelib stores a NaN by
+		// its wire word, so a signaling NaN keeps its payload (§4.6/§6.5) and no
+		// view over the member's buffer is built per decode.
+		"const _t = this._tf; _t.f32 = this._a0Fp;",
 		// fp64 needs no such channel: a double carries all 64 bits.
 		"const _t = this._td; _t.f64 = this._a0Dbl;",
 		// One target object per shape, re-pointed per array.
-		"  private readonly _tt: IntegerArrayTarget = { typed: new Uint8Array(0), minLo: 0, minHi: 0, maxLo: 0, maxHi: 0 };",
-		"  private readonly _tq: BoolArrayTarget = { bool: new Uint8Array(0) };",
-		"  private readonly _tb: FloatArrayTarget = { bits: new Uint32Array(0) };",
-		"  private readonly _td: FloatArrayTarget = { f64: new Float64Array(0) };",
+		// Their initial slots are the module's shared empty instances.
+		"  private readonly _tt: IntegerArrayTarget = { typed: _E_Uint8Array, minLo: 0, minHi: 0, maxLo: 0, maxHi: 0 };",
+		"  private readonly _tq: BoolArrayTarget = { bool: _E_Uint8Array };",
+		"  private readonly _tf: FloatArrayTarget = { f32: _E_Float32Array };",
+		"  private readonly _td: FloatArrayTarget = { f64: _E_Float64Array };",
 	} {
 		if !strings.Contains(mod, want) {
 			t.Errorf("message.ts missing %q:\n%s", want, mod)
@@ -1095,9 +1096,9 @@ func TestTSCountIsACapacityNotADefaultLength(t *testing.T) {
 	mod := genTSWith(t, fixedDefaultDef, map[string]any{})
 	for _, want := range []string{
 		// No schema default -> the empty array, whatever the count.
-		"none: Uint32Array = new Uint32Array(0);",
-		"ff: Float64Array = new Float64Array(0);",
-		"fe: EnumModeArray = new Int8Array(0);",
+		"none: Uint32Array = _E_Uint32Array;",
+		"ff: Float64Array = _E_Float64Array;",
+		"fe: EnumModeArray = _E_Int8Array;",
 		// A schema default stands exactly as written — not padded out to N.
 		"short: Uint32Array = new Uint32Array([1, 2]);",
 		"fb: Uint8Array = new Uint8Array([1]);",
@@ -1131,7 +1132,7 @@ func TestTSCountIsACapacityNotADefaultLength(t *testing.T) {
 	// The dynamic controls are unchanged — which is the point: the two kinds now
 	// read identically.
 	for _, want := range []string{
-		"dyn: Uint32Array = new Uint32Array(0);",       // no default -> empty
+		"dyn: Uint32Array = _E_Uint32Array;",           // no default -> empty
 		"dynd: Uint32Array = new Uint32Array([1, 2]);", // declared default kept verbatim
 		"dstrs: string[] = [];",
 	} {
@@ -1324,7 +1325,7 @@ func TestTSInt64Default(t *testing.T) {
 		for _, want := range []string{
 			`import { OStream, ArrayKind, DecodeStatus, SofabError, SofabErrorCode, elementsEqual, Visitor, ArrayTarget, IntegerArrayTarget, IStream, PayloadAcc, decode as _decode } from "@sofa-buffers/corelib";`,
 			// count: 8 is a CAPACITY, so a fresh array is empty (§3, af536c4).
-			"us: BigUint64Array = new BigUint64Array(0);",
+			"us: BigUint64Array = _E_BigUint64Array;",
 			// ...and the value goes out whole, the wire count being its length.
 			"os.writeUnsignedArray(0, this.us);",
 			// The member IS the destination: a BigUint64Array is handed straight to
@@ -1519,7 +1520,7 @@ messages:
 		// A native ROW is placed by id too. The id-blind append was unreachable
 		// while every row was written, and an interior gap makes it reachable,
 		// shifting every later row down one index.
-		"    while (_t.length <= id) _t.push(new Uint32Array(0));\n" +
+		"    while (_t.length <= id) _t.push(_E_Uint32Array);\n" +
 			"    const _r = new Uint32Array(count); _t[id] = _r; this._row6 = _r;",
 		// ...including a WRAPPER row, whose own collector is bound to the row the
 		// placement just made — a re-opened row index replaces (§7.4).
@@ -1580,7 +1581,7 @@ messages:
 
 	for _, want := range []string{
 		"strs: string[] = [];",
-		"nums: Uint32Array = new Uint32Array(0);",
+		"nums: Uint32Array = _E_Uint32Array;",
 		"blobs: Uint8Array[] = [];",
 		"objs: VecObjsElem[] = [];",
 		"rows: Uint32Array[] = [];",
@@ -1823,15 +1824,14 @@ func TestTSFp32SignalingNaNRawChannel(t *testing.T) {
 		"os.writeFp32(0, this.f32);",
 		// The ARRAY is a Float32Array and goes out through the plain writer, which
 		// copies its words — one call, no branch, no captured payload.
-		"fa: Float32Array = new Float32Array(0);",
+		"fa: Float32Array = _E_Float32Array;",
 		"os.writeFp32Array(2, this.fa);",
-		// ...and comes back through `bits` over its own buffer, which is what keeps
-		// the payload: `f32` would store values and quiet the NaN on the way in.
-		"const _m = this._a0Fa; const _t = this._tb;",
-		"_t.bits = new Uint32Array(_m.buffer, _m.byteOffset, _m.length);",
+		// ...and comes back through `f32` into the member itself: the corelib
+		// stores a NaN by its wire word, so the payload survives the way in.
+		"const _t = this._tf; _t.f32 = this._a0Fa;",
 		// fp64 is untouched throughout: a double IS an fp64.
 		"case 4: this.o.f64 = v; break;",
-		"d64: Float64Array = new Float64Array(0);",
+		"d64: Float64Array = _E_Float64Array;",
 		"const _t = this._td; _t.f64 = this._a0D64;",
 		"os.writeFp64Array(5, this.d64);",
 		"function _fp32Raw(bits: number): Uint8Array {",
@@ -1982,9 +1982,9 @@ messages:
 // It once asserted that the visitor assembled a raw-bytes payload element by
 // element, because a `number[]` member could not hold an fp32 signaling NaN's
 // payload (a JS number is a double, and widening quiets it). The member is a
-// `Float32Array` now and HOLDS the wire words, so the decoder writes them through
-// `bits` over that buffer and the encoder copies them straight back: the array IS
-// the payload in both directions.
+// `Float32Array` now and HOLDS the wire words: the decoder fills it through `f32`,
+// storing every NaN by its wire word (corelib-ts#188), and the encoder copies them
+// straight back: the array IS the payload in both directions.
 func TestTypescriptStreamFp32ArrayKeepsRawBits(t *testing.T) {
 	out := genTSWith(t, `
 version: 1
@@ -1996,22 +1996,19 @@ messages:
 `, map[string]any{})
 
 	// The member holds the words...
-	if !strings.Contains(out, "a: Float32Array = new Float32Array(0);") {
+	if !strings.Contains(out, "a: Float32Array = _E_Float32Array;") {
 		t.Errorf("an fp32 array must be held in a Float32Array:\n%s", out)
 	}
-	// ...the decoder writes them there, through a view over that same buffer...
-	for _, want := range []string{
-		"const _m = this._a0A; const _t = this._tb;",
-		"_t.bits = new Uint32Array(_m.buffer, _m.byteOffset, _m.length);",
-	} {
-		if !strings.Contains(out, want) {
-			t.Errorf("the fp32 array must be filled through its own buffer, missing %q:\n%s", want, out)
-		}
+	// ...the decoder writes them there, into the member itself...
+	if !strings.Contains(out, "const _t = this._tf; _t.f32 = this._a0A;") {
+		t.Errorf("the fp32 array must be filled through f32 into the member:\n%s", out)
 	}
-	// ...and `f32` must NOT be used: it stores values, and storing a widened
-	// signaling NaN back into a Float32Array cannot recover the payload.
-	if strings.Contains(out, "_t.f32 =") {
-		t.Errorf("an fp32 array must not be filled through the value destination:\n%s", out)
+	// ...and no word view is built per decode: that was one Uint32Array per array,
+	// and reading `.buffer` moves a small typed array's storage off the heap.
+	for _, gone := range []string{"_t.bits", ".buffer", "new Uint32Array(_m"} {
+		if strings.Contains(out, gone) {
+			t.Errorf("the fp32 array must not be offered a view over its buffer (%q):\n%s", gone, out)
+		}
 	}
 	// Nothing is captured, scanned or re-attached any more.
 	for _, gone := range []string{
@@ -2223,7 +2220,7 @@ messages:
 	// decoder fills through a 32-bit halves view -- no bigint is built, and no
 	// conversion pass follows the row.
 	for _, want := range []string{
-		"private _row3: BigUint64Array = new BigUint64Array(0);",
+		"private _row3: BigUint64Array = _E_BigUint64Array;",
 		"const _r = new BigUint64Array(count); _t[id] = _r; this._row3 = _r;",
 		"const _t = this._tt; _t.typed = this._row3;\n        _t.minLo = 0; _t.minHi = 0; _t.maxLo = 4294967295; _t.maxHi = 4294967295;",
 	} {
@@ -2510,11 +2507,11 @@ func TestTSWideBitfieldIsBigint(t *testing.T) {
 		// Storage, default and the default comparison that reads it.
 		"w: bigint = 9223372036854775808n;",
 		"n: number = 0;",
-		"wa: BigUint64Array = new BigUint64Array(0);",
+		"wa: BigUint64Array = _E_BigUint64Array;",
 		// A bitfield ARRAY takes the same carrier the width implies: Wide declares
 		// bit 63, so the elements need 64 bits; Narrow's highest position is 30, so
 		// a Uint32Array holds every reachable value.
-		"na: Uint32Array = new Uint32Array(0);",
+		"na: Uint32Array = _E_Uint32Array;",
 		"if (!(this.w === 9223372036854775808n)) return false;",
 		// JSON: a bigint is not JSON-able, so it prints as a decimal string and
 		// reads back through BigInt() -- exactly what u64 does.
@@ -2753,5 +2750,98 @@ func TestTSWidthAdmitsUndeclaredValues(t *testing.T) {
 	}
 	if !strings.Contains(mod, "_t.minLo = 0; _t.minHi = 0; _t.maxLo = 255; _t.maxHi = 0;") {
 		t.Errorf("the bitfield width bound is missing from the array destination:\n%s", mod)
+	}
+}
+
+// TestTSSharedEmptyTypedArrays: every EMPTY typed array the module needs -- a
+// native array member's default, a matrix row's gap padding, the visitor's
+// per-array registers and each bulk target's initial slot -- is the module's one
+// zero-length instance of that type, never a fresh `new T(0)` per slot. That is
+// sound only because a zero-length typed array cannot be written through and
+// nothing generated compares arrays by identity, and it is declared only for the
+// types the module uses (an unused module-level const fails noUnusedLocals).
+func TestTSSharedEmptyTypedArrays(t *testing.T) {
+	mod := genTSWith(t, `
+version: 1
+messages:
+  m:
+    payload:
+      b:  { id: 0, type: array, items: { type: u8, count: 4 } }
+      w:  { id: 1, type: array, items: { type: u16 } }
+      f:  { id: 2, type: array, items: { type: fp32, count: 4 } }
+      d:  { id: 3, type: array, items: { type: fp64, count: 4 } }
+      q:  { id: 4, type: array, items: { type: boolean, count: 4 } }
+      e:  { id: 5, type: array, items: { type: enum, count: 4, enum: { A: 0, B: 1 } } }
+      u:  { id: 6, type: array, items: { type: u64, count: 4 } }
+      r:  { id: 7, type: array, items: { type: array, count: 3, items: { type: u32, count: 3 } } }
+      dd: { id: 8, type: array, items: { type: u16, count: 2 }, default: [1, 2] }
+`, map[string]any{})
+
+	used := []string{"Uint8Array", "Int8Array", "Uint16Array", "Uint32Array", "BigUint64Array", "Float32Array", "Float64Array"}
+	for _, ty := range used {
+		decl := fmt.Sprintf("const _E_%s = new %s(0);", ty, ty)
+		if n := strings.Count(mod, decl); n != 1 {
+			t.Errorf("%q declared %d times, want exactly once:\n%s", decl, n, mod)
+		}
+	}
+	for _, ty := range []string{"Int16Array", "Int32Array", "BigInt64Array"} {
+		if strings.Contains(mod, "_E_"+ty) {
+			t.Errorf("unused _E_%s must not be declared:\n%s", ty, mod)
+		}
+	}
+	for _, want := range []string{
+		// Member defaults with no schema default, of every carrier.
+		"b: Uint8Array = _E_Uint8Array;",
+		"w: Uint16Array = _E_Uint16Array;",
+		"f: Float32Array = _E_Float32Array;",
+		"d: Float64Array = _E_Float64Array;",
+		"q: Uint8Array = _E_Uint8Array;",
+		"u: BigUint64Array = _E_BigUint64Array;",
+		// A declared default is a value of its own and stays a fresh array.
+		"dd: Uint16Array = new Uint16Array([1, 2]);",
+		// The visitor's registers, an enum's with its alias asserted on.
+		"private _a0E: MEElemArray = _E_Int8Array as MEElemArray;",
+		"e: MEElemArray = _E_Int8Array;",
+		"private _a0F: Float32Array = _E_Float32Array;",
+		// A matrix row's register and its gap padding.
+		"_t.push(_E_Uint32Array)",
+		// Each bulk target's initial slot.
+		"{ typed: _E_Uint8Array, minLo: 0, minHi: 0, maxLo: 0, maxHi: 0 }",
+		"{ bool: _E_Uint8Array }",
+		"{ f32: _E_Float32Array }",
+		"{ f64: _E_Float64Array }",
+	} {
+		if !strings.Contains(mod, want) {
+			t.Errorf("message.ts missing %q:\n%s", want, mod)
+		}
+	}
+	// Decode still REPLACES a member at the wire count rather than filling the
+	// shared instance -- the other half of why sharing it is sound.
+	if !strings.Contains(mod, "const _d = new Uint8Array(count);") {
+		t.Errorf("decode must build a fresh member at the wire count:\n%s", mod)
+	}
+	// No fresh empty typed array survives anywhere but the streaming finish,
+	// which feeds the IStream a zero-length chunk rather than holding one.
+	fresh := regexp.MustCompile(`new (?:Big)?(?:Uint|Int|Float)(?:8|16|32|64)Array\(0\)`)
+	for _, m := range fresh.FindAllStringIndex(mod, -1) {
+		lineStart := strings.LastIndex(mod[:m[0]], "\n") + 1
+		lineEnd := strings.Index(mod[m[0]:], "\n") + m[0]
+		ln := mod[lineStart:lineEnd]
+		if strings.HasPrefix(strings.TrimSpace(ln), "const _E_") || strings.Contains(ln, "this.is.feed(new Uint8Array(0))") {
+			continue
+		}
+		t.Errorf("a fresh empty typed array is left: %q", ln)
+	}
+
+	// A module with no native array declares none of them.
+	plain := genTSWith(t, `
+version: 1
+messages:
+  p:
+    payload:
+      a: { id: 0, type: u32 }
+`, map[string]any{})
+	if strings.Contains(plain, "_E_") {
+		t.Errorf("a module with no typed array must declare no shared empty instance:\n%s", plain)
 	}
 }
