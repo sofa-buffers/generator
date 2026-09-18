@@ -10,6 +10,8 @@ set -eu
 . "$(dirname "$0")/../lib/corelib.sh"
 # Shared MAX_SIZE fill check (ARCHITECTURE §9.6).
 . "$(dirname "$0")/../lib/maxsize_fill.sh"
+# Every backend Go test, run against the corelib with no skips allowed.
+. "$(dirname "$0")/../lib/backend_tests.sh"
 
 ROOT=$(cd "$(dirname "$0")/../../.." && pwd)
 CORELIB="${1:-${SOFAB_PY_CORELIB:-}}"
@@ -854,9 +856,8 @@ echo "==> element length + row count caps OK"
 # S6.2.1/S6.3 split the same way: a schema-bounded field decodes past a tighter
 # receiver cap, its own bound still rejects as INVALID, and a header that
 # contradicts the declared type is skipped rather than measured against it (S7.3).
-echo "==> shared-vector byte-exact conformance"
-( cd "$ROOT" && SOFAB_PY_CORELIB="$CORELIB" go test ./generators/python/ \
-    -run 'Conformance|WireArraySparsity|NestedNativeRowCountBound|SchemaBoundIsDeclaredNotCopied' -count=1 )
+echo "==> backend Go tests against the corelib (shared-vector byte-exact conformance, ...)"
+run_backend_tests generators/python SOFAB_PY_CORELIB "$CORELIB"
 
 # ...and the decode direction (generator#444): each vector's DENSE bytes fed into
 # a message that declares u64 on the anchors and nothing else, so every other

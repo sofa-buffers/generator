@@ -11,6 +11,8 @@ set -eu
 # Corelib checkout + ref pinning (docs/CI.md).
 . "$(dirname "$0")/../lib/corelib.sh"
 . "$(dirname "$0")/../lib/maxsize_fill.sh"
+# Every backend Go test, run against the corelib with no skips allowed.
+. "$(dirname "$0")/../lib/backend_tests.sh"
 
 ROOT=$(cd "$(dirname "$0")/../../.." && pwd)
 CORELIB="${1:-${SOFAB_C_CORELIB:-}}"
@@ -564,9 +566,8 @@ RT=$(printf '%s' '{"a":7,"b":10,"flag":true,"label":"hey"}' | "$DH" encode | "$D
 echo "$RT" | grep -q '"label":"hey"' || { echo "FAIL: non-default string not round-tripped"; exit 1; }
 echo "==> default omission byte-exact OK"
 
-echo "==> M4: shared-vector byte-exact conformance + gated Go build tests"
-( cd "$ROOT" && SOFAB_C_CORELIB="$CORELIB" go test ./generators/c/ \
-    -run 'Conformance|Compiles|Project' -count=1 )
+echo "==> M4: backend Go tests against the corelib (shared-vector byte-exact conformance, build tests, ...)"
+run_backend_tests generators/c SOFAB_C_CORELIB "$CORELIB"
 
 echo "==> corpus + realworld: every definition compiles"
 # BIG descriptor profile so wide field ids (up to 2^31-1) fit the descriptor.
