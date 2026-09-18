@@ -25,9 +25,9 @@ import (
 // Measured, tests/bench rows `python-native` and `python` on `vehicle_telemetry`
 // (Callgrind Ir/op, same corelib-py build on both sides):
 //
-//	row            encode              decode
-//	python-native  130,523 -> 130,396  803,018 -> 585,512  (-27.1%)
-//	python         1,082,511 -> 1,082,537  2,317,390 -> 2,095,758  (-9.6%)
+//	row            encode                   decode
+//	python-native  130,361 -> 130,544       789,779 -> 424,135    (-46.3%)
+//	python         1,081,799 -> 1,082,257   2,336,693 -> 1,931,996 (-17.3%)
 //
 // Encode is untouched: corelib-py has no encode-side table, and a decode-side one
 // changes nothing about how a message is written.
