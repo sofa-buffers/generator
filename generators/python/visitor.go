@@ -164,14 +164,26 @@ var pyValueHooks = []string{
 
 // --- emitter ----------------------------------------------------------------
 
-// emitVisitor writes the flat visitor class for one generated dataclass.
+// emitVisitor writes the flat visitor class for one generated dataclass, and --
+// where corelib-py's destination table can carry part of it -- the Binding that
+// takes those fields off the visitor entirely (binding.go).
 func (g *gen) emitVisitor(f *pyfile, name string, fields []*ir.Field) {
-	scopes := g.buildScopes(name, fields)
+	scopes := g.scopesFor(name, fields)
+	g.bind = g.plans[name]
+	defer func() { g.bind = nil }()
 
+	if g.bind != nil {
+		g.emitBindTables(f, g.bind)
+	}
 	f.line("# Dispatch locations for %s: one per sequence-framed scope in its tree.", name)
 	f.line("# A field id is only unique WITHIN a scope -- a nested sequence opens a fresh")
 	f.line("# id space -- so the visitor below keys every hook on (location, id).")
+	f.line("# A scope the table enters has no location here: the decoder walks it without")
+	f.line("# this visitor, so nothing ever dispatches against it.")
 	for _, sc := range scopes {
+		if sc.id != scopes[0].id && g.bind.isBoundScope(sc.id) {
+			continue
+		}
 		f.line("%s = %d", sc.name, sc.id)
 	}
 	f.blank()
@@ -193,8 +205,23 @@ func (g *gen) emitVisitor(f *pyfile, name string, fields []*ir.Field) {
 			f.line("        self.%s = 0", sc.ix)
 		}
 	}
-	f.blank()
+	if g.bind != nil {
+		g.emitBindStorage(f, g.bind)
+	} else {
+		f.blank()
+	}
 
+	switch {
+	case g.bind != nil:
+		g.emitScatter(f, g.bind)
+	case g.anyBind():
+		// Another class in this module carries a table, so the shared
+		// _StreamDecoder calls scatter() on whatever visitor it holds. This one
+		// has nothing to move: every field it reads is already on the message.
+		f.line("    def scatter(self) -> None:")
+		f.line("        \"\"\"Nothing to move: this class carries no destination table.\"\"\"")
+		f.blank()
+	}
 	g.emitSeqHooks(f, scopes)
 	g.emitOnArrayBegin(f, scopes)
 	for _, hook := range pyValueHooks {
@@ -211,10 +238,15 @@ func (g *gen) emitVisitor(f *pyfile, name string, fields []*ir.Field) {
 // §7.3's "treat it like an unknown id" for a sequence, and is why the stack is
 // pushed only on the accepting arms.
 func (g *gen) emitSeqHooks(f *pyfile, scopes []*pyScope) {
-	f.line("    def on_sequence_begin(self, fid: int) -> bool:")
-	f.line("        c = self._c")
+	// Rendered first, so the `c = self._c` read is emitted only when an arm
+	// actually tests it: a class whose whole tree is on the destination table
+	// declines every sequence that reaches it, and reads nothing to decide that.
+	arms := &pyfile{}
 	first := true
 	for _, sc := range scopes {
+		if g.bind.isBoundScope(sc.id) {
+			continue
+		}
 		var body []string
 		if sc.isArr {
 			if sc.child < 0 {
@@ -222,21 +254,27 @@ func (g *gen) emitSeqHooks(f *pyfile, scopes []*pyScope) {
 			}
 			body = g.arrSeqArm(sc, scopes[sc.child])
 		} else {
-			if len(sc.seqChild) == 0 {
-				continue
-			}
+			// Empty when the scope has no sequence-framed field the VISITOR
+			// enters -- either it has none at all, or the destination table
+			// descends into every one of them and the decoder never asks.
 			body = g.objSeqArm(sc, scopes)
 		}
-		f.line("        %s c == %s:", kw(&first), sc.name)
+		if len(body) == 0 {
+			continue
+		}
+		arms.line("        %s c == %s:", kw(&first), sc.name)
 		for _, ln := range body {
-			f.line("            %s", ln)
+			arms.line("            %s", ln)
 		}
 	}
-	if first {
-		f.line("        return False")
-	} else {
-		f.line("        return False")
+	f.line("    def on_sequence_begin(self, fid: int) -> bool:")
+	if !first {
+		f.line("        c = self._c")
+		f.b.WriteString(arms.b.String())
 	}
+	// Declining is what an unmatched sequence gets: the corelib then skips the
+	// whole subtree rather than walking it and offering every field inside.
+	f.line("        return False")
 	f.blank()
 	f.line("    def on_sequence_end(self) -> None:")
 	f.line("        if self._s:")
@@ -249,7 +287,7 @@ func (g *gen) emitSeqHooks(f *pyfile, scopes []*pyScope) {
 func (g *gen) objSeqArm(sc *pyScope, scopes []*pyScope) []string {
 	var out []string
 	inner := true
-	for _, fld := range sc.fields {
+	for _, fld := range g.bind.unboundFields(sc) {
 		child, ok := sc.seqChild[fld.ID]
 		if !ok {
 			continue
@@ -377,6 +415,9 @@ func (g *gen) emitValueHook(f *pyfile, scopes []*pyScope, hook string) {
 	}
 	var arms []arm
 	for _, sc := range scopes {
+		if g.bind.isBoundScope(sc.id) {
+			continue
+		}
 		var body []string
 		if sc.isArr {
 			body = g.arrValueArm(sc, hook)
@@ -423,7 +464,7 @@ func pyHookArgType(hook string) string {
 func (g *gen) objValueArm(sc *pyScope, hook string) []string {
 	var out []string
 	inner := true
-	for _, fld := range sc.fields {
+	for _, fld := range g.bind.unboundFields(sc) {
 		var want string
 		if fld.Kind == ir.KindArray {
 			if !isNativeArrayElem(fld.Elem) {
@@ -646,6 +687,9 @@ func (g *gen) emitOnField(f *pyfile, scopes []*pyScope) {
 	}
 	var arms []arm
 	for _, sc := range scopes {
+		if g.bind.isBoundScope(sc.id) {
+			continue
+		}
 		var body []string
 		if sc.isArr {
 			body = g.arrFieldArm(sc)
@@ -672,6 +716,21 @@ func (g *gen) emitOnField(f *pyfile, scopes []*pyScope) {
 	f.line("        than materialized, and no receiver cap may reach it. A decode that")
 	f.line("        steps over an over-cap field it does not want stays COMPLETE.")
 	f.line(`        """`)
+	// A scope whose ids are ALL on the destination table declines everything that
+	// reaches it, and when that is true of every scope the visitor still serves,
+	// the location test decides nothing: the hook is one unconditional decline.
+	allDecline := true
+	for _, a := range arms {
+		if len(a.body) != 1 || !strings.HasPrefix(a.body[0], "return False") {
+			allDecline = false
+			break
+		}
+	}
+	if allDecline && len(arms) == len(liveScopes(g.bind, scopes)) {
+		f.line("        %s", arms[0].body[0])
+		f.blank()
+		return
+	}
 	f.line("        c = self._c")
 	first := true
 	for _, a := range arms {
@@ -682,6 +741,18 @@ func (g *gen) emitOnField(f *pyfile, scopes []*pyScope) {
 	}
 	f.line("        return True")
 	f.blank()
+}
+
+// liveScopes are the scopes the visitor still dispatches against: everything the
+// destination table does not enter on its own.
+func liveScopes(p *bindPlan, scopes []*pyScope) []*pyScope {
+	var out []*pyScope
+	for _, sc := range scopes {
+		if !p.isBoundScope(sc.id) {
+			out = append(out, sc)
+		}
+	}
+	return out
 }
 
 // objFieldArm renders an object scope's header work, ONE ARM PER DECLARED ID.
@@ -709,13 +780,21 @@ func (g *gen) emitOnField(f *pyfile, scopes []*pyScope) {
 // nothing", so a decode that steps over an over-cap field it does not want stays
 // COMPLETE.
 func (g *gen) objFieldArm(sc *pyScope) []string {
-	out := []string{
-		fmt.Sprintf("if fld.id not in %s:", pyIDSet(sc.fields)),
-		"    return False  # an id this scope does not declare is walked, not read",
+	own := g.bind.unboundFields(sc)
+	if len(own) == 0 {
+		// The destination table carries every id this scope declares, so anything
+		// reaching the visitor here is an id the schema does not name -- including
+		// one arriving inside a scope the table descended into, which the visitor
+		// is not told about (corelib-py#146). All of it is walked, not read.
+		return []string{"return False  # every declared id is on the table: this one is unknown"}
 	}
-	out = append(out, textPayloadGuard(pyIDSet(textFields(sc.fields)))...)
+	out := []string{
+		fmt.Sprintf("if fld.id not in %s:", pyIDSet(own)),
+		"    return False  # not one of this scope's own ids: walked, not read",
+	}
+	out = append(out, textPayloadGuard(pyIDSet(textFields(own)))...)
 	inner := true
-	for _, fld := range sc.fields {
+	for _, fld := range g.bind.unboundFields(sc) {
 		var body []string
 		switch fld.Kind {
 		case ir.KindString, ir.KindBlob:
@@ -926,11 +1005,14 @@ func (g *gen) emitOnSchemaBound(f *pyfile, scopes []*pyScope) {
 	}
 	var arms []arm
 	for _, sc := range scopes {
+		if g.bind.isBoundScope(sc.id) {
+			continue
+		}
 		var body []string
 		if sc.isArr {
 			body = arrSchemaBoundArm(sc)
 		} else {
-			body = objSchemaBoundArm(sc)
+			body = g.objSchemaBoundArm(sc)
 		}
 		if len(body) > 0 {
 			arms = append(arms, arm{sc, body})
@@ -965,10 +1047,10 @@ func (g *gen) emitOnSchemaBound(f *pyfile, scopes []*pyScope) {
 }
 
 // objSchemaBoundArm renders an object scope's declarations, one per bounded id.
-func objSchemaBoundArm(sc *pyScope) []string {
+func (g *gen) objSchemaBoundArm(sc *pyScope) []string {
 	var out []string
 	inner := true
-	for _, fld := range sc.fields {
+	for _, fld := range g.bind.unboundFields(sc) {
 		var n int64
 		var why string
 		switch fld.Kind {
@@ -1074,6 +1156,9 @@ func (g *gen) emitOnArrayBegin(f *pyfile, scopes []*pyScope) {
 	}
 	var arms []arm
 	for _, sc := range scopes {
+		if g.bind.isBoundScope(sc.id) {
+			continue
+		}
 		var body []string
 		if sc.isArr {
 			body = g.arrArrayBeginArm(sc)
@@ -1115,7 +1200,7 @@ func (g *gen) emitOnArrayBegin(f *pyfile, scopes []*pyScope) {
 func (g *gen) objArrayBeginArm(sc *pyScope) []string {
 	var out []string
 	inner := true
-	for _, fld := range sc.fields {
+	for _, fld := range g.bind.unboundFields(sc) {
 		if fld.Kind != ir.KindArray || !isIntArrayElem(fld.Elem) {
 			continue
 		}

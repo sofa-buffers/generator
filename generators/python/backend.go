@@ -59,7 +59,34 @@ type gen struct {
 	// the emit path, which has no error channel of its own.
 	size    generator.SizePolicy
 	sizeErr error
+	// The decode half's destination tables (binding.go), decided for every class
+	// BEFORE any of them is emitted: a class's own decode() has to know whether
+	// its visitor carries a scatter, and the shared _StreamDecoder has to know
+	// whether ANY of them does. scopes caches the tree each plan was built from,
+	// which the visitor emitter walks again.
+	plans  map[string]*bindPlan
+	scopes map[string][]*pyScope
+	// bind is the plan of the class being emitted, nil while none is.
+	bind *bindPlan
 }
+
+// scopesFor returns a class's scope tree, built once and reused: buildBindPlan
+// walks it before emission and emitVisitor walks it again.
+func (g *gen) scopesFor(name string, fields []*ir.Field) []*pyScope {
+	if sc, ok := g.scopes[name]; ok {
+		return sc
+	}
+	sc := g.buildScopes(name, fields)
+	if g.scopes == nil {
+		g.scopes = map[string][]*pyScope{}
+	}
+	g.scopes[name] = sc
+	return sc
+}
+
+// anyBind reports whether any class in the module carries a destination table --
+// what decides whether the shared _StreamDecoder calls scatter() at all.
+func (g *gen) anyBind() bool { return len(g.plans) > 0 }
 
 // The floor corelib-py puts on a reassembly buffer: sofab.MIN_REASSEMBLY, what a
 // single construct's framing (an id header and a length word, ten bytes each at
@@ -204,6 +231,11 @@ func (g *gen) module(s *ir.Schema) []byte {
 	if strings.Contains(decodeSection, "SofaLimitError") {
 		names = append(names, "SofaLimitError")
 	}
+	// Binding is the destination table (binding.go); a schema whose fields the
+	// table cannot carry emits none and imports none.
+	if strings.Contains(decodeSection, "Binding()") {
+		names = append(names, "Binding")
+	}
 	// Field is the on_field argument, and WireType / FixlenSubtype are the tags
 	// its §7.3 tests compare against; each appears only where a bound exists.
 	needField, needWire, needFixlen := visitorNeeds(decodeSection)
@@ -300,20 +332,57 @@ func (g *gen) module(s *ir.Schema) []byte {
 // one flat visitor per generated class -- as text, so module() can size its
 // import line from it.
 func (g *gen) decodeSection(s *ir.Schema) string {
+	// Every class's table is decided BEFORE any class is emitted: a class's
+	// decode() has to know whether its visitor carries a scatter, the dataclasses
+	// are emitted ahead of this section, and the shared _StreamDecoder has to know
+	// whether any visitor in the module carries one.
+	g.plans = map[string]*bindPlan{}
+	for _, c := range g.decodeClasses(s) {
+		if p := g.buildBindPlan(c.name, g.scopesFor(c.name, c.fields)); p != nil {
+			g.plans[c.name] = p
+		}
+	}
+
+	body := &pyfile{}
+	for _, c := range g.decodeClasses(s) {
+		g.emitVisitor(body, c.name, c.fields)
+	}
+
 	f := &pyfile{}
 	f.line("# --- decode ---------------------------------------------------------------")
 	f.blank()
+	if g.anyBind() {
+		f.line("# The slot value that says a field never arrived. Storage a destination table")
+		f.line("# writes into starts filled with it, and the decoder overwrites only what the")
+		f.line("# wire carried, so a slot still holding it is a field the message omitted --")
+		f.line("# which is how absence is reported without inventing a value for it.")
+		f.line("_ABSENT = %s", bindAbsent)
+		f.blank()
+	}
 	g.emitStreamDecoder(f)
+	f.b.WriteString(body.b.String())
+	return f.b.String()
+}
+
+// decodeClass is one generated class with a visitor: the struct/union
+// dataclasses, then the messages, in emission order.
+type decodeClass struct {
+	name   string
+	fields []*ir.Field
+}
+
+func (g *gen) decodeClasses(s *ir.Schema) []decodeClass {
+	var out []decodeClass
 	for _, key := range s.NamedOrder {
 		nt := s.Named[key]
 		if nt.Category == ir.CatStruct || nt.Category == ir.CatUnion {
-			g.emitVisitor(f, g.typeName(key), nt.Fields)
+			out = append(out, decodeClass{g.typeName(key), nt.Fields})
 		}
 	}
 	for _, m := range s.Messages {
-		g.emitVisitor(f, exported(m.Name), m.Fields)
+		out = append(out, decodeClass{exported(m.Name), m.Fields})
 	}
-	return f.b.String()
+	return out
 }
 
 // emitStreamDecoder writes the generated reader §6.1.1 requires: the streaming
@@ -344,15 +413,34 @@ func (g *gen) emitStreamDecoder(f *pyfile) {
 	f.line("    and feeding an empty chunk asks again.")
 	f.line(`    """`)
 	f.line("")
-	f.line("    __slots__ = (\"message\", \"_d\")")
+	if g.anyBind() {
+		f.line("    __slots__ = (\"message\", \"_d\", \"_v\")")
+	} else {
+		f.line("    __slots__ = (\"message\", \"_d\")")
+	}
 	f.line("")
 	f.line("    def __init__(self, msg_cls, vis_cls, reassembly=REASSEMBLY) -> None:")
 	f.line("        self.message = msg_cls()")
-	f.line("        self._d = Decoder(visitor=vis_cls(self.message), %s,", g.capsArgs())
+	if g.anyBind() {
+		f.line("        self._v = vis_cls(self.message)")
+		f.line("        self._d = Decoder(visitor=self._v, %s,", g.capsArgs())
+	} else {
+		f.line("        self._d = Decoder(visitor=vis_cls(self.message), %s,", g.capsArgs())
+	}
 	f.line("                          reassembly=reassembly)")
 	f.line("")
 	f.line("    def feed(self, chunk) -> Status:")
-	f.line("        return self._d.feed(chunk)")
+	if g.anyBind() {
+		f.line("        st = self._d.feed(chunk)")
+		f.line("        if st is Status.COMPLETE:")
+		f.line("            # The fields the destination table carries land on the message")
+		f.line("            # here, in one pass, rather than one callback at a time during")
+		f.line("            # the walk. Everything the visitor handles is already on it.")
+		f.line("            self._v.scatter()")
+		f.line("        return st")
+	} else {
+		f.line("        return self._d.feed(chunk)")
+	}
 	f.line("")
 	f.line("    @property")
 	f.line("    def error(self):")
