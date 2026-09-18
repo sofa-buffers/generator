@@ -1372,7 +1372,7 @@ func (g *gen) emitVisitor(f *rfile, name string, fields []*ir.Field) {
 			f.line("        match (self.cur, id) {")
 			for _, fr := range fs {
 				if fr.kind == fkSeqArr && fr.elemKind == ir.KindString {
-					f.line("            (_Loc::%s, _) => { %s%s%s %s[id as usize] = _s; }", fr.loc, g.overIndexGuard(fr.cap), g.seqArrPresize(fr), g.seqElemGrow(fr.path), fr.path)
+					f.line("            (_Loc::%s, _) => { %s%s %s[id as usize] = _s; }", fr.loc, g.overIndexGuard(fr.cap), g.seqElemGrow(fr.path), fr.path)
 				}
 				for _, fld := range fr.fields {
 					if fld.Kind == ir.KindString {
@@ -1437,7 +1437,7 @@ func (g *gen) emitVisitor(f *rfile, name string, fields []*ir.Field) {
 			f.line("        match (self.cur, id) {")
 			for _, fr := range fs {
 				if fr.kind == fkSeqArr && fr.elemKind == ir.KindBlob {
-					f.line("            (_Loc::%s, _) => { %s%s%s %s[id as usize] = _b; }", fr.loc, g.overIndexGuard(fr.cap), g.seqArrPresize(fr), g.seqElemGrow(fr.path), fr.path)
+					f.line("            (_Loc::%s, _) => { %s%s %s[id as usize] = _b; }", fr.loc, g.overIndexGuard(fr.cap), g.seqElemGrow(fr.path), fr.path)
 				}
 				for _, fld := range fr.fields {
 					if fld.Kind == ir.KindBlob {
@@ -2250,41 +2250,6 @@ func (g *gen) pushFieldStmt(target, val string) string {
 	return fmt.Sprintf("%s.push(%s);", target, val)
 }
 
-// seqArrPresize emits the one-time sizing of a dynamic string/blob wrapper
-// array's Vec, placed between the over-index guard and seqElemGrow:
-// `if <v>.capacity() == 0 { <v>.reserve_exact(N); }`.
-//
-// seqElemGrow places element `id` by pushing defaults up to it, and a Vec grown
-// by push from empty allocates capacity 4 and reallocates to 8 at the 5th
-// element: a malloc plus a realloc (and a copy of four Strings) for a `count: 5`
-// array. A native array avoids that with reserveCount at its array_begin, where
-// the wire count is known; a wrapper array has no count header -- its length is
-// the highest element id + 1 (MESSAGE_SPEC §5.1) and is only known at the end.
-// What IS known is the schema `count` N, which the over-index guard in front of
-// this has just enforced (id < N), so N is the most this Vec can ever hold. It
-// is reserved once, on the first element to arrive: `capacity() == 0` is true
-// exactly then, because sequence_begin's clear() keeps the capacity, so a
-// repeated array wrapper (§7.4) does not reserve again.
-//
-// Only for a schema `count` -- a count-less array's MAX_DYN_ARRAY_COUNT is a
-// refusal threshold, not a size hint (see reserveCount) -- and clamped at
-// reserveCap like every other pre-size, so a huge declared count cannot turn a
-// single element into a huge allocation. Only on the dynamic std path
-// (!fixedFields): a heapless::Vec has its capacity inline and no reserve_exact.
-func (g *gen) seqArrPresize(fr frame) string {
-	if g.fixedFields() || fr.cap <= 0 {
-		return ""
-	}
-	n := fr.cap
-	if n > g.reserveCap {
-		n = g.reserveCap
-	}
-	if n <= 0 {
-		return ""
-	}
-	return fmt.Sprintf("if %s.capacity() == 0 { %s.reserve_exact(%d); } ", fr.path, fr.path, n)
-}
-
 // seqElemGrow emits the id-indexed growth prefix for a wrapper-sequence string/
 // blob element collector: grow the container to id+1, filling the gap with the
 // element default (empty), so a decoded element lands at index = its wire id and
@@ -2292,6 +2257,12 @@ func (g *gen) seqArrPresize(fr frame) string {
 // container is a fixed-capacity heapless::Vec (or an alloc fallback under
 // allow_dynamic): push may be a no-op when full, so the loop breaks when the length
 // stops growing to avoid spinning on an out-of-capacity id; get_mut then no-ops.
+//
+// The dynamic Vec is deliberately NOT reserved to the schema `count` up front. A
+// wrapper array has no count header, and `count` is a capacity (MESSAGE_SPEC
+// §5.1), not the length the message carries: reserving it would allocate the
+// declared worst case on every decode, which is what allow_dynamic: true exists
+// to avoid. It grows by push to what the message actually holds.
 func (g *gen) seqElemGrow(path string) string {
 	if g.fixedFields() {
 		return fmt.Sprintf("while %s.len() <= id as usize { let _n = %s.len(); let _ = %s.push(Default::default()); if %s.len() == _n { break; } }", path, path, path, path)

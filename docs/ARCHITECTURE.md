@@ -3648,18 +3648,20 @@ one precise realloc per repeated header, slower than doing nothing. With the cle
 ahead of it the length is always zero, the guard could only ever be true, and it
 is gone.
 
-**A wrapper string/blob array has no count header**, so there is no wire count to
-size it from: its length is the highest element id + 1 (§5.1) and is known only at
-the end. Rust std placed each element with `seqElemGrow` (push defaults up to the
-id), so a `count: 5` `Vec<String>` went 0 → 4 → 8, a malloc plus a realloc that
-moves four `String`s. What the decoder does know is the schema `count`, which the
-over-index guard has just enforced, so the first element to arrive reserves it
-once: `if v.capacity() == 0 { v.reserve_exact(N); }` — `capacity() == 0` holds
-exactly then, because `sequence_begin`'s `clear()` keeps the capacity across a
-repeated wrapper (§7.4). Same rules as every other pre-size: only on a schema
-`count` (a count-less array's receiver cap is a refusal threshold), clamped at
-`max_dyn_array_count`, and only on growable storage. The arena's rust row
-measured +7.9 % end to end on its one `count: 5` string array (analysis prototype).
+**A wrapper string/blob array is NOT pre-sized.** It has no count header, so there
+is no wire count to size it from: its length is the highest element id + 1 (§5.1)
+and is known only at the end. Rust std places each element with `seqElemGrow`
+(push defaults up to the id), so a `count: 5` `Vec<String>` goes 0 → 4 → 8, a
+malloc plus a realloc. Reserving the schema `count` on the first element would
+save that, and the arena's rust row measured +7.9 % for it on its one `count: 5`
+string array — but `count` is a capacity, not the length the message carries, so
+it would allocate the declared worst case on every decode (up to
+`max_dyn_array_count` elements, ~1.5 MB of `String`s, for one element on the
+wire, and again per row when nested). That is exactly what `allow_dynamic: true`
+exists to avoid: it trades speed for allocating only what a message holds. The
+native-array pre-size above is not the same move — it reserves the WIRE count,
+which is the real length. `tests/conformance/rust/decode_stack_depth.rs` pins it:
+a `count: 1000` string array carrying one element must not hold room for 1000.
 
 **A schema bound is not a ceiling by itself.** `count > N` establishes only that
 the wire stayed inside the *schema's* `N`, and `schema/sofabuffers-schema-v1.json`

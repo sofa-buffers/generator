@@ -1249,12 +1249,12 @@ sed '/^\/\/SOFAB_IMPORT$/d' "$ROOT/tests/conformance/rust/post_limit_fill.rs" \
 echo "==> [rs] post-limit fill and container refusal OK"
 
 # The std decoder's scope stack is a fixed [_Loc; D+1], D the schema's deepest
-# frame, and a counted string/blob wrapper array reserves its schema count once
-# (decode_stack_depth.rs says what each check pins). Both std storages: the stack
-# is the same on each, the pre-size exists only on the dynamic one, and on the
-# static one the whole decode must stay off the heap. The no_std legs keep their
+# frame, and a string/blob wrapper array grows to what the message carries rather
+# than reserving its schema count (decode_stack_depth.rs says what each check
+# pins). Both std storages: the stack is the same on each, the growth check runs
+# on the dynamic one, and on the static one the whole decode must stay off the heap. The no_std legs keep their
 # heapless::Vec stack and are covered by the matrix above.
-echo "==> [rs, rs-static] fixed decode stack at the schema depth, pre-sized string array"
+echo "==> [rs, rs-static] fixed decode stack at the schema depth, wrapper array growth"
 cat > "$WORK/depth.yaml" <<'YAML'
 version: 1
 messages:
@@ -1265,6 +1265,7 @@ messages:
       objs:  { id: 2, type: array, items: { type: struct, count: 3, fields: { inner: { id: 0, type: struct, fields: { w: { id: 0, type: u32 } } } } } }
       rows:  { id: 3, type: array, items: { type: array, count: 2, items: { type: string, count: 3, maxlen: 8 } } }
       names: { id: 4, type: array, items: { type: string, count: 5, maxlen: 8 } }
+      tags:  { id: 5, type: array, items: { type: string, count: 1000, maxlen: 8 } }
 YAML
 for dleg in dyn:true static:false; do
     dname=${dleg%%:*}
@@ -1281,9 +1282,9 @@ for dleg in dyn:true static:false; do
     printf 'mod message;\nuse message::*;\nconst STATIC: bool = %s;\n' "$dstatic" > "$WORK/depth-$dname/src/main.rs"
     sed '/^\/\/SOFAB_IMPORT$/d' "$ROOT/tests/conformance/rust/decode_stack_depth.rs" \
         >> "$WORK/depth-$dname/src/main.rs"
-    ( cd "$WORK/depth-$dname" && cargo run -q ) || { echo "FAIL: [$dname] decode stack depth / pre-size"; exit 1; }
+    ( cd "$WORK/depth-$dname" && cargo run -q ) || { echo "FAIL: [$dname] decode stack depth / wrapper growth"; exit 1; }
 done
-echo "==> [rs, rs-static] decode stack depth and pre-size OK"
+echo "==> [rs, rs-static] decode stack depth and wrapper growth OK"
 
 # CORELIB_PLAN §7.2 item 8 -- the shared file's `sequence_growth` block
 # (generator#449). Not run in corelib-rs, and not out of oversight: under the

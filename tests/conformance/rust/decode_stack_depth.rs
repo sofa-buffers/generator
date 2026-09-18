@@ -1,10 +1,9 @@
 // The std decoder's scope stack is a FIXED array sized from the schema, and a
-// wrapper string/blob array is pre-sized to its schema `count` -- both run, not
+// wrapper string/blob array grows to what the message carries -- both run, not
 // asserted.
 //
-// The generator tests pin the emitted text: `stack: [_Loc; 4]` for this schema,
-// and the `reserve_exact` in front of the element growth. Neither says the
-// number is RIGHT. A stack one entry short is invisible on every message that
+// The generator tests pin the emitted text: `stack: [_Loc; 4]` for this schema.
+// That does not say the number is RIGHT. A stack one entry short is invisible on every message that
 // does not reach the deepest frame and then open a sequence there, and the
 // symptom when one does is not a crash but the overflow arm: `err`, reported as
 // BufferFull, for a message that is perfectly well formed. So the depth is
@@ -26,9 +25,10 @@
 //      NOTHING -- the stack used to be a Vec that allocated at the first
 //      sequence_begin of every decode, which on `allow_dynamic: false` was the
 //      only heap traffic left. On static storage the whole message is checked.
-//   4. a `count: 5` string array filled to 5 holds capacity 5 (not the 8 that
-//      push-from-empty reaches), and on dynamic storage the one-shot decode does
-//      no realloc at all.
+//   4. on dynamic storage, a wrapper string array declared `count: 1000` that
+//      carries ONE element does not hold room for 1000: `count` is a capacity
+//      (MESSAGE_SPEC §5.1), and allow_dynamic: true allocates what the message
+//      carries, never the declared worst case.
 //
 // run.sh prepends the `use` line and `const STATIC: bool`.
 //SOFAB_IMPORT
@@ -37,7 +37,6 @@ use std::alloc::{GlobalAlloc, Layout, System};
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 static ALLOCATED: AtomicUsize = AtomicUsize::new(0);
-static REALLOCS: AtomicUsize = AtomicUsize::new(0);
 
 struct Counting;
 
@@ -50,7 +49,6 @@ unsafe impl GlobalAlloc for Counting {
         System.dealloc(p, l)
     }
     unsafe fn realloc(&self, p: *mut u8, l: Layout, new: usize) -> *mut u8 {
-        REALLOCS.fetch_add(1, Ordering::Relaxed);
         if new > l.size() {
             ALLOCATED.fetch_add(new - l.size(), Ordering::Relaxed);
         }
@@ -150,12 +148,10 @@ fn check_full(m: &Deep, how: &str) {
 fn main() {
     // 1. From below: the longest well-formed chain decodes, one-shot and chunked.
     let wire = full_wire();
-    let before = REALLOCS.load(Ordering::Relaxed);
     let one = match Deep::try_decode(&wire) {
         Ok(m) => m,
         Err(e) => fail(&format!("a well-formed message reaching the schema's full depth was refused: {e:?}")),
     };
-    let reallocs = REALLOCS.load(Ordering::Relaxed) - before;
     check_full(&one, "try_decode");
     let mut d = DeepDecoder::new();
     for b in &wire {
@@ -172,12 +168,20 @@ fn main() {
         fail("byte-by-byte decode differs from try_decode");
     }
 
-    // 4. The string array is sized to its schema count once.
-    if one.names.capacity() != 5 {
-        fail(&format!("a count: 5 string array filled to 5 must hold capacity 5, got {}", one.names.capacity()));
-    }
-    if !STATIC && reallocs != 0 {
-        fail(&format!("the one-shot decode reallocated {reallocs} time(s); every container is pre-sized or grows within its first allocation"));
+    // 4. A wrapper array grows to what the message carries, not to its count.
+    if !STATIC {
+        let sparse = build(|os| {
+            os.write_sequence_begin_lazy(5).unwrap();
+            os.write_str(0, "t").unwrap();
+            os.write_sequence_end().unwrap();
+        });
+        let m = Deep::try_decode(&sparse).unwrap_or_else(|e| fail(&format!("sparse tags refused: {e:?}")));
+        if m.tags.len() != 1 || m.tags[0].as_str() != "t" {
+            fail("tags[0] after a one-element wrapper array");
+        }
+        if m.tags.capacity() >= 1000 {
+            fail(&format!("a count: 1000 string array carrying one element reserved capacity {}; allow_dynamic: true must not allocate the declared worst case", m.tags.capacity()));
+        }
     }
 
     // 2. From above: over-index element, nested past any schema bound.
@@ -219,5 +223,5 @@ fn main() {
         }
         check_full(&m, "try_decode (alloc-free)");
     }
-    println!("decode stack depth + pre-size OK (static={STATIC})");
+    println!("decode stack depth + wrapper growth OK (static={STATIC})");
 }

@@ -591,9 +591,9 @@ messages:
 	// than elided: the ORDER is the property -- the inv reject first, so a
 	// doubly-bad message keeps answering InvalidMsg.
 	for _, want := range []string{
-		"if id as usize >= 4 { self.inv = true; return; } if self.lim { return; } if self.m.bs.capacity() == 0 { self.m.bs.reserve_exact(4); } while self.m.bs.len()", // bounded string
-		"if id as usize >= 3 { self.inv = true; return; } if self.lim { return; } if self.m.bb.capacity() == 0 { self.m.bb.reserve_exact(3); } while self.m.bb.len()", // bounded blob
-		"if id as usize >= 2 { self.inv = true; return; } if self.lim { return; } while self.m.bp.len()",                                                              // bounded struct
+		"if id as usize >= 4 { self.inv = true; return; } if self.lim { return; } while self.m.bs.len()", // bounded string
+		"if id as usize >= 3 { self.inv = true; return; } if self.lim { return; } while self.m.bb.len()", // bounded blob
+		"if id as usize >= 2 { self.inv = true; return; } if self.lim { return; } while self.m.bp.len()", // bounded struct
 	} {
 		if !strings.Contains(m, want) {
 			t.Errorf("std message.rs missing over-index guard %q", want)
@@ -678,7 +678,7 @@ messages:
 		// A schema-COUNTED wrapper array keeps its own InvalidMsg bound and takes
 		// the refusal behind it: the gap fill it would run is bounded by the schema,
 		// but it is still work for a message already refused.
-		"(_Loc::Root_bstr, _) => { if id as usize >= 4 { self.inv = true; return; } if self.lim { return; } if self.m.bstr.capacity() == 0 { self.m.bstr.reserve_exact(4); } while self.m.bstr.len() <= id as usize",
+		"(_Loc::Root_bstr, _) => { if id as usize >= 4 { self.inv = true; return; } if self.lim { return; } while self.m.bstr.len() <= id as usize",
 	} {
 		if !strings.Contains(m, want) {
 			t.Errorf("message.rs missing post-limit refusal %q:\n%s", want, m)
@@ -3352,13 +3352,13 @@ func TestRustStdDecodeStackIsFixed(t *testing.T) {
 	}
 }
 
-// TestRustWrapperStringArrayPresize: a schema-counted string/blob wrapper array
-// on growable storage reserves its count once, on the first element, after the
-// over-index guard -- instead of growing 0 -> 4 -> 8 under seqElemGrow's pushes.
-// Not for a count-less array (its receiver cap is a refusal threshold, not a size
-// hint), clamped at max_dyn_array_count like every other pre-size, and absent on
-// every fixed-capacity profile.
-func TestRustWrapperStringArrayPresize(t *testing.T) {
+// TestRustWrapperStringArrayNoPresize: a string/blob wrapper array on growable
+// storage grows by push to what the message carries. It is NOT reserved to its
+// schema `count` up front: `count` is a capacity (MESSAGE_SPEC §5.1), so doing
+// that would allocate the declared worst case on every decode -- up to
+// max_dyn_array_count elements for one element on the wire -- which is what
+// allow_dynamic: true exists to avoid.
+func TestRustWrapperStringArrayNoPresize(t *testing.T) {
 	const src = `
 version: 1
 messages:
@@ -3367,32 +3367,19 @@ messages:
       bs:  { id: 0, type: array, items: { type: string, count: 5, maxlen: 16 } }
       bb:  { id: 1, type: array, items: { type: blob,   count: 3, maxlen: 16 } }
       big: { id: 2, type: array, items: { type: string, count: 100000, maxlen: 4 } }
-      ds:  { id: 3, type: array, items: { type: string } }
-      so:  { id: 4, type: array, items: { type: struct, count: 2, fields: { x: { id: 0, type: i32 } } } }
 `
 	m := moduleFromYAML(t, src, map[string]any{"corelib": "rs"})
 	for _, want := range []string{
-		"(_Loc::Root_bs, _) => { if id as usize >= 5 { self.inv = true; return; } if self.lim { return; } if self.m.bs.capacity() == 0 { self.m.bs.reserve_exact(5); } while self.m.bs.len() <= id as usize",
-		"(_Loc::Root_bb, _) => { if id as usize >= 3 { self.inv = true; return; } if self.lim { return; } if self.m.bb.capacity() == 0 { self.m.bb.reserve_exact(3); } while self.m.bb.len() <= id as usize",
-		// Clamped at the resolved max_dyn_array_count (server tier: 65536).
-		"if self.m.big.capacity() == 0 { self.m.big.reserve_exact(65536); }",
+		"(_Loc::Root_bs, _) => { if id as usize >= 5 { self.inv = true; return; } while self.m.bs.len() <= id as usize",
+		"(_Loc::Root_bb, _) => { if id as usize >= 3 { self.inv = true; return; } while self.m.bb.len() <= id as usize",
 	} {
 		if !strings.Contains(m, want) {
 			t.Errorf("std dynamic message.rs missing %q:\n%s", want, m)
 		}
 	}
-	for _, notWant := range []string{"self.m.ds.reserve_exact", "self.m.so.reserve_exact"} {
-		if strings.Contains(m, notWant) {
-			t.Errorf("only a counted string/blob wrapper array is pre-sized, found %q", notWant)
-		}
-	}
-	for _, cfg := range []map[string]any{
-		{"corelib": "rs", "allow_dynamic": false},
-		{"corelib": "rs-no-std"},
-	} {
-		src := strings.Replace(src, "      ds:  { id: 3, type: array, items: { type: string } }\n", "", 1)
-		if got := moduleFromYAML(t, src, cfg); strings.Contains(got, ".capacity() == 0") {
-			t.Errorf("(%v) fixed-capacity storage has nothing to pre-size:\n%s", cfg, got)
+	for _, f := range []string{"bs", "bb", "big"} {
+		if strings.Contains(m, "self.m."+f+".reserve") {
+			t.Errorf("wrapper array %s must grow to what the message carries, not reserve its schema count:\n%s", f, m)
 		}
 	}
 }
