@@ -1071,20 +1071,29 @@ points worth recording:
   `writeFp32Array` copies them straight out. The scalar half stays — a JS number has
   nowhere to keep the bits.
   **Measured, against the same code with `number[]` members and the same hand-off.**
-  Both variants over `vehicle_telemetry` on one corelib, byte-identical wire and
-  identical decoded JSON, with only the container differing — every native array's
-  capacity raised together so the length is the variable:
+  Both variants over `vehicle_telemetry` on one corelib (corelib-ts `f4c64c0`),
+  byte-identical wire and identical decoded JSON, with only the container differing
+  — every native array's capacity raised together so the length is the variable:
 
   | elements/array | decode | encode |
   |---|---|---|
-  | 4 | +1.94 % | −1.82 % |
-  | 16 | +1.08 % | −6.46 % |
-  | 64 | +0.26 % | −15.55 % |
+  | 4 | +1.93 % | −1.60 % |
+  | 16 | +1.16 % | −6.32 % |
+  | 64 | +0.27 % | −15.47 % |
   | 256 | −1.84 % | −23.89 % |
 
-  Encode wins everywhere and the margin grows with length: a typed source states its
-  element width, so the writer reserves from the width instead of the wire-maximum
-  ten bytes per element. Decode is the side that pays at the short end — the
+  Encode wins everywhere and the margin grows with length, because the corelib's
+  varint kernel takes a separate loop for an exact-width source: a `Uint16Array` can
+  hold nothing but an integer in 0..65535, so the four per-element guards a
+  `number[]` needs — `typeof`, sign, safe-integer bound, `Number.isInteger` — move
+  out of the loop, the element load is unboxed, and the varint is emitted inline
+  rather than through a call. It is a per-ELEMENT saving, which is why it scales.
+  (An earlier version of this paragraph credited the gain to the writer reserving
+  from the declared width instead of ten bytes per element. corelib-ts `f4c64c0`
+  removed that estimate outright — a spoofed `constructor` could make it reserve
+  too little — and the table above, re-measured against it, moved by at most a
+  quarter point at any length, so the reservation was never where the gain came
+  from.) Decode is the side that pays at the short end — the
   destination is an `ArrayBuffer` allocation where a plain array was a JSArray
   (`new Uint16Array(0)` 732 Ir against `[]` 211) — and that cost is fixed per
   array, so it is level by ~64 elements and ahead by 256. So the container is a
