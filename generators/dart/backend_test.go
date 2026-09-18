@@ -178,9 +178,11 @@ func TestResetRestoresDefaults(t *testing.T) {
 		"    someu8 = 7;",
 		// A destination keeps its storage: the length goes back to 0, or the
 		// declared default is copied into it -- no reallocation, and none of the
-		// default either (a const literal).
+		// default either: it is a typed list built once per class, so the copy is
+		// a memmove.
 		"    somestring.length = 0;",
-		"    someblob.assign(const <int>[72, 101, 108, 108, 111]);",
+		"    someblob.assign(_someblobDefault);",
+		"  static final Uint8List _someblobDefault = Uint8List.fromList(const <int>[72, 101, 108, 108, 111]);",
 		// fp32 drops the captured NaN wire bits with the value (S4.6).
 		"    somefp32 = 0.0;\n    somefp32Fp32Bits = null;",
 		// A nested struct/union is reset in place, recursively -- the nested case:
@@ -198,9 +200,12 @@ func TestResetRestoresDefaults(t *testing.T) {
 		// in place. The literal is the default EXACTLY as written, never padded out
 		// to N -- someenumarray declares count: 4 with a 3-element default. An fp32
 		// array is no exception any more: its storage is the destination's own.
-		"    someuintarray.assign(const <int>[0, 1, 1000, 4294967295]);",
-		"    someenumarray.assign(const <int>[2, 1, 0]);",
-		"    somefloatarray.assign(const <double>[0.0, -1.5, 3.25]);",
+		"    someuintarray.assign(_someuintarrayDefault);",
+		"  static final Int64List _someuintarrayDefault = Int64List.fromList(const <int>[0, 1, 1000, 4294967295]);",
+		"    someenumarray.assign(_someenumarrayDefault);",
+		"  static final Int64List _someenumarrayDefault = Int64List.fromList(const <int>[2, 1, 0]);",
+		"    somefloatarray.assign(_somefloatarrayDefault);",
+		"  static final Float32List _somefloatarrayDefault = Float32List.fromList(const <double>[0.0, -1.5, 3.25]);",
 	} {
 		if !strings.Contains(out, want) {
 			t.Errorf("reset() missing %q", want)
@@ -237,7 +242,7 @@ func TestResetIsInPlaceForReuse(t *testing.T) {
 		// capacity adds no elements (§3). `nums` refills from its declared default,
 		// in place. `dyn` is count-less and has none: its length goes back to 0.
 		"    names.clear();",
-		"    nums.assign(const <int>[1, 2, 3]);",
+		"    nums.assign(_numsDefault);",
 		"    dyn.length = 0;",
 	} {
 		if !strings.Contains(body, want) {
@@ -642,20 +647,21 @@ func TestDartCountIsACapacityNotALength(t *testing.T) {
 		"  final sofab.InlineInt64Array fnums = sofab.InlineInt64Array(4, range: const sofab.ElemRange(0, 4294967295));",
 		// A declared default is materialized EXACTLY as written -- count: 4 with a
 		// 2-element default stays 2 elements long.
-		"  final sofab.InlineInt64Array withdef = sofab.InlineInt64Array(4, range: const sofab.ElemRange(0, 4294967295))..assign(const <int>[1, 2]);",
+		"  final sofab.InlineInt64Array withdef = sofab.InlineInt64Array(4, range: const sofab.ElemRange(0, 4294967295))..assign(_withdefDefault);",
+		"  static final Int64List _withdefDefault = Int64List.fromList(const <int>[1, 2]);",
 		// reset() restores the same thing, in place.
 		"    fixed.clear();",
 		"    fstrs.clear();",
 		"    fblobs.clear();",
 		"    fnums.length = 0;",
-		"    withdef.assign(const <int>[1, 2]);",
+		"    withdef.assign(_withdefDefault);",
 		// The field omit test: emptiness, or an exact compare against the declared
 		// default -- neither side padded to N, and only the `length` in use read.
 		"    if (fnums.length != 0) { e.writeUnsignedArray(4, fnums.storage, fnums.length); }",
-		"    if (!_prefixEq(withdef.storage, withdef.length, const <int>[1, 2])) { e.writeUnsignedArray(5, withdef.storage, withdef.length); }",
+		"    if (!_prefixEq(withdef.storage, withdef.length, _withdefDefault)) { e.writeUnsignedArray(5, withdef.storage, withdef.length); }",
 		// ...and _isDefault is the exact negation of it.
 		"    if (!(fnums.length == 0)) return false;",
-		"    if (!(_prefixEq(withdef.storage, withdef.length, const <int>[1, 2]))) return false;",
+		"    if (!(_prefixEq(withdef.storage, withdef.length, _withdefDefault))) return false;",
 		// A wrapper array writes a child for every element it holds (the last one
 		// unconditionally), so "no child written" IS "empty" -- for count:N and
 		// count-less alike, no narrowing on either side.

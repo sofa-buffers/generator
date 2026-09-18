@@ -260,7 +260,7 @@ func (g *gen) dartInit(f *ir.Field) string {
 	case ir.KindArray:
 		if nativeArrayElem(f.Elem) {
 			ctor := fmt.Sprintf("%s(%d%s)", inlineArrayType(f.Elem), initialCap(f), g.rangeArg(f.Elem, f.ElemRef))
-			if def, ok := g.defaultLit(f); ok {
+			if def, ok := defaultRef(f); ok {
 				return fmt.Sprintf(" = %s..assign(%s)", ctor, def)
 			}
 			return " = " + ctor
@@ -268,7 +268,7 @@ func (g *gen) dartInit(f *ir.Field) string {
 		return " = <" + g.dartArrayElemType(f.Elem, f.ElemRef, f.ElemItems) + ">[]"
 	case ir.KindString, ir.KindBlob:
 		ctor := fmt.Sprintf("%s(%d)", g.dartType(f), initialCap(f))
-		if def, ok := g.defaultLit(f); ok {
+		if def, ok := defaultRef(f); ok {
 			return fmt.Sprintf(" = %s..assign(%s)", ctor, def)
 		}
 		return " = " + ctor
@@ -367,21 +367,67 @@ func (g *gen) dartDefaultValue(f *ir.Field) string {
 	return strings.TrimPrefix(init, " = ")
 }
 
+// defaultRef names the class-level typed list (defaultDecl) holding the declared
+// default of a destination field -- the one value its storage is filled from at
+// construction and on reset(), and compared against for omission. ("", false)
+// when no non-empty default is declared: an empty default is the destination's
+// zero state already.
+//
+// A typed list rather than a `const <int>[]` literal, because that is what makes
+// the fill cheap: `assign` copies it with setRange, which is a memmove between
+// two typed lists of one element type and an element-by-element walk from a
+// plain List -- once per defaulted field of every object built, the bench row's
+// struct-array elements included.
+func defaultRef(f *ir.Field) (string, bool) {
+	if !hasDestDefault(f) {
+		return "", false
+	}
+	return "_" + dartIdent(f.Name) + "Default", true
+}
+
+// defaultDecl is the static declaration defaultRef names.
+func (g *gen) defaultDecl(f *ir.Field) string {
+	ref, _ := defaultRef(f)
+	lit, _ := g.defaultLit(f)
+	t := storageType(f)
+	return fmt.Sprintf("static final %s %s = %s.fromList(%s);", t, ref, t, lit)
+}
+
+// hasDestDefault reports whether a destination field declares a non-empty
+// default (see defaultLit).
+func hasDestDefault(f *ir.Field) bool {
+	switch f.Kind {
+	case ir.KindString:
+		s, ok := f.Default.(string)
+		return ok && s != ""
+	case ir.KindBlob:
+		s, ok := f.Default.(string)
+		if !ok {
+			return false
+		}
+		raw, err := base64.StdEncoding.DecodeString(strings.Join(strings.Fields(s), ""))
+		return err == nil && len(raw) > 0
+	case ir.KindArray:
+		vals, ok := f.Default.([]any)
+		return nativeArrayElem(f.Elem) && ok && len(vals) > 0
+	}
+	return false
+}
+
 // defaultLit renders the declared default of a destination field -- a string, a
-// blob or a native array -- as the literal its storage is filled from and
-// compared against: the UTF-8 bytes of a string, the bytes of a blob, the
-// elements of an array (a bool array's as 0/1, the integers it is stored as).
-// ("", false) when no non-empty default is declared: an empty default is the
-// destination's zero state already.
+// blob or a native array -- as the element literal defaultDecl builds its typed
+// list from: the UTF-8 bytes of a string, the bytes of a blob, the elements of an
+// array (a bool array's as 0/1, the integers it is stored as). ("", false)
+// exactly where hasDestDefault is false.
 //
 // It is NOT padded to a declared `count: N`: that is a capacity, not a length
 // (MESSAGE_SPEC §3), so the default stands exactly as written -- and so does the
 // value it is compared against, which is what keeps a length-N all-zero array
 // distinct from the empty one.
 //
-// An fp32 array's elements are written already rounded to fp32 (elemLit): its
-// storage holds the rounded value, and comparing that against the unrounded
-// literal would never find a non-representable default equal to itself.
+// An fp32 array's elements are written as the exact double of their fp32
+// rounding (fp32Lit), so the literal says precisely what the Float32List built
+// from it -- and every element decoded into the field -- holds.
 func (g *gen) defaultLit(f *ir.Field) (string, bool) {
 	switch f.Kind {
 	case ir.KindString:

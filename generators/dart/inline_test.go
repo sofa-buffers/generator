@@ -29,13 +29,15 @@ func TestDartInlineDestinationShapes(t *testing.T) {
 	out := genFor(t, writeDef(t, inlineSchema), map[string]any{})
 	for _, want := range []string{
 		// A bool array is compared as booleans and written as canonical 0/1.
-		"if (!_boolsEq(flags.storage, flags.length, const <int>[1, 0])) { e.writeUnsignedArray(0, _bools01(flags), flags.length); }",
+		"if (!_boolsEq(flags.storage, flags.length, _flagsDefault)) { e.writeUnsignedArray(0, _bools01(flags), flags.length); }",
+		"static final Int64List _flagsDefault = Int64List.fromList(const <int>[1, 0]);",
 		"if (_e0.length != 0 || _i0 == brows.length - 1) e.writeUnsignedArray(_i0, _bools01(_e0), _e0.length);",
 		// An fp32 default is emitted already rounded to fp32, so the stored
 		// elements compare equal to it.
-		"sofab.InlineFloat32Array(4)..assign(const <double>[0.10000000149011612, 1.7000000476837158])",
+		"static final Float32List _f32dDefault = Float32List.fromList(const <double>[0.10000000149011612, 1.7000000476837158]);",
 		// A string default is its UTF-8 bytes.
-		"final sofab.InlineString name = sofab.InlineString(8)..assign(const <int>[104, 195, 169, 106]);",
+		"final sofab.InlineString name = sofab.InlineString(8)..assign(_nameDefault);",
+		"static final Uint8List _nameDefault = Uint8List.fromList(const <int>[104, 195, 169, 106]);",
 		// 2000 u16 elements are 16 KB of Int64List: sized at the header instead.
 		"final sofab.InlineInt64Array big = sofab.InlineInt64Array(0, range: const sofab.ElemRange(0, 65535));",
 		"if (o.big.capacity < count) o.big.storage = Int64List(count);",

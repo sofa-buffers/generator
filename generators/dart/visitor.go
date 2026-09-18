@@ -453,7 +453,7 @@ func (g *gen) computeNeeds(s *ir.Schema) needs {
 }
 
 func (g *gen) scanField(fld *ir.Field, n *needs) {
-	if _, ok := g.defaultLit(fld); ok {
+	if hasDestDefault(fld) {
 		if fld.Kind == ir.KindArray && fld.Elem == ir.KindBool {
 			n.boolDefault = true
 		} else {
@@ -513,7 +513,7 @@ func (g *gen) emitPrelude(f *dfile, s *ir.Schema) {
 	if n.boolDefault {
 		f.line("// The default test of a bool array: its elements compared as booleans, since")
 		f.line("// any non-zero element decodes as `true`.")
-		f.line("bool _boolsEq(Int64List s, int n, List<int> d) {")
+		f.line("bool _boolsEq(Int64List s, int n, Int64List d) {")
 		f.line("  if (n != d.length) return false;")
 		f.line("  for (var i = 0; i < n; i++) {")
 		f.line("    if ((s[i] != 0) != (d[i] != 0)) return false;")

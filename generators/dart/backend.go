@@ -298,6 +298,9 @@ func (g *gen) emitClass(f *dfile, name, summary string, fields []*ir.Field, isMe
 			final = "final "
 		}
 		f.line("  %s%s %s%s;", final, g.dartType(fld), dartIdent(fld.Name), g.dartInit(fld))
+		if hasDestDefault(fld) {
+			f.line("  %s", g.defaultDecl(fld))
+		}
 		if fld.Kind == ir.KindFP32 {
 			// Companion raw-bits slot: a Dart `double` cannot carry an fp32 NaN's
 			// payload/signaling bits (§4.6), so when decode delivers a NaN we keep the
@@ -537,7 +540,7 @@ func (g *gen) emitResetField(f *dfile, fld *ir.Field) {
 		// CAPACITY, never a length (MESSAGE_SPEC §3), so a fresh count:N array
 		// holds no elements at all -- which is exactly what an absent field
 		// decodes back to.
-		if def, ok := g.defaultLit(fld); ok {
+		if def, ok := defaultRef(fld); ok {
 			f.line("    %s.assign(%s);", acc, def)
 			return
 		}
@@ -629,7 +632,7 @@ func (g *gen) destDefaultTest(fld *ir.Field, acc string, differs bool) string {
 	if differs {
 		not, cmp = "!", "!="
 	}
-	def, ok := g.defaultLit(fld)
+	def, ok := defaultRef(fld)
 	if !ok {
 		return fmt.Sprintf("%s.length %s 0", acc, cmp)
 	}
