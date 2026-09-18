@@ -3821,15 +3821,62 @@ is worth 9,914. `on_array_begin`'s count check was only 2,105 Ir to begin with.
 The change is kept for what it fixes, not for what it costs: the §6.2.1 defect
 above, and one implementation of the rule instead of two.
 
-**The shape that would pay is the table.** A destination map declares its bounds
-**once**, at construction, so no hook is called per field *and* the corelib's own
-§7.3 tag test sits ahead of the bound — both problems above disappear together.
-Adopting it means keying the flat visitor's `(location, id)` dispatch onto
-corelib-py's `Binding`, which is a larger change than this one was. Until then
-Python pays the call — and now pays it in every scope, since the undeclared-id
-decline above has no other home. A `Binding` names the ids it binds by
-construction, so it would answer that question without a per-field call at all,
-which makes it the obvious next step rather than merely a nicer one.
+**The shape that pays is the table, and it is now the shape.** A destination map
+declares its bounds **once**, at construction, so no hook is called per field
+*and* the corelib's own §7.3 tag test sits ahead of the bound — both problems
+above disappear together. The Python backend therefore emits a corelib-py
+`Binding` per generated class, handed over through `Visitor.destinations()`
+(`generators/python/binding.go`, generator#561): every field the table names is
+written straight into a slot the module owns, with no typed hook, no `on_field`
+and no `on_schema_bound` for it, and one straight-line `scatter()` moves the
+slots onto the dataclass when the decode completes. The flat visitor is unchanged
+for everything the table cannot carry, and the two compose in one decoder — the
+table is reached *through* the one decode surface, never beside it (§5.3.1).
+
+Measured, `tests/bench` on `vehicle_telemetry`, same corelib-py build both sides:
+
+| row | encode | decode |
+|---|---:|---:|
+| `python-native` | 130,523 → 130,396 | 803,018 → **585,512 (−27.1%)** |
+| `python` (pure) | 1,082,511 → 1,082,537 | 2,317,390 → **2,095,758 (−9.6%)** |
+
+Encode is untouched — corelib-py has no encode-side table.
+
+**Two rules decide what the table may carry**, and both are about a verdict it
+cannot reach, not about taste:
+
+1. **A field whose value needs a WIDTH check stays on the visitor.** An entry
+   carries a declared width for an *array's elements* (`elem_min`/`elem_max`,
+   applied by the decoder at each element) but none for a scalar: `words[at] =
+   value` is the whole store. Taking that verdict afterwards, in `scatter()`,
+   would put it behind a truncation §5.2 says it outranks — a `scatter` runs only
+   for a decode that already completed. So `u8..u32`, `i8..i32` and every
+   `enum`/`bitfield` narrower than the 64-bit slot keep the guarded store in the
+   typed hook. `u64`, `i64`, both floats, `boolean` (§4.4: no width at all),
+   `string`, `blob` and every **counted** native array go on the table; an array
+   the schema leaves unbounded does not, because its destination would be sized
+   by the wire (§6.6).
+
+2. **A scope is entered by the table only if its parent binds everything.** The
+   decoder descends into a bound sequence by itself and tells the visitor nothing
+   (corelib-py#146), so the visitor's `_c` still names the parent while the walk
+   is inside the child. An id the child's table does not name — an *unknown* id,
+   which is what forward compatibility delivers — is then offered to the visitor
+   under the parent's location, where an arm would store someone else's value. A
+   parent that binds everything it declares has no arms at all, and its
+   `on_field` is one unconditional decline. So a message of nothing but scalars
+   and structs binds its whole tree; one wrapper array anywhere in a scope stops
+   the descent below it, and that scope's own leaves are bound alone.
+
+A class binding fewer than **three** fields emits no table at all: the words
+buffer, the objects list, the two views and the `scatter()` call cost about what
+two saved callbacks are worth (measured: +12.6% at one bound field, +2.4% at two,
+−2.5% at three, −20.4% at six).
+
+Both rules are limits of what a table can *say* today, not of the wire format.
+corelib-py#149 (a declared width on a scalar entry) and corelib-py#150 (a child
+table that declines what it does not name) would lift them, and between them they
+would put every narrow scalar and the nested scopes on the table too.
 
 #### 9.5.2 Rust: why the cap stays in the generated visitor
 

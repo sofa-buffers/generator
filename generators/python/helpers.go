@@ -320,8 +320,15 @@ func (g *gen) emitJSON(f *pyfile, name string, fields []*ir.Field, ms generator.
 	f.line("    def decoder(cls, reassembly: int = REASSEMBLY) -> _StreamDecoder:")
 	f.line(`        """The streaming reader: feed it chunks of any size.`)
 	f.line("")
-	f.line("        The half-built message is on ``.message`` throughout; each ``feed``")
-	f.line("        returns the outcome for the bytes so far.")
+	f.line("        Each ``feed`` returns the outcome for the bytes so far, and")
+	f.line("        ``.message`` carries what has arrived.")
+	if g.plans[name] != nil {
+		f.line("")
+		f.line("        The fields this class decodes through its destination table land")
+		f.line("        there in one pass, when a feed returns COMPLETE; the rest appear as")
+		f.line("        they arrive. So a half-built message shows part of itself, and a")
+		f.line("        finished one shows all of it.")
+	}
 	f.line("")
 	f.line("        ``reassembly`` is where a construct split across two chunks is")
 	f.line("        joined. The default holds this schema's largest single value plus")
@@ -344,7 +351,12 @@ func (g *gen) emitJSON(f *pyfile, name string, fields []*ir.Field, ms generator.
 	f.line("        INCOMPLETE stays distinguishable from INVALID.")
 	f.line(`        """`)
 	f.line("        o = cls()")
-	f.line("        d = Decoder(visitor=_%sVisitor(o), %s,", name, g.capsArgs())
+	if g.plans[name] != nil {
+		f.line("        v = _%sVisitor(o)", name)
+		f.line("        d = Decoder(visitor=v, %s,", g.capsArgs())
+	} else {
+		f.line("        d = Decoder(visitor=_%sVisitor(o), %s,", name, g.capsArgs())
+	}
 	// One call, so nothing spans a chunk boundary and the buffer is never
 	// written; the most a TRUNCATED message can leave behind is the construct in
 	// flight, which is what MAX_FIELD_SPAN is. Sizing this at REASSEMBLY would
@@ -355,6 +367,12 @@ func (g *gen) emitJSON(f *pyfile, name string, fields []*ir.Field, ms generator.
 	f.line(`            raise SofaDecodeError(d.error or "invalid message")`)
 	f.line("        if st is Status.INCOMPLETE:")
 	f.line(`            raise SofaIncompleteError(d.error or "truncated message")`)
+	if g.plans[name] != nil {
+		f.line("        # COMPLETE, so the destination table's slots are final: one pass")
+		f.line("        # moves them onto the message. It runs AFTER the two refusals, so")
+		f.line("        # a decode that did not complete builds nothing.")
+		f.line("        v.scatter()")
+	}
 	f.line("        return o")
 	f.blank()
 }

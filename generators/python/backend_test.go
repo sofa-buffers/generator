@@ -64,8 +64,9 @@ func TestPythonStructural(t *testing.T) {
 	for _, want := range []string{
 		// example.yaml has count-bearing native arrays and bounded string/blob
 		// fields, so the flat visitor overrides on_field and needs Field/WireType/
-		// FixlenSubtype alongside the always-present decode names.
-		"from sofab import Decoder, Encoder, Field, FixlenSubtype, SofaDecodeError, SofaIncompleteError, SofaLimitError, Status, Visitor, WireType",
+		// FixlenSubtype alongside the always-present decode names -- and it binds
+		// part of the message, which is what pulls Binding in (binding.go).
+		"from sofab import Binding, Decoder, Encoder, Field, FixlenSubtype, SofaDecodeError, SofaIncompleteError, SofaLimitError, Status, Visitor, WireType",
 		"@dataclass",
 		"class Myfirstmessage:",
 		"def serialize(self, e: Encoder)",
@@ -75,9 +76,13 @@ func TestPythonStructural(t *testing.T) {
 		"def to_jsonable(self)",
 		"e.write_sequence_begin_lazy(", // every sequence opens lazily (MESSAGE_SPEC S2)
 		// The schema count is DECLARED, and the corelib applies it at the count
-		// header (generator#100/#216/#406).
+		// header (generator#100/#216/#406). For a field the destination table
+		// carries, the declaration IS the entry -- `cap` on an array, `maxlen` on
+		// a string/blob -- and no hook is asked for it; what still reaches
+		// on_schema_bound is everything the table cannot carry.
+		"    .unsigned_array(15, at=12, cap=4, count_at=16, elem_max=4294967295)",
 		"    def on_schema_bound(self, fid: int, n: int, wt, st) -> int:",
-		"                return 4  # someuintarray: schema count",
+		"            return 16  # somestringarray: schema element maxlen",
 	} {
 		if !strings.Contains(mod, want) {
 			t.Errorf("message.py missing %q", want)
@@ -266,7 +271,9 @@ messages:
 	// FixlenSubtype rides along: the string/blob ELEMENT bounds name it even though
 	// no *field* here is fixlen (generator#246), so the full line is asserted — a
 	// prefix match would pass either way and let the missing name through. There is
-	// no WireType: this schema has no native array, so nothing compares one.
+	// no WireType: this schema has no native array, so nothing compares one. And
+	// no Binding: every field here is a wrapper array, which no destination table
+	// can carry, so this module emits none.
 	if !strings.Contains(mod, "from sofab import Decoder, Encoder, Field, FixlenSubtype, SofaDecodeError, SofaIncompleteError, SofaLimitError, Status, Visitor\n") {
 		t.Errorf("message.py needs SofaDecodeError (over-index guard) AND FixlenSubtype (element guard) imported, else NameError at decode:\n%s", mod)
 	}
@@ -320,7 +327,7 @@ messages:
 	// Asserted as the FULL line (FixlenSubtype included — this schema has string
 	// and blob fields, and a string wrapper element): a prefix match cannot tell a
 	// complete import line from a truncated one (generator#246).
-	if !strings.Contains(mod, "from sofab import Decoder, Encoder, Field, FixlenSubtype, SofaDecodeError, SofaIncompleteError, SofaLimitError, Status, Visitor\n") {
+	if !strings.Contains(mod, "from sofab import Binding, Decoder, Encoder, Field, FixlenSubtype, SofaDecodeError, SofaIncompleteError, SofaLimitError, Status, Visitor\n") {
 		t.Errorf("message.py must import SofaDecodeError for the maxlen guard (else NameError at decode):\n%s", mod)
 	}
 
@@ -334,15 +341,13 @@ messages:
 	// the id and the announced length, so a bound it declares would otherwise
 	// reach a field that is not this field's value (generator#406).
 	for _, want := range []string{
-		// (b) scalar string: bound the wire byte length the header declares, never
-		// a re-encode of the decoded str (#155).
-		`                return 8  # s: schema maxlen`,
-		`if fld.subtype != FixlenSubtype.STRING:
-                    return False  # s: header is not the declared type -- skip it`,
-		// (b) scalar blob: same shape, same reason.
-		`                return 8  # b: schema maxlen`,
-		`if fld.subtype != FixlenSubtype.BLOB:
-                    return False  # b: header is not the declared type -- skip it`,
+		// (b) scalar string and blob: both are on the destination table here, so
+		// the bound is the ENTRY's `maxlen` and the §7.3 tag test is the corelib's
+		// own -- an entry whose wire type or fixlen subtype the header contradicts
+		// is skipped like an unknown id, ahead of the bound, without a hook. The
+		// number and the ordering are the same; the place is one layer down.
+		`    .string(0, at=0, maxlen=8, count_at=`,
+		`    .bytes(1, at=1, maxlen=8, count_at=`,
 		// (c) bounded wrapper string element (maxlen 5), at its own array scope --
 		// every element shares one declared type, so neither the declaration nor
 		// the tag test carries an id test.
@@ -364,15 +369,15 @@ messages:
 		t.Error(`string maxlen check must not re-encode via .encode("utf-8") (#155)`)
 	}
 
-	// (e) the unbounded string field declares no bound -- on_schema_bound has no
-	// arm for it -- but it IS declined on a tag mismatch, like every other
-	// declared field: the cap the Decoder applies to it must not reach a header
-	// that was never this field's value (MESSAGE_SPEC §7.3, CORELIB_PLAN §6.2.1).
-	if strings.Contains(mod, `return 0  # us:`) || strings.Contains(mod, `# us: schema maxlen`) {
-		t.Error("unbounded string must not declare a schema bound")
+	// (e) the unbounded string declares NO bound: `maxlen=0` is the entry's way of
+	// saying the schema bounds nothing here, which is what leaves the receiver cap
+	// on the field (CORELIB_PLAN §6.2.1) -- the same split on_schema_bound made by
+	// answering -1. Its §7.3 tag test is the corelib's, like every bound field's.
+	if !strings.Contains(mod, `    .string(3, at=2, maxlen=0, count_at=`) {
+		t.Errorf("an unbounded string must bind with maxlen=0, not a bound:\n%s", mod)
 	}
-	if !strings.Contains(mod, `return False  # us: header is not the declared type -- skip it`) {
-		t.Errorf("an unbounded string must still be declined on a §7.3 tag mismatch:\n%s", mod)
+	if strings.Contains(mod, `# us: schema maxlen`) {
+		t.Error("unbounded string must not declare a schema bound")
 	}
 }
 
@@ -397,10 +402,13 @@ messages:
 	mod := string(genPy(t, schema(t, src), map[string]any{})["message.py"])
 
 	// The bound is STATED to the decoder at the header, as the (min, max) pair it
-	// applies at each element, rather than scanned out of the assembled list.
+	// applies at each element, rather than scanned out of the assembled list. A
+	// counted array states it on its table ENTRY, a count-less one -- which has no
+	// destination to declare, so it stays on the visitor -- through on_array_begin.
+	// Same pair, same application point, one layer apart.
 	for _, want := range []string{
-		`return (None, None, 255)`,
-		`return (None, -32768, 32767)`,
+		`    .unsigned_array(0, at=0, cap=4, count_at=4, elem_max=255)`,
+		`    .signed_array(1, at=5, cap=4, count_at=9, elem_min=-32768, elem_max=32767)`,
 		// The width is a property of the element TYPE, not of the array length,
 		// so a count-less array carries it too.
 		`return (None, None, 4294967295)`,
@@ -409,8 +417,14 @@ messages:
 			t.Errorf("message.py missing element bound %q:\n%s", want, mod)
 		}
 	}
-	// u64 spans the value domain the corelib already hands over, so it states no
-	// width — and an fp32 array is not offered on_array_begin at all.
+	// u64 spans the value domain the corelib already hands over, so its entry
+	// states no width — and an fp32 array carries none on either route.
+	if !strings.Contains(mod, `    .unsigned_array(2, at=10, cap=4, count_at=14)`) {
+		t.Errorf("a u64 array must bind with no element width:\n%s", mod)
+	}
+	if !strings.Contains(mod, `    .float32_array(4, at=15, cap=4, count_at=19)`) {
+		t.Errorf("an fp32 array must bind with no element width:\n%s", mod)
+	}
 	for _, unwanted := range []string{
 		`raise SofaDecodeError("wa element:`,
 		`raise SofaDecodeError("fa element:`,
@@ -569,9 +583,10 @@ messages:
 		"if not (len(self.fixedStrs) == 0):",
 		"if not (len(self.fixedObjs) == 0):",
 		// The bound itself is untouched -- that is all `count` still does. A
-		// native array DECLARES it at the header; a wrapper array has no count
-		// word on the wire, so its index is bounded in on_field instead.
-		"                return 5  # shortDflt: schema count",
+		// native array DECLARES it at the header, on its table entry where the
+		// table carries the array; a wrapper array has no count word on the wire,
+		// so its index is bounded in on_field instead.
+		"    .unsigned_array(4, at=17, cap=5, count_at=22, elem_max=4294967295)",
 		"if fld.id >= 3:",
 	} {
 		if !strings.Contains(mod, want) {
@@ -624,8 +639,10 @@ messages:
 func TestPythonDecoderKeepsNoStatus(t *testing.T) {
 	mod := string(genPy(t, schemaFile(t, "../../examples/messages/example.yaml"), map[string]any{})["message.py"])
 	for _, want := range []string{
-		`    __slots__ = ("message", "_d")`,
-		"    def feed(self, chunk) -> Status:\n        return self._d.feed(chunk)",
+		// The visitor is held too, because example.yaml binds part of itself and
+		// the scatter runs off it -- but nothing here remembers a STATUS.
+		`    __slots__ = ("message", "_d", "_v")`,
+		"    def feed(self, chunk) -> Status:\n        st = self._d.feed(chunk)",
 		// `error` still belongs to the corelib: §6.3 keeps the reason behind an
 		// INVALID on the decoder, and it was never a second copy of anything.
 		"        return self._d.error",
@@ -885,42 +902,51 @@ messages:
 	mod := string(genPy(t, s, map[string]any{})["message.py"])
 	// No SofaLimitError: every field in this schema is bounded, so no receiver
 	// cap is live and the name would be dead (§9.5, generator#385).
-	if !strings.Contains(mod, "from sofab import Decoder, Encoder, Field, FixlenSubtype, SofaDecodeError, SofaIncompleteError, Status, Visitor, WireType") {
+	if !strings.Contains(mod, "from sofab import Binding, Decoder, Encoder, Field, FixlenSubtype, SofaDecodeError, SofaIncompleteError, Status, Visitor\n") {
 		t.Errorf("message.py missing the full decode import line:\n%s", mod)
 	}
 	for _, want := range []string{
-		// Each kind lands in the hook the corelib routes its wire type to, and
-		// nowhere else — that routing IS the §7.3 dispatch.
+		// A kind the destination table can carry states its tag ON THE ENTRY, and
+		// the corelib tests it there: an entry whose wire type -- or, for a fixlen
+		// one, whose subtype -- the header contradicts is skipped exactly like an
+		// unknown id, ahead of the bound the entry declares. fp32/fp64/string/blob
+		// all share FIXLEN and a fixlen array shares ARRAY_FIXLEN, so the binder
+		// method is what separates them.
+		"    .float32(3, at=2, count_at=3)",
+		"    .float64(4, at=4, count_at=5)",
+		"    .string(5, at=0, maxlen=8, count_at=6)",
+		"    .bytes(6, at=1, maxlen=8, count_at=7)",
+		"    .unsigned_array(8, at=8, cap=2, count_at=10, elem_max=4294967295)",
+		"    .signed_array(9, at=11, cap=2, count_at=13, elem_min=-2147483648, elem_max=2147483647)",
+		"    .float32_array(10, at=14, cap=2, count_at=16)",
+		// What the table cannot carry keeps the hook the corelib routes its wire
+		// type to -- that routing IS the §7.3 dispatch -- and, where the header
+		// needs testing, the on_field decline. Here that is the two narrow
+		// integers, the struct's own scope, and the wrapper array of strings.
 		"    def on_unsigned(self, fid: int, value: int) -> None:",
 		"    def on_signed(self, fid: int, value: int) -> None:",
-		"    def on_float32(self, fid: int, value: float) -> None:",
-		"    def on_float64(self, fid: int, value: float) -> None:",
 		"    def on_string(self, fid: int, value: str) -> None:",
-		"    def on_bytes(self, fid: int, value: bytes) -> None:",
-		"    def on_unsigned_array(self, fid: int, value: list[int]) -> None:",
-		"    def on_signed_array(self, fid: int, value: list[int]) -> None:",
-		"    def on_float32_array(self, fid: int, value: list[float]) -> None:",
-		// A schema-bounded id is DECLINED in on_field when the header is not the
-		// declared type: fp32/fp64/string/blob all share FIXLEN, so only the
-		// subtype separates them, and a fixlen array shares ARRAY_FIXLEN the same
-		// way. §7.3 wins over the schema bound, so the tag is decided first and
-		// the bound reaches only a field that survives it.
 		"if fld.subtype != FixlenSubtype.STRING:",
-		"if fld.subtype != FixlenSubtype.BLOB:",
-		"if fld.type != WireType.ARRAY_UNSIGNED:",
-		"if fld.type != WireType.ARRAY_SIGNED:",
-		"if fld.type != WireType.ARRAY_FIXLEN or fld.subtype != FixlenSubtype.FP32:",
-		// on_array_begin is left with the declared element WIDTH alone.
-		"    def on_array_begin(self, fid: int, wtype: WireType, count: int):",
-		"                return (None, None, 4294967295)",
-		// Every bound is one number, in one place.
-		"                return 2  # i: schema count",
-		"                return 2  # k: schema count",
 		// An unmatched sequence is declined, which skips its whole subtree.
 		"        return False",
 	} {
 		if !strings.Contains(mod, want) {
 			t.Errorf("message.py missing %q\n%s", want, mod)
+		}
+	}
+	// The hooks the table emptied are not emitted at all: an override that can
+	// never be reached would cost a Python call per field for nothing.
+	for _, gone := range []string{
+		"    def on_float32(self, fid: int, value: float) -> None:",
+		"    def on_float64(self, fid: int, value: float) -> None:",
+		"    def on_bytes(self, fid: int, value: bytes) -> None:",
+		"    def on_unsigned_array(self, fid: int, value: list[int]) -> None:",
+		"    def on_signed_array(self, fid: int, value: list[int]) -> None:",
+		"    def on_float32_array(self, fid: int, value: list[float]) -> None:",
+		"    def on_array_begin(self, fid: int, wtype: WireType, count: int):",
+	} {
+		if strings.Contains(mod, gone) {
+			t.Errorf("a hook the destination table emptied must not be emitted: %q\n%s", gone, mod)
 		}
 	}
 	// No skip plumbing survives beyond the §7.3 decline: the corelib does the
@@ -1598,17 +1624,22 @@ messages:
 		// An ARRAY's elements are bounded one step earlier, at the count header: the
 		// pair is handed to the decoder, which applies it as each element is read.
 		// A scan of the assembled list would come too late to reject an element a
-		// truncation stops the array from ever completing (§5.2).
-		"                return (None, None, 255)",
+		// truncation stops the array from ever completing (§5.2). Here the array is
+		// on the destination table, so the pair rides its entry.
+		"    .unsigned_array(8, at=4, cap=4, count_at=8, elem_max=255)",
 	} {
 		if !strings.Contains(got, want) {
 			t.Errorf("message.py missing width guard %q:\n%s", want, got)
 		}
 	}
-	// 64-bit destinations store bare: the whole arm is the assignment.
+	// A 64-bit destination has no width to guard, which is exactly what lets the
+	// destination table carry it: the store is `words[at] = value` and there is no
+	// verdict to lose. The narrow ones above stay on the visitor for the opposite
+	// reason -- an entry carries no scalar width, and taking that verdict after the
+	// decode would put it behind a truncation §5.2 says it outranks.
 	for _, want := range []string{
-		"            elif fid == 3:\n                self._o.d_u64 = value",
-		"            elif fid == 7:\n                self._o.h_i64 = value",
+		"    .unsigned(3, at=0, count_at=1)",
+		"    .signed(7, at=2, count_at=3)",
 	} {
 		if !strings.Contains(got, want) {
 			t.Errorf("message.py: a 64-bit destination must store unguarded (%q):\n%s", want, got)
@@ -1761,20 +1792,19 @@ messages:
 	for _, want := range []string{
 		"max_dyn_string_len=MAX_DYN_STRING_LEN",
 		"max_dyn_array_count=2",
-		`                return 8  # s: schema maxlen`,
-		`                return 4  # arr: schema count`,
-		// The bounded string at id 1 gets the §7.3 decline...
-		`            if fld.id == 1:
-                if fld.subtype != FixlenSubtype.STRING:
-                    return False`,
-		// ...and so does the UNBOUNDED one at id 5. It is the field the cap
-		// governs, which is exactly why a header contradicting its declared type
-		// must be skipped before the codec's parked verdict can be spent on it.
-		`            elif fld.id == 5:
-                if fld.subtype != FixlenSubtype.STRING:
-                    return False`,
-		// An id this scope does not declare is skipped outright.
-		`            if fld.id not in {1, 2, 3, 4, 5}:
+		// The schema bound is DECLARED on the entry for every field the table
+		// carries -- `maxlen` for a string or blob, `cap` for an array -- which is
+		// the same number on_schema_bound used to answer, reaching the same rule.
+		"    .string(1, at=0, maxlen=8, count_at=0)",
+		"    .unsigned_array(3, at=2, cap=4, count_at=6, elem_max=4294967295)",
+		// The UNBOUNDED string at id 5 declares maxlen=0, which is how an entry
+		// says the schema bounds nothing -- so the cap keeps governing it, and the
+		// §7.3 decline that must precede the cap is the corelib's own tag test on
+		// the entry rather than an on_field arm.
+		"    .string(5, at=2, maxlen=0, count_at=7)",
+		// An id this scope does not declare is still skipped outright; the set is
+		// what the VISITOR still owns, since a bound id never reaches this hook.
+		`            if fld.id not in {4}:
                 return False`,
 	} {
 		if !strings.Contains(mod, want) {

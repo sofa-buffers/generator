@@ -45,3 +45,31 @@ d = Telemetry.decoder(reassembly=MAX_FIELD_SPAN + (1 << 20))
 The one-shot `Telemetry.decode(data)` needs neither: a message fed in a single
 call never touches the buffer, so it is built with `MAX_FIELD_SPAN` — the most a
 *truncated* message can leave behind.
+
+## When a streamed message fills in
+
+Part of a message is decoded through a *destination table*: the corelib writes
+those fields straight into storage the module owns, without a Python callback per
+field, and one pass moves them onto the dataclass. That pass runs when a decode
+**completes**.
+
+For `decode(data)` nothing is observable — it returns a finished message or
+raises. For the streaming reader it means `.message` fills in from two directions:
+
+```python
+d = Telemetry.decoder()
+d.feed(first)          # INCOMPLETE — fields the visitor handles are already there
+d.feed(rest)           # COMPLETE   — the table's fields land now, all at once
+d.message              # the whole message, either way
+```
+
+A message that never completes therefore shows only the part the visitor handled.
+Nothing is lost: a decode short of COMPLETE has no finished message to report, and
+both refusals still surface as `SofaDecodeError` / `SofaIncompleteError`.
+
+Which fields go which way follows from the schema, not from a setting: `u64`,
+`i64`, `fp32`, `fp64`, `boolean`, `string`, `blob` and arrays with a declared
+`count` ride the table; the narrower integers, `enum` and `bitfield` (whose
+declared width the table cannot carry), arrays the schema leaves unbounded, and
+arrays of strings, blobs, structs, unions or arrays stay on the visitor. A class
+with fewer than three table-carried fields uses none at all.
