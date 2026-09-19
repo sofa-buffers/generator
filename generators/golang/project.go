@@ -397,7 +397,7 @@ func (g *gen) harness(s *ir.Schema, modPath string) []byte {
 	f.line("\tr.i++")
 	f.line("\treturn 1, nil")
 	f.line("}")
-	return f.bytes(g.banner, g.license)
+	return g.render(f, "harness/main.go")
 }
 
 func defaultMessage(s *ir.Schema) string {
