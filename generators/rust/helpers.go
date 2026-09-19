@@ -260,8 +260,20 @@ func (g *gen) rustSeqNew(hasCount bool) string {
 // their materialized default value -- including a NaN default, which the field is
 // then never equal to, so it always reaches the wire.
 func (g *gen) rustLeafNe(acc string, f *ir.Field) string {
-	if f.Kind == ir.KindString {
+	switch f.Kind {
+	case ir.KindBool:
+		// The bool itself is the test: comparing it against a literal is a
+		// redundant comparison (clippy::bool_comparison).
+		if g.rustFieldDefault(f) == "true" {
+			return "!" + acc
+		}
+		return acc
+	case ir.KindString:
 		lit, _ := f.Default.(string)
+		if lit == "" {
+			// Every string representation here derefs to str.
+			return fmt.Sprintf("!%s.is_empty()", acc)
+		}
 		// heapless::String and alloc::String both compare through as_str(); only a
 		// std String is directly PartialEq<&str> here.
 		if g.noStd || (g.staticStore && f.HasMaxlen) {

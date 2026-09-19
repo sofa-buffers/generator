@@ -581,6 +581,28 @@ func fieldsHaveDeprecated(fields []*ir.Field) bool {
 	return false
 }
 
+// approxConstantAllow sits on the impl blocks that spell a float default
+// (Default, and serialize's omit test). clippy::approx_constant is deny by
+// default and fires on a literal near a std constant, such as a schema default
+// of 3.141592653589793; the literal is the schema's value, written as declared.
+const approxConstantAllow = "#[allow(clippy::approx_constant)] // float defaults are the schema's values, written as declared"
+
+// fieldsHaveFloatDefault reports whether any of the fields spells a declared
+// floating-point default: an fp32/fp64 scalar, or a native fp array.
+func (g *gen) fieldsHaveFloatDefault(fields []*ir.Field) bool {
+	for _, fld := range fields {
+		switch {
+		case (fld.Kind == ir.KindFP32 || fld.Kind == ir.KindFP64) && fld.Default != nil:
+			return true
+		case fld.Kind == ir.KindArray && (fld.Elem == ir.KindFP32 || fld.Elem == ir.KindFP64):
+			if _, ok := g.rustNativeArrayParts(fld); ok {
+				return true
+			}
+		}
+	}
+	return false
+}
+
 func (g *gen) emitStruct(f *rfile, name string, fields []*ir.Field, isMessage bool, summary string) {
 	// rustdoc summary attaches to the struct that immediately follows.
 	f.emitDoc("", summary)
@@ -622,8 +644,12 @@ func (g *gen) emitStruct(f *rfile, name string, fields []*ir.Field, isMessage bo
 	// which would trip the deprecated lint; suppress it over the impl blocks that
 	// touch them so the generated crate stays warning-clean.
 	deprecated := fieldsHaveDeprecated(fields)
+	floatDefault := g.fieldsHaveFloatDefault(fields)
 	if deprecated {
 		f.line("#[allow(deprecated)]")
+	}
+	if floatDefault {
+		f.line(approxConstantAllow)
 	}
 	f.line("impl Default for %s {", name)
 	f.line("    fn default() -> Self {")
@@ -638,6 +664,9 @@ func (g *gen) emitStruct(f *rfile, name string, fields []*ir.Field, isMessage bo
 
 	if deprecated {
 		f.line("#[allow(deprecated)]")
+	}
+	if floatDefault {
+		f.line(approxConstantAllow)
 	}
 	f.line("impl %s {", name)
 	ms := g.messageSize(name, fields)
@@ -755,7 +784,7 @@ func (g *gen) emitSerialize(f *rfile, fld *ir.Field) {
 		// blob is a leaf: omit when equal to its default. Compare as slices so the
 		// same form works for std Vec and no_std heapless/alloc Vec alike.
 		if raw, ok := g.blobBytes(fld); ok {
-			f.line("        if &%s[..] != &%s[..] { let _ = os.write_blob(%d, &%s); }", acc, byteSliceLit(raw), fld.ID, acc)
+			f.line("        if %s[..] != %s[..] { let _ = os.write_blob(%d, &%s); }", acc, byteSliceLit(raw), fld.ID, acc)
 		} else {
 			f.line("        if !%s.is_empty() { let _ = os.write_blob(%d, &%s); }", acc, fld.ID, acc)
 		}
@@ -818,7 +847,7 @@ func (g *gen) nativeArrayNe(fld *ir.Field, acc string) string {
 		// heapless/alloc Vec alike. The literal is the default exactly as declared
 		// -- the same one the field is constructed with -- or a field sitting on
 		// its default would never compare equal and §2 would never omit it.
-		return fmt.Sprintf("&%s[..] != &[%s][..]", acc, parts)
+		return fmt.Sprintf("%s[..] != [%s][..]", acc, parts)
 	}
 	return fmt.Sprintf("!%s.is_empty()", acc)
 }

@@ -107,7 +107,7 @@ func TestRustStructural(t *testing.T) {
 		"pub someboolarray: Vec<bool>,",                // bounded bool array
 		"someuintarray: vec![0, 1, 1000, 4294967295],", // default is an N-element array literal
 		"someboolarray: vec![true, true, false],",      // the declared default exactly as written -- `count` never pads it
-		"if &self.someuintarray[..] != &[0, 1, 1000, 4294967295][..] {", // omit-guard is a default compare
+		"if self.someuintarray[..] != [0, 1, 1000, 4294967295][..] {", // omit-guard is a default compare
 		// Over-count rejects (generator#100/#216), then the container is sized to the
 		// count the reject just approved and the wire's M elements are collected into
 		// it (generator#505).
@@ -162,7 +162,7 @@ func TestRustStructural(t *testing.T) {
 		"pub somemap: heapless::Vec<",                                      // bounded -> heapless (default no_std storage)
 		"pub fn encode(&self) -> heapless::Vec<u8,",                        // heap-free encode
 		"stack: heapless::Vec<_Loc,",                                       // bounded decode stack
-		"if self.somestring.as_str() != \"\" {",                            // string omit via as_str
+		"if !self.somestring.is_empty() {",                            // string omit via as_str
 		"acc: sofab::PayloadAcc<",                                          // the corelib's accumulator, over storage this crate names (generator#345)
 		"match self.acc.feed(total, offset, chunk) { Ok(Some(_v)) => _v, Ok(None) => return, Err(_) => { self.err = true; return; } };", // ...whose finite storage adds the BufferFull arm
 		"match core::str::from_utf8(_p) { Ok(_v) => _v, Err(_) => { self.inv = true; \"\" } }",                                          // strict UTF-8 -> INVALID, agrees with std (issue #85)
@@ -907,7 +907,7 @@ messages:
 				}
 			}
 			// The write guard reads the SAME unpadded literal.
-			if !strings.Contains(m, "if &self.short[..] != &[1, 2][..] {") {
+			if !strings.Contains(m, "if self.short[..] != [1, 2][..] {") {
 				t.Errorf("the omit guard must compare against the unpadded default:\n%s", m)
 			}
 			// A default-less count:N array is default only when EMPTY: an all-zero
@@ -3392,6 +3392,7 @@ func TestRustNoBlanketAllow(t *testing.T) {
 	narrow := map[string]bool{
 		"#[allow(deprecated)]": true,
 		"#[allow(non_camel_case_types)] // variants spell the schema path (Root_a_b), not a type name": true,
+		approxConstantAllow: true,
 	}
 	for _, cfg := range []map[string]any{
 		{"corelib": "rs"},
@@ -3468,4 +3469,24 @@ func TestRustHarnessDeclaresTheModulePub(t *testing.T) {
 		}
 	}
 	t.Fatal("no src/main.rs")
+}
+
+// TestRustFloatDefaultsCarryTheApproxConstantAllow: a float default near a std
+// constant (the example's somefp64 is 3.141592653589793) trips
+// clippy::approx_constant, which is deny by default -- a user's `cargo clippy`
+// fails on it outright. The allow sits on exactly the two impl blocks that spell
+// the literal, and only on a struct that has one.
+func TestRustFloatDefaultsCarryTheApproxConstantAllow(t *testing.T) {
+	m := exampleModule(t, map[string]any{"corelib": "rs"})
+	for _, head := range []string{"impl Default for Myfirstmessage {", "impl Myfirstmessage {"} {
+		if !strings.Contains(m, approxConstantAllow+"\n"+head) {
+			t.Errorf("%q is not preceded by the approx_constant allow", head)
+		}
+	}
+	if strings.Contains(m, approxConstantAllow+"\nimpl Default for MyfirstmessageSomemapElem {") {
+		t.Error("a struct with no float default carries the approx_constant allow")
+	}
+	if n := strings.Count(m, approxConstantAllow); n != 2 {
+		t.Errorf("approx_constant allow emitted %d times, want 2 (Default + serialize of the one struct with a float default)", n)
+	}
 }
