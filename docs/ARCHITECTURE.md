@@ -5604,6 +5604,7 @@ A reimplementation is **conformant** when it reproduces these gates:
    | python (both engines) | `ruff check --select F,E9` (pyflakes + syntax errors), ruff pinned to one version; every process under `PYTHONWARNINGS=error` | `RUFF_VERSION` and a sweep at the end of `tests/conformance/python/run.sh`; `PYTHONWARNINGS` exported once, after the accelerator build |
    | java | `javac -Xlint:all -Werror` | the generated pom compiles with `-Xlint:all`; `MVN_STRICT` (`-Dmaven.compiler.failOnWarning=true`) on every `mvn package` of a generated project and `JAVAC_STRICT` on the corpus `javac` loop in `tests/conformance/java/run.sh` |
    | kotlin (the JVM harness builds, the corpus project and the `commonMain` metadata type-check) | `allWarningsAsErrors` | an init script (`KT_STRICT`) handed to every Gradle build of generated code in `tests/conformance/kotlin/run.sh` |
+   | csharp | `dotnet build -warnaserror` (nullable analysis stays off: the generated csproj sets `<Nullable>disable</Nullable>`) | `DOTNET_STRICT`, read by the one `dbuild` helper every `dotnet build` in `tests/conformance/csharp/run.sh` goes through |
 
    The generated C and C++ project Makefiles read `WARNFLAGS` (default
    `-Wall -Wextra`) apart from `CFLAGS`/`CXXFLAGS`, which is what lets one
@@ -5673,6 +5674,19 @@ A reimplementation is **conformant** when it reproduces these gates:
    plugin that moves it fails the build instead of silently dropping the gate. The
    multiplatform check compiles `commonMain` metadata only; no Kotlin/Native or JS
    compilation is part of the suite, so none is gated.
+
+   C#: `-warnaserror` is an MSBuild switch, so it reaches the referenced
+   corelib-cs project too, the way the C Makefile holds corelib-c-cpp's sources
+   to `WARNFLAGS`. Besides the example, the conformance messages and every
+   driver project, the suite builds the whole corpus, every realworld file and a
+   set of **narrow** messages (empty, one scalar kind, one array kind, a union
+   alone, a fully dynamic one), uncapped and with receiver caps. A visitor
+   callback dispatches only when the message declares a field of its kind, so a
+   narrow message is where an empty `switch ((cur, id)) { }` (CS1522) or fill
+   state nothing reads (CS0414) would come back; built with the pre-fix visitor
+   that set fails with 118 CS1522 and 26 CS0414. A `$defs`-only file still gets
+   a `Program.cs`; it carries no bench sink or warmup count and no `return`
+   after the message switch, which would be CS0414 and CS0162 there.
 
 ---
 
