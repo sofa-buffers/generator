@@ -294,6 +294,10 @@ func (g *gen) cppArrayElem(elem ir.Kind, ref *ir.TypeRef, items *ir.ArrayElem, e
 		// temporary of the wire element type wrong: the c-cpp one dangles, and the
 		// corelib-cpp one is empty again on the next chunk, so every element an
 		// earlier chunk delivered is lost.
+		//
+		// The byte storage must not make the decode a u8 one, though: the elements
+		// are booleans (§4.4), which the decode reaches through a bool view of this
+		// member -- see viewedElem.
 		return "std::uint8_t"
 	case ir.KindEnum, ir.KindStruct, ir.KindUnion:
 		return g.typeName(ref.Key)

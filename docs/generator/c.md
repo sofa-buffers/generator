@@ -26,3 +26,11 @@ A message `reading` with the default prefix becomes `message_reading`,
 Set it to something project-specific when the generated code is linked
 alongside other C in the same binary — two schemas generated with the same
 prefix and an overlapping message name collide at link time.
+
+## Booleans
+
+A `boolean` field, and each element of a `boolean` array, is a `uint8_t`.
+
+- **Decode.** Every non-zero wire value, however wide, is stored as `1`.
+- **Encode.** The member is written as it is stored. Keep it at `0` or `1` so
+  the message carries the canonical `true`.

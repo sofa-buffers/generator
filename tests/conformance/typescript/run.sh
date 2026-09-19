@@ -921,7 +921,7 @@ echo "==> int64: long corpus typechecks ($n64 definitions with a 64-bit field)"
 # default ("" / empty blob / zero-valued Point) that §2 omits on the wire and the
 # id-keyed placement has to restore.
 echo "==> nested wrapper rows round-trip"
-NR='{"strrows":[["a","bb","ccc"],["","","zz"]],"blobrows":[[[1,2],[3]],[[],[9,9,9,9]]],"structrows":[[{"x":1,"y":2},{"x":0,"y":0}],[{"x":-7,"y":8},{"x":3,"y":4}]],"strcube":[[["p","q"],["","r"]],[["s",""],["t","u"]]],"numrows":[[1,2,3],[4,5,6]],"fprows":[[1.5,2.5],[0,3.25]],"enumrows":[[0,1,2],[2]],"bfrows":[[1,2,3],[0]]}'
+NR='{"strrows":[["a","bb","ccc"],["","","zz"]],"blobrows":[[[1,2],[3]],[[],[9,9,9,9]]],"structrows":[[{"x":1,"y":2},{"x":0,"y":0}],[{"x":-7,"y":8},{"x":3,"y":4}]],"strcube":[[["p","q"],["","r"]],[["s",""],["t","u"]]],"numrows":[[1,2,3],[4,5,6]],"fprows":[[1.5,2.5],[0,3.25]],"enumrows":[[0,1,2],[2]],"bfrows":[[1,2,3],[0]],"boolrows":[[true,false,true],[false]]}'
 NROUT=$(cd "$WORK/corpus/nested_rows" && printf '%s' "$NR" | npx tsx harness.ts encode NestedRows | npx tsx harness.ts decode NestedRows)
 [ "$NROUT" = "$NR" ] || { echo "FAIL: nested wrapper row round-trip drift"; echo "  in : $NR"; echo "  out: $NROUT"; exit 1; }
 echo "==> nested wrapper rows OK"
