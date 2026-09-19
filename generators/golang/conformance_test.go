@@ -138,7 +138,7 @@ func buildGoHarness(t *testing.T, corelib, def string) (string, error) {
 			return "", err
 		}
 	}
-	for _, args := range [][]string{{"mod", "tidy"}, {"build", "-o", "harness_bin", "./harness"}} {
+	for _, args := range [][]string{{"mod", "tidy"}, {"vet", "./..."}, {"build", "-o", "harness_bin", "./harness"}} {
 		cmd := exec.Command("go", args...)
 		cmd.Dir = dir
 		cmd.Env = append(os.Environ(), "GOFLAGS=-mod=mod")

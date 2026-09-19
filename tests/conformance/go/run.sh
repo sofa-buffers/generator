@@ -1251,4 +1251,21 @@ sed -i "s#\${SOFAB_GO_CORELIB}#$CORELIB#" "$WORK/repeated/go.mod"
 python3 "$ROOT/tests/conformance/lib/check_repeated_id.py" "Go" \
     -- "$WORK/repeated-harness"
 
+# go vet over every module this run generated (ARCHITECTURE §12 gate 9). The
+# compiler already rejects an unused import or variable; vet is Go's warning
+# class, and a finding in generated code is one a user's CI would trip over.
+# It sweeps $WORK rather than listing the projects, so a block added above is
+# covered the day it is written; the hand-written drivers placed inside a
+# generated module are vetted with it. Only a cloned corelib is left out.
+echo "==> go vet: every generated module"
+_vetted=0
+for mod in $(find "$WORK" -name go.mod -not -path "$WORK/corelib/*" | sort); do
+    dir=$(dirname "$mod")
+    ( cd "$dir" && GOFLAGS=-mod=mod go vet ./... ) \
+        || { echo "FAIL: go vet in ${dir#"$WORK"/}"; exit 1; }
+    _vetted=$((_vetted + 1))
+done
+[ "$_vetted" -gt 0 ] || { echo "FAIL: go vet found no generated module to vet"; exit 1; }
+echo "==> go vet: $_vetted modules clean"
+
 echo "PASS"
