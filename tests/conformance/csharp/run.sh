@@ -18,6 +18,18 @@ WORK=$(mktemp -d)
 trap 'rm -rf "$WORK"' EXIT
 export DOTNET_SYSTEM_GLOBALIZATION_INVARIANT=1 DOTNET_CLI_TELEMETRY_OPTOUT=1 DOTNET_NOLOGO=1
 
+# Warnings are errors in EVERY build of generated code (ARCHITECTURE §12 gate 9):
+# a warning in Message.cs is a hard error in a consumer's TreatWarningsAsErrors
+# build, so it must fail here first. Every `dotnet build` below goes through
+# dbuild, so a new step cannot skip the policy. -warnaserror is an MSBuild switch
+# and reaches the referenced corelib-cs project as well. The build output goes
+# to a log that is printed on failure; `-v q` alone would hide the error text.
+DOTNET_STRICT="-warnaserror"
+dbuild() {
+    ( cd "$1" && dotnet build -v q $DOTNET_STRICT >"$WORK/dotnet-build.log" 2>&1 ) || {
+        cat "$WORK/dotnet-build.log"; echo "FAIL: dotnet build $DOTNET_STRICT in $1"; exit 1; }
+}
+
 if [ -z "$CORELIB" ]; then
     clone_corelib corelib-cs "$WORK/corelib"
     CORELIB="$WORK/corelib"
@@ -47,7 +59,7 @@ python3 "$ROOT/tests/conformance/lib/check_vectors_decode.py" --emit-schema \
 
 build() {
     ( cd "$ROOT" && go run ./cmd/sofabgen --config "$WORK/cfg.yaml" --lang csharp --in "$1" --out "$2" )
-    ( cd "$2" && dotnet build -v q >/dev/null )
+    dbuild "$2"
 }
 
 echo "==> generating + building example + conformance projects"
@@ -465,7 +477,7 @@ cat > "$WORK/cfg-limit.yaml" <<'YAML'
 generic: { emit: project, max_dyn_array_count: 4 }
 YAML
 ( cd "$ROOT" && go run ./cmd/sofabgen --config "$WORK/cfg-limit.yaml" --lang csharp --in "$WORK/dyn.yaml" --out "$WORK/dynlim" )
-( cd "$WORK/dynlim" && dotnet build -v q >/dev/null )
+dbuild "$WORK/dynlim"
 build "$WORK/dyn.yaml" "$WORK/dynfree"
 HL="dotnet $WORK/dynlim/bin/Debug/net9.0/harness.dll"
 HF="dotnet $WORK/dynfree/bin/Debug/net9.0/harness.dll"
@@ -551,7 +563,7 @@ YAML
     --in "$WORK/skipblob.yaml" --out "$WORK/skipblob" )
 rm "$WORK/skipblob/Program.cs"
 cp "$ROOT/tests/conformance/csharp/SkippedBlobAlloc.cs" "$WORK/skipblob/"
-( cd "$WORK/skipblob" && dotnet build -v q >/dev/null )
+dbuild "$WORK/skipblob"
 dotnet "$WORK/skipblob/bin/Debug/net9.0/harness.dll" \
     || { echo "FAIL: a skipped blob must not be materialised"; exit 1; }
 echo "==> skipped-blob allocation OK"
@@ -578,7 +590,7 @@ echo "==> a decoded message owns its bytes (CORELIB_PLAN §6.7, generator#412)"
     --in "$ROOT/examples/messages/example.yaml" --out "$WORK/own" )
 rm "$WORK/own/Program.cs"
 cp "$ROOT/tests/conformance/csharp/OwnershipCheck.cs" "$WORK/own/"
-( cd "$WORK/own" && dotnet build -v q >/dev/null )
+dbuild "$WORK/own"
 dotnet "$WORK/own/bin/Debug/net9.0/harness.dll" \
     || { echo "FAIL: a decoded field aliased the buffer it was decoded from"; exit 1; }
 echo "==> decode ownership OK"
@@ -610,7 +622,7 @@ cat > "$WORK/cfg-caps.yaml" <<'YAML'
 generic: { emit: project, max_dyn_string_len: 8, max_dyn_blob_len: 8 }
 YAML
 ( cd "$ROOT" && go run ./cmd/sofabgen --config "$WORK/cfg-caps.yaml" --lang csharp --in "$WORK/caps.yaml" --out "$WORK/caps" )
-( cd "$WORK/caps" && dotnet build -v q >/dev/null )
+dbuild "$WORK/caps"
 HP="dotnet $WORK/caps/bin/Debug/net9.0/harness.dll"
 
 # 1. 9 bytes into the uncapped-by-schema string: one over max_dyn_string_len 8.
@@ -780,12 +792,70 @@ ST=$(printf '' | $HC trydecode vecu | head -n1)       # empty message: valid
 [ "$ST" = "COMPLETE" ] || { echo "FAIL: empty message -> $ST (want COMPLETE)"; exit 1; }
 echo "==> TryDecode status OK (0x80 INCOMPLETE, empty COMPLETE)"
 
-echo "==> corpus + realworld: every definition builds"
-for def in "$ROOT"/tests/matrix/corpus/defs/*.yaml "$ROOT"/examples/messages/realworld/vehicle_telemetry.yaml; do
+# Every realworld file, the two $defs-only libraries (common, diagnostics) among
+# them: a project with no message still has a Program.cs, and what it would
+# leave unread is exactly the kind of warning -warnaserror is here to catch.
+echo "==> corpus + realworld: every definition builds warning-free"
+for def in "$ROOT"/tests/matrix/corpus/defs/*.yaml "$ROOT"/examples/messages/realworld/*.yaml; do
     name=$(basename "$def" .yaml)
     build "$def" "$WORK/corpus/$name"
 done
-echo "==> corpus builds ($(ls "$ROOT"/tests/matrix/corpus/defs/*.yaml | wc -l) definitions + realworld example)"
+echo "==> corpus builds ($(ls "$ROOT"/tests/matrix/corpus/defs/*.yaml | wc -l) definitions + $(ls "$ROOT"/examples/messages/realworld/*.yaml | wc -l) realworld files)"
+
+# Narrow shapes. A visitor is emitted per message, and each callback's dispatch
+# exists only when the message declares a field of that callback's kind -- so a
+# message that LACKS kinds is where an empty `switch ((cur, id)) { }` (CS1522) or
+# fill state that nothing reads (CS0414) would come back. The corpus messages are
+# broad; these are the narrow ones, one message each, built under -warnaserror.
+echo "==> narrow message shapes build warning-free"
+cat > "$WORK/shapes.yaml" <<'YAML'
+version: 1
+messages:
+  empty: { payload: {} }
+  only_u32: { payload: { a: { id: 0, type: u32 } } }
+  only_i8: { payload: { a: { id: 0, type: i8 } } }
+  only_fp64: { payload: { a: { id: 0, type: fp64 } } }
+  only_bool: { payload: { a: { id: 0, type: boolean } } }
+  only_str: { payload: { s: { id: 0, type: string } } }
+  only_blob: { payload: { b: { id: 0, type: blob, maxlen: 8 } } }
+  only_boolarr: { payload: { b: { id: 0, type: array, items: { type: boolean, count: 4 } } } }
+  only_u8arr: { payload: { b: { id: 0, type: array, items: { type: u8 } } } }
+  only_fprows: { payload: { mx: { id: 0, type: array, items: { type: array, count: 3, items: { type: fp32, count: 2 } } } } }
+  only_structarr: { payload: { ps: { id: 0, type: array, items: { type: struct, count: 4, fields: { x: { id: 0, type: i16 } } } } } }
+  only_strarr: { payload: { ss: { id: 0, type: array, items: { type: string } } } }
+  only_union:
+    payload:
+      u:
+        id: 0
+        type: union
+        oneof:
+          as_u16: { id: 0, type: u16 }
+          as_text: { id: 1, type: string, maxlen: 16 }
+  union_mixed:
+    payload:
+      tag: { id: 0, type: u32 }
+      choice:
+        id: 1
+        type: union
+        default_id: 0
+        oneof:
+          as_u16: { id: 0, type: u16 }
+          as_i32: { id: 1, type: i32 }
+          as_text: { id: 2, type: string, maxlen: 16 }
+          as_blob: { id: 3, type: blob, maxlen: 8 }
+      trailer: { id: 2, type: u8 }
+  fully_dynamic:
+    payload:
+      dyn_arr: { id: 0, type: array, items: { type: u32 } }
+      dyn_str: { id: 1, type: string }
+      dyn_blb: { id: 2, type: blob }
+      def_arr: { id: 3, type: array, items: { type: u32 }, default: [7, 9] }
+YAML
+build "$WORK/shapes.yaml" "$WORK/shapes"
+( cd "$ROOT" && go run ./cmd/sofabgen --config "$WORK/cfg-limit.yaml" --lang csharp \
+    --in "$WORK/shapes.yaml" --out "$WORK/shapes-capped" )
+dbuild "$WORK/shapes-capped"
+echo "==> narrow shapes OK ($(awk '/^messages:/ { m = 1; next } m && /^  [a-z0-9_]+:/ { n++ } END { print n }' "$WORK/shapes.yaml") messages, uncapped and capped)"
 
 # Declared integer width is a VALIDITY bound (MESSAGE_SPEC S7.1 + documentation#32,
 # generator#266, Crucible F-0033 / codegen defect G-0026). A value outside the
@@ -835,7 +905,7 @@ echo "==> enum/bitfield: bounded by the width the declaration implies (S1, gener
 { echo "version: 1"; echo "messages:"; } > "$WORK/closed.yaml"
 python3 "$ROOT/tests/conformance/lib/check_declared_width_kinds.py" --emit-schema >> "$WORK/closed.yaml"
 ( cd "$ROOT" && go run ./cmd/sofabgen --config "$WORK/cfg.yaml" --lang csharp --in "$WORK/closed.yaml" --out "$WORK/closed" )
-( cd "$WORK/closed" && dotnet build -v q >/dev/null )
+dbuild "$WORK/closed"
 python3 "$ROOT/tests/conformance/lib/check_declared_width_kinds.py" "csharp" \
     --invalid-pattern 'InvalidMessage' \
     --stream-verb streamdecode --stream-sizes 1,2,3,0 \
@@ -854,7 +924,7 @@ echo "==> sequence_growth: a wrapper array grows to its highest id, and the inde
 printf 'version: 1\nmessages:\n' > "$WORK/growth.yaml"
 python3 "$ROOT/tests/conformance/lib/check_growth.py" --emit-schema >> "$WORK/growth.yaml"
 ( cd "$ROOT" && go run ./cmd/sofabgen --config "$WORK/cfg-limit.yaml" --lang csharp --in "$WORK/growth.yaml" --out "$WORK/growth" )
-( cd "$WORK/growth" && dotnet build -v q >/dev/null )
+dbuild "$WORK/growth"
 # --cap must equal the max_dyn_array_count the config above generated with:
 # the cases' indices are offsets onto it, so a mismatch moves the boundary.
 python3 "$ROOT/tests/conformance/lib/check_growth.py" \
