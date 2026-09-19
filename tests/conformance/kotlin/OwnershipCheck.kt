@@ -54,6 +54,10 @@
 //     settled on: an aliased string destination must still RE-ENCODE, so the
 //     oracle stays a byte diff and never becomes a UTF-8 error that unrelated
 //     causes could produce.
+
+// The sample fills unsigned arrays (UIntArray), which are still opt-in API.
+@file:OptIn(ExperimentalUnsignedTypes::class)
+
 package message
 
 import org.sofabuffers.sofab.DecodeStatus
