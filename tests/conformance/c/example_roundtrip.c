@@ -8,7 +8,11 @@ int main(void) {
     message_myfirstmessage_init(&m);
 
     /* set representative non-default values across every field kind */
+    /* somei8 is deprecated in the schema; the round-trip must still carry it. */
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wdeprecated-declarations"
     m.somei8 = -42;
+#pragma GCC diagnostic pop
     m.somebool = 1;
     strcpy(m.somestring, "hello sofa");
     /* `count` is a capacity; the array's LENGTH is what goes on the wire
@@ -50,7 +54,10 @@ int main(void) {
     assert(r == SOFAB_RET_OK);
 
     /* verify round-trip */
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wdeprecated-declarations"
     assert(d.somei8 == -42);
+#pragma GCC diagnostic pop
     assert(d.somebool == 1);
     assert(strcmp(d.somestring, "hello sofa") == 0);
     for (int i = 0; i < 5; i++) assert(d.someintarray[i] == (int32_t)(i*1000 - 2000));

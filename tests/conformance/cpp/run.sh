@@ -32,6 +32,18 @@ fi
 echo "==> corelib-cpp: $CPP"
 echo "==> corelib-c-cpp: $CC"
 
+# Warning policy for every build of generated C++ here, in all four profiles
+# (ARCHITECTURE §12): a warning in generated code is an error in a user's -Werror
+# build, so it is one in this suite too. Every g++ leg that is expected to BUILD
+# takes $WARNFLAGS, and every generated project Makefile reads WARNFLAGS, so
+# exporting it covers each `make` leg -- a new one included -- without naming it.
+# The Makefiles apply it to the generated code and the harness only, never to the
+# corelib's own C sources, which are not generated code. The legs that must FAIL
+# to compile (a capability guard's #error) deliberately do not take it: -Werror
+# there could fail them for a reason other than the guard.
+WARNFLAGS="-Wall -Wextra -Werror"
+export WARNFLAGS
+
 # The decode-ownership check in every profile is built with -fsanitize=address
 # and needs the ASan runtime (libasan) present, which is a separate package on
 # some images. Checked once, up front: without this the first instrumented build
@@ -158,21 +170,23 @@ run_variant() {
 
     # The fill schema is the one place in this suite that carries every wire
     # shape, so it is also the one header most likely to hit a literal or
-    # attribute defect -- and the project Makefile above builds it with -Wall
-    # only, while the two -Werror builds further down compile the EXAMPLE schema,
-    # which has no wide bitfield. That gap shipped a real defect once: a bitfield
+    # attribute defect -- and the project Makefile above used to build it with
+    # -Wall only, while the two -Werror builds further down compile the EXAMPLE
+    # schema, which has no wide bitfield. That gap shipped a real defect once: a bitfield
     # flag mask for position 63 was emitted as a bare decimal, which fits no
     # signed type, so gcc and clang answered "integer constant is so large that
     # it is unsigned" -- a warning here, an error in a user's -Werror build, and
     # invisible to this suite (generator#470). Compiling the generated header
-    # strictly, on its own, closes it for every future shape too.
+    # strictly, on its own, closes it for every future shape too. The Makefile
+    # build now takes $WARNFLAGS as well; this leg stays because it compiles the
+    # header alone, with no harness around it to pull in what it forgot to.
     #
     # The header is compiled through a one-line translation unit rather than
     # named on the command line: g++ treats a header given directly as a MAIN
     # file, and `#pragma once` in a main file is itself a -Werror diagnostic.
-    echo "==> [$label] the generated fill header compiles under -Wall -Wextra -Werror"
+    echo "==> [$label] the generated fill header compiles under $WARNFLAGS"
     printf '#include "fill.hpp"\n' > "$WORK/fill-$label/strict_tu.cpp"
-    g++ -std=c++20 -Wall -Wextra -Werror -fsyntax-only $include -I"$WORK/fill-$label" \
+    g++ -std=c++20 -O2 $WARNFLAGS -fsyntax-only $include -I"$WORK/fill-$label" \
         "$WORK/fill-$label/strict_tu.cpp" \
         || { echo "FAIL: [$label] the generated fill header does not compile strictly"; exit 1; }
 
@@ -186,7 +200,7 @@ run_variant() {
     # boundaries, so the pure leg states the platform ceiling.
     STREAM_LIMITS=-DSOFAB_STREAM_LIMITS=1
     [ -n "$corelib" ] && STREAM_LIMITS=
-    g++ -std=c++20 -Wall -Werror $include -I"$WORK/ex-$label" $STREAM_LIMITS \
+    g++ -std=c++20 $WARNFLAGS $include -I"$WORK/ex-$label" $STREAM_LIMITS \
         -DMSG_TYPE=sofabuffers::Myfirstmessage -include myfirstmessage.hpp \
         -o "$WORK/stream-$label" "$ROOT/tests/conformance/cpp/streaming_check.cpp" \
         $STREAM_OBJS
@@ -214,7 +228,7 @@ run_variant() {
     # corelib-c-cpp copy that memcpys each payload from a remembered chunk
     # pointer at completion, both report heap-use-after-free here.
     echo "==> [$label] a decoded message owns its bytes (CORELIB_PLAN S6.7, generator#412)"
-    g++ -std=c++20 -Wall -Werror -g -fsanitize=address $include -I"$WORK/ex-$label" $STREAM_LIMITS \
+    g++ -std=c++20 $WARNFLAGS -g -fsanitize=address $include -I"$WORK/ex-$label" $STREAM_LIMITS \
         -DMSG_TYPE=sofabuffers::Myfirstmessage -include myfirstmessage.hpp \
         -o "$WORK/own-$label" "$ROOT/tests/conformance/cpp/ownership_check.cpp" \
         $OWN_OBJS
@@ -568,7 +582,7 @@ YAML
         make -C "$WORK/ex-$label-strict" clean >/dev/null
         make -C "$WORK/ex-$label-strict" "$@" \
             CFLAGS="-Os -ffunction-sections -fdata-sections -DSOFAB_STRICT_UTF8=1" \
-            CXXFLAGS="-Os -Wall -ffunction-sections -fdata-sections -fno-exceptions -fno-rtti -DSOFAB_STRICT_UTF8=1" \
+            CXXFLAGS="-Os -ffunction-sections -fdata-sections -fno-exceptions -fno-rtti -DSOFAB_STRICT_UTF8=1" \
             >/dev/null
         for surface in decode streamdecode; do
             python3 "$ROOT/tests/conformance/lib/check_skipped_string_utf8.py" "$label" \
@@ -812,7 +826,7 @@ YAML
         name=$(basename "$def" .yaml)
         ( cd "$ROOT" && go run ./cmd/sofabgen --config "$WORK/cfg-corpus-$label.yaml" --lang cpp --in "$def" --out "$WORK/corpus-$label/$name" >/dev/null )
         for h in "$WORK"/corpus-"$label"/"$name"/*.hpp; do
-            # -Wall -Werror, because the defects this loop exists to catch are
+            # $WARNFLAGS (-Werror), because the defects this loop exists to catch are
             # DIAGNOSTICS, not hard errors: an unsuffixed decimal literal above
             # INT64_MAX has no type under [lex.icon], and GCC accepts it as an
             # extension with a mere "integer constant is so large that it is
@@ -827,7 +841,12 @@ YAML
             # -W option at all, so -Wno-... is simply unrecognised there.
             tu="$WORK/corpus-$label/$name/_tu.cpp"
             printf '#include "%s"\n' "$h" > "$tu"
-            g++ -std=c++20 -Wall -Werror -fsyntax-only $include "$tu" \
+            #
+            # -O2 although nothing is code-generated: -Wstrict-aliasing needs the
+            # -fstrict-aliasing it turns on, and without it an enum arm the c-cpp
+            # profile casts was compiled here clean while every optimised build
+            # of the same header warned.
+            g++ -std=c++20 -O2 $WARNFLAGS -fsyntax-only $include "$tu" \
                 || { echo "FAIL: [$label] corpus def $name did not compile"; exit 1; }
         done
     done
@@ -1333,7 +1352,7 @@ int main()
     return failures ? 1 : 0;
 }
 CPP
-g++ -std=c++20 -O2 -Wall -I"$WORK/lim402" -I"$CPP/include" "$WORK/probe402.cpp" -o "$WORK/probe402"
+g++ -std=c++20 -O2 $WARNFLAGS -I"$WORK/lim402" -I"$CPP/include" "$WORK/probe402.cpp" -o "$WORK/probe402"
 "$WORK/probe402" || { echo "FAIL: [cpp] wrapper-array receiver caps (generator#402, §6.2.1)"; exit 1; }
 echo "==> [cpp] wrapper index + element caps OK (rejected before the allocation, bounded array untouched)"
 
@@ -1474,7 +1493,14 @@ subset_cpp() {  # label  expect(ok|fail)  "DISABLE flags"  "yaml"
     name=$1; expect=$2; flags=$3; yaml=$4
     printf '%s' "$yaml" > "$WORK/subc_$name.yaml"
     ( cd "$ROOT" && go run ./cmd/sofabgen --config "$WORK/cfg-clib.yaml" --lang cpp --in "$WORK/subc_$name.yaml" --out "$WORK/subc_$name" >/dev/null )
-    if g++ -std=c++20 -fsyntax-only -x c++ $flags -I"$CC/src/include" "$WORK"/subc_$name/*.hpp 2>/dev/null; then got=ok; else got=fail; fi
+    # Through a translation unit that includes every header, as a consumer does:
+    # a `#pragma once` header handed to g++ as the main file is a diagnostic of
+    # its own. Only an ok leg takes $WARNFLAGS (see its definition).
+    tu="$WORK/subc_$name/_tu.cpp"
+    for h in "$WORK"/subc_$name/*.hpp; do printf '#include "%s"\n' "$h"; done > "$tu"
+    strict=
+    [ "$expect" = ok ] && strict=$WARNFLAGS
+    if g++ -std=c++20 $strict -fsyntax-only $flags -I"$CC/src/include" "$tu" 2>/dev/null; then got=ok; else got=fail; fi
     [ "$got" = "$expect" ] || { echo "FAIL: [$name] expected $expect, got $got ($flags)"; exit 1; }
     echo "   [$name] $got"
 }
@@ -1561,15 +1587,15 @@ if g++ -std=c++20 -DSOFAB_DISABLE_INT64_SUPPORT $BIG -I"$CC/src/include" -I"$WOR
     exit 1
 fi
 # Control 1: one id lower and the same build succeeds -- a ceiling, not a blanket refusal.
-g++ -std=c++20 -DSOFAB_DISABLE_INT64_SUPPORT $BIG -I"$CC/src/include" -I"$WORK/narrowid" \
-    -fsyntax-only "$WORK/idmax_narrow.cpp" 2>/dev/null || {
+g++ -std=c++20 $WARNFLAGS -DSOFAB_DISABLE_INT64_SUPPORT $BIG -I"$CC/src/include" -I"$WORK/narrowid" \
+    -fsyntax-only "$WORK/idmax_narrow.cpp" || {
     echo "FAIL: an id AT SOFAB_ID_MAX must still compile on a 32-bit value build"
     exit 1
 }
 # Control 2: the rejected schema builds on the full 64-bit value build, so the
 # value width is what rejected it and not the descriptor profile.
-g++ -std=c++20 $BIG -I"$CC/src/include" -I"$WORK/wideid" \
-    -fsyntax-only "$WORK/idmax_wide.cpp" 2>/dev/null || {
+g++ -std=c++20 $WARNFLAGS $BIG -I"$CC/src/include" -I"$WORK/wideid" \
+    -fsyntax-only "$WORK/idmax_wide.cpp" || {
     echo "FAIL: the 64-bit value build has no narrowed id ceiling and must accept the schema"
     exit 1
 }
