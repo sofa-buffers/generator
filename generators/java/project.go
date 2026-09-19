@@ -44,6 +44,10 @@ func (g *gen) pom() string {
         <groupId>org.apache.maven.plugins</groupId>
         <artifactId>maven-compiler-plugin</artifactId>
         <version>3.11.0</version>
+        <configuration>
+          <showWarnings>true</showWarnings>
+          <compilerArgs><arg>-Xlint:all</arg></compilerArgs>
+        </configuration>
       </plugin>
       <plugin>
         <groupId>org.apache.maven.plugins</groupId>
@@ -64,13 +68,17 @@ func (g *gen) pom() string {
 
 // benchSinkField names one cheap integer scalar of m, folded in the bench loop so
 // the decode cannot be elided. It runs inside the measured loop, so it must stay
-// cheap -- Json.to() would be counted as decode cost.
+// cheap -- Json.to() would be counted as decode cost. A deprecated field is
+// never chosen: reading it would be a javac [deprecation] warning.
 func benchSinkField(m *ir.Message) string {
 	for _, f := range m.Fields {
+		if f.Deprecated {
+			continue
+		}
 		switch f.Kind {
 		case ir.KindU8, ir.KindU16, ir.KindU32, ir.KindU64,
 			ir.KindI8, ir.KindI16, ir.KindI32, ir.KindI64:
-			return f.Name
+			return javaIdent(f.Name)
 		}
 	}
 	return ""
@@ -289,7 +297,19 @@ func (g *gen) jsonHelper(s *ir.Schema) []byte {
 }
 
 func (g *gen) emitJSONFns(f *jfile, typeName string, fields []*ir.Field) {
+	// The JSON harness round-trips every field, deprecated ones included, from
+	// outside the message class: javac flags each such access as [deprecation].
+	suppress := ""
+	for _, fld := range fields {
+		if fld.Deprecated {
+			suppress = "    @SuppressWarnings(\"deprecation\") // the harness round-trips deprecated fields too"
+			break
+		}
+	}
 	// to
+	if suppress != "" {
+		f.line("%s", suppress)
+	}
 	f.line("    static void to(%s o, StringBuilder b) {", typeName)
 	f.line("        b.append('{');")
 	for i, fld := range fields {
@@ -302,6 +322,9 @@ func (g *gen) emitJSONFns(f *jfile, typeName string, fields []*ir.Field) {
 	f.line("        b.append('}');")
 	f.line("    }")
 	// from
+	if suppress != "" {
+		f.line("%s", suppress)
+	}
 	f.line("    static void from(JsonObject j, %s o) {", typeName)
 	f.line("        JsonElement e;")
 	for _, fld := range fields {

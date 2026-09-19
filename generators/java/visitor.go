@@ -1087,11 +1087,29 @@ func (g *gen) emitArraySkipGuard(f *jfile) {
 	f.line("        if (askip > 0) { askip--; return; }")
 }
 
+// framesTouchDeprecated reports whether any field the visitor writes -- in the
+// root or in any nested struct/union/element scope -- is marked deprecated.
+func framesTouchDeprecated(fs []frame) bool {
+	for _, fr := range fs {
+		for _, fld := range fr.fields {
+			if fld.Deprecated {
+				return true
+			}
+		}
+	}
+	return false
+}
+
 func (g *gen) emitVisitor(f *jfile, name string, fields []*ir.Field) {
 	fs := g.frames(&ir.Message{Name: name, Fields: fields})
 	limArr, limStr, limBlob := g.activeLimits(fs) // per-visitor decode limits (generator#102)
 	g.limArr = limArr                             // for overIndexGuard, which cannot reach fs
 
+	if framesTouchDeprecated(fs) {
+		// The visitor is a separate top-level class, so writing a @Deprecated
+		// field from it is a javac [deprecation] warning; decoding it is intended.
+		f.line("@SuppressWarnings(\"deprecation\") // decode must still fill deprecated fields")
+	}
 	f.line("class %sVisitor implements Visitor {", name)
 	f.line("    private final %s m;", name)
 	f.line("    private int cur = 0;")
