@@ -610,7 +610,7 @@ a reimplementation should emit code that honors all of them:
     written/read by the generated encode/decode, the backends whose deprecation
     marker is compiler-enforced (C, C++, C#, Rust) locally suppress the resulting
     self-use warning around the generated internal accesses (`#pragma GCC
-    diagnostic`, `#pragma warning disable 618`, `#[allow(deprecated)]`) so
+    diagnostic`, `#pragma warning disable 612`, `#[allow(deprecated)]`) so
     generated code stays warning-clean;
   - enum constant `description` and bitfield flag `description` (+ a
     `(default: true|false)` note from the flag's `default`) → a doc comment on each
@@ -4360,6 +4360,16 @@ to hang a count on and no per-element call to hang an index on. Inventing one
 purely to hold a check is the shape the measurements in §9.5 put at 1–2.5
 percentage points of decode and is what this design rejects. A split by field kind
 is allowed, and this is C#'s.
+
+**No arm, no switch; no reader, no field.** Every callback, not only
+`String()`/`Blob()`, builds its `(cur, id)` arms first and opens the switch only
+when there is at least one: a schema with no field of a callback's kind leaves
+that callback's body as the bare `askip` guard, which is the skip. The visitor's
+fill state follows the same rule: the primitive-array index `ai` (and its
+`ArrayBegin` reset) exists only where a primitive-array field does, the `afill`
+counter and its `ArrayBegin` arm only where some position is a native-array fill.
+An empty `switch` is CS1522 and a written-never-read field CS0414 — warnings in a
+file the consumer must not edit, fatal under `TreatWarningsAsErrors`.
 
 **Liveness moved source.** `MaxDynStringLen`/`MaxDynBlobLen` are emitted from the
 same frame walk that builds the dispatch arms, rather than from `ir.Bounds`. The
