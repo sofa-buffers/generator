@@ -19,9 +19,13 @@
 #   language under the given directories -- the generated example project AND
 #   every generated corpus project, never one file -- and fails listing each
 #   offending file with an excerpt of the change the formatter wants. Build
-#   output inside a project (zig's .zig-cache/zig-out, cargo's target/) is not
-#   generated code and is not looked at. A directory set holding no file of the
-#   language fails too: a check over nothing proves nothing.
+#   output inside a project (zig's .zig-cache/zig-out, cargo's target/, dart's
+#   .dart_tool) is not generated code and is not looked at, and neither is a
+#   `corelib` directory: the dart and python suites hand this their whole work
+#   dir, so that a project added to them tomorrow is covered the day it is
+#   written, and that work dir is also where they clone the corelib. A directory
+#   set holding no file of the language fails too: a check over nothing proves
+#   nothing.
 check_format() {
     _cf_lang=$1
     shift
@@ -51,6 +55,36 @@ check_format() {
             _cf_files=$(find "$@" -name target -prune -o -name '*.rs' -type f -print | sort)
             _cf_version="$_cf_version, edition $_cf_ed"
             ;;
+        dart)
+            _cf_version="dart $(dart --version 2>&1 | sed 's/^Dart SDK version: //;s/ .*//')"
+            # `dart format` picks its STYLE from the language version of the
+            # package a file belongs to (short below 3.7, tall from 3.7 on), so
+            # the version decides what "clean" means. Take it from the generated
+            # pubspec rather than hard-coding it here -- that is the constraint
+            # the user's own `dart format` in that package resolves -- and refuse
+            # a tree that declares more than one, which would make the answer
+            # ambiguous rather than make one of them right. Passing it also keeps
+            # the check independent of whether `dart pub get` has written a
+            # package config yet.
+            _cf_lv=$(find "$@" \( -name .dart_tool -o -name corelib \) -prune -o \
+                -name pubspec.yaml -type f -print \
+                | xargs -r sed -n 's/^ *sdk: *[^0-9]*\([0-9]*\.[0-9]*\)\..*/\1/p' | sort -u)
+            if [ "$(printf '%s\n' "$_cf_lv" | grep -c .)" -ne 1 ]; then
+                echo "FAIL: check_format dart: expected exactly one pubspec sdk constraint under $*, got: $_cf_lv"
+                exit 1
+            fi
+            _cf_files=$(find "$@" \( -name .dart_tool -o -name build -o -name corelib \) -prune -o \
+                -name '*.dart' -type f -print | sort)
+            _cf_version="$_cf_version, language version $_cf_lv"
+            ;;
+        python)
+            # The suite pins the ruff version and refuses to start under any
+            # other one (tests/conformance/python/run.sh), because ruff's
+            # formatting changes between releases; $RUFF is that binary.
+            _cf_ruff="${RUFF:-${SOFAB_RUFF:-ruff}}"
+            _cf_version=$("$_cf_ruff" --version)
+            _cf_files=$(find "$@" -name corelib -prune -o -name '*.py' -type f -print | sort)
+            ;;
         *)
             echo "FAIL: check_format: no canonical formatter is defined for '$_cf_lang'"
             exit 1
@@ -71,6 +105,15 @@ check_format() {
         # rustfmt --check prints the change it wants, file by file, so its own
         # output IS the excerpt; there is nothing to re-derive below.
         rust) _cf_out=$(printf '%s\n' "$_cf_files" | xargs rustfmt --check --edition "$_cf_ed" 2>&1) || _cf_rc=$? ;;
+        dart) _cf_out=$(printf '%s\n' "$_cf_files" | xargs dart format --output=none --summary=none \
+            --language-version="$_cf_lv" --set-exit-if-changed 2>&1) || _cf_rc=$? ;;
+        # No --isolated: sofabgen formats the generated tree with the user's own
+        # ruff settings (generators/python/format.go), so a verdict that ignored
+        # them would be a verdict about a tree nobody receives. ruff resolves
+        # its config per file, so both sides resolve the same one. --quiet drops
+        # the "N files already formatted" summary a CLEAN run prints, and only
+        # that: the per-file diff of a dirty one still comes through.
+        python) _cf_out=$(printf '%s\n' "$_cf_files" | xargs "$_cf_ruff" format --no-cache --quiet --check 2>&1) || _cf_rc=$? ;;
     esac
     if [ "$_cf_rc" -eq 0 ] && [ -z "$_cf_out" ]; then
         echo "==> $_cf_lang: $_cf_n generated files are formatter-clean ($_cf_version)"
@@ -84,9 +127,18 @@ check_format() {
     if [ "$(printf '%s\n' "$_cf_out" | wc -l)" -gt 200 ]; then
         echo "  ... (truncated; rerun the formatter over the generated tree for the rest)"
     fi
+    # The files to show a diff for. rustfmt --check and `ruff format --check`
+    # already print the change they want, so their own output above IS the
+    # excerpt and there is nothing to re-derive for them; gofmt -l, zig fmt
+    # --check and `dart format --set-exit-if-changed` only name files.
+    case "$_cf_lang" in
+        go | zig) _cf_bad=$(printf '%s\n' "$_cf_out" | grep -E '\.(go|zig|zon)$' || true) ;;
+        dart) _cf_bad=$(printf '%s\n' "$_cf_out" | sed -n 's/^Changed //p') ;;
+        *) _cf_bad="" ;;
+    esac
     _cf_tmp=$(mktemp -d)
     _cf_shown=0
-    for _cf_f in $(printf '%s\n' "$_cf_out" | grep -E '\.(go|zig|zon)$' || true); do
+    for _cf_f in $_cf_bad; do
         [ -f "$_cf_f" ] || continue
         [ "$_cf_shown" -lt 5 ] || break
         _cf_shown=$((_cf_shown + 1))
@@ -97,6 +149,11 @@ check_format() {
                 cp "$_cf_f" "$_cf_tmp/$(basename "$_cf_f")"
                 zig fmt "$_cf_tmp/$(basename "$_cf_f")" >/dev/null 2>&1 || true
                 diff -u "$_cf_f" "$_cf_tmp/$(basename "$_cf_f")" | head -40 || true
+                ;;
+            dart)
+                dart format --output=show --summary=none --language-version="$_cf_lv" \
+                    "$_cf_f" 2>/dev/null > "$_cf_tmp/want" || true
+                diff -u "$_cf_f" "$_cf_tmp/want" | head -40 || true
                 ;;
         esac
     done
