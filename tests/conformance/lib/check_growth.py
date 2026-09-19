@@ -246,7 +246,8 @@ def main() -> int:
               f"cannot resolve their cap-relative indices")
         return 1
 
-    data = json.load(open(vectors_path))
+    with open(vectors_path) as fh:
+        data = json.load(fh)
     cases = data.get("sequence_growth")
     if not cases:
         print("FAIL: this test_vectors.json carries no `sequence_growth` block -- "

@@ -18,6 +18,21 @@ CORELIB="${1:-${SOFAB_PY_CORELIB:-}}"
 WORK=$(mktemp -d)
 trap 'rm -rf "$WORK"' EXIT
 
+# Python has no compiler warnings, so generated code is held to a linter
+# instead (ARCHITECTURE §12 gate 9): ruff's pyflakes rules (F) and its syntax
+# errors (E9), over every module this run generates. The version is pinned --
+# the lang-python job installs exactly this one -- so a finding is the same
+# finding everywhere. Checked here, before anything is built, so a missing or
+# wrong ruff fails in the first second rather than after the whole run.
+RUFF_VERSION=0.16.8
+RUFF="${SOFAB_RUFF:-ruff}"
+_ruff_have=$("$RUFF" --version 2>/dev/null || true)
+if [ "$_ruff_have" != "ruff $RUFF_VERSION" ]; then
+    echo "FAIL: this suite lints generated code with ruff $RUFF_VERSION, but '$RUFF --version' says '${_ruff_have:-<not found>}'." >&2
+    echo "      pip install ruff==$RUFF_VERSION, or point SOFAB_RUFF at that binary." >&2
+    exit 1
+fi
+
 if [ -z "$CORELIB" ]; then
     echo "==> cloning corelib-py"
     clone_corelib corelib-py "$WORK/corelib"
@@ -97,6 +112,15 @@ else
         exit 1
     fi
 fi
+
+# From here on every Python process runs with warnings as errors -- the
+# `python3 -W error` of every leg, both engines, set once so a new leg cannot
+# miss it. A SyntaxWarning in a generated module (it fires when the module is
+# first compiled, which is its first import here) or a DeprecationWarning from
+# what generated code calls then fails the leg that hit it instead of scrolling
+# past. Set after the accelerator build: setuptools' own deprecation notices are
+# the corelib's toolchain, not generated code.
+export PYTHONWARNINGS=error
 
 cat > "$WORK/cfg.yaml" <<YAML
 generic: { emit: project }
@@ -1104,5 +1128,17 @@ for ENGINE in $ENGINES; do
 done
 unset SOFAB_PUREPYTHON || true
 if [ "$NATIVE" = yes ]; then require_engine native; else require_engine python; fi
+
+# The lint half of gate 9: every generated module in this run, the example's
+# harness.py included. It sweeps $WORK rather than listing the projects, so a
+# block added above is covered the day it is written; only a cloned corelib is
+# left out. --isolated keeps any ruff config on the machine out of the verdict.
+echo "==> ruff $RUFF_VERSION (F, E9): every generated module"
+_linted=$(find "$WORK" -name '*.py' -not -path "$WORK/corelib/*" | wc -l)
+[ "$_linted" -gt 0 ] || { echo "FAIL: ruff found no generated module to lint"; exit 1; }
+find "$WORK" -name '*.py' -not -path "$WORK/corelib/*" \
+    -exec "$RUFF" check --isolated --no-cache --select F,E9 --output-format concise {} + \
+    || { echo "FAIL: ruff found the above in generated Python"; exit 1; }
+echo "==> ruff: $_linted modules clean"
 
 echo "PASS"

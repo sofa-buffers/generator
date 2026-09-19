@@ -149,7 +149,8 @@ def main() -> int:
         if not os.path.isfile(f):
             print(f"FAIL: fixture {f} missing (renamed?)")
             return 1
-        data[f] = open(f, "rb").read()
+        with open(f, "rb") as fh:
+            data[f] = fh.read()
 
     # One process per (fixture, surface). Startup dominates -- a JVM or a
     # `dotnet` host costs far more than decoding a few dozen bytes -- and the

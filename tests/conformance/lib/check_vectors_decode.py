@@ -178,7 +178,8 @@ def main() -> int:
     mx = opt(head, "--max-id")
     max_id = int(mx) if mx else None
 
-    vectors = json.load(open(vectors_path))["vectors"]
+    with open(vectors_path) as fh:
+        vectors = json.load(fh)["vectors"]
 
     # One harness process per vector, run concurrently. Process startup dominates
     # everything else here -- a JVM, a `dotnet` host or an `npx tsx` transpile is
