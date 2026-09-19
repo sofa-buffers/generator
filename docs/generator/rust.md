@@ -11,7 +11,9 @@ choice decides the whole profile — throughput or footprint.
 | `no_std` | boolean | `true` for `rs-no-std` | Emit a genuinely `#![no_std]`, heap-free crate. `corelib: rs-no-std` only. |
 | `allow_dynamic` | boolean | depends on `corelib` | Storage for schema-bounded fields: `String`/`Vec` or fixed-capacity `heapless` ones. |
 
-The generic options apply here too; see the [generic config](README.md).
+The generic options apply here too — including `format`, which decides whether
+`sofabgen` runs `rustfmt` over what it emitted (see [Formatting](#formatting));
+see the [generic config](README.md).
 
 ## `corelib`
 
@@ -86,18 +88,31 @@ lib that re-exports the module, so a dependent crate has nothing to declare.
 
 ## Formatting
 
-Generated Rust is `rustfmt` output: `cargo fmt --check` over a tree that holds
-it passes, so generated files need no exclusion from a formatting gate and never
-come back reformatted.
+`sofabgen` can run `rustfmt` over what it generated, and does so only when you
+ask: it spawns no external tool on its own, so the same version writes the same
+bytes on every machine, whatever happens to be installed.
 
-`sofabgen` runs `rustfmt` itself, once per generated `.rs` file, with the edition
-the generated `Cargo.toml` declares. It runs in the output directory, so a
-`rustfmt.toml` of your own that covers that directory is honoured — the files
+Asking is one switch — the CLI flag `--format`, or the `generic.format` config
+key (the flag wins):
+
+| value | what `sofabgen` does |
+|---|---|
+| `off` (the default) | Never runs `rustfmt`. The files are the generator's own output: valid, compilable, not canonically formatted. |
+| `auto` | Runs `rustfmt` when it is available; when it is not, writes the files unformatted and says so once on stderr. |
+| `require` | Runs `rustfmt`, and fails the run when it is not available. |
+
+With the pass on, every generated `.rs` file goes through `rustfmt` once, at the
+edition the generated `Cargo.toml` declares, run in the output directory — so a
+`rustfmt.toml` of your own that covers that directory is honoured, and the files
 come out the way your own `cargo fmt` over that tree would leave them.
+`cargo fmt --check` over a tree holding them then passes, so generated files need
+no exclusion from a formatting gate and never come back reformatted.
 
-`rustfmt` ships with every `rustup` toolchain, so this normally needs nothing
-from you. If it is not on `PATH`, generation still succeeds: the files are
-written unformatted and `sofabgen` says so on stderr, and a later `cargo fmt`
-over the output directory brings them in line. If `rustfmt` is installed but
-rejects a generated file, generation fails with the file named — that is a
-generator bug, and writing the file would only move it into your build.
+It is a convenience. The generated code is correct and compiles either way; the
+switch only decides whether `rustfmt` has already been over it when you receive it,
+and running `cargo fmt` over the output directory yourself gets you the same tree.
+
+Under `auto` and under `require` alike, a `rustfmt` that RUNS and rejects a
+generated file fails the generation with the file named — that is a generator
+bug, and writing the file would only move it into your build.
+

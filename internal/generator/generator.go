@@ -69,13 +69,22 @@ func Registered() []string {
 // machine happens to have. So the CLI applies this pass to the files Generate
 // produced, just before writing them.
 //
+// The pass is NEVER automatic: sofabgen runs no external tool unless it was
+// asked to. The CLI's `--format` switch (and the `generic.format` config key)
+// decide — off (the default, this capability is not called at all), auto, or
+// require. That default is what keeps a generator run reproducible: the bytes
+// written depend on (IR, config) alone, not on which tools the box has.
+//
 // dir is the output directory the files are about to be written to. The
 // formatter runs there so it resolves the same project-level formatter
 // configuration the user's own `cargo fmt` over that tree would.
 //
-// note carries a single line for stderr when the formatter could not be run at
-// all because it is not installed: the files come back unformatted and that is
-// not an error, a generator must not require a language toolchain to emit code.
+// note reports that the formatter could not be run AT ALL because it is not
+// installed — a bare reason such as "rustfmt not found in PATH", with no
+// leading "note:" and no advice: the caller owns the phrasing, because what
+// follows from it depends on the switch (auto writes the files unformatted and
+// prints the reason; require fails the run with it). A non-empty note is the
+// one signal that NOTHING was formatted, and out is then the input unchanged.
 // A formatter that runs and REFUSES the code is an error — it means the backend
 // emitted something that does not parse.
 type Formatter interface {

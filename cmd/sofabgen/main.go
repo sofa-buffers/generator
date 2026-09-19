@@ -1,9 +1,11 @@
 // Command sofabgen is the SofaBuffers code generator CLI (PLAN §8.8). The
 // surface is deliberately tiny — everything configurable lives in the config
-// file; only --in/--out override it (the paths that legitimately vary between
-// machines). No per-option flags.
+// file; only --in/--out and --format override it (the paths that legitimately
+// vary between machines, and whether this run may spawn the target's
+// formatter). No per-option flags.
 //
 //	sofabgen --config <file> --lang <target> [--in <dir>] [--out <dir>]
+//	         [--format off|auto|require]
 //
 // In M0 no language backend is wired yet, so a run validates the definition(s),
 // resolves $ref, and builds the IR, printing a summary. With --lang set but no
@@ -79,11 +81,12 @@ func run(args []string, stdout, stderr *os.File) int {
 		outDir       = fs.String("out", "", "output folder (overrides generic.output_dir)")
 		printDefault = fs.Bool("print-defaults", false, "print the effective resolved config for --lang and exit")
 		dumpIR       = fs.Bool("dump-ir", false, "print the built IR as JSON for each input and exit (no codegen)")
+		formatFlag   = fs.String("format", "", "run the target's canonical formatter over the generated files: off|auto|require (default off, or generic.format)")
 		showVersion  = fs.Bool("version", false, "print version and exit")
 	)
 	fs.Usage = func() {
 		fmt.Fprintf(stderr, "sofabgen %s — SofaBuffers code generator\n\n", ver)
-		fmt.Fprintf(stderr, "usage: sofabgen --config <file> --lang <target> [--in <dir>] [--out <dir>]\n\n")
+		fmt.Fprintf(stderr, "usage: sofabgen --config <file> --lang <target> [--in <dir>] [--out <dir>] [--format off|auto|require]\n\n")
 		fs.PrintDefaults()
 	}
 	if err := fs.Parse(args); err != nil {
@@ -122,6 +125,13 @@ func run(args []string, stdout, stderr *os.File) int {
 
 	if *lang != "" && !knownTarget(*lang) {
 		fmt.Fprintf(stderr, "error: unknown --lang %q (known: %s)\n", *lang, strings.Join(config.KnownTargets(), ", "))
+		return 1
+	}
+
+	// Resolve the format switch: built-in default < generic.format < --format.
+	mode, err := resolveFormatMode(fs, *formatFlag, cfg, *lang)
+	if err != nil {
+		fmt.Fprintf(stderr, "error: %v\n", err)
 		return 1
 	}
 
@@ -183,7 +193,7 @@ func run(args []string, stdout, stderr *os.File) int {
 		}
 		printSummary(stdout, def, res.Schema)
 		if len(res.Files) > 0 {
-			files, err := formatFiles(*lang, out, res.Files, stderr, &formatNoted)
+			files, err := formatFiles(mode, *lang, out, res.Files, stderr, &formatNoted)
 			if err != nil {
 				fmt.Fprintf(stderr, "error: %v\n", err)
 				exit = 1
@@ -236,14 +246,96 @@ func collectDefs(input string) ([]string, error) {
 	return defs, nil
 }
 
+// formatMode is the value of the --format switch (and of the generic.format
+// config key): whether sofabgen may run the target's canonical formatter over
+// what it generated.
+type formatMode string
+
+const (
+	// formatOff is the DEFAULT. No external program is spawned, ever. A run is
+	// then a pure function of (IR, config): the same sofabgen version writes the
+	// same bytes on every machine, whatever tools happen to be installed — which
+	// is also what the golden snapshots in tests/matrix rest on.
+	formatOff formatMode = "off"
+	// formatAuto formats when the tool is there and writes unformatted output
+	// with a one-line note on stderr when it is not.
+	formatAuto formatMode = "auto"
+	// formatRequire formats, and fails the run when the tool is missing or
+	// refuses the generated code.
+	formatRequire formatMode = "require"
+)
+
+// formatModes lists the accepted values, in the order the help text names them.
+var formatModes = []formatMode{formatOff, formatAuto, formatRequire}
+
+// parseFormatMode turns a user-supplied string into a mode, naming all three
+// valid values on a miss rather than falling back to a default: a typo in
+// `--format=requre` must not silently write unformatted code.
+func parseFormatMode(s string) (formatMode, error) {
+	for _, m := range formatModes {
+		if s == string(m) {
+			return m, nil
+		}
+	}
+	names := make([]string, len(formatModes))
+	for i, m := range formatModes {
+		names[i] = string(m)
+	}
+	return "", fmt.Errorf("unknown format mode %q (valid: %s)", s, strings.Join(names, ", "))
+}
+
+// resolveFormatMode applies the documented precedence — built-in default
+// (off) < generic.format < --format — and reports a bad value from either
+// source, naming the source so the user knows which one to fix.
+func resolveFormatMode(fs *flag.FlagSet, flagVal string, cfg *config.Config, lang string) (formatMode, error) {
+	mode := formatOff
+	if s, ok := cfg.Effective(lang)["format"].(string); ok {
+		m, err := parseFormatMode(s)
+		if err != nil {
+			return "", fmt.Errorf("config generic.format: %w", err)
+		}
+		mode = m
+	}
+	// A flag only overrides when it was actually GIVEN; its zero value is not a
+	// choice. flag has no "was set" accessor, so ask the FlagSet.
+	given := false
+	fs.Visit(func(f *flag.Flag) {
+		if f.Name == "format" {
+			given = true
+		}
+	})
+	if given {
+		m, err := parseFormatMode(flagVal)
+		if err != nil {
+			return "", fmt.Errorf("--format: %w", err)
+		}
+		mode = m
+	}
+	return mode, nil
+}
+
 // formatFiles hands the generated files to the backend's canonical formatter,
-// when it has one (generator.Formatter). This sits in the CLI rather than in
-// Generate on purpose: Generate must stay a pure function of (IR, config) — the
-// golden gate compares its bytes — while the tree a user actually receives is
-// the one written here, and that is the tree their `cargo fmt --check` runs
-// over. A formatter that is not installed is reported once and skipped; a
-// formatter that refuses the code is a generator error.
-func formatFiles(lang, outDir string, files []generator.File, stderr *os.File, noted *bool) ([]generator.File, error) {
+// when it has one (generator.Formatter) AND the run asked for it. This sits in
+// the CLI rather than in Generate on purpose: Generate must stay a pure function
+// of (IR, config) — the golden gate compares its bytes — while the tree a user
+// actually receives is the one written here, and that is the tree their
+// `cargo fmt --check` runs over.
+//
+// The switch decides what happens:
+//
+//	off      nothing is looked up and nothing is spawned; the files are the
+//	         emitters' own output, byte for byte, on every machine.
+//	auto     format when the tool is installed; when it is not, write
+//	         unformatted output and print the reason once per run.
+//	require  format, and fail when the tool is missing.
+//
+// A formatter that RUNS and refuses the code is an error under auto as well as
+// under require: that means the backend emitted something that does not parse,
+// which no switch should turn into a written file.
+func formatFiles(mode formatMode, lang, outDir string, files []generator.File, stderr *os.File, noted *bool) ([]generator.File, error) {
+	if mode == formatOff {
+		return files, nil
+	}
 	b, ok := generator.Lookup(lang)
 	if !ok {
 		return files, nil
@@ -263,9 +355,17 @@ func formatFiles(lang, outDir string, files []generator.File, stderr *os.File, n
 	if err != nil {
 		return nil, err
 	}
-	if note != "" && !*noted {
-		*noted = true
-		fmt.Fprintln(stderr, note)
+	// A non-empty note means the tool is not installed and NOTHING was formatted
+	// (generator.Formatter). Under require that is the failure the user asked
+	// for; under auto it is a one-line report.
+	if note != "" {
+		if mode == formatRequire {
+			return nil, fmt.Errorf("--format=require: %s (generated %s was not formatted; --format=auto writes it unformatted instead)", note, lang)
+		}
+		if !*noted {
+			*noted = true
+			fmt.Fprintf(stderr, "note: %s — generated %s is written unformatted (--format=require fails the run instead)\n", note, lang)
+		}
 	}
 	return out, nil
 }

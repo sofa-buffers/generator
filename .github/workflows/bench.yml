@@ -66,14 +66,11 @@ jobs:
               sudo apt-get install -y gcc-arm-none-eabi libstdc++-arm-none-eabi-newlib ;;
           esac
 
-      # rustfmt: sofabgen formats the Rust it emits, so the crate measured here
-      # is the crate a user gets. It is whitespace either way, but a bench that
-      # measures a different source text than the one that ships is a trap.
       - uses: dtolnay/rust-toolchain@1.90.0
         if: startsWith(matrix.row, 'rust-')
         with:
           targets: thumbv6m-none-eabi
-          components: llvm-tools-preview, rustfmt
+          components: llvm-tools-preview
 
       - uses: mlugg/setup-zig@v2
         if: startsWith(matrix.row, 'zig')
@@ -94,14 +91,6 @@ jobs:
       - uses: actions/setup-python@v7
         if: startsWith(matrix.row, 'python')
         with: { python-version: "3.14" }
-
-      # ruff: sofabgen formats the Python it emits, so the modules measured here
-      # are the modules a user gets. Whitespace either way, but a bench that
-      # measures a different source text than the one that ships is a trap. The
-      # pin matches RUFF_VERSION in tests/conformance/python/run.sh.
-      - name: ruff (sofabgen formats generated Python with it)
-        if: startsWith(matrix.row, 'python')
-        run: python -m pip install "ruff==0.16.8"
 
       # Only python-native builds corelib-py's Cython extension. Without this the
       # row does not silently degrade to the pure engine — the recipe verifies
