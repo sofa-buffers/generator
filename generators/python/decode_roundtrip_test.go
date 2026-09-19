@@ -217,3 +217,142 @@ print("%s ok" % sofab.IMPL)
 		t.Logf("SOFAB_PUREPYTHON=%q: %s", pure, strings.TrimSpace(string(out)))
 	}
 }
+
+// TestPythonMistypedFieldIsSkipped is generator#575: a header whose wire type
+// contradicts the declared type is a §7.3 mismatch and must be skipped exactly
+// like an unknown id -- at an element of a wrapper array (of structs, of wrapper
+// rows), at the wrapper field itself, and at a scalar inside an element. The
+// visitor used to decline only a string/blob payload at those positions, so any
+// other header (an unsigned array, here) was ACCEPTED, and a field a visitor
+// accepts is a field corelib-py reads: the receiver cap and the reassembly bound
+// then hit a field §7.3 says is never read (CORELIB_PLAN §6.7.2).
+//
+// The controls are the same array at an unknown root id, which was always
+// skipped, and a real round trip through every scope, which must be unchanged.
+// Both engines run it -- the two share message.py, not the decoder underneath.
+func TestPythonMistypedFieldIsSkipped(t *testing.T) {
+	corelib := os.Getenv("SOFAB_PY_CORELIB")
+	if corelib == "" {
+		t.Skip("set SOFAB_PY_CORELIB to a corelib-py checkout")
+	}
+	py, err := exec.LookPath("python3")
+	if err != nil {
+		t.Skip("python3 not found")
+	}
+	const src = `
+version: 1
+messages:
+  Table:
+    payload:
+      rows: { id: 0, type: array, items: { type: struct, count: 4, fields: { k: { id: 0, type: u32 } } } }
+      deep: { id: 1, type: array, items: { type: array, items: { type: struct, fields: { v: { id: 0, type: u32 } } } } }
+      tail: { id: 2, type: u32 }
+`
+	// No string or blob anywhere: the reassembly buffer is then 16 bytes
+	// (MAX_FIELD_SPAN, module-wide), so the 17-entry mistyped array below is
+	// larger than it -- which is what turned a truncated skip into a refusal.
+	dir := t.TempDir()
+	for path, content := range genPy(t, schema(t, src), map[string]any{}) {
+		if err := os.WriteFile(filepath.Join(dir, path), content, 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	const driver = `
+import sys
+import sofab
+from sofab import SofaIncompleteError
+from message import Table, TableDeepElemElem, TableRowsElem
+
+
+def varint(v):
+    out = bytearray()
+    while True:
+        b, v = v & 0x7F, v >> 7
+        out.append(b | (0x80 if v else 0))
+        if not v:
+            return bytes(out)
+
+
+def header(fid, wt):
+    return varint((fid << 3) | wt)
+
+
+ARRAY_UNSIGNED, SEQUENCE_START, SEQUENCE_END = 3, 6, 7
+
+
+def uarray(fid, count, present):
+    """An unsigned array announcing count one-byte entries, present of them on the wire."""
+    return header(fid, ARRAY_UNSIGNED) + varint(count) + b"\x01" * present
+
+
+OPEN = lambda fid: header(fid, SEQUENCE_START)
+CLOSE = header(0, SEQUENCE_END)
+# The tail after the mistyped field proves the walk resumed behind it.
+TAIL = header(2, 0) + varint(9)
+
+CASES = [
+    # An element of a wrapper array: of structs (rows), of wrapper rows (deep).
+    ("rows[0], count 70000, complete", OPEN(0) + uarray(1, 70000, 70000) + CLOSE + TAIL, "COMPLETE"),
+    ("rows[0], count 20, 17 present", OPEN(0) + uarray(1, 20, 17), "INCOMPLETE"),
+    ("rows[0], count 1886575, 0 present", OPEN(0) + uarray(1, 1886575, 0), "INCOMPLETE"),
+    ("rows[7], past the capacity", OPEN(0) + uarray(7, 3, 3) + CLOSE + TAIL, "COMPLETE"),
+    ("deep[0], count 70000, complete", OPEN(1) + uarray(1, 70000, 70000) + CLOSE + TAIL, "COMPLETE"),
+    ("deep[0], count 20, 17 present", OPEN(1) + uarray(1, 20, 17), "INCOMPLETE"),
+    ("deep[0], count 1886575, 0 present", OPEN(1) + uarray(1, 1886575, 0), "INCOMPLETE"),
+    # The wrapper field itself, one scope up.
+    ("rows, count 70000, complete", uarray(0, 70000, 70000) + TAIL, "COMPLETE"),
+    ("deep, count 1886575, 0 present", uarray(1, 1886575, 0), "INCOMPLETE"),
+    # A scalar inside an element, one scope down.
+    ("rows[0].k, count 70000, complete", OPEN(0) + OPEN(0) + uarray(0, 70000, 70000) + CLOSE * 2 + TAIL, "COMPLETE"),
+    ("rows[0].k, count 20, 17 present", OPEN(0) + OPEN(0) + uarray(0, 20, 17), "INCOMPLETE"),
+    ("rows[0].k, count 1886575, 0 present", OPEN(0) + OPEN(0) + uarray(0, 1886575, 0), "INCOMPLETE"),
+    ("deep[0][0].v, count 70000, complete",
+     OPEN(1) + OPEN(0) + OPEN(0) + uarray(0, 70000, 70000) + CLOSE * 3 + TAIL, "COMPLETE"),
+    # Control: an unknown root id, always skipped.
+    ("unknown id 5, count 70000, complete", uarray(5, 70000, 70000) + TAIL, "COMPLETE"),
+]
+
+
+def verdict(wire):
+    try:
+        m = Table.decode(wire)
+    except SofaIncompleteError:
+        return "INCOMPLETE"
+    except Exception as e:
+        return "%s: %s" % (type(e).__name__, e)
+    return "COMPLETE" if m.tail == 9 else "COMPLETE, tail %r" % m.tail
+
+
+bad = 0
+for desc, wire, want in CASES:
+    got = verdict(wire)
+    if got != want:
+        bad += 1
+        print("[%s] mistyped %s: want %s, got %s" % (sofab.IMPL, desc, want, got))
+
+m = Table(rows=[TableRowsElem(k=7), TableRowsElem(k=0), TableRowsElem(k=9)],
+          deep=[[TableDeepElemElem(v=1)], [], [TableDeepElemElem(v=2), TableDeepElemElem(v=3)]], tail=9)
+back = Table.decode(m.encode())
+if back != m:
+    bad += 1
+    print("[%s] round trip: want %r, got %r" % (sofab.IMPL, m, back))
+if bad:
+    sys.exit("%d case(s) misjudged" % bad)
+print("%s ok" % sofab.IMPL)
+`
+	if err := os.WriteFile(filepath.Join(dir, "driver.py"), []byte(driver), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	for _, pure := range []string{"", "1"} {
+		cmd := exec.Command(py, filepath.Join(dir, "driver.py"))
+		cmd.Dir = dir
+		cmd.Env = append(os.Environ(),
+			"PYTHONPATH="+filepath.Join(corelib, "src")+string(os.PathListSeparator)+dir,
+			"SOFAB_PUREPYTHON="+pure)
+		out, err := cmd.CombinedOutput()
+		if err != nil {
+			t.Fatalf("SOFAB_PUREPYTHON=%q: %v\n%s", pure, err, out)
+		}
+		t.Logf("SOFAB_PUREPYTHON=%q: %s", pure, strings.TrimSpace(string(out)))
+	}
+}

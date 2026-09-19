@@ -816,15 +816,14 @@ func liveScopes(p *bindPlan, scopes []*pyScope) []*pyScope {
 
 // objFieldArm renders an object scope's header work, ONE ARM PER DECLARED ID.
 //
-// Each arm carries whichever of two mutually exclusive things the field needs,
-// and both sit behind the §7.3 tag test:
-//
-// Every count- or length-bearing field is DECLINED when the header does not
-// carry the tag its declared type maps to, so a value that was never this
-// field's reaches neither the bound on_schema_bound declares one hook later nor
-// the receiver cap the Decoder parked one hook earlier. §7.3 asks for a skip, and
-// a skipped field is never capped (§6.2.1) — the codec drops the parked verdict
-// the moment this hook declines.
+// Every field the visitor handles -- whatever its kind -- is DECLINED when the
+// header does not carry the tag its declared type maps to, so a value that was
+// never this field's reaches neither the bound on_schema_bound declares one hook
+// later nor the receiver cap the Decoder parked one hook earlier, nor the
+// reassembly buffer (declineOnMismatch). §7.3 asks for a skip, and a skipped
+// field is never capped (§6.2.1) — the codec drops the parked verdict the moment
+// this hook declines. A field on the destination table is not here: the table
+// applies the same tag test itself.
 //
 // The caps themselves are NOT here. The Decoder is handed all three and compares
 // them at the count/length header, off any field on_schema_bound declares and off
@@ -847,33 +846,23 @@ func (g *gen) objFieldArm(sc *pyScope) []string {
 		// is not told about (corelib-py#146). All of it is walked, not read.
 		return []string{"return False  # every declared id is on the table: this one is unknown"}
 	}
+	allSeq := true
+	for _, fld := range own {
+		allSeq = allSeq && isSequenceFramed(fld.Kind, fld.Elem)
+	}
+	if allSeq {
+		// Every id the visitor handles here arrives through on_sequence_begin, so
+		// what reaches on_field is either unknown or mistyped (declineOnMismatch).
+		return []string{"return False  # every id handled here is framed as a sequence: unknown or mistyped (S7.3)"}
+	}
 	out := []string{
 		fmt.Sprintf("if fld.id not in %s:", pyIDSet(own)),
 		"    return False  # not one of this scope's own ids: walked, not read",
 	}
-	out = append(out, textPayloadGuard(pyIDSet(textFields(own)))...)
 	inner := true
-	for _, fld := range g.bind.unboundFields(sc) {
-		var body []string
-		switch fld.Kind {
-		case ir.KindString, ir.KindBlob:
-			body = declineOnMismatch(tagMismatch(fld.Kind, 0), fld.Name)
-		case ir.KindArray:
-			// A wrapper array carries no count header of its own -- its length is
-			// its highest element index -- so it is bounded in on_sequence_begin
-			// and in the array scope's own arm, not here.
-			if !isNativeArrayElem(fld.Elem) {
-				continue
-			}
-			body = declineOnMismatch(tagMismatch(ir.KindArray, fld.Elem), fld.Name)
-		default:
-			continue
-		}
-		if len(body) == 0 {
-			continue
-		}
+	for _, fld := range own {
 		out = append(out, fmt.Sprintf("%s fld.id == %d:", kw(&inner), fld.ID))
-		out = append(out, indent(body)...)
+		out = append(out, indent(declineOnMismatch(fld.Kind, fld.Elem, fld.Name))...)
 	}
 	return out
 }
@@ -898,74 +887,22 @@ func (g *gen) objFieldArm(sc *pyScope) []string {
 // matrix row's element COUNT -- is not bounded here. Both are count/length words
 // the Decoder reads, so it applies the receiver cap to them itself; what it
 // cannot see is the INDEX, which is a field id.
+//
+// A scope whose element opens a scope of its own -- a struct, a union, a wrapper
+// row -- has no index bound here either: the element that is bounded is the one
+// on_sequence_begin opens, and every header that reaches on_field there is a
+// mismatch (declineOnMismatch).
 func (g *gen) arrFieldArm(sc *pyScope) []string {
-	var out []string
-	switch sc.elem {
-	case ir.KindString, ir.KindBlob:
-		out = append(out, declineOnMismatch(tagMismatch(sc.elem, 0), sc.loc)...)
-	case ir.KindArray:
-		if isNativeArrayElem(sc.elemItems.Elem) {
-			out = append(out, declineOnMismatch(
-				tagMismatch(ir.KindArray, sc.elemItems.Elem), sc.loc+" row")...)
-			break
-		}
-		out = append(out, textPayloadGuard("")...)
-	default:
-		out = append(out, textPayloadGuard("")...)
+	elem, loc := sc.elem, sc.loc
+	var rowElem ir.Kind
+	if elem == ir.KindArray {
+		rowElem, loc = sc.elemItems.Elem, sc.loc+" row"
 	}
-	if sc.child < 0 {
-		// A value element is bounded here; an element that opens a scope is
-		// bounded in on_sequence_begin, which no on_field precedes.
-		out = append(out, g.indexBound(sc.cap, "fld.id", sc.loc)...)
+	out := declineOnMismatch(elem, rowElem, loc)
+	if sc.child >= 0 {
+		return out
 	}
-	return out
-}
-
-// textFields returns the scope's fields declared `string` or `blob` -- the two
-// kinds whose payload is a byte run the codec materializes.
-func textFields(fields []*ir.Field) []*ir.Field {
-	var out []*ir.Field
-	for _, fld := range fields {
-		if fld.Kind == ir.KindString || fld.Kind == ir.KindBlob {
-			out = append(out, fld)
-		}
-	}
-	return out
-}
-
-// textPayloadGuard renders the §7.3 decline for the mismatch that costs
-// something: a fixlen header announcing a STRING or BLOB payload at a position
-// that declares neither.
-//
-// The per-id arms above walk the mismatch from one side only -- a header that is
-// not what THIS field declared. That is enough for every tag whose payload the
-// codec reads in place, and it is not enough for these two, because a string or
-// blob is a byte RUN: accepting the header hands the codec a length to
-// reassemble against, bytes to copy, and -- for a string -- a UTF-8 verdict to
-// take at payload completion (CORELIB_PLAN §6.4.4). CORELIB_PLAN §6.4.5 is
-// explicit that validation "runs only where a string is materialized ... never
-// on skip, in any mode", so a skipped string that is nevertheless validated
-// turns a decode §7.3 requires to stay COMPLETE into INVALID. The corelib cannot
-// see it coming: a field a visitor ACCEPTS is a field it reads, and the id chain
-// above accepted every id it declares whose kind is not string, blob or a native
-// array.
-//
-// `ids` is the set display of the positions that DO declare one, or "" for a
-// scope that declares none (an array scope of structs, say, where every element
-// is sequence-framed). The test is behind `fld.subtype is not None`, which is
-// true only for a fixlen scalar or a fixlen array header, so every other field
-// pays one identity comparison; §4.6 numbers the subtypes fp32, fp64, string,
-// blob, and a fixlen ARRAY's is always one of the first two (the corelib rejects
-// the others at the word, generator#411), so `>= STRING` says "a byte run".
-func textPayloadGuard(ids string) []string {
-	cond := "fld.subtype is not None and fld.subtype >= FixlenSubtype.STRING"
-	if ids != "" && ids != "frozenset()" {
-		cond += " and fld.id not in " + ids
-	}
-	return []string{
-		fmt.Sprintf("if %s:", cond),
-		"    return False  # a string/blob payload here is not this scope's: skip it, never materialize it (S6.4.5)",
-	}
+	return append(out, g.indexBound(sc.cap, "fld.id", sc.loc)...)
 }
 
 // pyIDSet renders the scope's declared ids as a set display of literals. CPython
@@ -986,42 +923,68 @@ func pyIDSet(fields []*ir.Field) string {
 
 // tagMismatch renders the test that a header does NOT carry the tag its declared
 // type maps to -- MESSAGE_SPEC §7.3's wire type, plus the subtype for a fixlen
-// one. `elem` is read only for ir.KindArray.
+// one. `elem` is read only for ir.KindArray. Only a VALUE kind has one: a
+// sequence-framed kind never reaches on_field well-formed (declineOnMismatch).
 //
 // A string/blob needs no wire-type test in front of its subtype: `subtype` is
 // set only for a fixlen scalar and a fixlen ARRAY, and a fixlen array's subtype
 // is always fp32/fp64 (the corelib rejects any other at the header), so
-// `subtype == STRING` already says "a fixlen scalar carrying a string". A fixlen
-// ARRAY does need both, because fp32/fp64 name a scalar subtype too.
+// `subtype == STRING` already says "a fixlen scalar carrying a string". An
+// fp32/fp64 scalar or a fixlen ARRAY does need both, because each shares its
+// subtype with the other.
 func tagMismatch(kind, elem ir.Kind) string {
-	switch kind {
-	case ir.KindString, ir.KindBlob:
+	if kind == ir.KindString || kind == ir.KindBlob {
 		return "fld.subtype != " + pyFixlenSubtype(kind)
-	case ir.KindArray:
-		x := &ir.Field{Kind: ir.KindArray, Elem: elem}
-		cond := "fld.type != " + pyExpectedWire(x)
-		if sub := pyFixlenSubtype(elem); sub != "" {
-			cond += " or fld.subtype != " + sub
-		}
-		return cond
 	}
-	return ""
+	cond := "fld.type != " + pyExpectedWire(&ir.Field{Kind: kind, Elem: elem})
+	sub := pyFixlenSubtype(kind)
+	if kind == ir.KindArray {
+		sub = pyFixlenSubtype(elem)
+	}
+	if sub != "" {
+		cond += " or fld.subtype != " + sub
+	}
+	return cond
 }
 
-// declineOnMismatch renders the §7.3 skip: a header that contradicts the
-// declared type is not this field's value, so it is declined here rather than
-// measured against the schema bound one hook later.
+// isSequenceFramed reports whether a declared type is written as a
+// SEQUENCE_START ... SEQUENCE_END frame: a struct, a union, a wrapper array.
+func isSequenceFramed(kind, elem ir.Kind) bool {
+	switch kind {
+	case ir.KindStruct, ir.KindUnion:
+		return true
+	case ir.KindArray:
+		return !isNativeArrayElem(elem)
+	}
+	return false
+}
+
+// declineOnMismatch renders the §7.3 skip for a position of declared type
+// (kind, elem): a header that contradicts the declared type is not this
+// position's value, so it is declined here rather than measured against the
+// schema bound one hook later.
 //
 // Declining is what an unknown id gets, which is what §7.3 asks for ("skipped,
-// exactly as a field with an unknown id is skipped"). It is also strictly less
-// work than letting the value through to a typed hook with no arm for it: the
-// payload is neither materialized nor validated (CORELIB_PLAN §6.7.2).
-func declineOnMismatch(cond, loc string) []string {
-	if cond == "" {
-		return nil
+// exactly as a field with an unknown id is skipped"), and EVERY declared type
+// needs it, whatever its payload: a field a visitor ACCEPTS is a field
+// corelib-py reads. A read is capped by the receiver limits and, when the
+// message ends inside it, held in the reassembly buffer, which is sized to
+// MAX_FIELD_SPAN -- the largest value the schema can carry, not the largest the
+// wire can announce. A string is also UTF-8-validated at payload completion,
+// which CORELIB_PLAN §6.4.5 forbids on a skip. None of that may reach a skipped
+// field (CORELIB_PLAN §6.7.2), so a mismatch is never let through to a typed
+// hook that merely has no arm for it.
+//
+// A sequence-framed type is declined unconditionally: its well-formed header is
+// a SEQUENCE_START, which the corelib hands to on_sequence_begin and never to
+// on_field, so whatever does arrive here is a mismatch, whatever its tag.
+func declineOnMismatch(kind, elem ir.Kind, loc string) []string {
+	if isSequenceFramed(kind, elem) {
+		return []string{fmt.Sprintf(
+			"return False  # %s: framed as a sequence -- any other header is mistyped (S7.3)", loc)}
 	}
 	return []string{
-		fmt.Sprintf("if %s:", cond),
+		fmt.Sprintf("if %s:", tagMismatch(kind, elem)),
 		fmt.Sprintf("    return False  # %s: header is not the declared type -- skip it", loc),
 	}
 }
