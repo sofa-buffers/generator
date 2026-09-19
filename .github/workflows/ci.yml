@@ -210,9 +210,11 @@ jobs:
       - uses: actions/setup-go@v7
         with:
           go-version: "1.27"
+      # rustfmt is not optional here: sofabgen runs it over every generated .rs
+      # file, and the suite then holds the result to `rustfmt --check`.
       - uses: dtolnay/rust-toolchain@stable
         with:
-          components: clippy
+          components: clippy, rustfmt
       - uses: ./.github/actions/corelib-refs
       - name: Rust backend — generate, build, round-trip, conformance
         run: ./tests/conformance/rust/run.sh

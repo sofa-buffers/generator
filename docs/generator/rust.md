@@ -83,3 +83,21 @@ use message::*;
 Declared private (`mod message;`), every part of the API your crate does not
 call is dead code to rustc and warns. With `no_std` on, the generated crate is a
 lib that re-exports the module, so a dependent crate has nothing to declare.
+
+## Formatting
+
+Generated Rust is `rustfmt` output: `cargo fmt --check` over a tree that holds
+it passes, so generated files need no exclusion from a formatting gate and never
+come back reformatted.
+
+`sofabgen` runs `rustfmt` itself, once per generated `.rs` file, with the edition
+the generated `Cargo.toml` declares. It runs in the output directory, so a
+`rustfmt.toml` of your own that covers that directory is honoured — the files
+come out the way your own `cargo fmt` over that tree would leave them.
+
+`rustfmt` ships with every `rustup` toolchain, so this normally needs nothing
+from you. If it is not on `PATH`, generation still succeeds: the files are
+written unformatted and `sofabgen` says so on stderr, and a later `cargo fmt`
+over the output directory brings them in line. If `rustfmt` is installed but
+rejects a generated file, generation fails with the file named — that is a
+generator bug, and writing the file would only move it into your build.
