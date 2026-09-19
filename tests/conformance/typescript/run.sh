@@ -25,6 +25,13 @@ fi
 echo "==> corelib-ts: $CORELIB"
 [ -f "$CORELIB/dist/index.js" ] || { echo "FAIL: corelib-ts not built (no dist/)"; exit 1; }
 
+# Every typecheck of generated code runs under the checks a strict consumer
+# turns on (ARCHITECTURE §12 gate 9). tsc has no warning class: these make the
+# unused-name and control-flow findings errors, on top of the emitted tsconfig's
+# `strict`. They go on the command line, not into the emitted tsconfig, so a
+# user's project keeps the tsconfig it was given. Every `tsc` below uses it.
+TSC_STRICT="--noUnusedLocals --noUnusedParameters --noImplicitReturns --noFallthroughCasesInSwitch"
+
 # Conformance def: one single-field message per scalar op.
 cat > "$WORK/conf.yaml" <<'YAML'
 version: 1
@@ -81,7 +88,7 @@ setup "$WORK/ex"
 setup "$WORK/conf"
 
 echo "==> typecheck generated code"
-( cd "$WORK/ex" && npx tsc --noEmit )
+( cd "$WORK/ex" && npx tsc --noEmit $TSC_STRICT )
 
 echo "==> JSON encode -> decode round-trip"
 # someblobarray is here for the OWNERSHIP legs of stream_check.ts, which run on
@@ -131,7 +138,7 @@ echo "==> round-trip fixture OK (no field sits on its schema default)"
 echo "==> bounded encode buffer is exactly MAX_SIZE (ARCHITECTURE §9.6)"
 gen "$ROOT/tests/conformance/lib/maxsize_fill.yaml" "$WORK/fill"
 ln -s "$WORK/ex/node_modules" "$WORK/fill/node_modules"
-( cd "$WORK/fill" && npx tsc --noEmit )
+( cd "$WORK/fill" && npx tsc --noEmit $TSC_STRICT )
 check_maxsize_constant typescript "$WORK/fill/message.ts" \
     "static readonly MAX_SIZE = $SOFAB_MAXSIZE_FILL_BYTES;\$"
 # JSON.parse is the harness's front door and a JS number is a double, so an
@@ -466,7 +473,7 @@ YAML
 gen "$WORK/dyn.yaml" "$WORK/nolim"
 ln -s "$WORK/ex/node_modules" "$WORK/lim/node_modules"
 ln -s "$WORK/ex/node_modules" "$WORK/nolim/node_modules"
-( cd "$WORK/lim" && npx tsc --noEmit )
+( cd "$WORK/lim" && npx tsc --noEmit $TSC_STRICT )
 printf '\003\005\001\002\003\004\005' > "$WORK/overlimit.bin"
 printf '\003\004\001\002\003\004' > "$WORK/atlimit.bin"
 if (cd "$WORK/lim" && npx tsx harness.ts decode dyn) < "$WORK/overlimit.bin" >/dev/null 2>"$WORK/limerr.txt"; then
@@ -587,7 +594,7 @@ YAML
 gen "$WORK/wrap.yaml" "$WORK/wnolim"
 ln -s "$WORK/ex/node_modules" "$WORK/wlim/node_modules"
 ln -s "$WORK/ex/node_modules" "$WORK/wnolim/node_modules"
-( cd "$WORK/wlim" && npx tsc --noEmit )
+( cd "$WORK/wlim" && npx tsc --noEmit $TSC_STRICT )
 # The bytes are produced by the UNCAPPED project, so they are well formed by
 # construction and the capped project's refusal can only be a policy one.
 printf '%s' '{"w":["abcdefgh"]}' | (cd "$WORK/wnolim" && npx tsx harness.ts encode wdyn) > "$WORK/wrap8.bin"
@@ -701,8 +708,8 @@ YAML
     gen "$WORK/i64.yaml" "$WORK/i64-$mode" "$WORK/cfg_$mode.yaml"
     ln -s "$WORK/ex/node_modules" "$WORK/i64-$mode/node_modules"
 done
-( cd "$WORK/i64-long" && npx tsc --noEmit )
-( cd "$WORK/i64-number" && npx tsc --noEmit )
+( cd "$WORK/i64-long" && npx tsc --noEmit $TSC_STRICT )
+( cd "$WORK/i64-number" && npx tsc --noEmit $TSC_STRICT )
 enc64() { ( cd "$WORK/i64-$1" && printf '%s' "$2" | npx tsx harness.ts encode m64 ); }
 # Full 64-bit range (scalars beyond 2^53): bigint vs long. ud == its schema
 # default exercises the longArrEq omission guard.
@@ -879,7 +886,7 @@ echo "==> Long-channel narrowing OK (over-width rejected, in-range exact)"
 echo "==> int64 modes OK (bigint == long == number on the wire)"
 
 echo "==> corpus + realworld: every definition typechecks"
-for def in "$ROOT"/tests/matrix/corpus/defs/*.yaml "$ROOT"/examples/messages/realworld/vehicle_telemetry.yaml; do
+for def in "$ROOT"/tests/matrix/corpus/defs/*.yaml "$ROOT"/examples/messages/realworld/*.yaml; do
     name=$(basename "$def" .yaml)
     # nested_rows.yaml (array<array<string|blob|struct>>, and the same one level
     # deeper) was skipped here while the backend handed the row CONTAINER to the
@@ -888,9 +895,9 @@ for def in "$ROOT"/tests/matrix/corpus/defs/*.yaml "$ROOT"/examples/messages/rea
     # in the loop and this leg is green without omissions.
     gen "$def" "$WORK/corpus/$name"
     ln -s "$WORK/ex/node_modules" "$WORK/corpus/$name/node_modules"
-    ( cd "$WORK/corpus/$name" && npx tsc --noEmit )
+    ( cd "$WORK/corpus/$name" && npx tsc --noEmit $TSC_STRICT )
 done
-echo "==> corpus typechecks ($(ls "$ROOT"/tests/matrix/corpus/defs/*.yaml | wc -l) definitions + realworld example)"
+echo "==> corpus typechecks ($(ls "$ROOT"/tests/matrix/corpus/defs/*.yaml | wc -l) definitions + $(ls "$ROOT"/examples/messages/realworld/*.yaml | wc -l) realworld)"
 
 # ...and the same definitions again under `int64: long`, for every one that has a
 # 64-bit field. The loop above generates in the DEFAULT mode, so nothing here used
@@ -904,12 +911,12 @@ generic: { emit: project }
 targets: { typescript: { int64: long } }
 YAML
 n64=0
-for def in "$ROOT"/tests/matrix/corpus/defs/*.yaml "$ROOT"/examples/messages/realworld/vehicle_telemetry.yaml; do
+for def in "$ROOT"/tests/matrix/corpus/defs/*.yaml "$ROOT"/examples/messages/realworld/*.yaml; do
     grep -Eq '\b(u64|i64)\b' "$def" || continue
     name=$(basename "$def" .yaml)
     gen "$def" "$WORK/corpus-long/$name" "$WORK/cfg_corpus_long.yaml"
     ln -s "$WORK/ex/node_modules" "$WORK/corpus-long/$name/node_modules"
-    ( cd "$WORK/corpus-long/$name" && npx tsc --noEmit )
+    ( cd "$WORK/corpus-long/$name" && npx tsc --noEmit $TSC_STRICT )
     n64=$((n64 + 1))
 done
 echo "==> int64: long corpus typechecks ($n64 definitions with a 64-bit field)"
@@ -1112,7 +1119,7 @@ printf 'version: 1\nmessages:\n' > "$WORK/arrlen.yaml"
 python3 "$ROOT/tests/conformance/lib/check_array_lengths.py" --emit-schema >> "$WORK/arrlen.yaml"
 gen "$WORK/arrlen.yaml" "$WORK/arrlen"
 ln -s "$WORK/ex/node_modules" "$WORK/arrlen/node_modules"
-( cd "$WORK/arrlen" && npx tsc --noEmit )
+( cd "$WORK/arrlen" && npx tsc --noEmit $TSC_STRICT )
 for surface in decode streamdecode; do
     python3 "$ROOT/tests/conformance/lib/check_array_lengths.py" "typescript" \
         --cwd "$WORK/arrlen" --verb "$surface" -- npx tsx harness.ts
@@ -1124,7 +1131,7 @@ done
 for mode in long number; do
     gen "$WORK/arrlen.yaml" "$WORK/arrlen-$mode" "$WORK/cfg_$mode.yaml"
     ln -s "$WORK/ex/node_modules" "$WORK/arrlen-$mode/node_modules"
-    ( cd "$WORK/arrlen-$mode" && npx tsc --noEmit )
+    ( cd "$WORK/arrlen-$mode" && npx tsc --noEmit $TSC_STRICT )
     python3 "$ROOT/tests/conformance/lib/check_array_lengths.py" "typescript int64: $mode" \
         --cwd "$WORK/arrlen-$mode" -- npx tsx harness.ts
 done
