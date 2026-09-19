@@ -5598,6 +5598,7 @@ A reimplementation is **conformant** when it reproduces these gates:
    |---|---|---|
    | c | `-Wall -Wextra -Werror` | `WARNFLAGS` in `tests/conformance/c/run.sh`, exported; the Go gated tests pass the same flags |
    | cpp (all four profiles) | `-Wall -Wextra -Werror` | `WARNFLAGS` in `tests/conformance/cpp/run.sh`, exported |
+   | rust / rs-no-std (every storage mode and feature set the suite builds) | `-D warnings`; plus `cargo clippy` with no deny-level finding on the example crate | `RUSTFLAGS` in `tests/conformance/rust/run.sh`, exported |
 
    The generated C and C++ project Makefiles read `WARNFLAGS` (default
    `-Wall -Wextra`) apart from `CFLAGS`/`CXXFLAGS`, which is what lets one
@@ -5606,6 +5607,28 @@ A reimplementation is **conformant** when it reproduces these gates:
    harness only, never to the corelib's C sources; the C Makefile builds
    everything in one command, so corelib-c-cpp's sources are held to it there
    too.
+
+   Rust: the generated module carries **no** crate- or module-wide `allow`. The
+   old blanket `#![allow(dead_code, unused_variables, unused_imports,
+   non_camel_case_types, clippy::all)]` made `-D warnings` vacuous and is gone.
+   The imports are derived from the rendered module (only the names it uses
+   unqualified), a visitor method with no arm is left to the trait default or
+   drains with `_`-named parameters, and the std harness declares
+   `pub mod message;` so the parts of the API it does not call are not dead
+   code. What remains is narrow and says why on the line: `allow(deprecated)` on
+   impls that touch a deprecated field, `allow(non_camel_case_types)` on the
+   private `_Loc` enum (its variants spell the schema path), and
+   `allow(clippy::approx_constant)` on the two impls that spell a float default
+   (the lint is deny by default and fires on a schema default such as
+   3.141592653589793). `RUSTFLAGS` also reaches the corelib, which cargo builds
+   as a path dependency. clippy's **warn-level** lints are not gated: the
+   generated visitor still carries a backlog (single-arm and wildcard-only
+   matches, `} if` on one line, needless `return`, `let _ =` on a unit `push`,
+   same-type `as` casts, derivable `Default` impls, and the `a < lo || a > hi`
+   width checks clippy would spell `!(lo..=hi).contains(&a)` — that one is kept
+   on purpose: measured on thumbv6m, the `contains` form costs 111 bytes of
+   `.text` on the vehicle_telemetry no_std crate), so the clippy call runs with
+   `-D warnings` lifted and fails only on a deny-level finding.
 
 ---
 
