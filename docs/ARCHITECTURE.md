@@ -5593,7 +5593,12 @@ A reimplementation is **conformant** when it reproduces these gates:
    `generators/*/backend_test.go` (plus corelib-gated tests: they skip in the
    hermetic job and run — the whole package, unfiltered, with a skip counted
    as a failure — in `lang-<x>` via `tests/conformance/lib/backend_tests.sh`;
-   docs/CI.md), and
+   docs/CI.md). The one skip that runner tolerates is the one gate 10 already
+   tolerates: a test gated on a canonical formatter, on a box that does not have
+   it. The suite has to name that tool, every skip's own reason has to name it
+   too, and `SOFAB_FORMAT_STRICT=1` — set in every `lang-*` job that holds
+   generated code to a formatter — turns the tolerance off, so CI still demands
+   that all of them run. Then there are
    dedicated matrix suites for sparse omission (`omit_test.go`), shared refs
    (`refs_test.go`), the multi-file real-world example (`realworld_test.go`),
    ASCII output, and doc comments (§8).
