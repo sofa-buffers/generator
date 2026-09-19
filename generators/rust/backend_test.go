@@ -103,11 +103,11 @@ func TestRustStructural(t *testing.T) {
 		"ArrayKind",                            // example has arrays -> array_begin imports it
 		"pub someu64: u64,",
 		"#[serde(default)]",
-		"pub someuintarray: Vec<u32>,",                 // bounded native array -> the profile's dynamic container
-		"pub somefloatarray: Vec<f32>,",                // bounded fp array
-		"pub someboolarray: Vec<bool>,",                // bounded bool array
-		"someuintarray: vec![0, 1, 1000, 4294967295],", // default is an N-element array literal
-		"someboolarray: vec![true, true, false],",      // the declared default exactly as written -- `count` never pads it
+		"pub someuintarray: Vec<u32>,",                                // bounded native array -> the profile's dynamic container
+		"pub somefloatarray: Vec<f32>,",                               // bounded fp array
+		"pub someboolarray: Vec<bool>,",                               // bounded bool array
+		"someuintarray: vec![0, 1, 1000, 4294967295],",                // default is an N-element array literal
+		"someboolarray: vec![true, true, false],",                     // the declared default exactly as written -- `count` never pads it
 		"if self.someuintarray[..] != [0, 1, 1000, 4294967295][..] {", // omit-guard is a default compare
 		// Over-count rejects (generator#100/#216), then the container is sized to the
 		// count the reject just approved and the wire's M elements are collected into
