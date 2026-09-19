@@ -111,7 +111,13 @@ func (g *gen) emitBench(f *zfile, s *ir.Schema) {
 
 	f.line("// benchMain runs one op of <workload>. Everything here is setup; only the")
 	f.line("// run_* call is collected.")
-	f.line("fn benchMain(alloc: std.mem.Allocator, w: []const u8, input: []const u8) !void {")
+	if len(s.Messages) == 0 {
+		// No message, no workload: the parameters go unread, and an unused
+		// parameter is a compile error in Zig, so each is discarded by name.
+		f.line("fn benchMain(_: std.mem.Allocator, _: []const u8, _: []const u8) !void {")
+	} else {
+		f.line("fn benchMain(alloc: std.mem.Allocator, w: []const u8, input: []const u8) !void {")
+	}
 	for _, m := range s.Messages {
 		mt := exported(m.Name)
 		low := strings.ToLower(m.Name)
@@ -176,9 +182,13 @@ func (g *gen) harness(s *ir.Schema) []byte {
 	f.line("    var rbuf: [4096]u8 = undefined;")
 	f.line("    var stdin = std.Io.File.stdin().reader(init.io, &rbuf);")
 	f.line("    const input = try stdin.interface.allocRemaining(alloc, .unlimited);")
-	f.line("    var wbuf: [4096]u8 = undefined;")
-	f.line("    var stdout = std.Io.File.stdout().writer(init.io, &wbuf);")
-	f.line("    const out = &stdout.interface;")
+	// Only a message's encode/decode writes to stdout; a schema without one
+	// would leave the writer an unused local, a compile error in Zig.
+	if len(s.Messages) > 0 {
+		f.line("    var wbuf: [4096]u8 = undefined;")
+		f.line("    var stdout = std.Io.File.stdout().writer(init.io, &wbuf);")
+		f.line("    const out = &stdout.interface;")
+	}
 	f.blank()
 	f.line("    // `bench <workload>` takes a workload, not a message name.")
 	f.line("    if (std.mem.eql(u8, mode, \"bench\")) {")
