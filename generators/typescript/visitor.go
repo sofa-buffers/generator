@@ -2,6 +2,7 @@ package typescript
 
 import (
 	"fmt"
+	"regexp"
 	"strings"
 
 	"github.com/sofa-buffers/generator/internal/ir"
@@ -187,11 +188,32 @@ func (g *gen) emitVisitor(f *tsfile, name string, fields []*ir.Field) {
 	f.line(" * and every hook keys on it. sequenceBegin sets it; sequenceEnd restores the")
 	f.line(" * parent, which is static: the scopes form a tree, so no stack is needed.")
 	f.line(" */")
+	// The hooks are rendered first: whether an index register is ever READ is a
+	// property of the emitted arms. A wrapper row of strings or blobs hands its
+	// elements to a corelib collector, so the row index it records is never
+	// consulted again, and a field only written is an error under noUnusedLocals.
+	hooks := &tsfile{}
+	g.emitSeqHooks(hooks, scopes)
+	g.emitScalarCb(hooks, scopes, "unsigned", unsignedKinds)
+	g.emitScalarCb(hooks, scopes, "signed", signedKinds)
+	g.emitFpCb(hooks, scopes)
+	g.emitFixlenBegin(hooks, scopes)
+	g.emitPayloadCb(hooks, scopes, "string")
+	g.emitPayloadCb(hooks, scopes, "blob")
+	g.emitArrayCbs(hooks, scopes)
+	hookText := hooks.b.String()
+
 	f.line("class %s implements Visitor {", visitorName(name))
 	f.line("  private _c = %s;", scopes[0].name)
 	for _, sc := range scopes {
 		if sc.ix != "" {
-			f.line("  private %s = 0;", sc.ix)
+			// Read anywhere but in its own `= id;` assignment: keep it.
+			ref, set := regexp.MustCompile(`this\.`+sc.ix+`\b`), "this."+sc.ix+" = id;"
+			if len(ref.FindAllStringIndex(hookText, -1)) > strings.Count(hookText, set) {
+				f.line("  private %s = 0;", sc.ix)
+			} else {
+				hookText = regexp.MustCompile(`(?m)^[ \t]*this\.`+sc.ix+` = id;\n`).ReplaceAllString(hookText, "")
+			}
 		}
 		if sc.row != "" {
 			f.line("  private %s: %s = %s;", sc.row, g.matRowType(sc),
@@ -213,16 +235,7 @@ func (g *gen) emitVisitor(f *tsfile, name string, fields []*ir.Field) {
 		}
 	}
 	f.line("  constructor(readonly o: %s, readonly a: PayloadAcc) {}", name)
-
-	g.emitSeqHooks(f, scopes)
-	g.emitScalarCb(f, scopes, "unsigned", unsignedKinds)
-	g.emitScalarCb(f, scopes, "signed", signedKinds)
-	g.emitFpCb(f, scopes)
-	g.emitFixlenBegin(f, scopes)
-	g.emitPayloadCb(f, scopes, "string")
-	g.emitPayloadCb(f, scopes, "blob")
-	g.emitArrayCbs(f, scopes)
-
+	f.b.WriteString(hookText)
 	f.line("}")
 	f.blank()
 }
@@ -235,7 +248,8 @@ func (g *gen) scopeSwitch(f *tsfile, sig string, arms map[int][]string, scopes [
 	if len(arms) == 0 {
 		return
 	}
-	f.line("  %s {", sig)
+	out := f
+	f = &tsfile{}
 	// A single-scope hook needs no dispatch at all: the one arm is guarded by its
 	// own location test, which is cheaper than a switch and keeps the common
 	// leaf-message shape (no nesting) exactly as monomorphic as it was.
@@ -282,7 +296,56 @@ func (g *gen) scopeSwitch(f *tsfile, sig string, arms map[int][]string, scopes [
 			f.line("    return%s;", tail)
 		}
 	}
-	f.line("  }")
+	body := f.b.String()
+	out.line("  %s {", fitParams(sig, body))
+	out.b.WriteString(body)
+	out.line("  }")
+}
+
+// fitParams narrows a hook signature to the parameters its rendered body reads.
+// A hook receives every argument the corelib's Visitor declares, but most arms
+// read only a few (`lo`/`hi` are for the Long channel, `count` only for a
+// pre-sized row), and a consumer building with noUnusedParameters rejects a
+// parameter nothing reads. An unread TRAILING parameter is dropped -- a method
+// with fewer parameters still implements the interface -- and an unread one
+// before a read one keeps its place under a `_` name, the spelling tsc exempts.
+func fitParams(sig, body string) string {
+	open, close := strings.IndexByte(sig, '('), strings.IndexByte(sig, ')')
+	if open < 0 || close < open || close == open+1 {
+		return sig
+	}
+	params := strings.Split(sig[open+1:close], ", ")
+	code := tsStringLit.ReplaceAllString(body, `""`)
+	used := make([]bool, len(params))
+	last := -1
+	for i, p := range params {
+		name, _, _ := strings.Cut(p, ":")
+		used[i] = identRe(strings.TrimSpace(name)).MatchString(code)
+		if used[i] {
+			last = i
+		}
+	}
+	kept := make([]string, 0, last+1)
+	for i := 0; i <= last; i++ {
+		p := params[i]
+		if !used[i] {
+			p = "_" + p
+		}
+		kept = append(kept, p)
+	}
+	return sig[:open+1] + strings.Join(kept, ", ") + sig[close:]
+}
+
+// tsStringLit matches a one-line double-quoted literal, whose text -- an error
+// message naming "count", say -- must not count as a read. Hook bodies build
+// their messages from these alone; a template literal is never emitted there.
+var tsStringLit = regexp.MustCompile(`"(?:[^"\\\n]|\\.)*"`)
+
+// identRe matches name as a whole identifier, not as part of a longer one or a
+// member access (`this._t.count` does not read a parameter `count`); a spread
+// (`...src`) is a read.
+func identRe(name string) *regexp.Regexp {
+	return regexp.MustCompile(`(^|[^\w$.]|\.\.\.)` + regexp.QuoteMeta(name) + `($|[^\w$])`)
 }
 
 // endsWithReturn reports whether a rendered arm always leaves the callback, so
