@@ -31,6 +31,13 @@ echo "==> corelib-ts: $CORELIB"
 # `strict`. They go on the command line, not into the emitted tsconfig, so a
 # user's project keeps the tsconfig it was given. Every `tsc` below uses it.
 TSC_STRICT="--noUnusedLocals --noUnusedParameters --noImplicitReturns --noFallthroughCasesInSwitch"
+# tsc_strict DIR -- typecheck one generated project under $TSC_STRICT and record
+# it, so the sweep at the end of the run checks only what no leg checked.
+tsc_strict() {
+    ( cd "$1" && npx tsc --noEmit $TSC_STRICT ) \
+        || { echo "FAIL: tsc $TSC_STRICT in ${1#"$WORK"/}"; exit 1; }
+    printf '%s\n' "$1" >> "$WORK/tsc-checked"
+}
 
 # Conformance def: one single-field message per scalar op.
 cat > "$WORK/conf.yaml" <<'YAML'
@@ -88,7 +95,7 @@ setup "$WORK/ex"
 setup "$WORK/conf"
 
 echo "==> typecheck generated code"
-( cd "$WORK/ex" && npx tsc --noEmit $TSC_STRICT )
+tsc_strict "$WORK/ex"
 
 echo "==> JSON encode -> decode round-trip"
 # someblobarray is here for the OWNERSHIP legs of stream_check.ts, which run on
@@ -138,7 +145,7 @@ echo "==> round-trip fixture OK (no field sits on its schema default)"
 echo "==> bounded encode buffer is exactly MAX_SIZE (ARCHITECTURE §9.6)"
 gen "$ROOT/tests/conformance/lib/maxsize_fill.yaml" "$WORK/fill"
 ln -s "$WORK/ex/node_modules" "$WORK/fill/node_modules"
-( cd "$WORK/fill" && npx tsc --noEmit $TSC_STRICT )
+tsc_strict "$WORK/fill"
 check_maxsize_constant typescript "$WORK/fill/message.ts" \
     "static readonly MAX_SIZE = $SOFAB_MAXSIZE_FILL_BYTES;\$"
 # JSON.parse is the harness's front door and a JS number is a double, so an
@@ -473,7 +480,7 @@ YAML
 gen "$WORK/dyn.yaml" "$WORK/nolim"
 ln -s "$WORK/ex/node_modules" "$WORK/lim/node_modules"
 ln -s "$WORK/ex/node_modules" "$WORK/nolim/node_modules"
-( cd "$WORK/lim" && npx tsc --noEmit $TSC_STRICT )
+tsc_strict "$WORK/lim"
 printf '\003\005\001\002\003\004\005' > "$WORK/overlimit.bin"
 printf '\003\004\001\002\003\004' > "$WORK/atlimit.bin"
 if (cd "$WORK/lim" && npx tsx harness.ts decode dyn) < "$WORK/overlimit.bin" >/dev/null 2>"$WORK/limerr.txt"; then
@@ -594,7 +601,7 @@ YAML
 gen "$WORK/wrap.yaml" "$WORK/wnolim"
 ln -s "$WORK/ex/node_modules" "$WORK/wlim/node_modules"
 ln -s "$WORK/ex/node_modules" "$WORK/wnolim/node_modules"
-( cd "$WORK/wlim" && npx tsc --noEmit $TSC_STRICT )
+tsc_strict "$WORK/wlim"
 # The bytes are produced by the UNCAPPED project, so they are well formed by
 # construction and the capped project's refusal can only be a policy one.
 printf '%s' '{"w":["abcdefgh"]}' | (cd "$WORK/wnolim" && npx tsx harness.ts encode wdyn) > "$WORK/wrap8.bin"
@@ -708,8 +715,8 @@ YAML
     gen "$WORK/i64.yaml" "$WORK/i64-$mode" "$WORK/cfg_$mode.yaml"
     ln -s "$WORK/ex/node_modules" "$WORK/i64-$mode/node_modules"
 done
-( cd "$WORK/i64-long" && npx tsc --noEmit $TSC_STRICT )
-( cd "$WORK/i64-number" && npx tsc --noEmit $TSC_STRICT )
+tsc_strict "$WORK/i64-long"
+tsc_strict "$WORK/i64-number"
 enc64() { ( cd "$WORK/i64-$1" && printf '%s' "$2" | npx tsx harness.ts encode m64 ); }
 # Full 64-bit range (scalars beyond 2^53): bigint vs long. ud == its schema
 # default exercises the longArrEq omission guard.
@@ -895,7 +902,7 @@ for def in "$ROOT"/tests/matrix/corpus/defs/*.yaml "$ROOT"/examples/messages/rea
     # in the loop and this leg is green without omissions.
     gen "$def" "$WORK/corpus/$name"
     ln -s "$WORK/ex/node_modules" "$WORK/corpus/$name/node_modules"
-    ( cd "$WORK/corpus/$name" && npx tsc --noEmit $TSC_STRICT )
+    tsc_strict "$WORK/corpus/$name"
 done
 echo "==> corpus typechecks ($(ls "$ROOT"/tests/matrix/corpus/defs/*.yaml | wc -l) definitions + $(ls "$ROOT"/examples/messages/realworld/*.yaml | wc -l) realworld)"
 
@@ -916,7 +923,7 @@ for def in "$ROOT"/tests/matrix/corpus/defs/*.yaml "$ROOT"/examples/messages/rea
     name=$(basename "$def" .yaml)
     gen "$def" "$WORK/corpus-long/$name" "$WORK/cfg_corpus_long.yaml"
     ln -s "$WORK/ex/node_modules" "$WORK/corpus-long/$name/node_modules"
-    ( cd "$WORK/corpus-long/$name" && npx tsc --noEmit $TSC_STRICT )
+    tsc_strict "$WORK/corpus-long/$name"
     n64=$((n64 + 1))
 done
 echo "==> int64: long corpus typechecks ($n64 definitions with a 64-bit field)"
@@ -1119,7 +1126,7 @@ printf 'version: 1\nmessages:\n' > "$WORK/arrlen.yaml"
 python3 "$ROOT/tests/conformance/lib/check_array_lengths.py" --emit-schema >> "$WORK/arrlen.yaml"
 gen "$WORK/arrlen.yaml" "$WORK/arrlen"
 ln -s "$WORK/ex/node_modules" "$WORK/arrlen/node_modules"
-( cd "$WORK/arrlen" && npx tsc --noEmit $TSC_STRICT )
+tsc_strict "$WORK/arrlen"
 for surface in decode streamdecode; do
     python3 "$ROOT/tests/conformance/lib/check_array_lengths.py" "typescript" \
         --cwd "$WORK/arrlen" --verb "$surface" -- npx tsx harness.ts
@@ -1131,7 +1138,7 @@ done
 for mode in long number; do
     gen "$WORK/arrlen.yaml" "$WORK/arrlen-$mode" "$WORK/cfg_$mode.yaml"
     ln -s "$WORK/ex/node_modules" "$WORK/arrlen-$mode/node_modules"
-    ( cd "$WORK/arrlen-$mode" && npx tsc --noEmit $TSC_STRICT )
+    tsc_strict "$WORK/arrlen-$mode"
     python3 "$ROOT/tests/conformance/lib/check_array_lengths.py" "typescript int64: $mode" \
         --cwd "$WORK/arrlen-$mode" -- npx tsx harness.ts
 done
@@ -1155,5 +1162,27 @@ gen "$WORK/repeated.yaml" "$WORK/repeated"
 ln -s "$WORK/ex/node_modules" "$WORK/repeated/node_modules"
 python3 "$ROOT/tests/conformance/lib/check_repeated_id.py" "TypeScript" \
     --cwd "$WORK/repeated" -- npx tsx harness.ts
+
+# Every generated project in the run, typechecked under $TSC_STRICT (ARCHITECTURE
+# §12 gate 9). Several legs only RUN their project through tsx, which does not
+# typecheck, so they are swept here rather than trusted to a per-leg call: the
+# sweep covers $WORK, so a block added above is covered the day it is written.
+# Projects a leg already checked are not checked twice; only a cloned corelib is
+# left out. A project with no node_modules cannot resolve the corelib, and is a
+# failure rather than something to skip.
+echo "==> tsc $TSC_STRICT: every generated project"
+_swept=0
+_total=0
+for cfg in $(find "$WORK" -name tsconfig.json -not -path '*/node_modules/*' -not -path "$WORK/corelib/*" | sort); do
+    dir=$(dirname "$cfg")
+    _total=$((_total + 1))
+    grep -qxF "$dir" "$WORK/tsc-checked" 2>/dev/null && continue
+    [ -e "$dir/node_modules" ] \
+        || { echo "FAIL: ${dir#"$WORK"/} has no node_modules to typecheck against"; exit 1; }
+    tsc_strict "$dir"
+    _swept=$((_swept + 1))
+done
+[ "$_total" -gt 0 ] || { echo "FAIL: the tsc sweep found no generated project"; exit 1; }
+echo "==> tsc: $_total projects clean ($_swept checked only by the sweep)"
 
 echo "PASS"
