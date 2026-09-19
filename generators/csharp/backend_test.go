@@ -1146,6 +1146,24 @@ messages:
 	if strings.Contains(m, "private int ai ") || strings.Contains(m, "[ai++]") {
 		t.Errorf("a native inner row is a List, not a primitive array: no `ai`:\n%s", m)
 	}
+
+	// A boolean array is a List<bool>, filled natively but not a primitive
+	// array: it keeps afill (and its Unsigned fill arm) without ai.
+	m = buildModule(t, []byte(`
+version: 1
+messages:
+  m:
+    payload:
+      b: { id: 0, type: array, items: { type: boolean, count: 4 } }
+`), "bools.yaml", map[string]any{})
+	for _, want := range []string{"private int afill ", "afill = kind switch", "(Root, 0) => count,", "case (Root, 0): if (afill == 0) break; afill--; m.b.Add(value != 0);"} {
+		if !strings.Contains(m, want) {
+			t.Errorf("a boolean array field needs %q:\n%s", want, m)
+		}
+	}
+	if strings.Contains(m, "private int ai ") || strings.Contains(m, "[ai++]") {
+		t.Errorf("a boolean array is a List, not a primitive array: no `ai`:\n%s", m)
+	}
 }
 
 // csMethod returns the generated method body starting at `head` up to the next
@@ -1828,18 +1846,19 @@ func TestCsWidthAdmitsUndeclaredValues(t *testing.T) {
 
 // The bench harness folds one integer field into its sink after every decode.
 // A deprecated field carries [Obsolete], and reading it there is CS0612 in the
-// generated Program.cs, so the sink passes over it to the next integer -- and
-// falls back to GetHashCode when a deprecated integer is the only one.
-func TestCsBenchSinkSkipsDeprecatedField(t *testing.T) {
+// generated Program.cs, so the sink prefers the next non-deprecated integer; a
+// deprecated integer that is the only one is still the sink, and the caller
+// wraps that one read in a narrow CS0612 pragma.
+func TestCsBenchSinkPrefersNonDeprecatedField(t *testing.T) {
 	m := &ir.Message{Name: "m", Fields: []*ir.Field{
 		{Name: "old", Kind: ir.KindU32, Deprecated: true},
 		{Name: "cur", Kind: ir.KindU32},
 	}}
-	if got := benchSinkField(m); got != "cur" {
-		t.Errorf("benchSinkField = %q, want the first non-deprecated integer %q", got, "cur")
+	if got, dep := benchSinkField(m); got != "cur" || dep {
+		t.Errorf("benchSinkField = (%q, %v), want the first non-deprecated integer (%q, false)", got, dep, "cur")
 	}
 	m.Fields = m.Fields[:1]
-	if got := benchSinkField(m); got != "" {
-		t.Errorf("benchSinkField = %q, want \"\" (GetHashCode fallback) when only a deprecated integer exists", got)
+	if got, dep := benchSinkField(m); got != "old" || !dep {
+		t.Errorf("benchSinkField = (%q, %v), want the only (deprecated) integer (%q, true)", got, dep, "old")
 	}
 }
