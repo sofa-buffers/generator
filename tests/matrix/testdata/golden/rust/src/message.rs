@@ -51,6 +51,7 @@ pub struct Scalars {
     pub flag: bool,
 }
 
+#[allow(clippy::approx_constant)] // float defaults are the schema's values, written as declared
 impl Default for Scalars {
     fn default() -> Self {
         Self {
@@ -66,6 +67,7 @@ impl Default for Scalars {
     }
 }
 
+#[allow(clippy::approx_constant)] // float defaults are the schema's values, written as declared
 impl Scalars {
     /// Worst-case encoded size of this message, derived from the schema.
     pub const MAX_SIZE: usize = 49;
@@ -77,7 +79,7 @@ impl Scalars {
         if self.i64min != i64::MIN { let _ = os.write_signed(4, self.i64min as Signed); }
         if self.f32 != 3.14 { let _ = os.write_fp32(5, self.f32); }
         if self.f64 != -2.5 { let _ = os.write_fp64(6, self.f64); }
-        if self.flag != true { let _ = os.write_boolean(7, self.flag); }
+        if !self.flag { let _ = os.write_boolean(7, self.flag); }
     }
     pub fn encode(&self) -> Vec<u8> {
         let mut buf = vec![0u8; Self::MAX_SIZE];
