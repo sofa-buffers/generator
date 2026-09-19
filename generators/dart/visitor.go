@@ -2,6 +2,7 @@ package dart
 
 import (
 	"fmt"
+	"strings"
 
 	"github.com/sofa-buffers/generator/internal/ir"
 )
@@ -487,8 +488,14 @@ func scanArrayElem(elem ir.Kind, items *ir.ArrayElem, n *needs) {
 	scanArrayElem(items.Elem, items.ElemItems, n)
 }
 
-func (g *gen) emitPrelude(f *dfile, s *ir.Schema) {
+func (g *gen) emitPrelude(f *dfile, s *ir.Schema, body string) {
 	n := g.computeNeeds(s)
+	// The schema scan says which helpers a type COULD call; the rendered body
+	// says which one it does. Both must hold, or the helper is unreferenced.
+	n.f32bits = n.f32bits && strings.Contains(body, "_f32FromBits(")
+	n.prefixEq = n.prefixEq && strings.Contains(body, "_prefixEq(")
+	n.boolDefault = n.boolDefault && strings.Contains(body, "_boolsEq(")
+	n.bools = n.bools && strings.Contains(body, "_bools01(")
 	if n.f32bits {
 		f.line("// Widen the 32 raw wire bits of an fp32 NaN to a display double for element")
 		f.line("// access; the exact bits are kept alongside for a bit-for-bit re-encode.")
