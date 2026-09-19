@@ -207,12 +207,9 @@ func (g *gen) emitVisitor(f *tsfile, name string, fields []*ir.Field) {
 	f.line("  private _c = %s;", scopes[0].name)
 	for _, sc := range scopes {
 		if sc.ix != "" {
-			// Read anywhere but in its own `= id;` assignment: keep it.
-			ref, set := regexp.MustCompile(`this\.`+sc.ix+`\b`), "this."+sc.ix+" = id;"
-			if len(ref.FindAllStringIndex(hookText, -1)) > strings.Count(hookText, set) {
+			var read bool
+			if hookText, read = dropUnreadRegister(hookText, sc.ix); read {
 				f.line("  private %s = 0;", sc.ix)
-			} else {
-				hookText = regexp.MustCompile(`(?m)^[ \t]*this\.`+sc.ix+` = id;\n`).ReplaceAllString(hookText, "")
 			}
 		}
 		if sc.row != "" {
@@ -300,6 +297,24 @@ func (g *gen) scopeSwitch(f *tsfile, sig string, arms map[int][]string, scopes [
 	out.line("  %s {", fitParams(sig, body))
 	out.b.WriteString(body)
 	out.line("  }")
+}
+
+// dropUnreadRegister decides whether the index register ix is ever READ in the
+// rendered hooks, i.e. referenced anywhere but in its own `this.ix = id;`
+// assignment. If it is, text is returned as is and read is true. If not, every
+// assignment is removed -- on a line of its own the line goes with it, inline
+// just the statement -- so no reference to the undeclared field is left. Both
+// the count and the removal work on the one assignment literal, so an
+// assignment the count saw is an assignment the removal takes.
+func dropUnreadRegister(text, ix string) (out string, read bool) {
+	set := "this." + ix + " = id;"
+	refs := len(regexp.MustCompile(`this\.`+regexp.QuoteMeta(ix)+`\b`).FindAllStringIndex(text, -1))
+	if refs > strings.Count(text, set) {
+		return text, true
+	}
+	text = regexp.MustCompile(`(?m)^[ \t]*`+regexp.QuoteMeta(set)+`[ \t]*\n`).ReplaceAllString(text, "")
+	text = strings.ReplaceAll(text, set+" ", "")
+	return strings.ReplaceAll(text, set, ""), false
 }
 
 // fitParams narrows a hook signature to the parameters its rendered body reads.
