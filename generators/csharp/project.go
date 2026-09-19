@@ -157,16 +157,23 @@ func (g *gen) harness(s *ir.Schema) []byte {
 
 // benchSinkField names one cheap integer scalar of m, folded in the bench loop so
 // the decode cannot be elided. It runs inside the measured loop, so it must stay
-// cheap -- serializing would be counted as decode cost.
-func benchSinkField(m *ir.Message) string {
+// cheap -- serializing would be counted as decode cost. A non-deprecated field is
+// preferred; a deprecated one is still a sink when it is the only integer, and
+// deprecated reports it so the caller wraps the read in a CS0612 pragma.
+func benchSinkField(m *ir.Message) (name string, deprecated bool) {
 	for _, f := range m.Fields {
 		switch f.Kind {
 		case ir.KindU8, ir.KindU16, ir.KindU32, ir.KindU64,
 			ir.KindI8, ir.KindI16, ir.KindI32, ir.KindI64:
-			return csIdent(f.Name)
+			if !f.Deprecated {
+				return csIdent(f.Name), false
+			}
+			if name == "" {
+				name, deprecated = csIdent(f.Name), true
+			}
 		}
 	}
-	return ""
+	return name, deprecated
 }
 
 // emitBenchBody emits the `bench <workload> <reps>` entry point (tests/bench,
@@ -216,13 +223,19 @@ func (g *gen) emitBenchBody(f *cfile, s *ir.Schema) {
 	for _, m := range s.Messages {
 		mt := exported(m.Name)
 		low := strings.ToLower(m.Name)
-		sink := benchSinkField(m)
+		sink, sinkDeprecated := benchSinkField(m)
 		f.line("    static void BenchOp_%s(bool enc, %s obj, byte[] wire) {", low, mt)
 		f.line("        if (enc) {")
 		f.line("            benchSink ^= obj.Encode().Length;")
 		f.line("        } else {")
 		if sink != "" {
+			if sinkDeprecated {
+				f.line("#pragma warning disable 612 // the only integer sink is a deprecated field")
+			}
 			f.line("            benchSink ^= (long)%s.Decode(wire).%s;", mt, sink)
+			if sinkDeprecated {
+				f.line("#pragma warning restore 612")
+			}
 		} else {
 			f.line("            benchSink ^= %s.Decode(wire).GetHashCode();", mt)
 		}

@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"github.com/sofa-buffers/generator/internal/analysis"
+	"github.com/sofa-buffers/generator/internal/ir"
 	"github.com/sofa-buffers/generator/internal/model"
 	"github.com/sofa-buffers/generator/internal/parser"
 )
@@ -361,7 +362,7 @@ func TestCsStructural(t *testing.T) {
 // TestCsMetadataDoc: field/enum/flag metadata renders as XML-doc comments and
 // native annotations — a deprecated field carries [Obsolete] plus a
 // "Deprecated." doc note (and the generated marshal/decode that reads it is
-// wrapped in a CS0618 pragma so the output builds warning-clean), each enum
+// wrapped in a CS0612 pragma so the output builds warning-clean), each enum
 // constant carries its description, and each flag carries its description with
 // the (default: true/false) note when the flag declares a default.
 func TestCsMetadataDoc(t *testing.T) {
@@ -389,10 +390,10 @@ messages:
 	for _, want := range []string{
 		// Deprecated field: doc note + native [Obsolete] attribute.
 		"/// Old identifier retained for backward compatibility.\n    /// Deprecated.\n    /// </summary>\n    [Obsolete]\n    public uint legacyId;",
-		// Internal access to the deprecated field is CS0618-suppressed.
-		"    public void Serialize(OStream os) {\n#pragma warning disable 618 // internal access to a member marked [Obsolete]",
-		"#pragma warning restore 618\n    }",
-		"#pragma warning disable 618 // internal access to a member marked [Obsolete]\ninternal sealed class TelemetryVisitor : IVisitor {",
+		// Internal access to the deprecated field is CS0612-suppressed.
+		"    public void Serialize(OStream os) {\n#pragma warning disable 612 // internal access to a member marked [Obsolete] (CS0612)",
+		"#pragma warning restore 612\n    }",
+		"#pragma warning disable 612 // internal access to a member marked [Obsolete] (CS0612)\ninternal sealed class TelemetryVisitor : IVisitor {",
 		// Enum constant descriptions.
 		"/// <summary>\n    /// Node is powered down.\n    /// </summary>\n    Off = 0,",
 		"/// <summary>\n    /// Node is sampling and transmitting.\n    /// </summary>\n    Active = 1,",
@@ -1056,6 +1057,112 @@ messages:
 	// The callback is still declared -- the Visitor interface requires it.
 	if !strings.Contains(m, "public void String(int id,") {
 		t.Errorf("String() must still be declared:\n%s", m)
+	}
+}
+
+// The same rule for every other (cur, id) dispatch: a callback whose kind the
+// schema never declares has no arm, and `switch ((cur, id)) { }` is CS1522
+// "Empty switch block". The primitive-array fill index `ai` and the fill counter
+// `afill` are read only by a native-array fill, so a schema without one must not
+// declare them either (CS0414 "assigned but its value is never used"). Both are
+// warnings in a file the consumer must not edit, and fatal under
+// TreatWarningsAsErrors. The u32-only schema is the reproduction of the defect;
+// the string-only one covers Unsigned, the one callback it leaves empty.
+func TestCsKindFreeCallbacksEmitNoEmptySwitch(t *testing.T) {
+	cases := []struct {
+		name, src string
+		empty     []string // callbacks with no arm: no switch at all
+		kept      []string // callbacks that do dispatch
+	}{
+		{"only u32", `
+version: 1
+messages:
+  m:
+    payload:
+      a: { id: 0, type: u32 }
+`, []string{"Signed(int id,", "Fp32(int id,", "Fp64(int id,", "ArrayBegin(int id,"}, []string{"Unsigned(int id,"}},
+		{"only string", `
+version: 1
+messages:
+  m:
+    payload:
+      s: { id: 0, type: string, maxlen: 8 }
+`, []string{"Unsigned(int id,", "Signed(int id,", "Fp32(int id,", "Fp64(int id,", "ArrayBegin(int id,"}, []string{"String(int id,"}},
+	}
+	for _, c := range cases {
+		m := buildModule(t, []byte(c.src), "kindfree.yaml", map[string]any{})
+		for _, cb := range c.empty {
+			fn := csMethod(t, m, "    public void "+cb)
+			if strings.Contains(fn, "switch ((cur, id))") {
+				t.Errorf("%s: %s declares no arm and must not open a (cur, id) switch (CS1522):\n%s", c.name, cb, fn)
+			}
+		}
+		for _, cb := range c.kept {
+			if fn := csMethod(t, m, "    public void "+cb); !strings.Contains(fn, "switch ((cur, id))") {
+				t.Errorf("%s: %s binds a field and must dispatch on (cur, id):\n%s", c.name, cb, fn)
+			}
+		}
+		for _, forbidden := range []string{"private int ai ", "ai = 0;", "[ai++]", "afill"} {
+			if strings.Contains(m, forbidden) {
+				t.Errorf("%s: a schema without a native array must not emit %q (CS0414):\n%s", c.name, forbidden, m)
+			}
+		}
+	}
+}
+
+// The gate must not overshoot: a native array still gets its fill index, its
+// fill counter and the ArrayBegin dispatch that allocates it. A native INNER row
+// (array of fp32 arrays) needs afill but has no primitive-array field, so it
+// must not get `ai`.
+func TestCsNativeArrayKeepsFillState(t *testing.T) {
+	m := buildModule(t, []byte(`
+version: 1
+messages:
+  m:
+    payload:
+      a: { id: 0, type: array, items: { type: u32, count: 4 } }
+`), "prim.yaml", map[string]any{})
+	for _, want := range []string{"private int ai ", "        ai = 0;", "[ai++]", "private int afill ", "afill = kind switch"} {
+		if !strings.Contains(m, want) {
+			t.Errorf("a primitive array field needs %q:\n%s", want, m)
+		}
+	}
+	if fn := csMethod(t, m, "    public void ArrayBegin(int id,"); !strings.Contains(fn, "switch ((cur, id))") {
+		t.Errorf("ArrayBegin must dispatch to allocate the array:\n%s", fn)
+	}
+
+	m = buildModule(t, []byte(`
+version: 1
+messages:
+  m:
+    payload:
+      mx: { id: 0, type: array, items: { type: array, count: 3, items: { type: fp32, count: 2 } } }
+`), "rows.yaml", map[string]any{})
+	for _, want := range []string{"private int afill ", "afill = kind switch", "if (afill == 0) break;"} {
+		if !strings.Contains(m, want) {
+			t.Errorf("a native inner row needs %q:\n%s", want, m)
+		}
+	}
+	if strings.Contains(m, "private int ai ") || strings.Contains(m, "[ai++]") {
+		t.Errorf("a native inner row is a List, not a primitive array: no `ai`:\n%s", m)
+	}
+
+	// A boolean array is a List<bool>, filled natively but not a primitive
+	// array: it keeps afill (and its Unsigned fill arm) without ai.
+	m = buildModule(t, []byte(`
+version: 1
+messages:
+  m:
+    payload:
+      b: { id: 0, type: array, items: { type: boolean, count: 4 } }
+`), "bools.yaml", map[string]any{})
+	for _, want := range []string{"private int afill ", "afill = kind switch", "(Root, 0) => count,", "case (Root, 0): if (afill == 0) break; afill--; m.b.Add(value != 0);"} {
+		if !strings.Contains(m, want) {
+			t.Errorf("a boolean array field needs %q:\n%s", want, m)
+		}
+	}
+	if strings.Contains(m, "private int ai ") || strings.Contains(m, "[ai++]") {
+		t.Errorf("a boolean array is a List, not a primitive array: no `ai`:\n%s", m)
 	}
 }
 
@@ -1734,5 +1841,24 @@ func TestCsWidthAdmitsUndeclaredValues(t *testing.T) {
 	}
 	if !strings.Contains(m, "value > 255") {
 		t.Errorf("the bitfield width bound is missing:\n%s", m)
+	}
+}
+
+// The bench harness folds one integer field into its sink after every decode.
+// A deprecated field carries [Obsolete], and reading it there is CS0612 in the
+// generated Program.cs, so the sink prefers the next non-deprecated integer; a
+// deprecated integer that is the only one is still the sink, and the caller
+// wraps that one read in a narrow CS0612 pragma.
+func TestCsBenchSinkPrefersNonDeprecatedField(t *testing.T) {
+	m := &ir.Message{Name: "m", Fields: []*ir.Field{
+		{Name: "old", Kind: ir.KindU32, Deprecated: true},
+		{Name: "cur", Kind: ir.KindU32},
+	}}
+	if got, dep := benchSinkField(m); got != "cur" || dep {
+		t.Errorf("benchSinkField = (%q, %v), want the first non-deprecated integer (%q, false)", got, dep, "cur")
+	}
+	m.Fields = m.Fields[:1]
+	if got, dep := benchSinkField(m); got != "old" || !dep {
+		t.Errorf("benchSinkField = (%q, %v), want the only (deprecated) integer (%q, true)", got, dep, "old")
 	}
 }
