@@ -144,7 +144,7 @@ fn main() {
         })
         .expect("7 bytes is above MIN_OUTPUT_BUFFER");
         m.serialize(&mut os);
-        os.flush();
+        let _ = os.flush(); // Result<usize> on corelib-rs, usize on rs-no-std
     }
     assert_eq!(
         &one_shot[..],
