@@ -611,6 +611,30 @@ func (g *gen) emitArraySkipGuard(f *rfile, arrSkip bool) {
 	f.line("        if self.askip > 0 { self.askip -= 1; return; } // array delivered at a scalar id")
 }
 
+// emitScalarVisit emits the Visitor method for one integer wire type (unsigned
+// or signed) around the match arms the caller collected. A schema with no field
+// of that wire type has no arm: the method is then left to the trait's default
+// when nothing needs draining, and otherwise only drains a wire-type-contradictory
+// array -- never a match with nothing but a wildcard, and never a named but
+// unused parameter.
+func (g *gen) emitScalarVisit(f *rfile, name, typ string, arms *rfile, arrSkip bool) {
+	if arms.b.Len() == 0 {
+		if arrSkip {
+			f.line("    fn %s(&mut self, _id: Id, _value: %s) {", name, typ)
+			f.line("        if self.askip > 0 { self.askip -= 1; } // array delivered at a scalar id")
+			f.line("    }")
+		}
+		return
+	}
+	f.line("    fn %s(&mut self, id: Id, value: %s) {", name, typ)
+	g.emitArraySkipGuard(f, arrSkip)
+	f.line("        match (self.cur, id) {")
+	f.b.WriteString(arms.b.String())
+	f.line("            _ => {}")
+	f.line("        }")
+	f.line("    }")
+}
+
 // wantUnsignedArrayElem / wantSignedArrayElem / wantFP32Elem / wantFP64Elem are
 // the four element-kind predicates that key an array_begin arm to a wire
 // ArrayKind. They partition the native array element kinds exactly as the
@@ -904,17 +928,20 @@ func (g *gen) emitVisitor(f *rfile, name string, fields []*ir.Field) {
 	f.line("    use super::*;")
 	// ArrayKind is gated behind the no-std `array` feature; import it only when an
 	// array_begin override is emitted (i.e. the message has a native array).
-	arrayKind := ""
+	// The other corelib names (IStream, Visitor, Id, ...) come from the crate
+	// module through `use super::*`, which imports exactly what the file uses.
+	var local []string
 	if emitArrayBegin {
-		arrayKind = ", ArrayKind"
+		local = append(local, "ArrayKind")
 	}
 	// FixlenType only for the fixlen_begin override, on the same on-demand rule --
 	// a message with no bounded string/blob names neither type.
-	fixlenType := ""
 	if len(g.fixlenBeginArms(fs, ir.KindString, g.strCapConst())) > 0 || len(g.fixlenBeginArms(fs, ir.KindBlob, g.blobCapConst())) > 0 {
-		fixlenType = ", FixlenType"
+		local = append(local, "FixlenType")
 	}
-	f.line("    use sofab::{IStream, Visitor, Id, Unsigned, Signed%s%s};", arrayKind, fixlenType)
+	if len(local) > 0 {
+		f.line("    %s", useDecl("sofab", local))
+	}
 	f.blank()
 	// Bounded decode stack for the no_std profile. Only LIVE scopes are stacked --
 	// a sequence opened inside a skipped subtree is depth-counted in `dead` instead
@@ -1155,6 +1182,9 @@ func (g *gen) emitVisitor(f *rfile, name string, fields []*ir.Field) {
 	// to a real scope, so nothing matches while cur is Dead and the whole subtree
 	// is discarded. See the sequence_begin default arm (generator#268/#272).
 	f.line("#[derive(Clone, Copy, PartialEq)]")
+	// A variant spells the schema path it stands for (Root_a_b): the field names
+	// stay readable in the dispatch arms, and the enum is private to the module.
+	f.line("#[allow(non_camel_case_types)] // variants spell the schema path (Root_a_b), not a type name")
 	f.line("enum _Loc {")
 	for _, fr := range fs {
 		f.line("    %s,", fr.loc)
@@ -1231,24 +1261,22 @@ func (g *gen) emitVisitor(f *rfile, name string, fields []*ir.Field) {
 	f.line("impl<'a> Visitor for V<'a> {")
 
 	// unsigned: u*/bitfield scalars, bool, and unsigned/bool/bitfield array elements
-	f.line("    fn unsigned(&mut self, id: Id, value: Unsigned) {")
-	g.emitArraySkipGuard(f, arrSkip)
-	f.line("        match (self.cur, id) {")
+	arms := &rfile{}
 	for _, fr := range fs {
 		switch fr.kind {
 		case fkStruct:
 			for _, fld := range fr.fields {
 				switch {
 				case fld.Kind == ir.KindU8 || fld.Kind == ir.KindU16 || fld.Kind == ir.KindU32 || fld.Kind == ir.KindU64 || fld.Kind == ir.KindBitfield:
-					f.line("            (_Loc::%s, %d) => { %s%s.%s = value as %s },", fr.loc, fld.ID, widthGuard(fld.Kind, fld.Ref), fr.path, rustIdent(fld.Name), g.rustType(fld))
+					arms.line("            (_Loc::%s, %d) => { %s%s.%s = value as %s },", fr.loc, fld.ID, widthGuard(fld.Kind, fld.Ref), fr.path, rustIdent(fld.Name), g.rustType(fld))
 				case fld.Kind == ir.KindBool:
-					f.line("            (_Loc::%s, %d) => %s.%s = value != 0,", fr.loc, fld.ID, fr.path, rustIdent(fld.Name))
+					arms.line("            (_Loc::%s, %d) => %s.%s = value != 0,", fr.loc, fld.ID, fr.path, rustIdent(fld.Name))
 				case fld.Kind == ir.KindArray && isUnsignedElem(fld.Elem):
-					g.emitNativeArrayStore(f, fr, fld, fmt.Sprintf("value as %s", numRustType(fld.Elem)))
+					g.emitNativeArrayStore(arms, fr, fld, fmt.Sprintf("value as %s", numRustType(fld.Elem)))
 				case fld.Kind == ir.KindArray && fld.Elem == ir.KindBool:
-					g.emitNativeArrayStore(f, fr, fld, "value != 0")
+					g.emitNativeArrayStore(arms, fr, fld, "value != 0")
 				case fld.Kind == ir.KindArray && fld.Elem == ir.KindBitfield:
-					g.emitNativeArrayStore(f, fr, fld, fmt.Sprintf("value as %s", bitfieldBacking(fld.ElemRef.Target)))
+					g.emitNativeArrayStore(arms, fr, fld, fmt.Sprintf("value as %s", bitfieldBacking(fld.ElemRef.Target)))
 				}
 			}
 		case fkNestedNative:
@@ -1266,30 +1294,26 @@ func (g *gen) emitVisitor(f *rfile, name string, fields []*ir.Field) {
 			if g.limits.arrayHas && fr.elemDyn {
 				store = g.limArrayStore(store)
 			}
-			f.line("            (_Loc::%s, _) => { %s%s%s; },", fr.loc, fillGuard, arrayWidthGuard(fr.elemKind, fr.elemRef), store)
+			arms.line("            (_Loc::%s, _) => { %s%s%s; },", fr.loc, fillGuard, arrayWidthGuard(fr.elemKind, fr.elemRef), store)
 		}
 	}
-	f.line("            _ => {}")
-	f.line("        }")
-	f.line("    }")
+	g.emitScalarVisit(f, "unsigned", "Unsigned", arms, arrSkip)
 
 	// signed: i*/enum scalars + signed/enum array elements
-	f.line("    fn signed(&mut self, id: Id, value: Signed) {")
-	g.emitArraySkipGuard(f, arrSkip)
-	f.line("        match (self.cur, id) {")
+	arms = &rfile{}
 	for _, fr := range fs {
 		switch fr.kind {
 		case fkStruct:
 			for _, fld := range fr.fields {
 				switch {
 				case fld.Kind == ir.KindI8 || fld.Kind == ir.KindI16 || fld.Kind == ir.KindI32 || fld.Kind == ir.KindI64:
-					f.line("            (_Loc::%s, %d) => { %s%s.%s = value as %s },", fr.loc, fld.ID, widthGuard(fld.Kind, fld.Ref), fr.path, rustIdent(fld.Name), g.rustType(fld))
+					arms.line("            (_Loc::%s, %d) => { %s%s.%s = value as %s },", fr.loc, fld.ID, widthGuard(fld.Kind, fld.Ref), fr.path, rustIdent(fld.Name), g.rustType(fld))
 				case fld.Kind == ir.KindEnum:
-					f.line("            (_Loc::%s, %d) => { %s%s.%s = value as %s },", fr.loc, fld.ID, widthGuard(fld.Kind, fld.Ref), fr.path, rustIdent(fld.Name), enumBacking(fld.Ref.Target))
+					arms.line("            (_Loc::%s, %d) => { %s%s.%s = value as %s },", fr.loc, fld.ID, widthGuard(fld.Kind, fld.Ref), fr.path, rustIdent(fld.Name), enumBacking(fld.Ref.Target))
 				case fld.Kind == ir.KindArray && isSignedElem(fld.Elem):
-					g.emitNativeArrayStore(f, fr, fld, fmt.Sprintf("value as %s", numRustType(fld.Elem)))
+					g.emitNativeArrayStore(arms, fr, fld, fmt.Sprintf("value as %s", numRustType(fld.Elem)))
 				case fld.Kind == ir.KindArray && fld.Elem == ir.KindEnum:
-					g.emitNativeArrayStore(f, fr, fld, fmt.Sprintf("value as %s", enumBacking(fld.ElemRef.Target)))
+					g.emitNativeArrayStore(arms, fr, fld, fmt.Sprintf("value as %s", enumBacking(fld.ElemRef.Target)))
 				}
 			}
 		case fkNestedNative:
@@ -1305,12 +1329,10 @@ func (g *gen) emitVisitor(f *rfile, name string, fields []*ir.Field) {
 			if g.limits.arrayHas && fr.elemDyn {
 				store = g.limArrayStore(store)
 			}
-			f.line("            (_Loc::%s, _) => { %s%s%s; },", fr.loc, fillGuard, arrayWidthGuard(fr.elemKind, fr.elemRef), store)
+			arms.line("            (_Loc::%s, _) => { %s%s%s; },", fr.loc, fillGuard, arrayWidthGuard(fr.elemKind, fr.elemRef), store)
 		}
 	}
-	f.line("            _ => {}")
-	f.line("        }")
-	f.line("    }")
+	g.emitScalarVisit(f, "signed", "Signed", arms, arrSkip)
 
 	if use.fp32 {
 		g.emitFloatVisit(f, fs, ir.KindFP32, "fp32", "f32", arrSkip)

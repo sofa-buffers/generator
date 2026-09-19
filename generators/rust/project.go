@@ -206,7 +206,11 @@ func (g *gen) harness(s *ir.Schema) []byte {
 		// (built only with the `std` feature) consumes it as a dependency.
 		f.line("use sofabuffers_generated::*;")
 	} else {
-		f.line("mod message;")
+		// pub: the module is the generated API, which the harness exercises only
+		// in part. Declared private, every item the harness does not touch would
+		// be dead code to rustc; declared pub, it is checked like a library's
+		// public surface, and only genuinely unreachable code still warns.
+		f.line("pub mod message;")
 		f.line("use message::*;")
 	}
 	f.line("use std::io::{Read, Write};")

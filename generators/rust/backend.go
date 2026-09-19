@@ -15,6 +15,7 @@ package rust
 
 import (
 	"fmt"
+	"regexp"
 	"strings"
 
 	"github.com/sofa-buffers/generator/internal/generator"
@@ -245,19 +246,70 @@ func (g *gen) module(s *ir.Schema) []byte {
 	if g.license != "" {
 		f.line("// SPDX-License-Identifier: %s", g.license)
 	}
-	f.line("#![allow(dead_code, unused_variables, unused_imports, non_camel_case_types, clippy::all)]")
+	// The body is rendered first so the imports can be exactly the names it uses:
+	// an import nothing reads is an unused_imports warning in the user's crate.
+	b := &rfile{}
+	g.moduleBody(b, s)
+	body := b.b.String()
 	// ArrayKind is only referenced by the per-message decoder's array_begin (and
 	// only when the schema has a scalar array); it is gated behind the no-std
-	// `array` feature, so it is imported there on demand, not crate-wide.
-	f.line("use sofab::{OStream, IStream, Visitor, Id, Unsigned, Signed};")
-	// serde is optional under no_std: the derives are gated behind a `serde` cargo
-	// feature (off in the heap-free firmware build, on for the JSON harness), so the
-	// import must be gated too. The std profile always derives serde.
-	if g.noStd {
-		f.line("#[cfg(feature = \"serde\")]")
+	// `array` feature, so it is imported there on demand, not crate-wide. The
+	// per-message decoder modules reach these names through `use super::*`.
+	if names := usedNames(body, "OStream", "IStream", "Visitor", "Id", "Unsigned", "Signed"); len(names) > 0 {
+		f.line("%s", useDecl("sofab", names))
 	}
-	f.line("use serde::{Serialize, Deserialize};")
+	if names := usedNames(body, "Serialize", "Deserialize"); len(names) > 0 {
+		// serde is optional under no_std: the derives are gated behind a `serde`
+		// cargo feature (off in the heap-free firmware build, on for the JSON
+		// harness), so the import must be gated too. The std profile always
+		// derives serde.
+		if g.noStd {
+			f.line("#[cfg(feature = \"serde\")]")
+		}
+		f.line("%s", useDecl("serde", names))
+	}
 	f.blank()
+	f.b.WriteString(body)
+	return f.bytes()
+}
+
+// useDecl spells `use path::{a, b};`, or `use path::a;` for a single name.
+func useDecl(path string, names []string) string {
+	if len(names) == 1 {
+		return fmt.Sprintf("use %s::%s;", path, names[0])
+	}
+	return fmt.Sprintf("use %s::{%s};", path, strings.Join(names, ", "))
+}
+
+// usedNamePat matches an unqualified use of an identifier: not preceded by `::`
+// (a path such as sofab::Unsigned needs no import) or by an identifier byte.
+func usedNamePat(name string) *regexp.Regexp {
+	return regexp.MustCompile(`(^|[^:\w])` + name + `\b`)
+}
+
+// usedNames returns, in the order given, the names that Rust code in text
+// refers to unqualified. Line comments are dropped first, so a doc comment that
+// mentions a type does not keep its import alive.
+func usedNames(text string, names ...string) []string {
+	var code strings.Builder
+	for _, ln := range strings.Split(text, "\n") {
+		if i := strings.Index(ln, "//"); i >= 0 {
+			ln = ln[:i]
+		}
+		code.WriteString(ln)
+		code.WriteByte('\n')
+	}
+	var out []string
+	for _, n := range names {
+		if usedNamePat(n).MatchString(code.String()) {
+			out = append(out, n)
+		}
+	}
+	return out
+}
+
+// moduleBody renders everything in src/message.rs below the imports.
+func (g *gen) moduleBody(f *rfile, s *ir.Schema) {
 	// capability guard for the whole crate. corelib-rs-no-std gates wire types
 	// behind Cargo features and exposes require!() to assert them; corelib-rs
 	// (std) always compiles every wire type in and has no such macro.
@@ -311,7 +363,6 @@ func (g *gen) module(s *ir.Schema) []byte {
 	for _, m := range s.Messages {
 		g.emitStruct(f, exported(m.Name), m.Fields, true, m.Summary)
 	}
-	return f.bytes()
 }
 
 // rustReservedNames are the module-scope Rust type names the emitted crate has
@@ -652,7 +703,10 @@ func (g *gen) emitStruct(f *rfile, name string, fields []*ir.Field, isMessage bo
 			// unwrapped, so this stays panic-free for the no_std profile too.
 			f.line("            if let Ok(mut os) = OStream::with_flush(&mut scratch, 0, |_d: &[u8]| out.extend_from_slice(_d)) {")
 			f.line("                self.serialize(&mut os);")
-			f.line("                os.flush();")
+			// corelib-rs's flush() returns a #[must_use] Result; the sink is an
+			// infallible Vec push, so there is nothing to report. The discard is
+			// explicit, like every write_* above it.
+			f.line("                let _ = os.flush();")
 			f.line("            }")
 			f.line("        }")
 			f.line("        out")

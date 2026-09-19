@@ -3383,3 +3383,89 @@ messages:
 		}
 	}
 }
+
+// TestRustNoBlanketAllow: the generated module carries no crate- or module-wide
+// lint allow. Every warning rustc would raise is fixed where it is emitted, and
+// the only allows left are narrow ones on the item that needs them, so a user
+// building with `-D warnings` sees exactly what the generator is answerable for.
+func TestRustNoBlanketAllow(t *testing.T) {
+	narrow := map[string]bool{
+		"#[allow(deprecated)]": true,
+		"#[allow(non_camel_case_types)] // variants spell the schema path (Root_a_b), not a type name": true,
+	}
+	for _, cfg := range []map[string]any{
+		{"corelib": "rs"},
+		{"corelib": "rs", "allow_dynamic": false},
+		{"corelib": "rs-no-std"},
+		{"corelib": "rs-no-std", "allow_dynamic": true},
+	} {
+		m := exampleModule(t, cfg)
+		if strings.Contains(m, "#![allow") {
+			t.Errorf("%v: module-wide #![allow] is back", cfg)
+		}
+		for _, ln := range strings.Split(m, "\n") {
+			ln = strings.TrimSpace(ln)
+			if strings.HasPrefix(ln, "#[allow") && !narrow[ln] {
+				t.Errorf("%v: unexpected allow %q", cfg, ln)
+			}
+		}
+	}
+}
+
+// TestRustUnarmedScalarVisitHasNoUnusedParams: a message with no signed field
+// has no arm for signed(). The method then only drains an array delivered at a
+// scalar id, with its parameters marked unused -- not a wildcard-only match over
+// an id and a value nothing reads.
+func TestRustUnarmedScalarVisitHasNoUnusedParams(t *testing.T) {
+	m := moduleFromYAML(t, "version: 1\nmessages:\n  u: { payload: { a: { id: 0, type: u32 } } }\n", map[string]any{"corelib": "rs"})
+	want := "    fn signed(&mut self, _id: Id, _value: Signed) {\n" +
+		"        if self.askip > 0 { self.askip -= 1; } // array delivered at a scalar id\n" +
+		"    }\n"
+	if !strings.Contains(m, want) {
+		t.Errorf("unarmed signed() not in its drain-only form:\n%s", sliceFn(t, m, "    fn signed("))
+	}
+	if !strings.Contains(m, "    fn unsigned(&mut self, id: Id, value: Unsigned) {") {
+		t.Error("armed unsigned() lost its named parameters")
+	}
+}
+
+// TestRustImportsFollowTheBody: the crate-level imports are exactly the names
+// the module uses unqualified -- a doc comment or a sofab:: path does not count,
+// and the per-message decoder module imports only what `use super::*` cannot
+// give it.
+func TestRustImportsFollowTheBody(t *testing.T) {
+	got := usedNames("// Visitor in a comment\nlet x = sofab::Unsigned::MAX;\nimpl Visitor for V {}\nlet s: Signed = 0; // OStream\n",
+		"OStream", "IStream", "Visitor", "Unsigned", "Signed")
+	if strings.Join(got, ",") != "Visitor,Signed" {
+		t.Errorf("usedNames = %v, want [Visitor Signed]", got)
+	}
+	if useDecl("sofab", []string{"ArrayKind"}) != "use sofab::ArrayKind;" {
+		t.Error("a single name is imported without braces")
+	}
+	m := exampleModule(t, map[string]any{"corelib": "rs"})
+	if strings.Contains(m, "    use sofab::{IStream") {
+		t.Error("the decoder module re-imports names use super::* already brings")
+	}
+	if !strings.Contains(m, "    use sofab::{ArrayKind, FixlenType};") {
+		t.Error("the decoder module lost its on-demand ArrayKind/FixlenType import")
+	}
+}
+
+// TestRustHarnessDeclaresTheModulePub: the std harness declares the generated
+// module `pub`. It exercises only part of the generated API; declared private,
+// everything else in it would be dead code to rustc and fail a -D warnings build.
+func TestRustHarnessDeclaresTheModulePub(t *testing.T) {
+	files, err := (&Backend{}).Generate(exampleSchema(t), map[string]any{"corelib": "rs", "emit": "project"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, f := range files {
+		if f.Path == "src/main.rs" {
+			if !strings.Contains(string(f.Content), "\npub mod message;\n") {
+				t.Error("harness does not declare `pub mod message;`")
+			}
+			return
+		}
+	}
+	t.Fatal("no src/main.rs")
+}
