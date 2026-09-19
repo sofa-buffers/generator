@@ -162,7 +162,7 @@ func TestRustStructural(t *testing.T) {
 		"pub somemap: heapless::Vec<",                                      // bounded -> heapless (default no_std storage)
 		"pub fn encode(&self) -> heapless::Vec<u8,",                        // heap-free encode
 		"stack: heapless::Vec<_Loc,",                                       // bounded decode stack
-		"if !self.somestring.is_empty() {",                            // string omit via as_str
+		"if !self.somestring.is_empty() {",                                 // string omit: empty default -> is_empty
 		"acc: sofab::PayloadAcc<",                                          // the corelib's accumulator, over storage this crate names (generator#345)
 		"match self.acc.feed(total, offset, chunk) { Ok(Some(_v)) => _v, Ok(None) => return, Err(_) => { self.err = true; return; } };", // ...whose finite storage adds the BufferFull arm
 		"match core::str::from_utf8(_p) { Ok(_v) => _v, Err(_) => { self.inv = true; \"\" } }",                                          // strict UTF-8 -> INVALID, agrees with std (issue #85)
@@ -3439,6 +3439,15 @@ func TestRustImportsFollowTheBody(t *testing.T) {
 		"OStream", "IStream", "Visitor", "Unsigned", "Signed")
 	if strings.Join(got, ",") != "Visitor,Signed" {
 		t.Errorf("usedNames = %v, want [Visitor Signed]", got)
+	}
+	// A `//` inside a string literal is not a comment: the name after it counts.
+	got = usedNames(`if self.url != "http://h" { let _ = os.write_unsigned(0, self.n as Unsigned); }`, "Unsigned")
+	if strings.Join(got, ",") != "Unsigned" {
+		t.Errorf("usedNames with // in a string literal = %v, want [Unsigned]", got)
+	}
+	got = usedNames(`let s = "a\"b"; // Signed`, "Signed")
+	if len(got) != 0 {
+		t.Errorf("usedNames after an escaped quote = %v, want none", got)
 	}
 	if useDecl("sofab", []string{"ArrayKind"}) != "use sofab::ArrayKind;" {
 		t.Error("a single name is imported without braces")

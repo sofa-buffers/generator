@@ -273,6 +273,25 @@ func (g *gen) module(s *ir.Schema) []byte {
 	return f.bytes()
 }
 
+// lineCommentStart is the offset of the `//` that opens a line comment in one
+// line of generated Rust, or len(ln) when there is none. A `//` inside a string
+// literal -- a schema default such as "http://host" -- does not open one. The
+// generator writes string literals with %q, so they never span lines.
+func lineCommentStart(ln string) int {
+	inStr := false
+	for i := 0; i < len(ln); i++ {
+		switch c := ln[i]; {
+		case inStr && c == '\\':
+			i++ // skip the escaped byte
+		case c == '"':
+			inStr = !inStr
+		case !inStr && c == '/' && i+1 < len(ln) && ln[i+1] == '/':
+			return i
+		}
+	}
+	return len(ln)
+}
+
 // useDecl spells `use path::{a, b};`, or `use path::a;` for a single name.
 func useDecl(path string, names []string) string {
 	if len(names) == 1 {
@@ -293,10 +312,7 @@ func usedNamePat(name string) *regexp.Regexp {
 func usedNames(text string, names ...string) []string {
 	var code strings.Builder
 	for _, ln := range strings.Split(text, "\n") {
-		if i := strings.Index(ln, "//"); i >= 0 {
-			ln = ln[:i]
-		}
-		code.WriteString(ln)
+		code.WriteString(ln[:lineCommentStart(ln)])
 		code.WriteByte('\n')
 	}
 	var out []string
