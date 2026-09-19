@@ -1018,12 +1018,11 @@ python3 "$ROOT/tests/conformance/lib/check_repeated_id.py" "Dart" \
 # (generators/dart/format.go) -- --format=require whenever `dart` is there,
 # which for this suite is whenever it can run at all, so a format pass that
 # stopped reaching a file fails the generation rather than this gate. This is
-# the check that the pass reached every file. The whole work dir is swept rather than a list of projects, so a
-# project added above is covered the day it is written; the corelib checkout is
-# not generated code and is pruned. The one hand-written file in the sweep,
+# the check that the pass reached every file. The whole work dir is swept rather
+# than a list of projects, so a project added above is covered the day it is
+# written; the corelib checkout is not generated code and is pruned. The one hand-written file in the sweep,
 # bin/ownership_check.dart copied into the example project, is held to the same
 # formatter -- it sits in a generated tree, so a user's dart format sees it too.
-echo "==> generated Dart is dart-format-clean (every project in this run)"
 check_format dart "$WORK"
 
 echo "PASS"

@@ -31,6 +31,14 @@ filter, and fails on any `--- SKIP` — in a lang job nothing has a reason to
 skip. A new gated test is therefore covered the moment it is written; there is
 no allowlist to forget to extend.
 
+The one exception is a test gated on a **canonical formatter**, which is
+optional by design (ARCHITECTURE §12 gate 10): `run.sh` may name a formatter it
+has established is not installed, and a skip whose own reason names that tool is
+then reported with a `!!!!` banner instead of failing. Every `lang-*` job that
+holds generated code to a formatter sets `SOFAB_FORMAT_STRICT=1`, which turns
+that banner — and the suite's own skipped formatter gates — back into failures,
+so in CI nothing is skipped either way.
+
 (`generators/dart`'s gated `TestConformance` only wraps `dart/run.sh` itself,
 so `lang-dart` already is that test.)
 

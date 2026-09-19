@@ -1216,7 +1216,6 @@ echo "==> corpus builds ($(ls "$ROOT"/tests/matrix/corpus/defs/*.yaml | wc -l) d
 # user's own gofmt gate over a tree holding generated code passes. The backend
 # formats with go/format and fails generation outright on source it cannot
 # parse; this is the check that its output really is what gofmt produces.
-echo "==> generated Go is gofmt-clean (example + corpus)"
 check_format go "$WORK/proj" "$WORK/corpus"
 
 # CORELIB_PLAN S7.2 item 8 -- the shared file's `sequence_growth` block
