@@ -5605,6 +5605,21 @@ A reimplementation is **conformant** when it reproduces these gates:
    | java | `javac -Xlint:all -Werror` | the generated pom compiles with `-Xlint:all`; `MVN_STRICT` (`-Dmaven.compiler.failOnWarning=true`) on every `mvn package` of a generated project and `JAVAC_STRICT` on the corpus `javac` loop in `tests/conformance/java/run.sh` |
    | kotlin (the JVM harness builds, the corpus project and the `commonMain` metadata type-check) | `allWarningsAsErrors` | an init script (`KT_STRICT`) handed to every Gradle build of generated code in `tests/conformance/kotlin/run.sh` |
    | csharp | `dotnet build -warnaserror` (nullable analysis stays off: the generated csproj sets `<Nullable>disable</Nullable>`) | `DOTNET_STRICT`, read by the one `dbuild` helper every `dotnet build` in `tests/conformance/csharp/run.sh` goes through |
+   | typescript (every `int64` mode) | `tsc` has no warning class, so the checks a strict consumer turns on are errors: `--noUnusedLocals --noUnusedParameters --noImplicitReturns --noFallthroughCasesInSwitch`, on top of the emitted tsconfig's `strict` | `TSC_STRICT` on every `tsc --noEmit` in `tests/conformance/typescript/run.sh` |
+   | dart | `dart analyze --fatal-infos` before every compile (`dart compile` fails on errors only) | `DART_STRICT`, read by `danalyze`, which `compile_project` and the corpus `check` call in `tests/conformance/dart/run.sh`; the Go gated driver tests analyze before they run (they need `SOFAB_DART_CORELIB`; unlike go/python/c, the `lang-dart` job does not run the backend package, whose `TestConformance` would re-enter the suite) |
+   | zig | nothing to add: an unused local, an unused parameter and a discarded non-void value are compile **errors** by language design, and Zig has no warning class | — |
+
+   The rule for every row is the same: a finding is fixed where the code is
+   emitted, and the setting lives in the harness, not in the generated project
+   files, except where the target has a place for it that does not fail a
+   user's build (Java's `-Xlint:all` in the pom, the C/C++ Makefiles'
+   `WARNFLAGS` default). Every `lang-<x>` CI job runs its suite unmodified, so
+   CI applies the same policy; the tools it needs beyond the toolchain are
+   installed by the job (`clippy` for rust, a pinned `ruff` for python), and
+   no job step carries `continue-on-error`. The toolchains themselves are not
+   pinned (`stable` Rust and Dart, TypeScript `^5`): a diagnostic a newer
+   release adds turns the job red, which is the point, and shows up there
+   first.
 
    The generated C and C++ project Makefiles read `WARNFLAGS` (default
    `-Wall -Wextra`) apart from `CFLAGS`/`CXXFLAGS`, which is what lets one
@@ -5687,6 +5702,43 @@ A reimplementation is **conformant** when it reproduces these gates:
    that set fails with 118 CS1522 and 26 CS0414. A `$defs`-only file still gets
    a `Program.cs`; it carries no bench sink or warmup count and no `return`
    after the message switch, which would be CS0414 and CS0162 there.
+
+   TypeScript: the flags go on the `tsc` command line rather than into the
+   emitted tsconfig, so a user's project keeps the configuration it was given
+   and the suite still proves the code meets the stricter one. The corpus
+   loops cover every realworld file and, for the 64-bit definitions, the
+   `long` mode too. A visitor hook is emitted with only the parameters its
+   rendered body reads: an unread trailing one is dropped (a method with fewer
+   parameters still implements the corelib's `Visitor`), and an unread one ahead
+   of a read one keeps its place under a `_` name, which tsc exempts. The row
+   index register of a wrapper row of strings or blobs is never read back --
+   the corelib collector places the elements -- so it is neither declared nor
+   assigned; a row of structs keeps it. The corelib import list is read off the
+   module's code with its comments blanked, so a comment that names a corelib
+   function (the `Long[]` compare's) does not import it. A `$defs`-only harness
+   imports no message module and declares no bench warmup.
+
+   Dart: the generated library carries no file-wide `ignore_for_file` except
+   `deprecated_member_use_from_same_package`, and that one only in a file that
+   touches a deprecated field (the lint is off by default; a consumer may turn
+   it on). The old blanket `unused_field, unused_element` ignore hid an
+   `_isDefault` getter nothing read -- serialize had long stopped calling it --
+   which is now gone. A named struct/union no message reaches (every type of a
+   `$defs`-only file) gets its class and no private decode visitor, and no JSON
+   codec in the harness. The file-level helpers and both files' imports are
+   derived from the rendered text (comments blanked), so a helper or an import
+   only a dropped visitor would use is not emitted either.
+
+   Zig: the unused-name errors come from AstGen, which runs over the **whole**
+   of every file that is imported, not only over the declarations something
+   references; the generated `message.zig` is imported by the harness root
+   `main.zig`, so all of it is held to them. Zig's semantic analysis is lazy,
+   though: a declaration nothing references is never type-checked. Forcing
+   every declaration of `message.zig` through analysis over the corpus, the
+   example and every realworld file finds nothing today, and a planted type
+   error in an unreferenced method is caught by that probe but not by the
+   suite -- a gap in compile coverage rather than in the warning policy, and
+   not gated.
 
 ---
 
