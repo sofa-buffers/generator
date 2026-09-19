@@ -33,3 +33,11 @@ With `emit: sources` there is no `go.mod` and the key does nothing.
 Only reaches the output under `emit: project`, where it becomes the `go` line of
 the generated `go.mod`. Raise it if the surrounding build needs a newer language
 version; the generated code itself does not require one.
+
+## Formatting
+
+Generated Go is `gofmt` output: `gofmt -l` over it prints nothing, so generated
+files need no exclusion from a gofmt gate and never come back reformatted.
+The formatting is done in-process (`go/format`), so no Go toolchain is needed
+at generation time; source that library cannot parse is a generator bug, and
+generation then fails with an error naming the file instead of writing it.

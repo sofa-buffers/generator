@@ -5785,6 +5785,64 @@ A reimplementation is **conformant** when it reproduces these gates:
    suite -- a gap in compile coverage rather than in the warning policy, and
    not gated.
 
+10. **Formatter-clean generated code** — a target whose language has ONE
+    canonical formatter has its generated code checked against it, in check
+    mode, with the formatter's default settings. Users run that check over their
+    whole tree in CI, generated files included; a generated file that fails it
+    forces them to exclude the file or to reformat after every regeneration.
+
+    One shared driver does it for every suite: `check_format <lang> <dir>...` in
+    `tests/conformance/lib/check_format.sh`, sourced like the other lib helpers.
+    Each suite calls it over the generated **example** project and over the
+    **corpus + realworld** projects — every definition, not one file — after the
+    build loop that produced them. It fails with the offending files and an
+    excerpt of the change the formatter wants, refuses a directory set that
+    holds no source of that language (a check over nothing proves nothing), and
+    refuses a language it has no canonical formatter for rather than passing it.
+    Build output inside a generated project (zig's `.zig-cache`, `zig-out`) is
+    not generated code and is skipped. The formatter version is the one the
+    `lang-<x>` job pins with its toolchain (`setup-go`, `mlugg/setup-zig`), so
+    the same check runs locally and in CI.
+
+    | target | formatter | how the output gets there |
+    |---|---|---|
+    | go | `gofmt -l` prints nothing | the backend formats every file through `go/format` (`generators/golang/gofile.go`) |
+    | zig | `zig fmt --check` | the backend emits zig fmt layout itself (`generators/zig/layout.go`) |
+
+    Go formats with the `go/format` **library**, so `sofabgen` needs no tool
+    beyond itself. Source that library cannot parse is a codegen bug: it is now
+    an error from `Generate`, naming the file, instead of the unformatted text
+    being written out — emitting it would hand the user a file that fails both
+    their `gofmt -l` and, most likely, their build, with nothing pointing back
+    at the generator. `generators/golang/gofile_test.go` proves both halves (the
+    second through a swapped `formatSource`, since the real one rejects nothing
+    the backend emits today).
+
+    Zig has no formatting library to call, and shelling out to `zig fmt` would
+    make the generator depend on a Zig toolchain at generation time, so the
+    layout is EMITTED. The emitters compose many statements as one-line strings
+    (a guard, a store and a return inside a switch prong), and zig fmt keeps
+    neither a block holding statements nor a non-empty switch body on one line;
+    `layoutZig` applies exactly that rule to the rendered file — each statement
+    and each prong on its own line, four spaces deeper, the closing brace back
+    on the opening line's indent with whatever followed it. Only whitespace
+    moves: the token stream is unchanged, and `generators/zig/layout_test.go`
+    asserts that, with every expectation in it re-derived from `zig fmt --check`
+    wherever zig is installed. Everything else zig fmt normalises is emitted in
+    its final form at the emitting site: a single-element list literal is
+    `.{x}`, a call's arguments stay on one line, and an identifier is quoted
+    (`@"name"`) only for a word that is still a Zig keyword — a quote zig fmt
+    would strip (`async`, `await`, `usingnamespace`, and value names such as
+    `true`/`null`) fails a user's `zig fmt --check`.
+
+    C, C++, Java, Kotlin and C# are deliberately **out**: none has a single
+    standard (clang-format needs a style chosen, google-java-format vs. IDE
+    defaults, ktfmt vs. ktlint, `dotnet format` reads an `.editorconfig`), and
+    choosing a house style for generated code is a separate decision. The
+    remaining single-formatter targets — rust/rs-no-std (`rustfmt`), dart
+    (`dart format`), python (`ruff format`) and typescript (`prettier`) — join
+    the table through the same driver.
+
 ---
 
 ## 13. Repository structure & dependency rule

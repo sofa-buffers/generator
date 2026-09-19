@@ -12,6 +12,8 @@ set -eu
 # Corelib checkout + ref pinning (docs/CI.md).
 . "$(dirname "$0")/../lib/corelib.sh"
 . "$(dirname "$0")/../lib/maxsize_fill.sh"
+# Generated code against the canonical formatter (ARCHITECTURE §12).
+. "$(dirname "$0")/../lib/check_format.sh"
 
 ROOT=$(cd "$(dirname "$0")/../../.." && pwd)
 CORELIB="${1:-${SOFAB_ZIG_CORELIB:-}}"
@@ -824,6 +826,14 @@ for def in "$ROOT"/tests/matrix/corpus/defs/*.yaml "$ROOT"/examples/messages/rea
     zig_typecheck "$def" "$WORK/corpus/$name"
 done
 echo "==> corpus builds ($(ls "$ROOT"/tests/matrix/corpus/defs/*.yaml | wc -l) definitions + $(ls "$ROOT"/examples/messages/realworld/*.yaml | wc -l) realworld)"
+
+# Canonical formatter (ARCHITECTURE §12): every generated file of the example
+# project and of every corpus/realworld project -- message.zig, the harness,
+# build.zig and build.zig.zon -- must pass `zig fmt --check`, so a user's own
+# zig fmt gate over a tree holding generated code passes. The backend emits zig
+# fmt layout itself (generators/zig/layout.go); sofabgen never runs zig.
+echo "==> generated Zig is zig-fmt-clean (example + corpus)"
+check_format zig "$WORK/ex" "$WORK/corpus"
 
 # Declared integer width is a VALIDITY bound (MESSAGE_SPEC S7.1 + documentation#32,
 # generator#266, Crucible F-0033 / codegen defect G-0026). A value outside the
