@@ -20,7 +20,7 @@
 # ---- Ir/op (method: toggle) -------------------------------------------------
 #
 # Built at -O3 -g -DNDEBUG, matching corelib-c-cpp/bench/CMakeLists.txt, overriding
-# the Makefile's emitted `CXXFLAGS ?= -O2 -Wall`.
+# the Makefile's emitted `CXXFLAGS ?= -O2` (its warnings ride in WARNFLAGS).
 #
 # C++ is the one row needing TWO corelib checkouts: SOFAB_CPP_DIR for the C++
 # corelib and SOFAB_C_DIR for the JSON test helper the harness links. rows.json

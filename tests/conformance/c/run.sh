@@ -26,6 +26,16 @@ if [ -z "$CORELIB" ]; then
 fi
 INC="$CORELIB/src/include"
 SRC="$CORELIB/src"
+
+# Warning policy for every build of generated C here (ARCHITECTURE §12): a
+# warning in generated code is an error in a user's -Werror build, so it is one
+# in this suite too. Every gcc leg that is expected to BUILD takes $WARNFLAGS, and
+# every generated project Makefile reads WARNFLAGS, so exporting it covers each
+# `make` leg -- a new one included -- without naming it. The legs that must FAIL
+# to compile (a capability guard's #error) deliberately do not take it: -Werror
+# there could fail them for a reason other than the guard.
+WARNFLAGS="-Wall -Wextra -Werror"
+export WARNFLAGS
 echo "==> corelib: $CORELIB"
 
 # The shared example intentionally leaves `somemap` unbounded (a dynamic map for
@@ -44,7 +54,7 @@ echo "==> generating C for the (bounded) example"
 ( cd "$ROOT" && go run ./cmd/sofabgen --lang c --in "$EXAMPLE" --out "$WORK/gen" )
 
 echo "==> compiling generated code + harness against corelib"
-gcc -std=c99 -Wall -Wextra \
+gcc -std=c99 $WARNFLAGS \
     -I"$INC" -I"$WORK/gen" \
     "$ROOT/tests/conformance/c/example_roundtrip.c" \
     "$WORK"/gen/*.c \
@@ -57,7 +67,7 @@ echo "==> running round-trip"
 echo "==> MAX_SIZE fill check: a fully filled message must encode to exactly MAX_SIZE"
 ( cd "$ROOT" && go run ./cmd/sofabgen --lang c \
     --in "$ROOT/tests/conformance/lib/maxsize_fill.yaml" --out "$WORK/fill" )
-gcc -std=c99 -Wall -Wextra \
+gcc -std=c99 $WARNFLAGS \
     -I"$INC" -I"$WORK/fill" \
     "$ROOT/tests/conformance/c/maxsize_fill.c" \
     "$WORK"/fill/*.c \
@@ -82,7 +92,7 @@ check_maxsize_fill c "$WORK/fillproj/harness/harness" encode fill
 echo "==> streaming: encode through a sink, feed the decoder byte by byte"
 ( cd "$ROOT" && go run ./cmd/sofabgen --lang c \
     --in "$ROOT/tests/conformance/lib/maxsize_fill.yaml" --out "$WORK/stream" )
-gcc -std=c99 -Wall -Wextra -Werror -I"$INC" -I"$WORK/stream" \
+gcc -std=c99 $WARNFLAGS -I"$INC" -I"$WORK/stream" \
     "$ROOT/tests/conformance/c/streaming_check.c" "$WORK"/stream/*.c \
     "$SRC/object.c" "$SRC/ostream.c" "$SRC/istream.c" -o "$WORK/stream_check"
 "$WORK/stream_check"
@@ -145,7 +155,7 @@ echo 'int main(void){return 0;}' | gcc -fsanitize=address -x c - -o /dev/null 2>
     exit 1
 }
 echo "==> a decoded message owns its bytes (CORELIB_PLAN S6.7, generator#412)"
-gcc -std=c99 -Wall -Wextra -Werror -fsanitize=address -I"$INC" -I"$WORK/stream" \
+gcc -std=c99 $WARNFLAGS -fsanitize=address -I"$INC" -I"$WORK/stream" \
     "$ROOT/tests/conformance/c/ownership_check.c" "$WORK"/stream/*.c \
     "$SRC/object.c" "$SRC/ostream.c" "$SRC/istream.c" -o "$WORK/own_check"
 "$WORK/own_check"
@@ -187,8 +197,8 @@ if gcc -std=c99 -DSOFAB_DISABLE_INT64_SUPPORT -I"$INC" -I"$WORK/widebf" \
     echo "      SOFAB_DISABLE_INT64_SUPPORT -- encode would return E_ARGUMENT (generator#539)"
     exit 1
 fi
-gcc -std=c99 -Wall -Wextra -DSOFAB_DISABLE_INT64_SUPPORT -I"$INC" -I"$WORK/narrowbf" \
-    -c "$WORK"/narrowbf/narrowbf.c -o /dev/null 2>/dev/null || {
+gcc -std=c99 $WARNFLAGS -DSOFAB_DISABLE_INT64_SUPPORT -I"$INC" -I"$WORK/narrowbf" \
+    -c "$WORK"/narrowbf/narrowbf.c -o /dev/null || {
     echo "FAIL: a uint32_t-backed bitfield must still build on a 32-bit value corelib"
     exit 1
 }
@@ -222,15 +232,15 @@ if gcc -std=c99 -DSOFAB_DISABLE_INT64_SUPPORT $BIG -I"$INC" -I"$WORK/wideid" \
 fi
 # Control 1: one id lower and the same build succeeds, so the guard is a ceiling
 # and not a blanket refusal of large ids.
-gcc -std=c99 -DSOFAB_DISABLE_INT64_SUPPORT $BIG -I"$INC" -I"$WORK/narrowid" \
-    -c "$WORK"/narrowid/narrowid.c -o /dev/null 2>/dev/null || {
+gcc -std=c99 $WARNFLAGS -DSOFAB_DISABLE_INT64_SUPPORT $BIG -I"$INC" -I"$WORK/narrowid" \
+    -c "$WORK"/narrowid/narrowid.c -o /dev/null || {
     echo "FAIL: an id AT SOFAB_ID_MAX must still compile on a 32-bit value build"
     exit 1
 }
 # Control 2: the rejected schema builds on the full 64-bit value build, so what
 # rejected it above is the value width and not the descriptor profile.
-gcc -std=c99 $BIG -I"$INC" -I"$WORK/wideid" \
-    -c "$WORK"/wideid/wideid.c -o /dev/null 2>/dev/null || {
+gcc -std=c99 $WARNFLAGS $BIG -I"$INC" -I"$WORK/wideid" \
+    -c "$WORK"/wideid/wideid.c -o /dev/null || {
     echo "FAIL: the 64-bit value build has no narrowed id ceiling and must accept the schema"
     exit 1
 }
@@ -410,7 +420,7 @@ echo "==> a skipped string is not UTF-8-validated (CORELIB_PLAN S6.4.5, generato
 cp -R "$WORK/proj" "$WORK/proj-strict"
 make -C "$WORK/proj-strict" clean >/dev/null
 make -C "$WORK/proj-strict" SOFAB_C_CORELIB="$CORELIB" \
-    CFLAGS="-Wall -Wextra -DSOFAB_STRICT_UTF8=1" >/dev/null
+    CFLAGS="-DSOFAB_STRICT_UTF8=1" >/dev/null
 for surface in decode streamdecode; do
     if [ "$surface" = decode ]; then
         U8_OPT=--status-verb; U8_VAL=status
@@ -608,13 +618,15 @@ for def in "$ROOT"/tests/matrix/corpus/defs/*.yaml "$ROOT"/examples/messages/rea
     case "$name" in no_maxlen | seq_elements_dyn | array_lengths_dyn) continue ;; esac
     ( cd "$ROOT" && go run ./cmd/sofabgen --lang c --in "$def" --out "$WORK/corpus/$name" >/dev/null )
     for c in "$WORK"/corpus/"$name"/*.c; do
-        # -Werror, because the defects this loop exists to catch are DIAGNOSTICS,
+        # $WARNFLAGS (-Werror), because the defects this loop exists to catch are DIAGNOSTICS,
         # not hard errors: an unsuffixed decimal constant above INT64_MAX has no
         # type under C11 6.4.4.1, and GCC accepts it as an extension with a mere
         # "integer constant is so large that it is unsigned" (generator#480). Every
         # corpus definition plus the realworld example was swept under these flags
         # before they were tightened: all clean.
-        gcc -std=c99 -Wall -Werror -DSOFAB_OBJECT_DESCR_PROFILE=3 -I"$INC" -I"$WORK/corpus/$name" -c "$c" -o /dev/null \
+        # -O2 for the diagnostics that only run with the optimiser's flags on
+        # (-Wstrict-aliasing, -Wmaybe-uninitialized); an unoptimised build skips them.
+        gcc -std=c99 -O2 $WARNFLAGS -DSOFAB_OBJECT_DESCR_PROFILE=3 -I"$INC" -I"$WORK/corpus/$name" -c "$c" -o /dev/null \
             || { echo "FAIL: corpus def $name did not compile"; exit 1; }
     done
 done
@@ -631,7 +643,7 @@ subset_c() {  # label  "DISABLE flags"  "yaml"
     printf '%s' "$yaml" > "$WORK/sub_$name.yaml"
     ( cd "$ROOT" && go run ./cmd/sofabgen --lang c --in "$WORK/sub_$name.yaml" --out "$WORK/sub_$name" >/dev/null )
     for c in "$WORK"/sub_$name/*.c; do
-        gcc -std=c99 -Wall -DSOFAB_OBJECT_DESCR_PROFILE=3 $flags -I"$INC" -I"$WORK/sub_$name" -c "$c" -o /dev/null \
+        gcc -std=c99 $WARNFLAGS -DSOFAB_OBJECT_DESCR_PROFILE=3 $flags -I"$INC" -I"$WORK/sub_$name" -c "$c" -o /dev/null \
             || { echo "FAIL: [$name] generated C did not compile against the corelib subset"; exit 1; }
     done
     echo "   [$name] compiles ($flags)"

@@ -20,8 +20,8 @@
 # debug build measures code that never ships. -g is free for Ir and lets
 # callgrind_annotate attribute later.
 #
-# Note this overrides the Makefile's own `CFLAGS ?= -Wall -Wextra`, which carries no
-# -O at all (generators/c/project.go).
+# Note this overrides the Makefile's own empty `CFLAGS ?=`, which carries no -O at
+# all (generators/c/project.go); its warnings ride in WARNFLAGS and are kept.
 
 # bench_build_ir <gen_proj> <corelib> -> builds harness/harness in place
 bench_build_ir() {
