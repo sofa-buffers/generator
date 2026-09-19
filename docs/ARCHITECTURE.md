@@ -5581,6 +5581,31 @@ A reimplementation is **conformant** when it reproduces these gates:
    deliberately **not** merged with gate 2: conformance builds unoptimized against a
    moving corelib, the bench builds `-O3`/`-Os` (§8 makes bounds checks debug-only
    assertions, so a debug build measures code that never ships).
+9. **Warning-clean generated code** — every build of generated code in a
+   `tests/conformance/<lang>/run.sh`, and in the corelib-gated backend tests that
+   compile it, treats a compiler warning as an error. A warning in generated code
+   is an error in a user's `-Werror` build (generator#480 was one), so the suite
+   has to meet it first. The policy is set **once per harness**, in one variable
+   every build leg reads, so a new leg inherits it without naming it; and a
+   diagnostic it surfaces is fixed in the **emitter** — a suppression is narrow,
+   sits at the emitting site and says why (a harness touching a `deprecated`
+   member on purpose is the standing example). Legs that must *fail* to compile
+   (a capability guard's `#error`) are exempt: `-Werror` there could fail them for
+   a reason other than the guard. Warnings from the corelibs' own sources are out
+   of scope.
+
+   | target | policy | where it is set |
+   |---|---|---|
+   | c | `-Wall -Wextra -Werror` | `WARNFLAGS` in `tests/conformance/c/run.sh`, exported; the Go gated tests pass the same flags |
+   | cpp (all four profiles) | `-Wall -Wextra -Werror` | `WARNFLAGS` in `tests/conformance/cpp/run.sh`, exported |
+
+   The generated C and C++ project Makefiles read `WARNFLAGS` (default
+   `-Wall -Wextra`) apart from `CFLAGS`/`CXXFLAGS`, which is what lets one
+   exported variable reach every `make` leg without overriding a profile's
+   optimisation flags. The C++ Makefiles apply it to the generated code and the
+   harness only, never to the corelib's C sources; the C Makefile builds
+   everything in one command, so corelib-c-cpp's sources are held to it there
+   too.
 
 ---
 
