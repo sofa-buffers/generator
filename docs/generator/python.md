@@ -81,3 +81,24 @@ The array limit is a cost, not a rule: an array on the table is written element 
 element into slots and then built into the list your dataclass holds, so past a
 few dozen elements the second pass costs more than the callback it saved — and the
 slots are reserved whether the array arrives or not.
+
+## Formatting
+
+Generated Python is `ruff format` output: `ruff format --check` over a tree that
+holds it passes, so generated modules need no exclusion from a formatting gate
+and never come back reformatted.
+
+`sofabgen` runs `ruff format` itself, once per generated `.py` module, in the
+output directory — so a `pyproject.toml` or `ruff.toml` of your own that covers
+that directory is honoured, and the modules come out the way your own
+`ruff format` over that tree would leave them.
+
+Unlike a compiler's formatter, `ruff` is not part of the Python toolchain, so it
+may simply not be there. If it is not on `PATH`, generation still succeeds: the
+modules are written unformatted and `sofabgen` says so on stderr, and a later
+`ruff format` over the output directory brings them in line. `ruff`'s output
+changes between releases, so a tree formatted by one version and checked by
+another can still report a difference; use the same version for both. If `ruff`
+is installed but rejects a generated module, generation fails with the file
+named — that is a generator bug, and writing the file would only move it into
+your program.
