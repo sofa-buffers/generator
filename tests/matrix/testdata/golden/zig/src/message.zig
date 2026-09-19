@@ -163,11 +163,26 @@ const _dec_Scalars = struct {
     };
 
     pub fn unsigned(self: *_dec_Scalars, id: sofab.Id, value: sofab.Unsigned) void {
-        if (self.askip > 0) { self.askip -= 1; return; }
+        if (self.askip > 0) {
+            self.askip -= 1;
+            return;
+        }
         switch (self.cur) {
             .root => switch (id) {
-                0 => { if (value > 255) { self.inv = true; return; } self.m.u8min = @intCast(value); },
-                1 => { if (value > 255) { self.inv = true; return; } self.m.u8max = @intCast(value); },
+                0 => {
+                    if (value > 255) {
+                        self.inv = true;
+                        return;
+                    }
+                    self.m.u8min = @intCast(value);
+                },
+                1 => {
+                    if (value > 255) {
+                        self.inv = true;
+                        return;
+                    }
+                    self.m.u8max = @intCast(value);
+                },
                 2 => self.m.u64max = value,
                 7 => self.m.flag = value != 0,
                 else => {},
@@ -177,10 +192,19 @@ const _dec_Scalars = struct {
     }
 
     pub fn signed(self: *_dec_Scalars, id: sofab.Id, value: sofab.Signed) void {
-        if (self.askip > 0) { self.askip -= 1; return; }
+        if (self.askip > 0) {
+            self.askip -= 1;
+            return;
+        }
         switch (self.cur) {
             .root => switch (id) {
-                3 => { if (value < -128 or value > 127) { self.inv = true; return; } self.m.i8min = @intCast(value); },
+                3 => {
+                    if (value < -128 or value > 127) {
+                        self.inv = true;
+                        return;
+                    }
+                    self.m.i8min = @intCast(value);
+                },
                 4 => self.m.i64min = value,
                 else => {},
             },
@@ -189,7 +213,10 @@ const _dec_Scalars = struct {
     }
 
     pub fn fp32(self: *_dec_Scalars, id: sofab.Id, value: f32) void {
-        if (self.askip > 0) { self.askip -= 1; return; }
+        if (self.askip > 0) {
+            self.askip -= 1;
+            return;
+        }
         switch (self.cur) {
             .root => switch (id) {
                 5 => self.m.f32 = value,
@@ -200,7 +227,10 @@ const _dec_Scalars = struct {
     }
 
     pub fn fp64(self: *_dec_Scalars, id: sofab.Id, value: f64) void {
-        if (self.askip > 0) { self.askip -= 1; return; }
+        if (self.askip > 0) {
+            self.askip -= 1;
+            return;
+        }
         switch (self.cur) {
             .root => switch (id) {
                 6 => self.m.f64 = value,
@@ -242,7 +272,10 @@ const _dec_Scalars = struct {
     /// stays the caller's, decided on `total` before this call; a field the
     /// schema leaves unbounded goes through _takeCapped instead.
     fn _take(self: *_dec_Scalars, total: usize, offset: usize, chunk: []const u8) ?[]const u8 {
-        return self.acc.take(self.alloc, total, offset, chunk, false) catch { self.inv = true; return null; };
+        return self.acc.take(self.alloc, total, offset, chunk, false) catch {
+            self.inv = true;
+            return null;
+        };
     }
 
     pub fn sequenceBegin(self: *_dec_Scalars, _: sofab.Id) void {

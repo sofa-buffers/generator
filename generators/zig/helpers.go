@@ -17,12 +17,15 @@ func cfgString(cfg map[string]any, key, dflt string) string {
 
 // zigKeywords are reserved words that, used verbatim as a struct field name,
 // are a syntax error and must be written as a quoted identifier (@"name").
-// Primitive type names (u8, bool, type, ...) are NOT keywords in field
-// position, so they stay unescaped.
+// Primitive names (u8, bool, true, null, undefined, ...) are NOT keywords in
+// field position, and neither are the words Zig has retired (async, await,
+// usingnamespace): those stay unescaped, since `zig fmt` strips a quote that is
+// not needed and a quoted one would fail a user's `zig fmt --check`. Every use
+// of zigIdent is a member position (a field, `.name`, `self.name`).
 var zigKeywords = map[string]bool{
 	"addrspace": true, "align": true, "allowzero": true, "and": true,
-	"anyframe": true, "anytype": true, "asm": true, "async": true,
-	"await": true, "break": true, "callconv": true, "catch": true,
+	"anyframe": true, "anytype": true, "asm": true, "break": true,
+	"callconv": true, "catch": true,
 	"comptime": true, "const": true, "continue": true, "defer": true,
 	"else": true, "enum": true, "errdefer": true, "error": true,
 	"export": true, "extern": true, "fn": true, "for": true, "if": true,
@@ -31,8 +34,7 @@ var zigKeywords = map[string]bool{
 	"packed": true, "pub": true, "resume": true, "return": true,
 	"struct": true, "suspend": true, "switch": true, "test": true,
 	"threadlocal": true, "try": true, "union": true, "unreachable": true,
-	"usingnamespace": true, "var": true, "volatile": true, "while": true,
-	"true": true, "false": true, "null": true, "undefined": true,
+	"var": true, "volatile": true, "while": true,
 }
 
 // zigDeclClash are field names that would collide with the declarations every
@@ -294,7 +296,7 @@ func (g *gen) zigFieldDefault(f *ir.Field) string {
 		}
 		if isNativeArrayElem(f.Elem) {
 			if parts, ok := g.zigNativeArrayParts(f); ok {
-				return "&.{ " + parts + " }"
+				return "&" + anonList(parts)
 			}
 			return "&.{}"
 		}
@@ -354,7 +356,7 @@ func (g *gen) zigFixedArrayDefault(f *ir.Field, n int64) string {
 	if int64(len(parts)) > n { // schema-invalid; never widen the storage
 		parts = parts[:n]
 	}
-	return fmt.Sprintf(".init(&.{ %s })", strings.Join(parts, ", "))
+	return fmt.Sprintf(".init(&%s)", anonList(strings.Join(parts, ", ")))
 }
 
 func (g *gen) zigIntDefault(f *ir.Field) string {
@@ -398,7 +400,7 @@ func (g *gen) blobBytes(f *ir.Field) ([]byte, bool) {
 }
 
 // byteSliceLit renders bytes as a Zig slice literal `&.{ 10, 20, 30 }` (an
-// empty string literal for no bytes).
+// empty string literal for no bytes, `&.{10}` for one).
 func byteSliceLit(raw []byte) string {
 	if len(raw) == 0 {
 		return `""`
@@ -407,7 +409,17 @@ func byteSliceLit(raw []byte) string {
 	for i, b := range raw {
 		parts[i] = fmt.Sprintf("%d", b)
 	}
-	return "&.{ " + strings.Join(parts, ", ") + " }"
+	return "&" + anonList(strings.Join(parts, ", "))
+}
+
+// anonList wraps comma-joined element literals in an anonymous list literal the
+// way `zig fmt` spells it: `.{ a, b }` for several elements, `.{a}` for one.
+// The elements are scalar literals, so a comma only ever separates two of them.
+func anonList(joined string) string {
+	if strings.Contains(joined, ",") {
+		return ".{ " + joined + " }"
+	}
+	return ".{" + joined + "}"
 }
 
 // zigLeafNe is the boolean omit-guard `<lhs> != <default>` for a scalar/string
