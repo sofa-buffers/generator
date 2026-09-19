@@ -12,6 +12,8 @@ set -eu
 . "$(dirname "$0")/../lib/maxsize_fill.sh"
 # Every backend Go test, run against the corelib with no skips allowed.
 . "$(dirname "$0")/../lib/backend_tests.sh"
+# Generated code against the canonical formatter (ARCHITECTURE §12).
+. "$(dirname "$0")/../lib/check_format.sh"
 
 ROOT=$(cd "$(dirname "$0")/../../.." && pwd)
 CORELIB="${1:-${SOFAB_GO_CORELIB:-}}"
@@ -1208,6 +1210,14 @@ for def in "$ROOT"/tests/matrix/corpus/defs/*.yaml "$ROOT"/examples/messages/rea
     ( cd "$WORK/corpus/$name" && GOFLAGS=-mod=mod go build ./... )
 done
 echo "==> corpus builds ($(ls "$ROOT"/tests/matrix/corpus/defs/*.yaml | wc -l) definitions + $(ls "$ROOT"/examples/messages/realworld/*.yaml | wc -l) realworld)"
+
+# Canonical formatter (ARCHITECTURE §12): every generated file of the example
+# project and of every corpus/realworld project must be `gofmt -l`-clean, so a
+# user's own gofmt gate over a tree holding generated code passes. The backend
+# formats with go/format and fails generation outright on source it cannot
+# parse; this is the check that its output really is what gofmt produces.
+echo "==> generated Go is gofmt-clean (example + corpus)"
+check_format go "$WORK/proj" "$WORK/corpus"
 
 # CORELIB_PLAN S7.2 item 8 -- the shared file's `sequence_growth` block
 # (generator#449). A wrapper array carries no element count: its length is
