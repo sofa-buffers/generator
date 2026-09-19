@@ -84,9 +84,13 @@ application {
 
 // benchSinkField names one cheap integer scalar of m, folded into the bench loop
 // so the decode cannot be elided. It runs inside the measured loop, so it must
-// stay cheap -- rendering JSON there would be counted as decode cost.
+// stay cheap -- rendering JSON there would be counted as decode cost. A
+// deprecated field is never chosen: reading it would be a deprecation warning.
 func benchSinkField(m *ir.Message) *ir.Field {
 	for _, f := range m.Fields {
+		if f.Deprecated {
+			continue
+		}
 		switch f.Kind {
 		case ir.KindU8, ir.KindU16, ir.KindU32, ir.KindU64,
 			ir.KindI8, ir.KindI16, ir.KindI32, ir.KindI64:
@@ -348,7 +352,11 @@ func (g *gen) jsonHelper(s *ir.Schema) []byte {
 }
 
 func (g *gen) emitJSONFns(f *kfile, typeName string, fields []*ir.Field) {
+	dep := anyDeprecated(fields) // the harness round-trips deprecated fields too
 	// to
+	if dep {
+		f.line("    %s", deprecationSuppress)
+	}
 	f.line("    internal fun to(o: %s, b: StringBuilder) {", typeName)
 	f.line("        b.append('{')")
 	for i, fld := range fields {
@@ -361,6 +369,9 @@ func (g *gen) emitJSONFns(f *kfile, typeName string, fields []*ir.Field) {
 	f.line("        b.append('}')")
 	f.line("    }")
 	// from
+	if dep {
+		f.line("    %s", deprecationSuppress)
+	}
 	f.line("    internal fun from(j: Map<String, JsonValue>, o: %s) {", typeName)
 	f.line("        var e: JsonValue?")
 	for _, fld := range fields {

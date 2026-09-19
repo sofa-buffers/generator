@@ -291,7 +291,7 @@ messages:
 		"     * Deprecated: this field is deprecated and may be removed in a future version.",
 		"    @Deprecated(\"This field is deprecated and may be removed in a future version.\")\n    public var legacyId: UInt",
 		"/** (unit: km/h) */",
-		"@file:Suppress(\"DEPRECATION\"",
+		"@Suppress(\"DEPRECATION\") // generated code must still read and write deprecated fields\npublic class Telemetry {",
 	} {
 		if !strings.Contains(m, want) {
 			t.Errorf("Telemetry.kt missing %q", want)
@@ -1779,5 +1779,68 @@ func TestKotlinNarrowEnumBitfieldArrayRoundTrip(t *testing.T) {
 	// arrays recovers a value from raw bits, and this one must not grow one.
 	if strings.Contains(j, "o.bf[_i0] and 0x") || strings.Contains(j, "o.en[_i0] and 0x") {
 		t.Errorf("a narrow element was masked -- the array type already holds the value:\n%s", j)
+	}
+}
+
+// TestKotlinDeprecationIsSuppressedOnlyWhereItIsRead: generated code builds
+// with allWarningsAsErrors. DEPRECATION is never suppressed file-wide (that
+// would hide a deprecated corelib API too): only a class declaring a deprecated
+// field, a visitor writing one in any nested scope, and the JSON functions that
+// round-trip one carry it. The bench sink never picks a deprecated field.
+func TestKotlinDeprecationIsSuppressedOnlyWhereItIsRead(t *testing.T) {
+	const src = `
+version: 1
+$defs:
+  struct:
+    Inner: { old: { id: 0, type: u8, deprecated: true } }
+messages:
+  Outer:
+    payload:
+      inner: { id: 0, type: struct, fields: { $ref: "#/$defs/struct/Inner" } }
+  Plain:
+    payload:
+      gone: { id: 0, type: u16, deprecated: true }
+      kept: { id: 1, type: u32 }
+  Clean:
+    payload:
+      a: { id: 0, type: u8 }
+`
+	files := genFromYAML(t, src, map[string]any{"package": "p", "emit": "project"})
+	const ann = "@Suppress(\"DEPRECATION\") // generated code must still read and write deprecated fields\n"
+	for path, c := range files {
+		if strings.Contains(c, "@file:Suppress(\"DEPRECATION\"") || strings.Contains(c, "UNUSED_PARAMETER") {
+			t.Errorf("%s: a file-wide suppression of a compiler diagnostic is back", path)
+		}
+	}
+	for _, c := range []struct{ file, decl string }{
+		{"StructInner.kt", "public class StructInner {"},
+		{"Plain.kt", "public class Plain {"},
+		{"Plain.kt", "internal class PlainVisitor("},
+		{"Outer.kt", "internal class OuterVisitor("},
+	} {
+		if !strings.Contains(files["src/main/kotlin/p/"+c.file], ann+c.decl) {
+			t.Errorf("%s: %q is not preceded by the deprecation suppression", c.file, c.decl)
+		}
+	}
+	for _, c := range []struct{ file, decl string }{
+		{"Outer.kt", "public class Outer {"},
+		{"Clean.kt", "public class Clean {"},
+		{"Clean.kt", "internal class CleanVisitor("},
+	} {
+		if strings.Contains(files["src/main/kotlin/p/"+c.file], ann+c.decl) {
+			t.Errorf("%s: %q touches no deprecated field and must not be suppressed", c.file, c.decl)
+		}
+	}
+	js := files["src/main/kotlin/p/Json.kt"]
+	for _, head := range []string{"internal fun to(o: StructInner,", "internal fun from(j: Map<String, JsonValue>, o: StructInner)", "internal fun to(o: Plain,"} {
+		if !strings.Contains(js, "    "+ann+"    "+head) {
+			t.Errorf("Json.kt: %q is not preceded by the deprecation suppression", head)
+		}
+	}
+	if strings.Contains(js, "    "+ann+"    internal fun to(o: Clean,") {
+		t.Error("Json.kt: Clean touches no deprecated field and must not be suppressed")
+	}
+	if !strings.Contains(files["src/main/kotlin/p/Main.kt"], "Plain.decode(wire).kept.toLong()") {
+		t.Error("bench sink must skip the deprecated field")
 	}
 }
