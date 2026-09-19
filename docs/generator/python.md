@@ -7,7 +7,9 @@ the enums and bitfield constants they use. The generated code calls into
 ## Options
 
 This target has none of its own. The generic options — `emit`, `license`,
-`max_message_size`, the `max_dyn_*` decode limits — are documented in the
+`max_message_size`, the `max_dyn_*` decode limits, and `format` (whether
+`sofabgen` runs `ruff format` over what it emitted, see
+[Formatting](#formatting)) — are documented in the
 [generic config](README.md) and apply here unchanged.
 
 ## The reassembly buffer
@@ -84,21 +86,36 @@ slots are reserved whether the array arrives or not.
 
 ## Formatting
 
-Generated Python is `ruff format` output: `ruff format --check` over a tree that
-holds it passes, so generated modules need no exclusion from a formatting gate
-and never come back reformatted.
+`sofabgen` can run `ruff format` over what it generated, and does so only when
+you ask: it spawns no external tool on its own, so the same version writes the
+same bytes on every machine, whatever happens to be installed. That matters more
+here than elsewhere — `ruff` is not part of the Python toolchain, so it may
+simply not be there.
 
-`sofabgen` runs `ruff format` itself, once per generated `.py` module, in the
-output directory — so a `pyproject.toml` or `ruff.toml` of your own that covers
-that directory is honoured, and the modules come out the way your own
-`ruff format` over that tree would leave them.
+Asking is one switch — the CLI flag `--format`, or the `generic.format` config
+key (the flag wins):
 
-Unlike a compiler's formatter, `ruff` is not part of the Python toolchain, so it
-may simply not be there. If it is not on `PATH`, generation still succeeds: the
-modules are written unformatted and `sofabgen` says so on stderr, and a later
-`ruff format` over the output directory brings them in line. `ruff`'s output
-changes between releases, so a tree formatted by one version and checked by
-another can still report a difference; use the same version for both. If `ruff`
-is installed but rejects a generated module, generation fails with the file
-named — that is a generator bug, and writing the file would only move it into
-your program.
+| value | what `sofabgen` does |
+|---|---|
+| `off` (the default) | Never runs `ruff format`. The files are the generator's own output: valid, compilable, not canonically formatted. |
+| `auto` | Runs `ruff format` when it is available; when it is not, writes the files unformatted and says so once on stderr. |
+| `require` | Runs `ruff format`, and fails the run when it is not available. |
+
+With the pass on, every generated `.py` module goes through `ruff format` once,
+run in the output directory — so a `pyproject.toml` or `ruff.toml` of your own
+that covers that directory is honoured, and the modules come out the way your own
+`ruff format` over that tree would leave them. `ruff format --check` over a tree
+holding them then passes, so generated modules need no exclusion from a
+formatting gate. `ruff`'s output changes between releases, so a tree formatted by
+one version and checked by another can still report a difference: use the same
+version for both.
+
+It is a convenience. The generated code is correct and compiles either way; the
+switch only decides whether `ruff format` has already been over it when it reaches you,
+and running `ruff format` over the output directory yourself gets you the
+same tree.
+
+Under `auto` and under `require` alike, a formatter that RUNS and rejects a
+generated file fails the generation with that file named — that is a generator
+bug, and writing the file would only move it into your build.
+

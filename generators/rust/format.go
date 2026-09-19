@@ -38,6 +38,9 @@ var (
 // rustfmt ships with every rustup toolchain, so anyone who can BUILD the
 // generated crate already has it. Anyone who cannot is not blocked: a missing
 // rustfmt returns the files unformatted with a note, never an error.
+//
+// Nothing here runs unless the caller asked for it: the CLI spawns rustfmt only
+// under --format=auto or --format=require, and the default is off.
 func (*Backend) Format(files []generator.File, dir string) ([]generator.File, string, error) {
 	var idx []int
 	for i, f := range files {
@@ -50,7 +53,7 @@ func (*Backend) Format(files []generator.File, dir string) ([]generator.File, st
 	}
 	bin, err := lookPath(rustfmtBin)
 	if err != nil {
-		return files, "note: rustfmt not found in PATH — generated Rust is written unformatted (`cargo fmt` over the output dir fixes it)", nil
+		return files, "rustfmt not found in PATH", nil
 	}
 	// rustfmt resolves rustfmt.toml from its working directory upwards. Running
 	// it in the output dir is what makes the generated files come out the way the

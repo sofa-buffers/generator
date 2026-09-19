@@ -44,6 +44,9 @@ var (
 // code already has it, which is the condition #579 put on invoking a formatter
 // from the generator. Anyone who does not is not blocked either — a missing
 // `dart` returns the files unformatted with a note, never an error.
+//
+// Nothing here runs unless the caller asked for it: the CLI spawns `dart format`
+// only under --format=auto or --format=require, and the default is off.
 func (*Backend) Format(files []generator.File, dir string) ([]generator.File, string, error) {
 	var idx []int
 	for i, f := range files {
@@ -56,7 +59,7 @@ func (*Backend) Format(files []generator.File, dir string) ([]generator.File, st
 	}
 	bin, err := dartLookPath(dartBin)
 	if err != nil {
-		return files, "note: dart not found in PATH — generated Dart is written unformatted (`dart format` over the output dir fixes it)", nil
+		return files, "dart not found in PATH", nil
 	}
 	// The formatter runs in the output dir, the way the user's own `dart format`
 	// over that tree would.

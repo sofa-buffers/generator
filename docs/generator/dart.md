@@ -6,7 +6,9 @@ Emits the generated classes for every message and named type, against
 ## Options
 
 This target has none of its own. The generic options — `emit`, `license`,
-`max_message_size`, the `max_dyn_*` decode limits — are documented in the
+`max_message_size`, the `max_dyn_*` decode limits, and `format` (whether
+`sofabgen` runs `dart format` over what it emitted, see
+[Formatting](#formatting)) — are documented in the
 [generic config](README.md) and apply here unchanged.
 
 ## Field types
@@ -74,21 +76,35 @@ Things worth knowing:
 
 ## Formatting
 
-Generated Dart is `dart format` output: `dart format --output=none
---set-exit-if-changed` over a tree that holds it passes, so generated files need
-no exclusion from a formatting gate and never come back reformatted.
+`sofabgen` can run `dart format` over what it generated, and does so only when
+you ask: it spawns no external tool on its own, so the same version writes the
+same bytes on every machine, whatever happens to be installed.
 
-`sofabgen` runs `dart format` itself, once per generated `.dart` file, at the
-language version the generated `pubspec.yaml` declares. That version is not a
-detail: `dart format` chooses its style by it — the short style below 3.7, the
-tall style from 3.7 on — so the files come out in the style your own
-`dart format` inside the generated package produces. With `emit: sources` there
-is no generated pubspec; the same language version is used, and if the package
-you drop the file into declares a different one, your formatter will restyle it.
+Asking is one switch — the CLI flag `--format`, or the `generic.format` config
+key (the flag wins):
 
-`dart format` is part of the Dart SDK, so this normally needs nothing from you.
-If `dart` is not on `PATH`, generation still succeeds: the files are written
-unformatted and `sofabgen` says so on stderr, and a later `dart format` over the
-output directory brings them in line. If `dart format` is available but rejects a
-generated file, generation fails with the file named — that is a generator bug,
-and writing the file would only move it into your build.
+| value | what `sofabgen` does |
+|---|---|
+| `off` (the default) | Never runs `dart format`. The files are the generator's own output: valid, compilable, not canonically formatted. |
+| `auto` | Runs `dart format` when it is available; when it is not, writes the files unformatted and says so once on stderr. |
+| `require` | Runs `dart format`, and fails the run when it is not available. |
+
+With the pass on, every generated `.dart` file goes through `dart format` once,
+at the language version the generated `pubspec.yaml` declares. That version is
+not a detail: `dart format` chooses its style by it — the short style below 3.7,
+the tall style from 3.7 on — so the files come out in the style your own
+`dart format` inside the generated package produces, and
+`dart format --output=none --set-exit-if-changed` over a tree holding them
+passes. With `emit: sources` there is no generated pubspec; the same language
+version is used, and if the package you drop the file into declares a different
+one, your formatter will restyle it.
+
+It is a convenience. The generated code is correct and compiles either way; the
+switch only decides whether `dart format` has already been over it when it reaches you,
+and running `dart format` over the output directory yourself gets you the
+same tree.
+
+Under `auto` and under `require` alike, a formatter that RUNS and rejects a
+generated file fails the generation with that file named — that is a generator
+bug, and writing the file would only move it into your build.
+

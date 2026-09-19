@@ -41,6 +41,9 @@ var (
 // The users this matters to are the ones running `ruff format --check` over
 // their tree, generated files included; they have ruff. For anyone else the
 // generated module is as usable unformatted.
+//
+// Nothing here runs unless the caller asked for it: the CLI spawns ruff only
+// under --format=auto or --format=require, and the default is off.
 func (*Backend) Format(files []generator.File, dir string) ([]generator.File, string, error) {
 	var idx []int
 	for i, f := range files {
@@ -53,7 +56,7 @@ func (*Backend) Format(files []generator.File, dir string) ([]generator.File, st
 	}
 	bin, err := ruffLookPath(ruffBin)
 	if err != nil {
-		return files, "note: ruff not found in PATH — generated Python is written unformatted (`ruff format` over the output dir fixes it)", nil
+		return files, "ruff not found in PATH", nil
 	}
 	// ruff resolves pyproject.toml/ruff.toml from the file's own directory
 	// upwards, so running it in the output dir under the file's real relative
