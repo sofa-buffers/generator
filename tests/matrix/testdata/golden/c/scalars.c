@@ -17,7 +17,7 @@ static const sofab_object_descr_field_t _message_fields_message_Scalars[] = {
     SOFAB_OBJECT_FIELD(4, message_Scalars_t, i64min, SOFAB_OBJECT_FIELDTYPE_SIGNED),
     SOFAB_OBJECT_FIELD(5, message_Scalars_t, f32, SOFAB_OBJECT_FIELDTYPE_FP32),
     SOFAB_OBJECT_FIELD(6, message_Scalars_t, f64, SOFAB_OBJECT_FIELDTYPE_FP64),
-    SOFAB_OBJECT_FIELD(7, message_Scalars_t, flag, SOFAB_OBJECT_FIELDTYPE_UNSIGNED),
+    SOFAB_OBJECT_FIELD(7, message_Scalars_t, flag, SOFAB_OBJECT_FIELDTYPE_BOOLEAN),
 };
 static const message_Scalars_t _message_defaults_message_Scalars = {
     .u8max = 255,

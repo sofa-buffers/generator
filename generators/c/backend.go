@@ -478,8 +478,12 @@ func (g *gen) scalarMember(cType string, f *ir.Field) (decl, entry string, err e
 		decl = fmt.Sprintf("%s %s;", intC(f.Kind), mn)
 		entry = field(f.ID, cType, mn, "SIGNED")
 	case ir.KindBool:
+		// BOOLEAN, not UNSIGNED: the wire form is the same unsigned varint, but
+		// CORELIB_PLAN §4.4 reads every non-zero value as true and normalizes it,
+		// with no width bound. Described as UNSIGNED, 2 was stored raw and 256 was
+		// rejected as INVALID by the one-byte width check.
 		decl = fmt.Sprintf("uint8_t %s;", mn)
-		entry = field(f.ID, cType, mn, "UNSIGNED")
+		entry = field(f.ID, cType, mn, "BOOLEAN")
 	case ir.KindFP32:
 		decl = fmt.Sprintf("float %s;", mn)
 		entry = field(f.ID, cType, mn, "FP32")
@@ -515,7 +519,8 @@ func (g *gen) scalarMember(cType string, f *ir.Field) (decl, entry string, err e
 		entry = field(f.ID, cType, mn, "UNSIGNED")
 	case ir.KindArray:
 		// Native array element (numeric/enum/boolean/bitfield): enum -> signed,
-		// boolean/bitfield -> unsigned, value-converted (not a sequence).
+		// bitfield -> unsigned, boolean -> the §4.4 boolean array (arrayFieldType),
+		// value-converted (not a sequence).
 		//
 		// MESSAGE_SPEC §3: `count: N` is the array's CAPACITY and the wire count M
 		// is its LENGTH — every element held is written, trailing element defaults
@@ -1098,7 +1103,12 @@ func arrayFieldType(k ir.Kind) string {
 		return "SOFAB_OBJECT_FIELDTYPE_ARRAY_FP32"
 	case ir.KindFP64:
 		return "SOFAB_OBJECT_FIELDTYPE_ARRAY_FP64"
-	default: // unsigned numeric, boolean, bitfield
+	case ir.KindBool:
+		// The unsigned-array wire form, with each element read under the §4.4
+		// rule: non-zero is true and normalized to 1, and no element is bounded by
+		// the one-byte slot it lands in.
+		return "SOFAB_OBJECT_FIELDTYPE_ARRAY_BOOLEAN"
+	default: // unsigned numeric, bitfield
 		return "SOFAB_OBJECT_FIELDTYPE_ARRAY_UNSIGNED"
 	}
 }

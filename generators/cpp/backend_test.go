@@ -1979,10 +1979,11 @@ func TestCppWrapperArrayAlwaysWritesLastElement(t *testing.T) {
 // temporary per delivery keeps only the last chunk's elements and silently drops
 // the rest:
 //
-//   - boolean: the member's element type BECOMES the wire's std::uint8_t, so the
-//     member is a native destination like any other and readArray binds it
-//     directly. std::vector<bool> could never have been a destination anyway: it
-//     is the bit-packed specialisation and has no data().
+//   - boolean: the member's element type is std::uint8_t -- std::vector<bool>
+//     could never have been a destination: it is the bit-packed specialisation
+//     and has no data(). readArray binds it through sofabgen::RawArray viewed
+//     as bool on both legs, so the corelib reads each element under
+//     CORELIB_PLAN §4.4 (generator#581).
 //   - enum: the member keeps its scoped enum element (the generated API and JSON
 //     stay value-typed) and readArray binds it through sofabgen::RawArray, which
 //     reinterprets the ELEMENTS -- the same narrow cast the scalar enum arm makes
@@ -2003,7 +2004,7 @@ func TestCppEnumBoolArrayNeverCastsTheContainer(t *testing.T) {
 			cfg:  map[string]any{"corelib": "c-cpp", "allow_dynamic": true},
 			want: []string{
 				"std::vector<std::uint8_t> flags = {};",
-				"is.readArray(flags, _count, 4);",
+				"{ sofabgen::RawArray<std::vector<std::uint8_t>, bool> _t0{&flags}; is.readArray(_t0, _count, 4); }",
 				"{ sofabgen::RawArray<std::vector<MColsElem>, std::int8_t> _t0{&cols}; is.readArray(_t0, _count, 3); }",
 			},
 		},
@@ -2011,7 +2012,8 @@ func TestCppEnumBoolArrayNeverCastsTheContainer(t *testing.T) {
 			name: "inline",
 			cfg:  map[string]any{"corelib": "c-cpp"},
 			want: []string{
-				"is.readArray(flags, _count, 4);",
+				"sofab::InlineVector<std::uint8_t, 4> flags = {};",
+				"{ sofabgen::RawArray<sofab::InlineVector<std::uint8_t, 4>, bool> _t0{&flags}; is.readArray(_t0, _count, 4); }",
 			},
 		},
 	} {
@@ -2030,6 +2032,10 @@ func TestCppEnumBoolArrayNeverCastsTheContainer(t *testing.T) {
 					t.Errorf("missing %q:\n%s", want, h)
 				}
 			}
+			// The u8 read of the boolean member is exactly the §4.4 defect.
+			if strings.Contains(h, "is.readArray(flags,") {
+				t.Errorf("a boolean array must not be read as a u8 array on c-cpp:\n%s", h)
+			}
 			// RawArray reinterprets the elements, never the container, and it never
 			// takes ownership of the ordering readArray documents.
 			if strings.Contains(h, "RawArray") && !strings.Contains(h, "reinterpret_cast<Wire *>(out->data())") {
@@ -2046,7 +2052,9 @@ func TestCppEnumBoolArrayNeverCastsTheContainer(t *testing.T) {
 	}
 	for _, want := range []string{
 		"std::vector<std::uint8_t> flags = {};",
-		"sofab::readArray(is, flags, 4);",
+		// The bool view on this leg too (corelib-cpp#143), and no element bound:
+		// a boolean has none (§4.4).
+		"{ sofabgen::RawArray<std::vector<std::uint8_t>, bool> _t0{&flags}; sofab::readArray(is, _t0, 4); }",
 		// The implied width rides along on this leg: an `enum` is bound by the
 		// smallest SIGNED type holding every declared constant (MESSAGE_SPEC §1),
 		// which for {RED: 0, GREEN: 1} is an i8 — NOT the 0..1 hull of the
@@ -2062,6 +2070,47 @@ func TestCppEnumBoolArrayNeverCastsTheContainer(t *testing.T) {
 	// with no wire state in it, and nothing resumes across it.)
 	if strings.Contains(pure, "if (sofab::readArray(is, _t0") {
 		t.Errorf("an enum array must not decode through a temporary:\n%s", pure)
+	}
+}
+
+// TestCppBoolRowReadsThroughTheBoolView pins generator#581 one level down: an
+// array<array<boolean>> row must reach the corelib as bool elements, or the row
+// is read as a u8 array (2 kept; 256 INVALID on c-cpp, a silent false on
+// corelib-cpp). The corelib's own row collector would hand the std::uint8_t row
+// to is.read(), so a boolean row takes the generated collector, whose row read
+// is the flat boolean arm -- the enum row's path -- on both legs.
+func TestCppBoolRowReadsThroughTheBoolView(t *testing.T) {
+	src := "version: 1\nmessages:\n  M:\n    payload:\n" +
+		"      rows: { id: 0, type: array, items: { type: array, count: 2, items: { type: boolean, count: 3 } } }\n"
+	for _, dyn := range []bool{false, true} {
+		h, err := genHeader(t, src, "m.hpp", map[string]any{"corelib": "c-cpp", "allow_dynamic": dyn})
+		if err != nil {
+			t.Fatalf("generate (allow_dynamic=%v): %v", dyn, err)
+		}
+		for _, want := range []string{
+			"void deserialize(sofab::IStreamImpl &is, sofab::id _id, std::size_t, std::size_t _count) noexcept override {",
+			", bool> _t1{&_e0}; is.readArray(_t1, _count, 3); }",
+			"#define SOFABGEN_RAW_ARRAY_HELPER",
+		} {
+			if !strings.Contains(h, want) {
+				t.Errorf("allow_dynamic=%v: missing %q:\n%s", dyn, want, h)
+			}
+		}
+		if strings.Contains(h, "MessageSeq<") {
+			t.Errorf("allow_dynamic=%v: a boolean row must not use the corelib row collector:\n%s", dyn, h)
+		}
+	}
+	for _, dyn := range []bool{false, true} {
+		pure, err := genHeader(t, src, "m.hpp", map[string]any{"allow_dynamic": dyn})
+		if err != nil {
+			t.Fatalf("generate cpp (allow_dynamic=%v): %v", dyn, err)
+		}
+		if !strings.Contains(pure, ", bool> _t1{&_e0}; sofab::readArray(is, _t1, 3); }") {
+			t.Errorf("corelib-cpp allow_dynamic=%v: the row must read through the bool view:\n%s", dyn, pure)
+		}
+		if strings.Contains(pure, "MessageSeq<") {
+			t.Errorf("corelib-cpp allow_dynamic=%v: a boolean row must not use the corelib row collector:\n%s", dyn, pure)
+		}
 	}
 }
 

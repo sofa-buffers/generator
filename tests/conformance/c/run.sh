@@ -87,6 +87,32 @@ gcc -std=c99 -Wall -Wextra -Werror -I"$INC" -I"$WORK/stream" \
     "$SRC/object.c" "$SRC/ostream.c" "$SRC/istream.c" -o "$WORK/stream_check"
 "$WORK/stream_check"
 
+# CORELIB_PLAN S4.4 (generator#581): every non-zero boolean reads as true, is
+# normalized to 1, and has no width bound. The C member is a uint8_t and the
+# harness JSON prints `v ? true : false`, so a raw 2 looks exactly like a
+# normalized 1 there; bool_check inspects the stored bytes and the re-encoded
+# wire instead, one-shot and drip-fed, at a scalar, an array, a nested-array row,
+# an array inside a struct, a union arm and a depth-3 row.
+echo "==> booleans: non-zero is true, normalized, unbounded (CORELIB_PLAN S4.4, generator#581)"
+mkdir -p "$WORK/bool"
+cat > "$WORK/bool/boolchk.yaml" <<'YAML'
+version: 1
+messages:
+  boolchk:
+    payload:
+      flag:   { id: 0, type: boolean }
+      flags:  { id: 1, type: array, items: { type: boolean, count: 5 } }
+      rows:   { id: 2, type: array, items: { type: array, count: 2, items: { type: boolean, count: 3 } } }
+      nested: { id: 3, type: struct, fields: { inner: { id: 0, type: array, items: { type: boolean, count: 3 } } } }
+      choice: { id: 4, type: union, oneof: { bits: { id: 0, type: array, items: { type: boolean, count: 3 } }, other: { id: 1, type: u8 } } }
+      cube:   { id: 5, type: array, items: { type: array, count: 2, items: { type: array, count: 2, items: { type: boolean, count: 2 } } } }
+YAML
+( cd "$ROOT" && go run ./cmd/sofabgen --lang c --in "$WORK/bool/boolchk.yaml" --out "$WORK/bool" )
+gcc -std=c99 -Wall -Wextra -Werror -I"$INC" -I"$WORK/bool" \
+    "$ROOT/tests/conformance/c/bool_check.c" "$WORK"/bool/*.c \
+    "$SRC/object.c" "$SRC/ostream.c" "$SRC/istream.c" -o "$WORK/bool_check"
+"$WORK/bool_check"
+
 # The LIFETIME half of the same contract (CORELIB_PLAN S6.7 / S6.7.1,
 # generator#412): a decoded message must OWN its bytes, so the buffer it came
 # from may be reused, overwritten or FREED the moment the call returns -- S6.0

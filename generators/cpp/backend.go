@@ -358,11 +358,12 @@ func (g *gen) maxFieldID(m *ir.Message) int64 {
 	return max
 }
 
-// needsRawArray reports whether this header decodes an ENUM array, the one case
-// that needs the sofabgen::RawArray element view: the member's element type is
-// the scoped enum (so JSON and the generated API stay value-typed) while the
-// wire element is its backing integer. Every other native array's member element
-// already IS the wire element type.
+// needsRawArray reports whether this header decodes an array whose elements are
+// read through the sofabgen::RawArray element view (viewedElem): an ENUM array,
+// whose member element is the scoped enum (so JSON and the generated API stay
+// value-typed) while the wire element is its backing integer, and a BOOLEAN
+// array, whose std::uint8_t member is read as bool elements. Every other native
+// array's member element already IS the wire element type.
 func (g *gen) needsRawArray(m *ir.Message) bool {
 	// A nested row counts too: array<array<enum>> binds its ROW through the same
 	// view, one level down, so a header that carries only the nested shape still
@@ -372,14 +373,14 @@ func (g *gen) needsRawArray(m *ir.Message) bool {
 		if e == nil {
 			return false
 		}
-		return e.Elem == ir.KindEnum || elemNeeds(e.ElemItems)
+		return g.viewedElem(e.Elem) || elemNeeds(e.ElemItems)
 	}
 	has := func(fields []*ir.Field) bool {
 		for _, fld := range fields {
 			if fld.Kind != ir.KindArray {
 				continue
 			}
-			if fld.Elem == ir.KindEnum || elemNeeds(fld.ElemItems) {
+			if g.viewedElem(fld.Elem) || elemNeeds(fld.ElemItems) {
 				return true
 			}
 		}
@@ -397,8 +398,24 @@ func (g *gen) needsRawArray(m *ir.Message) bool {
 	return false
 }
 
+// viewedElem reports whether an array of element kind k is decoded through
+// sofabgen::RawArray rather than straight into the member.
+//
+// An enum element is: see needsRawArray. So is a boolean element, on both legs:
+// each corelib reads a container of bool under the §4.4 rule -- every non-zero
+// element is true and normalized to 1, and no element is bounded by its
+// one-byte slot (corelib-c-cpp#172, corelib-cpp#143). Handed the std::uint8_t
+// member directly, the corelib reads a u8 array instead: 2 stays 2, and 256 is
+// INVALID on c-cpp and masked to a silent false on corelib-cpp (generator#581).
+// Both corelibs store each element as a byte -- the C store as a one-byte
+// integer, corelib-cpp through an unsigned char lvalue -- so the byte-backed
+// member is a well-defined destination.
+func (g *gen) viewedElem(k ir.Kind) bool {
+	return k == ir.KindEnum || k == ir.KindBool
+}
+
 // emitRawArrayHelper writes sofabgen::RawArray, the element-level view an enum
-// array's decode destination takes on both C++ legs.
+// or boolean array's decode destination takes on both C++ legs (viewedElem).
 //
 // Neither leg may read into a temporary of the wire element type. corelib-c-cpp
 // is a DEFERRED decoder: is.read()/readArray() record the destination's ADDRESS
@@ -433,8 +450,10 @@ func (g *gen) emitRawArrayHelper(f *hfile, m *ir.Message) {
 	f.line(" *")
 	f.line(" * An enum array's member elements are the scoped enum; the wire elements are")
 	f.line(" * the enum's backing integer. The two have the same size and the same object")
-	f.line(" * representation, so the member's own storage IS a valid destination -- which")
-	f.line(" * matters because the decode has to land there and not in a temporary:")
+	f.line(" * representation, so the member's own storage IS a valid destination. A boolean")
+	f.line(" * array's member elements are std::uint8_t, viewed as bool so the corelib reads")
+	f.line(" * each element under the boolean rule (non-zero is true, normalized to 1). Either")
+	f.line(" * way the decode has to land in the member and not in a temporary:")
 	f.line(" * corelib-c-cpp binds a destination by ADDRESS and fills it after the field")
 	f.line(" * callback returns, and corelib-cpp resumes a field split across feed chunks")
 	f.line(" * into the destination it was handed, once per chunk that carries part of it.")
@@ -446,10 +465,12 @@ func (g *gen) emitRawArrayHelper(f *hfile, m *ir.Message) {
 	f.line(" * the member's storage stays bound.")
 	f.line(" *")
 	f.line(" * @tparam Container Destination container (the member).")
-	f.line(" * @tparam Wire      Wire element type (the enum's backing integer).")
+	f.line(" * @tparam Wire      Element type the corelib reads (the enum's backing integer, or bool).")
 	f.line(" */")
 	f.line("template <typename Container, typename Wire>")
 	f.line("struct RawArray {")
+	f.line("    static_assert(sizeof(Wire) == sizeof(typename Container::value_type),")
+	f.line("                  \"the view must have the member's element size\");")
 	f.line("    using value_type = Wire;")
 	f.line("    Container *out;  ///< The member this view writes through.")
 	f.blank()
@@ -1602,12 +1623,29 @@ func (g *gen) deserializeArray(f *hfile, ind, target string, elem ir.Kind, ref *
 				ind, g.cppArrayContainer(elem, ref, items, count, elemMaxHas, elemMax), bk, tv, target, fn, tv, args)
 		}
 	case ir.KindBool:
-		// The element already IS the wire's std::uint8_t (cppArrayElem), so the
-		// member is a native destination like any other and takes the numeric arm
-		// verbatim -- no conversion, no temporary, and above all no
-		// reinterpret_cast of the container, which is what corrupted a
-		// std::vector<bool>'s control words under allow_dynamic.
-		g.nativeArrayRead(f, ind, target, elem, ref, count, hasCount, cap, depth)
+		// The member's element is std::uint8_t (cppArrayElem), but the elements are
+		// booleans: CORELIB_PLAN §4.4 reads every non-zero element as true,
+		// normalizes it to 1, and bounds no element by its width. Read as a u8
+		// array they are neither -- 2 is kept, and 256 is INVALID on c-cpp and
+		// masked to a silent false on corelib-cpp (generator#581).
+		//
+		// So both legs bind the member through sofabgen::RawArray viewed as bool,
+		// the enum arm's view with bool as the element type: each corelib's
+		// container-of-bool read performs the §4.4 mapping, and readArray keeps the
+		// tag, the schema count and the reset, as for any other array. It is still
+		// the member's own storage that gets bound -- never a temporary, and never
+		// a reinterpret_cast of the container, which is what corrupted a
+		// std::vector<bool>'s control words under allow_dynamic. No element bound
+		// is passed: a boolean has none.
+		cont := g.cppArrayContainer(elem, ref, items, count, elemMaxHas, elemMax)
+		if g.clib {
+			f.line("%s{ sofabgen::RawArray<%s, bool> %s{&%s}; is.readArray(%s, _count, %d); }",
+				ind, cont, tv, target, tv, cap)
+		} else {
+			fn, args := g.cppArrayCall(count, hasCount, "")
+			f.line("%s{ sofabgen::RawArray<%s, bool> %s{&%s}; sofab::%s(is, %s%s); }",
+				ind, cont, tv, target, fn, tv, args)
+		}
 	case ir.KindString:
 		cont := g.cppArrayContainer(elem, ref, items, count, elemMaxHas, elemMax)
 		// The leaf collectors stay in the corelib: they already PLACE each element
@@ -1675,7 +1713,12 @@ func (g *gen) deserializeArray(f *hfile, ind, target string, elem ir.Kind, ref *
 		// and fails the same static_assert. It takes the collector path below,
 		// where the row read is the flat enum-array emission one level down and
 		// binds through sofabgen::RawArray, exactly as a flat enum array does.
-		if isNativeArrayElem(items.Elem) && items.Elem != ir.KindEnum {
+		//
+		// A BOOLEAN row takes the same path, for the same reason one level down:
+		// the row read must bind through the bool view (see the KindBool arm), and
+		// the corelib collector would hand the std::uint8_t row to is.read() as a
+		// u8 array.
+		if isNativeArrayElem(items.Elem) && !g.viewedElem(items.Elem) {
 			inner := g.cppArrayContainer(items.Elem, items.ElemRef, items.ElemItems, items.Count, items.ElemMaxHas, items.ElemMax)
 			// The ROW's own schema `count:`, or -1 where the schema left the row
 			// unbounded -- which is a different fact from "these elements are not
@@ -1752,7 +1795,7 @@ func (g *gen) deserializeRowSeq(f *hfile, ind, target string, items *ir.ArrayEle
 		f.line("%svoid prepare() noexcept { if (out) out->clear(); }", in3)
 	}
 	// The c-cpp leg's readArray takes the field's announced element count, so a
-	// row whose read is a native array emission -- today an enum row, which binds
+	// row whose read is a native array emission -- an enum or boolean row, which binds
 	// through sofabgen::RawArray -- needs that parameter NAMED here, exactly as
 	// the message-level deserialize names it.
 	rowCountParam := "std::size_t"

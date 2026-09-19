@@ -54,3 +54,9 @@ messages:
       # static_assert generator#250 names above, in every cpp configuration.
       enumrows: { id: 6, type: array, items: { type: array, count: 2, items: { type: enum,     count: 3, enum: { $ref: '#/$defs/enum/Grade' } } } }
       bfrows:   { id: 7, type: array, items: { type: array, count: 2, items: { type: bitfield, count: 3, bits: { $ref: '#/$defs/bitfield/Marks' } } } }
+      # A boolean row: an unsigned array on the wire, but read under CORELIB_PLAN
+      # S4.4 (non-zero is true and normalized, no width bound). On the cpp c-cpp
+      # leg it leaves the corelib row collector for the generated one, which binds
+      # the std::uint8_t row as bool elements (generator#581) -- a path only a
+      # corpus row reaches in every configuration.
+      boolrows: { id: 8, type: array, items: { type: array, count: 2, items: { type: boolean, count: 3 } } }

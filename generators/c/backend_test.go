@@ -991,3 +991,45 @@ messages:
 		t.Errorf("a scalar fp64 field must not demand INT64:\n%s", h)
 	}
 }
+
+// TestBooleanUsesTheBooleanFieldTypes pins generator#581 on the C target: a
+// boolean is described as BOOLEAN / ARRAY_BOOLEAN, never UNSIGNED. The wire form
+// is the same unsigned varint, but only the boolean tags make corelib-c-cpp read
+// it under CORELIB_PLAN §4.4 -- every non-zero value is true and normalized to 1,
+// with no width bound. Described as UNSIGNED, 2 was stored raw and 256 was
+// rejected as INVALID by the one-byte width check. All three positions a boolean
+// reaches the descriptor from: a scalar, an array, and a nested-array row.
+func TestBooleanUsesTheBooleanFieldTypes(t *testing.T) {
+	files := genCFromYAML(t, `
+version: 1
+messages:
+  m:
+    payload:
+      flag:  { id: 0, type: boolean }
+      flags: { id: 1, type: array, items: { type: boolean, count: 5 } }
+      rows:  { id: 2, type: array, items: { type: array, count: 2, items: { type: boolean, count: 3 } } }
+`)
+	h, c := files["m.h"], files["m.c"]
+	for _, want := range []string{
+		"uint8_t flag;",
+		"uint8_t flags_len; uint8_t flags[5];",
+		"struct { uint8_t len; uint8_t vals[3]; } items[2];",
+	} {
+		if !strings.Contains(h, want) {
+			t.Errorf("m.h missing %q:\n%s", want, h)
+		}
+	}
+	for _, want := range []string{
+		"SOFAB_OBJECT_FIELD(0, message_m_t, flag, SOFAB_OBJECT_FIELDTYPE_BOOLEAN),",
+		"SOFAB_OBJECT_FIELD_ARRAY_SIZED(1, message_m_t, flags, flags_len, SOFAB_OBJECT_FIELDTYPE_ARRAY_BOOLEAN),",
+		"SOFAB_OBJECT_FIELD_ARRAY_SIZED(0, message_m_rows_elems_t, items[0].vals, items[0].len, SOFAB_OBJECT_FIELDTYPE_ARRAY_BOOLEAN),",
+		"SOFAB_OBJECT_FIELD_ARRAY_SIZED(1, message_m_rows_elems_t, items[1].vals, items[1].len, SOFAB_OBJECT_FIELDTYPE_ARRAY_BOOLEAN),",
+	} {
+		if !strings.Contains(c, want) {
+			t.Errorf("m.c missing %q:\n%s", want, c)
+		}
+	}
+	if strings.Contains(c, "FIELDTYPE_UNSIGNED") || strings.Contains(c, "FIELDTYPE_ARRAY_UNSIGNED") {
+		t.Errorf("m.c still describes a boolean as unsigned (§4.4):\n%s", c)
+	}
+}

@@ -46,9 +46,14 @@ and `std::string` / `sofab::FixedBytes<N>`.
 
 **A `boolean` array's element `T` is `std::uint8_t`, not `bool`**, in both storage
 modes. The member itself is the decode destination, and `std::vector<bool>` — the
-bit-packed specialisation, with no `data()` — cannot be one. It still reads and
-writes as a truth value (`0` is false, anything else true) and still appears as
-`true`/`false` in JSON; only the C++ element type differs.
+bit-packed specialisation, with no `data()` — cannot be one. It is still a truth
+value (`0` is false, anything else true) and still appears as `true`/`false` in
+JSON; only the C++ element type differs.
+
+- **Decode.** Every element is stored as `0` or `1`: any non-zero wire value,
+  however wide, decodes to `1`.
+- **Encode.** Every element is written as it is stored. Keep elements at `0` or
+  `1` so the message carries the canonical `true`.
 
 **The default depends on `corelib`** — `false` for `c-cpp` (an embedded target
 has no heap to spare), `true` for `cpp` (a server target would rather allocate

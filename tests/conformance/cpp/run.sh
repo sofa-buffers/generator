@@ -220,6 +220,35 @@ run_variant() {
         $OWN_OBJS
     "$WORK/own-$label"
 
+    # CORELIB_PLAN S4.4 (generator#581): every non-zero boolean reads as true, is
+    # normalized to 1, and has no width bound. A boolean array's member element is
+    # std::uint8_t, and the harness JSON prints `v ? true : false`, so a raw 2
+    # stored in it looks exactly like a normalized 1 there. bool_check inspects
+    # the stored bytes and the re-encoded wire instead, one-shot and drip-fed, at
+    # a scalar, an array, a nested-array row, an array inside a struct, a union
+    # arm and a depth-3 row.
+    echo "==> [$label] booleans: non-zero is true, normalized, unbounded (CORELIB_PLAN S4.4, generator#581)"
+    mkdir -p "$WORK/bool-$label"
+    cat > "$WORK/bool-$label/boolchk.yaml" <<'YAML'
+version: 1
+messages:
+  boolchk:
+    payload:
+      flag:   { id: 0, type: boolean }
+      flags:  { id: 1, type: array, items: { type: boolean, count: 5 } }
+      rows:   { id: 2, type: array, items: { type: array, count: 2, items: { type: boolean, count: 3 } } }
+      nested: { id: 3, type: struct, fields: { inner: { id: 0, type: array, items: { type: boolean, count: 3 } } } }
+      choice: { id: 4, type: union, oneof: { bits: { id: 0, type: array, items: { type: boolean, count: 3 } }, other: { id: 1, type: u8 } } }
+      cube:   { id: 5, type: array, items: { type: array, count: 2, items: { type: array, count: 2, items: { type: boolean, count: 2 } } } }
+YAML
+    (cd "$ROOT" && go run ./cmd/sofabgen --config "$WORK/cfg-corpus-$label.yaml" --lang cpp \
+        --in "$WORK/bool-$label/boolchk.yaml" --out "$WORK/bool-$label") >/dev/null
+    g++ -std=c++20 -Wall -Werror $include -I"$WORK/bool-$label" $STREAM_LIMITS \
+        -DMSG_TYPE=sofabuffers::Boolchk -include boolchk.hpp \
+        -o "$WORK/boolchk-$label" "$ROOT/tests/conformance/cpp/bool_check.cpp" \
+        $STREAM_OBJS
+    "$WORK/boolchk-$label"
+
     echo "==> [$label] JSON encode -> decode round-trip"
     OUT=$(printf '%s' "$IN" | "$WORK/ex-$label/harness/harness" encode myfirstmessage | "$WORK/ex-$label/harness/harness" decode myfirstmessage)
     for chk in \
@@ -823,7 +852,7 @@ run_variant() {
     ( cd "$ROOT" && go run ./cmd/sofabgen --config "$WORK/cfg-$label.yaml" --lang cpp \
         --in "$ROOT/tests/matrix/corpus/defs/nested_rows.yaml" --out "$WORK/rows-$label" )
     make -C "$WORK/rows-$label" "$@" >/dev/null
-    ROWS_IN='{"strrows":[["a","b","c"],["d"]],"blobrows":[[[1,2],[3]],[[4]]],"structrows":[[{"x":1,"y":2},{"x":3,"y":4}],[{"x":5,"y":6}]],"strcube":[[["a","b"],["c"]],[["d"]]],"numrows":[[1,2,3],[4,5,6]],"fprows":[[1.5,2.5],[3.5]],"enumrows":[[0,1,2],[2]],"bfrows":[[1,2,3],[0]]}'
+    ROWS_IN='{"strrows":[["a","b","c"],["d"]],"blobrows":[[[1,2],[3]],[[4]]],"structrows":[[{"x":1,"y":2},{"x":3,"y":4}],[{"x":5,"y":6}]],"strcube":[[["a","b"],["c"]],[["d"]]],"numrows":[[1,2,3],[4,5,6]],"fprows":[[1.5,2.5],[3.5]],"enumrows":[[0,1,2],[2]],"bfrows":[[1,2,3],[0]],"boolrows":[[true,false,true],[false]]}'
     ROWS_BIN="$WORK/rows-$label.bin"
     printf '%s' "$ROWS_IN" | "$WORK/rows-$label/harness/harness" encode NestedRows > "$ROWS_BIN"
     if [ -z "$corelib" ]; then
@@ -839,6 +868,7 @@ run_variant() {
         '"fprows":\[\[1.5,2.5\],\[3.5\]\]' \
         '"enumrows":\[\[0,1,2\],\[2\]\]' \
         '"bfrows":\[\[1,2,3\],\[0\]\]' \
+        '"boolrows":\[\[true,false,true\],\[false\]\]' \
         '"strrows":\[\["a","b","c"\],\["d"\]\]' \
         '"blobrows":\[\[\[1,2\],\[3\]\],\[\[4\]\]\]' \
         '"strcube":\[\[\["a","b"\],\["c"\]\],\[\["d"\]\]\]' \
