@@ -66,7 +66,7 @@ func TestProjectBuildsAndRoundTrips(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	build := exec.Command("make", "-C", dir, "SOFAB_C_CORELIB="+corelib)
+	build := exec.Command("make", "-C", dir, "SOFAB_C_CORELIB="+corelib, strictMakeVar)
 	if out, err := build.CombinedOutput(); err != nil {
 		t.Fatalf("project build failed:\n%s", out)
 	}

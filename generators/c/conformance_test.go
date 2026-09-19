@@ -185,7 +185,7 @@ func buildHarness(t *testing.T, corelib, def string) (string, error) {
 			return "", err
 		}
 	}
-	out, err := exec.Command("make", "-C", dir, "SOFAB_C_CORELIB="+corelib).CombinedOutput()
+	out, err := exec.Command("make", "-C", dir, "SOFAB_C_CORELIB="+corelib, strictMakeVar).CombinedOutput()
 	if err != nil {
 		return "", fmt.Errorf("build: %v\n%s", err, out)
 	}

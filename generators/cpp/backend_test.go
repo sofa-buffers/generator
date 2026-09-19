@@ -3089,3 +3089,33 @@ messages:
 		t.Errorf("corelib: cpp defines no SOFAB_ID_MAX macro; the guard must not be emitted:\n%s", pure)
 	}
 }
+
+// TestCppClibSizeParamNamedOnlyWhenRead: on the c-cpp profile deserialize names
+// its field-length parameter only when a string or blob arm reads it. Named in a
+// message without one it is an unused parameter, which -Wextra reports and a
+// user's -Werror build refuses.
+func TestCppClibSizeParamNamedOnlyWhenRead(t *testing.T) {
+	const noLen = `
+version: 1
+messages:
+  M:
+    payload:
+      a: { id: 0, type: u8 }
+`
+	h, err := fixedHeader(t, noLen, "m.hpp", map[string]any{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(h, "_size") {
+		t.Errorf("a message with no string or blob must leave the size parameter unnamed:\n%s", h)
+	}
+	for _, kind := range []string{"string", "blob"} {
+		h, err := fixedHeader(t, noLen+"      b: { id: 1, type: "+kind+", maxlen: 8 }\n", "m.hpp", map[string]any{})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !strings.Contains(h, "sofab::id id, std::size_t _size,") {
+			t.Errorf("a %s arm reads _size, so the parameter must be named:\n%s", kind, h)
+		}
+	}
+}

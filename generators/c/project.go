@@ -30,7 +30,11 @@ CC ?= cc
 # The C standard is kept separate from CFLAGS so it is always applied even if a
 # caller overrides CFLAGS. The generated code targets C99.
 CSTD ?= -std=c99
-CFLAGS ?= -Wall -Wextra
+# Warnings are kept separate from CFLAGS too, so overriding CFLAGS (to set an
+# optimisation level, say) keeps them. The generated code builds clean under
+# these; add -Werror to make any warning fatal.
+WARNFLAGS ?= -Wall -Wextra
+CFLAGS ?=
 INCLUDES := -Igenerated -I$(SOFAB_C_CORELIB)/src/include -I$(SOFAB_C_CORELIB)/test/shared
 # utf8.c holds the strict-UTF-8 validator. It is listed unconditionally: the
 # check is off by default and every function in that file then compiles away,
@@ -41,7 +45,7 @@ JSON := $(SOFAB_C_CORELIB)/test/shared/sofab_test_json.c
 GEN  := $(wildcard generated/*.c)
 
 harness/harness: harness/main.c $(GEN) $(CORE) $(JSON)
-	$(CC) $(CSTD) $(CFLAGS) $(INCLUDES) $^ -o $@
+	$(CC) $(CSTD) $(WARNFLAGS) $(CFLAGS) $(INCLUDES) $^ -o $@
 
 .PHONY: clean
 clean:
@@ -125,8 +129,13 @@ func (g *gen) harness(s *ir.Schema) []byte {
 		h.line(`#include "%s.h"`, strings.ToLower(m.Name))
 	}
 	h.blank()
-	h.line("%s", jsonPrelude)
-	h.blank()
+
+	// The rest of the file is rendered first so the prelude can carry only the
+	// helpers it calls: an unused static function is a -Wunused-function
+	// diagnostic, and a schema with no string or blob field calls none of the
+	// string/blob ones.
+	body := h
+	h = &cfile{}
 
 	// Forward-declare every json function so callers precede definitions
 	// regardless of emission order (a struct may use a type defined later).
@@ -156,7 +165,16 @@ func (g *gen) harness(s *ir.Schema) []byte {
 	}
 
 	g.emitMain(h, s)
-	return h.bytes()
+
+	rest := h.b.String()
+	for _, helper := range jsonPrelude {
+		if strings.Contains(rest, helper.name+"(") {
+			body.line("%s", helper.src)
+		}
+	}
+	body.blank()
+	body.b.WriteString(rest)
+	return body.bytes()
 }
 
 func (g *gen) jsonFn(key string) string   { return g.prefix + sanitizeKey(key) }
@@ -586,7 +604,10 @@ func scalarCType(f *ir.Field) string {
 
 // jsonPrelude is the small, dependency-free JSON output + helper block shared by
 // the generated harness (the reader comes from corelib's sofab_test_json).
-const jsonPrelude = `static void json_str(FILE *out, const char *s) {
+// jsonPrelude holds the harness's static JSON helpers, each emitted only when
+// the rendered harness calls it (see harness).
+var jsonPrelude = []struct{ name, src string }{
+	{"json_str", `static void json_str(FILE *out, const char *s) {
     fputc('"', out);
     for (; *s; s++) {
         unsigned char c = (unsigned char)*s;
@@ -598,21 +619,22 @@ const jsonPrelude = `static void json_str(FILE *out, const char *s) {
         else fputc(c, out);
     }
     fputc('"', out);
-}
-static void json_bytes(FILE *out, const unsigned char *b, size_t n) {
+}`},
+	{"json_bytes", `static void json_bytes(FILE *out, const unsigned char *b, size_t n) {
     fputc('[', out);
     for (size_t i = 0; i < n; i++) { if (i) fputc(',', out); fprintf(out, "%u", b[i]); }
     fputc(']', out);
-}
-static void json_to_str(const sofab_json_t *c, char *dst, size_t cap) {
+}`},
+	{"json_to_str", `static void json_to_str(const sofab_json_t *c, char *dst, size_t cap) {
     size_t L = 0; const char *s = sofab_json_string(c, &L);
     if (!s) { dst[0] = 0; return; }
     if (L >= cap) L = cap - 1;
     memcpy(dst, s, L); dst[L] = 0;
-}
-static size_t json_to_bytes(const sofab_json_t *c, unsigned char *dst, size_t cap) {
+}`},
+	{"json_to_bytes", `static size_t json_to_bytes(const sofab_json_t *c, unsigned char *dst, size_t cap) {
     size_t n = sofab_json_array_size(c);
     if (n > cap) n = cap;
     for (size_t i = 0; i < n; i++) dst[i] = (unsigned char)sofab_json_u64(sofab_json_array_at(c, i));
     return n;
-}`
+}`},
+}
