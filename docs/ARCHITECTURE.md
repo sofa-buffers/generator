@@ -5605,7 +5605,7 @@ A reimplementation is **conformant** when it reproduces these gates:
    | java | `javac -Xlint:all -Werror` | the generated pom compiles with `-Xlint:all`; `MVN_STRICT` (`-Dmaven.compiler.failOnWarning=true`) on every `mvn package` of a generated project and `JAVAC_STRICT` on the corpus `javac` loop in `tests/conformance/java/run.sh` |
    | kotlin (the JVM harness builds, the corpus project and the `commonMain` metadata type-check) | `allWarningsAsErrors` | an init script (`KT_STRICT`) handed to every Gradle build of generated code in `tests/conformance/kotlin/run.sh` |
    | csharp | `dotnet build -warnaserror` (nullable analysis stays off: the generated csproj sets `<Nullable>disable</Nullable>`) | `DOTNET_STRICT`, read by the one `dbuild` helper every `dotnet build` in `tests/conformance/csharp/run.sh` goes through |
-   | typescript (every `int64` mode) | `tsc` has no warning class, so the checks a strict consumer turns on are errors: `--noUnusedLocals --noUnusedParameters --noImplicitReturns --noFallthroughCasesInSwitch`, on top of the emitted tsconfig's `strict` | `TSC_STRICT` on every `tsc --noEmit` in `tests/conformance/typescript/run.sh` |
+   | typescript (every `int64` mode) | `tsc` has no warning class, so the checks a strict consumer turns on are errors: `--noUnusedLocals --noUnusedParameters --noImplicitReturns --noFallthroughCasesInSwitch`, on top of the emitted tsconfig's `strict` | `TSC_STRICT`, read by `tsc_strict`, which every leg that typechecks calls in `tests/conformance/typescript/run.sh`; a sweep at the end of the run checks every other generated project under the work dir, including the ones legs only run through `tsx` |
    | dart | `dart analyze --fatal-infos` before every compile (`dart compile` fails on errors only) | `DART_STRICT`, read by `danalyze`, which `compile_project` and the corpus `check` call in `tests/conformance/dart/run.sh`; the Go gated driver tests analyze before they run (they need `SOFAB_DART_CORELIB`; unlike go/python/c, the `lang-dart` job does not run the backend package, whose `TestConformance` would re-enter the suite) |
    | zig | nothing to add: an unused local, an unused parameter and a discarded non-void value are compile **errors** by language design, and Zig has no warning class | — |
 
@@ -5620,6 +5620,15 @@ A reimplementation is **conformant** when it reproduces these gates:
    pinned (`stable` Rust and Dart, TypeScript `^5`): a diagnostic a newer
    release adds turns the job red, which is the point, and shows up there
    first.
+
+   Every suite's corpus loop takes every file under
+   `examples/messages/realworld/`, the two `$defs`-only ones (`common.yaml`,
+   `diagnostics.yaml`) included: a schema with no message is where a harness
+   has least to do, so it is where an unused import, variable or bench sink
+   shows up. The C, C++, Java and Kotlin targets emit their types per message
+   and so emit no source for such a file; their suites build it as
+   `emit: project` instead (C and C++ every realworld file, in every C++
+   profile), so the harness is held to the policy too.
 
    The generated C and C++ project Makefiles read `WARNFLAGS` (default
    `-Wall -Wextra`) apart from `CFLAGS`/`CXXFLAGS`, which is what lets one
@@ -5741,7 +5750,11 @@ A reimplementation is **conformant** when it reproduces these gates:
    assigned; a row of structs keeps it. The corelib import list is read off the
    module's code with its comments blanked, so a comment that names a corelib
    function (the `Long[]` compare's) does not import it. A `$defs`-only harness
-   imports no message module and declares no bench warmup.
+   imports no message module and declares no bench warmup. `tsx`, which most
+   legs run their project through, strips types without checking them, so a
+   project only run is typechecked by the sweep at the end of the suite, like
+   Go's `go vet` and Python's `ruff` sweeps; a project a leg already checked is
+   not checked twice.
 
    Dart: the generated library carries no file-wide `ignore_for_file` except
    `deprecated_member_use_from_same_package`, and that one only in a file that
@@ -5752,7 +5765,12 @@ A reimplementation is **conformant** when it reproduces these gates:
    `$defs`-only file) gets its class and no private decode visitor, and no JSON
    codec in the harness. The file-level helpers and both files' imports are
    derived from the rendered text (comments blanked), so a helper or an import
-   only a dropped visitor would use is not emitted either.
+   only a dropped visitor would use is not emitted either. The deprecated
+   ignore stays file-wide rather than a per-line `// ignore:`: a deprecated
+   field is touched from every member the class emits for it (constructor,
+   serialize, reset, the decode visitor, the JSON codec), so per-line ignores
+   would be one comment per touching line, tied to the emitter's line layout,
+   and the file holds nothing but code generated for that schema.
 
    Zig: the unused-name errors come from AstGen, which runs over the **whole**
    of every file that is imported, not only over the declarations something
