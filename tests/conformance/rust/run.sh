@@ -133,6 +133,20 @@ run_variant() {
     rust_build "$EXAMPLE" "$WORK/ex-$label"
     rust_build "$WORK/conf.yaml" "$WORK/conf-$label"
 
+    # clippy on the example crate: no deny-level finding (clippy::correctness,
+    # e.g. approx_constant on a float default). A user's `cargo clippy` fails on
+    # those outright. clippy's warn-level lints are NOT gated yet -- the
+    # generated code still has a warn-level backlog -- so this call runs with the
+    # suite's -D warnings lifted, in its own target dir so the flag change does
+    # not rebuild the shared one. rustc's own warnings were already denied by
+    # the build above; a missing clippy component fails here, it is not skipped.
+    if ! ( cd "$WORK/ex-$label" && RUSTFLAGS= CARGO_TARGET_DIR="$WORK/target-clippy" \
+            cargo clippy -q ) >"$WORK/clippy-$label.log" 2>&1; then
+        cat "$WORK/clippy-$label.log"
+        echo "FAIL: [$label] cargo clippy reports a deny-level finding on the example crate"
+        exit 1
+    fi
+
     # MAX_SIZE fill check (ARCHITECTURE §9.6): MAX_SIZE sizes the encode buffer
     # (a heapless::Vec in the no_std profile), so a fully filled message must fit
     # it AND reach it exactly.

@@ -207,6 +207,8 @@ jobs:
         with:
           go-version: "1.27"
       - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
       - uses: ./.github/actions/corelib-refs
       - name: Rust backend — generate, build, round-trip, conformance
         run: ./tests/conformance/rust/run.sh
