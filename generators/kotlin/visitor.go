@@ -416,6 +416,12 @@ func (g *gen) emitVisitor(f *kfile, name string, fields []*ir.Field) {
 	f.line(" * streaming decode half of the message API, reached through [%s.decode],", name)
 	f.line(" * [%s.tryDecode] and [%s.Decoder].", name, name)
 	f.line(" */")
+	for _, fr := range fs {
+		if anyDeprecated(fr.fields) { // any scope the visitor writes, nested ones included
+			f.line("%s", deprecationSuppress)
+			break
+		}
+	}
 	f.line("internal class %sVisitor(private val m: %s) : Visitor {", name, name)
 	f.line("    private var cur = 0")
 	// The SKIPPED-SUBTREE scope. sequenceBegin moves here for any (scope, id) the
