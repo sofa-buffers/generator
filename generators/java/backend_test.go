@@ -2619,3 +2619,60 @@ func TestJavaNarrowBitfieldArrayIsWidenedForJSON(t *testing.T) {
 		t.Errorf("an enum array element must not be masked -- its width is signed:\n%s", j)
 	}
 }
+
+// TestJavaDeprecationIsSuppressedOnlyWhereItIsRead: the generated code builds
+// under javac -Xlint:all -Werror. A @Deprecated field is written by the visitor
+// (a separate top-level class) and round-tripped by the JSON harness, both of
+// which javac flags as [deprecation]; the suppression sits on exactly those
+// sites, and only when a field they touch is deprecated -- nested scopes
+// included. The bench sink never picks a deprecated field and spells a keyword
+// field through javaIdent. The generated pom compiles with -Xlint:all.
+func TestJavaDeprecationIsSuppressedOnlyWhereItIsRead(t *testing.T) {
+	const src = `
+version: 1
+$defs:
+  struct:
+    Inner: { old: { id: 0, type: u8, deprecated: true } }
+messages:
+  Outer:
+    payload:
+      inner: { id: 0, type: struct, fields: { $ref: "#/$defs/struct/Inner" } }
+  Plain:
+    payload:
+      gone: { id: 0, type: u16, deprecated: true }
+      int:  { id: 1, type: u32 }
+  Clean:
+    payload:
+      a: { id: 0, type: u8 }
+`
+	files := genJavaFromYAML(t, src, map[string]any{"package": "p", "emit": "project"})
+	const ann = `@SuppressWarnings("deprecation")`
+	for _, name := range []string{"Outer", "Plain"} {
+		src := files["src/main/java/p/"+name+".java"]
+		if !strings.Contains(src, ann+" // decode must still fill deprecated fields\nclass "+name+"Visitor") {
+			t.Errorf("%sVisitor writes a deprecated field but carries no deprecation suppression", name)
+		}
+	}
+	if c := files["src/main/java/p/Clean.java"]; strings.Contains(c, "SuppressWarnings") {
+		t.Error("Clean touches no deprecated field and must carry no suppression")
+	}
+	js := files["src/main/java/p/Json.java"]
+	sup := "    " + ann + " // the harness round-trips deprecated fields too\n"
+	for _, head := range []string{"static void to(StructInner ", "static void from(JsonObject j, StructInner ", "static void to(Plain ", "static void from(JsonObject j, Plain "} {
+		if !strings.Contains(js, sup+"    "+head) {
+			t.Errorf("Json.java: %q is not preceded by the deprecation suppression", head)
+		}
+	}
+	for _, head := range []string{"static void to(Outer ", "static void to(Clean "} {
+		if strings.Contains(js, sup+"    "+head) {
+			t.Errorf("Json.java: %q touches no deprecated field directly and must not be suppressed", head)
+		}
+	}
+	main := files["src/main/java/p/Main.java"]
+	if !strings.Contains(main, "benchSink ^= Plain.decode(wire).int_;") {
+		t.Errorf("bench sink must skip the deprecated field and spell the keyword field via javaIdent:\n%s", javaMethod(t, main, "private static void benchOp_plain("))
+	}
+	if !strings.Contains(files["pom.xml"], "<arg>-Xlint:all</arg>") {
+		t.Error("pom.xml must compile with -Xlint:all")
+	}
+}
