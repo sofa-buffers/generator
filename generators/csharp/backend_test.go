@@ -1862,3 +1862,50 @@ func TestCsBenchSinkPrefersNonDeprecatedField(t *testing.T) {
 		t.Errorf("benchSinkField = (%q, %v), want the only (deprecated) integer (%q, true)", got, dep, "old")
 	}
 }
+
+// csProgram generates src as a project and returns its Program.cs.
+func csProgram(t *testing.T, src string) string {
+	t.Helper()
+	doc, err := parser.Parse([]byte(src), "p.yaml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	s, err := model.Build(doc)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := analysis.Analyze(s); err != nil {
+		t.Fatal(err)
+	}
+	files, err := (&Backend{}).Generate(s, map[string]any{"emit": "project"})
+	if err != nil {
+		t.Fatalf("generate: %v", err)
+	}
+	for _, f := range files {
+		if f.Path == "Program.cs" {
+			return string(f.Content)
+		}
+	}
+	t.Fatal("no Program.cs")
+	return ""
+}
+
+// A file with no message ($defs only, like examples/messages/realworld/common.yaml)
+// still gets a Program.cs. The bench sink would be assigned and never read
+// (CS0414), and the `return 0;` after a switch whose only arm returns would be
+// unreachable (CS0162) -- both errors under TreatWarningsAsErrors. With a
+// message, both are read and reachable and must stay.
+func TestCsHarnessWithoutMessagesLeavesNothingUnread(t *testing.T) {
+	none := csProgram(t, "version: 1\n$defs:\n  struct:\n    P: { x: { id: 0, type: u8 } }\n")
+	for _, bad := range []string{"benchSink", "Warmup", "return 0;"} {
+		if strings.Contains(none, bad) {
+			t.Errorf("message-less Program.cs contains %q", bad)
+		}
+	}
+	one := csProgram(t, "version: 1\nmessages:\n  m: { payload: { a: { id: 0, type: u32 } } }\n")
+	for _, want := range []string{"static long benchSink = 0;", "static readonly int Warmup", "        return 0;\n    }\n}"} {
+		if !strings.Contains(one, want) {
+			t.Errorf("Program.cs with a message lacks %q", want)
+		}
+	}
+}

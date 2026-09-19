@@ -149,7 +149,11 @@ func (g *gen) harness(s *ir.Schema) []byte {
 	}
 	f.line("        default: Console.Error.WriteLine(\"unknown message\"); return 2;")
 	f.line("        }")
-	f.line("        return 0;")
+	// Only a message case breaks out of the switch; with none (a $defs-only
+	// file) the trailing return would be unreachable code (CS0162).
+	if len(s.Messages) > 0 {
+		f.line("        return 0;")
+	}
 	f.line("    }")
 	f.line("}")
 	return f.bytes()
@@ -196,11 +200,16 @@ func benchSinkField(m *ir.Message) (name string, deprecated bool) {
 //
 // Ported from corelib-cs/bench/run_callgrind.sh.
 func (g *gen) emitBenchBody(f *cfile, s *ir.Schema) {
-	f.line("    // Fixed warmup ops per run, independent of `reps`, so it cancels in the")
-	f.line("    // subtraction while leaving the measured ops at steady, fully-JITted cost.")
-	f.line("    static readonly int Warmup = int.TryParse(Environment.GetEnvironmentVariable(\"SOFAB_BENCH_WARMUP\"), out var _w) ? _w : 5000;")
-	f.line("    static long benchSink = 0;")
-	f.blank()
+	// The warmup count and the sink are read only by a message's bench op; a
+	// file with no message ($defs only) would leave benchSink assigned but never
+	// read (CS0414).
+	if len(s.Messages) > 0 {
+		f.line("    // Fixed warmup ops per run, independent of `reps`, so it cancels in the")
+		f.line("    // subtraction while leaving the measured ops at steady, fully-JITted cost.")
+		f.line("    static readonly int Warmup = int.TryParse(Environment.GetEnvironmentVariable(\"SOFAB_BENCH_WARMUP\"), out var _w) ? _w : 5000;")
+		f.line("    static long benchSink = 0;")
+		f.blank()
+	}
 	f.line("    static int BenchMain(string w, int reps, byte[] input) {")
 	for _, m := range s.Messages {
 		mt := exported(m.Name)
