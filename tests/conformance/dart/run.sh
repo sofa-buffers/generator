@@ -10,6 +10,8 @@ set -eu
 . "$(dirname "$0")/../lib/corelib.sh"
 # Shared MAX_SIZE fill check (ARCHITECTURE §9.6).
 . "$(dirname "$0")/../lib/maxsize_fill.sh"
+# Shared canonical-formatter check (ARCHITECTURE §12 gate 10).
+. "$(dirname "$0")/../lib/check_format.sh"
 
 ROOT=$(cd "$(dirname "$0")/../../.." && pwd)
 CORELIB="${1:-${SOFAB_DART_CORELIB:-}}"
@@ -998,5 +1000,19 @@ sed -i "s#\${SOFAB_DART_CORELIB}#$CORELIB#" "$WORK/repeated/pubspec.yaml"
 compile_project "$WORK/repeated"
 python3 "$ROOT/tests/conformance/lib/check_repeated_id.py" "Dart" \
     -- "$WORK/repeated/harness"
+
+# Gate 10: every generated .dart file this run produced -- the example, the
+# conformance schema, every corpus/realworld project and every project a leg
+# above generated for a config of its own -- must satisfy `dart format` at the
+# language version the generated pubspec declares, so a user's own dart format
+# over a tree holding generated code leaves it alone. sofabgen runs dart format
+# itself (generators/dart/format.go); this is the check that the pass reached
+# every file. The whole work dir is swept rather than a list of projects, so a
+# project added above is covered the day it is written; the corelib checkout is
+# not generated code and is pruned. The one hand-written file in the sweep,
+# bin/ownership_check.dart copied into the example project, is held to the same
+# formatter -- it sits in a generated tree, so a user's dart format sees it too.
+echo "==> generated Dart is dart-format-clean (every project in this run)"
+check_format dart "$WORK"
 
 echo "PASS"

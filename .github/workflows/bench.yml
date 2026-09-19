@@ -95,6 +95,14 @@ jobs:
         if: startsWith(matrix.row, 'python')
         with: { python-version: "3.14" }
 
+      # ruff: sofabgen formats the Python it emits, so the modules measured here
+      # are the modules a user gets. Whitespace either way, but a bench that
+      # measures a different source text than the one that ships is a trap. The
+      # pin matches RUFF_VERSION in tests/conformance/python/run.sh.
+      - name: ruff (sofabgen formats generated Python with it)
+        if: startsWith(matrix.row, 'python')
+        run: python -m pip install "ruff==0.16.8"
+
       # Only python-native builds corelib-py's Cython extension. Without this the
       # row does not silently degrade to the pure engine — the recipe verifies
       # sofab.IMPL and fails the row instead — but it would fail every run.

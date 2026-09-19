@@ -5819,6 +5819,8 @@ A reimplementation is **conformant** when it reproduces these gates:
     | go | `gofmt -l` prints nothing | the backend formats every file through `go/format` (`generators/golang/gofile.go`) |
     | rust / rs-no-std | `rustfmt --check --edition <crate edition>` | the CLI pipes every `.rs` file through `rustfmt` (`generators/rust/format.go`) |
     | zig | `zig fmt --check` | the backend emits zig fmt layout itself (`generators/zig/layout.go`) |
+    | dart | `dart format --output=none --set-exit-if-changed`, at the language version the generated `pubspec.yaml` declares | the CLI pipes every `.dart` file through `dart format` (`generators/dart/format.go`) |
+    | python | `ruff format --check`, at the ruff version the suite pins | the CLI pipes every `.py` module through `ruff format` (`generators/python/format.go`) |
 
     Go formats with the `go/format` **library**, so `sofabgen` needs no tool
     beyond itself. Source that library cannot parse is a codegen bug: it is now
@@ -5884,13 +5886,58 @@ A reimplementation is **conformant** when it reproduces these gates:
     the pass misses, or a rustfmt release whose output has moved, surfaces here
     instead of in a user's CI.
 
+    **Dart and python** are the same case as rust, and were measured the same
+    way. `dart format` rewrites all 54 generated files of the example plus the
+    corpus — ~9k diff lines in the short style, ~10k in the tall one — and both
+    styles break lines by width, so a long field or type name moves the splits;
+    `ruff format` rewrites all 27 generated modules (~6.3k diff lines), and while
+    much of that is mechanical (blank lines around definitions, one-line
+    `if cond: stmt` bodies, the `from sofab import …` line), the rest is again
+    width-driven: a probe schema with long field names makes ruff split a
+    dataclass default, a `def` whose return annotation no longer fits, a dict
+    literal and a comparison that shorter names keep on one line. So both run
+    through `generator.Formatter` in the CLI, with the same degradation: a
+    missing formatter writes the files unformatted with a note, a formatter that
+    RUNS and refuses is an error naming the file.
+
+    Dart adds one wrinkle of its own: `dart format` picks its STYLE from the
+    **language version** of the package a file belongs to — short style below
+    3.7, the tall style from 3.7 on — and at generation time there is no package
+    config yet (`dart pub get` writes it afterwards), so left alone it would
+    format against the SDK's latest version while the generated `pubspec.yaml`
+    asks for another. The pass therefore passes `--language-version` explicitly,
+    from a constant (`dart.LanguageVersion`) that
+    `generators/dart/format_test.go` pins to the `sdk:` constraint the generated
+    pubspec declares; the conformance check reads that constraint back out of
+    the pubspec files rather than repeating the constant, and refuses a tree
+    that holds more than one.
+
+    Python's wrinkle is that ruff, unlike rustfmt inside rustup or `dart format`
+    inside the Dart SDK, is **not** part of the toolchain a user of generated
+    Python already has — this is the pass that most often finds no formatter.
+    That is not a loss: the users it matters to are the ones running
+    `ruff format --check` over their tree, generated files included, and they
+    have ruff. ruff's formatting also changes between releases, so
+    `tests/conformance/python/run.sh` pins the version, refuses to start under
+    any other one, and puts that binary first on `PATH` — otherwise `sofabgen`
+    could format with one ruff and the gate check the result with another. It
+    passes no `--isolated`: `sofabgen` formats the tree with the user's own ruff
+    settings, so a verdict that ignored them would be a verdict about a tree
+    nobody receives (the lint half of gate 9 does the opposite, deliberately, to
+    keep a machine's config out of a LINT finding).
+
+    The dart and python checks are handed their suite's whole work directory
+    rather than a list of projects, so a project a later block adds is covered
+    the day it is written; the corelib a suite clones into that directory is not
+    generated code and is pruned. Like rust's, neither check proves the
+    emitters' layout — it pins that the pass reached every generated file.
+
     C, C++, Java, Kotlin and C# are deliberately **out**: none has a single
     standard (clang-format needs a style chosen, google-java-format vs. IDE
     defaults, ktfmt vs. ktlint, `dotnet format` reads an `.editorconfig`), and
     choosing a house style for generated code is a separate decision. The
-    remaining single-formatter targets — dart (`dart format`), python
-    (`ruff format`) and typescript (`prettier`) — join the table through the
-    same driver.
+    remaining single-formatter target, typescript (`prettier`), joins the table
+    through the same driver.
 
 ---
 

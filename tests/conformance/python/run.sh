@@ -12,6 +12,8 @@ set -eu
 . "$(dirname "$0")/../lib/maxsize_fill.sh"
 # Every backend Go test, run against the corelib with no skips allowed.
 . "$(dirname "$0")/../lib/backend_tests.sh"
+# Shared canonical-formatter check (ARCHITECTURE §12 gate 10).
+. "$(dirname "$0")/../lib/check_format.sh"
 
 ROOT=$(cd "$(dirname "$0")/../../.." && pwd)
 CORELIB="${1:-${SOFAB_PY_CORELIB:-}}"
@@ -32,6 +34,14 @@ if [ "$_ruff_have" != "ruff $RUFF_VERSION" ]; then
     echo "      pip install ruff==$RUFF_VERSION, or point SOFAB_RUFF at that binary." >&2
     exit 1
 fi
+# sofabgen formats the Python it emits by running `ruff format` off PATH
+# (generators/python/format.go), and the gate below checks that tree with $RUFF.
+# ruff's formatting changes between releases, so the two have to be the SAME
+# binary: put $RUFF's directory first on PATH rather than trust that whatever
+# `ruff` resolves to elsewhere happens to be the pinned one.
+RUFF=$(command -v "$RUFF")
+PATH="$(dirname "$RUFF"):$PATH"
+export PATH
 
 if [ -z "$CORELIB" ]; then
     echo "==> cloning corelib-py"
@@ -1140,5 +1150,13 @@ find "$WORK" -name '*.py' -not -path "$WORK/corelib/*" \
     -exec "$RUFF" check --isolated --no-cache --select F,E9 --output-format concise {} + \
     || { echo "FAIL: ruff found the above in generated Python"; exit 1; }
 echo "==> ruff: $_linted modules clean"
+
+# The format half of gate 10: `ruff format --check` over the same sweep, at the
+# same pinned ruff. sofabgen formats the Python it emits (generators/python/format.go),
+# so this is the check that the pass reached every module -- a module it misses,
+# or a pass that silently stopped running, fails here. The cloned corelib is not
+# generated code and is pruned.
+echo "==> ruff $RUFF_VERSION format --check: every generated module"
+check_format python "$WORK"
 
 echo "PASS"
