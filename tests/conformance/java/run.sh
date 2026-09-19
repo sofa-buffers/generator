@@ -26,6 +26,13 @@ VER=$(grep -m1 '<version>' "$CORELIB/pom.xml" | sed 's/.*<version>\(.*\)<\/versi
 echo "==> installing corelib-java $VER to local repo"
 ( cd "$CORELIB" && mvn -q -DskipTests install )
 
+# Warnings are errors for every build of generated code (ARCHITECTURE §12 gate 9).
+# The generated pom compiles with -Xlint:all; failOnWarning adds -Werror. It is
+# not applied to the corelib install above: corelib warnings are out of scope.
+# Under -q a failure names the file only -- rerun that mvn without -q to see why.
+MVN_STRICT="-Dmaven.compiler.failOnWarning=true"
+JAVAC_STRICT="-Xlint:all -Werror"
+
 cat > "$WORK/cfg.yaml" <<'YAML'
 generic: { emit: project }
 targets: { java: { package: message } }
@@ -48,7 +55,7 @@ python3 "$ROOT/tests/conformance/lib/check_vectors_decode.py" --emit-schema \
 
 build() {
     ( cd "$ROOT" && go run ./cmd/sofabgen --config "${3:-$WORK/cfg.yaml}" --lang java --in "$1" --out "$2" )
-    ( cd "$2" && mvn -q -Dsofab.version="$VER" package )
+    ( cd "$2" && mvn -q $MVN_STRICT -Dsofab.version="$VER" package )
 }
 
 echo "==> generating + building example + conformance projects"
@@ -129,7 +136,7 @@ check_maxsize_fill java java -jar "$WORK/fill/target/harness.jar" encode fill
 # (the pom names Main as its Main-Class).
 echo "==> a decoded message owns its bytes (CORELIB_PLAN §6.7, generator#412)"
 cp "$ROOT/tests/conformance/java/OwnershipCheck.java" "$WORK/ex/src/main/java/message/"
-( cd "$WORK/ex" && mvn -q -Dsofab.version="$VER" package )
+( cd "$WORK/ex" && mvn -q $MVN_STRICT -Dsofab.version="$VER" package )
 java -cp "$WORK/ex/target/harness.jar" message.OwnershipCheck \
     || { echo "FAIL: a decoded field aliased the buffer it was decoded from"; exit 1; }
 echo "==> decode ownership OK"
@@ -551,7 +558,7 @@ YAML
 ( cd "$ROOT" && go run ./cmd/sofabgen --config "$WORK/skipblobcfg.yaml" --lang java \
     --in "$WORK/skipblob.yaml" --out "$WORK/skipblob" )
 cp "$ROOT/tests/conformance/java/SkippedBlobAlloc.java" "$WORK/skipblob/src/main/java/message/"
-( cd "$WORK/skipblob" && mvn -q -Dsofab.version="$VER" package )
+( cd "$WORK/skipblob" && mvn -q $MVN_STRICT -Dsofab.version="$VER" package )
 java -cp "$WORK/skipblob/target/harness.jar" message.SkippedBlobAlloc \
     || { echo "FAIL: a skipped blob must not be materialised"; exit 1; }
 echo "==> skipped-blob allocation OK"
@@ -810,13 +817,13 @@ ST=$(printf '' | $HC trydecode vecu | head -n1)       # empty message: valid
 [ "$ST" = "COMPLETE" ] || { echo "FAIL: empty message -> $ST (want COMPLETE)"; exit 1; }
 echo "==> tryDecode status OK (0x80 INCOMPLETE, empty COMPLETE)"
 
-echo "==> corpus + realworld: every definition compiles (javac vs corelib jar)"
+echo "==> corpus + realworld: every definition compiles warning-free (javac $JAVAC_STRICT vs corelib jar)"
 JAR="$HOME/.m2/repository/org/sofabuffers/corelib/$VER/corelib-$VER.jar"
 for def in "$ROOT"/tests/matrix/corpus/defs/*.yaml "$ROOT"/examples/messages/realworld/vehicle_telemetry.yaml; do
     name=$(basename "$def" .yaml)
     ( cd "$ROOT" && go run ./cmd/sofabgen --lang java --in "$def" --out "$WORK/corpus/$name" >/dev/null )
     mkdir -p "$WORK/corpus/$name/out"
-    javac -cp "$JAR" -d "$WORK/corpus/$name/out" "$WORK"/corpus/"$name"/src/main/java/message/*.java \
+    javac $JAVAC_STRICT -cp "$JAR" -d "$WORK/corpus/$name/out" "$WORK"/corpus/"$name"/src/main/java/message/*.java \
         || { echo "FAIL: corpus def $name did not compile"; exit 1; }
 done
 echo "==> corpus compiles ($(ls "$ROOT"/tests/matrix/corpus/defs/*.yaml | wc -l) definitions + realworld example)"
