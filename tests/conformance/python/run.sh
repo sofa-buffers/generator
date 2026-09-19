@@ -29,19 +29,40 @@ trap 'rm -rf "$WORK"' EXIT
 RUFF_VERSION=0.16.8
 RUFF="${SOFAB_RUFF:-ruff}"
 _ruff_have=$("$RUFF" --version 2>/dev/null || true)
-if [ "$_ruff_have" != "ruff $RUFF_VERSION" ]; then
-    echo "FAIL: this suite lints generated code with ruff $RUFF_VERSION, but '$RUFF --version' says '${_ruff_have:-<not found>}'." >&2
+if [ -z "$_ruff_have" ]; then
+    # ruff is not part of the Python toolchain -- unlike gofmt or `dart format`,
+    # having a working Python says nothing about having it -- and this suite must
+    # be runnable on a box that has none of the external formatters. So both ruff
+    # gates (the lint half of gate 9 and the format half of gate 10) are skipped,
+    # loudly, and everything else in this suite still runs. SOFAB_FORMAT_STRICT=1
+    # turns the skip into a failure; the lang-python job installs ruff and sets
+    # it, so nothing is optional there.
+    skip_without_tool "ruff" "generated Python against ruff $RUFF_VERSION (gate 9 lint and gate 10 format)"
+    RUFF=""
+elif [ "$_ruff_have" != "ruff $RUFF_VERSION" ]; then
+    # Installed, but not the pinned one: that is a misconfiguration, not an
+    # absent tool, and it is not skippable -- ruff's findings and its formatting
+    # both move between releases, so another version answers another question.
+    echo "FAIL: this suite lints generated code with ruff $RUFF_VERSION, but '$RUFF --version' says '$_ruff_have'." >&2
     echo "      pip install ruff==$RUFF_VERSION, or point SOFAB_RUFF at that binary." >&2
     exit 1
+else
+    # sofabgen formats the Python it emits only when asked; the generations below
+    # ask (see $FMT). sofabgen resolves `ruff` off PATH and the gate at the end
+    # checks the result with $RUFF. ruff's formatting changes between releases,
+    # so the two have to be the SAME binary: put $RUFF's directory first on PATH
+    # rather than trust that whatever `ruff` resolves to elsewhere happens to be
+    # the pinned one.
+    RUFF=$(command -v "$RUFF")
+    PATH="$(dirname "$RUFF"):$PATH"
+    export PATH
 fi
-# sofabgen formats the Python it emits by running `ruff format` off PATH
-# (generators/python/format.go), and the gate below checks that tree with $RUFF.
-# ruff's formatting changes between releases, so the two have to be the SAME
-# binary: put $RUFF's directory first on PATH rather than trust that whatever
-# `ruff` resolves to elsewhere happens to be the pinned one.
-RUFF=$(command -v "$RUFF")
-PATH="$(dirname "$RUFF"):$PATH"
-export PATH
+
+# What every `sofabgen` run below passes as its --format argument:
+# --format=require when ruff is there, so a format pass that stopped reaching a
+# module fails the generation rather than the gate at the end, and --format=off
+# when it is not (tests/conformance/lib/check_format.sh).
+FMT=$(format_flag python)
 
 if [ -z "$CORELIB" ]; then
     echo "==> cloning corelib-py"
@@ -138,7 +159,7 @@ targets: { python: {} }
 YAML
 
 echo "==> generating Python project"
-( cd "$ROOT" && go run ./cmd/sofabgen --config "$WORK/cfg.yaml" --lang python --in examples/messages/example.yaml --out "$WORK/proj" )
+( cd "$ROOT" && go run ./cmd/sofabgen "$FMT" --config "$WORK/cfg.yaml" --lang python --in examples/messages/example.yaml --out "$WORK/proj" )
 
 echo "==> syntax check"
 python3 -m py_compile "$WORK/proj/message.py" "$WORK/proj/harness.py"
@@ -187,7 +208,7 @@ echo "==> round-trip fixture OK (no field sits on its schema default)"
 # carry independent over_buffer/_put/_drain implementations, so a leg that only
 # runs the default engine proves nothing about the other — and the native
 # over_buffer is typed `bytearray`, a mismatch the pure one would accept.
-( cd "$ROOT" && go run ./cmd/sofabgen --config "$WORK/cfg.yaml" --lang python --in "$ROOT/tests/conformance/lib/maxsize_fill.yaml" --out "$WORK/fill" )
+( cd "$ROOT" && go run ./cmd/sofabgen "$FMT" --config "$WORK/cfg.yaml" --lang python --in "$ROOT/tests/conformance/lib/maxsize_fill.yaml" --out "$WORK/fill" )
 # The constant is engine-independent -- it is generated source, not runtime --
 # so it is read once, outside the per-engine loop below.
 check_maxsize_constant python "$WORK/fill/message.py" \
@@ -347,7 +368,7 @@ messages:
     payload:
       a: { id: 0, type: array, items: { type: array, count: 2, items: { type: u32, count: 3 } } }
 YAML
-( cd "$ROOT" && go run ./cmd/sofabgen --config "$WORK/cfg.yaml" --lang python --in "$WORK/rows-def.yaml" --out "$WORK/rowsproj" )
+( cd "$ROOT" && go run ./cmd/sofabgen "$FMT" --config "$WORK/cfg.yaml" --lang python --in "$WORK/rows-def.yaml" --out "$WORK/rowsproj" )
 printf '\006\003\004\001\002\003\004\007' > "$WORK/row-over.bin"
 printf '\006\003\003\001\002\003\007' > "$WORK/row-ok.bin"
 if (cd "$WORK/rowsproj" && python3 harness.py decode rows) < "$WORK/row-over.bin" >/dev/null 2>&1; then
@@ -686,8 +707,8 @@ YAML
 cat > "$WORK/limit-cfg.yaml" <<YAML
 generic: { emit: project, max_dyn_array_count: 4 }
 YAML
-( cd "$ROOT" && go run ./cmd/sofabgen --config "$WORK/limit-cfg.yaml" --lang python --in "$WORK/limit-def.yaml" --out "$WORK/limitproj" )
-( cd "$ROOT" && go run ./cmd/sofabgen --config "$WORK/cfg.yaml" --lang python --in "$WORK/limit-def.yaml" --out "$WORK/nolimitproj" )
+( cd "$ROOT" && go run ./cmd/sofabgen "$FMT" --config "$WORK/limit-cfg.yaml" --lang python --in "$WORK/limit-def.yaml" --out "$WORK/limitproj" )
+( cd "$ROOT" && go run ./cmd/sofabgen "$FMT" --config "$WORK/cfg.yaml" --lang python --in "$WORK/limit-def.yaml" --out "$WORK/nolimitproj" )
 printf '\003\005\001\002\003\004\005' > "$WORK/limit-over.bin"
 printf '\003\004\001\002\003\004' > "$WORK/limit-ok.bin"
 # The old assertion here was `grep -qi limit` over the traceback, which is no
@@ -780,7 +801,7 @@ python3 "$ROOT/tests/conformance/lib/check_refusal_category.py" --emit-schema >>
 cat > "$WORK/refusal-cfg.yaml" <<YAML
 generic: { emit: project, max_dyn_array_count: 4, max_dyn_string_len: 8, max_dyn_blob_len: 8 }
 YAML
-( cd "$ROOT" && go run ./cmd/sofabgen --config "$WORK/refusal-cfg.yaml" --lang python --in "$WORK/refusal.yaml" --out "$WORK/refusalproj" )
+( cd "$ROOT" && go run ./cmd/sofabgen "$FMT" --config "$WORK/refusal-cfg.yaml" --lang python --in "$WORK/refusal.yaml" --out "$WORK/refusalproj" )
 for ENGINE in $ENGINES; do
     if [ "$ENGINE" = python ]; then export SOFAB_PUREPYTHON=1; else unset SOFAB_PUREPYTHON || true; fi
     require_engine "$ENGINE"
@@ -811,7 +832,7 @@ messages:
       b: { id: 1, type: array, items: { type: i32, count: 100000 } }
       w: { id: 2, type: array, items: { type: string } }
 YAML
-( cd "$ROOT" && go run ./cmd/sofabgen --config "$WORK/limit-cfg.yaml" --lang python --in "$WORK/excl.yaml" --out "$WORK/exclproj" )
+( cd "$ROOT" && go run ./cmd/sofabgen "$FMT" --config "$WORK/limit-cfg.yaml" --lang python --in "$WORK/excl.yaml" --out "$WORK/exclproj" )
 # b (id 1, signed array, count 6) is bounded by its own `count: 100000`, so the
 # cap of 4 must not touch it.
 printf '\014\006\002\002\002\002\002\002' > "$WORK/bounded6.bin"
@@ -864,7 +885,7 @@ YAML
 cat > "$WORK/elem-cfg.yaml" <<YAML
 generic: { emit: project, max_dyn_string_len: 4, max_dyn_array_count: 4 }
 YAML
-( cd "$ROOT" && go run ./cmd/sofabgen --config "$WORK/elem-cfg.yaml" --lang python --in "$WORK/elem.yaml" --out "$WORK/elemproj" )
+( cd "$ROOT" && go run ./cmd/sofabgen "$FMT" --config "$WORK/elem-cfg.yaml" --lang python --in "$WORK/elem.yaml" --out "$WORK/elemproj" )
 # 06 seq_begin(id 0) | 02 string elem id 0 | 2a fixlen_word (len 5, subtype
 # string) | "xxxxx" (5 bytes > cap 4) | 07 end
 printf '\006\002\052\170\170\170\170\170\007' > "$WORK/elemover.bin"
@@ -904,7 +925,7 @@ run_backend_tests generators/python SOFAB_PY_CORELIB "$CORELIB"
 echo "==> shared-vector decode conformance (skip matrix)"
 printf 'version: 1\nmessages:\n' > "$WORK/vecskip.yaml"
 python3 "$ROOT/tests/conformance/lib/check_vectors_decode.py" --emit-schema >> "$WORK/vecskip.yaml"
-( cd "$ROOT" && go run ./cmd/sofabgen --config "$WORK/cfg.yaml" --lang python \
+( cd "$ROOT" && go run ./cmd/sofabgen "$FMT" --config "$WORK/cfg.yaml" --lang python \
     --in "$WORK/vecskip.yaml" --out "$WORK/vecskip" >/dev/null )
 #
 # ...and on BOTH decode surfaces. `streamdecode` drips the message in ONE BYTE
@@ -933,7 +954,7 @@ unset SOFAB_PUREPYTHON || true
 echo "==> corpus + realworld: every definition imports"
 for def in "$ROOT"/tests/matrix/corpus/defs/*.yaml "$ROOT"/examples/messages/realworld/*.yaml; do
     name=$(basename "$def" .yaml)
-    ( cd "$ROOT" && go run ./cmd/sofabgen --lang python --in "$def" --out "$WORK/corpus/$name" >/dev/null )
+    ( cd "$ROOT" && go run ./cmd/sofabgen "$FMT" --lang python --in "$def" --out "$WORK/corpus/$name" >/dev/null )
     PYTHONPATH="$CORELIB/src:$WORK/corpus/$name" python3 -c "import message" \
         || { echo "FAIL: corpus def $name did not import"; exit 1; }
 done
@@ -973,7 +994,7 @@ echo "==> declared-width reject OK"
 echo "==> sequence_growth: a wrapper array grows to its highest id, and the index is the bound"
 printf 'version: 1\nmessages:\n' > "$WORK/growth.yaml"
 python3 "$ROOT/tests/conformance/lib/check_growth.py" --emit-schema >> "$WORK/growth.yaml"
-( cd "$ROOT" && go run ./cmd/sofabgen --config "$WORK/limit-cfg.yaml" --lang python --in "$WORK/growth.yaml" --out "$WORK/growth" >/dev/null )
+( cd "$ROOT" && go run ./cmd/sofabgen "$FMT" --config "$WORK/limit-cfg.yaml" --lang python --in "$WORK/growth.yaml" --out "$WORK/growth" >/dev/null )
 # --cap must equal the max_dyn_array_count the config above generated with:
 # the cases' indices are offsets onto it, so a mismatch moves the boundary.
 python3 "$ROOT/tests/conformance/lib/check_growth.py" \
@@ -1043,7 +1064,7 @@ unset SOFAB_PUREPYTHON || true
 echo "==> enum/bitfield: bounded by the width the declaration implies (S1, generator#516)"
 printf 'version: 1\nmessages:\n' > "$WORK/closed.yaml"
 python3 "$ROOT/tests/conformance/lib/check_declared_width_kinds.py" --emit-schema >> "$WORK/closed.yaml"
-( cd "$ROOT" && go run ./cmd/sofabgen --config "$WORK/cfg.yaml" --lang python --in "$WORK/closed.yaml" --out "$WORK/closedproj" )
+( cd "$ROOT" && go run ./cmd/sofabgen "$FMT" --config "$WORK/cfg.yaml" --lang python --in "$WORK/closed.yaml" --out "$WORK/closedproj" )
 for ENGINE in $ENGINES; do
     if [ "$ENGINE" = python ]; then export SOFAB_PUREPYTHON=1; else unset SOFAB_PUREPYTHON || true; fi
     require_engine "$ENGINE"
@@ -1069,7 +1090,7 @@ unset SOFAB_PUREPYTHON || true
 echo "==> §7.4 repeated id: wrappers replace, scopes merge (generator#523)"
 printf 'version: 1\nmessages:\n' > "$WORK/repeated.yaml"
 python3 "$ROOT/tests/conformance/lib/check_repeated_id.py" --emit-schema >> "$WORK/repeated.yaml"
-( cd "$ROOT" && go run ./cmd/sofabgen --config "$WORK/cfg.yaml" --lang python --in "$WORK/repeated.yaml" --out "$WORK/repeated" >/dev/null )
+( cd "$ROOT" && go run ./cmd/sofabgen "$FMT" --config "$WORK/cfg.yaml" --lang python --in "$WORK/repeated.yaml" --out "$WORK/repeated" >/dev/null )
 # BOTH engines, for the reason every decode block here runs on both: the
 # accelerator reimplements the visitor dispatch, so a pure-only run leaves the
 # half that actually ships unmeasured. The wrapper-row reset is generated code and
@@ -1124,7 +1145,7 @@ messages:
             when:  { id: 1, type: struct, fields: { k: { id: 0, type: u64 } } }
             ratio: { id: 4, type: fp64 }
 YAML
-( cd "$ROOT" && go run ./cmd/sofabgen --config "$WORK/cfg.yaml" --lang python --in "$WORK/table.yaml" --out "$WORK/table" >/dev/null )
+( cd "$ROOT" && go run ./cmd/sofabgen "$FMT" --config "$WORK/cfg.yaml" --lang python --in "$WORK/table.yaml" --out "$WORK/table" >/dev/null )
 grep -q "destinations" "$WORK/table/message.py" || {
     echo "FAIL: this schema must emit a destination table, or the check below proves nothing"; exit 1; }
 # BOTH engines: the accelerator carries its own copy of the mapped-field path
@@ -1143,20 +1164,26 @@ if [ "$NATIVE" = yes ]; then require_engine native; else require_engine python; 
 # harness.py included. It sweeps $WORK rather than listing the projects, so a
 # block added above is covered the day it is written; only a cloned corelib is
 # left out. --isolated keeps any ruff config on the machine out of the verdict.
-echo "==> ruff $RUFF_VERSION (F, E9): every generated module"
-_linted=$(find "$WORK" -name '*.py' -not -path "$WORK/corelib/*" | wc -l)
-[ "$_linted" -gt 0 ] || { echo "FAIL: ruff found no generated module to lint"; exit 1; }
-find "$WORK" -name '*.py' -not -path "$WORK/corelib/*" \
-    -exec "$RUFF" check --isolated --no-cache --select F,E9 --output-format concise {} + \
-    || { echo "FAIL: ruff found the above in generated Python"; exit 1; }
-echo "==> ruff: $_linted modules clean"
+if [ -n "$RUFF" ]; then
+    echo "==> ruff $RUFF_VERSION (F, E9): every generated module"
+    _linted=$(find "$WORK" -name '*.py' -not -path "$WORK/corelib/*" | wc -l)
+    [ "$_linted" -gt 0 ] || { echo "FAIL: ruff found no generated module to lint"; exit 1; }
+    find "$WORK" -name '*.py' -not -path "$WORK/corelib/*" \
+        -exec "$RUFF" check --isolated --no-cache --select F,E9 --output-format concise {} + \
+        || { echo "FAIL: ruff found the above in generated Python"; exit 1; }
+    echo "==> ruff: $_linted modules clean"
+else
+    skip_without_tool "ruff" "the lint half of gate 9 over every generated module"
+fi
 
 # The format half of gate 10: `ruff format --check` over the same sweep, at the
-# same pinned ruff. sofabgen formats the Python it emits (generators/python/format.go),
-# so this is the check that the pass reached every module -- a module it misses,
-# or a pass that silently stopped running, fails here. The cloned corelib is not
-# generated code and is pruned.
-echo "==> ruff $RUFF_VERSION format --check: every generated module"
+# same pinned ruff. Every generation above ran with $FMT, which is
+# --format=require whenever ruff is installed, so this is the check that the
+# pass reached every module -- a module it misses, or a pass that silently
+# stopped running, fails here. Without ruff the driver skips it, as loudly as
+# the banner at the top of this suite. The cloned corelib is not generated code
+# and is pruned.
+echo "==> ruff format --check: every generated module"
 check_format python "$WORK"
 
 echo "PASS"

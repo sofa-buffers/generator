@@ -14,6 +14,15 @@
 # separate decision; this driver refuses an unknown language rather than
 # passing it.
 #
+# The formatter itself may be missing: `sofabgen` never requires the target's
+# toolchain (--format defaults to off, ARCHITECTURE §12 gate 10), and neither
+# does this repository's own test suite -- rustfmt is a separate rustup
+# component and ruff is not part of the Python toolchain at all. So a suite asks
+# `format_flag <lang>` what to generate with, and this check SKIPS, loudly and
+# unmistakably, when the tool is not there. SOFAB_FORMAT_STRICT=1 turns every
+# such skip into a failure; the lang-<x> CI jobs install the formatters and set
+# it, so what is optional locally is mandatory there.
+#
 # check_format <lang> <dir>...
 #   Runs <lang>'s formatter in check mode over every source file of that
 #   language under the given directories -- the generated example project AND
@@ -26,9 +35,74 @@
 #   written, and that work dir is also where they clone the corelib. A directory
 #   set holding no file of the language fails too: a check over nothing proves
 #   nothing.
+
+# The canonical formatter of <lang>: the binary to look for in $_cf_bin and the
+# name to print in $_cf_toolname. An unknown language is refused here rather
+# than reported as "not installed" -- a typo must not become a silent skip.
+_cf_formatter() {
+    case "$1" in
+        go)     _cf_bin=gofmt;   _cf_toolname="gofmt" ;;
+        zig)    _cf_bin=zig;     _cf_toolname="zig fmt" ;;
+        rust)   _cf_bin=rustfmt; _cf_toolname="rustfmt" ;;
+        dart)   _cf_bin=dart;    _cf_toolname="dart format" ;;
+        python) _cf_bin="${RUFF:-${SOFAB_RUFF:-ruff}}"; _cf_toolname="ruff format" ;;
+        *)
+            echo "FAIL: check_format: no canonical formatter is defined for '$1'"
+            exit 1
+            ;;
+    esac
+}
+
+# formatter_present <lang> -- true when this box can run that formatter.
+formatter_present() {
+    _cf_formatter "$1"
+    command -v "$_cf_bin" >/dev/null 2>&1
+}
+
+# format_flag <lang> -- the --format value every `sofabgen` run of this suite
+# must pass, as a single argument.
+#
+# sofabgen formats nothing unless it is told to, so a suite that wants to hold
+# generated code to a formatter has to ask. It asks only when it can also CHECK
+# the result: --format=require when the formatter is installed -- a format pass
+# that silently stopped running then fails the generation itself, not just the
+# gate at the end -- and --format=off when it is not, which keeps the suite
+# runnable on a box with no formatter. `off` is named explicitly rather than
+# left out, so a `generic.format` in a config the suite writes or inherits
+# cannot turn the pass back on behind its back.
+format_flag() {
+    if formatter_present "$1"; then echo "--format=require"; else echo "--format=off"; fi
+}
+
+# skip_without_tool <tool> <what it would have checked>
+#   An absent tool is a SKIP, and a skip is never printed as a pass: this is a
+#   banner no one scrolling a log can mistake for one. SOFAB_FORMAT_STRICT=1
+#   turns it into a failure instead -- the lang-<x> CI jobs install the tools
+#   and set it, so what is optional on a laptop is mandatory in CI.
+skip_without_tool() {
+    if [ -n "${SOFAB_FORMAT_STRICT:-}" ]; then
+        echo "FAIL: $1 is not installed and SOFAB_FORMAT_STRICT is set -- $2 was NOT checked."
+        exit 1
+    fi
+    echo "!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!"
+    echo "!!!! SKIPPED, NOT PASSED: $2"
+    echo "!!!! $1 is not installed on this box."
+    echo "!!!! Install it, or set SOFAB_FORMAT_STRICT=1 to make this a failure"
+    echo "!!!! (the lang-<x> CI jobs install it and set SOFAB_FORMAT_STRICT=1)."
+    echo "!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!"
+}
+
 check_format() {
     _cf_lang=$1
     shift
+    # The formatter the suite could not use is the formatter this cannot check:
+    # with it absent, format_flag above generated with --format=off, so the code
+    # under $@ is the emitters' own output and holding it to the formatter would
+    # only report that fact. Skip loudly instead (or fail, under strict).
+    if ! formatter_present "$_cf_lang"; then
+        skip_without_tool "$_cf_toolname" "generated $_cf_lang against $_cf_toolname (ARCHITECTURE §12 gate 10)"
+        return 0
+    fi
     case "$_cf_lang" in
         go)
             _cf_version=$(go version)
@@ -85,10 +159,8 @@ check_format() {
             _cf_version=$("$_cf_ruff" --version)
             _cf_files=$(find "$@" -name corelib -prune -o -name '*.py' -type f -print | sort)
             ;;
-        *)
-            echo "FAIL: check_format: no canonical formatter is defined for '$_cf_lang'"
-            exit 1
-            ;;
+        # No default arm: _cf_formatter above already refused a language with
+        # no canonical formatter, before anything was looked up.
     esac
     _cf_n=$(printf '%s\n' "$_cf_files" | grep -c . || true)
     if [ "$_cf_n" -eq 0 ]; then

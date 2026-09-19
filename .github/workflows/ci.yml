@@ -95,6 +95,12 @@ jobs:
   # shared wire vectors. tests/conformance/go/run.sh clones the corelib.
   lang-go:
     runs-on: ubuntu-latest
+    # The formatter gate (ARCHITECTURE §12 gate 10) is optional on a box without
+    # gofmt -- the suite then says loudly that it skipped it. Here it is not
+    # optional: the Go toolchain this job installs brings it, so
+    # SOFAB_FORMAT_STRICT turns that skip into a failure.
+    env:
+      SOFAB_FORMAT_STRICT: "1"
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-go@v7
@@ -116,6 +122,12 @@ jobs:
   # round-trips JSON, and checks byte-exact output against the shared vectors.
   lang-python:
     runs-on: ubuntu-latest
+    # The formatter gate (ARCHITECTURE §12 gate 10) is optional on a box without
+    # ruff -- the suite then says loudly that it skipped it. Here it is not
+    # optional: this job pip-installs it, so SOFAB_FORMAT_STRICT turns that skip
+    # into a failure.
+    env:
+      SOFAB_FORMAT_STRICT: "1"
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-go@v7
@@ -131,9 +143,12 @@ jobs:
       # instead — but it would fail every run (generator#451).
       - name: Cython (corelib-py's native accelerator)
         run: python -m pip install --upgrade pip "setuptools>=61" wheel "Cython>=3.0,!=3.3.0"
-      # The linter run.sh holds generated code to (ARCHITECTURE §12 gate 9). The
-      # pin must match RUFF_VERSION in run.sh, which refuses any other version.
-      - name: ruff (lints generated Python)
+      # The linter run.sh holds generated code to (ARCHITECTURE §12 gate 9), and
+      # the formatter it generates with (--format=require, gate 10). Both are
+      # skippable on a box without ruff and not here, where SOFAB_FORMAT_STRICT
+      # is set. The pin must match RUFF_VERSION in run.sh, which refuses any
+      # other version.
+      - name: ruff (lints and formats generated Python)
         run: python -m pip install "ruff==0.16.8"
       - uses: ./.github/actions/corelib-refs
       - name: Python backend — generate, syntax, round-trip, conformance
@@ -205,13 +220,21 @@ jobs:
   # always-on std corelib-rs (corelib: rs). run.sh clones both.
   lang-rust:
     runs-on: ubuntu-latest
+    # The formatter gate (ARCHITECTURE §12 gate 10) is optional on a box without
+    # rustfmt -- the suite then says loudly that it skipped it. Here it is not
+    # optional: this job installs it as a toolchain component, so
+    # SOFAB_FORMAT_STRICT turns that skip into a failure.
+    env:
+      SOFAB_FORMAT_STRICT: "1"
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-go@v7
         with:
           go-version: "1.27"
-      # rustfmt is not optional here: sofabgen runs it over every generated .rs
-      # file, and the suite then holds the result to `rustfmt --check`.
+      # rustfmt is not optional here: SOFAB_FORMAT_STRICT above forbids the skip
+      # the suite would otherwise take. With it installed the suite generates
+      # with --format=require, so sofabgen runs it over every generated .rs file,
+      # and then holds the result to `rustfmt --check`.
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy, rustfmt
@@ -313,6 +336,12 @@ jobs:
   # corelib-zig.
   lang-zig:
     runs-on: ubuntu-latest
+    # The formatter gate (ARCHITECTURE §12 gate 10) is optional on a box without
+    # `zig fmt` -- the suite then says loudly that it skipped it. Here it is not
+    # optional: the Zig toolchain this job installs brings it, so
+    # SOFAB_FORMAT_STRICT turns that skip into a failure.
+    env:
+      SOFAB_FORMAT_STRICT: "1"
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-go@v7
@@ -338,6 +367,12 @@ jobs:
   # byte-exact output against the shared vectors. run.sh clones corelib-dart.
   lang-dart:
     runs-on: ubuntu-latest
+    # The formatter gate (ARCHITECTURE §12 gate 10) is optional on a box without
+    # `dart format` -- the suite then says loudly that it skipped it. Here it is
+    # not optional: the Dart SDK this job installs brings it, so
+    # SOFAB_FORMAT_STRICT turns that skip into a failure.
+    env:
+      SOFAB_FORMAT_STRICT: "1"
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-go@v7
