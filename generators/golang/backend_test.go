@@ -1465,3 +1465,25 @@ func TestGoWidthAdmitsUndeclaredValues(t *testing.T) {
 		t.Errorf("the withdrawn flag-mask guard was emitted:\n%s", all)
 	}
 }
+
+// TestGoHarnessWithoutMessagesImportsNothingUnused: a schema of shared types
+// alone gives the harness no message to encode, decode or bench, so it imports
+// neither the generated package nor encoding/json or encoding/hex -- Go rejects
+// an unused import at compile time.
+func TestGoHarnessWithoutMessagesImportsNothingUnused(t *testing.T) {
+	none := genGo(t, schemaFromYAMLString(t, "version: 1\n$defs:\n  struct:\n    P: { x: { id: 0, type: u8 } }\n"), map[string]any{"emit": "project"})["harness/main.go"]
+	if none == "" {
+		t.Fatal("no harness/main.go")
+	}
+	for _, bad := range []string{`"encoding/hex"`, `"encoding/json"`, `/message"`} {
+		if strings.Contains(none, bad) {
+			t.Errorf("message-less harness imports %s:\n%s", bad, none)
+		}
+	}
+	one := genGo(t, schemaFromYAMLString(t, "version: 1\nmessages:\n  m: { payload: { a: { id: 0, type: u32 } } }\n"), map[string]any{"emit": "project"})["harness/main.go"]
+	for _, want := range []string{`"encoding/hex"`, `"encoding/json"`, `/message"`} {
+		if !strings.Contains(one, want) {
+			t.Errorf("harness with a message lacks import %s", want)
+		}
+	}
+}

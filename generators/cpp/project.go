@@ -45,7 +45,11 @@ func (g *gen) emitBench(f *hfile, s *ir.Schema) {
 	f.line("    char err[128];")
 	f.line("    sofab_json_t *root = sofab_json_parse(in.data(), in.size(), err, sizeof(err));")
 	f.line("    if (!root) { std::cerr << \"json: \" << err << \"\\n\"; return 1; }")
-	f.line("    unsigned long long sink = 0;")
+	// Only a workload folds its results into sink; a schema without a message
+	// has none, and an unused variable there fails a -Werror build.
+	if len(s.Messages) > 0 {
+		f.line("    unsigned long long sink = 0;")
+	}
 	for _, m := range s.Messages {
 		low := strings.ToLower(m.Name)
 		f.line("    if (w == \"encode_%s\" || w == \"decode_%s\") {", low, low)

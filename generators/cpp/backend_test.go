@@ -3119,3 +3119,40 @@ messages:
 		}
 	}
 }
+
+// TestCppHarnessWithoutMessagesDeclaresNoSink: a schema of shared types alone
+// has no bench workload, so bench_main folds nothing into a sink; declaring one
+// anyway is an unused variable, a failed -Werror build.
+func TestCppHarnessWithoutMessagesDeclaresNoSink(t *testing.T) {
+	harness := func(src string) string {
+		t.Helper()
+		doc, err := parser.Parse([]byte(src), "in.yaml")
+		if err != nil {
+			t.Fatal(err)
+		}
+		s, err := model.Build(doc)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := analysis.Analyze(s); err != nil {
+			t.Fatal(err)
+		}
+		files, err := (&Backend{}).Generate(s, map[string]any{"namespace": "sofabuffers", "emit": "project"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, f := range files {
+			if f.Path == "harness/main.cpp" {
+				return string(f.Content)
+			}
+		}
+		t.Fatal("no harness/main.cpp")
+		return ""
+	}
+	if h := harness("version: 1\n$defs:\n  struct:\n    P: { x: { id: 0, type: u8 } }\n"); strings.Contains(h, "sink") {
+		t.Errorf("message-less harness declares a sink:\n%s", h)
+	}
+	if h := harness("version: 1\nmessages:\n  m: { payload: { a: { id: 0, type: u32 } } }\n"); !strings.Contains(h, "unsigned long long sink = 0;") {
+		t.Error("a harness with a message lost its bench sink")
+	}
+}
