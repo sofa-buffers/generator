@@ -819,14 +819,30 @@ echo "==> tryDecode status OK (0x80 INCOMPLETE, empty COMPLETE)"
 
 echo "==> corpus + realworld: every definition compiles warning-free (javac $JAVAC_STRICT vs corelib jar)"
 JAR="$HOME/.m2/repository/org/sofabuffers/corelib/$VER/corelib-$VER.jar"
-for def in "$ROOT"/tests/matrix/corpus/defs/*.yaml "$ROOT"/examples/messages/realworld/vehicle_telemetry.yaml; do
+for def in "$ROOT"/tests/matrix/corpus/defs/*.yaml "$ROOT"/examples/messages/realworld/*.yaml; do
     name=$(basename "$def" .yaml)
     ( cd "$ROOT" && go run ./cmd/sofabgen --lang java --in "$def" --out "$WORK/corpus/$name" >/dev/null )
     mkdir -p "$WORK/corpus/$name/out"
+    # The Java target emits its classes per message, so a $defs-only file
+    # (realworld/common.yaml, diagnostics.yaml) emits none; the project block
+    # below builds what it does emit, its harness.
+    ls "$WORK"/corpus/"$name"/src/main/java/message/*.java >/dev/null 2>&1 || continue
     javac $JAVAC_STRICT -cp "$JAR" -d "$WORK/corpus/$name/out" "$WORK"/corpus/"$name"/src/main/java/message/*.java \
         || { echo "FAIL: corpus def $name did not compile"; exit 1; }
 done
-echo "==> corpus compiles ($(ls "$ROOT"/tests/matrix/corpus/defs/*.yaml | wc -l) definitions + realworld example)"
+echo "==> corpus compiles ($(ls "$ROOT"/tests/matrix/corpus/defs/*.yaml | wc -l) definitions + $(ls "$ROOT"/examples/messages/realworld/*.yaml | wc -l) realworld)"
+
+# The message-less realworld files as emit:project, harness included, under
+# $MVN_STRICT: the harness is generated code too, and a schema with no message
+# is where it has least to do. (vehicle_telemetry's classes are compiled above;
+# its harness shape is the example's, built at the top of this suite.)
+echo "==> realworld: every \$defs-only file builds as a project, harness included"
+for def in "$ROOT"/examples/messages/realworld/*.yaml; do
+    grep -q '^messages:' "$def" && continue
+    name=$(basename "$def" .yaml)
+    build "$def" "$WORK/rwproj/$name" \
+        || { echo "FAIL: realworld $name did not build as a project"; exit 1; }
+done
 
 # Declared integer width is a VALIDITY bound (MESSAGE_SPEC S7.1 + documentation#32,
 # generator#266, Crucible F-0033 / codegen defect G-0026). A value outside the

@@ -810,7 +810,7 @@ YAML
     done
 
     echo "==> [$label] corpus + realworld: every definition compiles"
-    for def in "$ROOT"/tests/matrix/corpus/defs/*.yaml "$ROOT"/examples/messages/realworld/vehicle_telemetry.yaml; do
+    for def in "$ROOT"/tests/matrix/corpus/defs/*.yaml "$ROOT"/examples/messages/realworld/*.yaml; do
         # no_maxlen.yaml, seq_elements_dyn.yaml and array_lengths_dyn.yaml exist to
         # exercise genuinely unbounded fields — unbounded string/blob, the
         # count-less wrapper arrays that must never be narrowed or refilled, and a
@@ -826,6 +826,10 @@ YAML
         name=$(basename "$def" .yaml)
         ( cd "$ROOT" && go run ./cmd/sofabgen --config "$WORK/cfg-corpus-$label.yaml" --lang cpp --in "$def" --out "$WORK/corpus-$label/$name" >/dev/null )
         for h in "$WORK"/corpus-"$label"/"$name"/*.hpp; do
+            # The C++ target emits its headers per message, so a $defs-only file
+            # (realworld/common.yaml, diagnostics.yaml) emits none; the project
+            # block below builds what it does emit, its harness.
+            [ -e "$h" ] || continue
             # $WARNFLAGS (-Werror), because the defects this loop exists to catch are
             # DIAGNOSTICS, not hard errors: an unsuffixed decimal literal above
             # INT64_MAX has no type under [lex.icon], and GCC accepts it as an
@@ -850,7 +854,20 @@ YAML
                 || { echo "FAIL: [$label] corpus def $name did not compile"; exit 1; }
         done
     done
-    echo "==> [$label] corpus compiles ($(ls "$ROOT"/tests/matrix/corpus/defs/*.yaml | wc -l) definitions + realworld example)"
+    echo "==> [$label] corpus compiles ($(ls "$ROOT"/tests/matrix/corpus/defs/*.yaml | wc -l) definitions + $(ls "$ROOT"/examples/messages/realworld/*.yaml | wc -l) realworld)"
+
+    # Every realworld file as emit:project, harness included, under the exported
+    # $WARNFLAGS: the loop above is -fsyntax-only on the headers, and a schema
+    # with no message is where the harness has least to do -- and where an unused
+    # bench variable would hide.
+    echo "==> [$label] realworld: every file builds as a project, harness included"
+    for def in "$ROOT"/examples/messages/realworld/*.yaml; do
+        name=$(basename "$def" .yaml)
+        ( cd "$ROOT" && go run ./cmd/sofabgen --config "$WORK/cfg-$label.yaml" --lang cpp --in "$def" --out "$WORK/rwproj-$label/$name" >/dev/null )
+        make -C "$WORK/rwproj-$label/$name" "$@" >/dev/null \
+            || { echo "FAIL: [$label] realworld $name did not build as a project"; exit 1; }
+    done
+    echo "==> [$label] realworld projects build ($(ls "$ROOT"/examples/messages/realworld/*.yaml | wc -l) files)"
 
     # Nested rows, DECODED (corelib-cpp#124). The loop above is -fsyntax-only, so
     # for nested_rows.yaml -- the one corpus definition carrying array<array<T>> --

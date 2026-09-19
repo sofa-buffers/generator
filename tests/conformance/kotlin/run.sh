@@ -875,7 +875,7 @@ dependencies { implementation("org.sofabuffers:corelib-kotlin-mp:$VER") }
 kotlin { jvmToolchain((findProperty("sofab.jdk") as String? ?: "21").toInt()) }
 KTS
 ndefs=0
-for def in "$ROOT"/tests/matrix/corpus/defs/*.yaml "$ROOT"/examples/messages/realworld/vehicle_telemetry.yaml; do
+for def in "$ROOT"/tests/matrix/corpus/defs/*.yaml "$ROOT"/examples/messages/realworld/*.yaml; do
     name=$(basename "$def" .yaml)
     cat > "$WORK/corpuscfg.yaml" <<YAML
 targets: { kotlin: { package: corpus.$name } }
@@ -885,7 +885,19 @@ YAML
 done
 ( cd "$WORK/corpus" && "$GRADLEW" --console=plain -q $KT_STRICT compileKotlin ) \
     || { echo "FAIL: corpus definitions did not compile"; exit 1; }
-echo "==> corpus compiles ($ndefs definitions incl. the realworld example)"
+echo "==> corpus compiles ($ndefs definitions incl. every realworld file)"
+
+# The message-less realworld files as emit:project, harness included, under
+# $KT_STRICT: the Kotlin target emits its types per message, so the corpus
+# project above gets nothing from a $defs-only file, and its harness is
+# generated code too -- a schema with no message is where it has least to do.
+echo "==> realworld: every \$defs-only file builds as a project, harness included"
+for def in "$ROOT"/examples/messages/realworld/*.yaml; do
+    grep -q '^messages:' "$def" && continue
+    name=$(basename "$def" .yaml)
+    build "$def" "$WORK/rwproj/$name" \
+        || { echo "FAIL: realworld $name did not build as a project"; exit 1; }
+done
 
 # CORELIB_PLAN S7.2 item 8 -- the shared file's `sequence_growth` block
 # (generator#449). A wrapper array carries no element count: its length is
