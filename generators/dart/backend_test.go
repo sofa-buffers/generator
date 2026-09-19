@@ -659,17 +659,6 @@ func TestDartCountIsACapacityNotALength(t *testing.T) {
 		// default -- neither side padded to N, and only the `length` in use read.
 		"    if (fnums.length != 0) { e.writeUnsignedArray(4, fnums.storage, fnums.length); }",
 		"    if (!_prefixEq(withdef.storage, withdef.length, _withdefDefault)) { e.writeUnsignedArray(5, withdef.storage, withdef.length); }",
-		// ...and _isDefault is the exact negation of it.
-		"    if (!(fnums.length == 0)) return false;",
-		"    if (!(_prefixEq(withdef.storage, withdef.length, _withdefDefault))) return false;",
-		// A wrapper array writes a child for every element it holds (the last one
-		// unconditionally), so "no child written" IS "empty" -- for count:N and
-		// count-less alike, no narrowing on either side.
-		"    if (!(fixed.isEmpty)) return false;",
-		"    if (!(dynamic_.isEmpty)) return false;",
-		"    if (!(fstrs.isEmpty)) return false;",
-		"    if (!(rows.isEmpty)) return false;",
-		"    if (!(srows.isEmpty)) return false;",
 	} {
 		if !strings.Contains(out, want) {
 			t.Errorf("generated Dart missing %q:\n%s", want, out)
@@ -1600,6 +1589,108 @@ func TestDartDecoderAsksTheStreamForItsVerdict(t *testing.T) {
 	} {
 		if strings.Contains(out, gone) {
 			t.Errorf("generated code still carries the removed status copy %q (generator#555)", gone)
+		}
+	}
+}
+
+// dartFiles generates src and returns each emitted file by path.
+func dartFiles(t *testing.T, src string, cfg map[string]any) map[string]string {
+	t.Helper()
+	files, err := (&Backend{}).Generate(schemaFor(t, writeDef(t, src)), cfg)
+	if err != nil {
+		t.Fatalf("generate: %v", err)
+	}
+	out := map[string]string{}
+	for _, f := range files {
+		out[f.Path] = string(f.Content)
+	}
+	return out
+}
+
+// Generated Dart carries no file-wide analyzer suppression beyond the one a
+// deprecated field needs: `dart analyze --fatal-infos` is the build gate, and a
+// blanket `unused_element` ignore would let dead code through it -- it did hide
+// an `_isDefault` getter no code read. What was dead is not emitted instead: a
+// named type no message reaches has no private visitor (and no JSON codec in
+// the harness), and a message-less harness declares no bench state.
+func TestDartNoBlanketIgnoreAndNoDeadDeclarations(t *testing.T) {
+	const defsOnly = `version: 1
+$defs:
+  struct:
+    P:
+      x: { id: 0, type: fp32 }
+`
+	const withMsg = `version: 1
+$defs:
+  struct:
+    P:
+      x: { id: 0, type: fp32 }
+    Q:
+      y: { id: 0, type: i32 }
+messages:
+  m:
+    payload:
+      ps: { id: 0, type: array, items: { type: struct, fields: { $ref: '#/$defs/struct/P' } } }
+      old: { id: 1, type: u8, deprecated: true }
+`
+	bare := dartFiles(t, defsOnly, map[string]any{"emit": "project"})
+	full := dartFiles(t, withMsg, map[string]any{"emit": "project"})
+	for path, src := range map[string]string{
+		"defs-only message.dart": bare["lib/message.dart"], "defs-only harness.dart": bare["bin/harness.dart"],
+		"message.dart": full["lib/message.dart"], "harness.dart": full["bin/harness.dart"],
+	} {
+		if src == "" {
+			t.Fatalf("%s not generated", path)
+		}
+		for _, ln := range strings.Split(src, "\n") {
+			if strings.HasPrefix(ln, "// ignore_for_file:") && ln != "// ignore_for_file: deprecated_member_use_from_same_package" {
+				t.Errorf("%s carries a suppression beyond the deprecated one: %q", path, ln)
+			}
+		}
+		if strings.Contains(src, "_isDefault") {
+			t.Errorf("%s still emits the unread _isDefault getter", path)
+		}
+	}
+	for _, gone := range []string{"ignore_for_file", "_StructPVisitor", "_f32FromBits", "import 'dart:typed_data';"} {
+		if strings.Contains(bare["lib/message.dart"], gone) {
+			t.Errorf("defs-only message.dart emits %q, which nothing uses", gone)
+		}
+	}
+	for _, gone := range []string{"ignore_for_file", "_toJsonStructP", "_benchSink", "final warmup", "import 'dart:convert';", "import 'package:harness/message.dart';", "as sofab;"} {
+		if strings.Contains(bare["bin/harness.dart"], gone) {
+			t.Errorf("defs-only harness.dart emits %q, which nothing uses", gone)
+		}
+	}
+	// With a message: P is reached through the array and keeps its visitor and
+	// codec; Q is reached by nothing and keeps only its class.
+	for _, want := range []string{"class _StructPVisitor ", "class StructQ {", "_f32FromBits(", deprecatedIgnore} {
+		if !strings.Contains(full["lib/message.dart"], want) {
+			t.Errorf("message.dart missing %q", want)
+		}
+	}
+	if strings.Contains(full["lib/message.dart"], "_StructQVisitor") {
+		t.Error("message.dart emits a visitor for StructQ, which no message reaches")
+	}
+	for _, want := range []string{"_toJsonStructP(", "int _benchSink = 0;", "final warmup", deprecatedIgnore} {
+		if !strings.Contains(full["bin/harness.dart"], want) {
+			t.Errorf("harness.dart missing %q", want)
+		}
+	}
+	if strings.Contains(full["bin/harness.dart"], "_toJsonStructQ") {
+		t.Error("harness.dart emits a codec for StructQ, which no message reaches")
+	}
+}
+
+// The import scan reads code, not comments or strings.
+func TestDartCodeStripsLineComments(t *testing.T) {
+	for _, c := range []struct{ in, want string }{
+		{"a; // Int64List\nb;", "a; \nb;"},
+		{"/// Uint8List doc\nx", "\nx"},
+		{"s = 'http://x'; // c", "s = 'http://x'; "},
+		{"s = \"it\\\"s\"; // c", "s = \"it\\\"s\"; "},
+	} {
+		if got := dartCode(c.in); got != c.want {
+			t.Errorf("dartCode(%q) = %q, want %q", c.in, got, c.want)
 		}
 	}
 }

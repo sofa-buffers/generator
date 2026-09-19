@@ -38,6 +38,7 @@ package dart
 
 import (
 	"fmt"
+	"regexp"
 	"strconv"
 	"strings"
 
@@ -198,13 +199,32 @@ func (g *gen) module(s *ir.Schema) []byte {
 	if g.license != "" {
 		f.line("// SPDX-License-Identifier: %s", g.license)
 	}
-	f.line("// ignore_for_file: unused_field, unused_element, deprecated_member_use_from_same_package")
-	f.line("import 'dart:typed_data';")
-	f.line("import 'package:sofa_buffers_corelib/sofa_buffers_corelib.dart' as sofab;")
-	f.blank()
+	if anyDeprecated(s) {
+		f.line("%s", deprecatedIgnore)
+	}
+	head := f
+	f = &dfile{}
+
+	// The classes are rendered first: which file-level helpers they call is a
+	// property of the emitted text (a named type no message reaches has no
+	// visitor, so a helper only its visitor would call is not emitted either).
+	body := &dfile{}
+	// A named struct/union's decode visitor is private, so only a message that
+	// reaches the type can use it: one no message reaches -- every type of a
+	// $defs-only file -- gets its class and no visitor.
+	decoded := reachableNamed(s)
+	for _, key := range s.NamedOrder {
+		nt := s.Named[key]
+		if nt.Category == ir.CatStruct || nt.Category == ir.CatUnion {
+			g.emitClass(body, g.typeName(key), nt.Summary, nt.Fields, false, decoded[key])
+		}
+	}
+	for _, m := range s.Messages {
+		g.emitClass(body, exported(m.Name), m.Summary, m.Fields, true, true)
+	}
 
 	g.emitLimits(f)
-	g.emitPrelude(f, s)
+	g.emitPrelude(f, s, body.b.String())
 
 	for _, key := range s.NamedOrder {
 		nt := s.Named[key]
@@ -215,16 +235,135 @@ func (g *gen) module(s *ir.Schema) []byte {
 			g.emitBitfield(f, nt)
 		}
 	}
+	f.b.WriteString(body.b.String())
+
+	// The imports follow the rendered text: a file of enums and bitfields alone
+	// needs neither, and an unused import is an analyzer warning.
+	rest := f.b.String()
+	code := dartCode(rest)
+	if typedDataUse.MatchString(code) {
+		head.line("import 'dart:typed_data';")
+	}
+	if strings.Contains(code, "sofab.") {
+		head.line("import 'package:sofa_buffers_corelib/sofa_buffers_corelib.dart' as sofab;")
+	}
+	head.blank()
+	head.b.WriteString(rest)
+	return head.bytes()
+}
+
+// typedDataUse matches a name generated code takes from dart:typed_data.
+var typedDataUse = regexp.MustCompile(`\b(?:ByteData|ByteBuffer|BytesBuilder|TypedData|Endian|(?:Uint|Int)(?:8|16|32|64)List|Float(?:32|64)List|Uint8ClampedList)\b`)
+
+// dartCode blanks the line comments out of rendered Dart -- `//` to the end of
+// the line, outside a string literal -- so a doc comment naming a type is not
+// taken for a use of it. Generated Dart has no block comments.
+func dartCode(src string) string {
+	var b strings.Builder
+	b.Grow(len(src))
+	var quote byte
+	for i := 0; i < len(src); i++ {
+		c := src[i]
+		switch {
+		case quote != 0:
+			b.WriteByte(c)
+			if c == '\\' && i+1 < len(src) {
+				i++
+				b.WriteByte(src[i])
+			} else if c == quote || c == '\n' {
+				quote = 0
+			}
+		case c == '\'' || c == '"':
+			quote = c
+			b.WriteByte(c)
+		case c == '/' && i+1 < len(src) && src[i+1] == '/':
+			for i+1 < len(src) && src[i+1] != '\n' {
+				i++
+			}
+		default:
+			b.WriteByte(c)
+		}
+	}
+	return b.String()
+}
+
+// deprecatedIgnore is the one analyzer suppression generated code carries, and
+// only in a file that touches a deprecated field: serialize, reset and decode
+// must still read and write it, and deprecated_member_use_from_same_package
+// (a lint a consumer may enable) reports every such use.
+const deprecatedIgnore = "// Generated code must still read and write deprecated fields.\n" +
+	"// ignore_for_file: deprecated_member_use_from_same_package"
+
+// anyDeprecated reports whether any field of the schema, at any depth --
+// inline structs and array elements included -- is deprecated.
+func anyDeprecated(s *ir.Schema) bool {
+	seen := map[*ir.NamedType]bool{}
+	var walk func([]*ir.Field) bool
+	target := func(ref *ir.TypeRef) bool {
+		if ref == nil || ref.Target == nil || seen[ref.Target] {
+			return false
+		}
+		seen[ref.Target] = true
+		return walk(ref.Target.Fields)
+	}
+	walk = func(fields []*ir.Field) bool {
+		for _, fld := range fields {
+			if fld.Deprecated || target(fld.Ref) || target(fld.ElemRef) {
+				return true
+			}
+			for it := fld.ElemItems; it != nil; it = it.ElemItems {
+				if target(it.ElemRef) {
+					return true
+				}
+			}
+		}
+		return false
+	}
 	for _, key := range s.NamedOrder {
-		nt := s.Named[key]
-		if nt.Category == ir.CatStruct || nt.Category == ir.CatUnion {
-			g.emitClass(f, g.typeName(key), nt.Summary, nt.Fields, false)
+		if walk(s.Named[key].Fields) {
+			return true
 		}
 	}
 	for _, m := range s.Messages {
-		g.emitClass(f, exported(m.Name), m.Summary, m.Fields, true)
+		if walk(m.Fields) {
+			return true
+		}
 	}
-	return f.bytes()
+	return false
+}
+
+// reachableNamed is the set of named struct/union keys some message reaches,
+// through a field, an array element at any depth or another named type.
+func reachableNamed(s *ir.Schema) map[string]bool {
+	seen := map[string]bool{}
+	var walkRef func(*ir.TypeRef)
+	var walk func([]*ir.Field)
+	walkItems := func(ref *ir.TypeRef, items *ir.ArrayElem) {
+		walkRef(ref)
+		for it := items; it != nil; it = it.ElemItems {
+			walkRef(it.ElemRef)
+		}
+	}
+	walkRef = func(ref *ir.TypeRef) {
+		if ref == nil || ref.Target == nil || seen[ref.Key] {
+			return
+		}
+		if c := ref.Target.Category; c != ir.CatStruct && c != ir.CatUnion {
+			return
+		}
+		seen[ref.Key] = true
+		walk(ref.Target.Fields)
+	}
+	walk = func(fields []*ir.Field) {
+		for _, fld := range fields {
+			walkRef(fld.Ref)
+			walkItems(fld.ElemRef, fld.ElemItems)
+		}
+	}
+	for _, m := range s.Messages {
+		walk(m.Fields)
+	}
+	return seen
 }
 
 func (g *gen) emitLimits(f *dfile) {
@@ -283,7 +422,7 @@ func (g *gen) emitBitfield(f *dfile, nt *ir.NamedType) {
 
 // ---- object class ---------------------------------------------------------
 
-func (g *gen) emitClass(f *dfile, name, summary string, fields []*ir.Field, isMessage bool) {
+func (g *gen) emitClass(f *dfile, name, summary string, fields []*ir.Field, isMessage, withVisitor bool) {
 	emitDoc(f, "", summary)
 	f.line("class %s {", name)
 	for _, fld := range fields {
@@ -320,9 +459,6 @@ func (g *gen) emitClass(f *dfile, name, summary string, fields []*ir.Field, isMe
 
 	f.blank()
 	g.emitReset(f, fields)
-
-	f.blank()
-	g.emitIsDefault(f, fields)
 
 	if isMessage {
 		f.blank()
@@ -479,7 +615,9 @@ func (g *gen) emitClass(f *dfile, name, summary string, fields []*ir.Field, isMe
 		g.emitStreamDecoder(f, name)
 	}
 
-	g.emitVisitor(f, name, fields)
+	if withVisitor {
+		g.emitVisitor(f, name, fields)
+	}
 }
 
 // dartScratchSize is the fixed output buffer the unbounded encode arm writes
@@ -558,62 +696,9 @@ func (g *gen) emitResetField(f *dfile, fld *ir.Field) {
 	}
 }
 
-// ---- all-default predicate -------------------------------------------------
-
-// emitIsDefault emits the object's all-default predicate. It is the exact
-// negation of what [serialize] writes: the object is default iff serialize would
-// emit no child at all, evaluated per field and recursively (MESSAGE_SPEC §2).
-//
-// Keep this in lockstep with emitMarshal -- both are generated from
-// fieldIsDefaultExpr's per-field expressions for exactly that reason. A
-// predicate that disagrees with the writer omits a field that is on the wire, or
-// keeps one that is not.
-//
-// Library-private (`_isDefault`) so it can never collide with a schema field
-// name, and so the file-level `unused_element` ignore covers the classes that
-// are never array elements.
-func (g *gen) emitIsDefault(f *dfile, fields []*ir.Field) {
-	f.line("  /// Whether every field equals its declared default, compared per field and")
-	f.line("  /// recursively -- i.e. whether [serialize] would write no child at all.")
-	f.line("  bool get _isDefault {")
-	if len(fields) == 0 {
-		f.line("    return true;")
-		f.line("  }")
-		return
-	}
-	for _, fld := range fields {
-		f.line("    if (!(%s)) return false;", g.fieldIsDefaultExpr(fld))
-	}
-	f.line("    return true;")
-	f.line("  }")
-}
-
-// fieldIsDefaultExpr is the boolean expression "this field equals its default",
-// i.e. the negation of emitMarshal's write guard for the same field.
-func (g *gen) fieldIsDefaultExpr(fld *ir.Field) string {
-	acc := dartIdent(fld.Name)
-	switch {
-	case fld.Kind == ir.KindStruct || fld.Kind == ir.KindUnion:
-		// Lazily framed: the frame survives iff the nested serialize wrote a child,
-		// which is exactly "the nested object is not default".
-		return fmt.Sprintf("%s._isDefault", acc)
-	case isDest(fld):
-		return g.destIsDefaultExpr(fld, acc)
-	case fld.Kind == ir.KindArray:
-		// Wrapper array: the writer emits a child for every element it holds,
-		// because the LAST element is written whatever its value (§2) -- so "no
-		// child is written" is exactly "the array is empty", and the two cannot
-		// drift apart.
-		return fmt.Sprintf("%s.isEmpty", acc)
-	}
-	// Scalars, enums, bitfields, bools and fp32/fp64: serialize writes iff
-	// `acc != default`. An fp32 NaN never equals the default, so the captured raw
-	// bits ride along with a value that is already non-default.
-	return fmt.Sprintf("%s == %s", acc, g.dartDefaultValue(fld))
-}
-
-// destIsDefaultExpr is the default test of a destination field: its `length`
-// elements against the declared default, or `length == 0` when none is
+// destDefaultTest is the default test of a destination field -- or, when
+// `differs` is set, its negation, which is serialize's write guard: its
+// `length` elements against the declared default, or `length == 0` when none is
 // declared. The storage beyond `length` is capacity and takes no part.
 //
 // A native array's declared `count: N` is a CAPACITY, never a length
@@ -621,12 +706,6 @@ func (g *gen) fieldIsDefaultExpr(fld *ir.Field) string {
 // compared against the declared default exactly as written. A count:N array is
 // therefore default only when it is EMPTY -- an all-zero N-element value is a
 // length-N array, which differs from the empty one and stays on the wire.
-func (g *gen) destIsDefaultExpr(fld *ir.Field, acc string) string {
-	return g.destDefaultTest(fld, acc, false)
-}
-
-// destDefaultTest is destIsDefaultExpr, or its negation -- serialize's write
-// guard -- when `differs` is set.
 func (g *gen) destDefaultTest(fld *ir.Field, acc string, differs bool) string {
 	not, cmp := "", "=="
 	if differs {
