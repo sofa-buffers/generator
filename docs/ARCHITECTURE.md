@@ -5772,7 +5772,9 @@ A reimplementation is **conformant** when it reproduces these gates:
    would be one comment per touching line, tied to the emitter's line layout,
    and the file holds nothing but code generated for that schema.
 
-   Zig: the unused-name errors come from AstGen, which runs over the **whole**
+   Zig: a `$defs`-only harness discards `benchMain`'s parameters by name and
+   declares no stdout writer, since with no message neither is read. The
+   unused-name errors come from AstGen, which runs over the **whole**
    of every file that is imported, not only over the declarations something
    references; the generated `message.zig` is imported by the harness root
    `main.zig`, so all of it is held to them. Zig's semantic analysis is lazy,
