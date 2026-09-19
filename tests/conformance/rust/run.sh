@@ -43,6 +43,17 @@ trap 'rm -rf "$WORK"' EXIT
 CARGO_TARGET_DIR="$WORK/target"
 export CARGO_TARGET_DIR
 
+# Warnings are errors for every crate this run builds (ARCHITECTURE §12, gate 9):
+# a warning in generated code is a failed build in a user's `-D warnings` CI, so
+# it fails here first. Set once and exported, so no cargo call below can build
+# without it -- the generated crates, the hand-written drivers that include
+# them, and the corelib path dependency they compile against. A driver that
+# declares the generated module does so with `pub mod message;`: the module is
+# the generated API, and a driver that exercises part of it must not turn the
+# rest into dead code.
+RUSTFLAGS="-D warnings"
+export RUSTFLAGS
+
 # crate_bin_name OUT-DIR -- give a generated crate an identity unique to its
 # output directory, so a shared target/ cannot serve one crate's artifacts to
 # another. BOTH names have to move: the binary, because target/debug/<name>
@@ -169,7 +180,7 @@ run_variant() {
     rust_build "$STREAM_DEF" "$WORK/stream-$label"
     case "$label" in
         no-std-*) printf 'use sofabuffers_generated::*;\n' > "$WORK/stream-$label/src/main.rs" ;;
-        *)        printf 'mod message;\nuse message::*;\n' > "$WORK/stream-$label/src/main.rs" ;;
+        *)        printf 'pub mod message;\nuse message::*;\n' > "$WORK/stream-$label/src/main.rs" ;;
     esac
     sed '/^\/\/SOFAB_IMPORT$/d' "$ROOT/tests/conformance/rust/$STREAM_CHECK" \
         >> "$WORK/stream-$label/src/main.rs"
@@ -389,7 +400,7 @@ run_variant() {
     rust_build "$EXAMPLE" "$WORK/rep-$label"
     case "$label" in
         no-std-*) printf 'use sofabuffers_generated::*;\n' > "$WORK/rep-$label/src/main.rs" ;;
-        *)        printf 'mod message;\nuse message::*;\n' > "$WORK/rep-$label/src/main.rs" ;;
+        *)        printf 'pub mod message;\nuse message::*;\n' > "$WORK/rep-$label/src/main.rs" ;;
     esac
     sed '/^\/\/SOFAB_IMPORT$/d' "$ROOT/tests/conformance/rust/repeated_id.rs" \
         >> "$WORK/rep-$label/src/main.rs"
@@ -953,7 +964,7 @@ lim_project "$WORK/wrap.yaml" "$WORK/wlim"
 
 # lim_run DIR MSG OCTAL -- decode one hand-built message; JSON in LIM_OUT, the
 # harness's `decode error: <category>` line in LIM_ERR, exit status in LIM_RC.
-# Only that line is kept: `cargo run` re-emits the crate's build warnings on
+# Only that line is kept: `cargo run` may add its own progress lines on
 # stderr, and a diagnostic drowned in them is a test nobody can read.
 lim_run() {
     LIM_RC=0
@@ -1097,7 +1108,7 @@ rm -rf "$WORK/skipalloc"
 ( cd "$ROOT" && go run ./cmd/sofabgen --config "$WORK/cfg-lim.yaml" --lang rust --in "$WORK/dyn.yaml" --out "$WORK/skipalloc" )
 sed -i "s#\${SOFAB_RS_CORELIB}#$STD#" "$WORK/skipalloc/Cargo.toml"
 crate_bin_name "$WORK/skipalloc"
-printf 'mod message;\nuse message::*;\n' > "$WORK/skipalloc/src/main.rs"
+printf 'pub mod message;\nuse message::*;\n' > "$WORK/skipalloc/src/main.rs"
 sed '/^\/\/SOFAB_IMPORT$/d' "$ROOT/tests/conformance/rust/skipped_blob_alloc.rs" \
     >> "$WORK/skipalloc/src/main.rs"
 ( cd "$WORK/skipalloc" && cargo run -q ) || { echo "FAIL: a skipped blob must not be materialised"; exit 1; }
@@ -1129,7 +1140,7 @@ rm -rf "$WORK/bigalloc"
 ( cd "$ROOT" && go run ./cmd/sofabgen --config "$WORK/cfg-nolim.yaml" --lang rust --in "$WORK/bigarr.yaml" --out "$WORK/bigalloc" )
 sed -i "s#\${SOFAB_RS_CORELIB}#$STD#" "$WORK/bigalloc/Cargo.toml"
 crate_bin_name "$WORK/bigalloc"
-printf 'mod message;\nuse message::*;\n' > "$WORK/bigalloc/src/main.rs"
+printf 'pub mod message;\nuse message::*;\n' > "$WORK/bigalloc/src/main.rs"
 sed '/^\/\/SOFAB_IMPORT$/d' "$ROOT/tests/conformance/rust/truncated_array_alloc.rs" \
     >> "$WORK/bigalloc/src/main.rs"
 ( cd "$WORK/bigalloc" && cargo run -q ) || { echo "FAIL: a truncated bounded array must not allocate its declared count"; exit 1; }
@@ -1170,7 +1181,7 @@ rm -rf "$WORK/overalloc"
 ( cd "$ROOT" && go run ./cmd/sofabgen --config "$WORK/cfg-nolim.yaml" --lang rust --in "$WORK/bndarr.yaml" --out "$WORK/overalloc" )
 sed -i "s#\${SOFAB_RS_CORELIB}#$STD#" "$WORK/overalloc/Cargo.toml"
 crate_bin_name "$WORK/overalloc"
-printf 'mod message;\nuse message::*;\n' > "$WORK/overalloc/src/main.rs"
+printf 'pub mod message;\nuse message::*;\n' > "$WORK/overalloc/src/main.rs"
 sed '/^\/\/SOFAB_IMPORT$/d' "$ROOT/tests/conformance/rust/overcount_array_alloc.rs" \
     >> "$WORK/overalloc/src/main.rs"
 ( cd "$WORK/overalloc" && cargo run -q ) || { echo "FAIL: a rejected bounded array must stop collecting"; exit 1; }
@@ -1242,7 +1253,7 @@ rm -rf "$WORK/postlim"
 ( cd "$ROOT" && go run ./cmd/sofabgen --config "$WORK/cfg-lim-wide.yaml" --lang rust --in "$WORK/postlim.yaml" --out "$WORK/postlim" )
 sed -i "s#\${SOFAB_RS_CORELIB}#$STD#" "$WORK/postlim/Cargo.toml"
 crate_bin_name "$WORK/postlim"
-printf 'mod message;\nuse message::*;\n' > "$WORK/postlim/src/main.rs"
+printf 'pub mod message;\nuse message::*;\n' > "$WORK/postlim/src/main.rs"
 sed '/^\/\/SOFAB_IMPORT$/d' "$ROOT/tests/conformance/rust/post_limit_fill.rs" \
     >> "$WORK/postlim/src/main.rs"
 ( cd "$WORK/postlim" && cargo run -q ) || { echo "FAIL: a crossed cap must stop collecting, and stop materialising containers"; exit 1; }
@@ -1279,7 +1290,7 @@ for dleg in dyn:true static:false; do
     crate_bin_name "$WORK/depth-$dname"
     grep -q 'stack: \[_Loc; 4\],' "$WORK/depth-$dname/src/message.rs" \
         || { echo "FAIL: [$dname] the decode stack must be [_Loc; 4] for a depth-3 schema"; exit 1; }
-    printf 'mod message;\nuse message::*;\nconst STATIC: bool = %s;\n' "$dstatic" > "$WORK/depth-$dname/src/main.rs"
+    printf 'pub mod message;\nuse message::*;\nconst STATIC: bool = %s;\n' "$dstatic" > "$WORK/depth-$dname/src/main.rs"
     sed '/^\/\/SOFAB_IMPORT$/d' "$ROOT/tests/conformance/rust/decode_stack_depth.rs" \
         >> "$WORK/depth-$dname/src/main.rs"
     ( cd "$WORK/depth-$dname" && cargo run -q ) || { echo "FAIL: [$dname] decode stack depth / wrapper growth"; exit 1; }
