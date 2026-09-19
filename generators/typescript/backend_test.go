@@ -2996,3 +2996,29 @@ messages:
 		}
 	}
 }
+
+// TestDropUnreadRegister: an index register nothing reads loses every one of its
+// assignments -- a standalone line and one inline with other statements alike --
+// so the dropped declaration leaves no reference behind; one that is read
+// anywhere else is kept untouched.
+func TestDropUnreadRegister(t *testing.T) {
+	text := "    this._ix1 = id;\n    if (x) { this._ix1 = id; this._c = 3; }\n    { this._c = 4; this._ix1 = id;}\n"
+	out, read := dropUnreadRegister(text, "_ix1")
+	if read {
+		t.Fatal("a register only assigned was reported read")
+	}
+	if strings.Contains(out, "_ix1") {
+		t.Errorf("an assignment survived:\n%s", out)
+	}
+	if want := "    if (x) { this._c = 3; }\n    { this._c = 4; }\n"; out != want {
+		t.Errorf("got\n%q\nwant\n%q", out, want)
+	}
+	kept := text + "    const r = this._ix1;\n"
+	if out, read := dropUnreadRegister(kept, "_ix1"); !read || out != kept {
+		t.Error("a register that is read was dropped or rewritten")
+	}
+	// _ix1 is not _ix10: a read of the longer name does not keep the shorter.
+	if _, read := dropUnreadRegister("this._ix1 = id;\nuse(this._ix10);\n", "_ix1"); read {
+		t.Error("a read of _ix10 counted as a read of _ix1")
+	}
+}
