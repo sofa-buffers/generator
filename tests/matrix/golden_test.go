@@ -1,6 +1,7 @@
 package matrix
 
 import (
+	"flag"
 	"os"
 	"path/filepath"
 	"testing"
@@ -9,13 +10,23 @@ import (
 	"github.com/sofa-buffers/generator/internal/generator"
 )
 
+// updateGolden rewrites the snapshots instead of comparing against them.
+//
+// The snapshots are a backend's `Generate` output, and the CLI is no longer a
+// way to produce it: for the targets whose canonical formatter is an external
+// program (rust, dart, python) `sofabgen` pipes the files through it before
+// writing them (generator.Formatter, §8), so regenerating with `go run
+// ./cmd/sofabgen` writes FORMATTED files that this test then rejects — on a box
+// that has the formatter, and only there. Regenerating goes through the test
+// itself, which calls the same Generate this compares.
+var updateGolden = flag.Bool("update", false,
+	"rewrite tests/matrix/testdata/golden from the backends' Generate output")
+
 // TestGoldenOutput is the M8 reproducibility gate: regenerating scalars.yaml for
 // every backend must be byte-identical to the committed golden snapshots under
 // tests/matrix/golden/. A diff here means output drifted — regenerate with:
 //
-//	for l in c cpp go python typescript rust csharp java zig docs; do \
-//	  go run ./cmd/sofabgen --lang $l --in tests/matrix/corpus/defs/scalars.yaml \
-//	    --out tests/matrix/testdata/golden/$l; done
+//	go test ./tests/matrix -run TestGoldenOutput -update
 func TestGoldenOutput(t *testing.T) {
 	s, err := buildIR(t, "corpus/defs/scalars.yaml")
 	if err != nil {
@@ -31,6 +42,15 @@ func TestGoldenOutput(t *testing.T) {
 		}
 		for _, f := range files {
 			golden := filepath.Join("testdata", "golden", lang, f.Path)
+			if *updateGolden {
+				if err := os.MkdirAll(filepath.Dir(golden), 0o755); err != nil {
+					t.Fatalf("[%s] %s: %v", lang, golden, err)
+				}
+				if err := os.WriteFile(golden, f.Content, 0o644); err != nil {
+					t.Fatalf("[%s] %s: %v", lang, golden, err)
+				}
+				continue
+			}
 			want, err := os.ReadFile(golden)
 			if err != nil {
 				t.Errorf("[%s] missing golden %s (regenerate)", lang, golden)

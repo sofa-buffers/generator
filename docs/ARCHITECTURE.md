@@ -5565,7 +5565,11 @@ A reimplementation is **conformant** when it reproduces these gates:
    subsets.
 5. **Golden reproducibility** — regenerate a fixed def for every backend and
    byte-diff against committed goldens (`tests/matrix/testdata/golden/`); plus a
-   frozen IR golden.
+   frozen IR golden. The goldens are `Generate` output, taken before the
+   optional formatter pass the CLI applies (gate 10), so they are refreshed
+   through the test itself — `go test ./tests/matrix -run TestGoldenOutput
+   -update` — and not by running `sofabgen`, which on a box holding rustfmt,
+   `dart format` or ruff would write formatted files this gate then rejects.
 6. **CI** — a hermetic core job + one `lang-<x>` job per target, on every
    push to `main`, every pull request, and manual dispatch. Each `lang-<x>` job
    additionally uploads the generated sources (example + realworld + corpus,
