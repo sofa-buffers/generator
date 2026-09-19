@@ -2813,14 +2813,30 @@ measured against corelib-py on both engines and both decode surfaces, a fixlen
 STRING payload at an id declared `fp64` (or `struct`) came back INVALID where
 MESSAGE_SPEC §7.3 requires COMPLETE with the field at its default.
 
-The fix keys on what the **wire** announces rather than on what the schema
-declares, which is why it is one guard per scope and not one arm per id: a fixlen
-header whose subtype is `string` or `blob` — the two subtypes whose payload is a
-byte run — is declined unless the id is one that declares one. It is emitted in
-every scope of every module, including a schema with no fixlen field anywhere,
-because the schema is not what decides whether such a header can arrive. Cost is
-one `fld.subtype is not None` identity comparison on the accepted path; the set
-membership behind it is reached only for fixlen headers. The pull-style backends
+The first fix keyed on what the **wire** announces: one guard per scope that
+declined a fixlen `string`/`blob` header unless the id declared one. That covered
+the UTF-8 verdict and nothing else, and a string is not the only read that costs
+something a skip does not (generator#575): every read is **capped** by the
+receiver's `max_dyn_*` limits and, when the message ends inside it, held in the
+**reassembly buffer**, which generated Python sizes to `MAX_FIELD_SPAN` — the
+largest value the *schema* can carry, not the largest the wire can announce. An
+unsigned array of 70000 entries at a `u32` id, at a struct id, at a wrapper
+array's own id, or as an element of an array of structs was therefore read, and a
+complete message came back `SofaLimitError`; truncated inside it, one 17 bytes
+long came back `SofaArgumentError` instead of INCOMPLETE.
+
+So the test is now **one arm per id, for every kind**, and the per-scope guard is
+gone: every position the visitor handles — a field it declares and does not leave
+to the destination table, or an array scope's element — declines a header whose
+wire type (and, for fp32/fp64/string/blob, whose subtype) is not the one its
+declared type maps to. A **sequence-framed** position (struct, union, wrapper
+array) declines unconditionally: its well-formed header is a `SEQUENCE_START`,
+which the corelib hands to `on_sequence_begin` and never to `on_field`, so
+whatever reaches `on_field` there is mistyped — and a scope whose visitor-handled
+ids are all sequence-framed collapses to a single `return False`. A string header
+at a position declaring neither string nor blob is declined by that position's
+own wire-type test, so `FixlenSubtype` is referenced — and imported — only where
+a fixlen type is declared. The pull-style backends
 (`go`, `dart`) resolve a destination before asking the corelib for bytes and
 never had this shape; the push backends that already carry a #257/#258
 destination guard in front of their string callback (`rust`, `java`, `csharp`,
