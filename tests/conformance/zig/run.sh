@@ -832,7 +832,6 @@ echo "==> corpus builds ($(ls "$ROOT"/tests/matrix/corpus/defs/*.yaml | wc -l) d
 # build.zig and build.zig.zon -- must pass `zig fmt --check`, so a user's own
 # zig fmt gate over a tree holding generated code passes. The backend emits zig
 # fmt layout itself (generators/zig/layout.go); sofabgen never runs zig.
-echo "==> generated Zig is zig-fmt-clean (example + corpus)"
 check_format zig "$WORK/ex" "$WORK/corpus"
 
 # Declared integer width is a VALIDITY bound (MESSAGE_SPEC S7.1 + documentation#32,

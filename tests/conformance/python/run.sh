@@ -1191,7 +1191,6 @@ fi
 # stopped running, fails here. Without ruff the driver skips it, as loudly as
 # the banner at the top of this suite. The cloned corelib is not generated code
 # and is pruned.
-echo "==> ruff format --check: every generated module"
 check_format python "$WORK"
 
 echo "PASS"
