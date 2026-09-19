@@ -121,12 +121,13 @@ func (f *zfile) line(format string, args ...any) {
 }
 func (f *zfile) blank() { f.b.WriteByte('\n') }
 
-// bytes closes the file on exactly one newline. Sections separate themselves
-// with a trailing blank line, so whichever happens to come last would otherwise
-// leave a blank line at EOF -- which `zig fmt` removes, and a `zig fmt --check`
-// in a user's own tree then fails on.
+// bytes renders the file in `zig fmt` layout (layoutZig) and closes it on
+// exactly one newline. Sections separate themselves with a trailing blank line,
+// so whichever happens to come last would otherwise leave a blank line at EOF
+// -- which `zig fmt` removes, and a `zig fmt --check` in a user's own tree then
+// fails on.
 func (f *zfile) bytes() []byte {
-	return []byte(strings.TrimRight(f.b.String(), "\n") + "\n")
+	return []byte(layoutZig(strings.TrimRight(f.b.String(), "\n")) + "\n")
 }
 
 // emitDoc writes a Zig doc comment (`///`, one line per line of text) at the
@@ -413,7 +414,7 @@ func (g *gen) arrayNeExpr(fld *ir.Field, acc string) string {
 	if isNativeArrayElem(fld.Elem) {
 		if parts, ok := g.zigNativeArrayParts(fld); ok {
 			elem := g.zigArrayElem(fld.Elem, fld.ElemRef, fld.ElemItems)
-			return fmt.Sprintf("!std.mem.eql(%s, %s, &.{ %s })", elem, g.arrayValExpr(fld, acc), parts)
+			return fmt.Sprintf("!std.mem.eql(%s, %s, &%s)", elem, g.arrayValExpr(fld, acc), anonList(parts))
 		}
 		// A count:N field keeps its length behind an accessor -- the inline
 		// capacity past it is not part of the value; a dynamic one is a slice and

@@ -104,7 +104,7 @@ func TestZigStructural(t *testing.T) {
 		"11 => if (total > 50) { self.inv = true; } else { const chunk = self._takeStr(total, offset, _chunk) orelse return; self.m.somestring = chunk; },",
 		"/// Unsigned 8-bit integer", // descriptions as doc comments
 	} {
-		if !strings.Contains(m, want) {
+		if !containsCode(m, want) {
 			t.Errorf("message.zig missing %q", want)
 		}
 	}
@@ -112,19 +112,19 @@ func TestZigStructural(t *testing.T) {
 	// (MESSAGE_SPEC S2): the write stays unconditional -- there is no generated
 	// omit-guard -- but the corelib drops the frame when the nested marshal wrote
 	// no child, i.e. when the object equals its declared default.
-	if !strings.Contains(m, "try os.writeSequenceBeginLazy(20);") {
+	if !containsCode(m, "try os.writeSequenceBeginLazy(20);") {
 		t.Error("nested struct field must be opened with writeSequenceBeginLazy")
 	}
-	if !strings.Contains(m, "try os.writeSequenceBeginLazy(20);\n        try self.somestruct.serialize(os);\n        try os.writeSequenceEnd();") {
+	if !containsCode(m, "try os.writeSequenceBeginLazy(20);\n        try self.somestruct.serialize(os);\n        try os.writeSequenceEnd();") {
 		t.Error("nested struct field must close with the dropping writeSequenceEnd")
 	}
 	// The eager begin is gone from the corelib; no call site may still use it.
-	if strings.Contains(m, "os.writeSequenceBegin(") {
+	if containsCode(m, "os.writeSequenceBegin(") {
 		t.Error("eager writeSequenceBegin must not be emitted any more")
 	}
 	// The shared scratch buffer must never reach a destination directly: that is
 	// the exact shape of generator#293, and it reads as a harmless one-liner.
-	if strings.Contains(m, "return self.acc._buf.items;") {
+	if containsCode(m, "return self.acc._buf.items;") {
 		t.Error("the payload bind must hand out a copy, not a view into the shared acc buffer (generator#293)")
 	}
 	// No heap containers in the message type: storage is fixed arrays + slices.
@@ -134,7 +134,7 @@ func TestZigStructural(t *testing.T) {
 	// buffer (_dec_*.acc, which only a payload split across feed chunks reaches).
 	if body, ok := structBody(m, "pub const Myfirstmessage = struct {"); !ok {
 		t.Error("message.zig: could not locate the Myfirstmessage struct")
-	} else if strings.Contains(body, "ArrayList(") {
+	} else if containsCode(body, "ArrayList(") {
 		t.Errorf("message.zig uses a heap container for field storage:\n%s", body)
 	}
 }
@@ -222,7 +222,7 @@ messages:
 		".root_bp => blk: {\n                if (id >= 2) { self.inv = true; break :blk .dead; }\n",                                                                                             // bounded struct: rejected BEFORE the gap-fill grows
 		`if (v.inv) return error.InvalidMessage;`, // surfaced as INVALID
 	} {
-		if !strings.Contains(m, want) {
+		if !containsCode(m, want) {
 			t.Errorf("message.zig missing over-index guard %q", want)
 		}
 	}
@@ -236,12 +236,12 @@ messages:
 	// (CORELIB_PLAN §6.2.1, generator#432) -- so no guard is emitted in front of
 	// either. Its bind is the string one, which decides strict UTF-8 (issue
 	// #85) before the element is materialized.
-	if !strings.Contains(m, `.root_ds => { const chunk = self._takeStrCapped(total, offset, _chunk, max_dyn_string_len) orelse return; sofab.arrays.setElemCapped([]const u8, self.alloc, &(self.m.ds), id, "", chunk, max_dyn_array_count) catch { self.lim = true; }; },`) {
+	if !containsCode(m, `.root_ds => { const chunk = self._takeStrCapped(total, offset, _chunk, max_dyn_string_len) orelse return; sofab.arrays.setElemCapped([]const u8, self.alloc, &(self.m.ds), id, "", chunk, max_dyn_array_count) catch { self.lim = true; }; },`) {
 		t.Errorf("a dynamic wrapper array must cap its element index:\n%s", m)
 	}
 	// And the rule has ONE implementation (§6.2.1): with the cap passed in, the
 	// generated layer must not test the index a second time.
-	if strings.Contains(m, "id >= max_dyn_array_count") {
+	if containsCode(m, "id >= max_dyn_array_count") {
 		t.Errorf("the receiver index cap must be the corelib's alone, not also a generated guard:\n%s", m)
 	}
 }
@@ -280,24 +280,24 @@ messages:
 		// Surfaced as INVALID.
 		`if (v.inv) return error.InvalidMessage;`,
 	} {
-		if !strings.Contains(m, want) {
+		if !containsCode(m, want) {
 			t.Errorf("message.zig missing maxlen guard %q:\n%s", want, m)
 		}
 	}
 	// The unbounded scalar string (no maxlen, no configured limit) has no length
 	// guard, but it still binds through the string bind (issue #85): invalid
 	// UTF-8 is INVALID (self.inv), never lossy — applies to unbounded strings too.
-	if !strings.Contains(m, `3 => { const chunk = self._takeStrCapped(total, offset, _chunk, max_dyn_string_len) orelse return; self.m.us = chunk; },`) {
+	if !containsCode(m, `3 => { const chunk = self._takeStrCapped(total, offset, _chunk, max_dyn_string_len) orelse return; self.m.us = chunk; },`) {
 		t.Errorf("unbounded string must store straight through (utf8-checked):\n%s", m)
 	}
 	// What it does carry is the receiver cap, at the target's finite default
 	// (§9.5, generator#385) -- a separate bound with a separate verdict: over the
 	// cap is self.lim (LimitExceeded), never self.inv.
-	if !strings.Contains(m, "3 => { const chunk = self._takeStrCapped(total, offset, _chunk, max_dyn_string_len) orelse return;") {
+	if !containsCode(m, "3 => { const chunk = self._takeStrCapped(total, offset, _chunk, max_dyn_string_len) orelse return;") {
 		t.Errorf("unbounded string must carry the default receiver cap:\n%s", m)
 	}
 	// ...and no schema maxlen guard, which is what the 8 above would be.
-	if strings.Contains(m, "3 => if (total > 8)") {
+	if containsCode(m, "3 => if (total > 8)") {
 		t.Errorf("unbounded string must not carry a maxlen guard:\n%s", m)
 	}
 }
@@ -349,7 +349,7 @@ messages:
 		"try os.writeArraySigned(6, self.fe.slice());",
 		"try os.writeArrayUnsigned(7, self.fbf.slice());",
 	} {
-		if !strings.Contains(m, want) {
+		if !containsCode(m, want) {
 			t.Errorf("message.zig missing %q", want)
 		}
 	}
@@ -359,23 +359,23 @@ messages:
 		"try os.writeArrayUnsigned(8, self.dyn);",
 		"try os.writeArrayFp32(9, self.dynf);",
 	} {
-		if !strings.Contains(m, want) {
+		if !containsCode(m, want) {
 			t.Errorf("dynamic array must write its value whole: missing %q", want)
 		}
 	}
 
 	// A nested array row writes the loop variable straight through.
-	if !strings.Contains(m, "try os.writeArrayUnsigned(@intCast(_i0), _e0);") {
+	if !containsCode(m, "try os.writeArrayUnsigned(@intCast(_i0), _e0);") {
 		t.Error("nested array row must be written whole")
 	}
 	// The trailing-run trim is gone from every call site (the corelib still ships
 	// sofab.arrays.trimTail; the generator simply stops calling it).
-	if strings.Contains(m, "trimTail") {
+	if containsCode(m, "trimTail") {
 		t.Errorf("no trailing-default-run trim may survive:\n%s", m)
 	}
 	// So is the fixed-count wrapper narrowing that went with it.
 	for _, notWant := range []string{"_trimObjs", "_trimSlices"} {
-		if strings.Contains(m, notWant) {
+		if containsCode(m, notWant) {
 			t.Errorf("the count:N wrapper trim %q must be gone:\n%s", notWant, m)
 		}
 	}
@@ -414,7 +414,7 @@ messages:
 		// the inline storage behind it is N wide. A 3-element default on count:5 is
 		// a 3-element array, not a 5-element one.
 		"d: sofab.FixedArray(u32, 5) = .init(&.{ 1, 2, 3 }),",
-		"f: sofab.FixedArray(f32, 3) = .init(&.{ 1.5 }),",
+		"f: sofab.FixedArray(f32, 3) = .init(&.{1.5}),",
 		"zeros: sofab.FixedArray(u32, 5) = .init(&.{ 0, 0 }),",
 		// No default at all: the EMPTY array, which is what a fresh count:N array
 		// now is (it used to be N element defaults).
@@ -430,12 +430,12 @@ messages:
 		// then (see TestZigDeclaredWidthIsAValidityBound).
 		"1 => { if (self.afill != 0) { self.afill -= 1; if (value > 4294967295) { self.inv = true; return; } self.m.d.push(@intCast(value), &self.inv); } },",
 	} {
-		if !strings.Contains(m, want) {
+		if !containsCode(m, want) {
 			t.Errorf("message.zig missing %q:\n%s", want, m)
 		}
 	}
 	// Nothing refills the tail any more: the [M, N) slots are spare capacity.
-	if strings.Contains(m, "@splat(") {
+	if containsCode(m, "@splat(") {
 		t.Errorf("a count:N array must not be splat-reset (that was the fill-to-N):\n%s", m)
 	}
 }
@@ -507,18 +507,18 @@ messages:
 		// the corelib, on a call the decode path already made.
 		"self.m.arr = sofab.arrays.allocNCapped(u64, self.alloc, count, max_dyn_array_count)",
 	} {
-		if !strings.Contains(m, want) {
+		if !containsCode(m, want) {
 			t.Errorf("limits message.zig missing %q", want)
 		}
 	}
-	if strings.Contains(m, "max_dyn_blob_len") {
+	if containsCode(m, "max_dyn_blob_len") {
 		t.Error("inert blob limit must not be emitted (no unbounded blob)")
 	}
 	// Exactly the two unbounded fields are guarded (bounded barr is not): the
 	// array at allocNCapped, the string length in its bind. The length cap's
 	// LimitExceeded maps to lim in both bind forms, _takeCapped (blob) and
 	// _takeStrCapped (string), hence three sites for two guards.
-	if got := strings.Count(m, "self.lim = true"); got != 3 {
+	if got := countCode(m, "self.lim = true"); got != 3 {
 		t.Errorf("want exactly 3 limit-flag sites (2 guards), got %d", got)
 	}
 	// One implementation of the length cap, and it is not a generated comparison
@@ -529,7 +529,7 @@ messages:
 	// (generator#432). The number now travels into _takeCapped instead.
 	cb := m[strings.Index(m, "pub fn string("):]
 	cb = cb[:strings.Index(cb, "\n    }")]
-	if strings.Contains(cb, "total > max_dyn") {
+	if containsCode(cb, "total > max_dyn") {
 		t.Errorf("the payload callback must not re-implement the length cap:\n%s", cb)
 	}
 
@@ -541,18 +541,18 @@ messages:
 		"const max_dyn_string_len: usize = 1048576;",
 		"if (v.lim) return error.LimitExceeded;",
 	} {
-		if !strings.Contains(plain, want) {
+		if !containsCode(plain, want) {
 			t.Errorf("default limits missing %q", want)
 		}
 	}
 	// Liveness is still a property of the schema, not of the configuration.
-	if strings.Contains(plain, "max_dyn_blob_len") {
+	if containsCode(plain, "max_dyn_blob_len") {
 		t.Error("inert blob limit must not be emitted (no unbounded blob)")
 	}
 	// The cap is what bounds the count, so the allocation is exact with the
 	// default cap exactly as with a configured one -- and the capped reservation
 	// is gone entirely (§9.5, shape A).
-	if !strings.Contains(plain, "sofab.arrays.allocNCapped(u64, self.alloc, count, max_dyn_array_count)") || strings.Contains(plain, "allocCapped") {
+	if !containsCode(plain, "sofab.arrays.allocNCapped(u64, self.alloc, count, max_dyn_array_count)") || containsCode(plain, "allocCapped") {
 		t.Error("no-config output must allocate the checked count exactly")
 	}
 }
@@ -581,7 +581,7 @@ func TestZigDecoderAsksTheStreamForItsVerdict(t *testing.T) {
 		"            const st = try self.is.feed(&.{}, &self.v);\n" +
 			"            if (st == .incomplete) return error.IncompleteMessage;",
 	} {
-		if !strings.Contains(m, want) {
+		if !containsCode(m, want) {
 			t.Errorf("message.zig missing terminal-refusal shape %q", want)
 		}
 	}
@@ -592,13 +592,13 @@ func TestZigDecoderAsksTheStreamForItsVerdict(t *testing.T) {
 		"self.st = .incomplete;",
 		"pub fn status(self: *const Decoder) sofab.Status {",
 	} {
-		if strings.Contains(m, gone) {
+		if containsCode(m, gone) {
 			t.Errorf("message.zig still carries the removed status latch %q (generator#541)", gone)
 		}
 	}
 	// The removed accessor must not come back: asking the stream a second time no
 	// longer compiles (corelib-zig#84).
-	if strings.Contains(m, "self.is.status()") {
+	if containsCode(m, "self.is.status()") {
 		t.Error("IStream.status() is gone (corelib-zig#84); feed's return is the only answer")
 	}
 }
@@ -657,12 +657,12 @@ messages:
 		"/// Old identifier retained for backward compatibility.",
 		"/// Deprecated.",
 	} {
-		if !strings.Contains(m, want) {
+		if !containsCode(m, want) {
 			t.Errorf("metadata message.zig missing %q", want)
 		}
 	}
 	// A flag without a default must NOT get a default note.
-	if strings.Contains(m, "safe threshold. (default:") {
+	if containsCode(m, "safe threshold. (default:") {
 		t.Error("flag without a default must not carry a (default: ...) note")
 	}
 }
@@ -674,10 +674,10 @@ func TestZigProjectMode(t *testing.T) {
 			t.Errorf("project mode missing %s", path)
 		}
 	}
-	if !strings.Contains(files["build.zig.zon"], "${SOFAB_ZIG_CORELIB}") {
+	if !containsCode(files["build.zig.zon"], "${SOFAB_ZIG_CORELIB}") {
 		t.Error("build.zig.zon must carry the corelib path placeholder")
 	}
-	if !strings.Contains(files["build.zig.zon"], ".name = .sofabuffers_generated") {
+	if !containsCode(files["build.zig.zon"], ".name = .sofabuffers_generated") {
 		t.Error("build.zig.zon must pin the fixed package name (its fingerprint depends on it)")
 	}
 	h := files["src/main.zig"]
@@ -705,7 +705,7 @@ func TestZigProjectMode(t *testing.T) {
 		"                    std.debug.print(\"decode error: {s} [finish={s}]\\n\",",
 		"            dec.finish() catch |e| {",
 	} {
-		if !strings.Contains(h, want) {
+		if !containsCode(h, want) {
 			t.Errorf("main.zig missing %q", want)
 		}
 	}
@@ -714,7 +714,7 @@ func TestZigProjectMode(t *testing.T) {
 		"if (dec.status() != fed) return error.StatusDisagreesWithFeed;",
 		"[status=",
 	} {
-		if strings.Contains(h, gone) {
+		if containsCode(h, gone) {
 			t.Errorf("main.zig still carries the retired status-latch shape %q (generator#541)", gone)
 		}
 	}
@@ -756,7 +756,7 @@ func TestZigKeywordEscaping(t *testing.T) {
 		"@\"switch\": u32 = 0,",
 		"type: u32 = 0,", // primitive-type names are legal field names
 	} {
-		if !strings.Contains(m, want) {
+		if !containsCode(m, want) {
 			t.Errorf("keywords message.zig missing %q", want)
 		}
 	}
@@ -813,14 +813,14 @@ messages:
 		"                    4 => 0,", // declared fp32 array disarms under .fp32 (#193, #259)
 		"                    else => count,",
 	} {
-		if !strings.Contains(m, want) {
+		if !containsCode(m, want) {
 			t.Errorf("message.zig missing §7.3 array-at-scalar guard %q:\n%s", want, m)
 		}
 	}
 	// The guard sits in every callback a scalar shares: unsigned(), signed() and
 	// fp32() (the schema has an fp32 array, so that callback is emitted; there is
 	// no fp64, so three occurrences).
-	if n := strings.Count(m, "if (self.askip > 0) { self.askip -= 1; return; }"); n != 3 {
+	if n := countCode(m, "if (self.askip > 0) { self.askip -= 1; return; }"); n != 3 {
 		t.Errorf("want the §7.3 guard in unsigned(), signed() and fp32(), got %d", n)
 	}
 
@@ -837,7 +837,7 @@ messages:
 		t.Fatalf("generate: %v", err)
 	}
 	scalarOnly := string(scf[0].Content)
-	if !strings.Contains(scalarOnly, "pub fn arrayBegin(self: *_dec_M, _: sofab.Id, kind: sofab.ArrayKind, count: usize) void {") {
+	if !containsCode(scalarOnly, "pub fn arrayBegin(self: *_dec_M, _: sofab.Id, kind: sofab.ArrayKind, count: usize) void {") {
 		t.Errorf("scalar-only message.zig must emit arrayBegin with an unused id:\n%s", scalarOnly)
 	}
 }
@@ -893,12 +893,12 @@ messages:
 		"            .fp32 => switch (self.cur) {",
 		"            .fp64 => switch (self.cur) {",
 	} {
-		if !strings.Contains(m, want) {
+		if !containsCode(m, want) {
 			t.Errorf("message.zig missing %q:\n%s", want, m)
 		}
 	}
 	// The collapsed kind is gone from the emitted code entirely.
-	if strings.Contains(m, ".fixlen") {
+	if containsCode(m, ".fixlen") {
 		t.Errorf("ArrayKind.fixlen no longer exists in corelib-zig; emitted code must not name it:\n%s", m)
 	}
 
@@ -918,13 +918,13 @@ messages:
 		{fp32Arm, ".fp32", "2 => 0,", "3 => 0,"},
 		{fp64Arm, ".fp64", "3 => 0,", "2 => 0,"},
 	} {
-		if !strings.Contains(tc.arm, tc.want) {
+		if !containsCode(tc.arm, tc.want) {
 			t.Errorf("the %s skip arm must disarm %q:\n%s", tc.name, tc.want, tc.arm)
 		}
-		if strings.Contains(tc.arm, tc.notWant) {
+		if containsCode(tc.arm, tc.notWant) {
 			t.Errorf("the %s skip arm must NOT disarm %q (that field's subtype is the other one):\n%s", tc.name, tc.notWant, tc.arm)
 		}
-		if !strings.Contains(tc.arm, "else => count,") {
+		if !containsCode(tc.arm, "else => count,") {
 			t.Errorf("the %s skip arm must discard every other id:\n%s", tc.name, tc.arm)
 		}
 	}
@@ -986,12 +986,12 @@ messages:
 	m := string(files[0].Content)
 
 	// Every sequence opens lazily: the eager begin no longer exists in the corelib.
-	if strings.Contains(m, "os.writeSequenceBegin(") {
+	if containsCode(m, "os.writeSequenceBegin(") {
 		t.Error("eager writeSequenceBegin must not be emitted any more")
 	}
 	// 6 field wrappers + 4 element frames (st, nest row, nst row, nst struct); a
 	// native `mat` row has no frame of its own.
-	if n := strings.Count(m, "os.writeSequenceBeginLazy("); n != 10 {
+	if n := countCode(m, "os.writeSequenceBeginLazy("); n != 10 {
 		t.Errorf("want 10 lazy sequence opens, got %d:\n%s", n, m)
 	}
 
@@ -1015,7 +1015,7 @@ messages:
 		// interior empty row is not written at all, the last one always is.
 		"        for (self.mat, 0..) |_e0, _i0| {\n            if (_e0.len != 0 or _i0 == self.mat.len - 1) {\n                try os.writeArrayUnsigned(@intCast(_i0), _e0);\n            }\n        }",
 	} {
-		if !strings.Contains(m, want) {
+		if !containsCode(m, want) {
 			t.Errorf("message.zig missing lazy-framing shape %q:\n%s", want, m)
 		}
 	}
@@ -1024,10 +1024,10 @@ messages:
 	// nst struct), and one dropping closer per element site PLUS one per array
 	// FIELD wrapper -- the element sites now emit both arms of the positional
 	// choice. ("...EndKeep();" is not a substring of "...End();".)
-	if n := strings.Count(m, "os.writeSequenceEndKeep();"); n != 4 {
+	if n := countCode(m, "os.writeSequenceEndKeep();"); n != 4 {
 		t.Errorf("want 4 keeping closers (one per wrapper-array element site), got %d", n)
 	}
-	if n := strings.Count(m, "os.writeSequenceEnd();"); n != 10 {
+	if n := countCode(m, "os.writeSequenceEnd();"); n != 10 {
 		t.Errorf("want 10 dropping closers (6 field wrappers + 4 element interiors), got %d", n)
 	}
 
@@ -1044,10 +1044,10 @@ messages:
 		t.Fatalf("generate: %v", err)
 	}
 	sm := string(sff[0].Content)
-	if !strings.Contains(sm, "try os.writeSequenceBeginLazy(1);\n        try self.inner.serialize(os);\n        try os.writeSequenceEnd();") {
+	if !containsCode(sm, "try os.writeSequenceBeginLazy(1);\n        try self.inner.serialize(os);\n        try os.writeSequenceEnd();") {
 		t.Errorf("a struct FIELD must be opened lazily and closed with the dropping end:\n%s", sm)
 	}
-	if strings.Contains(sm, "writeSequenceEndKeep") {
+	if containsCode(sm, "writeSequenceEndKeep") {
 		t.Error("a struct FIELD must not keep an all-default frame")
 	}
 }
@@ -1080,17 +1080,17 @@ messages:
 		"for (self.dynamic, 0..) |*_e0, _i0| {",
 		"for (self.fstrs, 0..) |_e0, _i0| {",
 	} {
-		if !strings.Contains(m, want) {
+		if !containsCode(m, want) {
 			t.Errorf("the element loop must run over the whole value: missing %q:\n%s", want, m)
 		}
 	}
 	// The count:N struct array's closer is positional, exactly like the dynamic
 	// one's: dropped in the interior (an id gap), kept at the last index.
-	if !strings.Contains(m, "            try os.writeSequenceBeginLazy(@intCast(_i0));\n            try _e0.serialize(os);\n            if (_i0 == self.fixed.len - 1) {\n                try os.writeSequenceEndKeep();\n            } else {\n                try os.writeSequenceEnd();\n            }\n") {
+	if !containsCode(m, "            try os.writeSequenceBeginLazy(@intCast(_i0));\n            try _e0.serialize(os);\n            if (_i0 == self.fixed.len - 1) {\n                try os.writeSequenceEndKeep();\n            } else {\n                try os.writeSequenceEnd();\n            }\n") {
 		t.Errorf("a count:N struct element must take the positional closer:\n%s", m)
 	}
 	// A count:N string element gets the same last-index escape as a dynamic one.
-	if !strings.Contains(m, "if (_e0.len != 0 or _i0 == self.fstrs.len - 1) try os.writeString(@intCast(_i0), _e0);") {
+	if !containsCode(m, "if (_e0.len != 0 or _i0 == self.fstrs.len - 1) try os.writeString(@intCast(_i0), _e0);") {
 		t.Errorf("a count:N string element must keep the last-index write:\n%s", m)
 	}
 
@@ -1103,13 +1103,13 @@ messages:
 		"if (self.dynamic.len != 0) return false;",
 		"if (self.fstrs.len != 0) return false;",
 	} {
-		if !strings.Contains(m, want) {
+		if !containsCode(m, want) {
 			t.Errorf("isDefault must test emptiness alone: missing %q:\n%s", want, m)
 		}
 	}
 	// The element predicate itself: the explicit form of the "no child was
 	// written" test the lazy framing only encodes implicitly for a FIELD.
-	if !strings.Contains(m, "pub fn isDefault(self: *const VecFixedElem) bool {\n        if (self.k != 0) return false;\n        return true;\n    }") {
+	if !containsCode(m, "pub fn isDefault(self: *const VecFixedElem) bool {\n        if (self.k != 0) return false;\n        return true;\n    }") {
 		t.Errorf("every struct type must carry the all-default predicate:\n%s", m)
 	}
 }
@@ -1164,7 +1164,7 @@ messages:
 		"                self.ei_root_matstr = id;\n" +
 		"                sofab.arrays.at(self.m.matstr, @as(usize, id)).* = &.{};\n" +
 		"                break :blk .root_matstr_e;"
-	if !strings.Contains(m, want) {
+	if !containsCode(m, want) {
 		t.Errorf("a wrapper row must be RESET on open, after the reject and the grow:\n%s", m)
 	}
 
@@ -1172,10 +1172,10 @@ messages:
 	// placed and descended into, and nothing else. A backend that reset every
 	// re-opened element id would zero the fields the second opening does not
 	// mention, which is the other half of §7.4 broken.
-	if !strings.Contains(m, "                self.ei_root_objs = id;\n                break :blk .root_objs_e;") {
+	if !containsCode(m, "                self.ei_root_objs = id;\n                break :blk .root_objs_e;") {
 		t.Errorf("a struct element must be placed and descended into, nothing more:\n%s", m)
 	}
-	if strings.Contains(m, "sofab.arrays.at(self.m.objs, @as(usize, id)).* =") {
+	if containsCode(m, "sofab.arrays.at(self.m.objs, @as(usize, id)).* =") {
 		t.Errorf("a re-opened struct element MERGES (§7.4) and must not be reset:\n%s", m)
 	}
 }
@@ -1204,16 +1204,16 @@ messages:
 		// bounds the gap-fill above
 		"                if (id >= 4) { self.inv = true; break :blk .dead; }",
 	} {
-		if !strings.Contains(m, want) {
+		if !containsCode(m, want) {
 			t.Errorf("message.zig missing %q:\n%s", want, m)
 		}
 	}
 	// The defect this replaced: appending ignored the id entirely.
-	if strings.Contains(m, "self.m.objs.len + 1") || strings.Contains(m, "sofab.arrays.last(self.m.objs)") {
+	if containsCode(m, "self.m.objs.len + 1") || containsCode(m, "sofab.arrays.last(self.m.objs)") {
 		t.Errorf("a wrapper element must not be appended id-blind:\n%s", m)
 	}
 	// No fill-to-N survives, for either kind: `count` never adds elements.
-	if strings.Contains(m, "&(self.m.objs), 4") || strings.Contains(m, "=> _ = sofab.arrays.grow") {
+	if containsCode(m, "&(self.m.objs), 4") || containsCode(m, "=> _ = sofab.arrays.grow") {
 		t.Errorf("a count:N wrapper array must not be default-filled to N:\n%s", m)
 	}
 }
@@ -1249,12 +1249,12 @@ messages:
 		// The index registers exist, one per collecting frame.
 		"    ei_root_mat: usize = 0,",
 	} {
-		if !strings.Contains(m, want) {
+		if !containsCode(m, want) {
 			t.Errorf("message.zig missing %q:\n%s", want, m)
 		}
 	}
 	// The defect: appending at the end of the outer slice, id unread.
-	if strings.Contains(m, "self.m.mat.len + 1") || strings.Contains(m, "sofab.arrays.last(self.m.mat)") {
+	if containsCode(m, "self.m.mat.len + 1") || containsCode(m, "sofab.arrays.last(self.m.mat)") {
 		t.Errorf("a matrix row must not be appended id-blind:\n%s", m)
 	}
 }
@@ -1294,12 +1294,12 @@ messages:
 		// The native twin agrees: N of inline capacity, length 0.
 		"    nums: sofab.FixedArray(u32, 3) = .{},",
 	} {
-		if !strings.Contains(m, want) {
+		if !containsCode(m, want) {
 			t.Errorf("message.zig missing %q:\n%s", want, m)
 		}
 	}
 	// The `**` repetition literal was the materialization; it must be gone.
-	if strings.Contains(m, "** 3)") || strings.Contains(m, "** 2)") {
+	if containsCode(m, "** 3)") || containsCode(m, "** 2)") {
 		t.Errorf("no count:N array may be materialized to N element defaults:\n%s", m)
 	}
 
@@ -1310,7 +1310,7 @@ messages:
 		"2 => blk: { self.m.objs = &.{}; break :blk .root_objs; },",
 		"3 => blk: { self.m.rows = &.{}; break :blk .root_rows; },",
 	} {
-		if !strings.Contains(m, want) {
+		if !containsCode(m, want) {
 			t.Errorf("message.zig missing the sequenceBegin reset %q:\n%s", want, m)
 		}
 	}
@@ -1345,7 +1345,7 @@ messages:
 		// the count:N array takes the very same guard -- one rule, one shape
 		"for (self.fixedstr, 0..) |_e0, _i0| {\n            if (_e0.len != 0 or _i0 == self.fixedstr.len - 1) try os.writeString(@intCast(_i0), _e0);",
 	} {
-		if !strings.Contains(m, want) {
+		if !containsCode(m, want) {
 			t.Errorf("message.zig missing %q:\n%s", want, m)
 		}
 	}
@@ -1356,7 +1356,7 @@ messages:
 		"if (self.dynblob.len != 0) return false;",
 		"if (self.fixedstr.len != 0) return false;",
 	} {
-		if !strings.Contains(m, want) {
+		if !containsCode(m, want) {
 			t.Errorf("isDefault must test emptiness alone: missing %q:\n%s", want, m)
 		}
 	}
@@ -1394,18 +1394,18 @@ messages:
 		// Array element: guard inside the fill guard, so a §7.3 skip stays a skip.
 		"8 => { if (self.afill != 0) { self.afill -= 1; if (value > 255) { self.inv = true; return; }",
 	} {
-		if !strings.Contains(m, want) {
+		if !containsCode(m, want) {
 			t.Errorf("message.zig missing width guard %q:\n%s", want, m)
 		}
 	}
 	// 64-bit destinations pass through with neither guard nor cast.
 	for _, want := range []string{"3 => self.m.d_u64 = value,", "7 => self.m.h_i64 = value,"} {
-		if !strings.Contains(m, want) {
+		if !containsCode(m, want) {
 			t.Errorf("message.zig: a 64-bit destination must store unguarded (%q):\n%s", want, m)
 		}
 	}
 	// The masking cast is gone: nothing may @truncate a decoded scalar any more.
-	if strings.Contains(m, "@truncate(value)") {
+	if containsCode(m, "@truncate(value)") {
 		t.Errorf("a decoded value must never be masked to the declared width (§7.1):\n%s", m)
 	}
 }
@@ -1498,7 +1498,7 @@ func TestZigEnumAndBitfieldWidthBoundAtEverySixPositions(t *testing.T) {
 		".root_mat => { " + fill + enRej,
 		".root_mbf => { " + fill + bfRej,
 	} {
-		if !strings.Contains(m, want) {
+		if !containsCode(m, want) {
 			t.Errorf("message.zig: an enum/bitfield position stores without its §1 width bound, missing %q:\n%s", want, m)
 		}
 	}
@@ -1507,7 +1507,7 @@ func TestZigEnumAndBitfieldWidthBoundAtEverySixPositions(t *testing.T) {
 	// carrier to the target — and the guard on the raw accumulator is what
 	// enforces the declared width ahead of the @intCast into it.
 	for _, want := range []string{"en: i8 = 0,", "bf: u8 = 0,"} {
-		if !strings.Contains(m, want) {
+		if !containsCode(m, want) {
 			t.Errorf("message.zig: the §1 width bound must not widen storage, missing %q:\n%s", want, m)
 		}
 	}
@@ -1520,7 +1520,7 @@ func TestZigEnumAndBitfieldWidthBoundAtEverySixPositions(t *testing.T) {
 		"0 => self.m.st.se = @intCast(value),",
 		"1 => self.m.un.ubf = @intCast(value),",
 	} {
-		if strings.Contains(m, bad) {
+		if containsCode(m, bad) {
 			t.Errorf("message.zig still stores an enum/bitfield through a bare @intCast (%q):\n%s", bad, m)
 		}
 	}
@@ -1548,15 +1548,15 @@ func TestZigEnumBitfieldWidthElisions(t *testing.T) {
 		t.Fatalf("generate: %v", err)
 	}
 	m := string(files[0].Content)
-	if !strings.Contains(m, "0 => self.m.f = value,") {
+	if !containsCode(m, "0 => self.m.f = value,") {
 		t.Errorf("a bitfield implying the full u64 width must store unguarded:\n%s", m)
 	}
-	if strings.Contains(m, "0xffffffffffffffff") || strings.Contains(m, "18446744073709551615") {
+	if containsCode(m, "0xffffffffffffffff") || containsCode(m, "18446744073709551615") {
 		t.Errorf("a tautological u64 guard was emitted:\n%s", m)
 	}
 	// {R:0, G:1, B:2} implies i8, NOT the 0..2 hull of its constants: 5 is a
 	// valid wire value for this field and must decode.
-	if !strings.Contains(m, "1 => { if (value < -128 or value > 127) { self.inv = true; return; } self.m.e = @intCast(value); },") {
+	if !containsCode(m, "1 => { if (value < -128 or value > 127) { self.inv = true; return; } self.m.e = @intCast(value); },") {
 		t.Errorf("a contiguous enum must take the implied i8 width, not its constant hull:\n%s", m)
 	}
 }
@@ -1574,15 +1574,15 @@ func TestZigWidthAdmitsUndeclaredValues(t *testing.T) {
 	m := string(files[0].Content)
 	// enum {0,1,2,10}: the guard must admit 5 — i.e. be the i8 interval, never a
 	// membership switch over the constants.
-	if strings.Contains(m, "switch (value) { 0, 1, 2, 10 =>") {
+	if containsCode(m, "switch (value) { 0, 1, 2, 10 =>") {
 		t.Errorf("the withdrawn membership switch over enum constants was emitted:\n%s", m)
 	}
 	// bitfield pos{0,1,3}: the guard must admit 4 — i.e. bound the WIDTH (255),
 	// never the flag mask (0xb).
-	if strings.Contains(m, "~@as(u64, 0xb)") {
+	if containsCode(m, "~@as(u64, 0xb)") {
 		t.Errorf("the withdrawn flag-mask guard was emitted:\n%s", m)
 	}
-	if !strings.Contains(m, "if (value > 255) { self.inv = true; return; } ") {
+	if !containsCode(m, "if (value > 255) { self.inv = true; return; } ") {
 		t.Errorf("the bitfield width bound is missing:\n%s", m)
 	}
 }
@@ -1626,15 +1626,15 @@ messages:
 		"                else => .dead,",
 		"            else => .dead,",
 	} {
-		if !strings.Contains(m, want) {
+		if !containsCode(m, want) {
 			t.Errorf("message.zig missing %q:\n%s", want, m)
 		}
 	}
 	// The defects themselves.
-	if strings.Contains(m, ".unsigned, .signed =>") {
+	if containsCode(m, ".unsigned, .signed =>") {
 		t.Errorf("the integer kinds must not share one arrayBegin arm (#270):\n%s", m)
 	}
-	if strings.Contains(m, "else => self.cur,") {
+	if containsCode(m, "else => self.cur,") {
 		t.Errorf("`else => self.cur` lets a skipped subtree's children bind into the enclosing scope (#268/#272):\n%s", m)
 	}
 }
@@ -1664,10 +1664,10 @@ messages:
 		"        }\n" +
 		"        self.cur = .dead;\n" +
 		"    }"
-	if !strings.Contains(m, want) {
+	if !containsCode(m, want) {
 		t.Errorf("a scalar-only message must still override sequenceBegin to skip:\n%s", m)
 	}
-	if !strings.Contains(m, "pub fn sequenceEnd(") {
+	if !containsCode(m, "pub fn sequenceEnd(") {
 		t.Errorf("sequenceEnd must accompany it, or the stack never unwinds:\n%s", m)
 	}
 }
@@ -1702,21 +1702,21 @@ messages:
 
 	// Zig's hook is the only one in the family that RETURNS an error rather than
 	// setting a sticky flag, so the reject is `return sofab.Error.InvalidMessage`.
-	if !strings.Contains(m, "pub fn fixlenBegin(self: *_dec_M, id: sofab.Id, subtype: sofab.FixlenType, total: usize) sofab.Error!void {") {
+	if !containsCode(m, "pub fn fixlenBegin(self: *_dec_M, id: sofab.Id, subtype: sofab.FixlenType, total: usize) sofab.Error!void {") {
 		t.Fatal("no fixlenBegin, or the wrong signature (it must be fallible)")
 	}
-	if !strings.Contains(m, ".string => switch (self.cur) {") ||
-		!strings.Contains(m, "0 => if (total > 8) return sofab.Error.InvalidMessage,") {
+	if !containsCode(m, ".string => switch (self.cur) {") ||
+		!containsCode(m, "0 => if (total > 8) return sofab.Error.InvalidMessage,") {
 		t.Error("a scalar string maxlen must be latched under .string")
 	}
-	if !strings.Contains(m, ".blob => switch (self.cur) {") ||
-		!strings.Contains(m, "1 => if (total > 4) return sofab.Error.InvalidMessage,") {
+	if !containsCode(m, ".blob => switch (self.cur) {") ||
+		!containsCode(m, "1 => if (total > 4) return sofab.Error.InvalidMessage,") {
 		t.Error("a scalar blob maxlen must be latched under .blob")
 	}
-	if !strings.Contains(m, ".root_sa => { if (id >= 3) return sofab.Error.InvalidMessage; if (total > 6) return sofab.Error.InvalidMessage; },") {
+	if !containsCode(m, ".root_sa => { if (id >= 3) return sofab.Error.InvalidMessage; if (total > 6) return sofab.Error.InvalidMessage; },") {
 		t.Error("a wrapper element must latch over-index then element maxlen")
 	}
-	if strings.Count(m, "total > 8") < 2 {
+	if countCode(m, "total > 8") < 2 {
 		t.Error("the payload-side maxlen guard must remain as defense")
 	}
 }
@@ -1765,13 +1765,13 @@ messages:
 		"if (id >= 3) { self.inv = true; self.an = 0; } else if (count > 4) { self.inv = true; self.an = 0; }",
 		"sofab.arrays.at(self.m.mat, id).* = sofab.arrays.allocN(u32, self.alloc, count);",
 	} {
-		if !strings.Contains(m, want) {
+		if !containsCode(m, want) {
 			t.Errorf("message.zig missing %q:\n%s", want, m)
 		}
 	}
 	// The capped reservation is gone entirely: every allocation is now the exact
 	// one, and a remaining allocCapped would be an arm that skipped its bound.
-	if strings.Contains(m, "allocCapped") {
+	if containsCode(m, "allocCapped") {
 		t.Errorf("no array may still be reserved capped and grown into:\n%s", m)
 	}
 }
@@ -1842,13 +1842,13 @@ messages:
 		// and the flag is surfaced as the policy category, never as INVALID.
 		"if (v.lim) return error.LimitExceeded;",
 	} {
-		if !strings.Contains(m, want) {
+		if !containsCode(m, want) {
 			t.Errorf("message.zig missing wrapper index cap %q:\n%s", want, m)
 		}
 	}
 	// One implementation (§6.2.1): the index cap is compared in the corelib, so
 	// nothing in the generated layer -- fixlenBegin included -- may test it too.
-	if strings.Contains(m, "id >= max_dyn_array_count") {
+	if containsCode(m, "id >= max_dyn_array_count") {
 		t.Errorf("a receiver index cap must not also be a generated guard:\n%s", m)
 	}
 	// The uncapped helpers stay the SCHEMA-bounded entry points, so an unbounded
@@ -1859,13 +1859,13 @@ messages:
 		"sofab.arrays.grow(MDobjsElem,",
 		"sofab.arrays.grow([]const u32, self.alloc, &(self.m.dmat)",
 	} {
-		if strings.Contains(m, gone) {
+		if containsCode(m, gone) {
 			t.Errorf("an unbounded array must not use the uncapped helper %q:\n%s", gone, m)
 		}
 	}
 	// The cap governs only what the schema left unbounded (§9.5): a count:N array
 	// keeps its own bound and its own category.
-	if !strings.Contains(m, ".root_bstrs => if (id >= 4) { self.inv = true; }") {
+	if !containsCode(m, ".root_bstrs => if (id >= 4) { self.inv = true; }") {
 		t.Errorf("a count:N wrapper array must keep its INVALID schema bound:\n%s", m)
 	}
 }
@@ -1935,13 +1935,13 @@ messages:
 		// bound alone.
 		".root_es => { if (total > max_dyn_string_len) return sofab.Error.LimitExceeded; },",
 	} {
-		if !strings.Contains(hook, want) {
+		if !containsCode(hook, want) {
 			t.Errorf("fixlenBegin missing %q:\n%s", want, hook)
 		}
 	}
 	// The bounded field must not pick the cap up as well: one length bound per
 	// field, chosen by whether the schema declared one.
-	if strings.Contains(hook, "2 => if (total > max_dyn_string_len)") {
+	if containsCode(hook, "2 => if (total > max_dyn_string_len)") {
 		t.Errorf("a maxlen-bounded field must not also carry the receiver cap:\n%s", hook)
 	}
 }
@@ -1981,7 +1981,7 @@ messages:
 		"        return p;",
 		"    }",
 	}, "\n")
-	if !strings.Contains(m, takeStr) {
+	if !containsCode(m, takeStr) {
 		t.Errorf("_takeStr must validate the source before it copies:\n%s", m)
 	}
 	takeStrCapped := strings.Join([]string{
@@ -1990,17 +1990,17 @@ messages:
 		"        return self._takeStr(total, offset, chunk);",
 		"    }",
 	}, "\n")
-	if !strings.Contains(m, takeStrCapped) {
+	if !containsCode(m, takeStrCapped) {
 		t.Errorf("_takeStrCapped must refuse over-cap through the corelib before the string bind:\n%s", m)
 	}
 	// The arms carry no UTF-8 code of their own any more: every utf8Valid call
 	// in the file is one of the two inside _takeStr.
-	if got := strings.Count(m, "sofab.utf8Valid("); got != 2 {
+	if got := countCode(m, "sofab.utf8Valid("); got != 2 {
 		t.Errorf("want utf8Valid only inside _takeStr (2 calls), got %d:\n%s", got, m)
 	}
 	blob := m[strings.Index(m, "pub fn blob("):]
 	blob = blob[:strings.Index(blob, "\n    }")]
-	if !strings.Contains(blob, "2 => if (total > 8) { self.inv = true; } else { const chunk = self._take(total, offset, _chunk) orelse return; self.m.bb = chunk; },") {
+	if !containsCode(blob, "2 => if (total > 8) { self.inv = true; } else { const chunk = self._take(total, offset, _chunk) orelse return; self.m.bb = chunk; },") {
 		t.Errorf("blob must stay on the plain _take bind, stored verbatim:\n%s", blob)
 	}
 }
@@ -2024,13 +2024,13 @@ messages:
 		t.Fatalf("generate: %v", err)
 	}
 	m := string(files[0].Content)
-	if strings.Contains(m, "fn _takeStr(self: *_dec_B,") || strings.Contains(m, "fn _takeStrCapped(self: *_dec_B,") {
+	if containsCode(m, "fn _takeStr(self: *_dec_B,") || containsCode(m, "fn _takeStrCapped(self: *_dec_B,") {
 		t.Errorf("a decoder without strings must not emit the string binds:\n%s", m)
 	}
-	if !strings.Contains(m, "fn _takeStr(self: *_dec_S,") {
+	if !containsCode(m, "fn _takeStr(self: *_dec_S,") {
 		t.Errorf("a decoder with a bounded string must emit _takeStr:\n%s", m)
 	}
-	if strings.Contains(m, "fn _takeStrCapped(self: *_dec_S,") {
+	if containsCode(m, "fn _takeStrCapped(self: *_dec_S,") {
 		t.Errorf("a decoder whose only string is schema-bounded must not emit _takeStrCapped:\n%s", m)
 	}
 }
@@ -2055,16 +2055,30 @@ func TestZigHarnessWithoutMessagesLeavesNothingUnused(t *testing.T) {
 		return ""
 	}
 	none := harness("version: 1\n$defs:\n  struct:\n    P: { x: { id: 0, type: u8 } }\n")
-	if !strings.Contains(none, "fn benchMain(_: std.mem.Allocator, _: []const u8, _: []const u8) !void {") {
+	if !containsCode(none, "fn benchMain(_: std.mem.Allocator, _: []const u8, _: []const u8) !void {") {
 		t.Errorf("message-less benchMain does not discard its parameters:\n%s", none)
 	}
-	if strings.Contains(none, "const out = &stdout.interface;") {
+	if containsCode(none, "const out = &stdout.interface;") {
 		t.Errorf("message-less main declares a stdout writer nothing uses:\n%s", none)
 	}
 	one := harness("version: 1\nmessages:\n  m: { payload: { a: { id: 0, type: u32 } } }\n")
 	for _, want := range []string{"fn benchMain(alloc: std.mem.Allocator, w: []const u8, input: []const u8) !void {", "const out = &stdout.interface;"} {
-		if !strings.Contains(one, want) {
+		if !containsCode(one, want) {
 			t.Errorf("harness with a message lacks %q", want)
 		}
 	}
 }
+
+// flat collapses every run of whitespace, line breaks included, to one space.
+// The emitted Zig is laid out the way `zig fmt` lays it out (layoutZig), so a
+// block that the emitters compose on one line reaches the file spread over
+// several; the assertions in this file are about the CODE -- which tokens, in
+// which order -- and compare both sides flattened. The layout itself is held to
+// zig fmt by tests/conformance/zig/run.sh.
+func flat(s string) string { return strings.Join(strings.Fields(s), " ") }
+
+// containsCode is strings.Contains over flattened code (see flat).
+func containsCode(code, want string) bool { return strings.Contains(flat(code), flat(want)) }
+
+// countCode is strings.Count over flattened code (see flat).
+func countCode(code, want string) int { return strings.Count(flat(code), flat(want)) }
