@@ -905,10 +905,18 @@ func (g *gen) emitStruct(f *hfile, name, summary string, fields []*ir.Field, isM
 	// the schema maxlen and the §6.2.1 cap are arguments to readString/readBlob,
 	// which measure the announced length themselves and behind the §7.3 tag test.
 	// Leaving the parameter unnamed is how that is kept true -- a named _size is
-	// the raw material of a guard in front of the read.
+	// the raw material of a guard in front of the read. On the clib path it is
+	// named only when a string or blob arm reads it: a message without one would
+	// otherwise carry an unused parameter, which -Wextra reports and a user's
+	// -Werror build turns into an error.
 	sizeParam := "std::size_t"
 	if g.clib {
-		sizeParam = "std::size_t _size"
+		for _, fld := range fields {
+			if fld.Kind == ir.KindString || fld.Kind == ir.KindBlob {
+				sizeParam = "std::size_t _size"
+				break
+			}
+		}
 	}
 	// The wire element count (_count) is passed to the c-cpp wrapper's readArray,
 	// which takes it in both storage modes: it bounds the count before a dynamic
@@ -1464,7 +1472,15 @@ func (g *gen) emitDeserialize(f *hfile, fld *ir.Field) {
 		// type.
 		if g.clib {
 			if fld.Kind == ir.KindEnum {
+				// The wrapper's read() only takes the reference's ADDRESS and hands it
+				// to the C runtime, which fills sizeof(backing) bytes; no C++ access
+				// goes through the cast lvalue, so -Wstrict-aliasing (on by -Wall from
+				// -O2 and -Os, for a backing wider than a byte) is a false positive
+				// here, silenced for this one statement.
+				f.line("#pragma GCC diagnostic push")
+				f.line(`#pragma GCC diagnostic ignored "-Wstrict-aliasing"`)
 				f.line("            is.read(reinterpret_cast<%s &>(%s));", enumBacking(fld.Ref.Target), acc)
+				f.line("#pragma GCC diagnostic pop")
 			} else {
 				f.line("            is.read(%s);", acc)
 			}

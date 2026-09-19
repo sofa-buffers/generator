@@ -111,8 +111,12 @@ CC  ?= gcc
 # C++20 for the harness (corelib-cpp requires concepts, std::span).
 CSTD   ?= -std=c99
 CXXSTD ?= -std=c++20
+# Warnings for the generated code and the harness, kept apart from CXXFLAGS so
+# overriding those keeps them. The generated code builds clean under these; add
+# -Werror to make any warning fatal. The vendored JSON reader is not covered.
+WARNFLAGS ?= -Wall -Wextra
 CFLAGS   ?= -O2
-CXXFLAGS ?= -O2 -Wall
+CXXFLAGS ?= -O2
 INCLUDES := -I. -I$(SOFAB_CPP_DIR)/include -I$(SOFAB_C_DIR)/test/shared
 
 .PHONY: all
@@ -126,7 +130,7 @@ sofab_test_json.o: $(SOFAB_C_DIR)/test/shared/sofab_test_json.c
 	$(CC) $(CSTD) $(CFLAGS) -I$(SOFAB_C_DIR)/test/shared -c $< -o $@
 
 harness/harness: harness/main.cpp sofab_test_json.o
-	$(CXX) $(CXXSTD) $(CXXFLAGS) $(INCLUDES) harness/main.cpp sofab_test_json.o -o $@
+	$(CXX) $(CXXSTD) $(WARNFLAGS) $(CXXFLAGS) $(INCLUDES) harness/main.cpp sofab_test_json.o -o $@
 
 .PHONY: clean
 clean:
@@ -153,7 +157,11 @@ CXXSTD ?= -std=c++20
 # These are safe for every corelib-c-cpp build and cut .text with zero wire/API
 # impact; override C/CXXFLAGS to change them.
 CFLAGS   ?= -Os -ffunction-sections -fdata-sections
-CXXFLAGS ?= -Os -Wall -ffunction-sections -fdata-sections -fno-exceptions -fno-rtti
+CXXFLAGS ?= -Os -ffunction-sections -fdata-sections -fno-exceptions -fno-rtti
+# Warnings for the generated code and the harness, kept apart from CXXFLAGS so
+# overriding those keeps them. The generated code builds clean under these; add
+# -Werror to make any warning fatal. The corelib's C sources are not covered.
+WARNFLAGS ?= -Wall -Wextra
 LDFLAGS  ?= -Wl,--gc-sections
 INCLUDES := -I. -I$(SOFAB_C_DIR)/src/include -I$(SOFAB_C_DIR)/test/shared
 
@@ -172,7 +180,7 @@ sofab_test_json.o: $(SOFAB_C_DIR)/test/shared/sofab_test_json.c
 	$(CC) $(CSTD) $(CFLAGS) -I$(SOFAB_C_DIR)/src/include -I$(SOFAB_C_DIR)/test/shared -c $< -o $@
 
 harness/harness: harness/main.cpp $(COBJS)
-	$(CXX) $(CXXSTD) $(CXXFLAGS) $(INCLUDES) harness/main.cpp $(COBJS) $(LDFLAGS) -o $@
+	$(CXX) $(CXXSTD) $(WARNFLAGS) $(CXXFLAGS) $(INCLUDES) harness/main.cpp $(COBJS) $(LDFLAGS) -o $@
 
 .PHONY: clean
 clean:
@@ -236,7 +244,21 @@ func (g *gen) emitJSONFns(f *hfile, typeName string, fields []*ir.Field) {
 	f.blank()
 }
 
+// deprecatedAccess wraps a harness access to a [[deprecated]] member in a local
+// -Wdeprecated-declarations suppression. The harness reads and writes such a
+// member by name on purpose, and without it the project would not build under
+// -Werror. It returns the closing pragma for the caller to defer.
+func deprecatedAccess(f *hfile, fld *ir.Field) func() {
+	if !fld.Deprecated {
+		return func() {}
+	}
+	f.line("#pragma GCC diagnostic push")
+	f.line(`#pragma GCC diagnostic ignored "-Wdeprecated-declarations"`)
+	return func() { f.line("#pragma GCC diagnostic pop") }
+}
+
 func (g *gen) emitToJSON(f *hfile, fld *ir.Field) {
+	defer deprecatedAccess(f, fld)()
 	acc := "o." + cppIdent(fld.Name)
 	switch fld.Kind {
 	case ir.KindU8, ir.KindU16, ir.KindU32, ir.KindU64, ir.KindBitfield:
@@ -292,6 +314,7 @@ func (g *gen) toJSONArray(f *hfile, ind, expr string, elem ir.Kind, ref *ir.Type
 }
 
 func (g *gen) emitFromJSON(f *hfile, fld *ir.Field) {
+	defer deprecatedAccess(f, fld)()
 	acc := "o." + cppIdent(fld.Name)
 	f.line("    c = sofab_json_get(j, %q);", fld.Name)
 	f.line("    if (c) {")
@@ -378,7 +401,11 @@ func (g *gen) fromJSONArray(f *hfile, ind, node, target string, elem ir.Kind, re
 	case ir.KindBlob:
 		f.line("%s{ %s _b{}; json_to_bytes(%s, _b); %s.push_back(std::move(_b)); }", inner, g.cppArrayElem(elem, ref, items, elemMaxHas, elemMax), ev, target)
 	case ir.KindStruct, ir.KindUnion:
-		f.line("%s{ %s %s; from_json(%s, %s); %s.push_back(std::move(%s)); }", inner, g.typeName(ref.Key), vv, ev, vv, target, vv)
+		// Value-initialised ({}), like the blob and row temporaries: the object is
+		// zeroed before its constructor runs, so no member the corelib base leaves
+		// without an initialiser is read by the move below -- g++ reports that read
+		// under -Wmaybe-uninitialized.
+		f.line("%s{ %s %s{}; from_json(%s, %s); %s.push_back(std::move(%s)); }", inner, g.typeName(ref.Key), vv, ev, vv, target, vv)
 	case ir.KindArray:
 		icont := g.cppArrayContainer(items.Elem, items.ElemRef, items.ElemItems, items.Count, items.ElemMaxHas, items.ElemMax)
 		f.line("%s{ %s %s{};", inner, icont, vv)

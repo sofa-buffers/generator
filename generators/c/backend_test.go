@@ -120,6 +120,14 @@ func TestDeterministic(t *testing.T) {
 	}
 }
 
+// strictWarnings is the warning policy every build of generated C in these tests
+// applies (ARCHITECTURE §12): a warning in generated code is an error in a user's
+// -Werror build, so it is one here. strictMakeVar hands the same flags to a
+// generated project's Makefile, which reads them from WARNFLAGS.
+var strictWarnings = []string{"-Wall", "-Wextra", "-Werror"}
+
+var strictMakeVar = "WARNFLAGS=" + strings.Join(strictWarnings, " ")
+
 // TestCompilesAgainstCorelib is the real build gate: it compiles the generated
 // sources against corelib-c-cpp with gcc. It runs only when SOFAB_C_CORELIB
 // points at a corelib-c-cpp checkout and gcc is present; otherwise it skips
@@ -140,10 +148,10 @@ func TestCompilesAgainstCorelib(t *testing.T) {
 		}
 	}
 	inc := filepath.Join(corelib, "src", "include")
-	cmd := exec.Command(gcc, "-std=c99", "-Wall", "-Wextra",
-		"-I"+inc, "-I"+dir, "-c", filepath.Join(dir, "myfirstmessage.c"),
+	args := append([]string{"-std=c99"}, strictWarnings...)
+	args = append(args, "-I"+inc, "-I"+dir, "-c", filepath.Join(dir, "myfirstmessage.c"),
 		"-o", filepath.Join(dir, "msg.o"))
-	if out, err := cmd.CombinedOutput(); err != nil {
+	if out, err := exec.Command(gcc, args...).CombinedOutput(); err != nil {
 		t.Fatalf("generated C failed to compile against corelib:\n%s", out)
 	}
 }
@@ -1031,5 +1039,38 @@ messages:
 	}
 	if strings.Contains(c, "FIELDTYPE_UNSIGNED") || strings.Contains(c, "FIELDTYPE_ARRAY_UNSIGNED") {
 		t.Errorf("m.c still describes a boolean as unsigned (§4.4):\n%s", c)
+	}
+}
+
+// TestHarnessEmitsOnlyCalledJSONHelpers: the project harness's static JSON
+// helpers are emitted only when the harness calls them. An uncalled static
+// function is a -Wunused-function diagnostic, so a schema with no string or blob
+// field must not carry the string/blob helpers.
+func TestHarnessEmitsOnlyCalledJSONHelpers(t *testing.T) {
+	helpers := []string{"json_str", "json_bytes", "json_to_str", "json_to_bytes"}
+	hs := genCProject(t, `
+version: 1
+messages:
+  M:
+    payload:
+      a: { id: 0, type: u8 }
+`)["harness/main.c"]
+	for _, h := range helpers {
+		if strings.Contains(hs, h+"(") {
+			t.Errorf("harness defines or calls %s with no string or blob field:\n%s", h, hs)
+		}
+	}
+	hs = genCProject(t, `
+version: 1
+messages:
+  M:
+    payload:
+      s: { id: 0, type: string, maxlen: 8 }
+      b: { id: 1, type: blob, maxlen: 8 }
+`)["harness/main.c"]
+	for _, h := range helpers {
+		if !strings.Contains(hs, "static ") || !strings.Contains(hs, " "+h+"(") {
+			t.Errorf("harness must define %s when it calls it:\n%s", h, hs)
+		}
 	}
 }
