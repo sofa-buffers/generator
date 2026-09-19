@@ -50,6 +50,23 @@ echo "==> publishing corelib-kotlin-mp $VER to the local Maven repo"
 ( cd "$CORELIB" && "$GRADLEW" --console=plain -q \
     publishJvmPublicationToMavenLocal publishKotlinMultiplatformPublicationToMavenLocal )
 
+# Warnings are errors for every compilation of generated code (ARCHITECTURE §12
+# gate 9): an init script sets allWarningsAsErrors on every Kotlin compile task
+# of the build it is handed. It is not handed to the corelib publish above --
+# corelib warnings are out of scope. The property is set unconditionally on any
+# task named compile*Kotlin*, so a plugin that moved it fails the build loudly
+# instead of dropping the gate.
+cat > "$WORK/werror.gradle" <<'GRADLE'
+allprojects {
+    tasks.configureEach { t ->
+        if (t.name.startsWith("compile") && t.name.contains("Kotlin")) {
+            t.compilerOptions.allWarningsAsErrors.set(true)
+        }
+    }
+}
+GRADLE
+KT_STRICT="--init-script $WORK/werror.gradle"
+
 cat > "$WORK/cfg.yaml" <<'YAML'
 generic: { emit: project }
 targets: { kotlin: { package: message } }
@@ -72,7 +89,7 @@ python3 "$ROOT/tests/conformance/lib/check_vectors_decode.py" --emit-schema \
 
 build() {
     ( cd "$ROOT" && go run ./cmd/sofabgen --config "${3:-$WORK/cfg.yaml}" --lang kotlin --in "$1" --out "$2" )
-    ( cd "$2" && "$GRADLEW" --console=plain -q -Psofab.version="$VER" installDist )
+    ( cd "$2" && "$GRADLEW" --console=plain -q $KT_STRICT -Psofab.version="$VER" installDist )
 }
 
 echo "==> generating + building example + conformance projects"
@@ -166,7 +183,7 @@ check_maxsize_fill kotlin "$WORK/fill/build/install/harness/bin/harness" encode 
 # install image is unchanged for every row that uses $H.
 echo "==> a decoded message owns its bytes (CORELIB_PLAN §6.7, generator#412)"
 cp "$ROOT/tests/conformance/kotlin/OwnershipCheck.kt" "$WORK/ex/src/main/kotlin/message/"
-( cd "$WORK/ex" && "$GRADLEW" --console=plain -q -Psofab.version="$VER" installDist )
+( cd "$WORK/ex" && "$GRADLEW" --console=plain -q $KT_STRICT -Psofab.version="$VER" installDist )
 # The JDK is the one exported above, never the one on PATH: the Kotlin Gradle
 # plugin refuses a newer JDK, and this repo's devcontainer keeps a newer one as
 # the default.
@@ -837,11 +854,11 @@ kotlin {
     }
 }
 KTS
-( cd "$WORK/mp" && "$GRADLEW" --console=plain -q compileCommonMainKotlinMetadata ) \
+( cd "$WORK/mp" && "$GRADLEW" --console=plain -q $KT_STRICT compileCommonMainKotlinMetadata ) \
     || { echo "FAIL: the generated sources are not commonMain-clean"; exit 1; }
 echo "==> commonMain type-check OK"
 
-echo "==> corpus + realworld: every definition compiles"
+echo "==> corpus + realworld: every definition compiles, warnings as errors"
 mkdir -p "$WORK/corpus"
 # One Gradle project per definition would pay the toolchain cost N times, so the
 # corpus is compiled as ONE project with a source set per definition -- each in
@@ -866,7 +883,7 @@ YAML
     ( cd "$ROOT" && go run ./cmd/sofabgen --config "$WORK/corpuscfg.yaml" --lang kotlin --in "$def" --out "$WORK/corpus" >/dev/null )
     ndefs=$((ndefs + 1))
 done
-( cd "$WORK/corpus" && "$GRADLEW" --console=plain -q compileKotlin ) \
+( cd "$WORK/corpus" && "$GRADLEW" --console=plain -q $KT_STRICT compileKotlin ) \
     || { echo "FAIL: corpus definitions did not compile"; exit 1; }
 echo "==> corpus compiles ($ndefs definitions incl. the realworld example)"
 
