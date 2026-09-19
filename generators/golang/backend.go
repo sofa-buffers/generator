@@ -53,6 +53,9 @@ func (*Backend) Generate(s *ir.Schema, cfg map[string]any) ([]generator.File, er
 	if g.sizeErr != nil {
 		return nil, g.sizeErr
 	}
+	if g.fmtErr != nil {
+		return nil, g.fmtErr
+	}
 	return files, nil
 }
 
@@ -66,6 +69,22 @@ type gen struct {
 	// the emit path, which has no error channel of its own.
 	size    generator.SizePolicy
 	sizeErr error
+	// fmtErr carries the first file go/format could not parse (see render).
+	fmtErr error
+}
+
+// render finishes a file through gofile.bytes. The emit path has no error
+// channel, so a file go/format rejects is recorded here, named, and returned by
+// Generate instead of any output.
+func (g *gen) render(f *gofile, name string) []byte {
+	out, err := f.bytes(g.banner, g.license)
+	if err != nil {
+		if g.fmtErr == nil {
+			g.fmtErr = fmt.Errorf("go backend: generated %s is not valid Go (a generator bug): %w", name, err)
+		}
+		return nil
+	}
+	return out
 }
 
 // messageSize resolves a message's worst-case encoded size via the shared walk
@@ -283,7 +302,7 @@ type _isDefaulter interface{ isDefault() bool }`)
 		f.line("// entry left out is a caller mistake (sofab.ErrArgument), not a looser bound.")
 		f.line("%s", g.capsDecl())
 	}
-	return f.bytes(g.banner, g.license)
+	return g.render(f, "sofab_visitor.go")
 }
 
 // ---- types.go : all named types -----------------------------------------
@@ -306,7 +325,7 @@ func (g *gen) typesFile() []byte {
 			g.emitObject(f, g.typeName(key), nt.Fields)
 		}
 	}
-	return f.bytes(g.banner, g.license)
+	return g.render(f, "types.go")
 }
 
 func (g *gen) emitEnum(f *gofile, nt *ir.NamedType) {
@@ -1487,7 +1506,7 @@ func (g *gen) messageFile(m *ir.Message) []byte {
 	f.line("\t}")
 	f.line("\treturn m, nil")
 	f.line("}")
-	return f.bytes(g.banner, g.license)
+	return g.render(f, strings.ToLower(m.Name)+".go")
 }
 
 // wireMaxDepth is the format's MAX_DEPTH (corelib-go sofab.MaxDepth, §4.9): the
