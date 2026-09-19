@@ -157,9 +157,14 @@ func (g *gen) harness(s *ir.Schema) []byte {
 
 // benchSinkField names one cheap integer scalar of m, folded in the bench loop so
 // the decode cannot be elided. It runs inside the measured loop, so it must stay
-// cheap -- serializing would be counted as decode cost.
+// cheap -- serializing would be counted as decode cost. A deprecated field is
+// passed over: it carries [Obsolete], and reading it from the harness is CS0612
+// in generated code.
 func benchSinkField(m *ir.Message) string {
 	for _, f := range m.Fields {
+		if f.Deprecated {
+			continue
+		}
 		switch f.Kind {
 		case ir.KindU8, ir.KindU16, ir.KindU32, ir.KindU64,
 			ir.KindI8, ir.KindI16, ir.KindI32, ir.KindI64:
