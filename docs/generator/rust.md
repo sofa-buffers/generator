@@ -68,3 +68,18 @@ Two things worth knowing before switching it off under `corelib: rs`:
 
 This is the Rust analogue of the C++ [`allow_dynamic`](cpp.md#allow_dynamic),
 and behaves the same way.
+
+## Including the generated module
+
+The generated code builds clean under `RUSTFLAGS="-D warnings"` and
+`cargo clippy -- -D warnings`. It carries no crate- or module-wide lint
+`allow`, so declare the module the way you would any library surface:
+
+```rust
+pub mod message;
+use message::*;
+```
+
+Declared private (`mod message;`), every part of the API your crate does not
+call is dead code to rustc and warns. With `no_std` on, the generated crate is a
+lib that re-exports the module, so a dependent crate has nothing to declare.

@@ -5599,7 +5599,7 @@ A reimplementation is **conformant** when it reproduces these gates:
    |---|---|---|
    | c | `-Wall -Wextra -Werror` | `WARNFLAGS` in `tests/conformance/c/run.sh`, exported; the Go gated tests pass the same flags |
    | cpp (all four profiles) | `-Wall -Wextra -Werror` | `WARNFLAGS` in `tests/conformance/cpp/run.sh`, exported |
-   | rust / rs-no-std (every storage mode and feature set the suite builds) | `-D warnings`; plus `cargo clippy` with no deny-level finding on the example crate | `RUSTFLAGS` in `tests/conformance/rust/run.sh`, exported |
+   | rust / rs-no-std (every storage mode and feature set the suite builds) | `-D warnings`; plus `cargo clippy --all-targets -- -D warnings` on the example, the conformance messages and every corpus and realworld crate | `RUSTFLAGS` in `tests/conformance/rust/run.sh`, exported |
    | go | `go vet` with no finding (the compiler already rejects unused imports and variables) | a sweep at the end of `tests/conformance/go/run.sh` over every module under the run's work dir; the Go gated tests vet before they build |
    | python (both engines) | `ruff check --select F,E9` (pyflakes + syntax errors), ruff pinned to one version; every process under `PYTHONWARNINGS=error` | `RUFF_VERSION` and a sweep at the end of `tests/conformance/python/run.sh`; `PYTHONWARNINGS` exported once, after the accelerator build |
    | java | `javac -Xlint:all -Werror` | the generated pom compiles with `-Xlint:all`; `MVN_STRICT` (`-Dmaven.compiler.failOnWarning=true`) on every `mvn package` of a generated project and `JAVAC_STRICT` on the corpus `javac` loop in `tests/conformance/java/run.sh` |
@@ -5642,14 +5642,39 @@ A reimplementation is **conformant** when it reproduces these gates:
    `allow(clippy::approx_constant)` on the two impls that spell a float default
    (the lint is deny by default and fires on a schema default such as
    3.141592653589793). `RUSTFLAGS` also reaches the corelib, which cargo builds
-   as a path dependency. clippy's **warn-level** lints are not gated: the
-   generated visitor still carries a backlog (single-arm and wildcard-only
-   matches, `} if` on one line, needless `return`, `let _ =` on a unit `push`,
-   same-type `as` casts, derivable `Default` impls, and the `a < lo || a > hi`
-   width checks clippy would spell `!(lo..=hi).contains(&a)` — that one is kept
-   on purpose: measured on thumbv6m, the `contains` form costs 111 bytes of
-   `.text` on the vehicle_telemetry no_std crate), so the clippy call runs with
-   `-D warnings` lifted and fails only on a deny-level finding.
+   as a path dependency.
+
+   clippy is gated with **every** lint it warns on denied, the setting a Rust CI
+   usually runs. The generated code meets it in two ways. Where a shape could
+   simply be written the way clippy asks, the emitter writes it so: a reject
+   guard ends its statement with `;` (so `} if` / `} {` on one line do not read
+   as a missing `else`), and a matrix row, already a reference out of the outer
+   `.iter()`, is not borrowed again. Two style shapes are kept and allowed on
+   the one item that has them. The flat visitor's `impl` carries
+   `allow(clippy::single_match, match_single_binding, collapsible_match,
+   needless_return, unnecessary_cast, let_unit_value, unnecessary_operation,
+   manual_range_contains)`: its arms are stamped per field from one template, so
+   a one-arm match, an arm-ending guard, a cast that is a no-op only for the
+   widest element type, and a `push` that returns `()` under alloc but a
+   `Result` under heapless are the shapes every field shares.
+   `manual_range_contains` is kept on purpose: measured on thumbv6m, the
+   `!(lo..=hi).contains(&a)` form costs 111 bytes of `.text` on the
+   vehicle_telemetry no_std crate. Every `impl Default` carries
+   `allow(clippy::derivable_impls)`: one spelled-out shape serves a struct with
+   declared defaults and one without. Every lint allowed is a clippy
+   style/complexity lint; nothing in `correctness` or `suspicious` is. A lint
+   clippy has renamed or split across releases (the missing-`else` one is
+   `possible_missing_else` in newer releases) is fixed in the emitted shape
+   rather than allowed by name, since an allow naming a lint an older clippy
+   does not know is itself a warning there.
+
+   The std harness's `pub mod message;` is the integration contract as well: a
+   consumer that declares the module private (`mod message;`) and calls only
+   part of it gets rustc's `dead_code` warnings on the rest, as it would for any
+   private module. docs/generator/rust.md says so. A schema with no message
+   (a `$defs`-only file) gets a harness that imports nothing it does not use and
+   dispatches on nothing, and its no_std/alloc lib root pulls `extern crate
+   alloc` when a shared struct, not only a message, holds an alloc container.
 
    Go and Python are checked by a **sweep** rather than per leg: each suite
    ends by vetting (`go vet ./...`) or linting (`ruff`) everything under its
