@@ -134,7 +134,13 @@ func (g *gen) emitBench(f *kfile, s *ir.Schema) {
 		f.line("        benchSink = benchSink xor obj.encode().size.toLong()")
 		f.line("    } else {")
 		if sink != nil {
-			f.line("        benchSink = benchSink xor %s.decode(wire).%s.toLong()", mt, ktIdent(sink.Name))
+			// An i64 field already is a Long: `.toLong()` on it is a compiler
+			// warning (redundant call of conversion method).
+			conv := ".toLong()"
+			if sink.Kind == ir.KindI64 {
+				conv = ""
+			}
+			f.line("        benchSink = benchSink xor %s.decode(wire).%s%s", mt, ktIdent(sink.Name), conv)
 		} else {
 			f.line("        benchSink = benchSink xor %s.decode(wire).hashCode().toLong()", mt)
 		}

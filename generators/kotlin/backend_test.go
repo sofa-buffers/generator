@@ -1786,7 +1786,8 @@ func TestKotlinNarrowEnumBitfieldArrayRoundTrip(t *testing.T) {
 // with allWarningsAsErrors. DEPRECATION is never suppressed file-wide (that
 // would hide a deprecated corelib API too): only a class declaring a deprecated
 // field, a visitor writing one in any nested scope, and the JSON functions that
-// round-trip one carry it. The bench sink never picks a deprecated field.
+// round-trip one carry it. The bench sink never picks a deprecated field and
+// never converts a Long to Long.
 func TestKotlinDeprecationIsSuppressedOnlyWhereItIsRead(t *testing.T) {
 	const src = `
 version: 1
@@ -1804,6 +1805,9 @@ messages:
   Clean:
     payload:
       a: { id: 0, type: u8 }
+  Wide:
+    payload:
+      w: { id: 0, type: i64 }
 `
 	files := genFromYAML(t, src, map[string]any{"package": "p", "emit": "project"})
 	const ann = "@Suppress(\"DEPRECATION\") // generated code must still read and write deprecated fields\n"
@@ -1842,5 +1846,9 @@ messages:
 	}
 	if !strings.Contains(files["src/main/kotlin/p/Main.kt"], "Plain.decode(wire).kept.toLong()") {
 		t.Error("bench sink must skip the deprecated field")
+	}
+	// An i64 is already a Long: .toLong() would be a compiler warning.
+	if !strings.Contains(files["src/main/kotlin/p/Main.kt"], "Wide.decode(wire).w\n") {
+		t.Error("bench sink on an i64 field must not call the redundant .toLong()")
 	}
 }
