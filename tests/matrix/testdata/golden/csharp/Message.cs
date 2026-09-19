@@ -139,9 +139,7 @@ internal sealed class ScalarsVisitor : IVisitor {
     private readonly Scalars m;
     private int cur = 0;
     private const int _DEAD = -1;
-    private int ai = 0;                // index into the primitive array currently being filled
     private int askip = 0;             // elements left to discard from a wire-type-contradictory array
-    private int afill = 0;             // elements still expected by an armed native-array fill (S7.3)
     private int[] stk = new int[16];   // sequence scope stack (unboxed, was Stack<int>)
     private int sp = 0;
     public ScalarsVisitor(Scalars msg) { m = msg; }
@@ -184,7 +182,6 @@ internal sealed class ScalarsVisitor : IVisitor {
         // delivers is skipped whole -- its bytes are never copied out.
     }
     public void ArrayBegin(int id, ArrayKind kind, int count) {
-        ai = 0;
         // An array header at an id that does not declare a native array of the
         // matching element kind is a wire-type contradiction: discard its
         // `count` elements, exactly as an unknown id would be skipped.
@@ -203,23 +200,6 @@ internal sealed class ScalarsVisitor : IVisitor {
             },
             _ => 0,
         };
-        afill = kind switch {
-            ArrayKind.Unsigned => (cur, id) switch {
-                _ => 0,
-            },
-            ArrayKind.Signed => (cur, id) switch {
-                _ => 0,
-            },
-            ArrayKind.Fp32 => (cur, id) switch {
-                _ => 0,
-            },
-            ArrayKind.Fp64 => (cur, id) switch {
-                _ => 0,
-            },
-            _ => 0,
-        };
-        switch ((cur, id)) {
-        }
     }
     public void SequenceBegin(int id) {
         if (sp == stk.Length) System.Array.Resize(ref stk, sp * 2);

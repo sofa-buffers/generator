@@ -1059,6 +1059,94 @@ messages:
 	}
 }
 
+// The same rule for every other (cur, id) dispatch: a callback whose kind the
+// schema never declares has no arm, and `switch ((cur, id)) { }` is CS1522
+// "Empty switch block". The primitive-array fill index `ai` and the fill counter
+// `afill` are read only by a native-array fill, so a schema without one must not
+// declare them either (CS0414 "assigned but its value is never used"). Both are
+// warnings in a file the consumer must not edit, and fatal under
+// TreatWarningsAsErrors. The u32-only schema is the reproduction of the defect;
+// the string-only one covers Unsigned, the one callback it leaves empty.
+func TestCsKindFreeCallbacksEmitNoEmptySwitch(t *testing.T) {
+	cases := []struct {
+		name, src string
+		empty     []string // callbacks with no arm: no switch at all
+		kept      []string // callbacks that do dispatch
+	}{
+		{"only u32", `
+version: 1
+messages:
+  m:
+    payload:
+      a: { id: 0, type: u32 }
+`, []string{"Signed(int id,", "Fp32(int id,", "Fp64(int id,", "ArrayBegin(int id,"}, []string{"Unsigned(int id,"}},
+		{"only string", `
+version: 1
+messages:
+  m:
+    payload:
+      s: { id: 0, type: string, maxlen: 8 }
+`, []string{"Unsigned(int id,", "Signed(int id,", "Fp32(int id,", "Fp64(int id,", "ArrayBegin(int id,"}, []string{"String(int id,"}},
+	}
+	for _, c := range cases {
+		m := buildModule(t, []byte(c.src), "kindfree.yaml", map[string]any{})
+		for _, cb := range c.empty {
+			fn := csMethod(t, m, "    public void "+cb)
+			if strings.Contains(fn, "switch ((cur, id))") {
+				t.Errorf("%s: %s declares no arm and must not open a (cur, id) switch (CS1522):\n%s", c.name, cb, fn)
+			}
+		}
+		for _, cb := range c.kept {
+			if fn := csMethod(t, m, "    public void "+cb); !strings.Contains(fn, "switch ((cur, id))") {
+				t.Errorf("%s: %s binds a field and must dispatch on (cur, id):\n%s", c.name, cb, fn)
+			}
+		}
+		for _, forbidden := range []string{"private int ai ", "ai = 0;", "[ai++]", "afill"} {
+			if strings.Contains(m, forbidden) {
+				t.Errorf("%s: a schema without a native array must not emit %q (CS0414):\n%s", c.name, forbidden, m)
+			}
+		}
+	}
+}
+
+// The gate must not overshoot: a native array still gets its fill index, its
+// fill counter and the ArrayBegin dispatch that allocates it. A native INNER row
+// (array of fp32 arrays) needs afill but has no primitive-array field, so it
+// must not get `ai`.
+func TestCsNativeArrayKeepsFillState(t *testing.T) {
+	m := buildModule(t, []byte(`
+version: 1
+messages:
+  m:
+    payload:
+      a: { id: 0, type: array, items: { type: u32, count: 4 } }
+`), "prim.yaml", map[string]any{})
+	for _, want := range []string{"private int ai ", "        ai = 0;", "[ai++]", "private int afill ", "afill = kind switch"} {
+		if !strings.Contains(m, want) {
+			t.Errorf("a primitive array field needs %q:\n%s", want, m)
+		}
+	}
+	if fn := csMethod(t, m, "    public void ArrayBegin(int id,"); !strings.Contains(fn, "switch ((cur, id))") {
+		t.Errorf("ArrayBegin must dispatch to allocate the array:\n%s", fn)
+	}
+
+	m = buildModule(t, []byte(`
+version: 1
+messages:
+  m:
+    payload:
+      mx: { id: 0, type: array, items: { type: array, count: 3, items: { type: fp32, count: 2 } } }
+`), "rows.yaml", map[string]any{})
+	for _, want := range []string{"private int afill ", "afill = kind switch", "if (afill == 0) break;"} {
+		if !strings.Contains(m, want) {
+			t.Errorf("a native inner row needs %q:\n%s", want, m)
+		}
+	}
+	if strings.Contains(m, "private int ai ") || strings.Contains(m, "[ai++]") {
+		t.Errorf("a native inner row is a List, not a primitive array: no `ai`:\n%s", m)
+	}
+}
+
 // csMethod returns the generated method body starting at `head` up to the next
 // top-level `    public ` line, so an ordering assertion inside one callback
 // cannot accidentally match text from a neighbouring one.
