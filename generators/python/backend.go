@@ -210,12 +210,20 @@ func (g *gen) module(s *ir.Schema) []byte {
 		f.line("# SPDX-License-Identifier: %s", g.license)
 	}
 	f.line("from __future__ import annotations")
-	f.line("from dataclasses import dataclass, field")
-	f.line("from enum import IntEnum, IntFlag")
-	// The decode section is emitted FIRST, into a buffer, so the import line can
-	// be read off what it actually references (visitorNeeds) instead of a second
-	// walk over the schema that has to agree with the emitter by hand.
+	// The type and decode sections are emitted FIRST, into buffers, so every
+	// import line can be read off what the module actually references
+	// (visitorNeeds) instead of a second walk over the schema that has to agree
+	// with the emitter by hand. An import nothing uses is a pyflakes finding
+	// (F401) in the user's lint run. Decode goes first: it decides the
+	// destination tables (g.plans) the dataclasses' decode() reads.
 	decodeSection := g.decodeSection(s)
+	typeSection := g.typeSection(s)
+	if imp := stdlibImport("dataclasses", typeSection, dataclassNames); imp != "" {
+		f.line("%s", imp)
+	}
+	if imp := stdlibImport("enum", typeSection, enumNames); imp != "" {
+		f.line("%s", imp)
+	}
 	// SofaDecodeError and SofaIncompleteError are unconditional: every class's
 	// decode() surfaces the three-valued outcome through them (MESSAGE_SPEC §7).
 	names := []string{
@@ -305,6 +313,18 @@ func (g *gen) module(s *ir.Schema) []byte {
 	f.line("REASSEMBLY = MAX_FIELD_SPAN + %d", streamChunkRoom)
 	f.blank()
 
+	f.b.WriteString(typeSection)
+	// Decode last: an array scope gap-fills with an element CONSTRUCTOR, so every
+	// dataclass a visitor can name must already be defined.
+	f.b.WriteString(decodeSection)
+	return f.bytes()
+}
+
+// typeSection renders the enums, the bitfield constants and the dataclasses
+// (structs/unions, then messages) as text, so module() can size its stdlib
+// imports from it.
+func (g *gen) typeSection(s *ir.Schema) string {
+	f := &pyfile{}
 	// enums + bitfield constants first
 	for _, key := range s.NamedOrder {
 		nt := s.Named[key]
@@ -325,10 +345,36 @@ func (g *gen) module(s *ir.Schema) []byte {
 	for _, m := range s.Messages {
 		g.emitDataclass(f, exported(m.Name), m.Summary, m.Fields)
 	}
-	// Decode last: an array scope gap-fills with an element CONSTRUCTOR, so every
-	// dataclass a visitor can name must already be defined.
-	f.b.WriteString(decodeSection)
-	return f.bytes()
+	return f.b.String()
+}
+
+// stdlibName is one name the type section may import, and the text that marks
+// its use: what the emitter writes when it uses the name, never the bare name,
+// which a field or doc comment may spell too.
+type stdlibName struct{ name, use string }
+
+// dataclassNames and enumNames are matched against the rendered type section,
+// the only place the module uses them: `@dataclass` heads every class,
+// `field(...)` is pyDefault's mutable default, and the two enum bases are what
+// emitEnum and emitBitfieldConsts derive from.
+var (
+	dataclassNames = []stdlibName{{"dataclass", "@dataclass\n"}, {"field", "field(default_factory="}}
+	enumNames      = []stdlibName{{"IntEnum", "(IntEnum):\n"}, {"IntFlag", "(IntFlag):\n"}}
+)
+
+// stdlibImport returns `from <mod> import <names>` for the names the text uses,
+// or "" when it uses none of them.
+func stdlibImport(mod, text string, names []stdlibName) string {
+	var used []string
+	for _, n := range names {
+		if strings.Contains(text, n.use) {
+			used = append(used, n.name)
+		}
+	}
+	if len(used) == 0 {
+		return ""
+	}
+	return fmt.Sprintf("from %s import %s", mod, strings.Join(used, ", "))
 }
 
 // decodeSection renders the module's decode half -- the streaming reader plus

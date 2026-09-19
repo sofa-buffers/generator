@@ -2298,3 +2298,31 @@ func TestPythonBitfieldSpanningBit63IsUnguarded(t *testing.T) {
 		t.Errorf("the withdrawn flag-mask guard was emitted:\n%s", mod)
 	}
 }
+
+// TestPythonStdlibImportsFollowTheBody: the dataclasses and enum imports name
+// only what the module uses. An unused one is a pyflakes F401 in the user's
+// lint run, and a missing one is a NameError at import, so both directions are
+// pinned: a schema without an enum/bitfield/mutable default imports none of
+// those names, and the example, which has all of them, imports every one.
+func TestPythonStdlibImportsFollowTheBody(t *testing.T) {
+	head := func(path string) string {
+		mod := string(genPy(t, schemaFile(t, path), map[string]any{})["message.py"])
+		var b strings.Builder
+		for _, l := range strings.Split(mod, "\n") {
+			if strings.HasPrefix(l, "from dataclasses ") || strings.HasPrefix(l, "from enum ") {
+				b.WriteString(l + "\n")
+			}
+		}
+		return b.String()
+	}
+	for _, c := range []struct{ path, want string }{
+		{"../../examples/messages/example.yaml", "from dataclasses import dataclass, field\nfrom enum import IntEnum, IntFlag\n"},
+		{"../../tests/matrix/corpus/defs/scalars.yaml", "from dataclasses import dataclass\n"},
+		{"../../tests/matrix/corpus/defs/enums.yaml", "from dataclasses import dataclass\nfrom enum import IntEnum\n"},
+		{"../../tests/matrix/corpus/defs/bitfields.yaml", "from dataclasses import dataclass, field\nfrom enum import IntFlag\n"},
+	} {
+		if got := head(c.path); got != c.want {
+			t.Errorf("%s: stdlib imports\n%s\nwant\n%s", c.path, got, c.want)
+		}
+	}
+}
