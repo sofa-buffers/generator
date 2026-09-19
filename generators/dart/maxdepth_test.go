@@ -161,7 +161,9 @@ func runDartDriver(t *testing.T, schema, driver, pass string) {
 	if err := os.WriteFile(filepath.Join(dir, "bin", "rt.dart"), []byte(driver), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	for _, args := range [][]string{{"pub", "get"}, {"run", "bin/rt.dart"}} {
+	// Analyzed with infos fatal before it runs: the conformance suite's gate on
+	// generated code (ARCHITECTURE §12 gate 9) holds here too.
+	for _, args := range [][]string{{"pub", "get"}, {"analyze", "--fatal-infos"}, {"run", "bin/rt.dart"}} {
 		cmd := exec.Command("dart", args...)
 		cmd.Dir = dir
 		out, err := cmd.CombinedOutput()

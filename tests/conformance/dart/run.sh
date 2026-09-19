@@ -50,21 +50,40 @@ YAML
 python3 "$ROOT/tests/conformance/lib/check_vectors_decode.py" --emit-schema \
     >> "$WORK/conf.yaml"
 
-# Generate a project, wire the corelib path, resolve deps and compile the harness
-# to a native exe (fast: no per-invocation JIT startup for the vector loop).
+# Every generated project is analyzed before it is compiled, with infos fatal
+# (ARCHITECTURE §12 gate 9): `dart compile` fails on errors only, so without this
+# a warning or a lint in generated code -- an unused import, an unreferenced
+# declaration -- would pass every leg. The generated code carries no blanket
+# ignore, so the analyzer sees all of it. Every `dart compile` below goes through
+# compile_project, and the corpus sweep analyzes without compiling.
+DART_STRICT="--fatal-infos"
+danalyze() { # danalyze <projdir>
+    ( cd "$1" && dart analyze $DART_STRICT >"$1.analyze.log" 2>&1 ) \
+        || { cat "$1.analyze.log"; echo "FAIL: dart analyze $DART_STRICT: $1"; exit 1; }
+}
+# compile_project <projdir>: resolve deps, analyze, compile the harness to a
+# native exe (fast: no per-invocation JIT startup for the vector loop).
+compile_project() {
+    ( cd "$1" && dart pub get >/dev/null 2>&1 )
+    danalyze "$1"
+    ( cd "$1" && dart compile exe bin/harness.dart -o harness >/dev/null )
+}
+
+# Generate a project, wire the corelib path and compile it.
 build() {
     ( cd "$ROOT" && go run ./cmd/sofabgen --config "$WORK/cfg.yaml" --lang dart --in "$1" --out "$2" )
     sed -i "s#\${SOFAB_DART_CORELIB}#$CORELIB#" "$2/pubspec.yaml"
-    ( cd "$2" && dart pub get >/dev/null 2>&1 && dart compile exe bin/harness.dart -o harness >/dev/null 2>&1 )
+    compile_project "$2"
 }
 
-# Lighter check for the corpus sweep: generate, resolve deps, and type-check with
-# `dart analyze` (a clean analyze == the generated code + harness compile), which
-# is far faster than AOT-compiling an exe for every definition.
+# Lighter check for the corpus sweep: generate, resolve deps, and analyze (a
+# clean analyze == the generated code + harness compile), which is far faster
+# than AOT-compiling an exe for every definition.
 check() {
     ( cd "$ROOT" && go run ./cmd/sofabgen --config "$WORK/cfg.yaml" --lang dart --in "$1" --out "$2" )
     sed -i "s#\${SOFAB_DART_CORELIB}#$CORELIB#" "$2/pubspec.yaml"
-    ( cd "$2" && dart pub get >/dev/null 2>&1 && dart analyze --fatal-warnings >/dev/null )
+    ( cd "$2" && dart pub get >/dev/null 2>&1 )
+    danalyze "$2"
 }
 
 echo "==> generating + building example + conformance projects"
@@ -170,6 +189,7 @@ echo "==> encode-buffer ownership OK"
 # a whole payload could be handed over unchanged.
 echo "==> a decoded message owns its bytes (must outlive its input buffer)"
 cp "$ROOT/tests/conformance/dart/ownership_check.dart" "$WORK/ex/bin/ownership_check.dart"
+danalyze "$WORK/ex"
 ( cd "$WORK/ex" && dart run bin/ownership_check.dart ) \
     || { echo "FAIL: a decoded field aliased the buffer it was decoded from"; exit 1; }
 echo "==> decode ownership OK"
@@ -529,7 +549,7 @@ generic: { emit: project, max_dyn_array_count: 4 }
 YAML
 ( cd "$ROOT" && go run ./cmd/sofabgen --config "$WORK/cfg-limit.yaml" --lang dart --in "$WORK/dyn.yaml" --out "$WORK/dynlim" )
 sed -i "s#\${SOFAB_DART_CORELIB}#$CORELIB#" "$WORK/dynlim/pubspec.yaml"
-( cd "$WORK/dynlim" && dart pub get >/dev/null 2>&1 && dart compile exe bin/harness.dart -o harness >/dev/null 2>&1 )
+compile_project "$WORK/dynlim"
 build "$WORK/dyn.yaml" "$WORK/dynfree"
 printf '\003\005\001\002\003\004\005' > "$WORK/overlimit.bin"
 printf '\003\004\001\002\003\004' > "$WORK/atlimit.bin"
@@ -619,7 +639,7 @@ generic: { emit: project, max_dyn_array_count: 4, max_dyn_string_len: 8, max_dyn
 YAML
 ( cd "$ROOT" && go run ./cmd/sofabgen --config "$WORK/cfg-refusal.yaml" --lang dart --in "$WORK/refusal.yaml" --out "$WORK/refusal" )
 sed -i "s#\${SOFAB_DART_CORELIB}#$CORELIB#" "$WORK/refusal/pubspec.yaml"
-( cd "$WORK/refusal" && dart pub get >/dev/null 2>&1 && dart compile exe bin/harness.dart -o harness >/dev/null 2>&1 )
+compile_project "$WORK/refusal"
 python3 "$ROOT/tests/conformance/lib/check_refusal_category.py" "dart" \
     --max-dyn-array-count 4 --max-dyn-string-len 8 --max-dyn-blob-len 8 \
     --status-verb trydecode -- "$WORK/refusal/harness"
@@ -662,7 +682,7 @@ grep -q 'const int maxDynArrayCount = 4;' "$WORK/wraplim/lib/message.dart" \
 grep -q 'maxDynWrapperIndex' "$WORK/wraplim/lib/message.dart" \
     && { echo "FAIL: the second, unraised constant is gone with the raise"; exit 1; }
 sed -i "s#\${SOFAB_DART_CORELIB}#$CORELIB#" "$WORK/wraplim/pubspec.yaml"
-( cd "$WORK/wraplim" && dart pub get >/dev/null 2>&1 && dart compile exe bin/harness.dart -o harness >/dev/null 2>&1 )
+compile_project "$WORK/wraplim"
 build "$WORK/wrap.yaml" "$WORK/wrapfree"
 # 06 seq_begin(id 0) | 2a string element id 5 | 0a 78 (fixlen "x") | 07 end
 printf '\006\052\012\170\007' > "$WORK/wrapover.bin"
@@ -696,7 +716,7 @@ messages:
 YAML
 ( cd "$ROOT" && go run ./cmd/sofabgen --config "$WORK/cfg-limit.yaml" --lang dart --in "$WORK/excl.yaml" --out "$WORK/excl" )
 sed -i "s#\${SOFAB_DART_CORELIB}#$CORELIB#" "$WORK/excl/pubspec.yaml"
-( cd "$WORK/excl" && dart pub get >/dev/null 2>&1 && dart compile exe bin/harness.dart -o harness >/dev/null 2>&1 )
+compile_project "$WORK/excl"
 # b (id 1, signed array, count 6) is bounded by its own `count: 100000`, so the
 # cap of 4 must not touch it. Under the raise this decoded only because the cap
 # had been lifted to 100000 for EVERY field, `a` included.
@@ -768,7 +788,7 @@ generic: { emit: project, max_dyn_string_len: 24 }
 YAML
 ( cd "$ROOT" && go run ./cmd/sofabgen --config "$WORK/cfg-strlim.yaml" --lang dart --in "$WORK/dynstr.yaml" --out "$WORK/strlim" )
 sed -i "s#\${SOFAB_DART_CORELIB}#$CORELIB#" "$WORK/strlim/pubspec.yaml"
-( cd "$WORK/strlim" && dart pub get >/dev/null 2>&1 && dart compile exe bin/harness.dart -o harness >/dev/null 2>&1 )
+compile_project "$WORK/strlim"
 printf '\002\242\006' > "$WORK/overcap_trunc.bin"
 OUT=$("$WORK/strlim/harness" decode dyn < "$WORK/overcap_trunc.bin" 2>&1 || true)
 case "$OUT" in
@@ -859,11 +879,11 @@ ST=$(printf '' | "$WORK/conf/harness" trydecode vecu | sed -n 1p)       # empty 
 echo "==> tryDecode status OK (0x80 INCOMPLETE, empty COMPLETE)"
 
 echo "==> corpus + realworld: every definition builds"
-for def in "$ROOT"/tests/matrix/corpus/defs/*.yaml "$ROOT"/examples/messages/realworld/vehicle_telemetry.yaml; do
+for def in "$ROOT"/tests/matrix/corpus/defs/*.yaml "$ROOT"/examples/messages/realworld/*.yaml; do
     name=$(basename "$def" .yaml)
     check "$def" "$WORK/corpus/$name"
 done
-echo "==> corpus builds ($(ls "$ROOT"/tests/matrix/corpus/defs/*.yaml | wc -l) definitions + realworld example)"
+echo "==> corpus builds ($(ls "$ROOT"/tests/matrix/corpus/defs/*.yaml | wc -l) definitions + $(ls "$ROOT"/examples/messages/realworld/*.yaml | wc -l) realworld)"
 
 # Declared integer width is a VALIDITY bound (MESSAGE_SPEC S7.1 + documentation#32,
 # generator#266, Crucible F-0033 / codegen defect G-0026). A value outside the
@@ -901,7 +921,7 @@ printf 'version: 1\nmessages:\n' > "$WORK/growth.yaml"
 python3 "$ROOT/tests/conformance/lib/check_growth.py" --emit-schema >> "$WORK/growth.yaml"
 ( cd "$ROOT" && go run ./cmd/sofabgen --config "$WORK/cfg-limit.yaml" --lang dart --in "$WORK/growth.yaml" --out "$WORK/growth" )
 sed -i "s#\${SOFAB_DART_CORELIB}#$CORELIB#" "$WORK/growth/pubspec.yaml"
-( cd "$WORK/growth" && dart pub get >/dev/null 2>&1 && dart compile exe bin/harness.dart -o harness >/dev/null 2>&1 )
+compile_project "$WORK/growth"
 # --cap must equal the max_dyn_array_count the config above generated with:
 # the cases' indices are offsets onto it, so a mismatch moves the boundary.
 python3 "$ROOT/tests/conformance/lib/check_growth.py" \
@@ -975,7 +995,7 @@ printf 'version: 1\nmessages:\n' > "$WORK/repeated.yaml"
 python3 "$ROOT/tests/conformance/lib/check_repeated_id.py" --emit-schema >> "$WORK/repeated.yaml"
 ( cd "$ROOT" && go run ./cmd/sofabgen --config "$WORK/cfg.yaml" --lang dart --in "$WORK/repeated.yaml" --out "$WORK/repeated" )
 sed -i "s#\${SOFAB_DART_CORELIB}#$CORELIB#" "$WORK/repeated/pubspec.yaml"
-( cd "$WORK/repeated" && dart pub get >/dev/null 2>&1 && dart compile exe bin/harness.dart -o harness >/dev/null )
+compile_project "$WORK/repeated"
 python3 "$ROOT/tests/conformance/lib/check_repeated_id.py" "Dart" \
     -- "$WORK/repeated/harness"
 
