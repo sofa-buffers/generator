@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"github.com/sofa-buffers/generator/internal/analysis"
+	"github.com/sofa-buffers/generator/internal/ir"
 	"github.com/sofa-buffers/generator/internal/model"
 	"github.com/sofa-buffers/generator/internal/parser"
 )
@@ -1822,5 +1823,23 @@ func TestCsWidthAdmitsUndeclaredValues(t *testing.T) {
 	}
 	if !strings.Contains(m, "value > 255") {
 		t.Errorf("the bitfield width bound is missing:\n%s", m)
+	}
+}
+
+// The bench harness folds one integer field into its sink after every decode.
+// A deprecated field carries [Obsolete], and reading it there is CS0612 in the
+// generated Program.cs, so the sink passes over it to the next integer -- and
+// falls back to GetHashCode when a deprecated integer is the only one.
+func TestCsBenchSinkSkipsDeprecatedField(t *testing.T) {
+	m := &ir.Message{Name: "m", Fields: []*ir.Field{
+		{Name: "old", Kind: ir.KindU32, Deprecated: true},
+		{Name: "cur", Kind: ir.KindU32},
+	}}
+	if got := benchSinkField(m); got != "cur" {
+		t.Errorf("benchSinkField = %q, want the first non-deprecated integer %q", got, "cur")
+	}
+	m.Fields = m.Fields[:1]
+	if got := benchSinkField(m); got != "" {
+		t.Errorf("benchSinkField = %q, want \"\" (GetHashCode fallback) when only a deprecated integer exists", got)
 	}
 }
