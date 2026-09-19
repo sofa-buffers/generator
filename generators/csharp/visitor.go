@@ -822,7 +822,14 @@ func (g *gen) emitVisitor(f *cfile, name string, fields []*ir.Field) {
 	// case per real scope -- so nothing matches while cur is _DEAD and the whole
 	// subtree is discarded, children included (generator#268 / #272).
 	f.line("    private const int _DEAD = -1;")
-	f.line("    private int ai = 0;                // index into the primitive array currently being filled")
+	// The fill index and the fill counter exist only for a message that has
+	// something to fill: a visitor with neither reads them nowhere, and a field
+	// that is written but never read is a compiler warning (CS0414) in a file the
+	// consumer must not edit -- fatal under TreatWarningsAsErrors.
+	primArr, nativeFill := hasPrimArray(fs), hasNativeFill(fs)
+	if primArr {
+		f.line("    private int ai = 0;                // index into the primitive array currently being filled")
+	}
 	// S7.3 array-vs-scalar skip counter (generator#183): an integer array whose id
 	// is declared as a SCALAR is a wire-type contradiction and must be skipped like
 	// an unknown id. corelib-cs delivers array elements through the same
@@ -834,7 +841,9 @@ func (g *gen) emitVisitor(f *cfile, name string, fields []*ir.Field) {
 	// array-fill arm and be stored as element 0. ArrayBegin arms this with the
 	// element count at legitimate native-array positions; a fill arm runs only
 	// while it is positive, so an unarmed bare scalar (afill == 0) is skipped.
-	f.line("    private int afill = 0;             // elements still expected by an armed native-array fill (S7.3)")
+	if nativeFill {
+		f.line("    private int afill = 0;             // elements still expected by an armed native-array fill (S7.3)")
+	}
 	f.line("    private int[] stk = new int[16];   // sequence scope stack (unboxed, was Stack<int>)")
 	f.line("    private int sp = 0;")
 	if hasPayloadDest(fs) {
@@ -876,58 +885,58 @@ func (g *gen) emitVisitor(f *cfile, name string, fields []*ir.Field) {
 	// boolean/bitfield), and native-nested unsigned inner rows.
 	f.line("    public void Unsigned(int id, ulong value) {")
 	g.emitArraySkipGuard(f)
-	f.line("        switch ((cur, id)) {")
+	var uArms []string
 	for _, fr := range fs {
 		if fr.isArr {
 			if fr.elem == ir.KindArray && unsignedArrayElem(fr.items.Elem) {
-				f.line("            case (%s, _): %s%s%s.Add(%s); break;", fr.loc, fillGuard, widthThrow(fr.items.Elem, fr.items.ElemRef, fr.loc+" element"), elemAt(fr.path, fr.loc), g.arrayElemAddRHS(fr.items.Elem, fr.items.ElemRef, "value"))
+				uArms = append(uArms, fmt.Sprintf("            case (%s, _): %s%s%s.Add(%s); break;", fr.loc, fillGuard, widthThrow(fr.items.Elem, fr.items.ElemRef, fr.loc+" element"), elemAt(fr.path, fr.loc), g.arrayElemAddRHS(fr.items.Elem, fr.items.ElemRef, "value")))
 			}
 			continue
 		}
 		for _, fld := range fr.fields {
 			switch {
 			case fld.Kind == ir.KindU8 || fld.Kind == ir.KindU16 || fld.Kind == ir.KindU32 || fld.Kind == ir.KindU64:
-				f.line("            case (%s, %d): %s%s.%s = (%s)value; break;", fr.loc, fld.ID, widthThrow(fld.Kind, fld.Ref, fld.Name), fr.path, csIdent(fld.Name), g.csType(fld))
+				uArms = append(uArms, fmt.Sprintf("            case (%s, %d): %s%s.%s = (%s)value; break;", fr.loc, fld.ID, widthThrow(fld.Kind, fld.Ref, fld.Name), fr.path, csIdent(fld.Name), g.csType(fld)))
 			case fld.Kind == ir.KindBitfield:
-				f.line("            case (%s, %d): %s%s.%s = (%s)value; break;", fr.loc, fld.ID, widthThrow(fld.Kind, fld.Ref, fld.Name), fr.path, csIdent(fld.Name), g.typeName(fld.Ref.Key))
+				uArms = append(uArms, fmt.Sprintf("            case (%s, %d): %s%s.%s = (%s)value; break;", fr.loc, fld.ID, widthThrow(fld.Kind, fld.Ref, fld.Name), fr.path, csIdent(fld.Name), g.typeName(fld.Ref.Key)))
 			case fld.Kind == ir.KindBool:
-				f.line("            case (%s, %d): %s.%s = value != 0; break;", fr.loc, fld.ID, fr.path, csIdent(fld.Name))
+				uArms = append(uArms, fmt.Sprintf("            case (%s, %d): %s.%s = value != 0; break;", fr.loc, fld.ID, fr.path, csIdent(fld.Name)))
 			case fld.Kind == ir.KindArray && primArrayElem(fld.Elem) && unsignedArrayElem(fld.Elem):
-				f.line("            case (%s, %d): %s break;", fr.loc, fld.ID, primFill(fr.path+"."+csIdent(fld.Name), fld, widthThrow(fld.Elem, fld.ElemRef, fld.Name+" element"), primElemCast(fld.Elem, fld.ElemRef, "value")))
+				uArms = append(uArms, fmt.Sprintf("            case (%s, %d): %s break;", fr.loc, fld.ID, primFill(fr.path+"."+csIdent(fld.Name), fld, widthThrow(fld.Elem, fld.ElemRef, fld.Name+" element"), primElemCast(fld.Elem, fld.ElemRef, "value"))))
 			case fld.Kind == ir.KindArray && unsignedArrayElem(fld.Elem):
-				f.line("            case (%s, %d): %s break;", fr.loc, fld.ID, nativeListFill(fr.path+"."+csIdent(fld.Name), widthThrow(fld.Elem, fld.ElemRef, fld.Name+" element"), g.arrayElemAddRHS(fld.Elem, fld.ElemRef, "value")))
+				uArms = append(uArms, fmt.Sprintf("            case (%s, %d): %s break;", fr.loc, fld.ID, nativeListFill(fr.path+"."+csIdent(fld.Name), widthThrow(fld.Elem, fld.ElemRef, fld.Name+" element"), g.arrayElemAddRHS(fld.Elem, fld.ElemRef, "value"))))
 			}
 		}
 	}
-	f.line("        }")
+	emitDispatch(f, uArms)
 	f.line("    }")
 
 	// Signed: i*/enum scalars, signed array elements (numeric/enum), and
 	// native-nested signed inner rows.
 	f.line("    public void Signed(int id, long value) {")
 	g.emitArraySkipGuard(f)
-	f.line("        switch ((cur, id)) {")
+	var sArms []string
 	for _, fr := range fs {
 		if fr.isArr {
 			if fr.elem == ir.KindArray && signedArrayElem(fr.items.Elem) {
-				f.line("            case (%s, _): %s%s%s.Add(%s); break;", fr.loc, fillGuard, widthThrow(fr.items.Elem, fr.items.ElemRef, fr.loc+" element"), elemAt(fr.path, fr.loc), g.arrayElemAddRHS(fr.items.Elem, fr.items.ElemRef, "value"))
+				sArms = append(sArms, fmt.Sprintf("            case (%s, _): %s%s%s.Add(%s); break;", fr.loc, fillGuard, widthThrow(fr.items.Elem, fr.items.ElemRef, fr.loc+" element"), elemAt(fr.path, fr.loc), g.arrayElemAddRHS(fr.items.Elem, fr.items.ElemRef, "value")))
 			}
 			continue
 		}
 		for _, fld := range fr.fields {
 			switch {
 			case fld.Kind == ir.KindI8 || fld.Kind == ir.KindI16 || fld.Kind == ir.KindI32 || fld.Kind == ir.KindI64:
-				f.line("            case (%s, %d): %s%s.%s = (%s)value; break;", fr.loc, fld.ID, widthThrow(fld.Kind, fld.Ref, fld.Name), fr.path, csIdent(fld.Name), g.csType(fld))
+				sArms = append(sArms, fmt.Sprintf("            case (%s, %d): %s%s.%s = (%s)value; break;", fr.loc, fld.ID, widthThrow(fld.Kind, fld.Ref, fld.Name), fr.path, csIdent(fld.Name), g.csType(fld)))
 			case fld.Kind == ir.KindEnum:
-				f.line("            case (%s, %d): %s%s.%s = (%s)value; break;", fr.loc, fld.ID, widthThrow(fld.Kind, fld.Ref, fld.Name), fr.path, csIdent(fld.Name), g.typeName(fld.Ref.Key))
+				sArms = append(sArms, fmt.Sprintf("            case (%s, %d): %s%s.%s = (%s)value; break;", fr.loc, fld.ID, widthThrow(fld.Kind, fld.Ref, fld.Name), fr.path, csIdent(fld.Name), g.typeName(fld.Ref.Key)))
 			case fld.Kind == ir.KindArray && primArrayElem(fld.Elem) && signedArrayElem(fld.Elem):
-				f.line("            case (%s, %d): %s break;", fr.loc, fld.ID, primFill(fr.path+"."+csIdent(fld.Name), fld, widthThrow(fld.Elem, fld.ElemRef, fld.Name+" element"), primElemCast(fld.Elem, fld.ElemRef, "value")))
+				sArms = append(sArms, fmt.Sprintf("            case (%s, %d): %s break;", fr.loc, fld.ID, primFill(fr.path+"."+csIdent(fld.Name), fld, widthThrow(fld.Elem, fld.ElemRef, fld.Name+" element"), primElemCast(fld.Elem, fld.ElemRef, "value"))))
 			case fld.Kind == ir.KindArray && signedArrayElem(fld.Elem):
-				f.line("            case (%s, %d): %s break;", fr.loc, fld.ID, nativeListFill(fr.path+"."+csIdent(fld.Name), widthThrow(fld.Elem, fld.ElemRef, fld.Name+" element"), g.arrayElemAddRHS(fld.Elem, fld.ElemRef, "value")))
+				sArms = append(sArms, fmt.Sprintf("            case (%s, %d): %s break;", fr.loc, fld.ID, nativeListFill(fr.path+"."+csIdent(fld.Name), widthThrow(fld.Elem, fld.ElemRef, fld.Name+" element"), g.arrayElemAddRHS(fld.Elem, fld.ElemRef, "value"))))
 			}
 		}
 	}
-	f.line("        }")
+	emitDispatch(f, sArms)
 	f.line("    }")
 
 	g.emitFloatVisit(f, fs, ir.KindFP32, "Fp32", "float")
@@ -942,10 +951,14 @@ func (g *gen) emitVisitor(f *cfile, name string, fields []*ir.Field) {
 	// native-nested (array-of-array) scope (each row arrives as ArrayBegin(index),
 	// and the index IS the row's position, see placeRow).
 	f.line("    public void ArrayBegin(int id, ArrayKind kind, int count) {")
-	f.line("        ai = 0;")
+	if primArr {
+		f.line("        ai = 0;")
+	}
 	g.emitArraySkipArm(f, fs)
-	g.emitArrayFillArm(f, fs)
-	f.line("        switch ((cur, id)) {")
+	if nativeFill {
+		g.emitArrayFillArm(f, fs)
+	}
+	var aArms []string
 	for _, fr := range fs {
 		if fr.isArr {
 			if fr.elem == ir.KindArray && nativeArrayElem(fr.items.Elem) {
@@ -971,8 +984,8 @@ func (g *gen) emitVisitor(f *cfile, name string, fields []*ir.Field) {
 				// only ever rejects a row that survives the kind test.
 				// Kind first (§7.3), then the row's ID, then its element count -- the
 				// order every backend takes the two INVALID verdicts in.
-				f.line("            case (%s, _): %s%s%s%sbreak;", fr.loc, arrayKindGuard(fr.items.Elem),
-					g.overIndexGuard(fr.cap, fr.loc), guard, g.placeRowAt(fr))
+				aArms = append(aArms, fmt.Sprintf("            case (%s, _): %s%s%s%sbreak;", fr.loc, arrayKindGuard(fr.items.Elem),
+					g.overIndexGuard(fr.cap, fr.loc), guard, g.placeRowAt(fr)))
 			}
 			continue
 		}
@@ -1012,15 +1025,15 @@ func (g *gen) emitVisitor(f *cfile, name string, fields []*ir.Field) {
 				if guard == "" {
 					panic("csharp: native array with neither a schema count nor a cap -- every target has a finite default (§9.5)")
 				}
-				f.line("            case (%s, %d): %s%s%s.%s = new %s[count]; break;", fr.loc, fld.ID, kindGuard, guard, fr.path, csIdent(fld.Name), primArrayBase(fld.Elem, fld.ElemRef))
+				aArms = append(aArms, fmt.Sprintf("            case (%s, %d): %s%s%s.%s = new %s[count]; break;", fr.loc, fld.ID, kindGuard, guard, fr.path, csIdent(fld.Name), primArrayBase(fld.Elem, fld.ElemRef)))
 			} else if fld.Kind == ir.KindArray && nativeArrayElem(fld.Elem) {
 				// List<T> (the boolean array): cleared and appended to, with or
 				// without a count -- the M elements the wire carried are the whole value.
-				f.line("            case (%s, %d): %s%s%s.%s.Clear(); break;", fr.loc, fld.ID, kindGuard, guard, fr.path, csIdent(fld.Name))
+				aArms = append(aArms, fmt.Sprintf("            case (%s, %d): %s%s%s.%s.Clear(); break;", fr.loc, fld.ID, kindGuard, guard, fr.path, csIdent(fld.Name)))
 			}
 		}
 	}
-	f.line("        }")
+	emitDispatch(f, aArms)
 	f.line("    }")
 
 	// SequenceBegin / SequenceEnd. Object scope: descend into a struct/union
@@ -1080,26 +1093,82 @@ func (g *gen) emitVisitor(f *cfile, name string, fields []*ir.Field) {
 	f.blank()
 }
 
+// emitDispatch writes a callback's (cur, id) switch over the arms built for it,
+// and nothing at all when there are none. A schema that declares no field of a
+// callback's kind leaves it without a single arm, and `switch (...) { }` is
+// CS1522 "Empty switch block" -- a warning in a file the consumer must not edit,
+// fatal under TreatWarningsAsErrors. With no arm the switch would match nothing
+// anyway, so leaving it out skips every value exactly as it did: the body is the
+// skip, as it already is for String and Blob.
+func emitDispatch(f *cfile, arms []string) {
+	if len(arms) == 0 {
+		return
+	}
+	f.line("        switch ((cur, id)) {")
+	for _, a := range arms {
+		f.line("%s", a)
+	}
+	f.line("        }")
+}
+
+// hasPrimArray reports whether this message declares a field held in a C#
+// primitive array (see primArrayElem) -- the only thing the fill index `ai`
+// indexes, so the only reason a visitor declares and resets it.
+func hasPrimArray(fs []frame) bool {
+	for _, fr := range fs {
+		if fr.isArr {
+			continue
+		}
+		for _, fld := range fr.fields {
+			if fld.Kind == ir.KindArray && primArrayElem(fld.Elem) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// hasNativeFill reports whether any (scope, id) of this message is a native-array
+// fill position -- a native array field, or a native inner row of a nested array.
+// It is exactly the set emitArrayFillArm arms and fillGuard fronts, so it decides
+// whether the visitor needs the afill counter at all.
+func hasNativeFill(fs []frame) bool {
+	for _, fr := range fs {
+		if fr.isArr {
+			if fr.elem == ir.KindArray && nativeArrayElem(fr.items.Elem) {
+				return true
+			}
+			continue
+		}
+		for _, fld := range fr.fields {
+			if fld.Kind == ir.KindArray && nativeArrayElem(fld.Elem) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
 func (g *gen) emitFloatVisit(f *cfile, fs []frame, kind ir.Kind, cb, ctype string) {
 	f.line("    public void %s(int id, %s value) {", cb, ctype)
 	g.emitArraySkipGuard(f)
-	f.line("        switch ((cur, id)) {")
+	var arms []string
 	for _, fr := range fs {
 		if fr.isArr {
 			if fr.elem == ir.KindArray && fr.items.Elem == kind {
-				f.line("            case (%s, _): %s%s.Add(value); break;", fr.loc, fillGuard, elemAt(fr.path, fr.loc))
+				arms = append(arms, fmt.Sprintf("            case (%s, _): %s%s.Add(value); break;", fr.loc, fillGuard, elemAt(fr.path, fr.loc)))
 			}
 			continue
 		}
 		for _, fld := range fr.fields {
 			switch {
 			case fld.Kind == kind:
-				f.line("            case (%s, %d): %s.%s = value; break;", fr.loc, fld.ID, fr.path, csIdent(fld.Name))
+				arms = append(arms, fmt.Sprintf("            case (%s, %d): %s.%s = value; break;", fr.loc, fld.ID, fr.path, csIdent(fld.Name)))
 			case fld.Kind == ir.KindArray && fld.Elem == kind:
-				f.line("            case (%s, %d): %s break;", fr.loc, fld.ID, primFill(fr.path+"."+csIdent(fld.Name), fld, "", "value"))
+				arms = append(arms, fmt.Sprintf("            case (%s, %d): %s break;", fr.loc, fld.ID, primFill(fr.path+"."+csIdent(fld.Name), fld, "", "value")))
 			}
 		}
 	}
-	f.line("        }")
+	emitDispatch(f, arms)
 	f.line("    }")
 }
