@@ -71,3 +71,24 @@ Things worth knowing:
   is read through `storage`, not widened into a `double`.
 - **A destination is complete when the decode reports `complete`.** After
   `incomplete` or a refusal its contents are unspecified.
+
+## Formatting
+
+Generated Dart is `dart format` output: `dart format --output=none
+--set-exit-if-changed` over a tree that holds it passes, so generated files need
+no exclusion from a formatting gate and never come back reformatted.
+
+`sofabgen` runs `dart format` itself, once per generated `.dart` file, at the
+language version the generated `pubspec.yaml` declares. That version is not a
+detail: `dart format` chooses its style by it — the short style below 3.7, the
+tall style from 3.7 on — so the files come out in the style your own
+`dart format` inside the generated package produces. With `emit: sources` there
+is no generated pubspec; the same language version is used, and if the package
+you drop the file into declares a different one, your formatter will restyle it.
+
+`dart format` is part of the Dart SDK, so this normally needs nothing from you.
+If `dart` is not on `PATH`, generation still succeeds: the files are written
+unformatted and `sofabgen` says so on stderr, and a later `dart format` over the
+output directory brings them in line. If `dart format` is available but rejects a
+generated file, generation fails with the file named — that is a generator bug,
+and writing the file would only move it into your build.
