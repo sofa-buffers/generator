@@ -5817,6 +5817,7 @@ A reimplementation is **conformant** when it reproduces these gates:
     | target | formatter | how the output gets there |
     |---|---|---|
     | go | `gofmt -l` prints nothing | the backend formats every file through `go/format` (`generators/golang/gofile.go`) |
+    | rust / rs-no-std | `rustfmt --check --edition <crate edition>` | the CLI pipes every `.rs` file through `rustfmt` (`generators/rust/format.go`) |
     | zig | `zig fmt --check` | the backend emits zig fmt layout itself (`generators/zig/layout.go`) |
 
     Go formats with the `go/format` **library**, so `sofabgen` needs no tool
@@ -5845,13 +5846,51 @@ A reimplementation is **conformant** when it reproduces these gates:
     would strip (`async`, `await`, `usingnamespace`, and value names such as
     `true`/`null`) fails a user's `zig fmt --check`.
 
+    Rust is the third case: rustfmt is a **program**, not a library, and the
+    emitters cannot produce its output. rustfmt's line breaking is width-driven
+    (`max_width`, `fn_call_width`, `struct_lit_width`, `chain_width`), and the
+    widths come from SCHEMA content — measured on the corpus, a long enough
+    field name or default value makes rustfmt break a condition, a field-access
+    chain or a struct literal that a shorter one keeps on one line. An emitter
+    rule for that is a reimplementation of rustfmt, and anything short of one is
+    a guarantee that holds for the corpus and quietly fails on a user's schema.
+    So the generator runs rustfmt, under the conditions the target allows: it
+    ships with every rustup toolchain, so anyone who can BUILD the generated
+    crate already has it, and anyone who cannot is not blocked — a missing
+    rustfmt writes the files unformatted with a note on stderr, never an error.
+    A rustfmt that RUNS and refuses is an error naming the file, for the reason
+    the Go fallback was removed: it means the emitter produced Rust that does
+    not parse.
+
+    That pass runs in the **CLI**, not in `Generate` (`generator.Formatter`, an
+    optional backend capability; `cmd/sofabgen/main.go` applies it between
+    `Generate` and the writer). `Generate` stays a pure function of (IR, config)
+    — the golden gate of item 1 and every backend unit test compare its bytes —
+    and shelling out inside it would make a backend's output depend on which
+    tools the machine happens to have. The tree a user receives is the one the
+    writer produces, and that is the tree their `cargo fmt --check` runs over.
+    rustfmt runs with the output directory as its working directory, so it
+    resolves the project's own `rustfmt.toml` the way `cargo fmt` in that tree
+    would. The edition it parses under is a constant (`rust.Edition`) that
+    `generators/rust/format_test.go` pins to the `edition` the generated
+    `Cargo.toml` declares, in both project shapes. The conformance check takes
+    the edition from those `Cargo.toml` files rather than repeating the
+    constant, and refuses a tree that holds more than one.
+
+    The rust check is therefore not proving the emitters' layout, the way the go
+    and zig ones do — it pins that the pass reached every `.rs` file, across all
+    four legs (`rs`, `rs-static`, `no-std-dynamic`, `no-std-static`) and every
+    corpus and realworld crate, at the rustfmt the `lang-rust` job ships. A file
+    the pass misses, or a rustfmt release whose output has moved, surfaces here
+    instead of in a user's CI.
+
     C, C++, Java, Kotlin and C# are deliberately **out**: none has a single
     standard (clang-format needs a style chosen, google-java-format vs. IDE
     defaults, ktfmt vs. ktlint, `dotnet format` reads an `.editorconfig`), and
     choosing a house style for generated code is a separate decision. The
-    remaining single-formatter targets — rust/rs-no-std (`rustfmt`), dart
-    (`dart format`), python (`ruff format`) and typescript (`prettier`) — join
-    the table through the same driver.
+    remaining single-formatter targets — dart (`dart format`), python
+    (`ruff format`) and typescript (`prettier`) — join the table through the
+    same driver.
 
 ---
 

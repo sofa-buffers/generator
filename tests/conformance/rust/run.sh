@@ -18,6 +18,8 @@ set -eu
 # Corelib checkout + ref pinning (docs/CI.md).
 . "$(dirname "$0")/../lib/corelib.sh"
 . "$(dirname "$0")/../lib/maxsize_fill.sh"
+# Generated code against the canonical formatter (ARCHITECTURE §12).
+. "$(dirname "$0")/../lib/check_format.sh"
 
 ROOT=$(cd "$(dirname "$0")/../../.." && pwd)
 NOSTD="${1:-${SOFAB_RS_CORELIB:-}}"
@@ -917,6 +919,14 @@ YAML
         rust_clippy "$WORK/corpus-$label/$name"
     done
     echo "==> [$label] corpus builds clippy-clean ($(ls "$ROOT"/tests/matrix/corpus/defs/*.yaml | wc -l) definitions + $(ls "$ROOT"/examples/messages/realworld/*.yaml | wc -l) realworld)"
+
+    # rustfmt --check over everything this leg generated: the example crate, the
+    # conformance crate and every corpus/realworld crate. sofabgen runs rustfmt
+    # itself (generators/rust/format.go), so what this pins is that it actually
+    # reached every .rs file, at the rustfmt the lang-rust job ships -- a file
+    # the pass misses, or a formatter version whose output has moved, shows up
+    # here rather than in a user's `cargo fmt --check`.
+    check_format rust "$WORK/ex-$label" "$WORK/conf-$label" "$WORK/corpus-$label"
 }
 
 # corelib-rs (std, the default): always-on, no feature flags.
