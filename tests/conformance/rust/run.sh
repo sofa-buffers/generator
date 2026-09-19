@@ -24,6 +24,15 @@ set -eu
 ROOT=$(cd "$(dirname "$0")/../../.." && pwd)
 NOSTD="${1:-${SOFAB_RS_CORELIB:-}}"
 STD="${2:-${SOFAB_RS_STD_CORELIB:-}}"
+
+# What every `sofabgen` run below passes as its --format argument. sofabgen
+# formats nothing unless it is asked to, and this suite asks -- with
+# --format=require, so a format pass that stopped reaching a file fails the
+# generation instead of leaving unformatted code for the gate at the end -- but
+# only when rustfmt is actually installed. rustfmt is a separate rustup
+# component, so a box with cargo need not have it; there the flag is
+# --format=off and the gate skips loudly (tests/conformance/lib/check_format.sh).
+FMT=$(format_flag rust)
 WORK=$(mktemp -d)
 trap 'rm -rf "$WORK"' EXIT
 
@@ -110,7 +119,7 @@ run_variant() {
     printf 'generic: { emit: project }\ntargets: { rust: { %s } }\n' "$cfgbody" > "$WORK/cfg-$label.yaml"
 
     rust_build() {  # def-or-yaml out-dir
-        ( cd "$ROOT" && go run ./cmd/sofabgen --config "$WORK/cfg-$label.yaml" --lang rust --in "$1" --out "$2" )
+        ( cd "$ROOT" && go run ./cmd/sofabgen "$FMT" --config "$WORK/cfg-$label.yaml" --lang rust --in "$1" --out "$2" )
         sed -i "s#\${SOFAB_RS_CORELIB}#$corelib#" "$2/Cargo.toml"
         crate_bin_name "$2"
         ( cd "$2" && cargo build -q )
@@ -921,11 +930,16 @@ YAML
     echo "==> [$label] corpus builds clippy-clean ($(ls "$ROOT"/tests/matrix/corpus/defs/*.yaml | wc -l) definitions + $(ls "$ROOT"/examples/messages/realworld/*.yaml | wc -l) realworld)"
 
     # rustfmt --check over everything this leg generated: the example crate, the
-    # conformance crate and every corpus/realworld crate. sofabgen runs rustfmt
-    # itself (generators/rust/format.go), so what this pins is that it actually
-    # reached every .rs file, at the rustfmt the lang-rust job ships -- a file
-    # the pass misses, or a formatter version whose output has moved, shows up
-    # here rather than in a user's `cargo fmt --check`.
+    # conformance crate and every corpus/realworld crate. sofabgen only formats
+    # when it is told to, and this suite tells it: every generation above passes
+    # $FMT (generators/rust/format.go), which is --format=require whenever
+    # rustfmt is installed -- a pass that stopped reaching a file then fails the
+    # generation, not just this gate. Without rustfmt the suite generated with
+    # --format=off and the check below skips, loudly.
+    # What the gate pins is that the pass actually reached every
+    # .rs file, at the rustfmt the lang-rust job ships -- a file the pass misses,
+    # or a formatter version whose output has moved, shows up here rather than in
+    # a user's `cargo fmt --check`.
     check_format rust "$WORK/ex-$label" "$WORK/conf-$label" "$WORK/corpus-$label"
 }
 
@@ -982,7 +996,7 @@ messages:
 YAML
 printf 'generic: { emit: project, max_dyn_array_count: 4, max_dyn_string_len: 8, max_dyn_blob_len: 8 }\ntargets: { rust: { corelib: rs } }\n' > "$WORK/cfg-lim.yaml"
 lim_project() { # DEF OUT -- generate, point at the std corelib, build
-    ( cd "$ROOT" && go run ./cmd/sofabgen --config "$WORK/cfg-lim.yaml" --lang rust --in "$1" --out "$2" )
+    ( cd "$ROOT" && go run ./cmd/sofabgen "$FMT" --config "$WORK/cfg-lim.yaml" --lang rust --in "$1" --out "$2" )
     sed -i "s#\${SOFAB_RS_CORELIB}#$STD#" "$2/Cargo.toml"
     crate_bin_name "$2"
     ( cd "$2" && cargo build -q )
@@ -1109,7 +1123,7 @@ lim_complete "$WORK/wlim" wrap '\016\112\022AB\007'        '"objs":\[\]' "a STRI
 # never "unlimited" (generator#385): the same oversized bytes decode against a
 # project with no key set, because 5 elements is far under that default.
 printf 'generic: { emit: project }\ntargets: { rust: { corelib: rs } }\n' > "$WORK/cfg-nolim.yaml"
-( cd "$ROOT" && go run ./cmd/sofabgen --config "$WORK/cfg-nolim.yaml" --lang rust --in "$WORK/dyn.yaml" --out "$WORK/nolim" )
+( cd "$ROOT" && go run ./cmd/sofabgen "$FMT" --config "$WORK/cfg-nolim.yaml" --lang rust --in "$WORK/dyn.yaml" --out "$WORK/nolim" )
 sed -i "s#\${SOFAB_RS_CORELIB}#$STD#" "$WORK/nolim/Cargo.toml"
 crate_bin_name "$WORK/nolim"
 ( cd "$WORK/nolim" && cargo build -q )
@@ -1133,7 +1147,7 @@ echo "==> [rs] decode limits OK"
 # way the streaming legs replace it with streaming_check.rs.
 echo "==> [rs] a §7.3-skipped 1 MiB blob allocates nothing (CORELIB_PLAN §6.2.1/§6.6)"
 rm -rf "$WORK/skipalloc"
-( cd "$ROOT" && go run ./cmd/sofabgen --config "$WORK/cfg-lim.yaml" --lang rust --in "$WORK/dyn.yaml" --out "$WORK/skipalloc" )
+( cd "$ROOT" && go run ./cmd/sofabgen "$FMT" --config "$WORK/cfg-lim.yaml" --lang rust --in "$WORK/dyn.yaml" --out "$WORK/skipalloc" )
 sed -i "s#\${SOFAB_RS_CORELIB}#$STD#" "$WORK/skipalloc/Cargo.toml"
 crate_bin_name "$WORK/skipalloc"
 printf 'pub mod message;\nuse message::*;\n' > "$WORK/skipalloc/src/main.rs"
@@ -1165,7 +1179,7 @@ messages:
       arr: { id: 0, type: array, items: { type: u64, count: 2000000 } }
 YAML
 rm -rf "$WORK/bigalloc"
-( cd "$ROOT" && go run ./cmd/sofabgen --config "$WORK/cfg-nolim.yaml" --lang rust --in "$WORK/bigarr.yaml" --out "$WORK/bigalloc" )
+( cd "$ROOT" && go run ./cmd/sofabgen "$FMT" --config "$WORK/cfg-nolim.yaml" --lang rust --in "$WORK/bigarr.yaml" --out "$WORK/bigalloc" )
 sed -i "s#\${SOFAB_RS_CORELIB}#$STD#" "$WORK/bigalloc/Cargo.toml"
 crate_bin_name "$WORK/bigalloc"
 printf 'pub mod message;\nuse message::*;\n' > "$WORK/bigalloc/src/main.rs"
@@ -1206,7 +1220,7 @@ messages:
       wide: { id: 2, type: array, items: { type: u32, count: 100000 } }
 YAML
 rm -rf "$WORK/overalloc"
-( cd "$ROOT" && go run ./cmd/sofabgen --config "$WORK/cfg-nolim.yaml" --lang rust --in "$WORK/bndarr.yaml" --out "$WORK/overalloc" )
+( cd "$ROOT" && go run ./cmd/sofabgen "$FMT" --config "$WORK/cfg-nolim.yaml" --lang rust --in "$WORK/bndarr.yaml" --out "$WORK/overalloc" )
 sed -i "s#\${SOFAB_RS_CORELIB}#$STD#" "$WORK/overalloc/Cargo.toml"
 crate_bin_name "$WORK/overalloc"
 printf 'pub mod message;\nuse message::*;\n' > "$WORK/overalloc/src/main.rs"
@@ -1219,7 +1233,7 @@ sed '/^\/\/SOFAB_IMPORT$/d' "$ROOT/tests/conformance/rust/overcount_array_alloc.
 # compile there unchanged -- the same trick skipped_blob_nostd.rs uses.
 printf 'generic: { emit: project }\ntargets: { rust: { corelib: rs-no-std, allow_dynamic: true } }\n' > "$WORK/cfg-nsdyn-alloc.yaml"
 rm -rf "$WORK/overalloc-nsdyn"
-( cd "$ROOT" && go run ./cmd/sofabgen --config "$WORK/cfg-nsdyn-alloc.yaml" --lang rust --in "$WORK/bndarr.yaml" --out "$WORK/overalloc-nsdyn" )
+( cd "$ROOT" && go run ./cmd/sofabgen "$FMT" --config "$WORK/cfg-nsdyn-alloc.yaml" --lang rust --in "$WORK/bndarr.yaml" --out "$WORK/overalloc-nsdyn" )
 sed -i "s#\${SOFAB_RS_CORELIB}#$NOSTD#" "$WORK/overalloc-nsdyn/Cargo.toml"
 crate_bin_name "$WORK/overalloc-nsdyn"
 printf 'use sofabuffers_generated::*;\n' > "$WORK/overalloc-nsdyn/src/main.rs"
@@ -1278,7 +1292,7 @@ YAML
 # string, and it must go on being a breach.
 printf 'generic: { emit: project, max_dyn_array_count: 65536, max_dyn_string_len: 8, max_dyn_blob_len: 8 }\ntargets: { rust: { corelib: rs } }\n' > "$WORK/cfg-lim-wide.yaml"
 rm -rf "$WORK/postlim"
-( cd "$ROOT" && go run ./cmd/sofabgen --config "$WORK/cfg-lim-wide.yaml" --lang rust --in "$WORK/postlim.yaml" --out "$WORK/postlim" )
+( cd "$ROOT" && go run ./cmd/sofabgen "$FMT" --config "$WORK/cfg-lim-wide.yaml" --lang rust --in "$WORK/postlim.yaml" --out "$WORK/postlim" )
 sed -i "s#\${SOFAB_RS_CORELIB}#$STD#" "$WORK/postlim/Cargo.toml"
 crate_bin_name "$WORK/postlim"
 printf 'pub mod message;\nuse message::*;\n' > "$WORK/postlim/src/main.rs"
@@ -1313,7 +1327,7 @@ for dleg in dyn:true static:false; do
     [ "$ddyn" = false ] && dstatic=true
     printf 'generic: { emit: project }\ntargets: { rust: { corelib: rs, allow_dynamic: %s } }\n' "$ddyn" > "$WORK/cfg-depth-$dname.yaml"
     rm -rf "$WORK/depth-$dname"
-    ( cd "$ROOT" && go run ./cmd/sofabgen --config "$WORK/cfg-depth-$dname.yaml" --lang rust --in "$WORK/depth.yaml" --out "$WORK/depth-$dname" )
+    ( cd "$ROOT" && go run ./cmd/sofabgen "$FMT" --config "$WORK/cfg-depth-$dname.yaml" --lang rust --in "$WORK/depth.yaml" --out "$WORK/depth-$dname" )
     sed -i "s#\${SOFAB_RS_CORELIB}#$STD#" "$WORK/depth-$dname/Cargo.toml"
     crate_bin_name "$WORK/depth-$dname"
     grep -q 'stack: \[_Loc; 4\],' "$WORK/depth-$dname/src/message.rs" \
@@ -1344,7 +1358,7 @@ echo "==> [rs, rs-static] decode stack depth and wrapper growth OK"
 echo "==> [rs] sequence_growth: a wrapper array grows to its highest id, and the index is the bound"
 printf 'version: 1\nmessages:\n' > "$WORK/growth.yaml"
 python3 "$ROOT/tests/conformance/lib/check_growth.py" --emit-schema >> "$WORK/growth.yaml"
-( cd "$ROOT" && go run ./cmd/sofabgen --config "$WORK/cfg-lim.yaml" --lang rust \
+( cd "$ROOT" && go run ./cmd/sofabgen "$FMT" --config "$WORK/cfg-lim.yaml" --lang rust \
     --in "$WORK/growth.yaml" --out "$WORK/growth" )
 sed -i "s#\${SOFAB_RS_CORELIB}#$STD#" "$WORK/growth/Cargo.toml"
 crate_bin_name "$WORK/growth"
@@ -1398,7 +1412,7 @@ echo "==> [no-std-dynamic] lib builds (alloc fallback)"
 # heapless with NO allocator at all (no `extern crate alloc`), and an unbounded
 # field must instead be a hard generation error.
 printf 'generic: { emit: project }\ntargets: { rust: { corelib: rs-no-std } }\n' > "$WORK/cfg-no-std-static.yaml"
-( cd "$ROOT" && go run ./cmd/sofabgen --config "$WORK/cfg-no-std-static.yaml" --lang rust --in "$WORK/conf.yaml" --out "$WORK/no-std-static" )
+( cd "$ROOT" && go run ./cmd/sofabgen "$FMT" --config "$WORK/cfg-no-std-static.yaml" --lang rust --in "$WORK/conf.yaml" --out "$WORK/no-std-static" )
 if grep -q 'extern crate alloc' "$WORK/no-std-static/src/lib.rs"; then echo "FAIL: no-std-static crate must not pull alloc"; exit 1; fi
 sed -i "s#\${SOFAB_RS_CORELIB}#$NOSTD#" "$WORK/no-std-static/Cargo.toml"
 crate_bin_name "$WORK/no-std-static"
@@ -1489,7 +1503,7 @@ sed '/^\/\/SOFAB_IMPORT$/d' "$ROOT/tests/conformance/rust/streaming_check_nostd.
 # it is sized from the schema -- conf.yaml's maxlen 4096 would swallow the test.
 echo "==> [no-std-static] a §7.3-skipped blob larger than the fixed accumulator still decodes"
 printf 'version: 1\nmessages:\n  sb: { payload: { b: { id: 0, type: blob, maxlen: 8 }, s: { id: 1, type: string, maxlen: 8 } } }\n' > "$WORK/sb.yaml"
-( cd "$ROOT" && go run ./cmd/sofabgen --config "$WORK/cfg-no-std-static.yaml" --lang rust --in "$WORK/sb.yaml" --out "$WORK/skipnostd" )
+( cd "$ROOT" && go run ./cmd/sofabgen "$FMT" --config "$WORK/cfg-no-std-static.yaml" --lang rust --in "$WORK/sb.yaml" --out "$WORK/skipnostd" )
 sed -i "s#\${SOFAB_RS_CORELIB}#$NOSTD#" "$WORK/skipnostd/Cargo.toml"
 crate_bin_name "$WORK/skipnostd"
 printf 'use sofabuffers_generated::*;\n' > "$WORK/skipnostd/src/main.rs"
@@ -1508,7 +1522,7 @@ printf 'version: 1\nmessages:\n  m: { payload: { s: { id: 0, type: string } } }\
 printf 'targets: { rust: { corelib: rs-no-std } }\n' > "$WORK/reject-static.yaml"
 printf 'targets: { rust: { corelib: rs-no-std, allow_dynamic: true } }\n' > "$WORK/reject-dynamic.yaml"
 for c in reject-static reject-dynamic; do
-    if ( cd "$ROOT" && go run ./cmd/sofabgen --config "$WORK/$c.yaml" --lang rust --in "$WORK/unbounded.yaml" --out "$WORK/unbounded-$c" 2>/dev/null ); then
+    if ( cd "$ROOT" && go run ./cmd/sofabgen "$FMT" --config "$WORK/$c.yaml" --lang rust --in "$WORK/unbounded.yaml" --out "$WORK/unbounded-$c" 2>/dev/null ); then
         echo "FAIL: unbounded field under no_std ($c) should error"; exit 1
     fi
 done
@@ -1521,7 +1535,7 @@ echo "==> unbounded field is rejected in both storage modes"
 echo "==> no-std feature-subset smoke: a varint-only schema builds with no features"
 printf 'version: 1\nmessages:\n  tiny: { payload: { a: { id: 0, type: i32 }, b: { id: 1, type: u16 }, c: { id: 2, type: boolean } } }\n' > "$WORK/tiny.yaml"
 printf 'generic: { emit: project }\ntargets: { rust: { corelib: rs-no-std } }\n' > "$WORK/cfg-tiny.yaml"
-( cd "$ROOT" && go run ./cmd/sofabgen --config "$WORK/cfg-tiny.yaml" --lang rust --in "$WORK/tiny.yaml" --out "$WORK/tiny" )
+( cd "$ROOT" && go run ./cmd/sofabgen "$FMT" --config "$WORK/cfg-tiny.yaml" --lang rust --in "$WORK/tiny.yaml" --out "$WORK/tiny" )
 grep -q 'default-features = false' "$WORK/tiny/Cargo.toml" || { echo "FAIL: varint-only schema should need no sofab features"; exit 1; }
 sed -i "s#\${SOFAB_RS_CORELIB}#$NOSTD#" "$WORK/tiny/Cargo.toml"
 crate_bin_name "$WORK/tiny"

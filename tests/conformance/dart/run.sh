@@ -15,6 +15,14 @@ set -eu
 
 ROOT=$(cd "$(dirname "$0")/../../.." && pwd)
 CORELIB="${1:-${SOFAB_DART_CORELIB:-}}"
+
+# What every `sofabgen` run below passes as its --format argument: sofabgen
+# formats nothing unless asked, and this suite asks with --format=require so a
+# format pass that stopped reaching a file fails the generation rather than the
+# gate at the end. `dart format` is part of the SDK this suite needs anyway, so
+# in practice this is always --format=require; the probe is what keeps the
+# suite honest on a box without it (tests/conformance/lib/check_format.sh).
+FMT=$(format_flag dart)
 WORK=$(mktemp -d)
 trap 'rm -rf "$WORK"' EXIT
 
@@ -73,7 +81,7 @@ compile_project() {
 
 # Generate a project, wire the corelib path and compile it.
 build() {
-    ( cd "$ROOT" && go run ./cmd/sofabgen --config "$WORK/cfg.yaml" --lang dart --in "$1" --out "$2" )
+    ( cd "$ROOT" && go run ./cmd/sofabgen "$FMT" --config "$WORK/cfg.yaml" --lang dart --in "$1" --out "$2" )
     sed -i "s#\${SOFAB_DART_CORELIB}#$CORELIB#" "$2/pubspec.yaml"
     compile_project "$2"
 }
@@ -82,7 +90,7 @@ build() {
 # clean analyze == the generated code + harness compile), which is far faster
 # than AOT-compiling an exe for every definition.
 check() {
-    ( cd "$ROOT" && go run ./cmd/sofabgen --config "$WORK/cfg.yaml" --lang dart --in "$1" --out "$2" )
+    ( cd "$ROOT" && go run ./cmd/sofabgen "$FMT" --config "$WORK/cfg.yaml" --lang dart --in "$1" --out "$2" )
     sed -i "s#\${SOFAB_DART_CORELIB}#$CORELIB#" "$2/pubspec.yaml"
     ( cd "$2" && dart pub get >/dev/null 2>&1 )
     danalyze "$2"
@@ -549,7 +557,7 @@ YAML
 cat > "$WORK/cfg-limit.yaml" <<'YAML'
 generic: { emit: project, max_dyn_array_count: 4 }
 YAML
-( cd "$ROOT" && go run ./cmd/sofabgen --config "$WORK/cfg-limit.yaml" --lang dart --in "$WORK/dyn.yaml" --out "$WORK/dynlim" )
+( cd "$ROOT" && go run ./cmd/sofabgen "$FMT" --config "$WORK/cfg-limit.yaml" --lang dart --in "$WORK/dyn.yaml" --out "$WORK/dynlim" )
 sed -i "s#\${SOFAB_DART_CORELIB}#$CORELIB#" "$WORK/dynlim/pubspec.yaml"
 compile_project "$WORK/dynlim"
 build "$WORK/dyn.yaml" "$WORK/dynfree"
@@ -639,7 +647,7 @@ python3 "$ROOT/tests/conformance/lib/check_refusal_category.py" --emit-schema >>
 cat > "$WORK/cfg-refusal.yaml" <<'YAML'
 generic: { emit: project, max_dyn_array_count: 4, max_dyn_string_len: 8, max_dyn_blob_len: 8 }
 YAML
-( cd "$ROOT" && go run ./cmd/sofabgen --config "$WORK/cfg-refusal.yaml" --lang dart --in "$WORK/refusal.yaml" --out "$WORK/refusal" )
+( cd "$ROOT" && go run ./cmd/sofabgen "$FMT" --config "$WORK/cfg-refusal.yaml" --lang dart --in "$WORK/refusal.yaml" --out "$WORK/refusal" )
 sed -i "s#\${SOFAB_DART_CORELIB}#$CORELIB#" "$WORK/refusal/pubspec.yaml"
 compile_project "$WORK/refusal"
 python3 "$ROOT/tests/conformance/lib/check_refusal_category.py" "dart" \
@@ -676,7 +684,7 @@ messages:
       w: { id: 0, type: array, items: { type: string } }
       b: { id: 1, type: array, items: { type: string, count: 100 } }
 YAML
-( cd "$ROOT" && go run ./cmd/sofabgen --config "$WORK/cfg-limit.yaml" --lang dart --in "$WORK/wrap.yaml" --out "$WORK/wraplim" )
+( cd "$ROOT" && go run ./cmd/sofabgen "$FMT" --config "$WORK/cfg-limit.yaml" --lang dart --in "$WORK/wrap.yaml" --out "$WORK/wraplim" )
 grep -q 'rcap: maxDynArrayCount' "$WORK/wraplim/lib/message.dart" \
     || { echo "FAIL: the wrapper index cap must reach the collector"; exit 1; }
 grep -q 'const int maxDynArrayCount = 4;' "$WORK/wraplim/lib/message.dart" \
@@ -716,7 +724,7 @@ messages:
       b: { id: 1, type: array, items: { type: i32, count: 100000 } }
       w: { id: 2, type: array, items: { type: string } }
 YAML
-( cd "$ROOT" && go run ./cmd/sofabgen --config "$WORK/cfg-limit.yaml" --lang dart --in "$WORK/excl.yaml" --out "$WORK/excl" )
+( cd "$ROOT" && go run ./cmd/sofabgen "$FMT" --config "$WORK/cfg-limit.yaml" --lang dart --in "$WORK/excl.yaml" --out "$WORK/excl" )
 sed -i "s#\${SOFAB_DART_CORELIB}#$CORELIB#" "$WORK/excl/pubspec.yaml"
 compile_project "$WORK/excl"
 # b (id 1, signed array, count 6) is bounded by its own `count: 100000`, so the
@@ -788,7 +796,7 @@ YAML
 cat > "$WORK/cfg-strlim.yaml" <<'YAML'
 generic: { emit: project, max_dyn_string_len: 24 }
 YAML
-( cd "$ROOT" && go run ./cmd/sofabgen --config "$WORK/cfg-strlim.yaml" --lang dart --in "$WORK/dynstr.yaml" --out "$WORK/strlim" )
+( cd "$ROOT" && go run ./cmd/sofabgen "$FMT" --config "$WORK/cfg-strlim.yaml" --lang dart --in "$WORK/dynstr.yaml" --out "$WORK/strlim" )
 sed -i "s#\${SOFAB_DART_CORELIB}#$CORELIB#" "$WORK/strlim/pubspec.yaml"
 compile_project "$WORK/strlim"
 printf '\002\242\006' > "$WORK/overcap_trunc.bin"
@@ -921,7 +929,7 @@ echo "==> declared-width reject OK"
 echo "==> sequence_growth: a wrapper array grows to its highest id, and the index is the bound"
 printf 'version: 1\nmessages:\n' > "$WORK/growth.yaml"
 python3 "$ROOT/tests/conformance/lib/check_growth.py" --emit-schema >> "$WORK/growth.yaml"
-( cd "$ROOT" && go run ./cmd/sofabgen --config "$WORK/cfg-limit.yaml" --lang dart --in "$WORK/growth.yaml" --out "$WORK/growth" )
+( cd "$ROOT" && go run ./cmd/sofabgen "$FMT" --config "$WORK/cfg-limit.yaml" --lang dart --in "$WORK/growth.yaml" --out "$WORK/growth" )
 sed -i "s#\${SOFAB_DART_CORELIB}#$CORELIB#" "$WORK/growth/pubspec.yaml"
 compile_project "$WORK/growth"
 # --cap must equal the max_dyn_array_count the config above generated with:
@@ -995,7 +1003,7 @@ python3 "$ROOT/tests/conformance/lib/check_declared_width_kinds.py" "dart" \
 echo "==> §7.4 repeated id: wrappers replace, scopes merge (generator#523)"
 printf 'version: 1\nmessages:\n' > "$WORK/repeated.yaml"
 python3 "$ROOT/tests/conformance/lib/check_repeated_id.py" --emit-schema >> "$WORK/repeated.yaml"
-( cd "$ROOT" && go run ./cmd/sofabgen --config "$WORK/cfg.yaml" --lang dart --in "$WORK/repeated.yaml" --out "$WORK/repeated" )
+( cd "$ROOT" && go run ./cmd/sofabgen "$FMT" --config "$WORK/cfg.yaml" --lang dart --in "$WORK/repeated.yaml" --out "$WORK/repeated" )
 sed -i "s#\${SOFAB_DART_CORELIB}#$CORELIB#" "$WORK/repeated/pubspec.yaml"
 compile_project "$WORK/repeated"
 python3 "$ROOT/tests/conformance/lib/check_repeated_id.py" "Dart" \
@@ -1006,8 +1014,11 @@ python3 "$ROOT/tests/conformance/lib/check_repeated_id.py" "Dart" \
 # above generated for a config of its own -- must satisfy `dart format` at the
 # language version the generated pubspec declares, so a user's own dart format
 # over a tree holding generated code leaves it alone. sofabgen runs dart format
-# itself (generators/dart/format.go); this is the check that the pass reached
-# every file. The whole work dir is swept rather than a list of projects, so a
+# only when asked, and every generation above asks, with $FMT
+# (generators/dart/format.go) -- --format=require whenever `dart` is there,
+# which for this suite is whenever it can run at all, so a format pass that
+# stopped reaching a file fails the generation rather than this gate. This is
+# the check that the pass reached every file. The whole work dir is swept rather than a list of projects, so a
 # project added above is covered the day it is written; the corelib checkout is
 # not generated code and is pruned. The one hand-written file in the sweep,
 # bin/ownership_check.dart copied into the example project, is held to the same

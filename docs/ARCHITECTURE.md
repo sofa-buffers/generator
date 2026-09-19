@@ -404,13 +404,18 @@ A backend is a self-contained, additive plugin. The contract:
 - **Optional capability — `Formatter`**: `Format(files, dir) (files, note, err)`.
   A target whose canonical formatter is an external *program* rather than a Go
   package implements it, and the **CLI** applies it between `Generate` and the
-  writer (§12 item 10; today: rust → `rustfmt`). It is deliberately outside
-  `Generate`, which stays a pure function of (IR, config) — the golden gate
-  compares its bytes — so no backend's output depends on which tools the machine
-  happens to have. A formatter that is not installed returns the files untouched
-  plus a one-line note: emitting code must never require the target toolchain. A
-  formatter that runs and refuses is an error, because that means the emitter
+  writer (§12 item 10; today: rust → `rustfmt`, dart → `dart format`,
+  python → `ruff format`). It is deliberately outside `Generate`, which stays a
+  pure function of (IR, config) — the golden gate compares its bytes — so no
+  backend's output depends on which tools the machine happens to have. A
+  formatter that is not installed returns the files untouched plus a one-line
+  note naming the reason: emitting code must never require the target toolchain.
+  A formatter that runs and refuses is an error, because that means the emitter
   produced source the language cannot parse.
+  **The pass never runs on its own.** sofabgen spawns no external tool unless
+  the run asked for one: the `--format` switch (config key `generic.format`)
+  selects `off` — the default, the capability is not called at all — `auto`, or
+  `require`. §12 item 10 has the switch and why the default is off.
 - **Registry / self-registration**: each backend registers itself by language
   key into a central registry at init; the CLI selects via `Lookup(lang)`.
   Duplicate registration panics at init (surfacing the first time a binary
@@ -5565,11 +5570,17 @@ A reimplementation is **conformant** when it reproduces these gates:
    subsets.
 5. **Golden reproducibility** — regenerate a fixed def for every backend and
    byte-diff against committed goldens (`tests/matrix/testdata/golden/`); plus a
-   frozen IR golden. The goldens are `Generate` output, taken before the
-   optional formatter pass the CLI applies (gate 10), so they are refreshed
-   through the test itself — `go test ./tests/matrix -run TestGoldenOutput
-   -update` — and not by running `sofabgen`, which on a box holding rustfmt,
-   `dart format` or ruff would write formatted files this gate then rejects.
+   frozen IR golden. The goldens are `Generate` output, and a plain `sofabgen`
+   run reproduces them byte for byte — that is what `--format` defaulting to
+   `off` buys (gate 10). They are refreshed through the test itself — `go test
+   ./tests/matrix -run TestGoldenOutput -update` — because a run with
+   `--format=auto` or `--format=require` applies the CLI's formatter pass on a
+   box holding rustfmt, `dart format` or ruff and would write formatted files
+   this gate then rejects. A second test pins the property rather than trusting
+   it: with a stub for every external formatter as the only thing on `PATH`,
+   every backend's `Generate` output still equals its golden and no stub ran —
+   so a formatter release, or a colleague without the tool, can never move a
+   snapshot.
 6. **CI** — a hermetic core job + one `lang-<x>` job per target, on every
    push to `main`, every pull request, and manual dispatch. Each `lang-<x>` job
    additionally uploads the generated sources (example + realworld + corpus,
@@ -5709,7 +5720,11 @@ A reimplementation is **conformant** when it reproduces these gates:
    not parse. The suite refuses to run with any ruff but the pinned one
    (`RUFF_VERSION`, `SOFAB_RUFF` to point at a binary), and the `lang-python`
    job installs exactly that version, so a finding means the same thing
-   locally and in CI. `PYTHONWARNINGS=error` is the `python3 -W error` of every
+   locally and in CI. ruff being *absent* is the one case that is not a
+   refusal: it is not part of the Python toolchain, and the suite must run on a
+   box that has no external formatter or linter at all, so this half is skipped
+   with the same `!!!!` banner gate 10 uses and `SOFAB_FORMAT_STRICT=1` — set
+   in `lang-python` — turns the skip back into a failure. `PYTHONWARNINGS=error` is the `python3 -W error` of every
    leg on both engines: a SyntaxWarning fires when a generated module is first
    compiled, which is its first import in the run, and a DeprecationWarning
    from anything generated code calls fails the leg that hit it. A
@@ -5821,10 +5836,66 @@ A reimplementation is **conformant** when it reproduces these gates:
     | target | formatter | how the output gets there |
     |---|---|---|
     | go | `gofmt -l` prints nothing | the backend formats every file through `go/format` (`generators/golang/gofile.go`) |
-    | rust / rs-no-std | `rustfmt --check --edition <crate edition>` | the CLI pipes every `.rs` file through `rustfmt` (`generators/rust/format.go`) |
+    | rust / rs-no-std | `rustfmt --check --edition <crate edition>` | the CLI pipes every `.rs` file through `rustfmt` when asked (`generators/rust/format.go`) |
     | zig | `zig fmt --check` | the backend emits zig fmt layout itself (`generators/zig/layout.go`) |
-    | dart | `dart format --output=none --set-exit-if-changed`, at the language version the generated `pubspec.yaml` declares | the CLI pipes every `.dart` file through `dart format` (`generators/dart/format.go`) |
-    | python | `ruff format --check`, at the ruff version the suite pins | the CLI pipes every `.py` module through `ruff format` (`generators/python/format.go`) |
+    | dart | `dart format --output=none --set-exit-if-changed`, at the language version the generated `pubspec.yaml` declares | the CLI pipes every `.dart` file through `dart format` when asked (`generators/dart/format.go`) |
+    | python | `ruff format --check`, at the ruff version the suite pins | the CLI pipes every `.py` module through `ruff format` when asked (`generators/python/format.go`) |
+
+    **The `--format` switch, and why it is off by default — sofabgen runs no
+    external tool unless it was asked to.** Whether the CLI applies
+    `generator.Formatter` is one switch for the whole run, not one per language,
+    with three values:
+
+    | value | what happens |
+    |---|---|
+    | `off` | **the default.** The capability is not called at all; no process is spawned, nothing is printed. |
+    | `auto` | Format when the tool is installed. When it is not, write unformatted output and print the reason once per run on stderr. |
+    | `require` | Format, and FAIL the run when the tool is missing. |
+
+    It is exposed twice: the CLI flag `--format=off\|auto\|require` and the
+    config key `generic.format` (same three values, in the closed config
+    schema). Precedence is the usual one — built-in default < `generic.format` <
+    `--format` — and an unrecognised value from either source is a startup error
+    naming the three, never a silent fallback to a default. A formatter that
+    RUNS and refuses the code is an error under `auto` as well: that is an
+    emitter bug, and no switch turns it into a written file.
+
+    The default is `off` because the alternative is an invisible step. With the
+    pass automatic, one `sofabgen <version> --config <same> --in <same>` writes
+    different bytes on two machines depending on which tools each has, and a
+    tool the user never asked for runs on their box. Off makes a run a pure
+    function of (IR, config) again — which is the same property the golden
+    snapshots of item 5 rest on: they are `Generate` output, and a plain CLI run
+    reproduces them. The cost is that the DEFAULT output of rust, dart and
+    python is unformatted-but-valid code; anyone who wants otherwise says so
+    once, in their config, or runs their own formatter over the output
+    directory.
+
+    Everything in this repository that depends on formatted output asks for it
+    explicitly, and asks only when it can also check the answer. The driver
+    answers both questions: `format_flag <lang>` returns the `--format` value
+    every `sofabgen` call of that suite passes — `--format=require` when the
+    formatter is installed, so a pass that stopped reaching a file fails the
+    generation itself rather than only this gate, and `--format=off` when it is
+    not. The rust, dart and python suites take it once at the top and pass
+    `"$FMT"` at every call site. go and zig need nothing: their output is
+    formatter-clean from the emitter itself, whatever the switch says.
+
+    **A suite runs on a box with no external formatter at all, and says so.**
+    rustfmt is a separate rustup component and ruff is not part of the Python
+    toolchain, so requiring them to run the tests would be the same imposition
+    the default `off` removes from generation. With the formatter absent the
+    suite generates unformatted, and `check_format` prints a `!!!!`-banner
+    naming the tool and what was NOT checked — a skip is never silent and never
+    printed as a pass — and carries on. `SOFAB_FORMAT_STRICT=1` turns every such
+    skip into a failure, and the `lang-*` CI jobs, which install the formatters,
+    set it: optional on a laptop, mandatory in CI. Python's ruff LINT half
+    (gate 9) rides on the same switch, for the same reason and with the same
+    banner; an installed ruff of the wrong version stays a hard failure, because
+    that is a misconfiguration rather than an absent tool.
+
+    `tests/bench` does not ask: it measures the default output, which is what
+    ships. Formatting is whitespace, so no row can move either way.
 
     Go formats with the `go/format` **library**, so `sofabgen` needs no tool
     beyond itself. Source that library cannot parse is a codegen bug: it is now
@@ -5900,9 +5971,10 @@ A reimplementation is **conformant** when it reproduces these gates:
     width-driven: a probe schema with long field names makes ruff split a
     dataclass default, a `def` whose return annotation no longer fits, a dict
     literal and a comparison that shorter names keep on one line. So both run
-    through `generator.Formatter` in the CLI, with the same degradation: a
-    missing formatter writes the files unformatted with a note, a formatter that
-    RUNS and refuses is an error naming the file.
+    through `generator.Formatter` in the CLI, with the same behaviour under the
+    switch: a missing formatter fails under `require` and writes the files
+    unformatted with a note under `auto`, while a formatter that RUNS and
+    refuses is an error naming the file under either.
 
     Dart adds one wrinkle of its own: `dart format` picks its STYLE from the
     **language version** of the package a file belongs to — short style below
