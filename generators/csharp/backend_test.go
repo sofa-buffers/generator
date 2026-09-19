@@ -361,7 +361,7 @@ func TestCsStructural(t *testing.T) {
 // TestCsMetadataDoc: field/enum/flag metadata renders as XML-doc comments and
 // native annotations — a deprecated field carries [Obsolete] plus a
 // "Deprecated." doc note (and the generated marshal/decode that reads it is
-// wrapped in a CS0618 pragma so the output builds warning-clean), each enum
+// wrapped in a CS0612 pragma so the output builds warning-clean), each enum
 // constant carries its description, and each flag carries its description with
 // the (default: true/false) note when the flag declares a default.
 func TestCsMetadataDoc(t *testing.T) {
@@ -389,10 +389,10 @@ messages:
 	for _, want := range []string{
 		// Deprecated field: doc note + native [Obsolete] attribute.
 		"/// Old identifier retained for backward compatibility.\n    /// Deprecated.\n    /// </summary>\n    [Obsolete]\n    public uint legacyId;",
-		// Internal access to the deprecated field is CS0618-suppressed.
-		"    public void Serialize(OStream os) {\n#pragma warning disable 618 // internal access to a member marked [Obsolete]",
-		"#pragma warning restore 618\n    }",
-		"#pragma warning disable 618 // internal access to a member marked [Obsolete]\ninternal sealed class TelemetryVisitor : IVisitor {",
+		// Internal access to the deprecated field is CS0612-suppressed.
+		"    public void Serialize(OStream os) {\n#pragma warning disable 612 // internal access to a member marked [Obsolete] (CS0612)",
+		"#pragma warning restore 612\n    }",
+		"#pragma warning disable 612 // internal access to a member marked [Obsolete] (CS0612)\ninternal sealed class TelemetryVisitor : IVisitor {",
 		// Enum constant descriptions.
 		"/// <summary>\n    /// Node is powered down.\n    /// </summary>\n    Off = 0,",
 		"/// <summary>\n    /// Node is sampling and transmitting.\n    /// </summary>\n    Active = 1,",

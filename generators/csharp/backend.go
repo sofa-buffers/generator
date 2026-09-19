@@ -173,17 +173,20 @@ func (g *gen) emitClass(f *cfile, name, summary string, fields []*ir.Field, isMe
 	f.blank()
 
 	// Serialize. Generated marshal legitimately reads fields marked [Obsolete];
-	// silence the CS0618 deprecation warning around that internal access.
+	// silence the CS0612 deprecation warning around that internal access. The
+	// attribute carries no message, and a message-less [Obsolete] raises CS0612 --
+	// CS0618 is its with-message twin, which suppressing instead left every use
+	// site warning.
 	dep := hasDeprecatedDirect(fields)
 	f.line("    public void Serialize(OStream os) {")
 	if dep {
-		f.line("#pragma warning disable 618 // internal access to a member marked [Obsolete]")
+		f.line("#pragma warning disable 612 // internal access to a member marked [Obsolete] (CS0612)")
 	}
 	for _, fld := range fields {
 		g.emitMarshal(f, fld)
 	}
 	if dep {
-		f.line("#pragma warning restore 618")
+		f.line("#pragma warning restore 612")
 	}
 	f.line("    }")
 
@@ -269,14 +272,14 @@ func (g *gen) emitClass(f *cfile, name, summary string, fields []*ir.Field, isMe
 	if isMessage {
 		// The flat-visitor decode writes into reachable fields, including any
 		// marked [Obsolete] (message-level or nested struct/union); silence the
-		// CS0618 deprecation warning around the generated decode.
+		// CS0612 deprecation warning around the generated decode.
 		depVis := framesHaveDeprecated(g.frames(&ir.Message{Name: name, Fields: fields}))
 		if depVis {
-			f.line("#pragma warning disable 618 // internal access to a member marked [Obsolete]")
+			f.line("#pragma warning disable 612 // internal access to a member marked [Obsolete] (CS0612)")
 		}
 		g.emitVisitor(f, name, fields)
 		if depVis {
-			f.line("#pragma warning restore 618")
+			f.line("#pragma warning restore 612")
 			f.blank()
 		}
 	}
@@ -373,18 +376,18 @@ func (g *gen) emitDecoder(f *cfile, name string) {
 // written"), generated from the very same per-field expressions the writer uses so
 // the two cannot drift apart: a predicate that disagrees with the writer omits a
 // field that is on the wire, or keeps one that is not.
-// `dep` carries emitMarshal's CS0618 guard: the predicate reads the very same
+// `dep` carries emitMarshal's CS0612 guard: the predicate reads the very same
 // members, including any marked [Obsolete].
 func (g *gen) emitIsDefault(f *cfile, fields []*ir.Field, dep bool) {
 	f.line("    public bool IsDefault() {")
 	if dep {
-		f.line("#pragma warning disable 618 // internal access to a member marked [Obsolete]")
+		f.line("#pragma warning disable 612 // internal access to a member marked [Obsolete] (CS0612)")
 	}
 	for _, fld := range fields {
 		f.line("        if (!(%s)) return false;", g.fieldIsDefaultExpr(fld))
 	}
 	if dep {
-		f.line("#pragma warning restore 618")
+		f.line("#pragma warning restore 612")
 	}
 	f.line("        return true;")
 	f.line("    }")
@@ -434,7 +437,7 @@ func (g *gen) arrayIsDefaultExpr(fld *ir.Field, acc string) string {
 }
 
 // hasDeprecatedDirect reports whether any direct field of a class is deprecated,
-// so its Serialize reads a member marked [Obsolete] and needs the CS0618 guard.
+// so its Serialize reads a member marked [Obsolete] and needs the CS0612 guard.
 func hasDeprecatedDirect(fields []*ir.Field) bool {
 	for _, fld := range fields {
 		if fld.Deprecated {
