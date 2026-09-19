@@ -607,7 +607,7 @@ run_backend_tests generators/c SOFAB_C_CORELIB "$CORELIB"
 
 echo "==> corpus + realworld: every definition compiles"
 # BIG descriptor profile so wide field ids (up to 2^31-1) fit the descriptor.
-for def in "$ROOT"/tests/matrix/corpus/defs/*.yaml "$ROOT"/examples/messages/realworld/vehicle_telemetry.yaml; do
+for def in "$ROOT"/tests/matrix/corpus/defs/*.yaml "$ROOT"/examples/messages/realworld/*.yaml; do
     name=$(basename "$def" .yaml)
     # no_maxlen, seq_elements_dyn and array_lengths_dyn are deliberately-unbounded
     # schemas (dynamic-path coverage for heap targets); the heapless C target
@@ -618,6 +618,10 @@ for def in "$ROOT"/tests/matrix/corpus/defs/*.yaml "$ROOT"/examples/messages/rea
     case "$name" in no_maxlen | seq_elements_dyn | array_lengths_dyn) continue ;; esac
     ( cd "$ROOT" && go run ./cmd/sofabgen --lang c --in "$def" --out "$WORK/corpus/$name" >/dev/null )
     for c in "$WORK"/corpus/"$name"/*.c; do
+        # The C target emits its types per message, so a $defs-only file
+        # (realworld/common.yaml, diagnostics.yaml) emits no source at all; the
+        # project block below builds what it does emit, its harness.
+        [ -e "$c" ] || continue
         # $WARNFLAGS (-Werror), because the defects this loop exists to catch are DIAGNOSTICS,
         # not hard errors: an unsuffixed decimal constant above INT64_MAX has no
         # type under C11 6.4.4.1, and GCC accepts it as an extension with a mere
@@ -630,7 +634,20 @@ for def in "$ROOT"/tests/matrix/corpus/defs/*.yaml "$ROOT"/examples/messages/rea
             || { echo "FAIL: corpus def $name did not compile"; exit 1; }
     done
 done
-echo "==> corpus compiles ($(ls "$ROOT"/tests/matrix/corpus/defs/*.yaml | wc -l) definitions + realworld example)"
+echo "==> corpus compiles ($(ls "$ROOT"/tests/matrix/corpus/defs/*.yaml | wc -l) definitions + $(ls "$ROOT"/examples/messages/realworld/*.yaml | wc -l) realworld)"
+
+# Every realworld file as emit:project, harness included, under the exported
+# $WARNFLAGS: the harness is generated code too, and a schema with no message
+# is where it has least to do -- and where an unused bench variable, or a
+# dispatch on a first message that does not exist, would hide.
+echo "==> realworld: every file builds as a project, harness included"
+for def in "$ROOT"/examples/messages/realworld/*.yaml; do
+    name=$(basename "$def" .yaml)
+    ( cd "$ROOT" && go run ./cmd/sofabgen --config "$WORK/proj.yaml" --lang c --in "$def" --out "$WORK/rwproj/$name" >/dev/null )
+    make -C "$WORK/rwproj/$name" SOFAB_C_CORELIB="$CORELIB" >/dev/null \
+        || { echo "FAIL: realworld $name did not build as a project"; exit 1; }
+done
+echo "==> realworld projects build ($(ls "$ROOT"/examples/messages/realworld/*.yaml | wc -l) files)"
 
 # corelib feature-subset configs. corelib-c-cpp can be built with SOFAB_DISABLE_*
 # macros to drop wire types for a smaller footprint. The generated code guards
