@@ -129,7 +129,7 @@ func TestGoEncodeMaxDepthRoundTrip(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(dir, "rt_test.go"), []byte(goDepthDriver), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	for _, args := range [][]string{{"mod", "tidy"}, {"test", "-count=1", "./..."}} {
+	for _, args := range [][]string{{"mod", "tidy"}, {"vet", "./..."}, {"test", "-count=1", "./..."}} {
 		cmd := exec.Command("go", args...)
 		cmd.Dir = dir
 		cmd.Env = append(os.Environ(), "GOFLAGS=-mod=mod")
