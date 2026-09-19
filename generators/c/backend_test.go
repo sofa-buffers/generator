@@ -182,6 +182,12 @@ func genCErr(t *testing.T, src string) error {
 
 func genCFromYAML(t *testing.T, src string) map[string]string {
 	t.Helper()
+	return genCFromYAMLCfg(t, src, map[string]any{})
+}
+
+// genCFromYAMLCfg is genCFromYAML under an explicit config.
+func genCFromYAMLCfg(t *testing.T, src string, cfg map[string]any) map[string]string {
+	t.Helper()
 	doc, err := parser.Parse([]byte(src), "test.yaml")
 	if err != nil {
 		t.Fatal(err)
@@ -200,7 +206,7 @@ func genCFromYAML(t *testing.T, src string) map[string]string {
 	if err := analysis.Analyze(s); err != nil {
 		t.Fatal(err)
 	}
-	files, err := (&Backend{}).Generate(s, map[string]any{})
+	files, err := (&Backend{}).Generate(s, cfg)
 	if err != nil {
 		t.Fatalf("generate: %v", err)
 	}
@@ -1072,5 +1078,25 @@ messages:
 		if !strings.Contains(hs, "static ") || !strings.Contains(hs, " "+h+"(") {
 			t.Errorf("harness must define %s when it calls it:\n%s", h, hs)
 		}
+	}
+}
+
+// TestCHarnessWithoutMessages: a schema of shared types alone generates no C
+// type (the target emits per message), so its project harness converts nothing
+// and declares no bench sink -- it used to index the absent first message and
+// panic, and would otherwise reference types that do not exist.
+func TestCHarnessWithoutMessages(t *testing.T) {
+	out := genCFromYAMLCfg(t, "version: 1\n$defs:\n  struct:\n    P: { x: { id: 0, type: u8 } }\n", map[string]any{"emit": "project"})
+	main, ok := out["harness/main.c"]
+	if !ok {
+		t.Fatal("no harness/main.c")
+	}
+	for _, bad := range []string{"_to_json", "_from_json", "sink", "sofab_ret_name", "size_t i;"} {
+		if strings.Contains(main, bad) {
+			t.Errorf("message-less harness contains %q:\n%s", bad, main)
+		}
+	}
+	if !strings.Contains(main, "int main(int argc, char **argv) {") {
+		t.Errorf("message-less harness has no main:\n%s", main)
 	}
 }

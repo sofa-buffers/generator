@@ -292,13 +292,21 @@ func (g *gen) emitBench(f *gofile, s *ir.Schema, pkgAlias string) {
 // harness emits the uniform encode/decode JSON CLI for the Go module.
 func (g *gen) harness(s *ir.Schema, modPath string) []byte {
 	f := newGoFile("main")
-	f.imp("encoding/hex")
-	f.imp("encoding/json")
+	// A schema of shared types alone ($defs, no message) has no message to
+	// encode, decode or bench: the harness then reads none of the generated
+	// package, JSON or hex, and Go refuses an unused import outright.
+	hasMsg := len(s.Messages) > 0
+	if hasMsg {
+		f.imp("encoding/hex")
+		f.imp("encoding/json")
+	}
 	f.imp("fmt")
 	f.imp("io")
 	f.imp("os")
 	f.imp("reflect")
-	f.imp(modPath + "/" + g.pkg)
+	if hasMsg {
+		f.imp(modPath + "/" + g.pkg)
+	}
 
 	pkgAlias := g.pkg
 	g.emitBench(f, s, pkgAlias)

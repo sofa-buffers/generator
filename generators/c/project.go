@@ -137,6 +137,15 @@ func (g *gen) harness(s *ir.Schema) []byte {
 	body := h
 	h = &cfile{}
 
+	// The C target emits its types per message, so a schema of shared types
+	// alone ($defs, no message) generates no header and no type: the harness
+	// has nothing to convert and is the bench stub emitMain leaves.
+	if len(s.Messages) == 0 {
+		g.emitMain(h, s)
+		body.b.WriteString(h.b.String())
+		return body.bytes()
+	}
+
 	// Forward-declare every json function so callers precede definitions
 	// regardless of emission order (a struct may use a type defined later).
 	h.line("/* forward declarations */")
@@ -445,8 +454,12 @@ func (g *gen) emitBenchMain(h *cfile, s *ir.Schema) {
 	h.line("    char err[128];")
 	h.line("    sofab_json_t *root = sofab_json_parse((const char *)in, len, err, sizeof(err));")
 	h.line(`    if (!root) { fprintf(stderr, "json: %%s\n", err); return 1; }`)
-	h.line("    unsigned long long sink = 0;")
-	h.line("    size_t i;")
+	// Only a workload folds its results into sink; a schema without a message
+	// has none, and the two would be unused variables there.
+	if len(s.Messages) > 0 {
+		h.line("    unsigned long long sink = 0;")
+		h.line("    size_t i;")
+	}
 	for _, m := range s.Messages {
 		low := strings.ToLower(m.Name)
 		pfx := g.prefix + low
@@ -483,6 +496,18 @@ func (g *gen) emitBenchMain(h *cfile, s *ir.Schema) {
 func (g *gen) emitMain(h *cfile, s *ir.Schema) {
 	g.emitBench(h, s)
 	g.emitBenchMain(h, s)
+	if len(s.Messages) == 0 {
+		// A schema of shared types alone ($defs, no message) has nothing to
+		// encode or decode; the harness keeps only the bench dispatcher, which
+		// answers every workload as unknown.
+		h.line("int main(int argc, char **argv) {")
+		h.line("    if (argc < 2) { fprintf(stderr, \"usage: %%s bench <workload>\\n\", argv[0]); return 2; }")
+		h.line(`    if (strcmp(argv[1], "bench") == 0) return bench_main(argc > 2 ? argv[2] : "", (const unsigned char *)"{}", 2);`)
+		h.line("    fprintf(stderr, \"unknown message\\n\");")
+		h.line("    return 2;")
+		h.line("}")
+		return
+	}
 	// The §7 decode outcome as a NAME. Two verbs need it, for the same reason:
 	// an exit status says only that something was refused, and the categories a
 	// conformance driver has to tell apart are INVALID (malformed bytes,
