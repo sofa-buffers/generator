@@ -163,9 +163,13 @@ func (g *gen) module(s *ir.Schema) []byte {
 	if g.license != "" {
 		f.line("// SPDX-License-Identifier: %s", g.license)
 	}
-	f.line("import { %s } from %q;", strings.Join(usedImports(body), ", "), corelibPkg)
+	// The scan reads code only: a comment naming a corelib function (the Long
+	// array compare says it is "elementsEqual for Long[]") is not a use, and an
+	// import taken for it is an unused one under noUnusedLocals.
+	code := codeOnly(body)
+	f.line("import { %s } from %q;", strings.Join(usedImports(code), ", "), corelibPkg)
 	f.blank()
-	if used := usedEmptyTyped(body); len(used) > 0 {
+	if used := usedEmptyTyped(code); len(used) > 0 {
 		f.line("// Shared zero-length placeholders, one per typed-array type: an empty typed")
 		f.line("// array holds nothing and cannot be written through, so a single instance")
 		f.line("// serves every empty default, visitor register and target slot below.")
@@ -221,6 +225,48 @@ var corelibNames = []string{
 	"Long", "SofabError", "SofabErrorCode", "elementsEqual",
 	"Visitor", "ArrayTarget", "IntegerArrayTarget", "FloatArrayTarget", "BoolArrayTarget",
 	"IStream", "PayloadAcc", "decodeUtf8", "StringSeq", "BlobSeq",
+}
+
+// codeOnly blanks the comments out of a rendered module: `//` to the end of the
+// line and `/* ... */` blocks, each outside a string literal. What is left is
+// what the import scan may count as a use.
+func codeOnly(src string) string {
+	var b strings.Builder
+	b.Grow(len(src))
+	var quote byte // the open string literal's delimiter, or 0
+	for i := 0; i < len(src); i++ {
+		c := src[i]
+		switch {
+		case quote != 0:
+			b.WriteByte(c)
+			if c == '\\' && i+1 < len(src) {
+				i++
+				b.WriteByte(src[i])
+			} else if c == quote {
+				quote = 0
+			}
+		case c == '"' || c == '\'' || c == '`':
+			quote = c
+			b.WriteByte(c)
+		case c == '/' && i+1 < len(src) && src[i+1] == '/':
+			for i < len(src) && src[i] != '\n' {
+				i++
+			}
+			if i < len(src) {
+				b.WriteByte('\n')
+			}
+		case c == '/' && i+1 < len(src) && src[i+1] == '*':
+			end := strings.Index(src[i+2:], "*/")
+			if end < 0 {
+				return b.String()
+			}
+			b.WriteString(strings.Repeat("\n", strings.Count(src[i:i+2+end+2], "\n")))
+			i += 2 + end + 1
+		default:
+			b.WriteByte(c)
+		}
+	}
+	return b.String()
 }
 
 // usedImports selects the corelib names a rendered module actually references.

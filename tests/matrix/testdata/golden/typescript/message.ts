@@ -156,7 +156,7 @@ class _ScalarsVis implements Visitor {
   private _c = _L_Scalars;
   constructor(readonly o: Scalars, readonly a: PayloadAcc) {}
   sequenceBegin(): boolean { return false; }
-  unsigned(id: number, v: number | bigint, lo: number, hi: number): void {
+  unsigned(id: number, v: number | bigint): void {
     if (this._c !== _L_Scalars) return;
     switch (id) {
     case 0: { const _v = v as number; if (_v > 255) throw new SofabError(SofabErrorCode.InvalidMsg, "u8min: value outside declared width u8"); this.o.u8min = _v; break; }
@@ -166,7 +166,7 @@ class _ScalarsVis implements Visitor {
     default: break;
     }
   }
-  signed(id: number, v: number | bigint, lo: number, hi: number): void {
+  signed(id: number, v: number | bigint): void {
     if (this._c !== _L_Scalars) return;
     switch (id) {
     case 3: { const _v = v as number; if (_v < -128 || _v > 127) throw new SofabError(SofabErrorCode.InvalidMsg, "i8min: value outside declared width i8"); this.o.i8min = _v; break; }

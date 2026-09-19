@@ -584,7 +584,9 @@ func genTSWith(t *testing.T, src string, cfg map[string]any) string {
 func TestTSInt64Long(t *testing.T) {
 	mod := genTSWith(t, int64Def, map[string]any{"int64": "long"})
 	for _, want := range []string{
-		`import { OStream, ArrayKind, DecodeStatus, Long, SofabError, SofabErrorCode, elementsEqual, Visitor, ArrayTarget, IntegerArrayTarget, IStream, PayloadAcc, decode as _decode } from "@sofa-buffers/corelib";`,
+		// No elementsEqual: every array here is Long-backed and compared by
+		// longArrEq, whose comment merely names it.
+		`import { OStream, ArrayKind, DecodeStatus, Long, SofabError, SofabErrorCode, Visitor, ArrayTarget, IntegerArrayTarget, IStream, PayloadAcc, decode as _decode } from "@sofa-buffers/corelib";`,
 		// Long[] backing field + accessor pair; setter converts once. `count: 8` is a
 		// CAPACITY, not a length (§3), so a fresh us is the EMPTY array — not 8
 		// Long zeros.
@@ -647,8 +649,11 @@ func TestTSInt64Long(t *testing.T) {
 		// the same message no longer pays for that choice: the channel was read once
 		// from the root and covered every field alike (#344, #335).
 		"class _MVis implements Visitor {",
-		"  unsigned(id: number, v: number | bigint, lo: number, hi: number): void {",
-		"  arrayBulk(id: number, kind: ArrayKind, count: number): ArrayTarget | null {",
+		// Every integer field here is Long-backed, so nothing reads the number-first
+		// `v`: it keeps its place under the `_` name noUnusedParameters exempts.
+		"  unsigned(id: number, _v: number | bigint, lo: number, hi: number): void {",
+		// `count` is not read by a bulk arm, so the hook does not declare it.
+		"  arrayBulk(id: number, kind: ArrayKind): ArrayTarget | null {",
 		"  sequenceBegin(id: number): boolean {",
 		// JSON keeps the decimal-string form, with the schema's signedness.
 		`"u": this._u.toString(false),`,
@@ -2843,5 +2848,151 @@ messages:
 `, map[string]any{})
 	if strings.Contains(plain, "_E_") {
 		t.Errorf("a module with no typed array must declare no shared empty instance:\n%s", plain)
+	}
+}
+
+// A consumer building with noUnusedParameters rejects a hook parameter nothing
+// reads, and the corelib's Visitor hands every hook more arguments than most
+// arms use. The emitted signature therefore carries exactly the parameters its
+// body reads: an unread trailing one is dropped, and an unread one ahead of a
+// read one keeps its place under the `_` name tsc exempts.
+func TestTSHookParamsFitTheBody(t *testing.T) {
+	for _, c := range []struct{ sig, body, want string }{
+		{"unsigned(id: number, v: number | bigint, lo: number, hi: number): void",
+			"switch (id) { case 0: this.o.a = v; }",
+			"unsigned(id: number, v: number | bigint): void"},
+		{"unsigned(id: number, v: number | bigint, lo: number, hi: number): void",
+			"switch (id) { case 4: this.o[\"_u\"] = Long.fromBits(lo, hi); }",
+			"unsigned(id: number, _v: number | bigint, lo: number, hi: number): void"},
+		// A member access or a word inside a string literal is not a read.
+		{"arrayBulk(id: number, kind: ArrayKind, count: number): ArrayTarget | null",
+			"if (kind !== ArrayKind.Unsigned) return null; _t.count = 1; throw new E(\"id count\");",
+			"arrayBulk(_id: number, kind: ArrayKind): ArrayTarget | null"},
+		{"sequenceBegin(id: number): boolean", "return false;", "sequenceBegin(): boolean"},
+		// A spread reads its operand.
+		{"blob(id: number, src: Uint8Array): void", "f(...src);", "blob(_id: number, src: Uint8Array): void"},
+	} {
+		if got := fitParams(c.sig, c.body); got != c.want {
+			t.Errorf("fitParams(%q)\n got %q\nwant %q", c.sig, got, c.want)
+		}
+	}
+
+	mod := genTSWith(t, `
+version: 1
+messages:
+  m:
+    payload:
+      a: { id: 0, type: u32 }
+      xs: { id: 1, type: array, items: { type: u16 } }
+`, nil)
+	for _, want := range []string{
+		"  unsigned(id: number, v: number | bigint): void {",
+		"  arrayBulk(id: number, kind: ArrayKind): ArrayTarget | null {",
+	} {
+		if !strings.Contains(mod, want) {
+			t.Errorf("message.ts missing %q:\n%s", want, mod)
+		}
+	}
+	for _, gone := range []string{"lo: number, hi: number", "count: number): ArrayTarget"} {
+		if strings.Contains(mod, gone) {
+			t.Errorf("message.ts declares a parameter nothing reads: %q", gone)
+		}
+	}
+}
+
+// A wrapper row of strings hands its elements to a corelib collector, so the
+// row index is never read back; a register written and never read is an error
+// under noUnusedLocals. A row of structs does read it, to reach the element.
+func TestTSIndexRegisterOnlyWhenRead(t *testing.T) {
+	mod := genTSWith(t, `
+version: 1
+$defs:
+  struct:
+    P:
+      x: { id: 0, type: i32 }
+messages:
+  m:
+    payload:
+      srows: { id: 0, type: array, items: { type: array, items: { type: string, maxlen: 4 } } }
+      prows: { id: 1, type: array, items: { type: array, items: { type: struct, fields: { $ref: '#/$defs/struct/P' } } } }
+`, nil)
+	re := regexp.MustCompile(`private (_ix\d+) = 0;`)
+	declared := re.FindAllStringSubmatch(mod, -1)
+	if len(declared) == 0 {
+		t.Fatalf("no index register at all -- the struct rows need one:\n%s", mod)
+	}
+	for _, d := range declared {
+		if !strings.Contains(mod, "[this."+d[1]+"]") {
+			t.Errorf("%s is declared but never read", d[1])
+		}
+	}
+	for _, m := range regexp.MustCompile(`this\.(_ix\d+) = id;`).FindAllStringSubmatch(mod, -1) {
+		if !strings.Contains(mod, "private "+m[1]+" = 0;") {
+			t.Errorf("%s is assigned but not declared", m[1])
+		}
+	}
+	if !strings.Contains(mod, "this.o.srows") {
+		t.Fatalf("string rows not decoded at all:\n%s", mod)
+	}
+}
+
+// A schema of $defs alone has no message: the harness then names neither the
+// module namespace nor the bench inputs, so it leaves nothing unused.
+func TestTSHarnessWithoutMessagesLeavesNothingUnread(t *testing.T) {
+	harnessOf := func(src string) string {
+		files, err := (&Backend{}).Generate(schema(t, src), map[string]any{"emit": "project"})
+		if err != nil {
+			t.Fatalf("generate: %v", err)
+		}
+		for _, f := range files {
+			if f.Path == "harness.ts" {
+				return string(f.Content)
+			}
+		}
+		t.Fatal("no harness.ts")
+		return ""
+	}
+	bare := harnessOf("version: 1\n$defs:\n  struct:\n    P:\n      x: { id: 0, type: i32 }\n")
+	for _, gone := range []string{`import * as M`, "BENCH_WARMUP", "reps: number, input: Buffer"} {
+		if strings.Contains(bare, gone) {
+			t.Errorf("message-less harness still emits %q", gone)
+		}
+	}
+	if !strings.Contains(bare, "async function benchMain(w: string, _reps: number, _input: Buffer)") {
+		t.Errorf("message-less benchMain signature changed:\n%s", bare)
+	}
+	full := harnessOf(int64Def)
+	for _, want := range []string{`import * as M from "./message.js";`, "const BENCH_WARMUP", "async function benchMain(w: string, reps: number, input: Buffer)"} {
+		if !strings.Contains(full, want) {
+			t.Errorf("harness with a message is missing %q", want)
+		}
+	}
+}
+
+// A corelib name that appears only in a comment is not a use: importing it
+// leaves an unused import, which noUnusedLocals rejects. The Long-mode array
+// compare's doc comment names elementsEqual, and nothing else in a Long-only
+// module calls it.
+func TestTSImportsIgnoreComments(t *testing.T) {
+	mod := genTSWith(t, `
+version: 1
+messages:
+  m:
+    payload:
+      ud: { id: 0, type: array, items: { type: u64, count: 2 }, default: [1, 2] }
+`, map[string]any{"int64": "long"})
+	imp, _, _ := strings.Cut(mod[strings.Index(mod, "import {"):], "\n")
+	if strings.Contains(imp, "elementsEqual") && !strings.Contains(codeOnly(mod), "elementsEqual(") {
+		t.Errorf("elementsEqual imported but only a comment names it:\n%s", imp)
+	}
+	for _, c := range []struct{ in, want string }{
+		{"a // b\nc", "a \nc"},
+		{"x = \"// not a comment\"; // gone", "x = \"// not a comment\"; "},
+		{"/** doc\n * elementsEqual\n */\ny", "\n\n\ny"},
+		{"s = 'it\\'s'; // x", "s = 'it\\'s'; "},
+	} {
+		if got := codeOnly(c.in); got != c.want {
+			t.Errorf("codeOnly(%q) = %q, want %q", c.in, got, c.want)
+		}
 	}
 }
