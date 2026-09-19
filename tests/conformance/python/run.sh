@@ -28,6 +28,9 @@ trap 'rm -rf "$WORK"' EXIT
 # wrong ruff fails in the first second rather than after the whole run.
 RUFF_VERSION=0.16.8
 RUFF="${SOFAB_RUFF:-ruff}"
+# Non-empty only on a box without ruff: it is what the two ruff gates below and
+# the backend-test runner key their skip off.
+RUFF_ABSENT=""
 _ruff_have=$("$RUFF" --version 2>/dev/null || true)
 if [ -z "$_ruff_have" ]; then
     # ruff is not part of the Python toolchain -- unlike gofmt or `dart format`,
@@ -39,6 +42,7 @@ if [ -z "$_ruff_have" ]; then
     # it, so nothing is optional there.
     skip_without_tool "ruff" "generated Python against ruff $RUFF_VERSION (gate 9 lint and gate 10 format)"
     RUFF=""
+    RUFF_ABSENT=ruff
 elif [ "$_ruff_have" != "ruff $RUFF_VERSION" ]; then
     # Installed, but not the pinned one: that is a misconfiguration, not an
     # absent tool, and it is not skippable -- ruff's findings and its formatting
@@ -56,6 +60,7 @@ else
     RUFF=$(command -v "$RUFF")
     PATH="$(dirname "$RUFF"):$PATH"
     export PATH
+    RUFF_ABSENT=""
 fi
 
 # What every `sofabgen` run below passes as its --format argument:
@@ -912,7 +917,10 @@ echo "==> element length + row count caps OK"
 # receiver cap, its own bound still rejects as INVALID, and a header that
 # contradicts the declared type is skipped rather than measured against it (S7.3).
 echo "==> backend Go tests against the corelib (shared-vector byte-exact conformance, ...)"
-run_backend_tests generators/python SOFAB_PY_CORELIB "$CORELIB"
+# $RUFF_ABSENT is "ruff" only when this box has none (see the banner at the top),
+# and it buys exactly one thing: the package's real-ruff test may then say it
+# skipped. With ruff installed it is empty and any skip fails the suite.
+run_backend_tests generators/python SOFAB_PY_CORELIB "$CORELIB" "$RUFF_ABSENT"
 
 # ...and the decode direction (generator#444): each vector's DENSE bytes fed into
 # a message that declares u64 on the anchors and nothing else, so every other

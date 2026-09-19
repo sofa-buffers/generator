@@ -81,7 +81,7 @@ format_flag() {
 #   and set it, so what is optional on a laptop is mandatory in CI.
 skip_without_tool() {
     if [ -n "${SOFAB_FORMAT_STRICT:-}" ]; then
-        echo "FAIL: $1 is not installed and SOFAB_FORMAT_STRICT is set -- $2 was NOT checked."
+        echo "FAIL: $1 is not installed and SOFAB_FORMAT_STRICT is set -- skipped: $2."
         exit 1
     fi
     echo "!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!"
