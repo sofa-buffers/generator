@@ -113,6 +113,13 @@ run_variant() {
         crate_bin_name "$2"
         ( cd "$2" && cargo build -q )
     }
+    rust_clippy() {  # crate-dir
+        if ! ( cd "$1" && cargo clippy -q --all-targets -- -D warnings ) >"$1.clippy.log" 2>&1; then
+            cat "$1.clippy.log"
+            echo "FAIL: [$label] cargo clippy -- -D warnings reports a finding in $(basename "$1")"
+            exit 1
+        fi
+    }
 
     # example.yaml leaves `somemap` deliberately count-less to show the dynamic
     # form. The no_std profile requires a bound in both storage modes, so this leg
@@ -133,19 +140,15 @@ run_variant() {
     rust_build "$EXAMPLE" "$WORK/ex-$label"
     rust_build "$WORK/conf.yaml" "$WORK/conf-$label"
 
-    # clippy on the example crate: no deny-level finding (clippy::correctness,
-    # e.g. approx_constant on a float default). A user's `cargo clippy` fails on
-    # those outright. clippy's warn-level lints are NOT gated yet -- the
-    # generated code still has a warn-level backlog -- so this call runs with the
-    # suite's -D warnings lifted, in its own target dir so the flag change does
-    # not rebuild the shared one. rustc's own warnings were already denied by
-    # the build above; a missing clippy component fails here, it is not skipped.
-    if ! ( cd "$WORK/ex-$label" && RUSTFLAGS= CARGO_TARGET_DIR="$WORK/target-clippy" \
-            cargo clippy -q ) >"$WORK/clippy-$label.log" 2>&1; then
-        cat "$WORK/clippy-$label.log"
-        echo "FAIL: [$label] cargo clippy reports a deny-level finding on the example crate"
-        exit 1
-    fi
+    # clippy with every lint it warns on denied, on the example and conformance
+    # crates here and on every corpus/realworld crate below: a user's
+    # `cargo clippy -- -D warnings` must pass on generated code. The few style
+    # lints a stamped arm or a spelled-out Default trips are allowed at their
+    # emitting site (generators/rust), never here. --all-targets takes the
+    # harness bin along with the lib; a missing clippy component fails here, it
+    # is not skipped.
+    rust_clippy "$WORK/ex-$label"
+    rust_clippy "$WORK/conf-$label"
 
     # MAX_SIZE fill check (ARCHITECTURE §9.6): MAX_SIZE sizes the encode buffer
     # (a heapless::Vec in the no_std profile), so a fully filled message must fit
@@ -896,8 +899,8 @@ YAML
             --cwd "$WORK/conf-$label" -- cargo run -q --
     done
 
-    echo "==> [$label] corpus + realworld: every definition builds"
-    for def in "$ROOT"/tests/matrix/corpus/defs/*.yaml "$ROOT"/examples/messages/realworld/vehicle_telemetry.yaml; do
+    echo "==> [$label] corpus + realworld: every definition builds, clippy-clean"
+    for def in "$ROOT"/tests/matrix/corpus/defs/*.yaml "$ROOT"/examples/messages/realworld/*.yaml; do
         # no_maxlen.yaml exists to exercise genuinely unbounded string/blob fields.
         # The no_std profile rejects those by design — in both storage modes — so
         # it is not a definition this leg can compile, and skipping it is the
@@ -911,8 +914,9 @@ YAML
         esac
         name=$(basename "$def" .yaml)
         rust_build "$def" "$WORK/corpus-$label/$name"
+        rust_clippy "$WORK/corpus-$label/$name"
     done
-    echo "==> [$label] corpus builds ($(ls "$ROOT"/tests/matrix/corpus/defs/*.yaml | wc -l) definitions + realworld example)"
+    echo "==> [$label] corpus builds clippy-clean ($(ls "$ROOT"/tests/matrix/corpus/defs/*.yaml | wc -l) definitions + $(ls "$ROOT"/examples/messages/realworld/*.yaml | wc -l) realworld)"
 }
 
 # corelib-rs (std, the default): always-on, no feature flags.
