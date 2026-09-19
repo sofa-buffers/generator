@@ -51,6 +51,7 @@ pub struct Scalars {
     pub flag: bool,
 }
 
+#[allow(clippy::derivable_impls)] // one Default shape whether or not the schema declares defaults
 #[allow(clippy::approx_constant)] // float defaults are the schema's values, written as declared
 impl Default for Scalars {
     fn default() -> Self {
@@ -244,12 +245,13 @@ struct V<'a> {
     askip: usize, // elements left to discard from a wire-type-contradictory array
 }
 
+#[allow(clippy::single_match, clippy::match_single_binding, clippy::collapsible_match, clippy::needless_return, clippy::unnecessary_cast, clippy::let_unit_value, clippy::unnecessary_operation, clippy::manual_range_contains)] // arms are stamped per field from one template
 impl<'a> Visitor for V<'a> {
     fn unsigned(&mut self, id: Id, value: Unsigned) {
         if self.askip > 0 { self.askip -= 1; return; } // array delivered at a scalar id
         match (self.cur, id) {
-            (_Loc::Root, 0) => { if value > 255 { self.inv = true; return; } self.m.u8min = value as u8 },
-            (_Loc::Root, 1) => { if value > 255 { self.inv = true; return; } self.m.u8max = value as u8 },
+            (_Loc::Root, 0) => { if value > 255 { self.inv = true; return; }; self.m.u8min = value as u8 },
+            (_Loc::Root, 1) => { if value > 255 { self.inv = true; return; }; self.m.u8max = value as u8 },
             (_Loc::Root, 2) => { self.m.u64max = value as u64 },
             (_Loc::Root, 7) => self.m.flag = value != 0,
             _ => {}
@@ -258,7 +260,7 @@ impl<'a> Visitor for V<'a> {
     fn signed(&mut self, id: Id, value: Signed) {
         if self.askip > 0 { self.askip -= 1; return; } // array delivered at a scalar id
         match (self.cur, id) {
-            (_Loc::Root, 3) => { if value < -128 || value > 127 { self.inv = true; return; } self.m.i8min = value as i8 },
+            (_Loc::Root, 3) => { if value < -128 || value > 127 { self.inv = true; return; }; self.m.i8min = value as i8 },
             (_Loc::Root, 4) => { self.m.i64min = value as i64 },
             _ => {}
         }

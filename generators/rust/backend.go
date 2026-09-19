@@ -228,6 +228,14 @@ func (g *gen) usesAlloc(s *ir.Schema) bool {
 	for _, m := range s.Messages {
 		walk(m.Fields)
 	}
+	// Every named struct/union is emitted, reachable from a message or not, so
+	// its containers need alloc too -- a schema of shared types alone (no
+	// message) is still a crate that has to build.
+	for _, key := range s.NamedOrder {
+		if nt := s.Named[key]; nt.Category == ir.CatStruct || nt.Category == ir.CatUnion {
+			walk(nt.Fields)
+		}
+	}
 	return found
 }
 
@@ -603,6 +611,12 @@ func fieldsHaveDeprecated(fields []*ir.Field) bool {
 // of 3.141592653589793; the literal is the schema's value, written as declared.
 const approxConstantAllow = "#[allow(clippy::approx_constant)] // float defaults are the schema's values, written as declared"
 
+// derivableImplsAllow sits on every generated `impl Default`. Default is spelled
+// out even where each field sits at its type default, so one shape serves a
+// struct with declared defaults and one without; clippy::derivable_impls would
+// have the second derive it instead.
+const derivableImplsAllow = "#[allow(clippy::derivable_impls)] // one Default shape whether or not the schema declares defaults"
+
 // fieldsHaveFloatDefault reports whether any of the fields spells a declared
 // floating-point default: an fp32/fp64 scalar, or a native fp array.
 func (g *gen) fieldsHaveFloatDefault(fields []*ir.Field) bool {
@@ -661,6 +675,7 @@ func (g *gen) emitStruct(f *rfile, name string, fields []*ir.Field, isMessage bo
 	// touch them so the generated crate stays warning-clean.
 	deprecated := fieldsHaveDeprecated(fields)
 	floatDefault := g.fieldsHaveFloatDefault(fields)
+	f.line(derivableImplsAllow)
 	if deprecated {
 		f.line("#[allow(deprecated)]")
 	}
@@ -928,13 +943,20 @@ func (g *gen) serializeArray(f *rfile, ind, idExpr, val string, elem ir.Kind, re
 	iv := fmt.Sprintf("_i%d", depth)
 	ev := fmt.Sprintf("_e%d", depth)
 	tv := fmt.Sprintf("_t%d", depth)
+	// At depth 0 val is a field (self.x) and is borrowed; below it, val is an
+	// element of an outer .iter() and is a reference already -- borrowing it
+	// again is a needless_borrow.
+	borrowed := "&" + val
+	if depth > 0 {
+		borrowed = val
+	}
 	switch elem {
 	case ir.KindU8, ir.KindU16, ir.KindU32, ir.KindU64, ir.KindBitfield:
 		// bitfield backing is an unsigned int (UnsignedElem), so it writes directly.
-		f.line("%slet _ = os.write_array_unsigned(%s, &%s);", ind, idExpr, val)
+		f.line("%slet _ = os.write_array_unsigned(%s, %s);", ind, idExpr, borrowed)
 	case ir.KindI8, ir.KindI16, ir.KindI32, ir.KindI64, ir.KindEnum:
 		// enum backing is a signed int (SignedElem), so it writes directly.
-		f.line("%slet _ = os.write_array_signed(%s, &%s);", ind, idExpr, val)
+		f.line("%slet _ = os.write_array_signed(%s, %s);", ind, idExpr, borrowed)
 	case ir.KindBool:
 		// bool is not an array element type; lower to a 0/1 unsigned array. The
 		// temporary matches the field's own container, so a heap-free profile stays
@@ -943,9 +965,9 @@ func (g *gen) serializeArray(f *rfile, ind, idExpr, val string, elem ir.Kind, re
 		typ := g.rustSeq("u8", hasCount, count)
 		f.line("%s{ let %s: %s = %s.iter().map(|_v| *_v as u8).collect(); let _ = os.write_array_unsigned(%s, &%s); }", ind, tv, typ, val, idExpr, tv)
 	case ir.KindFP32:
-		f.line("%slet _ = os.write_array_fp32(%s, &%s);", ind, idExpr, val)
+		f.line("%slet _ = os.write_array_fp32(%s, %s);", ind, idExpr, borrowed)
 	case ir.KindFP64:
-		f.line("%slet _ = os.write_array_fp64(%s, &%s);", ind, idExpr, val)
+		f.line("%slet _ = os.write_array_fp64(%s, %s);", ind, idExpr, borrowed)
 	case ir.KindString:
 		// A string element is a leaf: in the array's INTERIOR it is omitted when it
 		// equals the element default (empty), leaving an id gap the decoder restores

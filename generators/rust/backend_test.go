@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"github.com/sofa-buffers/generator/internal/analysis"
+	"github.com/sofa-buffers/generator/internal/generator"
 	"github.com/sofa-buffers/generator/internal/ir"
 	"github.com/sofa-buffers/generator/internal/model"
 	"github.com/sofa-buffers/generator/internal/parser"
@@ -111,7 +112,7 @@ func TestRustStructural(t *testing.T) {
 		// Over-count rejects (generator#100/#216), then the container is sized to the
 		// count the reject just approved and the wire's M elements are collected into
 		// it (generator#505).
-		"if count > 4 { self.inv = true; self.afill = 0; return; } self.m.someuintarray.clear(); self.m.someuintarray.reserve_exact(count) ",
+		"if count > 4 { self.inv = true; self.afill = 0; return; }; self.m.someuintarray.clear(); self.m.someuintarray.reserve_exact(count) ",
 		"acc: sofab::PayloadAcc,", // the corelib owns chunk reassembly (generator#345)
 		"let _p = match self.acc.feed(total, offset, chunk) { Some(_v) => _v, None => return };",                   // ...and generated code only calls it
 		"match core::str::from_utf8(_p) { Ok(_v) => _v.to_owned(), Err(_) => { self.inv = true; String::new() } }", // strict UTF-8 on the ASSEMBLED payload: invalid -> INVALID (issue #85, subsumes #80)
@@ -268,7 +269,7 @@ messages:
 		// later count-less array still arrives armed. See limArrayStore, and
 		// tests/conformance/rust/post_limit_fill.rs, which measures both halves
 		// of what it buys (generator#511).
-		"(ArrayKind::Unsigned, _Loc::Root, 1) => { if count > MAX_DYN_ARRAY_COUNT { self.lim = true; self.afill = 0; return; } self.m.arr.clear() },",
+		"(ArrayKind::Unsigned, _Loc::Root, 1) => { if count > MAX_DYN_ARRAY_COUNT { self.lim = true; self.afill = 0; return; }; self.m.arr.clear() },",
 		"(_Loc::Root, 1) => { if self.afill == 0 { return; } self.afill -= 1; { if !self.lim { self.m.arr.push(value as u64); } }; },",
 		// Unbounded nested native inner array: same guard on its array_begin arm
 		// (the inner-Vec push is skipped, so the store must be lim-gated too).
@@ -278,8 +279,8 @@ messages:
 		// CLEARED on open even here: §7.4 replacement is a semantics rule, so it does
 		// not depend on the bound being a schema `count` (generator#509). What the
 		// missing bound suppresses is the pre-size, and only that.
-		"(ArrayKind::Unsigned, _Loc::Root_mat, _) => { if id as usize >= MAX_DYN_ARRAY_COUNT { self.lim = true; self.afill = 0; return; } if count > MAX_DYN_ARRAY_COUNT { self.lim = true; self.afill = 0; return; } if self.lim { return; } while self.m.mat.len() <= id as usize { self.m.mat.push(Default::default()); } self._ix0 = id as usize; if let Some(_r) = self.m.mat.get_mut(id as usize) { _r.clear(); } },",
-		"(_Loc::Root_mat, _) => { if self.afill == 0 { return; } self.afill -= 1; if value > 4294967295 { self.inv = true; self.afill = 0; return; } { if !self.lim { if let Some(_r) = self.m.mat.get_mut(self._ix0) { _r.push(value as u32); }; } }; },",
+		"(ArrayKind::Unsigned, _Loc::Root_mat, _) => { if id as usize >= MAX_DYN_ARRAY_COUNT { self.lim = true; self.afill = 0; return; }; if count > MAX_DYN_ARRAY_COUNT { self.lim = true; self.afill = 0; return; }; if self.lim { return; }; while self.m.mat.len() <= id as usize { self.m.mat.push(Default::default()); } self._ix0 = id as usize; if let Some(_r) = self.m.mat.get_mut(id as usize) { _r.clear(); } },",
+		"(_Loc::Root_mat, _) => { if self.afill == 0 { return; } self.afill -= 1; if value > 4294967295 { self.inv = true; self.afill = 0; return; }; { if !self.lim { if let Some(_r) = self.m.mat.get_mut(self._ix0) { _r.push(value as u32); }; } }; },",
 		// Unbounded string/blob: declared total checked at the top of the callback,
 		// scalar fields and wrapper-sequence string elements alike.
 		"(_Loc::Root, 0) => if total > MAX_DYN_STRING_LEN { self.lim = true; return; },",
@@ -468,6 +469,18 @@ func TestRustDeterministic(t *testing.T) {
 // schema and returns the generated src/message.rs.
 func moduleFromYAML(t *testing.T, src string, cfg map[string]any) string {
 	t.Helper()
+	for _, f := range filesFromYAML(t, src, cfg) {
+		if f.Path == "src/message.rs" {
+			return string(f.Content)
+		}
+	}
+	t.Fatal("no module")
+	return ""
+}
+
+// filesFromYAML generates every file of an inline schema under cfg.
+func filesFromYAML(t *testing.T, src string, cfg map[string]any) []generator.File {
+	t.Helper()
 	doc, err := parser.Parse([]byte(src), "inline.yaml")
 	if err != nil {
 		t.Fatal(err)
@@ -487,13 +500,7 @@ func moduleFromYAML(t *testing.T, src string, cfg map[string]any) string {
 	if err != nil {
 		t.Fatalf("generate: %v", err)
 	}
-	for _, f := range files {
-		if f.Path == "src/message.rs" {
-			return string(f.Content)
-		}
-	}
-	t.Fatal("no module")
-	return ""
+	return files
 }
 
 // TestRustReservedTypeNames: a schema element whose Rust name collides with a
@@ -591,9 +598,9 @@ messages:
 	// than elided: the ORDER is the property -- the inv reject first, so a
 	// doubly-bad message keeps answering InvalidMsg.
 	for _, want := range []string{
-		"if id as usize >= 4 { self.inv = true; return; } if self.lim { return; } while self.m.bs.len()", // bounded string
-		"if id as usize >= 3 { self.inv = true; return; } if self.lim { return; } while self.m.bb.len()", // bounded blob
-		"if id as usize >= 2 { self.inv = true; return; } if self.lim { return; } while self.m.bp.len()", // bounded struct
+		"if id as usize >= 4 { self.inv = true; return; }; if self.lim { return; }; while self.m.bs.len()", // bounded string
+		"if id as usize >= 3 { self.inv = true; return; }; if self.lim { return; }; while self.m.bb.len()", // bounded blob
+		"if id as usize >= 2 { self.inv = true; return; }; if self.lim { return; }; while self.m.bp.len()", // bounded struct
 	} {
 		if !strings.Contains(m, want) {
 			t.Errorf("std message.rs missing over-index guard %q", want)
@@ -602,7 +609,7 @@ messages:
 	// Dynamic string array keeps every index (no guard on the ds arm).
 	if strings.Contains(m, "self.m.ds.len() <= id as usize") && strings.Contains(m, "ds.len() <= id as usize { self.m.ds.push(Default::default()); } self.m.ds[id as usize] = _s; }") {
 		// ds fill present; ensure it is NOT preceded by an inv guard on the same arm.
-		if strings.Contains(m, "self.inv = true; return; } while self.m.ds.len()") {
+		if strings.Contains(m, "self.inv = true; return; }; while self.m.ds.len()") {
 			t.Errorf("dynamic string array must not carry an over-index guard")
 		}
 	}
@@ -614,9 +621,9 @@ messages:
 	srcNoStd := strings.Replace(src, "      ds: { id: 3, type: array, items: { type: string } }\n", "", 1)
 	mn := moduleFromYAML(t, srcNoStd, map[string]any{"corelib": "rs-no-std", "allow_dynamic": true})
 	for _, want := range []string{
-		"if id as usize >= 4 { self.inv = true; return; } while self.m.bs.len()", // bounded string
-		"if id as usize >= 3 { self.inv = true; return; } while self.m.bb.len()", // bounded blob
-		"if id as usize >= 2 { self.inv = true; return; } while self.m.bp.len()", // bounded struct (generator#247)
+		"if id as usize >= 4 { self.inv = true; return; }; while self.m.bs.len()", // bounded string
+		"if id as usize >= 3 { self.inv = true; return; }; while self.m.bb.len()", // bounded blob
+		"if id as usize >= 2 { self.inv = true; return; }; while self.m.bp.len()", // bounded struct (generator#247)
 	} {
 		if !strings.Contains(mn, want) {
 			t.Errorf("no_std message.rs missing over-index guard %q:\n%s", want, mn)
@@ -624,7 +631,7 @@ messages:
 	}
 	// Dynamic string array (ds) is the alloc fallback under allow_dynamic (cap -1),
 	// so it still carries no over-index guard.
-	if strings.Contains(mn, "self.inv = true; return; } while self.m.ds.len()") {
+	if strings.Contains(mn, "self.inv = true; return; }; while self.m.ds.len()") {
 		t.Errorf("no_std dynamic string array must not carry an over-index guard:\n%s", mn)
 	}
 }
@@ -663,22 +670,22 @@ messages:
 	for _, want := range []string{
 		// A wrapper element's own store, string and blob: the refusal sits between
 		// the over-index reject and the gap fill it fronts.
-		"(_Loc::Root_strs, _) => { if id as usize >= MAX_DYN_ARRAY_COUNT { self.lim = true; return; } if self.lim { return; } while self.m.strs.len() <= id as usize",
-		"(_Loc::Root_blbs, _) => { if id as usize >= MAX_DYN_ARRAY_COUNT { self.lim = true; return; } if self.lim { return; } while self.m.blbs.len() <= id as usize",
+		"(_Loc::Root_strs, _) => { if id as usize >= MAX_DYN_ARRAY_COUNT { self.lim = true; return; }; if self.lim { return; }; while self.m.strs.len() <= id as usize",
+		"(_Loc::Root_blbs, _) => { if id as usize >= MAX_DYN_ARRAY_COUNT { self.lim = true; return; }; if self.lim { return; }; while self.m.blbs.len() <= id as usize",
 		// A struct element and a wrapper ROW are placed by sequence_begin, which
 		// grows the outer container before descending; refusing there is what keeps
 		// the gap fill from running.
-		"(_Loc::Root_objs, _) => { if id as usize >= MAX_DYN_ARRAY_COUNT { self.lim = true; return; } if self.lim { return; } while self.m.objs.len() <= id as usize",
-		"(_Loc::Root_rows, _) => { if id as usize >= MAX_DYN_ARRAY_COUNT { self.lim = true; return; } if self.lim { return; } while self.m.rows.len() <= id as usize",
+		"(_Loc::Root_objs, _) => { if id as usize >= MAX_DYN_ARRAY_COUNT { self.lim = true; return; }; if self.lim { return; }; while self.m.objs.len() <= id as usize",
+		"(_Loc::Root_rows, _) => { if id as usize >= MAX_DYN_ARRAY_COUNT { self.lim = true; return; }; if self.lim { return; }; while self.m.rows.len() <= id as usize",
 		// The inner string element of that row, one level down.
-		"(_Loc::Root_rows_e, _) => { if id as usize >= MAX_DYN_ARRAY_COUNT { self.lim = true; return; } if self.lim { return; } while self.m.rows[self._ix",
+		"(_Loc::Root_rows_e, _) => { if id as usize >= MAX_DYN_ARRAY_COUNT { self.lim = true; return; }; if self.lim { return; }; while self.m.rows[self._ix",
 		// A NATIVE row header: both of its own rejects first (each disarming the
 		// fill, generator#508), then the refusal, then the gap fill.
-		"_Loc::Root_mat, _) => { if id as usize >= MAX_DYN_ARRAY_COUNT { self.lim = true; self.afill = 0; return; } if count > MAX_DYN_ARRAY_COUNT { self.lim = true; self.afill = 0; return; } if self.lim { return; } while self.m.mat.len() <= id as usize",
+		"_Loc::Root_mat, _) => { if id as usize >= MAX_DYN_ARRAY_COUNT { self.lim = true; self.afill = 0; return; }; if count > MAX_DYN_ARRAY_COUNT { self.lim = true; self.afill = 0; return; }; if self.lim { return; }; while self.m.mat.len() <= id as usize",
 		// A schema-COUNTED wrapper array keeps its own InvalidMsg bound and takes
 		// the refusal behind it: the gap fill it would run is bounded by the schema,
 		// but it is still work for a message already refused.
-		"(_Loc::Root_bstr, _) => { if id as usize >= 4 { self.inv = true; return; } if self.lim { return; } while self.m.bstr.len() <= id as usize",
+		"(_Loc::Root_bstr, _) => { if id as usize >= 4 { self.inv = true; return; }; if self.lim { return; }; while self.m.bstr.len() <= id as usize",
 	} {
 		if !strings.Contains(m, want) {
 			t.Errorf("message.rs missing post-limit refusal %q:\n%s", want, m)
@@ -687,8 +694,8 @@ messages:
 	// It never precedes a reject that would have set inv, which is what keeps the
 	// verdict where it was.
 	for _, bad := range []string{
-		"if self.lim { return; } if id as usize >=",
-		"if self.lim { return; } if count >",
+		"if self.lim { return; }; if id as usize >=",
+		"if self.lim { return; }; if count >",
 	} {
 		if strings.Contains(m, bad) {
 			t.Errorf("post-limit refusal must follow the arm's own rejects, found %q", bad)
@@ -697,7 +704,7 @@ messages:
 	// The count-less NATIVE leaf array is untouched: its elements have been dropped
 	// at the store since generator#102 and its array_begin arm allocates nothing,
 	// so there is no container there to refuse (generator#511 keeps that test).
-	if !strings.Contains(m, "(ArrayKind::Unsigned, _Loc::Root, 1) => { if count > MAX_DYN_ARRAY_COUNT { self.lim = true; self.afill = 0; return; } self.m.nums.clear() },") {
+	if !strings.Contains(m, "(ArrayKind::Unsigned, _Loc::Root, 1) => { if count > MAX_DYN_ARRAY_COUNT { self.lim = true; self.afill = 0; return; }; self.m.nums.clear() },") {
 		t.Errorf("the count-less native leaf arm must be unchanged:\n%s", m)
 	}
 	if !strings.Contains(m, "{ if !self.lim { self.m.nums.push(value as u32); } }") {
@@ -1017,11 +1024,11 @@ messages:
 		cfg := tc.cfg
 		m := moduleFromYAML(t, src, cfg)
 		for _, want := range []string{
-			"(ArrayKind::Unsigned, _Loc::Root, 0) => { if count > 5 { self.inv = true; self.afill = 0; return; } self.m.defd.clear()" + tc.size("defd") + " },",
-			"(ArrayKind::Unsigned, _Loc::Root, 2) => { if count > 3 { self.inv = true; self.afill = 0; return; } self.m.nodef.clear()" + tc.size("nodef") + " },",
+			"(ArrayKind::Unsigned, _Loc::Root, 0) => { if count > 5 { self.inv = true; self.afill = 0; return; }; self.m.defd.clear()" + tc.size("defd") + " },",
+			"(ArrayKind::Unsigned, _Loc::Root, 2) => { if count > 3 { self.inv = true; self.afill = 0; return; }; self.m.nodef.clear()" + tc.size("nodef") + " },",
 			// The fp32 array's arm is keyed to its own subtype, so an fp64 header
 			// at id 3 never reaches this bound (generator#259).
-			"(ArrayKind::Fp32, _Loc::Root, 3) => { if count > 3 { self.inv = true; self.afill = 0; return; } self.m.fdef.clear()" + tc.size("fdef") + " },",
+			"(ArrayKind::Fp32, _Loc::Root, 3) => { if count > 3 { self.inv = true; self.afill = 0; return; }; self.m.fdef.clear()" + tc.size("fdef") + " },",
 		} {
 			if !strings.Contains(m, want) {
 				t.Errorf("message.rs (%v) missing %q:\n%s", cfg, want, m)
@@ -1070,8 +1077,8 @@ messages:
 		for _, want := range []string{
 			// row id vs the OUTER count, then element count vs the INNER count,
 			// both before the row is opened or grown, both disarming the fill.
-			"(ArrayKind::Unsigned, _Loc::Root_mat, _) => { if id as usize >= 2 { self.inv = true; self.afill = 0; return; } if count > 3 { self.inv = true; self.afill = 0; return; } while self.m.mat.len() <= id as usize {",
-			"(ArrayKind::Fp32, _Loc::Root_fmat, _) => { if id as usize >= 2 { self.inv = true; self.afill = 0; return; } if count > 4 { self.inv = true; self.afill = 0; return; } while self.m.fmat.len() <= id as usize {",
+			"(ArrayKind::Unsigned, _Loc::Root_mat, _) => { if id as usize >= 2 { self.inv = true; self.afill = 0; return; }; if count > 3 { self.inv = true; self.afill = 0; return; }; while self.m.mat.len() <= id as usize {",
+			"(ArrayKind::Fp32, _Loc::Root_fmat, _) => { if id as usize >= 2 { self.inv = true; self.afill = 0; return; }; if count > 4 { self.inv = true; self.afill = 0; return; }; while self.m.fmat.len() <= id as usize {",
 		} {
 			if !strings.Contains(m, want) {
 				t.Errorf("message.rs (%v) missing %q:\n%s", cfg, want, m)
@@ -1230,11 +1237,11 @@ messages:
 			// Target match: keyed by (kind, loc, id), with the schema `count` bound
 			// and the clear both INSIDE the kind-matched arm.
 			"match (kind, self.cur, id) {",
-			"(ArrayKind::Fp32, _Loc::Root, 1) => { if count > 4 { self.inv = true; self.afill = 0; return; } self.m.f32s.clear()" + tc.size("f32s") + " },",
-			"(ArrayKind::Fp64, _Loc::Root, 2) => { if count > 6 { self.inv = true; self.afill = 0; return; } self.m.f64s.clear()" + tc.size("f64s") + " },",
+			"(ArrayKind::Fp32, _Loc::Root, 1) => { if count > 4 { self.inv = true; self.afill = 0; return; }; self.m.f32s.clear()" + tc.size("f32s") + " },",
+			"(ArrayKind::Fp64, _Loc::Root, 2) => { if count > 6 { self.inv = true; self.afill = 0; return; }; self.m.f64s.clear()" + tc.size("f64s") + " },",
 			// Integer arrays are unaffected: no second header word, so no subtype to
 			// contradict.
-			"(ArrayKind::Unsigned, _Loc::Root, 3) => { if count > 8 { self.inv = true; self.afill = 0; return; } self.m.ints.clear()" + tc.size("ints") + " },",
+			"(ArrayKind::Unsigned, _Loc::Root, 3) => { if count > 8 { self.inv = true; self.afill = 0; return; }; self.m.ints.clear()" + tc.size("ints") + " },",
 		} {
 			if !strings.Contains(m, want) {
 				t.Errorf("message.rs (%v) missing subtype-keyed fixlen arm %q:\n%s", cfg, want, m)
@@ -1654,7 +1661,7 @@ messages:
 		for _, want := range []string{
 			// The string row: reject an over-index element FIRST, grow to it, record
 			// the index, THEN clear the row that id names.
-			"(_Loc::Root_matstr, _) => { if id as usize >= 2 { self.inv = true; return; } " +
+			"(_Loc::Root_matstr, _) => { if id as usize >= 2 { self.inv = true; return; }; " +
 				"while self.m.matstr.len() <= id as usize { ",
 			"self._ix0 = id as usize; if let Some(_r) = self.m.matstr.get_mut(id as usize) { _r.clear(); } _Loc::Root_matstr_e },",
 			// ...and one level down, where the row's own elements are native rows:
@@ -1703,7 +1710,7 @@ messages:
 		got := moduleFromYAML(t, src, cfg)
 		// Struct elements: gap-fill to id under the over-index guard, then descend
 		// into out[id].
-		if !strings.Contains(got, "(_Loc::Root_objs, _) => { if id as usize >= 4 { self.inv = true; return; } while self.m.objs.len() <= id as usize {") {
+		if !strings.Contains(got, "(_Loc::Root_objs, _) => { if id as usize >= 4 { self.inv = true; return; }; while self.m.objs.len() <= id as usize {") {
 			t.Errorf("(%v) struct element must gap-fill under the over-index guard:\n%s", cfg, got)
 		}
 		if !strings.Contains(got, "self._ix0 = id as usize; _Loc::Root_objs_e },") {
@@ -1714,7 +1721,7 @@ messages:
 		}
 		// Matrix rows: array_begin opens the row the id names, and elements push into
 		// THAT row rather than into the last one appended.
-		if !strings.Contains(got, "(ArrayKind::Unsigned, _Loc::Root_mat, _) => { if id as usize >= 4 { self.inv = true; self.afill = 0; return; } if count > 3 { self.inv = true; self.afill = 0; return; } while self.m.mat.len() <= id as usize {") ||
+		if !strings.Contains(got, "(ArrayKind::Unsigned, _Loc::Root_mat, _) => { if id as usize >= 4 { self.inv = true; self.afill = 0; return; }; if count > 3 { self.inv = true; self.afill = 0; return; }; while self.m.mat.len() <= id as usize {") ||
 			// Pinned to the closing brace: all three configs here have DYNAMIC rows,
 			// so all three CLEAR the row -- a repeated row id replaces rather than
 			// merges (§7.4, generator#509) -- and then size it from the inner count
@@ -1732,7 +1739,7 @@ messages:
 		// exists, and after the over-index reject's `return`, so a refused element id
 		// cannot wipe a valid earlier row. There is no pre-size to pair with it: a
 		// wrapper row announces no count anywhere on the wire (§5.1).
-		if !strings.Contains(got, "(_Loc::Root_rows, _) => { if id as usize >= 4 { self.inv = true; return; } while self.m.rows.len() <= id as usize {") ||
+		if !strings.Contains(got, "(_Loc::Root_rows, _) => { if id as usize >= 4 { self.inv = true; return; }; while self.m.rows.len() <= id as usize {") ||
 			!strings.Contains(got, "self._ix2 = id as usize; if let Some(_r) = self.m.rows.get_mut(id as usize) { _r.clear(); } _Loc::Root_rows_e },") {
 			t.Errorf("(%v) a wrapper row must be placed at out[id] and cleared there:\n%s", cfg, got)
 		}
@@ -1950,12 +1957,12 @@ func TestRustDeclaredWidthIsAValidityBound(t *testing.T) {
 	for _, corelib := range []string{"rs", "rs-no-std"} {
 		got := moduleFromYAML(t, widthSrc, map[string]any{"corelib": corelib})
 		for _, want := range []string{
-			"if value > 255 { self.inv = true; return; } self.m.a_u8 = value as u8",
-			"if value > 65535 { self.inv = true; return; } self.m.b_u16 = value as u16",
-			"if value > 4294967295 { self.inv = true; return; } self.m.c_u32 = value as u32",
-			"if value < -128 || value > 127 { self.inv = true; return; } self.m.e_i8 = value as i8",
-			"if value < -32768 || value > 32767 { self.inv = true; return; } self.m.f_i16 = value as i16",
-			"if value < -2147483648 || value > 2147483647 { self.inv = true; return; } self.m.g_i32 = value as i32",
+			"if value > 255 { self.inv = true; return; }; self.m.a_u8 = value as u8",
+			"if value > 65535 { self.inv = true; return; }; self.m.b_u16 = value as u16",
+			"if value > 4294967295 { self.inv = true; return; }; self.m.c_u32 = value as u32",
+			"if value < -128 || value > 127 { self.inv = true; return; }; self.m.e_i8 = value as i8",
+			"if value < -32768 || value > 32767 { self.inv = true; return; }; self.m.f_i16 = value as i16",
+			"if value < -2147483648 || value > 2147483647 { self.inv = true; return; }; self.m.g_i32 = value as i32",
 			// An ARRAY element carries the same bound, and the guard follows the fill
 			// guard: an over-width scalar at an array id with no array_begin is a
 			// §7.3 skip, which must not become an INVALID.
@@ -2024,9 +2031,9 @@ func TestRustEnumAndBitfieldArrayElementsCarryTheirDeclaredWidth(t *testing.T) {
 	} {
 		got := moduleFromYAML(t, enumBitfieldElemSrc, map[string]any{"corelib": c.corelib})
 		const fill = "if self.afill == 0 { return; } self.afill -= 1; "
-		const u8Rej = "if value > 255 { self.inv = true; self.afill = 0; return; } "
-		const bfRej = "if value > 255 { self.inv = true; self.afill = 0; return; } "
-		const enRej = "if value < -128 || value > 127 { self.inv = true; self.afill = 0; return; } "
+		const u8Rej = "if value > 255 { self.inv = true; self.afill = 0; return; }; "
+		const bfRej = "if value > 255 { self.inv = true; self.afill = 0; return; }; "
+		const enRej = "if value < -128 || value > 127 { self.inv = true; self.afill = 0; return; }; "
 		for _, want := range []string{
 			// The bitfield element: the highest declared pos is 2, so the implied
 			// width is u8 and 256 is the first refused value. 2 and 4 are in.
@@ -2092,7 +2099,7 @@ func TestRustEnumBitfieldWidthElisions(t *testing.T) {
 	}
 	// {R:0, G:1, B:2} implies i8, NOT the 0..2 hull of its constants: 5 is a valid
 	// wire value for this field and must decode.
-	if !strings.Contains(got, "(_Loc::Root, 2) => { if value < -128 || value > 127 { self.inv = true; return; } self.m.e = value as i8 },") {
+	if !strings.Contains(got, "(_Loc::Root, 2) => { if value < -128 || value > 127 { self.inv = true; return; }; self.m.e = value as i8 },") {
 		t.Errorf("a contiguous enum must take the implied i8 width, not its constant hull:\n%s", got)
 	}
 }
@@ -2119,9 +2126,9 @@ messages:
 `
 	got := moduleFromYAML(t, src, map[string]any{"corelib": "rs"})
 	for _, want := range []string{
-		"if value > 255 { self.inv = true; self.afill = 0; return; } self.m.b8.push(value as u8);",
-		"if value > 65535 { self.inv = true; self.afill = 0; return; } self.m.b16.push(value as u16);",
-		"if value > 4294967295 { self.inv = true; self.afill = 0; return; } self.m.b32.push(value as u32);",
+		"if value > 255 { self.inv = true; self.afill = 0; return; }; self.m.b8.push(value as u8);",
+		"if value > 65535 { self.inv = true; self.afill = 0; return; }; self.m.b16.push(value as u16);",
+		"if value > 4294967295 { self.inv = true; self.afill = 0; return; }; self.m.b32.push(value as u32);",
 	} {
 		if !strings.Contains(got, want) {
 			t.Errorf("message.rs missing %q:\n%s", want, got)
@@ -2190,10 +2197,10 @@ messages:
 // through arrayWidthGuard — but "the arm is shared" is exactly the kind of claim
 // that stops being true after a refactor, so each frame is pinned by name.
 func TestRustEnumAndBitfieldWidthBoundAtEverySixPositions(t *testing.T) {
-	const enRej = "if value < -128 || value > 127 { self.inv = true; return; } "
-	const bfRej = "if value > 255 { self.inv = true; return; } "
-	const enFill = "if value < -128 || value > 127 { self.inv = true; self.afill = 0; return; } "
-	const bfFill = "if value > 255 { self.inv = true; self.afill = 0; return; } "
+	const enRej = "if value < -128 || value > 127 { self.inv = true; return; }; "
+	const bfRej = "if value > 255 { self.inv = true; return; }; "
+	const enFill = "if value < -128 || value > 127 { self.inv = true; self.afill = 0; return; }; "
+	const bfFill = "if value > 255 { self.inv = true; self.afill = 0; return; }; "
 	const fill = "if self.afill == 0 { return; } self.afill -= 1; "
 	for _, corelib := range []string{"rs", "rs-no-std"} {
 		got := moduleFromYAML(t, widthSixSrc, map[string]any{"corelib": corelib})
@@ -2303,8 +2310,8 @@ messages:
 			"            ArrayKind::Unsigned => match (self.cur, id) {\n                (_Loc::Root_arrays, 0) => count,\n                _ => 0,\n            },",
 			// The schema `count` bound names the declared kind, so a fixlen header
 			// at an integer id matches no arm and is never measured (#271).
-			"(ArrayKind::Unsigned, _Loc::Root_arrays, 0) => { if count > 5 { self.inv = true; self.afill = 0; return; } self.m.arrays.u8s.clear()" + tc.size("u8s") + " },",
-			"(ArrayKind::Signed, _Loc::Root_arrays, 1) => { if count > 5 { self.inv = true; self.afill = 0; return; } self.m.arrays.i8s.clear()" + tc.size("i8s") + " },",
+			"(ArrayKind::Unsigned, _Loc::Root_arrays, 0) => { if count > 5 { self.inv = true; self.afill = 0; return; }; self.m.arrays.u8s.clear()" + tc.size("u8s") + " },",
+			"(ArrayKind::Signed, _Loc::Root_arrays, 1) => { if count > 5 { self.inv = true; self.afill = 0; return; }; self.m.arrays.i8s.clear()" + tc.size("i8s") + " },",
 		} {
 			if !strings.Contains(got, want) {
 				t.Errorf("(%v) array_begin must key on the wire kind, missing %q:\n%s", cfg, want, got)
@@ -2724,7 +2731,7 @@ messages:
 	}
 	// A wrapper element carries BOTH bounds, over-index first: an element that is
 	// not this array's element at all must not be measured against its bound.
-	if !strings.Contains(m, "(_Loc::Root_sa, _) => { if id as usize >= 3 { self.inv = true; return; } if total > 6 { self.inv = true; return; } },") {
+	if !strings.Contains(m, "(_Loc::Root_sa, _) => { if id as usize >= 3 { self.inv = true; return; }; if total > 6 { self.inv = true; return; }; },") {
 		t.Error("a wrapper element must latch over-index then element maxlen")
 	}
 	// The payload-side guards STAY: unreachable now, but the only thing still
@@ -2786,12 +2793,12 @@ messages:
 	}
 
 	for _, want := range []string{
-		"(_Loc::Root_dstrs, _) => { if id as usize >= MAX_DYN_ARRAY_COUNT { self.lim = true; return; } if self.lim { return; } while self.m.dstrs.len() <= id as usize",
-		"(_Loc::Root_dblbs, _) => { if id as usize >= MAX_DYN_ARRAY_COUNT { self.lim = true; return; } if self.lim { return; } while self.m.dblbs.len() <= id as usize",
-		"(_Loc::Root_dobjs, _) => { if id as usize >= MAX_DYN_ARRAY_COUNT { self.lim = true; return; } if self.lim { return; } while self.m.dobjs.len() <= id as usize",
+		"(_Loc::Root_dstrs, _) => { if id as usize >= MAX_DYN_ARRAY_COUNT { self.lim = true; return; }; if self.lim { return; }; while self.m.dstrs.len() <= id as usize",
+		"(_Loc::Root_dblbs, _) => { if id as usize >= MAX_DYN_ARRAY_COUNT { self.lim = true; return; }; if self.lim { return; }; while self.m.dblbs.len() <= id as usize",
+		"(_Loc::Root_dobjs, _) => { if id as usize >= MAX_DYN_ARRAY_COUNT { self.lim = true; return; }; if self.lim { return; }; while self.m.dobjs.len() <= id as usize",
 		// A native matrix ROW takes the index cap too: its id is the outer array's
 		// length. Its own element count is capped beside it, id first.
-		"_Loc::Root_dmat, _) => { if id as usize >= MAX_DYN_ARRAY_COUNT { self.lim = true; self.afill = 0; return; } if count > MAX_DYN_ARRAY_COUNT",
+		"_Loc::Root_dmat, _) => { if id as usize >= MAX_DYN_ARRAY_COUNT { self.lim = true; self.afill = 0; return; }; if count > MAX_DYN_ARRAY_COUNT",
 		// and the flag is surfaced as the policy category, never as InvalidMsg.
 		"if limited { return Err(DecodeError::Sofab(sofab::Error::LimitExceeded)); }",
 	} {
@@ -2801,7 +2808,7 @@ messages:
 	}
 	// The cap governs only what the schema left unbounded (§9.5): a count:N array
 	// keeps its own bound and its own category.
-	if !strings.Contains(m, "(_Loc::Root_bstrs, _) => { if id as usize >= 4 { self.inv = true; return; } if self.lim { return; }") {
+	if !strings.Contains(m, "(_Loc::Root_bstrs, _) => { if id as usize >= 4 { self.inv = true; return; }; if self.lim { return; }") {
 		t.Errorf("a count:N wrapper array must keep its InvalidMsg schema bound:\n%s", m)
 	}
 }
@@ -2936,7 +2943,7 @@ messages:
 		// is a separate §6.2.1 bound, still applied in the payload callback --
 		// out of scope here and noted so a reader does not mistake its absence
 		// for a rule this test covers.)
-		"(_Loc::Root_sa, _) => { if total > MAX_DYN_STRING_LEN { self.lim = true; return; } },",
+		"(_Loc::Root_sa, _) => { if total > MAX_DYN_STRING_LEN { self.lim = true; return; }; },",
 		// ...all of it behind the §7.3 declared-subtype gate.
 		"FixlenType::Str => match (self.cur, id) {",
 		"FixlenType::Blob => match (self.cur, id) {",
@@ -3029,18 +3036,18 @@ messages:
 			// Whole arms, so the ORDER is pinned too: the reserve can only ever
 			// follow the over-count reject. Reserving first would hand an
 			// attacker-controlled count straight to the allocator.
-			"(ArrayKind::Unsigned, _Loc::Root, 0) => { if count > 4 { self.inv = true; self.afill = 0; return; } self.m.nums.clear(); self.m.nums.reserve_exact(count) },",
+			"(ArrayKind::Unsigned, _Loc::Root, 0) => { if count > 4 { self.inv = true; self.afill = 0; return; }; self.m.nums.clear(); self.m.nums.reserve_exact(count) },",
 			// A fixlen (fp) array is the same arm, reached through its own subtype.
-			"(ArrayKind::Fp32, _Loc::Root, 1) => { if count > 3 { self.inv = true; self.afill = 0; return; } self.m.fps.clear(); self.m.fps.reserve_exact(count) },",
+			"(ArrayKind::Fp32, _Loc::Root, 1) => { if count > 3 { self.inv = true; self.afill = 0; return; }; self.m.fps.clear(); self.m.fps.reserve_exact(count) },",
 			// Under a struct, addressed through the frame's path -- the bound is not
 			// a property of being at Root.
-			"(ArrayKind::Unsigned, _Loc::Root_s, 0) => { if count > 5 { self.inv = true; self.afill = 0; return; } self.m.s.vals.clear(); self.m.s.vals.reserve_exact(count) },",
+			"(ArrayKind::Unsigned, _Loc::Root_s, 0) => { if count > 5 { self.inv = true; self.afill = 0; return; }; self.m.s.vals.clear(); self.m.s.vals.reserve_exact(count) },",
 			// ...and inside a struct that is the ELEMENT of a wrapper sequence, where
 			// the arm is addressed through the element index and fires once per
 			// element rather than once per message. That is the fourth reach of the
 			// leaf arm, and the first cut of #505 left it out of its own surface
 			// claim; csharp emits `new ulong[count]` at the identical shape.
-			"(ArrayKind::Unsigned, _Loc::Root_rows_e, 0) => { if count > 7 { self.inv = true; self.afill = 0; return; } self.m.rows[self._ix1].vs.clear(); self.m.rows[self._ix1].vs.reserve_exact(count) },",
+			"(ArrayKind::Unsigned, _Loc::Root_rows_e, 0) => { if count > 7 { self.inv = true; self.afill = 0; return; }; self.m.rows[self._ix1].vs.clear(); self.m.rows[self._ix1].vs.reserve_exact(count) },",
 			// A nested row is the same field one level down: its INNER count is
 			// checked by the row guards, so the row it just opened is CLEARED and then
 			// sized from it. Through get_mut, because the growth loop above can
@@ -3049,7 +3056,7 @@ messages:
 			// `is_empty()` guard, which existed only because this arm did not clear
 			// and a repeated row id would otherwise have reserved len + M -- with the
 			// clear in front, len is always 0 here (see rowReset, generator#509).
-			"if count > 6 { self.inv = true; self.afill = 0; return; } while self.m.mat.len() <= id as usize {",
+			"if count > 6 { self.inv = true; self.afill = 0; return; }; while self.m.mat.len() <= id as usize {",
 			"self._ix0 = id as usize; if let Some(_r) = self.m.mat.get_mut(id as usize) { _r.clear(); _r.reserve_exact(count); } },",
 		} {
 			if !strings.Contains(m, want) {
@@ -3085,7 +3092,7 @@ messages:
             vs: { id: 0, type: array, items: { type: u64, count: 7 } }
 `
 	d := moduleFromYAML(t, unbounded, map[string]any{})
-	if !strings.Contains(d, "(ArrayKind::Unsigned, _Loc::Root, 1) => { if count > MAX_DYN_ARRAY_COUNT { self.lim = true; self.afill = 0; return; } self.m.free.clear() },") {
+	if !strings.Contains(d, "(ArrayKind::Unsigned, _Loc::Root, 1) => { if count > MAX_DYN_ARRAY_COUNT { self.lim = true; self.afill = 0; return; }; self.m.free.clear() },") {
 		t.Errorf("the count-less arm must stay lazy -- clear and nothing else:\n%s", d)
 	}
 	if strings.Contains(d, "self.m.free.reserve") {
@@ -3115,13 +3122,13 @@ messages:
 	// -- capacity is a hint, so the Vec still grows to hold a wire that really
 	// delivers more, but a truncated prefix can no longer buy the schema's whole
 	// declared worst case.
-	if !strings.Contains(d, "if count > 2000000 { self.inv = true; self.afill = 0; return; } self.m.huge.clear(); self.m.huge.reserve_exact(count.min(65536)) },") {
+	if !strings.Contains(d, "if count > 2000000 { self.inv = true; self.afill = 0; return; }; self.m.huge.clear(); self.m.huge.reserve_exact(count.min(65536)) },") {
 		t.Errorf("a schema count past the ceiling must be pre-sized to the ceiling:\n%s", d)
 	}
 	// The wrapper-sequence element arm is the one that fires up to
 	// MAX_DYN_ARRAY_COUNT times per message; it is bounded per firing by its own
 	// schema count, and now by the ceiling as well.
-	if !strings.Contains(d, "(ArrayKind::Unsigned, _Loc::Root_wrapped_e, 0) => { if count > 7 { self.inv = true; self.afill = 0; return; } self.m.wrapped[self._ix1].vs.clear(); self.m.wrapped[self._ix1].vs.reserve_exact(count) },") {
+	if !strings.Contains(d, "(ArrayKind::Unsigned, _Loc::Root_wrapped_e, 0) => { if count > 7 { self.inv = true; self.afill = 0; return; }; self.m.wrapped[self._ix1].vs.clear(); self.m.wrapped[self._ix1].vs.reserve_exact(count) },") {
 		t.Errorf("a bounded array under an unbounded wrapper sequence must be sized:\n%s", d)
 	}
 
@@ -3154,7 +3161,7 @@ messages:
 		if strings.Contains(m, "reserve_exact") {
 			t.Errorf("message.rs (%v) must not reserve into fixed-capacity storage:\n%s", cfg, m)
 		}
-		if !strings.Contains(m, "(ArrayKind::Unsigned, _Loc::Root, 0) => { if count > 4 { self.inv = true; self.afill = 0; return; } self.m.nums.clear() },") {
+		if !strings.Contains(m, "(ArrayKind::Unsigned, _Loc::Root, 0) => { if count > 4 { self.inv = true; self.afill = 0; return; }; self.m.nums.clear() },") {
 			t.Errorf("message.rs (%v) fixed-capacity arm must be clear-only:\n%s", cfg, m)
 		}
 	}
@@ -3203,14 +3210,14 @@ messages:
 			// The schema-bounded count header — the shape the issue measured. The
 			// disarm precedes #505's reserve, which is untouched and still only ever
 			// reached by a count the reject has already approved.
-			"(ArrayKind::Unsigned, _Loc::Root, 0) => { if count > 4 { self.inv = true; self.afill = 0; return; } self.m.bigs.clear()",
+			"(ArrayKind::Unsigned, _Loc::Root, 0) => { if count > 4 { self.inv = true; self.afill = 0; return; }; self.m.bigs.clear()",
 			// The fixlen (fp) twin, reached through its own subtype: the issue never
 			// measured it and it was exposed identically.
-			"(ArrayKind::Fp64, _Loc::Root, 2) => { if count > 4 { self.inv = true; self.afill = 0; return; } self.m.fx.clear()",
+			"(ArrayKind::Fp64, _Loc::Root, 2) => { if count > 4 { self.inv = true; self.afill = 0; return; }; self.m.fx.clear()",
 			// A native ROW's two bounds — the row id against the outer count, and the
 			// row's own element count against the inner one. These already disarmed;
 			// pinned so they stay that way.
-			"(ArrayKind::Unsigned, _Loc::Root_mat, _) => { if id as usize >= 2 { self.inv = true; self.afill = 0; return; } if count > 4 { self.inv = true; self.afill = 0; return; }",
+			"(ArrayKind::Unsigned, _Loc::Root_mat, _) => { if id as usize >= 2 { self.inv = true; self.afill = 0; return; }; if count > 4 { self.inv = true; self.afill = 0; return; }",
 			// The MID-ARRAY width trip: an element that breaches its declared width
 			// invalidates the message, and every later element of that same array
 			// still arrives. Unsigned and signed forms both; the push that follows is
@@ -3225,7 +3232,7 @@ messages:
 		// A SCALAR field's width reject keeps the plain form: there is no fill to
 		// disarm, nothing further is delivered for it, and writing afill there would
 		// claim a relationship that does not exist.
-		if !strings.Contains(m, "(_Loc::Root, 5) => { if value > 255 { self.inv = true; return; } self.m.scalar = value as u8 },") {
+		if !strings.Contains(m, "(_Loc::Root, 5) => { if value > 255 { self.inv = true; return; }; self.m.scalar = value as u8 },") {
 			t.Errorf("message.rs (%v) a scalar width reject must not touch afill:\n%s", cfg, m)
 		}
 	}
@@ -3250,7 +3257,7 @@ messages:
       objs:   { id: 5, type: array, items: { type: struct, count: 2, fields: { x: { id: 0, type: u32 } } } }
       mat:    { id: 6, type: array, items: { type: array, count: 2, items: { type: u32, count: 4 } } }
 `, map[string]any{"corelib": "rs", "max_dyn_array_count": 64})
-	if !strings.Contains(d, "(ArrayKind::Unsigned, _Loc::Root, 1) => { if count > MAX_DYN_ARRAY_COUNT { self.lim = true; self.afill = 0; return; } self.m.free.clear() },") {
+	if !strings.Contains(d, "(ArrayKind::Unsigned, _Loc::Root, 1) => { if count > MAX_DYN_ARRAY_COUNT { self.lim = true; self.afill = 0; return; }; self.m.free.clear() },") {
 		t.Errorf("the over-cap count header must disarm the fill too:\n%s", d)
 	}
 	for _, m := range append(mods, d) {
@@ -3370,8 +3377,8 @@ messages:
 `
 	m := moduleFromYAML(t, src, map[string]any{"corelib": "rs"})
 	for _, want := range []string{
-		"(_Loc::Root_bs, _) => { if id as usize >= 5 { self.inv = true; return; } while self.m.bs.len() <= id as usize",
-		"(_Loc::Root_bb, _) => { if id as usize >= 3 { self.inv = true; return; } while self.m.bb.len() <= id as usize",
+		"(_Loc::Root_bs, _) => { if id as usize >= 5 { self.inv = true; return; }; while self.m.bs.len() <= id as usize",
+		"(_Loc::Root_bb, _) => { if id as usize >= 3 { self.inv = true; return; }; while self.m.bb.len() <= id as usize",
 	} {
 		if !strings.Contains(m, want) {
 			t.Errorf("std dynamic message.rs missing %q:\n%s", want, m)
@@ -3393,6 +3400,8 @@ func TestRustNoBlanketAllow(t *testing.T) {
 		"#[allow(deprecated)]": true,
 		"#[allow(non_camel_case_types)] // variants spell the schema path (Root_a_b), not a type name": true,
 		approxConstantAllow: true,
+		derivableImplsAllow: true,
+		visitorClippyAllow:  true,
 	}
 	for _, cfg := range []map[string]any{
 		{"corelib": "rs"},
@@ -3497,5 +3506,87 @@ func TestRustFloatDefaultsCarryTheApproxConstantAllow(t *testing.T) {
 	}
 	if n := strings.Count(m, approxConstantAllow); n != 2 {
 		t.Errorf("approx_constant allow emitted %d times, want 2 (Default + serialize of the one struct with a float default)", n)
+	}
+}
+
+// TestRustClippyAllowsSitOnTheirItem: the two clippy allows the generated code
+// needs sit on the item that needs them -- every `impl Default`, and the flat
+// visitor's impl -- and nowhere else.
+func TestRustClippyAllowsSitOnTheirItem(t *testing.T) {
+	m := exampleModule(t, map[string]any{"corelib": "rs"})
+	if n, d := strings.Count(m, derivableImplsAllow+"\n"), strings.Count(m, "\nimpl Default for "); n != d || n == 0 {
+		t.Errorf("derivable_impls allow on %d items, want one per impl Default (%d)", n, d)
+	}
+	if !strings.Contains(m, visitorClippyAllow+"\n#[allow(deprecated)]\nimpl<'a> Visitor for V<'a> {") {
+		t.Error("the flat visitor impl is not preceded by its clippy allow")
+	}
+	if strings.Count(m, visitorClippyAllow) != strings.Count(m, "impl<'a> Visitor for V<'a> {") {
+		t.Error("the visitor clippy allow sits somewhere other than a visitor impl")
+	}
+}
+
+// TestRustGuardsDoNotReadAsMissingElse: a reject guard is followed on the same
+// line by the arm's next statement. Ended by `}` alone, `} if` and `} {` read as
+// an `else` left out (clippy::possible_missing_else, suspicious_else_formatting);
+// the guard ends its statement with `;`.
+func TestRustGuardsDoNotReadAsMissingElse(t *testing.T) {
+	for _, cfg := range []map[string]any{{"corelib": "rs"}, {"corelib": "rs-no-std"}} {
+		m := exampleModule(t, cfg)
+		for _, bad := range []string{"return; } if ", "return; } { ", "return; } while "} {
+			if strings.Contains(m, bad) {
+				t.Errorf("%v: a guard is followed by %q with no statement end", cfg, bad)
+			}
+		}
+	}
+}
+
+// TestRustNestedNativeRowIsNotReborrowed: a row of a matrix is an element of the
+// outer .iter(), so it is a reference already; it is passed as is, not &-ed
+// again (clippy::needless_borrow). The top-level field is still borrowed.
+func TestRustNestedNativeRowIsNotReborrowed(t *testing.T) {
+	m := exampleModule(t, map[string]any{"corelib": "rs"})
+	if !strings.Contains(m, "os.write_array_unsigned(_i0 as Id, _e0);") {
+		t.Error("the matrix row is not passed as the reference it already is")
+	}
+	if strings.Contains(m, "as Id, &_e0);") {
+		t.Error("a matrix row is borrowed again")
+	}
+	if !strings.Contains(m, "os.write_array_unsigned(15, &self.someuintarray);") {
+		t.Error("a top-level native array is no longer borrowed")
+	}
+}
+
+// TestRustHarnessWithoutMessagesLeavesNothingUnread: a schema of shared types
+// alone has nothing for the harness to dispatch on. Its main.rs imports neither
+// the module's names, Write nor black_box, marks the bench input unread, and has
+// no wildcard-only match -- each would fail a `-D warnings` build or clippy.
+func TestRustHarnessWithoutMessagesLeavesNothingUnread(t *testing.T) {
+	src := "version: 1\n$defs:\n  struct:\n    Point:\n      x: { id: 0, type: i32 }\n      tag: { id: 1, type: string, maxlen: 8 }\n"
+	for _, cfg := range []map[string]any{
+		{"corelib": "rs", "emit": "project"},
+		{"corelib": "rs-no-std", "emit": "project"},
+		{"corelib": "rs-no-std", "allow_dynamic": true, "emit": "project"},
+	} {
+		var main, lib string
+		files := filesFromYAML(t, src, cfg)
+		for _, f := range files {
+			switch f.Path {
+			case "src/main.rs":
+				main = string(f.Content)
+			case "src/lib.rs":
+				lib = string(f.Content)
+			}
+		}
+		for _, bad := range []string{"use message::*;", "use sofabuffers_generated::*;", "Write", "black_box", "match name", " input: &[u8]"} {
+			if strings.Contains(main, bad) {
+				t.Errorf("%v: message-less harness still has %q:\n%s", cfg, bad, main)
+			}
+		}
+		if !strings.Contains(main, "_input: &[u8]") {
+			t.Errorf("%v: the unread bench input is not marked unused:\n%s", cfg, main)
+		}
+		if cfg["allow_dynamic"] == true && !strings.Contains(lib, "extern crate alloc;") {
+			t.Errorf("%v: a shared struct with an alloc String needs extern crate alloc:\n%s", cfg, lib)
+		}
 	}
 }

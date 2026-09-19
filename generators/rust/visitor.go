@@ -114,13 +114,26 @@ func boundOf(has bool, v int64) int64 {
 // Both bounds are followed by limRefuse, which answers the OTHER half of the
 // same question: this element's index is inside the bound, but a cap crossed
 // EARLIER in the same message has already refused it (generator#518).
+// visitorClippyAllow sits on the flat visitor's impl. Its arms are stamped
+// from one template per field kind and storage mode, so a shape clippy's style
+// lints would rewrite for one field is the shape every field shares: a match
+// with one live arm (single_match, match_single_binding, collapsible_match), a
+// guard that ends the arm (needless_return), a cast that is a no-op only for
+// the widest element type (unnecessary_cast), and a container push that returns
+// () under alloc and a Result under heapless (let_unit_value,
+// unnecessary_operation). manual_range_contains stays allowed on purpose: two
+// compares keep thumbv6m .text smaller than RangeInclusive::contains. Every lint
+// named here is a clippy::style/complexity lint; nothing in correctness or
+// suspicious is allowed.
+const visitorClippyAllow = "#[allow(clippy::single_match, clippy::match_single_binding, clippy::collapsible_match, clippy::needless_return, clippy::unnecessary_cast, clippy::let_unit_value, clippy::unnecessary_operation, clippy::manual_range_contains)] // arms are stamped per field from one template"
+
 func (g *gen) overIndexGuard(cap int64) string {
 	var out string
 	switch {
 	case cap >= 0:
-		out = fmt.Sprintf("if id as usize >= %d { self.inv = true; return; } ", cap)
+		out = fmt.Sprintf("if id as usize >= %d { self.inv = true; return; }; ", cap)
 	case g.limits.arrayHas:
-		out = "if id as usize >= MAX_DYN_ARRAY_COUNT { self.lim = true; return; } "
+		out = "if id as usize >= MAX_DYN_ARRAY_COUNT { self.lim = true; return; }; "
 	}
 	return out + g.limRefuse()
 }
@@ -174,7 +187,7 @@ func (g *gen) limRefuse() string {
 	if !g.limits.any() {
 		return ""
 	}
-	return "if self.lim { return; } "
+	return "if self.lim { return; }; "
 }
 
 // reserveCount emits the sizing half of a schema-bounded native array's
@@ -400,7 +413,7 @@ func (g *gen) wrapperRowReset(path string) string {
 // a branch on every element of every array on a maxspeed target, for a condition
 // false in every non-attack decode.
 func fillReject(cond, flag string) string {
-	return fmt.Sprintf("if %s { self.%s = true; self.afill = 0; return; } ", cond, flag)
+	return fmt.Sprintf("if %s { self.%s = true; self.afill = 0; return; }; ", cond, flag)
 }
 
 // rowGuards returns the reject clauses that front a native row's array_begin arm,
@@ -1249,6 +1262,7 @@ func (g *gen) emitVisitor(f *rfile, name string, fields []*ir.Field) {
 	f.line("}")
 	f.blank()
 
+	f.line(visitorClippyAllow)
 	// The flat visitor assigns into deprecated fields (self.m.<path>) directly, so
 	// suppress the deprecated lint over the whole impl when any reachable field is
 	// deprecated; keeps the generated crate warning-clean.
@@ -1920,13 +1934,13 @@ func (g *gen) fixlenBeginArms(fs []frame, kind ir.Kind, capName string) []string
 		if fr.kind == fkSeqArr && fr.elemKind == kind && (fr.cap >= 0 || fr.emax >= 0 || (capped && fr.elemDyn)) {
 			body := ""
 			if fr.cap >= 0 {
-				body += fmt.Sprintf("if id as usize >= %d { self.inv = true; return; } ", fr.cap)
+				body += fmt.Sprintf("if id as usize >= %d { self.inv = true; return; }; ", fr.cap)
 			}
 			switch {
 			case fr.emax >= 0:
-				body += fmt.Sprintf("if total > %d { self.inv = true; return; } ", fr.emax)
+				body += fmt.Sprintf("if total > %d { self.inv = true; return; }; ", fr.emax)
 			case capped && fr.elemDyn:
-				body += fmt.Sprintf("if total > %s { self.lim = true; return; } ", capName)
+				body += fmt.Sprintf("if total > %s { self.lim = true; return; }; ", capName)
 			}
 			arms = append(arms, fmt.Sprintf("                (_Loc::%s, _) => { %s},", fr.loc, body))
 		}
@@ -2046,7 +2060,7 @@ func widthGuard(k ir.Kind, ref *ir.TypeRef) string {
 	if cond == "" {
 		return ""
 	}
-	return fmt.Sprintf("if %s { self.inv = true; return; } ", cond)
+	return fmt.Sprintf("if %s { self.inv = true; return; }; ", cond)
 }
 
 // declaredWidthCond is the reject comparison for an `enum` and a `bitfield`,
