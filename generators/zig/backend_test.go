@@ -2034,3 +2034,37 @@ messages:
 		t.Errorf("a decoder whose only string is schema-bounded must not emit _takeStrCapped:\n%s", m)
 	}
 }
+
+// TestZigHarnessWithoutMessagesLeavesNothingUnused: a schema of shared types
+// alone has no workload and nothing to write, so benchMain discards its
+// parameters by name and main declares no stdout writer. In Zig an unused
+// parameter or local is a compile error, not a warning.
+func TestZigHarnessWithoutMessagesLeavesNothingUnused(t *testing.T) {
+	harness := func(src string) string {
+		t.Helper()
+		files, err := (&Backend{}).Generate(buildSchema(t, src), map[string]any{"emit": "project"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, f := range files {
+			if f.Path == "src/main.zig" {
+				return string(f.Content)
+			}
+		}
+		t.Fatal("no src/main.zig")
+		return ""
+	}
+	none := harness("version: 1\n$defs:\n  struct:\n    P: { x: { id: 0, type: u8 } }\n")
+	if !strings.Contains(none, "fn benchMain(_: std.mem.Allocator, _: []const u8, _: []const u8) !void {") {
+		t.Errorf("message-less benchMain does not discard its parameters:\n%s", none)
+	}
+	if strings.Contains(none, "const out = &stdout.interface;") {
+		t.Errorf("message-less main declares a stdout writer nothing uses:\n%s", none)
+	}
+	one := harness("version: 1\nmessages:\n  m: { payload: { a: { id: 0, type: u32 } } }\n")
+	for _, want := range []string{"fn benchMain(alloc: std.mem.Allocator, w: []const u8, input: []const u8) !void {", "const out = &stdout.interface;"} {
+		if !strings.Contains(one, want) {
+			t.Errorf("harness with a message lacks %q", want)
+		}
+	}
+}
