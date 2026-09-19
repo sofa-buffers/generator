@@ -60,3 +60,24 @@ func Registered() []string {
 	sort.Strings(out)
 	return out
 }
+
+// Formatter is an OPTIONAL capability a Backend may implement: the target's
+// canonical formatter is an external program (rustfmt) rather than a Go package
+// (go/format), so it cannot run inside Generate. Generate is a pure function of
+// (IR, config) — the golden gate and every backend unit test rest on that — and
+// shelling out inside it would make a backend's output depend on which tools the
+// machine happens to have. So the CLI applies this pass to the files Generate
+// produced, just before writing them.
+//
+// dir is the output directory the files are about to be written to. The
+// formatter runs there so it resolves the same project-level formatter
+// configuration the user's own `cargo fmt` over that tree would.
+//
+// note carries a single line for stderr when the formatter could not be run at
+// all because it is not installed: the files come back unformatted and that is
+// not an error, a generator must not require a language toolchain to emit code.
+// A formatter that runs and REFUSES the code is an error — it means the backend
+// emitted something that does not parse.
+type Formatter interface {
+	Format(files []File, dir string) (out []File, note string, err error)
+}

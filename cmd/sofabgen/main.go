@@ -155,6 +155,9 @@ func run(args []string, stdout, stderr *os.File) int {
 	}
 
 	exit := 0
+	// A backend whose canonical formatter is an external program says so once
+	// per run, not once per definition file.
+	formatNoted := false
 	for _, def := range defs {
 		// --dump-ir stops after the IR (stages [1]-[4]); no backend selected.
 		runLang := *lang
@@ -180,12 +183,18 @@ func run(args []string, stdout, stderr *os.File) int {
 		}
 		printSummary(stdout, def, res.Schema)
 		if len(res.Files) > 0 {
-			if err := writeFiles(out, res.Files); err != nil {
+			files, err := formatFiles(*lang, out, res.Files, stderr, &formatNoted)
+			if err != nil {
 				fmt.Fprintf(stderr, "error: %v\n", err)
 				exit = 1
 				continue
 			}
-			fmt.Fprintf(stdout, "  wrote %d file(s) to %s\n", len(res.Files), out)
+			if err := writeFiles(out, files); err != nil {
+				fmt.Fprintf(stderr, "error: %v\n", err)
+				exit = 1
+				continue
+			}
+			fmt.Fprintf(stdout, "  wrote %d file(s) to %s\n", len(files), out)
 		}
 	}
 	return exit
@@ -225,6 +234,40 @@ func collectDefs(input string) ([]string, error) {
 	}
 	sort.Strings(defs)
 	return defs, nil
+}
+
+// formatFiles hands the generated files to the backend's canonical formatter,
+// when it has one (generator.Formatter). This sits in the CLI rather than in
+// Generate on purpose: Generate must stay a pure function of (IR, config) — the
+// golden gate compares its bytes — while the tree a user actually receives is
+// the one written here, and that is the tree their `cargo fmt --check` runs
+// over. A formatter that is not installed is reported once and skipped; a
+// formatter that refuses the code is a generator error.
+func formatFiles(lang, outDir string, files []generator.File, stderr *os.File, noted *bool) ([]generator.File, error) {
+	b, ok := generator.Lookup(lang)
+	if !ok {
+		return files, nil
+	}
+	f, ok := b.(generator.Formatter)
+	if !ok {
+		return files, nil
+	}
+	// The formatter runs in the output dir so it sees the project's own
+	// formatter config; it has to exist before the files land in it.
+	if outDir != "" {
+		if err := os.MkdirAll(outDir, 0o755); err != nil {
+			return nil, err
+		}
+	}
+	out, note, err := f.Format(files, outDir)
+	if err != nil {
+		return nil, err
+	}
+	if note != "" && !*noted {
+		*noted = true
+		fmt.Fprintln(stderr, note)
+	}
+	return out, nil
 }
 
 func writeFiles(outDir string, files []generator.File) error {

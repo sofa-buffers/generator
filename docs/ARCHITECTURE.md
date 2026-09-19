@@ -401,6 +401,16 @@ A backend is a self-contained, additive plugin. The contract:
   `Generate(schema, cfg) ([]File, error)` where `File = {Path, Content}`. The
   backend traverses the **read-only** frozen IR and returns files; it must never
   mutate the IR.
+- **Optional capability — `Formatter`**: `Format(files, dir) (files, note, err)`.
+  A target whose canonical formatter is an external *program* rather than a Go
+  package implements it, and the **CLI** applies it between `Generate` and the
+  writer (§12 item 10; today: rust → `rustfmt`). It is deliberately outside
+  `Generate`, which stays a pure function of (IR, config) — the golden gate
+  compares its bytes — so no backend's output depends on which tools the machine
+  happens to have. A formatter that is not installed returns the files untouched
+  plus a one-line note: emitting code must never require the target toolchain. A
+  formatter that runs and refuses is an error, because that means the emitter
+  produced source the language cannot parse.
 - **Registry / self-registration**: each backend registers itself by language
   key into a central registry at init; the CLI selects via `Lookup(lang)`.
   Duplicate registration panics at init (surfacing the first time a binary
@@ -5850,7 +5860,9 @@ A reimplementation is **conformant** when it reproduces these gates:
 ```
 cmd/sofabgen/            CLI entrypoint (the sofabgen binary)
 internal/                GENERIC, language-independent core (imports no backend)
-  pipeline/              orchestrates stages [1]–[5] (stage [6] formatting lives inside each backend)
+  pipeline/              orchestrates stages [1]–[5] (stage [6] formatting lives inside each
+                         backend, or — where the formatter is an external program — in the CLI
+                         via the optional generator.Formatter capability, §8)
   parser/                YAML/JSON parse + $ref resolve + hard-gate validation
   model/                 lowering: validated doc → IR nodes
   analysis/              ref resolution + nesting-depth check (freeze-by-contract)

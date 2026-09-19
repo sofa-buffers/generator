@@ -66,11 +66,14 @@ jobs:
               sudo apt-get install -y gcc-arm-none-eabi libstdc++-arm-none-eabi-newlib ;;
           esac
 
+      # rustfmt: sofabgen formats the Rust it emits, so the crate measured here
+      # is the crate a user gets. It is whitespace either way, but a bench that
+      # measures a different source text than the one that ships is a trap.
       - uses: dtolnay/rust-toolchain@1.90.0
         if: startsWith(matrix.row, 'rust-')
         with:
           targets: thumbv6m-none-eabi
-          components: llvm-tools-preview
+          components: llvm-tools-preview, rustfmt
 
       - uses: mlugg/setup-zig@v2
         if: startsWith(matrix.row, 'zig')
