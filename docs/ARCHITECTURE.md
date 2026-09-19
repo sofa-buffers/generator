@@ -608,10 +608,11 @@ a reimplementation should emit code that honors all of them:
     godoc `Deprecated:` paragraph (Go), a Sphinx `.. deprecated::` directive
     (Python), a `/// Deprecated.` note (Zig). Because a deprecated field is still
     written/read by the generated encode/decode, the backends whose deprecation
-    marker is compiler-enforced (C, C++, C#, Rust) locally suppress the resulting
-    self-use warning around the generated internal accesses (`#pragma GCC
-    diagnostic`, `#pragma warning disable 612`, `#[allow(deprecated)]`) so
-    generated code stays warning-clean;
+    marker is compiler-enforced (C, C++, C#, Rust, Java, Kotlin) locally suppress
+    the resulting self-use warning around the generated internal accesses
+    (`#pragma GCC diagnostic`, `#pragma warning disable 612`,
+    `#[allow(deprecated)]`, `@SuppressWarnings("deprecation")`,
+    `@Suppress("DEPRECATION")`) so generated code stays warning-clean;
   - enum constant `description` and bitfield flag `description` (+ a
     `(default: true|false)` note from the flag's `default`) → a doc comment on each
     generated constant. C and Java lower enum/bitfield fields to a raw integer and
@@ -4582,7 +4583,7 @@ language's native deprecation marker: `[[deprecated]]` (C++),
 `[Obsolete]` (C#), `#[deprecated]` (Rust), `@deprecated` TSDoc (TS), the godoc
 `Deprecated:` paragraph (Go), a Sphinx `.. deprecated::` directive (Python), a
 `/// Deprecated.` note (Zig), and `@Deprecated("…")` (Kotlin). Because the
-generated encode/decode still touches a deprecated field, C/C++/C#/Rust/Kotlin locally suppress the resulting self-use
+generated encode/decode still touches a deprecated field, C/C++/C#/Rust/Java/Kotlin locally suppress the resulting self-use
 warning so generated code stays warning-clean. **C and Java lower enum/bitfield
 fields to a raw integer** and emit no named constants, so they carry only the
 field-level metadata above. **Kotlin lowers them to a raw integer too and still
@@ -5601,6 +5602,8 @@ A reimplementation is **conformant** when it reproduces these gates:
    | rust / rs-no-std (every storage mode and feature set the suite builds) | `-D warnings`; plus `cargo clippy` with no deny-level finding on the example crate | `RUSTFLAGS` in `tests/conformance/rust/run.sh`, exported |
    | go | `go vet` with no finding (the compiler already rejects unused imports and variables) | a sweep at the end of `tests/conformance/go/run.sh` over every module under the run's work dir; the Go gated tests vet before they build |
    | python (both engines) | `ruff check --select F,E9` (pyflakes + syntax errors), ruff pinned to one version; every process under `PYTHONWARNINGS=error` | `RUFF_VERSION` and a sweep at the end of `tests/conformance/python/run.sh`; `PYTHONWARNINGS` exported once, after the accelerator build |
+   | java | `javac -Xlint:all -Werror` | the generated pom compiles with `-Xlint:all`; `MVN_STRICT` (`-Dmaven.compiler.failOnWarning=true`) on every `mvn package` of a generated project and `JAVAC_STRICT` on the corpus `javac` loop in `tests/conformance/java/run.sh` |
+   | kotlin (the JVM harness builds, the corpus project and the `commonMain` metadata type-check) | `allWarningsAsErrors` | an init script (`KT_STRICT`) handed to every Gradle build of generated code in `tests/conformance/kotlin/run.sh` |
 
    The generated C and C++ project Makefiles read `WARNFLAGS` (default
    `-Wall -Wextra`) apart from `CFLAGS`/`CXXFLAGS`, which is what lets one
@@ -5650,6 +5653,26 @@ A reimplementation is **conformant** when it reproduces these gates:
    shared drivers close what they open rather than rely on it. The generated
    module imports from `dataclasses` and `enum` only the names its rendered
    type section uses, read off the text as the `sofab` import line already is.
+
+   Java and Kotlin: `-Xlint:all` sits in the generated pom itself, so a user's
+   Maven build reports the same lint the suite gates on; the suite adds only
+   `failOnWarning`, which is what keeps the pom usable without `-Werror`. The one
+   finding on either target was a deprecated field touched from outside its
+   class. The suppression is emitted only on the declarations that touch one: in
+   Java the visitor (a separate top-level class) and the `Json` functions of that
+   type; in Kotlin, where a class's own use of its deprecated member is reported
+   too, also the class that declares it. Kotlin's generated files used to open
+   with a file-wide `@file:Suppress("DEPRECATION", …, "UNUSED_PARAMETER", …)`.
+   That would also have hidden a deprecated **corelib** API called from generated
+   code, so both compiler diagnostics are gone from it; the names left in it are
+   IDE inspections, which the compiler ignores (the compiler's own
+   redundant-conversion warning fires through them, which is how the bench
+   harness's `Long.toLong()` was found). The `emit: project` bench sink never
+   reads a deprecated field. The Kotlin init script sets the property on every
+   `compile*Kotlin*` task without checking that it exists, so a Kotlin Gradle
+   plugin that moves it fails the build instead of silently dropping the gate. The
+   multiplatform check compiles `commonMain` metadata only; no Kotlin/Native or JS
+   compilation is part of the suite, so none is gated.
 
 ---
 
