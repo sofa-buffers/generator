@@ -50,6 +50,35 @@ type gen struct {
 	// the emit path, which has no error channel of its own.
 	size    generator.SizePolicy
 	sizeErr error
+	// mks are the module-level element factories the decode surface asked for,
+	// keyed by name and kept in first-use order (see factory).
+	mks    map[string]string
+	mkName []string
+}
+
+// mkArr names the one factory every fresh-array gap takes: a wrapper row, a row
+// of rows and a `Long[]` matrix row all fill a gap with a new empty array, and
+// `never[]` is assignable to each of their element types.
+const mkArr = "_MK_ARR"
+
+// factory registers a module-level element factory under `name` and returns that
+// name, so the same one is emitted once however many arrays take it.
+//
+// Module-level rather than an arrow at each construction site: a FramedSeq is
+// built once per array occurrence per decode, and a shared function object makes
+// that one fewer allocation and one monomorphic `this.make()` call site instead
+// of a fresh closure per array. It stays GENERATED and does not move into the
+// corelib, because it names a generated symbol -- which is ARCHITECTURE §8's own
+// line between the two layers.
+func (g *gen) factory(name, expr string) string {
+	if g.mks == nil {
+		g.mks = map[string]string{}
+	}
+	if _, ok := g.mks[name]; !ok {
+		g.mks[name] = expr
+		g.mkName = append(g.mkName, name)
+	}
+	return name
 }
 
 // messageSize resolves a message's worst-case encoded size via the shared walk
@@ -222,9 +251,10 @@ func usedEmptyTyped(body string) []string {
 // one call site that needs the free function.
 var corelibNames = []string{
 	"OStream", "WireType", "FixlenSubtype", "ArrayKind", "DecodeStatus",
-	"Long", "SofabError", "SofabErrorCode", "elementsEqual",
+	"Long", "SofabError", "SofabErrorCode", "elementsEqual", "longElementsEqual",
+	"fp32RawBytes",
 	"Visitor", "ArrayTarget", "IntegerArrayTarget", "FloatArrayTarget", "BoolArrayTarget",
-	"IStream", "PayloadAcc", "decodeUtf8", "StringSeq", "BlobSeq",
+	"IStream", "PayloadAcc", "decodeUtf8", "StringSeq", "BlobSeq", "ElementSeq", "FramedSeq",
 }
 
 // codeOnly blanks the comments out of a rendered module: `//` to the end of the
@@ -312,7 +342,6 @@ func identUsed(body, name string) bool {
 
 // moduleBody renders everything below the import line.
 func (g *gen) moduleBody(f *tsfile, s *ir.Schema) {
-	use := g.scanHelpers(s)
 	if g.limits.any() {
 		f.line("// Receiver-side decode limits, baked from the sofabgen config")
 		f.line("// (max_dyn_array_count / max_dyn_string_len / max_dyn_blob_len). They govern")
@@ -330,14 +359,6 @@ func (g *gen) moduleBody(f *tsfile, s *ir.Schema) {
 		if g.limits.blobHas {
 			f.line("export const MAX_DYN_BLOB_LEN = %d;", g.limits.blobLen)
 		}
-		f.blank()
-	}
-	if use.longArrEq {
-		f.line("%s", longArrEqHelper)
-		f.blank()
-	}
-	if use.fp32Raw {
-		f.line("%s", fp32BitsHelper)
 		f.blank()
 	}
 
@@ -365,17 +386,35 @@ func (g *gen) moduleBody(f *tsfile, s *ir.Schema) {
 
 	// The decode surface, after the classes it fills: one flat visitor per object
 	// type and a public incremental Decoder per message.
+	//
+	// Rendered into a buffer of its own first, because WHICH element factories the
+	// module needs is a property of the emitted arms -- the same reason the import
+	// scan reads the rendered text rather than the schema a second time. They are
+	// written out ahead of it, after the classes they name.
 	if decodesAnyField(s) {
+		vis := &tsfile{}
 		for _, key := range s.NamedOrder {
 			nt := s.Named[key]
 			if nt.Category == ir.CatStruct || nt.Category == ir.CatUnion {
-				g.emitVisitor(f, g.typeName(key), nt.Fields)
+				g.emitVisitor(vis, g.typeName(key), nt.Fields)
 			}
 		}
 		for _, m := range s.Messages {
-			g.emitVisitor(f, exported(m.Name), m.Fields)
-			g.emitDecoderClass(f, exported(m.Name))
+			g.emitVisitor(vis, exported(m.Name), m.Fields)
+			g.emitDecoderClass(vis, exported(m.Name))
 		}
+		if len(g.mkName) > 0 {
+			f.line("// Element factories: an array element's default, built fresh for each slot.")
+			f.line("// An element equal to its default is left off the wire, so decoding an array")
+			f.line("// with a gap in it has to fill the missing slots -- and one shared instance")
+			f.line("// would make every filled slot, and every element decoded into a filled one,")
+			f.line("// the same object. One factory per element type, shared by every array of it.")
+			for _, name := range g.mkName {
+				f.line("const %s = %s;", name, g.mks[name])
+			}
+			f.blank()
+		}
+		f.b.WriteString(vis.b.String())
 	}
 }
 
@@ -696,7 +735,7 @@ func (g *gen) fieldIsDefaultExpr(fld *ir.Field) string {
 	switch fld.Kind {
 	case ir.KindU64, ir.KindI64:
 		// A Long is an object: `===` would compare identity, so the test is the
-		// (low, high) pair, exactly as longArrEq does per element.
+		// (low, high) pair, exactly as longElementsEqual does per element.
 		if g.longScalars() {
 			return g.longScalarIsDefault(acc, fld)
 		}
@@ -727,7 +766,7 @@ func (g *gen) arrayIsDefaultExpr(fld *ir.Field, acc string) string {
 		if def, ok := g.nativeArrayDefault(fld); ok {
 			eq := "elementsEqual"
 			if g.longBacked(fld) {
-				eq = "longArrEq"
+				eq = "longElementsEqual"
 			}
 			return fmt.Sprintf("%s(%s, %s)", eq, acc, def)
 		}
@@ -856,7 +895,7 @@ func (g *gen) emitMarshalArray(f *tsfile, fld *ir.Field, acc string) {
 			// word-pair helper instead of elementsEqual's element !==.
 			eq := "elementsEqual"
 			if g.longBacked(fld) {
-				eq = "longArrEq"
+				eq = "longElementsEqual"
 			}
 			f.line("    if (!%s(%s, %s)) {", eq, acc, def)
 		} else {

@@ -52,7 +52,7 @@ type tsScope struct {
 	loc        string // schema location named in a rejection message
 	ix         string // index register, "" when no element scope needs one
 	row        string // current-row register for a native matrix row, "" otherwise
-	seq        string // StringSeq/BlobSeq slot, "" for a framed element kind
+	seq        string // corelib collector slot for this array's elements
 	child      int    // element scope id, -1 when the element is a value
 	parent     int    // scope this one is entered from, -1 for the root
 }
@@ -103,12 +103,19 @@ func (ss *tsScopeSet) array(g *gen, locName, arrPath, loc string, elem ir.Kind, 
 		cap: cap, elemMaxHas: emHas, elemMax: em, loc: loc, child: -1, parent: -1,
 	}
 	ss.scopes = append(ss.scopes, sc)
+	// EVERY wrapper array is driven through a corelib collector. The two §6.2.1
+	// index bounds and the gap fill that places an element at its id are the same
+	// code for every schema, with the schema carried entirely by arguments and a
+	// type parameter, so they live there (ARCHITECTURE §8). Which collector an
+	// element takes is seqClass's business; what generated code keeps is the
+	// routing -- the index register, the scope switch, and for a leaf element the
+	// two payload events.
+	sc.seq = fmt.Sprintf("_q%d", sc.id)
 	switch elem {
 	case ir.KindString, ir.KindBlob:
 		// The corelib's own collector owns the whole element: both index bounds,
 		// the per-element maxlen, the payload join and (for a string) the strict
 		// UTF-8 decode. Generated code only routes the two events to it.
-		sc.seq = fmt.Sprintf("_q%d", sc.id)
 	case ir.KindStruct, ir.KindUnion:
 		sc.ix = fmt.Sprintf("_ix%d", sc.id)
 		sc.child = ss.object(g, locName+"_e", fmt.Sprintf("%s[this.%s]!", arrPath, sc.ix), ref.Target.Fields)
@@ -217,7 +224,7 @@ func (g *gen) emitVisitor(f *tsfile, name string, fields []*ir.Field) {
 				g.emptyRegisterLit(sc.elemItems.Elem, sc.elemItems.ElemRef, g.matRowType(sc)))
 		}
 		if sc.seq != "" {
-			f.line("  private %s: %s | null = null;", sc.seq, g.seqClass(sc.elem))
+			f.line("  private %s: %s | null = null;", sc.seq, g.seqClass(sc))
 		}
 	}
 	g.emitBulkState(f, g.bulkNeedsOf(scopes))
@@ -454,9 +461,11 @@ func (g *gen) objSeqArm(sc *tsScope, scopes []*tsScope) []string {
 			// empty rather than merging into whatever the defaults put there.
 			acc := g.visStorage("this.o", fld)
 			b = fmt.Sprintf("    case %d: { const _t: %s = []; %s = _t; ", fld.ID, g.arrElemType(ch), acc)
-			if ch.seq != "" {
-				b += fmt.Sprintf("this.%s = %s; ", ch.seq, g.seqCtor(ch, "_t"))
-			}
+			// The collector is bound HERE, over the destination this arm just
+			// built, so the element arm below always finds one bound to the current
+			// array -- which is also what §7.4's replacement needs: a re-opened
+			// array field must not keep collecting into the destination it dropped.
+			b += fmt.Sprintf("this.%s = %s; ", ch.seq, g.seqCtor(ch, "_t"))
 		} else {
 			b = fmt.Sprintf("    case %d: { ", fld.ID)
 		}
@@ -466,30 +475,26 @@ func (g *gen) objSeqArm(sc *tsScope, scopes []*tsScope) []string {
 	return idSwitch(arms)
 }
 
-// arrSeqArm renders an array scope's element arm. The id IS the index, so there
-// is no id test -- only the §5.1 capacity bound, then the gap-fill that places
-// the element at its index (an interior element equal to the element default is
-// omitted on the wire, MESSAGE_SPEC §2).
+// arrSeqArm renders an array scope's element arm for a FRAMED element -- a
+// struct, a union or a nested row. The id IS the index (§5.1), so there is no id
+// test; the collector takes the two index bounds and grows the destination to
+// that index, filling whatever gaps the omitted interior elements left
+// (MESSAGE_SPEC §2), and what stays here is the routing into the element's own
+// scope.
 //
-// The gap-fill is emitted here rather than taken from the corelib's ElementSeq
-// because a framed element's default is a fresh OBJECT: ElementSeq writes one
-// shared `def` into every gap, which is right for the immutable "" / empty bytes
-// its string and blob collectors fill with and would alias every gap of a struct
-// array onto one instance.
+// The two kinds differ in one thing and the collector spells it: a struct/union
+// element MERGES on a re-opened id -- its value IS the scope, so §7.4's
+// last-occurrence-wins means the fields arriving second land on the object the
+// first opening built -- while a ROW is itself an array wrapper and REPLACES
+// what an earlier opening put at that index. `reserve` leaves a slot that is
+// already there alone; `place` writes the fresh row over it.
 func (g *gen) arrSeqArm(sc *tsScope, child *tsScope) []string {
-	out := []string{fmt.Sprintf("    const _t = %s;", sc.arrPath)}
-	out = append(out, g.indexBound(sc)...)
-	out = append(out, fmt.Sprintf("    while (_t.length <= id) _t.push(%s);", g.elemDefault(sc)))
+	var out []string
 	if sc.elem == ir.KindArray {
-		// A ROW is itself an array wrapper, so a re-opened row index REPLACES what
-		// an earlier opening built (§7.4) rather than merging into it -- unlike a
-		// struct/union element, whose scope merges. A framed element is left alone
-		// here: the gap-fill above already put an instance at the index, and the
-		// element scope decodes into it.
-		out = append(out, fmt.Sprintf("    const _e: %s = []; _t[id] = _e;", g.arrElemType(child)))
-		if child.seq != "" {
-			out = append(out, fmt.Sprintf("    this.%s = %s;", child.seq, g.seqCtor(child, "_e")))
-		}
+		out = append(out, fmt.Sprintf("    const _e: %s = []; this.%s!.place(id, _e);", g.arrElemType(child), sc.seq))
+		out = append(out, fmt.Sprintf("    this.%s = %s;", child.seq, g.seqCtor(child, "_e")))
+	} else {
+		out = append(out, fmt.Sprintf("    this.%s!.reserve(id);", sc.seq))
 	}
 	out = append(out,
 		fmt.Sprintf("    this.%s = id;", sc.ix),
@@ -498,42 +503,17 @@ func (g *gen) arrSeqArm(sc *tsScope, child *tsScope) []string {
 	return out
 }
 
-// indexBound renders the two §5.1/§6.2.1 index bounds for an array scope whose
-// elements generated code places itself: the schema capacity as validity, or --
-// where the schema left the array open -- the receiver cap as policy. Never
-// both: §6.2.1 keeps a cap off a field the schema already bounds.
-func (g *gen) indexBound(sc *tsScope) []string {
-	if sc.cap >= 0 {
-		return []string{
-			fmt.Sprintf("    if (id >= %d) throw new SofabError(SofabErrorCode.InvalidMsg, %q);",
-				sc.cap, fmt.Sprintf("%s: array index above schema capacity %d", sc.loc, sc.cap)),
-		}
-	}
-	if !g.limits.arrayHas {
-		return nil
-	}
-	return []string{
-		fmt.Sprintf("    if (id >= MAX_DYN_ARRAY_COUNT) throw new SofabError(SofabErrorCode.LimitExceeded, %q + id + %q + MAX_DYN_ARRAY_COUNT);",
-			sc.loc+": array index ", " exceeds the receiver cap "),
-	}
-}
-
-// elemDefault is the value a gap-filled element of an array scope takes.
-func (g *gen) elemDefault(sc *tsScope) string {
-	switch sc.elem {
-	case ir.KindArray:
-		return "[]"
-	default: // struct / union
-		return "new " + g.typeName(sc.elemRef.Key) + "()"
-	}
-}
-
-// seqClass / seqCtor name the corelib collector a string or blob wrapper array
-// is driven through, and build one over the destination. Both index bounds, both
-// element-length bounds, the payload join and the strict UTF-8 decode live there
-// (ARCHITECTURE §8): none of it knows a schema, all of it arrives as arguments.
+// seqClass / seqCtor name the corelib collector a wrapper array is driven
+// through, and build one over the destination. Both index bounds, the gap fill,
+// and -- for a leaf element -- both element-length bounds, the payload join and
+// the strict UTF-8 decode live there (ARCHITECTURE §8): none of it knows a
+// schema, all of it arrives as arguments and type parameters.
+//
 // arrayCountBound is the count reject for one native array field, emitted in
-// arrayBegin ahead of the destination it sizes.
+// arrayBegin ahead of the destination it sizes. It is the one bound that does
+// NOT move: the corelib has no call at that point to hang it on, and a call
+// invented to carry a check costs more than the guard it replaces (the rule
+// corelib-java's Seq states for the family).
 //
 // TWO bounds land here and they are mutually exclusive by rule: an array the
 // schema counts is INVALID above that count, and one the schema leaves uncounted
@@ -553,31 +533,87 @@ func (g *gen) arrayCountBound(cap int64, what string) string {
 		fmt.Sprintf("%s: array count above configured limit ", what))
 }
 
-func (g *gen) seqClass(elem ir.Kind) string {
-	if elem == ir.KindBlob {
+// seqClass names the corelib collector one wrapper array's elements are driven
+// through, spelled as the declared type of the visitor slot that holds it.
+//
+// Four shapes, and the only axis between them is what a GAP must hold. The
+// container grows to the arriving index (ARCHITECTURE §9.5 shape B), so every
+// slot below it that the encoder omitted (§2) takes the element default:
+//
+//   - string / blob -- StringSeq / BlobSeq, which own the element whole: both
+//     index bounds, the element maxlen, the payload join, the UTF-8 decode.
+//   - a typed-array matrix row -- ElementSeq<T>, filling gaps with the module's
+//     shared zero-length instance. Sharing one is sound for the same reason
+//     emptyTyped relies on: it holds nothing, an indexed store on it is dropped,
+//     and it cannot be grown.
+//   - everything else -- FramedSeq<T>, whose gap value comes from a FACTORY. A
+//     struct/union element is a fresh object and a wrapper row or a `Long[]` row
+//     a fresh array; all three are mutable and reachable by the caller, so one
+//     shared instance would alias every gap of the array onto it and -- since an
+//     arriving element decodes into the slot the reservation placed -- every
+//     ELEMENT onto it too.
+func (g *gen) seqClass(sc *tsScope) string {
+	switch sc.elem {
+	case ir.KindString:
+		return "StringSeq"
+	case ir.KindBlob:
 		return "BlobSeq"
+	case ir.KindArray:
+		if g.sharedGapSafe(sc.elemItems.Elem, sc.elemItems.ElemRef) {
+			return "ElementSeq<" + g.matRowType(sc) + ">"
+		}
+		return "FramedSeq<" + g.matRowType(sc) + ">"
 	}
-	return "StringSeq"
+	return "FramedSeq<" + g.typeName(sc.elemRef.Key) + ">"
 }
 
-// seqCtor builds the collector for one string/blob wrapper array: the schema
-// bounds first (`cap`, `elemMax`) and then, behind them, the receiver caps for
-// whichever of the two the schema left open.
+// sharedGapSafe reports whether ONE instance may fill every gap of an array with
+// this element kind -- which only a zero-length typed array may (see seqClass).
+func (g *gen) sharedGapSafe(elem ir.Kind, ref *ir.TypeRef) bool {
+	return g.tsTypedArray(elem, ref) != ""
+}
+
+// gapValue renders the element default a framed collector fills a gap with: the
+// module's shared empty instance where sharing is sound, and otherwise the
+// module-level factory that builds one per slot.
+func (g *gen) gapValue(sc *tsScope) string {
+	if sc.elem == ir.KindArray {
+		it := sc.elemItems
+		if g.sharedGapSafe(it.Elem, it.ElemRef) {
+			return g.emptyRegisterLit(it.Elem, it.ElemRef, g.matRowType(sc))
+		}
+		return g.factory(mkArr, "(): never[] => []")
+	}
+	t := g.typeName(sc.elemRef.Key)
+	return g.factory("_MK_"+t, fmt.Sprintf("() => new %s()", t))
+}
+
+// seqCtor builds the collector for one wrapper array: the schema bounds first
+// (`cap`, and for a leaf element `elemMax`) and then, behind them, the receiver
+// caps for whichever of them the schema left open.
 //
-// All four are passed, always. The collector is where BOTH of this shape's
-// receiver bounds land -- a wrapper array's elements never reach the generated
-// visitor, neither their index nor their length word -- and an omitted argument
-// is not "the corelib's default" but the format ceiling, i.e. no receiver bound
-// at all. Each pair is exclusive by rule (§6.2.1): where the schema declares a
+// Every one is passed, always. The collector is where this shape's receiver
+// bounds land -- a wrapper array's element index never reaches the generated
+// visitor, nor, for a leaf element, its length word -- and an omitted argument is
+// not "the corelib's default" but the format ceiling, i.e. no receiver bound at
+// all. Each pair is exclusive by rule (§6.2.1): where the schema declares a
 // `count`/`maxlen` the cap beside it is inert and the violation is INVALID, and
 // where it does not, the cap governs and its violation is LimitExceeded.
 func (g *gen) seqCtor(sc *tsScope, dst string) string {
-	emax := int64(-1)
-	if sc.elemMaxHas {
-		emax = sc.elemMax
+	switch sc.elem {
+	case ir.KindString, ir.KindBlob:
+		emax := int64(-1)
+		if sc.elemMaxHas {
+			emax = sc.elemMax
+		}
+		return fmt.Sprintf("new %s(%s, this.a, %d, %d, %q, %s, %s)",
+			g.seqClass(sc), dst, sc.cap, emax, sc.loc, g.arrayCap(), g.elemMaxCap(sc.elem))
 	}
-	return fmt.Sprintf("new %s(%s, this.a, %d, %d, %q, %s, %s)",
-		g.seqClass(sc.elem), dst, sc.cap, emax, sc.loc, g.arrayCap(), g.elemMaxCap(sc.elem))
+	// A framed element has no payload of its own, so no accumulator and no
+	// element-length pair: the destination, the gap value, the schema capacity
+	// and -- behind it, for a schema that declared none -- the receiver index cap.
+	return fmt.Sprintf("new %s(%s, %s, %d, %q, %s)",
+		g.seqClass(sc), dst, g.gapValue(sc), sc.cap, sc.loc, g.arrayCap())
 }
 
 // --- typed value callbacks --------------------------------------------------
@@ -717,7 +753,7 @@ func (g *gen) emitFpCb(f *tsfile, scopes []*tsScope) {
 			switch x.Kind {
 			case ir.KindFP32:
 				if fp32RawCompanion(x) {
-					i32 = append(i32, fmt.Sprintf("    case %d: { %s = v; %s = Number.isNaN(v) ? _fp32Raw(bits) : null; break; }",
+					i32 = append(i32, fmt.Sprintf("    case %d: { %s = v; %s = Number.isNaN(v) ? fp32RawBytes(bits) : null; break; }",
 						x.ID, acc, g.fp32RawStorage(sc.path, x)))
 				} else {
 					i32 = append(i32, fmt.Sprintf("    case %d: %s = v; break;", x.ID, acc))
@@ -750,8 +786,12 @@ func (g *gen) emitFixlenBegin(f *tsfile, scopes []*tsScope) {
 	for _, sc := range scopes {
 		if sc.isArr {
 			// A wrapper array's elements are bounded by the corelib collector, which
-			// takes the same verdict at the same word.
-			if sc.seq != "" {
+			// takes the same verdict at the same word. Only a LEAF element has a
+			// length word at all: every array scope now holds a collector, but a
+			// framed one (FramedSeq / ElementSeq) has no begin hook and nothing to
+			// hand it -- a struct, a union or a row is framed by a sequence, not by
+			// a fixlen header.
+			if sc.elem == ir.KindString || sc.elem == ir.KindBlob {
 				arms[sc.id] = []string{fmt.Sprintf("    this.%s?.begin(id, sub, total);", sc.seq)}
 			}
 			continue
@@ -806,7 +846,10 @@ func (g *gen) emitPayloadCb(f *tsfile, scopes []*tsScope, cb string) {
 	arms := map[int][]string{}
 	for _, sc := range scopes {
 		if sc.isArr {
-			if sc.seq != "" && sc.elem == want {
+			// Only a LEAF element of this callback's own kind: a framed element's
+			// collector has no `element` hook, and a `blob` array must not be handed
+			// a `string` payload (a §7.3 mismatch the corelib already skipped).
+			if sc.elem == want {
 				arms[sc.id] = []string{fmt.Sprintf("    this.%s?.element(id, total, offset, src, start, end);", sc.seq)}
 			}
 			continue
@@ -1111,21 +1154,26 @@ func (g *gen) emitArrayCbs(f *tsfile, scopes []*tsScope) {
 			if sc.row == "" {
 				continue
 			}
-			b := []string{fmt.Sprintf("    const _t = %s;", sc.arrPath)}
 			// `return`, not `break`: a scope arm is emitted bare when it is the only
 			// one (no switch to break out of) and inside a `case` when it is not, and
 			// leaving the callback is the right thing in both -- nothing else in the
 			// hook would run.
-			b = append(b, fmt.Sprintf("    if (kind !== ArrayKind.%s) return;", tsArrayKind(sc.elemItems.Elem)))
-			b = append(b, g.indexBound(sc)...)
+			b := []string{fmt.Sprintf("    if (kind !== ArrayKind.%s) return;", tsArrayKind(sc.elemItems.Elem))}
+			// The row INDEX is bounded before the row COUNT, and the container is
+			// grown after both. checkIndex is split out of place for exactly that:
+			// §7.2 item 8 wants a rejected row -- by either bound -- to leave the
+			// matrix exactly as it was, so a lower row id delivered afterwards still
+			// lands at its own index. place then re-takes the index bound, which is
+			// one integer compare and keeps the two orderings in one place.
+			b = append(b, fmt.Sprintf("    this.%s!.checkIndex(id);", sc.seq))
 			if bound := g.arrayCountBound(capOf(sc.elemItems.HasCount, sc.elemItems.Count), sc.loc+" element"); bound != "" {
 				b = append(b, "    "+strings.TrimSuffix(bound, " "))
 			}
-			b = append(b, fmt.Sprintf("    while (_t.length <= id) _t.push(%s);",
-				g.emptyArrayLit(sc.elemItems.Elem, sc.elemItems.ElemRef)),
-				fmt.Sprintf("    const _r%s = %s; _t[id] = _r; this.%s = _r;",
-					g.newArrayDecl(sc.elemItems.Elem, sc.elemItems.ElemRef, g.matRowType(sc)),
-					g.newArrayExpr(sc.elemItems.Elem, sc.elemItems.ElemRef, g.matRowType(sc)), sc.row))
+			// A ROW is an array wrapper, so a re-opened row id REPLACES what an
+			// earlier header built there (§7.4) -- place, not reserve.
+			b = append(b, fmt.Sprintf("    const _r%s = %s; this.%s!.place(id, _r); this.%s = _r;",
+				g.newArrayDecl(sc.elemItems.Elem, sc.elemItems.ElemRef, g.matRowType(sc)),
+				g.newArrayExpr(sc.elemItems.Elem, sc.elemItems.ElemRef, g.matRowType(sc)), sc.seq, sc.row))
 			begin[sc.id] = b
 
 			p := g.planBulk(sc.elemItems.Elem, sc.elemItems.ElemRef)
@@ -1465,37 +1513,3 @@ func (g *gen) emitDecoderClass(f *tsfile, name string) {
 	f.line("}")
 	f.blank()
 }
-
-// fp32BitsHelper turns the fp32 hook's 32-bit wire word back into the four bytes
-// the generated companion slot holds (MESSAGE_SPEC §4.6). The word is what the
-// corelib delivers -- a number costs nothing to pass, where the byte view it
-// replaced was an allocation per value and a borrowed slice §6.7 forbids -- so
-// the four bytes are materialized here, only for the NaN that needs them.
-const fp32BitsHelper = `// _fp32RawInto writes the four little-endian wire bytes of an fp32's 32-bit word
-// to out[off].
-function _fp32RawInto(out: Uint8Array, off: number, bits: number): void {
-  out[off] = bits & 0xff;
-  out[off + 1] = (bits >>> 8) & 0xff;
-  out[off + 2] = (bits >>> 16) & 0xff;
-  out[off + 3] = (bits >>> 24) & 0xff;
-}
-
-// _fp32Raw is the scalar flavour: a fresh 4-byte companion for one value. Built
-// only for a NaN, which is the only value a JS number cannot re-encode exactly.
-function _fp32Raw(bits: number): Uint8Array {
-  const out = new Uint8Array(4);
-  _fp32RawInto(out, 0, bits);
-  return out;
-}`
-
-// longArrEqHelper is the Long[] flavour of elementsEqual: Long elements are object
-// identities, so the sparse-omission default compare goes by (low, high) word
-// pairs instead of element !==. Emitted only when some Long-backed 64-bit
-// array carries a non-empty schema default (see scanHelpers).
-const longArrEqHelper = `// longArrEq is elementsEqual for Long[]: element-wise compare by (low, high) word pair
-// (Long objects are identities, so !== would never match a default literal).
-function longArrEq(a: readonly Long[], b: readonly Long[]): boolean {
-  if (a.length !== b.length) return false;
-  for (let i = 0; i < a.length; i++) if (a[i]!.low !== b[i]!.low || a[i]!.high !== b[i]!.high) return false;
-  return true;
-}`
