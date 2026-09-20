@@ -73,7 +73,11 @@ func stubFormattersOnPath(t *testing.T) string {
 	t.Helper()
 	dir := t.TempDir()
 	marker := filepath.Join(dir, "spawned")
-	for _, tool := range []string{"rustfmt", "dart", "ruff", "gofmt", "zig", "clang-format"} {
+	// Every binary a generator.Formatter implementor could reach for
+	// (ARCHITECTURE §8 names them), plus npx, which is how a prettier is
+	// commonly resolved. A formatter added to a backend belongs in this list
+	// the same day, or this test cannot see it spawn.
+	for _, tool := range []string{"rustfmt", "dart", "ruff", "prettier", "npx", "gofmt", "zig", "clang-format"} {
 		script := "#!/bin/sh\necho " + tool + " >> " + marker + "\necho MANGLED\n"
 		if err := os.WriteFile(filepath.Join(dir, tool), []byte(script), 0o755); err != nil {
 			t.Fatal(err)
