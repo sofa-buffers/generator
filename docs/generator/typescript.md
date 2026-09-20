@@ -121,8 +121,8 @@ bytes on every machine, whatever happens to be installed. That matters here for
 the same reason it does for Python — `prettier` is not part of the TypeScript
 toolchain, so it may simply not be there.
 
-Asking is one switch — the CLI flag `--format`, or the `generic.format` config
-key (the flag wins):
+Asking is one switch — the CLI flag `--format`, or the `generic.run_formatter`
+config key (the flag wins):
 
 | value | what `sofabgen` does |
 |---|---|

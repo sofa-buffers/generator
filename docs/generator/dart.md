@@ -80,8 +80,8 @@ Things worth knowing:
 you ask: it spawns no external tool on its own, so the same version writes the
 same bytes on every machine, whatever happens to be installed.
 
-Asking is one switch — the CLI flag `--format`, or the `generic.format` config
-key (the flag wins):
+Asking is one switch — the CLI flag `--format`, or the `generic.run_formatter`
+config key (the flag wins):
 
 | value | what `sofabgen` does |
 |---|---|
@@ -90,14 +90,21 @@ key (the flag wins):
 | `require` | Runs `dart format`, and fails the run when it is not available. |
 
 With the pass on, every generated `.dart` file goes through `dart format` once,
-at the language version the generated `pubspec.yaml` declares. That version is
+at the language version of the package the files are going into. That version is
 not a detail: `dart format` chooses its style by it — the short style below 3.7,
-the tall style from 3.7 on — so the files come out in the style your own
-`dart format` inside the generated package produces, and
-`dart format --output=none --set-exit-if-changed` over a tree holding them
-passes. With `emit: sources` there is no generated pubspec; the same language
-version is used, and if the package you drop the file into declares a different
-one, your formatter will restyle it.
+the tall style from 3.7 on — so it decides what "formatted" means.
+
+Where it comes from:
+
+| your run | the language version used |
+|---|---|
+| `emit: project` | the `sdk:` lower bound of the generated `pubspec.yaml` |
+| `emit: sources` (the default) | the `sdk:` lower bound of the `pubspec.yaml` above the output directory — your package's |
+| neither (the output directory is in no package) | 3.4 |
+
+So the files arrive in the style your own `dart format` over that package
+produces, and `dart format --output=none --set-exit-if-changed` over a tree
+holding them passes.
 
 It is a convenience. The generated code is correct and compiles either way; the
 switch only decides whether `dart format` has already been over it when it reaches you,
