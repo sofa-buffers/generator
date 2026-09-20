@@ -8,7 +8,9 @@ Emits one class per message and named type, against `corelib-ts`.
 |---|---|---|---|
 | `int64` | `bigint` \| `long` \| `number` | `bigint` | How 64-bit fields are represented in the generated API. |
 
-The generic options apply here too; see the [generic config](README.md).
+The generic options apply here too — including `format`, which decides whether
+`sofabgen` runs `prettier` over what it emitted (see [Formatting](#formatting));
+see the [generic config](README.md).
 
 ## `int64`
 
@@ -110,3 +112,44 @@ represented, and a mask has no lossy-number reading to opt into.
 In JSON, a `bigint`-carried bitfield is a decimal **string**, as `u64` is under
 `int64: bigint` — `fromJSON` accepts both the string and a plain number. A
 `number`-carried one is a plain JSON number.
+
+## Formatting
+
+`sofabgen` can run `prettier` over what it generated, and does so only when you
+ask: it spawns no external tool on its own, so the same version writes the same
+bytes on every machine, whatever happens to be installed. That matters here for
+the same reason it does for Python — `prettier` is not part of the TypeScript
+toolchain, so it may simply not be there.
+
+Asking is one switch — the CLI flag `--format`, or the `generic.format` config
+key (the flag wins):
+
+| value | what `sofabgen` does |
+|---|---|
+| `off` (the default) | Never runs `prettier`. The files are the generator's own output: valid, type-checking, not canonically formatted. |
+| `auto` | Runs `prettier` when it is available; when it is not, writes the files unformatted and says so once on stderr. |
+| `require` | Runs `prettier`, and fails the run when it is not available. |
+
+With the pass on, every generated `.ts` file goes through `prettier` once. The
+output directory's own `node_modules/.bin/prettier` is preferred over anything on
+`PATH`, so a project that pins prettier as a devDependency is formatted by the
+version it pins. prettier runs in the output directory, so a `.prettierrc`,
+`.editorconfig` or `.prettierignore` of your own that covers it is honoured, and
+the files come out the way your own `prettier --write` over that tree would leave
+them. `prettier --check` over a tree holding them then passes, so generated files
+need no exclusion from a formatting gate. prettier's output changes between
+releases, so a tree formatted by one version and checked by another can still
+report a difference: use the same version for both.
+
+It is a convenience. The generated code is correct and type-checks either way;
+the switch only decides whether `prettier` has already been over it when it
+reaches you, and running `prettier --write` over the output directory yourself
+gets you the same tree.
+
+Under `auto` and under `require` alike, a `prettier` that RUNS and rejects a
+generated file fails the generation with that file named — that is a generator
+bug, and writing the file would only move it into your build.
+
+The rest of an `emit: project` tree — `package.json`, `tsconfig.json` and
+`README.md` — is written the way prettier writes it whatever the switch says,
+including at `off`, where nothing is run at all.
