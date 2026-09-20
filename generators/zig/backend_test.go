@@ -762,6 +762,34 @@ func TestZigKeywordEscaping(t *testing.T) {
 	}
 }
 
+// The words that are NOT Zig keywords in field position, although they read
+// like reserved ones. Quoting them would fail a user's `zig fmt --check`, since
+// zig fmt strips a quote that is not needed -- and the corpus cannot carry this
+// case, because `true` and `null` are reserved words in other targets
+// (keywords.yaml is generated for all of them). Hence a unit test here.
+func TestZigNonKeywordsAreNotQuoted(t *testing.T) {
+	names := []string{"true", "false", "null", "undefined", "usingnamespace", "async", "await"}
+	src := "version: 1\nmessages:\n  m:\n    payload:\n"
+	for i, n := range names {
+		// Quoted in the YAML: `true`, `false` and `null` are YAML scalars, so
+		// an unquoted key would not even reach the schema as a name.
+		src += fmt.Sprintf("      %q: { id: %d, type: u32 }\n", n, i)
+	}
+	files, err := (&Backend{}).Generate(buildSchema(t, src), map[string]any{})
+	if err != nil {
+		t.Fatalf("generate: %v", err)
+	}
+	m := string(files[0].Content)
+	for _, n := range names {
+		if !containsCode(m, n+": u32 = 0,") {
+			t.Errorf("field %q is not emitted as a plain identifier", n)
+		}
+		if containsCode(m, `@"`+n+`"`) {
+			t.Errorf("field %q is quoted; zig fmt strips an unnecessary @\"...\" and a user's `zig fmt --check` then fails", n)
+		}
+	}
+}
+
 func TestZigDeterministic(t *testing.T) {
 	a := exampleFiles(t, map[string]any{"emit": "project"})
 	b := exampleFiles(t, map[string]any{"emit": "project"})
