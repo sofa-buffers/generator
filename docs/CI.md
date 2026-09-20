@@ -24,7 +24,9 @@ a red CI job must be reproducible with one command.
 Some Go tests beside a backend (`generators/{golang,python,c}/`) build and run
 generated code against a real corelib. They are gated on `SOFAB_<X>_CORELIB`
 (and the target toolchain) and **skip** without it, so `hermetic` stays free of
-corelibs and toolchains. The `lang-<x>` job is where they run: its `run.sh`
+corelibs and toolchains. `generators/typescript/` joins the same runner without
+needing a corelib: its gated tests want a real `prettier`, which the hermetic
+job does not have either. The `lang-<x>` job is where they run: its `run.sh`
 calls `run_backend_tests` (`tests/conformance/lib/backend_tests.sh`), which runs
 the backend's **whole** test package with the corelib variable set, no `-run`
 filter, and fails on any `--- SKIP` — in a lang job nothing has a reason to

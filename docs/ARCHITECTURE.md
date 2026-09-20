@@ -405,8 +405,9 @@ A backend is a self-contained, additive plugin. The contract:
   A target whose canonical formatter is an external *program* rather than a Go
   package implements it, and the **CLI** applies it between `Generate` and the
   writer (§12 item 10; today: rust → `rustfmt`, dart → `dart format`,
-  python → `ruff format`). It is deliberately outside `Generate`, which stays a
-  pure function of (IR, config) — the golden gate compares its bytes — so no
+  python → `ruff format`, typescript → `prettier`). It is deliberately outside
+  `Generate`, which stays a pure function of (IR, config) — the golden gate
+  compares its bytes — so no
   backend's output depends on which tools the machine happens to have. A
   formatter that is not installed returns the files untouched plus a one-line
   note naming the reason: emitting code must never require the target toolchain.
@@ -5833,10 +5834,10 @@ A reimplementation is **conformant** when it reproduces these gates:
     excerpt of the change the formatter wants, refuses a directory set that
     holds no source of that language (a check over nothing proves nothing), and
     refuses a language it has no canonical formatter for rather than passing it.
-    Build output inside a generated project (zig's `.zig-cache`, `zig-out`) is
-    not generated code and is skipped. The formatter version is the one the
-    `lang-<x>` job pins with its toolchain (`setup-go`, `mlugg/setup-zig`), so
-    the same check runs locally and in CI.
+    Build output inside a generated project (zig's `.zig-cache`, `zig-out`,
+    npm's `node_modules` and `dist`) is not generated code and is skipped. The
+    formatter version is the one the `lang-<x>` job pins with its toolchain
+    (`setup-go`, `mlugg/setup-zig`), so the same check runs locally and in CI.
 
     | target | formatter | how the output gets there |
     |---|---|---|
@@ -5845,6 +5846,7 @@ A reimplementation is **conformant** when it reproduces these gates:
     | zig | `zig fmt --check` | the backend emits zig fmt layout itself (`generators/zig/layout.go`) |
     | dart | `dart format --output=none --set-exit-if-changed`, at the language version the generated `pubspec.yaml` declares | the CLI pipes every `.dart` file through `dart format` when asked (`generators/dart/format.go`) |
     | python | `ruff format --check`, at the ruff version the suite pins | the CLI pipes every `.py` module through `ruff format` when asked (`generators/python/format.go`) |
+    | typescript | `prettier --list-different`, at the prettier version the suite pins | the CLI pipes every `.ts` file through `prettier` when asked (`generators/typescript/format.go`); the project's `package.json`, `tsconfig.json` and `README.md` are emitted prettier-clean |
 
     **The `--format` switch, and why it is off by default — sofabgen runs no
     external tool unless it was asked to.** Whether the CLI applies
@@ -5882,15 +5884,16 @@ A reimplementation is **conformant** when it reproduces these gates:
     every `sofabgen` call of that suite passes — `--format=require` when the
     formatter is installed, so a pass that stopped reaching a file fails the
     generation itself rather than only this gate, and `--format=off` when it is
-    not. The rust, dart and python suites take it once at the top and pass
-    `"$FMT"` at every call site. go and zig need nothing: their output is
-    formatter-clean from the emitter itself, whatever the switch says.
+    not. The rust, dart, python and typescript suites take it once at the top
+    and pass `"$FMT"` at every call site. go and zig need nothing: their output
+    is formatter-clean from the emitter itself, whatever the switch says.
 
     **A suite runs on a box with no external formatter at all, and says so.**
-    rustfmt is a separate rustup component and ruff is not part of the Python
-    toolchain, so requiring them to run the tests would be the same imposition
-    the default `off` removes from generation. With the formatter absent the
-    suite generates unformatted, and `check_format` prints a `!!!!`-banner
+    rustfmt is a separate rustup component, and neither ruff nor prettier is
+    part of its language's toolchain, so requiring them to run the tests would
+    be the same imposition the default `off` removes from generation. With the
+    formatter absent the suite generates unformatted, and `check_format` prints
+    a `!!!!`-banner
     naming the tool and what was NOT checked — a skip is never silent and never
     printed as a pass — and carries on. `SOFAB_FORMAT_STRICT=1` turns every such
     skip into a failure, and the `lang-*` CI jobs, which install the formatters,
@@ -6007,18 +6010,67 @@ A reimplementation is **conformant** when it reproduces these gates:
     nobody receives (the lint half of gate 9 does the opposite, deliberately, to
     keep a machine's config out of a LINT finding).
 
-    The dart and python checks are handed their suite's whole work directory
-    rather than a list of projects, so a project a later block adds is covered
-    the day it is written; the corelib a suite clones into that directory is not
-    generated code and is pruned. Like rust's, neither check proves the
-    emitters' layout — it pins that the pass reached every generated file.
+    The dart, python and typescript checks are handed their suite's whole work
+    directory rather than a list of projects, so a project a later block adds is
+    covered the day it is written; the corelib a suite clones into that
+    directory is not generated code and is pruned.
+
+    **What a pass-backed check is worth, plainly.** go and zig prove the
+    EMITTERS: the code is formatter-clean as it leaves `Generate`, at any
+    `--format` value, and the check would fail the day an emitter stopped
+    producing it. rust, dart, python and typescript prove less, and are only
+    worth what they prove: `sofabgen` runs the formatter and the suite then
+    checks the result with the SAME binary, so such a check cannot fail from
+    version drift inside one job, and it says nothing about the emitters'
+    layout. What it does catch is a generated file the pass never reaches, the
+    pass being disabled or broken, and the formatter being absent where CI
+    expects it.
+
+    **TypeScript** is the fourth of that kind, and the last target to join.
+    Measured the same way: `prettier` rewrites all 54 generated `.ts` files of
+    the example plus the corpus — 12.6k changed lines against 15.3k lines of
+    source, i.e. most of the output. Part of that is mechanical (the import
+    list, the quoted object keys in `toJSON`, `if (!(x.isDefault()))`, the
+    emitters' one-line `case` arms), but the rest is width-driven, and the width
+    comes from SCHEMA content: two probe schemas differing only in the LENGTH of
+    their message, field and type names get different output, the long one
+    breaking a `static fromJSON(d: Record<string, unknown>): T` signature, a
+    field initialiser after its `=`, a `new Uint8Array(T.MAX_SIZE)` call and an
+    `if (…) return false;` body that the short one keeps on one line each. As
+    with rustfmt, an emitter rule for that is a reimplementation of prettier. So
+    the `.ts` files go through `generator.Formatter` too, with the same
+    behaviour under the switch. prettier is not part of the TypeScript toolchain
+    either, so, like ruff, it degrades with a note rather than failing; the pass
+    prefers the generated tree's own `node_modules/.bin/prettier` over anything
+    on `PATH`, because that is the version a JavaScript project pins and checks
+    against.
+
+    What the emitters DO own for this target is everything prettier does not
+    have to run to get right: the generated `package.json`, `tsconfig.json` and
+    `README.md` are written prettier-clean, at `--format=off` as much as
+    anywhere else, so a user's `prettier --check .` only ever sees the `.ts`
+    files the pass handles. Those three are fixed emitter constants rather than
+    schema-derived output, so a corpus-wide sweep would say the same thing 27
+    times over; `generators/typescript/format_test.go` holds them instead, and
+    the conformance check stays on `.ts`. That check has two wrinkles of its
+    own. It selects files by the `// Code generated by sofabgen` marker rather
+    than by extension, because this suite drops hand-written `.ts` fixtures
+    (`stream_check.ts`, `typecheck64.ts`) into the generated project directories
+    it builds, and holding the harness to prettier would be checking the wrong
+    thing. And it passes `--ignore-path /dev/null`: prettier's default ignore
+    list is `[.gitignore, .prettierignore]` resolved from the CURRENT directory,
+    which during a suite run is this repository — whose `.gitignore` holds
+    `.claude*` — and an IGNORED file passes prettier silently, so without that
+    the gate could become a pass over nothing. The check asks prettier
+    `--file-info` about one of the files first and fails unless it comes back
+    not-ignored and parsed as TypeScript, which is what turns that failure mode
+    into a named error instead of a green run.
 
     C, C++, Java, Kotlin and C# are deliberately **out**: none has a single
     standard (clang-format needs a style chosen, google-java-format vs. IDE
     defaults, ktfmt vs. ktlint, `dotnet format` reads an `.editorconfig`), and
-    choosing a house style for generated code is a separate decision. The
-    remaining single-formatter target, typescript (`prettier`), joins the table
-    through the same driver.
+    choosing a house style for generated code is a separate decision. Every
+    target whose language HAS one canonical formatter is now in the table.
 
 ---
 
