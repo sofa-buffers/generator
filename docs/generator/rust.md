@@ -92,8 +92,8 @@ lib that re-exports the module, so a dependent crate has nothing to declare.
 ask: it spawns no external tool on its own, so the same version writes the same
 bytes on every machine, whatever happens to be installed.
 
-Asking is one switch — the CLI flag `--format`, or the `generic.format` config
-key (the flag wins):
+Asking is one switch — the CLI flag `--format`, or the `generic.run_formatter`
+config key (the flag wins):
 
 | value | what `sofabgen` does |
 |---|---|

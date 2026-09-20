@@ -193,7 +193,7 @@ sofabgen --config <file> --lang <c|cpp|rust|go|python|java|kotlin|csharp|typescr
 | `--lang <target>` | yes | Which backend to generate |
 | `--in <dir>` | no | Override the config's input definition folder |
 | `--out <dir>` | no | Override the config's output folder |
-| `--format <mode>` | no | Override the config's `generic.format`: `off` (default) runs no external formatter, `auto` runs the target's one when installed, `require` fails without it |
+| `--format <mode>` | no | Override the config's `generic.run_formatter`: `off` (default) runs no external formatter, `auto` runs the target's one when installed, `require` fails without it |
 
 ## Repository layout
 

@@ -414,9 +414,14 @@ A backend is a self-contained, additive plugin. The contract:
   A formatter that runs and refuses is an error, because that means the emitter
   produced source the language cannot parse.
   **The pass never runs on its own.** sofabgen spawns no external tool unless
-  the run asked for one: the `--format` switch (config key `generic.format`)
-  selects `off` — the default, the capability is not called at all — `auto`, or
-  `require`. §12 item 10 has the switch and why the default is off.
+  the run asked for one: the `--format` switch (config key
+  `generic.run_formatter`) selects `off` — the default, the capability is not
+  called at all — `auto`, or `require`. The key is not called `format`: the docs
+  target has a per-target option of that name (`format: html`), and
+  `Config.Effective` merges `targets.<lang>` over `generic`, so a generic key
+  reusing a per-target name is read as it in both directions. A generic key
+  therefore may not take the name of any per-target one. §12 item 10 has the
+  switch and why the default is off.
 - **Registry / self-registration**: each backend registers itself by language
   key into a central registry at init; the CLI selects via `Lookup(lang)`.
   Duplicate registration panics at init (surfacing the first time a binary
@@ -5594,12 +5599,16 @@ A reimplementation is **conformant** when it reproduces these gates:
    `generators/*/backend_test.go` (plus corelib-gated tests: they skip in the
    hermetic job and run — the whole package, unfiltered, with a skip counted
    as a failure — in `lang-<x>` via `tests/conformance/lib/backend_tests.sh`;
-   docs/CI.md). The one skip that runner tolerates is the one gate 10 already
+   docs/CI.md).    The one skip that runner tolerates is the one gate 10 already
    tolerates: a test gated on a canonical formatter, on a box that does not have
-   it. The suite has to name that tool, every skip's own reason has to name it
+   it (or has it at a version the suite does not pin, which counts the same).
+   The suite has to name that tool, every skip's own reason has to name it
    too, and `SOFAB_FORMAT_STRICT=1` — set in every `lang-*` job that holds
    generated code to a formatter — turns the tolerance off, so CI still demands
-   that all of them run. Then there are
+   that all of them run. Every suite whose backend package holds a
+   formatter-driving test runs that package this way, `rust` and `dart`
+   included; `generators/dart` no longer wraps the conformance suite in a Go
+   test of its own, which would have made the suite run itself. Then there are
    dedicated matrix suites for sparse omission (`omit_test.go`), shared refs
    (`refs_test.go`), the multi-file real-world example (`realworld_test.go`),
    ASCII output, and doc comments (§8).
@@ -5860,9 +5869,11 @@ A reimplementation is **conformant** when it reproduces these gates:
     | `require` | Format, and FAIL the run when the tool is missing. |
 
     It is exposed twice: the CLI flag `--format=off\|auto\|require` and the
-    config key `generic.format` (same three values, in the closed config
-    schema). Precedence is the usual one — built-in default < `generic.format` <
-    `--format` — and an unrecognised value from either source is a startup error
+    config key `generic.run_formatter` (same three values, in the closed config
+    schema; read from `generic` alone, never through `Effective`, so no backend
+    ever receives it). Precedence is the usual one — built-in default <
+    `generic.run_formatter` < `--format` — and an unrecognised value from either
+    source is a startup error
     naming the three, never a silent fallback to a default. A formatter that
     RUNS and refuses the code is an error under `auto` as well: that is an
     emitter bug, and no switch turns it into a written file.
@@ -5878,29 +5889,73 @@ A reimplementation is **conformant** when it reproduces these gates:
     once, in their config, or runs their own formatter over the output
     directory.
 
-    Everything in this repository that depends on formatted output asks for it
-    explicitly, and asks only when it can also check the answer. The driver
-    answers both questions: `format_flag <lang>` returns the `--format` value
-    every `sofabgen` call of that suite passes — `--format=require` when the
-    formatter is installed, so a pass that stopped reaching a file fails the
-    generation itself rather than only this gate, and `--format=off` when it is
-    not. The rust, dart, python and typescript suites take it once at the top
-    and pass `"$FMT"` at every call site. go and zig need nothing: their output
-    is formatter-clean from the emitter itself, whatever the switch says.
+    **The gate checks a tree of its own, and nothing else does.** A suite
+    generates everything else with `--format=off`, because that is what
+    `sofabgen` writes by default and therefore the code a user actually
+    receives: those are the bytes that have to build warning-free, lint clean,
+    typecheck, round-trip and pass the shared vectors. The formatted tree is a
+    different artifact — the convenience a user can ask for — so it is generated
+    once more, separately, by `format_gen` (`tests/conformance/lib/check_format.sh`)
+    into a `fmt` directory the gate then checks. Holding the guarantees of gate 9
+    to the formatter's rewrite instead, as the first cut of this gate did, would
+    have moved every one of them off the shipped artifact onto a variant.
+
+    `format_gen` picks the `--format` value per language: `require` for rust,
+    dart, python and typescript, whose formatter is an external program the CLI
+    runs only when asked; `off` for go and zig, whose output is formatter-clean
+    as it leaves `Generate` (go formats with the `go/format` LIBRARY, zig's
+    layout is emitted), where the DEFAULT is the thing to check.
+
+    That tree covers the example, the suite's own conformance schema, every
+    corpus and realworld definition, and one project per config a leg of the
+    suite used — a decode limit or a cap changes what is emitted. And it holds
+    generated files ONLY, which is what makes the verdict exact: the suites drop
+    hand-written fixtures into the generated projects they build
+    (`stream_check.ts`, `ownership_check.dart`, `streaming_check*.rs`,
+    `ownership_check.zig`, probe `main.go` files), and a sweep by extension over
+    a work directory counts those as generated code. Cheap enough to be worth
+    it: generation is the fast part, and nothing in the `fmt` tree is built —
+    except one project per suite where building it is cheap (dart analyzes and
+    compiles it, python lints it), so that a formatter rewrite that broke the
+    code could not pass unnoticed.
 
     **A suite runs on a box with no external formatter at all, and says so.**
     rustfmt is a separate rustup component, and neither ruff nor prettier is
     part of its language's toolchain, so requiring them to run the tests would
     be the same imposition the default `off` removes from generation. With the
-    formatter absent the suite generates unformatted, and `check_format` prints
-    a `!!!!`-banner
-    naming the tool and what was NOT checked — a skip is never silent and never
-    printed as a pass — and carries on. `SOFAB_FORMAT_STRICT=1` turns every such
-    skip into a failure, and the `lang-*` CI jobs, which install the formatters,
-    set it: optional on a laptop, mandatory in CI. Python's ruff LINT half
-    (gate 9) rides on the same switch, for the same reason and with the same
-    banner; an installed ruff of the wrong version stays a hard failure, because
-    that is a misconfiguration rather than an absent tool.
+    formatter absent nothing is generated for this gate, `check_format` prints a
+    `!!!!`-banner naming the tool and what was NOT checked — a skip is never
+    silent and never printed as a pass — and the suite carries on.
+    `SOFAB_FORMAT_STRICT=1` turns every such skip into a failure, and the
+    `lang-*` CI jobs, which install the formatters, set it: optional on a
+    laptop, mandatory in CI. Python's ruff LINT half (gate 9) rides on the same
+    switch, for the same reason and with the same banner.
+
+    An installed formatter of the WRONG version counts as absent too
+    (`format_unavailable`). ruff's and prettier's output moves between releases,
+    so a check against another version answers another question and must never
+    be reported as a pass — but refusing to run at all would leave a developer
+    who happens to have some ruff or some prettier worse off than one who has
+    none, which is the harsher state to be in and the more common one. So the
+    gate skips, loudly, naming the version it wanted, and everything else in the
+    suite runs; under `SOFAB_FORMAT_STRICT=1` it is a failure again, in the first
+    seconds of the job.
+
+    Because every `lang-*` job installs its formatter and sets that variable,
+    none of those skip branches would otherwise ever run in CI. `lang-python` —
+    the cheapest of them — therefore runs its suite a SECOND time with ruff
+    uninstalled and the variable cleared, and that run has to exit 0. All four
+    formatter suites share `check_format.sh` and `backend_tests.sh`, so pinning
+    the toolless path once pins it family-wide.
+
+    rustfmt is the one formatter whose version is not pinned: it comes with the
+    toolchain (`dtolnay/rust-toolchain@stable` in `lang-rust`), while ruff and
+    prettier are installed by the job at an exact version the suite refuses to
+    substitute. That asymmetry cannot produce a false pass — `sofabgen` and the
+    gate use the same binary within a job — and pinning a whole Rust toolchain
+    to pin its rustfmt would cost more than it buys; what it means is that the
+    bytes a `--format=auto` Rust user receives move with each stable release,
+    which is inherent to a convenience that shells out to their own tool.
 
     `tests/bench` does not ask: it measures the default output, which is what
     ships. Formatting is whitespace, so no row can move either way.
@@ -5987,14 +6042,24 @@ A reimplementation is **conformant** when it reproduces these gates:
     Dart adds one wrinkle of its own: `dart format` picks its STYLE from the
     **language version** of the package a file belongs to — short style below
     3.7, the tall style from 3.7 on — and at generation time there is no package
-    config yet (`dart pub get` writes it afterwards), so left alone it would
-    format against the SDK's latest version while the generated `pubspec.yaml`
-    asks for another. The pass therefore passes `--language-version` explicitly,
-    from a constant (`dart.LanguageVersion`) that
-    `generators/dart/format_test.go` pins to the `sdk:` constraint the generated
-    pubspec declares; the conformance check reads that constraint back out of
-    the pubspec files rather than repeating the constant, and refuses a tree
-    that holds more than one.
+    config yet (`dart pub get` writes `.dart_tool/package_config.json`
+    afterwards), so left alone it would format against the SDK's latest version
+    whatever the package asks for. The pass therefore passes
+    `--language-version` explicitly, resolved from the package the files are
+    going INTO (`dart.languageVersion`): the `sdk:` lower bound of the generated
+    `pubspec.yaml` when the run scaffolds a project — it is one of the files
+    being written, so it is read out of them — and otherwise the one of the
+    `pubspec.yaml` above the output directory, which under the DEFAULT
+    `emit: sources` is the user's own package. A constant would be wrong exactly
+    there: `dart.LanguageVersion` is 3.4, which selects the short style, while a
+    package today is almost always ≥3.7, so sources dropped into it would be
+    rewritten by the user's own `dart format` — the rewrite this pass exists to
+    spare them, silently, even under `--format=require`. The constant remains as
+    the fallback for an output directory that is in no package at all, and
+    `generators/dart/format_test.go` pins it to the generated pubspec's
+    constraint and holds the resolution against the real `dart format`. The
+    conformance check reads the constraint back out of the pubspec files rather
+    than repeating any of it, and refuses a tree that holds more than one.
 
     Python's wrinkle is that ruff, unlike rustfmt inside rustup or `dart format`
     inside the Dart SDK, is **not** part of the toolchain a user of generated
@@ -6009,11 +6074,6 @@ A reimplementation is **conformant** when it reproduces these gates:
     settings, so a verdict that ignored them would be a verdict about a tree
     nobody receives (the lint half of gate 9 does the opposite, deliberately, to
     keep a machine's config out of a LINT finding).
-
-    The dart, python and typescript checks are handed their suite's whole work
-    directory rather than a list of projects, so a project a later block adds is
-    covered the day it is written; the corelib a suite clones into that
-    directory is not generated code and is pruned.
 
     **What a pass-backed check is worth, plainly.** go and zig prove the
     EMITTERS: the code is formatter-clean as it leaves `Generate`, at any
@@ -6052,12 +6112,8 @@ A reimplementation is **conformant** when it reproduces these gates:
     files the pass handles. Those three are fixed emitter constants rather than
     schema-derived output, so a corpus-wide sweep would say the same thing 27
     times over; `generators/typescript/format_test.go` holds them instead, and
-    the conformance check stays on `.ts`. That check has two wrinkles of its
-    own. It selects files by the `// Code generated by sofabgen` marker rather
-    than by extension, because this suite drops hand-written `.ts` fixtures
-    (`stream_check.ts`, `typecheck64.ts`) into the generated project directories
-    it builds, and holding the harness to prettier would be checking the wrong
-    thing. And it passes `--ignore-path /dev/null`: prettier's default ignore
+    the conformance check stays on `.ts`. That check has a wrinkle of its
+    own: it passes `--ignore-path /dev/null`: prettier's default ignore
     list is `[.gitignore, .prettierignore]` resolved from the CURRENT directory,
     which during a suite run is this repository — whose `.gitignore` holds
     `.claude*` — and an IGNORED file passes prettier silently, so without that
