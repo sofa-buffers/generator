@@ -12,17 +12,18 @@ set -eu
 . "$(dirname "$0")/../lib/maxsize_fill.sh"
 # Shared canonical-formatter check (ARCHITECTURE §12 gate 10).
 . "$(dirname "$0")/../lib/check_format.sh"
+# Every backend Go test, run against the corelib with no skips allowed.
+. "$(dirname "$0")/../lib/backend_tests.sh"
 
 ROOT=$(cd "$(dirname "$0")/../../.." && pwd)
 CORELIB="${1:-${SOFAB_DART_CORELIB:-}}"
 
-# What every `sofabgen` run below passes as its --format argument: sofabgen
-# formats nothing unless asked, and this suite asks with --format=require so a
-# format pass that stopped reaching a file fails the generation rather than the
-# gate at the end. `dart format` is part of the SDK this suite needs anyway, so
-# in practice this is always --format=require; the probe is what keeps the
-# suite honest on a box without it (tests/conformance/lib/check_format.sh).
-FMT=$(format_flag dart)
+# Every generation below is --format=off: the bytes a user receives from
+# `sofabgen` by default are the emitters' own, and those are the bytes this
+# suite compiles, analyzes and round-trips. The FORMATTED tree is a separate
+# artifact -- what the user gets when they ask for the convenience pass -- and
+# gate 10 at the end generates and checks it on its own
+# (tests/conformance/lib/check_format.sh).
 WORK=$(mktemp -d)
 trap 'rm -rf "$WORK"' EXIT
 
@@ -81,7 +82,7 @@ compile_project() {
 
 # Generate a project, wire the corelib path and compile it.
 build() {
-    ( cd "$ROOT" && go run ./cmd/sofabgen "$FMT" --config "$WORK/cfg.yaml" --lang dart --in "$1" --out "$2" )
+    ( cd "$ROOT" && go run ./cmd/sofabgen --format=off --config "$WORK/cfg.yaml" --lang dart --in "$1" --out "$2" )
     sed -i "s#\${SOFAB_DART_CORELIB}#$CORELIB#" "$2/pubspec.yaml"
     compile_project "$2"
 }
@@ -90,7 +91,7 @@ build() {
 # clean analyze == the generated code + harness compile), which is far faster
 # than AOT-compiling an exe for every definition.
 check() {
-    ( cd "$ROOT" && go run ./cmd/sofabgen "$FMT" --config "$WORK/cfg.yaml" --lang dart --in "$1" --out "$2" )
+    ( cd "$ROOT" && go run ./cmd/sofabgen --format=off --config "$WORK/cfg.yaml" --lang dart --in "$1" --out "$2" )
     sed -i "s#\${SOFAB_DART_CORELIB}#$CORELIB#" "$2/pubspec.yaml"
     ( cd "$2" && dart pub get >/dev/null 2>&1 )
     danalyze "$2"
@@ -557,7 +558,7 @@ YAML
 cat > "$WORK/cfg-limit.yaml" <<'YAML'
 generic: { emit: project, max_dyn_array_count: 4 }
 YAML
-( cd "$ROOT" && go run ./cmd/sofabgen "$FMT" --config "$WORK/cfg-limit.yaml" --lang dart --in "$WORK/dyn.yaml" --out "$WORK/dynlim" )
+( cd "$ROOT" && go run ./cmd/sofabgen --format=off --config "$WORK/cfg-limit.yaml" --lang dart --in "$WORK/dyn.yaml" --out "$WORK/dynlim" )
 sed -i "s#\${SOFAB_DART_CORELIB}#$CORELIB#" "$WORK/dynlim/pubspec.yaml"
 compile_project "$WORK/dynlim"
 build "$WORK/dyn.yaml" "$WORK/dynfree"
@@ -647,7 +648,7 @@ python3 "$ROOT/tests/conformance/lib/check_refusal_category.py" --emit-schema >>
 cat > "$WORK/cfg-refusal.yaml" <<'YAML'
 generic: { emit: project, max_dyn_array_count: 4, max_dyn_string_len: 8, max_dyn_blob_len: 8 }
 YAML
-( cd "$ROOT" && go run ./cmd/sofabgen "$FMT" --config "$WORK/cfg-refusal.yaml" --lang dart --in "$WORK/refusal.yaml" --out "$WORK/refusal" )
+( cd "$ROOT" && go run ./cmd/sofabgen --format=off --config "$WORK/cfg-refusal.yaml" --lang dart --in "$WORK/refusal.yaml" --out "$WORK/refusal" )
 sed -i "s#\${SOFAB_DART_CORELIB}#$CORELIB#" "$WORK/refusal/pubspec.yaml"
 compile_project "$WORK/refusal"
 python3 "$ROOT/tests/conformance/lib/check_refusal_category.py" "dart" \
@@ -684,7 +685,7 @@ messages:
       w: { id: 0, type: array, items: { type: string } }
       b: { id: 1, type: array, items: { type: string, count: 100 } }
 YAML
-( cd "$ROOT" && go run ./cmd/sofabgen "$FMT" --config "$WORK/cfg-limit.yaml" --lang dart --in "$WORK/wrap.yaml" --out "$WORK/wraplim" )
+( cd "$ROOT" && go run ./cmd/sofabgen --format=off --config "$WORK/cfg-limit.yaml" --lang dart --in "$WORK/wrap.yaml" --out "$WORK/wraplim" )
 grep -q 'rcap: maxDynArrayCount' "$WORK/wraplim/lib/message.dart" \
     || { echo "FAIL: the wrapper index cap must reach the collector"; exit 1; }
 grep -q 'const int maxDynArrayCount = 4;' "$WORK/wraplim/lib/message.dart" \
@@ -724,7 +725,7 @@ messages:
       b: { id: 1, type: array, items: { type: i32, count: 100000 } }
       w: { id: 2, type: array, items: { type: string } }
 YAML
-( cd "$ROOT" && go run ./cmd/sofabgen "$FMT" --config "$WORK/cfg-limit.yaml" --lang dart --in "$WORK/excl.yaml" --out "$WORK/excl" )
+( cd "$ROOT" && go run ./cmd/sofabgen --format=off --config "$WORK/cfg-limit.yaml" --lang dart --in "$WORK/excl.yaml" --out "$WORK/excl" )
 sed -i "s#\${SOFAB_DART_CORELIB}#$CORELIB#" "$WORK/excl/pubspec.yaml"
 compile_project "$WORK/excl"
 # b (id 1, signed array, count 6) is bounded by its own `count: 100000`, so the
@@ -796,7 +797,7 @@ YAML
 cat > "$WORK/cfg-strlim.yaml" <<'YAML'
 generic: { emit: project, max_dyn_string_len: 24 }
 YAML
-( cd "$ROOT" && go run ./cmd/sofabgen "$FMT" --config "$WORK/cfg-strlim.yaml" --lang dart --in "$WORK/dynstr.yaml" --out "$WORK/strlim" )
+( cd "$ROOT" && go run ./cmd/sofabgen --format=off --config "$WORK/cfg-strlim.yaml" --lang dart --in "$WORK/dynstr.yaml" --out "$WORK/strlim" )
 sed -i "s#\${SOFAB_DART_CORELIB}#$CORELIB#" "$WORK/strlim/pubspec.yaml"
 compile_project "$WORK/strlim"
 printf '\002\242\006' > "$WORK/overcap_trunc.bin"
@@ -929,7 +930,7 @@ echo "==> declared-width reject OK"
 echo "==> sequence_growth: a wrapper array grows to its highest id, and the index is the bound"
 printf 'version: 1\nmessages:\n' > "$WORK/growth.yaml"
 python3 "$ROOT/tests/conformance/lib/check_growth.py" --emit-schema >> "$WORK/growth.yaml"
-( cd "$ROOT" && go run ./cmd/sofabgen "$FMT" --config "$WORK/cfg-limit.yaml" --lang dart --in "$WORK/growth.yaml" --out "$WORK/growth" )
+( cd "$ROOT" && go run ./cmd/sofabgen --format=off --config "$WORK/cfg-limit.yaml" --lang dart --in "$WORK/growth.yaml" --out "$WORK/growth" )
 sed -i "s#\${SOFAB_DART_CORELIB}#$CORELIB#" "$WORK/growth/pubspec.yaml"
 compile_project "$WORK/growth"
 # --cap must equal the max_dyn_array_count the config above generated with:
@@ -1003,26 +1004,50 @@ python3 "$ROOT/tests/conformance/lib/check_declared_width_kinds.py" "dart" \
 echo "==> §7.4 repeated id: wrappers replace, scopes merge (generator#523)"
 printf 'version: 1\nmessages:\n' > "$WORK/repeated.yaml"
 python3 "$ROOT/tests/conformance/lib/check_repeated_id.py" --emit-schema >> "$WORK/repeated.yaml"
-( cd "$ROOT" && go run ./cmd/sofabgen "$FMT" --config "$WORK/cfg.yaml" --lang dart --in "$WORK/repeated.yaml" --out "$WORK/repeated" )
+( cd "$ROOT" && go run ./cmd/sofabgen --format=off --config "$WORK/cfg.yaml" --lang dart --in "$WORK/repeated.yaml" --out "$WORK/repeated" )
 sed -i "s#\${SOFAB_DART_CORELIB}#$CORELIB#" "$WORK/repeated/pubspec.yaml"
 compile_project "$WORK/repeated"
 python3 "$ROOT/tests/conformance/lib/check_repeated_id.py" "Dart" \
     -- "$WORK/repeated/harness"
 
-# Gate 10: every generated .dart file this run produced -- the example, the
-# conformance schema, every corpus/realworld project and every project a leg
-# above generated for a config of its own -- must satisfy `dart format` at the
-# language version the generated pubspec declares, so a user's own dart format
-# over a tree holding generated code leaves it alone. sofabgen runs dart format
-# only when asked, and every generation above asks, with $FMT
-# (generators/dart/format.go) -- --format=require whenever `dart` is there,
-# which for this suite is whenever it can run at all, so a format pass that
-# stopped reaching a file fails the generation rather than this gate. This is
-# the check that the pass reached every file. The whole work dir is swept rather
-# than a list of projects, so a project added above is covered the day it is
-# written; the corelib checkout is not generated code and is pruned. The one hand-written file in the sweep,
-# bin/ownership_check.dart copied into the example project, is held to the same
-# formatter -- it sits in a generated tree, so a user's dart format sees it too.
-check_format dart "$WORK"
+# Every backend test, against the real corelib, with no skip allowed: the tests
+# that drive `dart format` for real live there, and the lang-dart job is the
+# only place a Dart SDK exists to run them (tests/conformance/lib/backend_tests.sh).
+run_backend_tests generators/dart SOFAB_DART_CORELIB "$CORELIB"
+
+# Gate 10 (ARCHITECTURE §12): what a user receives when they ASK for the format
+# pass -- `--format=require` -- must satisfy `dart format` at the language
+# version the generated pubspec declares, so their own `dart format` over a tree
+# holding generated code leaves it alone.
+#
+# This is its own tree. Everything above is generated with --format=off, the
+# default, because that is the code a user gets without asking and therefore the
+# code that has to analyze, compile and round-trip. Here the same schemas are
+# generated once more, formatted, over every shape this suite has: the example,
+# the conformance schema, every corpus and realworld definition, and one project
+# per config a leg above used, since a decode limit or a cap changes what is
+# emitted. A tree of its own also means the gate sees generated files ONLY --
+# bin/ownership_check.dart and the other hand-written fixtures this suite copies
+# into generated projects are not held to a formatter they never went through.
+echo "==> gate 10: regenerating every schema with the format pass"
+format_gen dart "$WORK/fmt/ex" --config "$WORK/cfg.yaml" --in "$ROOT/examples/messages/example.yaml"
+format_gen dart "$WORK/fmt/conf" --config "$WORK/cfg.yaml" --in "$WORK/conf.yaml"
+format_gen_corpus dart "$WORK/fmt" --config "$WORK/cfg.yaml"
+format_gen dart "$WORK/fmt/dynlim" --config "$WORK/cfg-limit.yaml" --in "$WORK/dyn.yaml"
+format_gen dart "$WORK/fmt/refusal" --config "$WORK/cfg-refusal.yaml" --in "$WORK/refusal.yaml"
+format_gen dart "$WORK/fmt/strlim" --config "$WORK/cfg-strlim.yaml" --in "$WORK/dynstr.yaml"
+format_gen dart "$WORK/fmt/growth" --config "$WORK/cfg-limit.yaml" --in "$WORK/growth.yaml"
+format_gen dart "$WORK/fmt/repeated" --config "$WORK/cfg.yaml" --in "$WORK/repeated.yaml"
+check_format dart "$WORK/fmt"
+
+# ... and it still builds. A formatter is supposed to move whitespace only, but
+# the pass is a convenience sofabgen OFFERS, so the artifact it produces is held
+# to the same bar as the default one: the formatted example project is analyzed
+# with infos fatal and compiled, exactly like the unformatted one above.
+if [ -d "$WORK/fmt/ex" ]; then
+    echo "==> the formatted example project still analyzes and compiles"
+    sed -i "s#\${SOFAB_DART_CORELIB}#$CORELIB#" "$WORK/fmt/ex/pubspec.yaml"
+    compile_project "$WORK/fmt/ex"
+fi
 
 echo "PASS"

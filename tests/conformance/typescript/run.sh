@@ -50,12 +50,19 @@ if [ -z "$_prettier_have" ]; then
     # optional there.
     PRETTIER_ABSENT=prettier
 elif [ "$_prettier_have" != "$PRETTIER_VERSION" ]; then
-    # Installed, but not the pinned one: a misconfiguration, not an absent tool,
-    # and not skippable -- prettier's layout moves between releases, so another
-    # version answers another question.
-    echo "FAIL: this suite formats generated code with prettier $PRETTIER_VERSION, but '$PRETTIER --version' says '$_prettier_have'." >&2
-    echo "      npm install -g prettier@$PRETTIER_VERSION, or point SOFAB_PRETTIER at that binary." >&2
-    exit 1
+    # Installed, but not the pinned one. prettier's layout moves between
+    # releases, so another version answers another question -- but refusing to
+    # run at all would make a developer who happens to have SOME prettier (a
+    # common thing in a JavaScript toolbox) worse off than one who has none,
+    # who still gets the whole suite minus the format gate. So this is treated
+    # exactly like an absent tool: the gate skips, loudly and naming the version
+    # wanted, and everything else runs. SOFAB_FORMAT_STRICT=1 makes it a failure
+    # again, and the lang-typescript job, which installs the pin, sets it.
+    skip_without_tool "prettier $PRETTIER_VERSION (this box has $_prettier_have)" \
+        "generated TypeScript against prettier $PRETTIER_VERSION (gate 10) -- npm install -g prettier@$PRETTIER_VERSION, or point SOFAB_PRETTIER at that binary"
+    format_unavailable typescript "prettier $PRETTIER_VERSION (this box has $_prettier_have)"
+    PRETTIER_ABSENT=prettier
+    PRETTIER=""
 else
     # sofabgen resolves `prettier` off PATH and the gate at the end checks the
     # result with $PRETTIER. Since prettier's formatting changes between
@@ -67,11 +74,12 @@ else
     export PATH PRETTIER
 fi
 
-# What every `sofabgen` run below passes as its --format argument:
-# --format=require when prettier is there, so a format pass that stopped
-# reaching a file fails the generation rather than the gate at the end, and
-# --format=off when it is not (tests/conformance/lib/check_format.sh).
-FMT=$(format_flag typescript)
+# Every generation below is --format=off: the bytes a user receives from
+# `sofabgen` by default are the emitters' own, and those are the bytes this
+# suite typechecks, builds and round-trips. The FORMATTED tree is a separate
+# artifact -- what the user gets when they ask for the convenience pass -- and
+# gate 10 at the end generates and checks it on its own
+# (tests/conformance/lib/check_format.sh).
 
 # Every typecheck of generated code runs under the checks a strict consumer
 # turns on (ARCHITECTURE §12 gate 9). tsc has no warning class: these make the
@@ -119,7 +127,7 @@ YAML
 # gen <def> <outdir> [config]  — config defaults to the shared $WORK/cfg.yaml.
 # The int64-mode loop MUST pass its own config: without it every mode project is
 # generated with the default (bigint) and the mode comparison is vacuous.
-gen() { ( cd "$ROOT" && go run ./cmd/sofabgen --config "${3:-$WORK/cfg.yaml}" "$FMT" --lang typescript --in "$1" --out "$2" ); }
+gen() { ( cd "$ROOT" && go run ./cmd/sofabgen --config "${3:-$WORK/cfg.yaml}" --format=off --lang typescript --in "$1" --out "$2" ); }
 
 # Instantiate the differential decode harness into a generated project. Defined
 # here rather than beside its first heavy use: the int64 legs above the streaming
@@ -524,7 +532,7 @@ cat > "$WORK/cfg_lim.yaml" <<'YAML'
 generic: { emit: project, max_dyn_array_count: 4 }
 targets: { typescript: {} }
 YAML
-( cd "$ROOT" && go run ./cmd/sofabgen --config "$WORK/cfg_lim.yaml" "$FMT" --lang typescript --in "$WORK/dyn.yaml" --out "$WORK/lim" )
+( cd "$ROOT" && go run ./cmd/sofabgen --config "$WORK/cfg_lim.yaml" --format=off --lang typescript --in "$WORK/dyn.yaml" --out "$WORK/lim" )
 gen "$WORK/dyn.yaml" "$WORK/nolim"
 ln -s "$WORK/ex/node_modules" "$WORK/lim/node_modules"
 ln -s "$WORK/ex/node_modules" "$WORK/nolim/node_modules"
@@ -645,7 +653,7 @@ cat > "$WORK/cfg_wlim.yaml" <<'YAML'
 generic: { emit: project, max_dyn_string_len: 4 }
 targets: { typescript: {} }
 YAML
-( cd "$ROOT" && go run ./cmd/sofabgen --config "$WORK/cfg_wlim.yaml" "$FMT" --lang typescript --in "$WORK/wrap.yaml" --out "$WORK/wlim" )
+( cd "$ROOT" && go run ./cmd/sofabgen --config "$WORK/cfg_wlim.yaml" --format=off --lang typescript --in "$WORK/wrap.yaml" --out "$WORK/wlim" )
 gen "$WORK/wrap.yaml" "$WORK/wnolim"
 ln -s "$WORK/ex/node_modules" "$WORK/wlim/node_modules"
 ln -s "$WORK/ex/node_modules" "$WORK/wnolim/node_modules"
@@ -1116,7 +1124,7 @@ echo "==> declared-width reject OK"
 echo "==> sequence_growth: a wrapper array grows to its highest id, and the index is the bound"
 printf 'version: 1\nmessages:\n' > "$WORK/growth.yaml"
 python3 "$ROOT/tests/conformance/lib/check_growth.py" --emit-schema >> "$WORK/growth.yaml"
-( cd "$ROOT" && go run ./cmd/sofabgen --config "$WORK/cfg_lim.yaml" "$FMT" --lang typescript --in "$WORK/growth.yaml" --out "$WORK/growth" )
+( cd "$ROOT" && go run ./cmd/sofabgen --config "$WORK/cfg_lim.yaml" --format=off --lang typescript --in "$WORK/growth.yaml" --out "$WORK/growth" )
 ln -s "$WORK/ex/node_modules" "$WORK/growth/node_modules"
 # --cap must equal the max_dyn_array_count the config above generated with:
 # the cases' indices are offsets onto it, so a mismatch moves the boundary.
@@ -1240,10 +1248,37 @@ echo "==> tsc: $_total projects clean ($_swept checked only by the sweep)"
 # the helper's signature.
 run_backend_tests generators/typescript SOFAB_TS_CORELIB "$CORELIB" "$PRETTIER_ABSENT"
 
-# Every generated .ts in the run against prettier (ARCHITECTURE §12 gate 10).
-# The whole work dir, so a project a later block adds is covered the day it is
-# written; the driver picks out the files sofabgen wrote and leaves this suite's
-# own hand-written .ts fixtures alone.
-check_format typescript "$WORK"
+# Gate 10 (ARCHITECTURE §12): what a user receives when they ASK for the format
+# pass -- `--format=require` -- must satisfy prettier at the pinned version, so
+# their own `prettier --check .` over a tree holding generated code leaves it
+# alone.
+#
+# This is its own tree. Everything above is generated with --format=off, the
+# default, because that is the code a user gets without asking and therefore the
+# code that has to typecheck, build and round-trip. Here the same schemas are
+# generated once more, formatted, over every shape this suite has: the example,
+# the conformance schema, every corpus and realworld definition, and one project
+# per config a leg above used -- the int64 modes above all, which change every
+# 64-bit position in the output. A tree of its own also means the gate sees
+# generated files ONLY: this suite drops hand-written .ts fixtures
+# (stream_check.ts, typecheck64.ts) into the generated projects it builds, and
+# holding the harness to prettier would be checking the wrong thing.
+echo "==> gate 10: regenerating every schema with the format pass"
+format_gen typescript "$WORK/fmt/ex" --config "$WORK/cfg.yaml" --in "$ROOT/examples/messages/example.yaml"
+format_gen typescript "$WORK/fmt/conf" --config "$WORK/cfg.yaml" --in "$WORK/conf.yaml"
+format_gen typescript "$WORK/fmt/fill" --config "$WORK/cfg.yaml" --in "$ROOT/tests/conformance/lib/maxsize_fill.yaml"
+format_gen typescript "$WORK/fmt/lim" --config "$WORK/cfg_lim.yaml" --in "$WORK/dyn.yaml"
+format_gen typescript "$WORK/fmt/wlim" --config "$WORK/cfg_wlim.yaml" --in "$WORK/wrap.yaml"
+format_gen typescript "$WORK/fmt/growth" --config "$WORK/cfg_lim.yaml" --in "$WORK/growth.yaml"
+format_gen typescript "$WORK/fmt/closed" --config "$WORK/cfg.yaml" --in "$WORK/closed.yaml"
+format_gen typescript "$WORK/fmt/arrlen" --config "$WORK/cfg.yaml" --in "$WORK/arrlen.yaml"
+format_gen typescript "$WORK/fmt/repeated" --config "$WORK/cfg.yaml" --in "$WORK/repeated.yaml"
+for mode in bigint long number; do
+    format_gen typescript "$WORK/fmt/i64-$mode" --config "$WORK/cfg_$mode.yaml" --in "$WORK/i64.yaml"
+    format_gen typescript "$WORK/fmt/arrlen-$mode" --config "$WORK/cfg_$mode.yaml" --in "$WORK/arrlen.yaml"
+done
+format_gen_corpus typescript "$WORK/fmt" --config "$WORK/cfg.yaml"
+format_gen_corpus typescript "$WORK/fmt-long" --config "$WORK/cfg_corpus_long.yaml"
+check_format typescript "$WORK/fmt" "$WORK/fmt-long"
 
 echo "PASS"

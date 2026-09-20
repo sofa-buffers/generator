@@ -1211,12 +1211,6 @@ for def in "$ROOT"/tests/matrix/corpus/defs/*.yaml "$ROOT"/examples/messages/rea
 done
 echo "==> corpus builds ($(ls "$ROOT"/tests/matrix/corpus/defs/*.yaml | wc -l) definitions + $(ls "$ROOT"/examples/messages/realworld/*.yaml | wc -l) realworld)"
 
-# Canonical formatter (ARCHITECTURE §12): every generated file of the example
-# project and of every corpus/realworld project must be `gofmt -l`-clean, so a
-# user's own gofmt gate over a tree holding generated code passes. The backend
-# formats with go/format and fails generation outright on source it cannot
-# parse; this is the check that its output really is what gofmt produces.
-check_format go "$WORK/proj" "$WORK/corpus"
 
 # CORELIB_PLAN S7.2 item 8 -- the shared file's `sequence_growth` block
 # (generator#449). A wrapper array carries no element count: its length is
@@ -1276,5 +1270,33 @@ for mod in $(find "$WORK" -name go.mod -not -path "$WORK/corelib/*" | sort); do
 done
 [ "$_vetted" -gt 0 ] || { echo "FAIL: go vet found no generated module to vet"; exit 1; }
 echo "==> go vet: $_vetted modules clean"
+
+# Gate 10 (ARCHITECTURE §12): generated Go must be `gofmt -l`-clean, so a user's
+# own gofmt gate over a tree holding generated code passes. The backend formats
+# with the go/format LIBRARY inside Generate and fails generation outright on
+# source it cannot parse, so what is checked here is the EMITTERS' own output at
+# the DEFAULT --format value -- this target has no external pass to ask for.
+#
+# The check gets a tree of its own rather than sweeping the trees built above,
+# for two reasons: those hold hand-written probe files of this suite
+# ($WORK/proj/own/main.go, $WORK/lim402/probe/main.go), which are not generated
+# code, and a tree of its own can cover every schema and config this run used
+# instead of the two that happened to be listed.
+echo "==> gate 10: regenerating every schema for the formatter check"
+format_gen go "$WORK/fmt/proj" --config "$WORK/cfg.yaml" --in "$ROOT/examples/messages/example.yaml"
+format_gen go "$WORK/fmt/fill" --config "$WORK/cfg.yaml" --in "$ROOT/tests/conformance/lib/maxsize_fill.yaml"
+format_gen go "$WORK/fmt/fixsub" --config "$WORK/cfg.yaml" --in "$WORK/fixsub.yaml"
+format_gen go "$WORK/fmt/lim102" --config "$WORK/cfg-limits.yaml" --in "$WORK/dyn102.yaml"
+format_gen go "$WORK/fmt/excl" --config "$WORK/cfg-limits.yaml" --in "$WORK/excl.yaml"
+format_gen go "$WORK/fmt/strlim" --config "$WORK/cfg-strlim.yaml" --in "$WORK/dynstr.yaml"
+format_gen go "$WORK/fmt/mat" --config "$WORK/cfg.yaml" --in "$WORK/mat.yaml"
+format_gen go "$WORK/fmt/lim402" --config "$WORK/cfg-402.yaml" --in "$WORK/dyn402.yaml"
+format_gen go "$WORK/fmt/width" --config "$WORK/cfg.yaml" --in "$WORK/width.yaml"
+format_gen go "$WORK/fmt/closed" --config "$WORK/cfg.yaml" --in "$WORK/closed.yaml"
+format_gen go "$WORK/fmt/vecskip" --config "$WORK/cfg.yaml" --in "$WORK/vecskip.yaml"
+format_gen go "$WORK/fmt/growth" --config "$WORK/cfg-limits.yaml" --in "$WORK/growth.yaml"
+format_gen go "$WORK/fmt/repeated" --config "$WORK/cfg.yaml" --in "$WORK/repeated.yaml"
+format_gen_corpus go "$WORK/fmt" --config "$WORK/cfg.yaml"
+check_format go "$WORK/fmt"
 
 echo "PASS"

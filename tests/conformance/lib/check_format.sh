@@ -14,28 +14,29 @@
 # separate decision; this driver refuses an unknown language rather than
 # passing it.
 #
+# What the gate checks is a tree of its OWN: `format_gen` below generates it,
+# and the suite's other legs -- compile, lint, typecheck, round-trip -- stay on
+# the emitters' own bytes, which is what `sofabgen` writes by default and
+# therefore what a user actually builds. See format_gen for why.
+#
 # The formatter itself may be missing: `sofabgen` never requires the target's
 # toolchain (--format defaults to off, ARCHITECTURE §12 gate 10), and neither
 # does this repository's own test suite -- rustfmt is a separate rustup
 # component, and neither ruff nor prettier is part of its language's toolchain
-# at all. So a suite asks `format_flag <lang>` what to generate with, and this
-# check SKIPS, loudly and unmistakably, when the tool is not there.
-# SOFAB_FORMAT_STRICT=1 turns every such skip into a failure; the lang-<x> CI
-# jobs install the formatters and set it, so what is optional locally is
-# mandatory there.
+# at all. So `format_gen` generates nothing and this check SKIPS, loudly and
+# unmistakably, when the tool is not there. SOFAB_FORMAT_STRICT=1 turns every
+# such skip into a failure; the lang-<x> CI jobs install the formatters and set
+# it, so what is optional locally is mandatory there.
 #
 # check_format <lang> <dir>...
 #   Runs <lang>'s formatter in check mode over every source file of that
-#   language under the given directories -- the generated example project AND
-#   every generated corpus project, never one file -- and fails listing each
-#   offending file with an excerpt of the change the formatter wants. Build
-#   output inside a project (zig's .zig-cache/zig-out, cargo's target/, dart's
-#   .dart_tool, npm's node_modules and dist) is not generated code and is not
-#   looked at, and neither is a `corelib` directory: the dart and python suites
-#   hand this their whole work dir, so that a project added to them tomorrow is
-#   covered the day it is written, and that work dir is also where they clone
-#   the corelib. A directory set holding no file of the language fails too: a
-#   check over nothing proves nothing.
+#   language under the given directories -- the whole gate-10 tree, never one
+#   file -- and fails listing each offending file with an excerpt of the change
+#   the formatter wants. Build output inside a project (zig's
+#   .zig-cache/zig-out, cargo's target/, dart's .dart_tool, npm's node_modules
+#   and dist) is not generated code and is not looked at, and neither is a
+#   `corelib` directory. A directory set holding no file of the language fails
+#   too: a check over nothing proves nothing.
 
 # The canonical formatter of <lang>: the binary to look for in $_cf_bin and the
 # name to print in $_cf_toolname. An unknown language is refused here rather
@@ -55,25 +56,105 @@ _cf_formatter() {
     esac
 }
 
-# formatter_present <lang> -- true when this box can run that formatter.
+# formatter_present <lang> -- true when this RUN can use that formatter.
 formatter_present() {
     _cf_formatter "$1"
+    case " $CF_UNAVAILABLE " in *" $1 "*) return 1 ;; esac
     command -v "$_cf_bin" >/dev/null 2>&1
 }
 
-# format_flag <lang> -- the --format value every `sofabgen` run of this suite
-# must pass, as a single argument.
+# format_unavailable <lang> [why] -- declare that this run cannot use <lang>'s
+# formatter although a binary of that name may be on PATH.
 #
-# sofabgen formats nothing unless it is told to, so a suite that wants to hold
-# generated code to a formatter has to ask. It asks only when it can also CHECK
-# the result: --format=require when the formatter is installed -- a format pass
-# that silently stopped running then fails the generation itself, not just the
-# gate at the end -- and --format=off when it is not, which keeps the suite
-# runnable on a box with no formatter. `off` is named explicitly rather than
-# left out, so a `generic.format` in a config the suite writes or inherits
-# cannot turn the pass back on behind its back.
-format_flag() {
-    if formatter_present "$1"; then echo "--format=require"; else echo "--format=off"; fi
+# The one case today is a version the suite does not pin. ruff and prettier
+# change their layout between releases, so a check against another version
+# answers another question and must not be reported as a pass -- but refusing to
+# RUN would leave a developer who happens to have some ruff or some prettier
+# worse off than one who has none, who still gets the whole suite minus the
+# formatter gate. So an unpinned formatter is treated exactly like an absent
+# one: nothing is generated for gate 10, and the gate skips, loudly, naming the
+# version it wanted. SOFAB_FORMAT_STRICT=1 makes it a failure again, and the
+# lang-<x> jobs, which install the pin, set it.
+CF_UNAVAILABLE=""
+CF_UNAVAILABLE_WHY=""
+format_unavailable() {
+    CF_UNAVAILABLE="$CF_UNAVAILABLE $1"
+    if [ -n "${2:-}" ]; then
+        CF_UNAVAILABLE_WHY="$2"
+    fi
+}
+
+# format_mode <lang> -- the --format value gate 10 generates ITS OWN tree with.
+#
+#   go, zig     off      Their output is formatter-clean as it leaves Generate:
+#                        go formats with the go/format LIBRARY, and zig's layout
+#                        is emitted (generators/zig/layout.go). The gate proves
+#                        the EMITTERS, so it must look at what a user gets at the
+#                        DEFAULT switch value, which is off.
+#   the rest    require  Their formatter is an external program the CLI runs
+#                        only when asked, so what the gate proves is that the
+#                        PASS reached every generated file and that its result
+#                        is clean. require, not auto: a pass that silently
+#                        stopped running must fail the generation, not go
+#                        unnoticed.
+#
+# `off` is named explicitly rather than left out, so a `generic.run_formatter`
+# in a config a suite writes or inherits cannot turn the pass on behind its back.
+format_mode() {
+    case "$1" in
+        go | zig) echo "--format=off" ;;
+        *) echo "--format=require" ;;
+    esac
+}
+
+# format_gen <lang> <outdir> <sofabgen args...>
+#   Generates ONE tree for gate 10 to check, under <outdir>, with the --format
+#   value format_mode gives that language. Uses $ROOT (the repository) and needs
+#   nothing else from the caller.
+#
+# Gate 10 generates its own trees rather than checking the ones a suite builds,
+# and the reason is what the switch means. The default is --format=off, so the
+# code a user receives from `sofabgen` is the EMITTERS' own bytes; that is what
+# every other leg of a suite must compile, lint, typecheck and round-trip, or
+# the guarantees would hold for a variant nobody gets. The formatted tree is a
+# different artifact -- a convenience the user can ask for -- and it is checked
+# here, once, on its own.
+#
+# Being its own tree is also what makes the check honest: it holds nothing but
+# generated files, so a hand-written fixture a suite copies into a generated
+# project (stream_check.ts, ownership_check.dart) can never be counted as
+# generated code, and no filter is needed to keep it out.
+#
+# A missing formatter makes this a no-op; check_format then skips, loudly, for
+# the same reason (or fails under SOFAB_FORMAT_STRICT=1).
+format_gen() {
+    _fg_lang=$1
+    _fg_out=$2
+    shift 2
+    formatter_present "$_fg_lang" || return 0
+    ( cd "$ROOT" && go run ./cmd/sofabgen "$(format_mode "$_fg_lang")" \
+        --lang "$_fg_lang" --out "$_fg_out" "$@" ) >/dev/null
+}
+
+# format_gen_corpus <lang> <outroot> <sofabgen args...>
+#   format_gen over every corpus definition and every realworld schema, into
+#   <outroot>/<name>. The whole corpus, because these are the shapes a target's
+#   emitters can produce at all: one schema proves the pass ran, the corpus
+#   proves it ran over every construct.
+format_gen_corpus() {
+    _fc_lang=$1
+    _fc_out=$2
+    shift 2
+    formatter_present "$_fc_lang" || return 0
+    for _fc_def in "$ROOT"/tests/matrix/corpus/defs/*.yaml "$ROOT"/examples/messages/realworld/*.yaml; do
+        # $FMT_SKIP_DEFS: definitions THIS config cannot express at all, named by
+        # file name -- the rust no_std legs, whose profile refuses an unbounded
+        # field, are the only ones today. It is the same list that leg's build
+        # loop skips; a definition left out here is one the pass genuinely never
+        # sees, not one the gate forgot.
+        case " ${FMT_SKIP_DEFS:-} " in *" $(basename "$_fc_def") "*) continue ;; esac
+        format_gen "$_fc_lang" "$_fc_out/$(basename "$_fc_def" .yaml)" --in "$_fc_def" "$@"
+    done
 }
 
 # skip_without_tool <tool> <what it would have checked>
@@ -97,12 +178,19 @@ skip_without_tool() {
 check_format() {
     _cf_lang=$1
     shift
-    # The formatter the suite could not use is the formatter this cannot check:
-    # with it absent, format_flag above generated with --format=off, so the code
-    # under $@ is the emitters' own output and holding it to the formatter would
-    # only report that fact. Skip loudly instead (or fail, under strict).
+    # The formatter this run cannot use is the formatter this cannot check:
+    # format_gen above then generated nothing, so there is no tree under $@ at
+    # all. Skip loudly instead (or fail, under strict).
     if ! formatter_present "$_cf_lang"; then
-        skip_without_tool "$_cf_toolname" "generated $_cf_lang against $_cf_toolname (ARCHITECTURE §12 gate 10)"
+        _cf_why=$_cf_toolname
+        case " $CF_UNAVAILABLE " in
+        *" $_cf_lang "*)
+            if [ -n "$CF_UNAVAILABLE_WHY" ]; then
+                _cf_why=$CF_UNAVAILABLE_WHY
+            fi
+            ;;
+        esac
+        skip_without_tool "$_cf_why" "generated $_cf_lang against $_cf_toolname (ARCHITECTURE §12 gate 10)"
         return 0
     fi
     case "$_cf_lang" in
@@ -171,23 +259,10 @@ check_format() {
             # thing 27 times over; generators/typescript/format_test.go holds
             # them instead, and holds them at --format=off, where no formatter
             # runs. node_modules is a dependency tree, not generated code, and
-            # dist/ is build output.
-            #
-            # And, unlike the other suites, this one drops HAND-WRITTEN .ts
-            # fixtures (stream_check.ts, typecheck64.ts) into the generated
-            # project dirs it builds, so a sweep by extension alone would hold
-            # the harness to prettier rather than the emitter. The generated
-            # files say so on their first line; that marker is the filter, so a
-            # file the backend starts emitting tomorrow is covered the day it is
-            # written and a fixture added beside it never is.
+            # dist/ is build output; neither exists in the gate-10 tree, and
+            # both are pruned so that a directory passed by hand behaves too.
             _cf_files=$(find "$@" \( -name node_modules -o -name dist -o -name corelib \) -prune -o \
-                -name '*.ts' -type f -print | sort | while IFS= read -r _cf_cand; do
-                    # An `if`, not `&&`: under `set -e` a loop whose LAST file is
-                    # a fixture would otherwise end non-zero and kill the suite.
-                    if head -1 "$_cf_cand" | grep -q 'Code generated by sofabgen'; then
-                        printf '%s\n' "$_cf_cand"
-                    fi
-                done)
+                -name '*.ts' -type f -print | sort)
             ;;
         # No default arm: _cf_formatter above already refused a language with
         # no canonical formatter, before anything was looked up.

@@ -3,7 +3,6 @@ package dart
 import (
 	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -573,33 +572,6 @@ func TestGeneratedIsASCII(t *testing.T) {
 		if out[i] >= 0x80 {
 			t.Fatalf("non-ASCII byte 0x%02x at offset %d", out[i], i)
 		}
-	}
-}
-
-// TestConformance runs the full generate -> dart build -> round-trip ->
-// shared-vector harness. Gated on SOFAB_DART_CORELIB (a corelib-dart checkout)
-// and the `dart` toolchain; skipped otherwise, so the hermetic core CI job stays
-// toolchain-free (the lang-dart job runs the harness directly).
-func TestConformance(t *testing.T) {
-	corelib := os.Getenv("SOFAB_DART_CORELIB")
-	if corelib == "" {
-		t.Skip("set SOFAB_DART_CORELIB to a corelib-dart checkout to run the Dart conformance harness")
-	}
-	if _, err := exec.LookPath("dart"); err != nil {
-		t.Skip("dart toolchain not on PATH")
-	}
-	root, err := filepath.Abs("../..")
-	if err != nil {
-		t.Fatal(err)
-	}
-	cmd := exec.Command(filepath.Join(root, "tests", "conformance", "dart", "run.sh"), corelib)
-	cmd.Dir = root
-	out, err := cmd.CombinedOutput()
-	if err != nil {
-		t.Fatalf("conformance harness failed: %v\n%s", err, out)
-	}
-	if !strings.Contains(string(out), "PASS") {
-		t.Fatalf("conformance harness did not report PASS:\n%s", out)
 	}
 }
 
