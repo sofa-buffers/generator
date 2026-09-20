@@ -367,7 +367,6 @@ OUT=$("$WORK/sk/zig-out/bin/harness" decode skiprepro < "$WORK/skip_control.bin"
 echo "$OUT" | grep -q '"keep":7' || { echo "FAIL: control keep=7 must decode; got: $OUT"; exit 1; }
 echo "==> skipped array does not eat the next field OK"
 
-
 # fp ARRAY delivered to a SCALAR-declared fp id (MESSAGE_SPEC S7.3, generator#193):
 # the fp analogue of the integer case above. corelib-zig streams a fixlen (fp) array
 # element-by-element through the very fp32()/fp64() callbacks a lone scalar uses, so
@@ -827,12 +826,6 @@ for def in "$ROOT"/tests/matrix/corpus/defs/*.yaml "$ROOT"/examples/messages/rea
 done
 echo "==> corpus builds ($(ls "$ROOT"/tests/matrix/corpus/defs/*.yaml | wc -l) definitions + $(ls "$ROOT"/examples/messages/realworld/*.yaml | wc -l) realworld)"
 
-# Canonical formatter (ARCHITECTURE §12): every generated file of the example
-# project and of every corpus/realworld project -- message.zig, the harness,
-# build.zig and build.zig.zon -- must pass `zig fmt --check`, so a user's own
-# zig fmt gate over a tree holding generated code passes. The backend emits zig
-# fmt layout itself (generators/zig/layout.go); sofabgen never runs zig.
-check_format zig "$WORK/ex" "$WORK/corpus"
 
 # Declared integer width is a VALIDITY bound (MESSAGE_SPEC S7.1 + documentation#32,
 # generator#266, Crucible F-0033 / codegen defect G-0026). A value outside the
@@ -921,5 +914,34 @@ python3 "$ROOT/tests/conformance/lib/check_repeated_id.py" --emit-schema >> "$WO
 zig_build "$WORK/repeated.yaml" "$WORK/repeated"
 python3 "$ROOT/tests/conformance/lib/check_repeated_id.py" "Zig" \
     -- "$WORK/repeated/zig-out/bin/harness"
+
+# Gate 10 (ARCHITECTURE §12): every generated file -- message.zig, the harness,
+# build.zig and build.zig.zon -- must pass `zig fmt --check`, so a user's own
+# zig fmt gate over a tree holding generated code passes. The backend emits zig
+# fmt layout itself (generators/zig/layout.go) and sofabgen never runs zig, so
+# this checks the EMITTERS at the DEFAULT --format value; there is no external
+# pass to ask for.
+#
+# The check gets a tree of its own rather than sweeping the trees built above:
+# those hold this suite's hand-written fixtures (stream_check.zig and
+# ownership_check.zig, copied in as src/main.zig), which are not generated code,
+# and a tree of its own covers every schema and config this run used instead of
+# the two that happened to be listed. Zig is the target where that matters most:
+# its layout comes from a hand-written pass, not from the real formatter.
+echo "==> gate 10: regenerating every schema for the formatter check"
+format_gen zig "$WORK/fmt/ex" --config "$WORK/cfg.yaml" --in "$ROOT/examples/messages/example.yaml"
+format_gen zig "$WORK/fmt/conf" --config "$WORK/cfg.yaml" --in "$WORK/conf.yaml"
+format_gen zig "$WORK/fmt/fill" --config "$WORK/cfg.yaml" --in "$ROOT/tests/conformance/lib/maxsize_fill.yaml"
+format_gen zig "$WORK/fmt/skiprepro" --config "$WORK/cfg.yaml" --in "$WORK/skiprepro.yaml"
+format_gen zig "$WORK/fmt/probe" --config "$WORK/cfg.yaml" --in "$WORK/probe.yaml"
+format_gen zig "$WORK/fmt/lim" --config "$WORK/cfg_lim.yaml" --in "$WORK/dyn.yaml"
+format_gen zig "$WORK/fmt/nolim" --config "$WORK/cfg.yaml" --in "$WORK/dyn.yaml"
+format_gen zig "$WORK/fmt/sblim" --config "$WORK/cfg_sb.yaml" --in "$WORK/dynsb.yaml"
+format_gen zig "$WORK/fmt/wrap" --config "$WORK/cfg_lim.yaml" --in "$WORK/wrap.yaml"
+format_gen zig "$WORK/fmt/closed" --config "$WORK/cfg.yaml" --in "$WORK/closed.yaml"
+format_gen zig "$WORK/fmt/growth" --config "$WORK/cfg_lim.yaml" --in "$WORK/growth.yaml"
+format_gen zig "$WORK/fmt/repeated" --config "$WORK/cfg.yaml" --in "$WORK/repeated.yaml"
+format_gen_corpus zig "$WORK/fmt" --config "$WORK/cfg.yaml"
+check_format zig "$WORK/fmt"
 
 echo "PASS"
