@@ -3156,3 +3156,57 @@ func TestCppHarnessWithoutMessagesDeclaresNoSink(t *testing.T) {
 		t.Error("a harness with a message lost its bench sink")
 	}
 }
+
+// TestCppHarnessFixedStringArrayElements: the element type of a string array is
+// decided by the element's own maxlen, not by the container. With
+// allow_dynamic false a count-less array of bounded strings is a
+// std::vector<sofab::FixedString<N>> -- a std::vector whose elements have no
+// (const char *, std::size_t) constructor -- so the harness must build every
+// string element by default-constructing a slot and assigning a
+// std::string_view, the one call std::string and FixedString share. Found as
+// generator#583: the corpus loop is -fsyntax-only on the headers, so the
+// harness's hard error never surfaced.
+func TestCppHarnessFixedStringArrayElements(t *testing.T) {
+	const src = `version: 1
+messages:
+  m:
+    payload:
+      dyn_strs:   { id: 0, type: array, items: { type: string, maxlen: 8 } }
+      fixed_strs: { id: 1, type: array, items: { type: string, maxlen: 8, count: 4 } }
+      free_strs:  { id: 2, type: array, items: { type: string } }
+`
+	for _, dynamic := range []bool{false, true} {
+		doc, err := parser.Parse([]byte(src), "in.yaml")
+		if err != nil {
+			t.Fatal(err)
+		}
+		s, err := model.Build(doc)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := analysis.Analyze(s); err != nil {
+			t.Fatal(err)
+		}
+		files, err := (&Backend{}).Generate(s, map[string]any{
+			"namespace": "sofabuffers", "emit": "project", "allow_dynamic": dynamic,
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		var json string
+		for _, f := range files {
+			if f.Path == "harness/json.hpp" {
+				json = string(f.Content)
+			}
+		}
+		if json == "" {
+			t.Fatal("no harness/json.hpp")
+		}
+		if strings.Contains(json, "emplace_back(_s, _l)") {
+			t.Errorf("allow_dynamic=%v: harness builds a string element from (ptr, len), which FixedString has no constructor for:\n%s", dynamic, json)
+		}
+		if n := strings.Count(json, "emplace_back().assign(std::string_view{_s, _l})"); n != 3 {
+			t.Errorf("allow_dynamic=%v: want all 3 string arrays assigned through a string_view, got %d:\n%s", dynamic, n, json)
+		}
+	}
+}

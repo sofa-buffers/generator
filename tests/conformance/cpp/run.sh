@@ -856,18 +856,28 @@ YAML
     done
     echo "==> [$label] corpus compiles ($(ls "$ROOT"/tests/matrix/corpus/defs/*.yaml | wc -l) definitions + $(ls "$ROOT"/examples/messages/realworld/*.yaml | wc -l) realworld)"
 
-    # Every realworld file as emit:project, harness included, under the exported
-    # $WARNFLAGS: the loop above is -fsyntax-only on the headers, and a schema
-    # with no message is where the harness has least to do -- and where an unused
-    # bench variable would hide.
-    echo "==> [$label] realworld: every file builds as a project, harness included"
-    for def in "$ROOT"/examples/messages/realworld/*.yaml; do
+    # Every corpus and realworld file as emit:project, harness included, under the
+    # exported $WARNFLAGS: the loop above is -fsyntax-only on the headers, so it
+    # never compiles the harness at all. A schema with no message is where the
+    # harness has least to do -- and where an unused bench variable would hide.
+    # The corpus half is what the realworld files cannot reach: on this leg with
+    # allow_dynamic false, a count-less array of maxlen strings is a
+    # std::vector<FixedString<N>>, and the harness built its elements from
+    # (const char *, size_t) -- a constructor FixedString does not have, a hard
+    # error, and invisible while only the headers were compiled (generator#583).
+    echo "==> [$label] corpus + realworld: every file builds as a project, harness included"
+    for def in "$ROOT"/tests/matrix/corpus/defs/*.yaml "$ROOT"/examples/messages/realworld/*.yaml; do
+        # The same deliberately-unbounded definitions the compile loop above skips
+        # on the embedded profile.
+        case "$corelib:$(basename "$def")" in
+        c-cpp:no_maxlen.yaml | c-cpp:seq_elements_dyn.yaml | c-cpp:array_lengths_dyn.yaml) continue ;;
+        esac
         name=$(basename "$def" .yaml)
         ( cd "$ROOT" && go run ./cmd/sofabgen --config "$WORK/cfg-$label.yaml" --lang cpp --in "$def" --out "$WORK/rwproj-$label/$name" >/dev/null )
         make -C "$WORK/rwproj-$label/$name" "$@" >/dev/null \
-            || { echo "FAIL: [$label] realworld $name did not build as a project"; exit 1; }
+            || { echo "FAIL: [$label] $name did not build as a project"; exit 1; }
     done
-    echo "==> [$label] realworld projects build ($(ls "$ROOT"/examples/messages/realworld/*.yaml | wc -l) files)"
+    echo "==> [$label] projects build ($(ls "$ROOT"/tests/matrix/corpus/defs/*.yaml | wc -l) corpus definitions + $(ls "$ROOT"/examples/messages/realworld/*.yaml | wc -l) realworld files)"
 
     # Nested rows, DECODED (corelib-cpp#124). The loop above is -fsyntax-only, so
     # for nested_rows.yaml -- the one corpus definition carrying array<array<T>> --

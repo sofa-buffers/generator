@@ -349,7 +349,7 @@ func (g *gen) emitFromJSON(f *hfile, fld *ir.Field) {
 }
 
 func (g *gen) emitFromJSONArray(f *hfile, fld *ir.Field, acc string) {
-	g.fromJSONArray(f, "        ", "c", acc, fld.Elem, fld.ElemRef, fld.ElemItems, fld.Count, fld.ElemMaxHas, fld.ElemMax, 0)
+	g.fromJSONArray(f, "        ", "c", acc, fld.Elem, fld.ElemRef, fld.ElemItems, fld.ElemMaxHas, fld.ElemMax, 0)
 }
 
 // fromJSONArray parses a JSON array node into target, recursing for nested
@@ -364,7 +364,7 @@ func (g *gen) emitFromJSONArray(f *hfile, fld *ir.Field, acc string) {
 // as the input, and without the resize a fresh empty container would swallow
 // every element: the index-assign below is bounded by the container's current
 // size.
-func (g *gen) fromJSONArray(f *hfile, ind, node, target string, elem ir.Kind, ref *ir.TypeRef, items *ir.ArrayElem, count int64, elemMaxHas bool, elemMax int64, depth int) {
+func (g *gen) fromJSONArray(f *hfile, ind, node, target string, elem ir.Kind, ref *ir.TypeRef, items *ir.ArrayElem, elemMaxHas bool, elemMax int64, depth int) {
 	iv := fmt.Sprintf("_i%d", depth)
 	ev := fmt.Sprintf("_e%d", depth)
 	vv := fmt.Sprintf("_v%d", depth)
@@ -396,12 +396,12 @@ func (g *gen) fromJSONArray(f *hfile, ind, node, target string, elem ir.Kind, re
 	f.line("%sconst sofab_json_t *%s = sofab_json_array_at(%s, %s);", inner, ev, node, iv)
 	switch elem {
 	case ir.KindString:
-		if strings.HasPrefix(g.cppArrayContainer(elem, ref, items, count, elemMaxHas, elemMax), "sofab::InlineVector") {
-			// InlineVector<FixedString>: default-construct a slot, then assign.
-			f.line("%s{ size_t _l; const char *_s = sofab_json_string(%s, &_l); %s.emplace_back().assign(std::string_view{_s, _l}); }", inner, ev, target)
-		} else {
-			f.line("%s{ size_t _l; const char *_s = sofab_json_string(%s, &_l); %s.emplace_back(_s, _l); }", inner, ev, target)
-		}
+		// Default-construct a slot, then assign. The element type is decided by the
+		// element's own maxlen, not by the container: a count-less array of bounded
+		// strings is a std::vector of sofab::FixedString, which has no (ptr, len)
+		// constructor. .assign(std::string_view) is the one call both element types
+		// -- std::string and sofab::FixedString<N> -- share.
+		f.line("%s{ size_t _l; const char *_s = sofab_json_string(%s, &_l); %s.emplace_back().assign(std::string_view{_s, _l}); }", inner, ev, target)
 	case ir.KindBlob:
 		f.line("%s{ %s _b{}; json_to_bytes(%s, _b); %s.push_back(std::move(_b)); }", inner, g.cppArrayElem(elem, ref, items, elemMaxHas, elemMax), ev, target)
 	case ir.KindStruct, ir.KindUnion:
@@ -413,7 +413,7 @@ func (g *gen) fromJSONArray(f *hfile, ind, node, target string, elem ir.Kind, re
 	case ir.KindArray:
 		icont := g.cppArrayContainer(items.Elem, items.ElemRef, items.ElemItems, items.Count, items.ElemMaxHas, items.ElemMax)
 		f.line("%s{ %s %s{};", inner, icont, vv)
-		g.fromJSONArray(f, inner+"    ", ev, vv, items.Elem, items.ElemRef, items.ElemItems, items.Count, items.ElemMaxHas, items.ElemMax, depth+1)
+		g.fromJSONArray(f, inner+"    ", ev, vv, items.Elem, items.ElemRef, items.ElemItems, items.ElemMaxHas, items.ElemMax, depth+1)
 		f.line("%s%s.push_back(std::move(%s)); }", inner+"    ", target, vv)
 	}
 	f.line("%s}", ind)

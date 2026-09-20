@@ -5667,8 +5667,24 @@ A reimplementation is **conformant** when it reproduces these gates:
    has least to do, so it is where an unused import, variable or bench sink
    shows up. The C, C++, Java and Kotlin targets emit their types per message
    and so emit no source for such a file; their suites build it as
-   `emit: project` instead (C and C++ every realworld file, in every C++
-   profile), so the harness is held to the policy too.
+   `emit: project` instead, so the harness is held to the policy too.
+
+   **The C and C++ suites build the whole corpus that way, not only the
+   realworld files** — every corpus definition, in every C++ profile. The
+   harness is generated code with a schema-shaped surface of its own (JSON
+   helpers per field, per element kind), and the loop above compiles only the
+   generated types: the C leg hands them to gcc, the C++ leg is `-fsyntax-only`
+   over the headers. Two defects lived in exactly that gap (generator#583). The
+   C harness read the raw schema name where the type had the mangled one, so a
+   field named after a C keyword emitted `o->return`; and the C++ harness built
+   a string array element from `(const char *, std::size_t)`, a constructor
+   `sofab::FixedString<N>` does not have — which is what a count-less array of
+   `maxlen` strings decays to when `allow_dynamic` is false, the element type
+   following the element's own bound and not the container's. Both are hard
+   errors, not diagnostics, and neither could surface until the harness itself
+   was compiled. The deliberately-unbounded definitions (`no_maxlen`,
+   `seq_elements_dyn`, `array_lengths_dyn`) are skipped where the compile loop
+   already skips them: C always, C++ on the `c-cpp` profile.
 
    The generated C and C++ project Makefiles read `WARNFLAGS` (default
    `-Wall -Wextra`) apart from `CFLAGS`/`CXXFLAGS`, which is what lets one
