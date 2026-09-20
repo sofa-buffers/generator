@@ -636,18 +636,31 @@ for def in "$ROOT"/tests/matrix/corpus/defs/*.yaml "$ROOT"/examples/messages/rea
 done
 echo "==> corpus compiles ($(ls "$ROOT"/tests/matrix/corpus/defs/*.yaml | wc -l) definitions + $(ls "$ROOT"/examples/messages/realworld/*.yaml | wc -l) realworld)"
 
-# Every realworld file as emit:project, harness included, under the exported
-# $WARNFLAGS: the harness is generated code too, and a schema with no message
-# is where it has least to do -- and where an unused bench variable, or a
-# dispatch on a first message that does not exist, would hide.
-echo "==> realworld: every file builds as a project, harness included"
-for def in "$ROOT"/examples/messages/realworld/*.yaml; do
+# Every corpus and realworld file as emit:project, harness included, under the
+# exported $WARNFLAGS: the harness is generated code too, and the loop above
+# compiles only the generated types. A schema with no message is where the
+# harness has least to do -- and where an unused bench variable, or a dispatch on
+# a first message that does not exist, would hide. The corpus half is what the
+# realworld files cannot reach: a field named after a C keyword got the escaped
+# member in the types and the raw schema name in the harness's JSON helpers
+# (`o->return`), which is a hard error and was invisible while only the types
+# were built (generator#583).
+echo "==> corpus + realworld: every file builds as a project, harness included"
+for def in "$ROOT"/tests/matrix/corpus/defs/*.yaml "$ROOT"/examples/messages/realworld/*.yaml; do
     name=$(basename "$def" .yaml)
+    # The same deliberately-unbounded definitions the compile loop above skips:
+    # the heapless C target requires a bound on every field, so none of them is a
+    # valid C input.
+    case "$name" in no_maxlen | seq_elements_dyn | array_lengths_dyn) continue ;; esac
     ( cd "$ROOT" && go run ./cmd/sofabgen --config "$WORK/proj.yaml" --lang c --in "$def" --out "$WORK/rwproj/$name" >/dev/null )
-    make -C "$WORK/rwproj/$name" SOFAB_C_CORELIB="$CORELIB" >/dev/null \
-        || { echo "FAIL: realworld $name did not build as a project"; exit 1; }
+    # BIG descriptor profile, like the compile loop: ids_and_meta.yaml carries
+    # field ids past the default profile's id width and its generated header
+    # #errors out without it.
+    make -C "$WORK/rwproj/$name" SOFAB_C_CORELIB="$CORELIB" \
+        CFLAGS="-DSOFAB_OBJECT_DESCR_PROFILE=3" >/dev/null \
+        || { echo "FAIL: $name did not build as a project"; exit 1; }
 done
-echo "==> realworld projects build ($(ls "$ROOT"/examples/messages/realworld/*.yaml | wc -l) files)"
+echo "==> projects build ($(ls "$ROOT"/tests/matrix/corpus/defs/*.yaml | wc -l) corpus definitions + $(ls "$ROOT"/examples/messages/realworld/*.yaml | wc -l) realworld files)"
 
 # corelib feature-subset configs. corelib-c-cpp can be built with SOFAB_DISABLE_*
 # macros to drop wire types for a smaller footprint. The generated code guards

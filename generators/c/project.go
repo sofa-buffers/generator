@@ -212,7 +212,9 @@ func (g *gen) fieldToJSON(h *cfile, f *ir.Field) {
 		h.line(`#pragma GCC diagnostic ignored "-Wdeprecated-declarations"`)
 		defer h.line("#pragma GCC diagnostic pop")
 	}
-	acc := "o->" + f.Name
+	// The member carries the escaped identifier (cIdent); the JSON key keeps the
+	// schema name, so a field named after a C keyword reads and writes the same JSON.
+	acc := "o->" + cIdent(f.Name)
 	switch f.Kind {
 	case ir.KindU8, ir.KindU16, ir.KindU32, ir.KindU64, ir.KindBitfield:
 		h.line(`    fprintf(out, "%%llu", (unsigned long long)%s);`, acc)
@@ -327,7 +329,9 @@ func (g *gen) fieldFromJSON(h *cfile, f *ir.Field) {
 		h.line(`#pragma GCC diagnostic ignored "-Wdeprecated-declarations"`)
 		defer h.line("#pragma GCC diagnostic pop")
 	}
-	acc := "o->" + f.Name
+	// The member carries the escaped identifier (cIdent); the JSON key keeps the
+	// schema name, so a field named after a C keyword reads and writes the same JSON.
+	acc := "o->" + cIdent(f.Name)
 	h.line(`    c = sofab_json_get(j, "%s");`, f.Name)
 	h.line("    if (c) {")
 	switch f.Kind {

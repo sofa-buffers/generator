@@ -4,9 +4,58 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 )
+
+// TestProjectHarnessEscapesKeywordMembers: the generated types mangle a field
+// named after a C keyword (cIdent, trailing underscore), so the harness's JSON
+// helpers must read and write the mangled member -- `o->return_`, not
+// `o->return`, which is a syntax error. The JSON key stays the schema name:
+// mangling is a C-identifier problem and must not reach the JSON the shared
+// vectors are written in. Found as generator#583, where the corpus loop compiled
+// only the generated types and never the harness.
+func TestProjectHarnessEscapesKeywordMembers(t *testing.T) {
+	const src = `version: 1
+$defs:
+  struct:
+    Nested:
+      return: { id: 0, type: boolean }
+      class:  { id: 1, type: u32 }
+messages:
+  kw:
+    payload:
+      int:    { id: 0, type: u32 }
+      for:    { id: 1, type: array, items: { type: u8, count: 3 } }
+      struct: { id: 2, type: string, maxlen: 8 }
+      double: { id: 3, type: fp64 }
+      nested: { id: 4, type: struct, fields: { $ref: '#/$defs/struct/Nested' } }
+`
+	files := genCFromYAMLCfg(t, src, map[string]any{"emit": "project"})
+	h, ok := files["harness/main.c"]
+	if !ok {
+		t.Fatal("no harness/main.c")
+	}
+	for _, want := range []string{"o->int_", "o->for_", "o->struct_", "o->double_", "o->return_"} {
+		if !strings.Contains(h, want) {
+			t.Errorf("harness does not read the mangled member %q:\n%s", want, h)
+		}
+	}
+	// Driven off cKeywords itself, so a keyword added there is covered here too.
+	for kw := range cKeywords {
+		if regexp.MustCompile(`o->` + kw + `\b`).MatchString(h) {
+			t.Errorf("harness accesses the unmangled member o->%s", kw)
+		}
+	}
+	// The wire-side name is untouched: a decoder fed the shared vectors' JSON
+	// still finds the field.
+	for _, want := range []string{`\"return\":`, `sofab_json_get(j, "return")`, `\"int\":`} {
+		if !strings.Contains(h, want) {
+			t.Errorf("harness lost the JSON key %q:\n%s", want, h)
+		}
+	}
+}
 
 func genProject(t *testing.T) map[string][]byte {
 	t.Helper()
