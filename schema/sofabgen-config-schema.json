@@ -76,14 +76,14 @@
       ],
       "description": "sources (default): just the message-type source files. project: additionally scaffold a buildable project (build files + the canonical-JSON conformance harness)."
     },
-    "format": {
+    "run_formatter": {
       "type": "string",
       "enum": [
         "off",
         "auto",
         "require"
       ],
-      "description": "Whether sofabgen may run the target's canonical formatter (rustfmt, `dart format`, `ruff format`, prettier) over the files it generated. off (the default): no external program is ever spawned, so the output is a pure function of the definitions and this config. auto: format when the tool is installed, otherwise write unformatted output and note it on stderr. require: format, and fail the run when the tool is missing or refuses. The CLI --format flag overrides this key. Targets whose formatter is a library (Go) or whose emitter already produces canonical layout (Zig) are unaffected: their output is formatted either way. A target with no canonical formatter at all (c, cpp, java, kotlin, csharp, docs) has nothing to run, so the switch is inert there, require included."
+      "description": "Whether sofabgen may run the target's canonical formatter (rustfmt, `dart format`, `ruff format`, prettier) over the files it generated. Named `run_formatter` rather than `format` because `format` is a per-target option of the docs backend (`format: html`) and a generic key may not reuse a per-target name. off (the default): no external program is ever spawned, so the output is a pure function of the definitions and this config. auto: format when the tool is installed, otherwise write unformatted output and note it on stderr. require: format, and fail the run when the tool is missing or refuses. The CLI --format flag overrides this key. Targets whose formatter is a library (Go) or whose emitter already produces canonical layout (Zig) are unaffected: their output is formatted either way. A target with no canonical formatter at all (c, cpp, java, kotlin, csharp, docs) has nothing to run, so the switch is inert there, require included."
     },
     "generic": {
       "type": "object",
@@ -96,8 +96,8 @@
         "emit": {
           "$ref": "#/$defs/emit"
         },
-        "format": {
-          "$ref": "#/$defs/format"
+        "run_formatter": {
+          "$ref": "#/$defs/run_formatter"
         },
         "input_dir": {
           "type": "string",

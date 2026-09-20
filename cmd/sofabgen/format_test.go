@@ -353,27 +353,27 @@ func TestFormatSwitchEndToEnd(t *testing.T) {
 	// wants formatted output says so once, in its config.
 	t.Run("config_key_turns_it_on", func(t *testing.T) {
 		marker := stubRustfmtOnPath(t)
-		cfg := writeConfig(t, "generic:\n  format: auto\n")
+		cfg := writeConfig(t, "generic:\n  run_formatter: auto\n")
 		out := t.TempDir()
 		code, errOut := runCLI(t, "--config", cfg, "--lang", "rust", "--in", exampleDef, "--out", out)
 		if code != 0 {
 			t.Fatalf("exit %d: %s", code, errOut)
 		}
 		if !spawned(t, marker) {
-			t.Error("generic.format: auto did not reach the format pass")
+			t.Error("generic.run_formatter: auto did not reach the format pass")
 		}
 	})
 
 	t.Run("flag_overrides_the_config_key", func(t *testing.T) {
 		marker := stubRustfmtOnPath(t)
-		cfg := writeConfig(t, "generic:\n  format: auto\n")
+		cfg := writeConfig(t, "generic:\n  run_formatter: auto\n")
 		out := t.TempDir()
 		code, errOut := runCLI(t, "--config", cfg, "--lang", "rust", "--in", exampleDef, "--out", out, "--format=off")
 		if code != 0 {
 			t.Fatalf("exit %d: %s", code, errOut)
 		}
 		if spawned(t, marker) {
-			t.Error("--format=off did not override generic.format: auto")
+			t.Error("--format=off did not override generic.run_formatter: auto")
 		}
 	})
 
@@ -426,12 +426,12 @@ func TestFormatSwitchEndToEnd(t *testing.T) {
 	// The config key goes through the closed config schema, so a bad value there
 	// is refused at load time, before any generation.
 	t.Run("an_unknown_config_value_is_refused", func(t *testing.T) {
-		cfg := writeConfig(t, "generic:\n  format: sometimes\n")
+		cfg := writeConfig(t, "generic:\n  run_formatter: sometimes\n")
 		code, errOut := runCLI(t, "--config", cfg, "--lang", "rust", "--in", exampleDef, "--out", t.TempDir())
 		if code == 0 {
-			t.Fatal("generic.format: sometimes was accepted")
+			t.Fatal("generic.run_formatter: sometimes was accepted")
 		}
-		if !strings.Contains(errOut, "format") {
+		if !strings.Contains(errOut, "run_formatter") {
 			t.Errorf("the error does not name the key: %q", errOut)
 		}
 	})

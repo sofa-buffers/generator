@@ -70,7 +70,8 @@ func Registered() []string {
 // produced, just before writing them.
 //
 // The pass is NEVER automatic: sofabgen runs no external tool unless it was
-// asked to. The CLI's `--format` switch (and the `generic.format` config key)
+// asked to. The CLI's `--format` switch (and the `generic.run_formatter` config
+// key)
 // decide — off (the default, this capability is not called at all), auto, or
 // require. That default is what keeps a generator run reproducible: the bytes
 // written depend on (IR, config) alone, not on which tools the box has.

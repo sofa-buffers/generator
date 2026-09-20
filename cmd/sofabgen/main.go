@@ -81,7 +81,7 @@ func run(args []string, stdout, stderr *os.File) int {
 		outDir       = fs.String("out", "", "output folder (overrides generic.output_dir)")
 		printDefault = fs.Bool("print-defaults", false, "print the effective resolved config for --lang and exit")
 		dumpIR       = fs.Bool("dump-ir", false, "print the built IR as JSON for each input and exit (no codegen)")
-		formatFlag   = fs.String("format", "", "run the target's canonical formatter over the generated files: off|auto|require (default off, or generic.format)")
+		formatFlag   = fs.String("format", "", "run the target's canonical formatter over the generated files: off|auto|require (default off, or generic.run_formatter)")
 		showVersion  = fs.Bool("version", false, "print version and exit")
 	)
 	fs.Usage = func() {
@@ -128,8 +128,8 @@ func run(args []string, stdout, stderr *os.File) int {
 		return 1
 	}
 
-	// Resolve the format switch: built-in default < generic.format < --format.
-	mode, err := resolveFormatMode(fs, *formatFlag, cfg, *lang)
+	// Resolve the format switch: built-in default < generic.run_formatter < --format.
+	mode, err := resolveFormatMode(fs, *formatFlag, cfg)
 	if err != nil {
 		fmt.Fprintf(stderr, "error: %v\n", err)
 		return 1
@@ -246,9 +246,9 @@ func collectDefs(input string) ([]string, error) {
 	return defs, nil
 }
 
-// formatMode is the value of the --format switch (and of the generic.format
-// config key): whether sofabgen may run the target's canonical formatter over
-// what it generated.
+// formatMode is the value of the --format switch (and of the
+// generic.run_formatter config key): whether sofabgen may run the target's
+// canonical formatter over what it generated.
 type formatMode string
 
 const (
@@ -285,14 +285,23 @@ func parseFormatMode(s string) (formatMode, error) {
 }
 
 // resolveFormatMode applies the documented precedence — built-in default
-// (off) < generic.format < --format — and reports a bad value from either
-// source, naming the source so the user knows which one to fix.
-func resolveFormatMode(fs *flag.FlagSet, flagVal string, cfg *config.Config, lang string) (formatMode, error) {
+// (off) < generic.run_formatter < --format — and reports a bad value from
+// either source, naming the source so the user knows which one to fix.
+//
+// The key is `run_formatter`, not `format`, and it is read from cfg.Generic
+// rather than through cfg.Effective: `format` is already a PER-TARGET option of
+// the docs backend (`format: html`), and Effective merges targets.<lang> over
+// generic, so a shared name would collide in both directions — the docs
+// target's own `html` would be read here as a format mode, and a generic mode
+// would be handed to the docs backend, which knows only `html`. A generic key
+// therefore may not reuse the name of any per-target one; this one does not,
+// and reading it from Generic keeps it out of what a backend receives.
+func resolveFormatMode(fs *flag.FlagSet, flagVal string, cfg *config.Config) (formatMode, error) {
 	mode := formatOff
-	if s, ok := cfg.Effective(lang)["format"].(string); ok {
+	if s, ok := cfg.Generic["run_formatter"].(string); ok {
 		m, err := parseFormatMode(s)
 		if err != nil {
-			return "", fmt.Errorf("config generic.format: %w", err)
+			return "", fmt.Errorf("config generic.run_formatter: %w", err)
 		}
 		mode = m
 	}
