@@ -21,13 +21,13 @@ a red CI job must be reproducible with one command.
 
 ### Backend tests that need a corelib
 
-Some Go tests beside a backend (`generators/{golang,python,c}/`) build and run
-generated code against a real corelib. They are gated on `SOFAB_<X>_CORELIB`
+Some Go tests beside a backend (`generators/{golang,python,c,dart}/`) build and
+run generated code against a real corelib. They are gated on `SOFAB_<X>_CORELIB`
 (and the target toolchain) and **skip** without it, so `hermetic` stays free of
-corelibs and toolchains. `generators/typescript/` joins the same runner without
-needing a corelib: its gated tests want a real `prettier`, which the hermetic
-job does not have either. The `lang-<x>` job is where they run: its `run.sh`
-calls `run_backend_tests` (`tests/conformance/lib/backend_tests.sh`), which runs
+corelibs and toolchains. `generators/{typescript,rust}/` join the same runner
+without needing a corelib: their gated tests want a real `prettier` or
+`rustfmt`, which the hermetic job does not have either. The `lang-<x>` job is
+where they run: its `run.sh` calls `run_backend_tests` (`tests/conformance/lib/backend_tests.sh`), which runs
 the backend's **whole** test package with the corelib variable set, no `-run`
 filter, and fails on any `--- SKIP` — in a lang job nothing has a reason to
 skip. A new gated test is therefore covered the moment it is written; there is
@@ -35,14 +35,12 @@ no allowlist to forget to extend.
 
 The one exception is a test gated on a **canonical formatter**, which is
 optional by design (ARCHITECTURE §12 gate 10): `run.sh` may name a formatter it
-has established is not installed, and a skip whose own reason names that tool is
-then reported with a `!!!!` banner instead of failing. Every `lang-*` job that
+has established this run cannot use — absent, or installed at a version the
+suite does not pin — and a skip whose own reason names that tool is then
+reported with a `!!!!` banner instead of failing. Every `lang-*` job that
 holds generated code to a formatter sets `SOFAB_FORMAT_STRICT=1`, which turns
 that banner — and the suite's own skipped formatter gates — back into failures,
 so in CI nothing is skipped either way.
-
-(`generators/dart`'s gated `TestConformance` only wraps `dart/run.sh` itself,
-so `lang-dart` already is that test.)
 
 `lang-c` and `lang-cpp` additionally need the **ASan runtime** (`libasan`) on the
 image: their decode-ownership check is built with `-fsanitize=address`, because a
