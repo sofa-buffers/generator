@@ -153,6 +153,23 @@ jobs:
       - uses: ./.github/actions/corelib-refs
       - name: Python backend — generate, syntax, round-trip, conformance
         run: ./tests/conformance/python/run.sh
+      # The toolless leg, and the only one in this workflow. `sofabgen` never
+      # requires the target's toolchain (--format defaults to off) and neither
+      # does this repository's own test suite -- but every lang-* job installs
+      # its formatter and sets SOFAB_FORMAT_STRICT=1, so the skip branches of
+      # tests/conformance/lib/{check_format,backend_tests}.sh, and the suites'
+      # own "no formatter" paths, would run nowhere and rot unnoticed. All four
+      # formatter suites share those two drivers, so pinning them once, in the
+      # cheapest job, pins them family-wide. ruff is uninstalled first -- an
+      # empty SOFAB_FORMAT_STRICT alone would still find it on PATH -- and the
+      # suite must still exit 0, with its skip banners.
+      - name: Python backend — the same suite with no formatter installed
+        env:
+          SOFAB_FORMAT_STRICT: ""
+        run: |
+          python -m pip uninstall -y ruff
+          ! command -v ruff || { echo "ruff is still on PATH; this leg would prove nothing"; exit 1; }
+          ./tests/conformance/python/run.sh
       - name: Generate sources (artifact)
         if: always()
         run: ./tests/gen-artifacts.sh python generated
