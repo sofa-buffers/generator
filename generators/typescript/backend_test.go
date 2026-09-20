@@ -3,6 +3,7 @@ package typescript
 import (
 	"fmt"
 	"os"
+	"path/filepath"
 	"regexp"
 	"strings"
 	"testing"
@@ -31,6 +32,47 @@ func schema(t *testing.T, src string) *ir.Schema {
 		t.Fatal(err)
 	}
 	return s
+}
+
+// schemaFile builds the IR from a definition FILE, so a $ref into a file beside
+// it resolves; schema() above parses bytes, which cannot.
+func schemaFile(t *testing.T, path string) *ir.Schema {
+	t.Helper()
+	doc, err := parser.Load(path)
+	if err != nil {
+		t.Fatalf("%s: %v", path, err)
+	}
+	resolved, err := doc.Resolve()
+	if err != nil {
+		t.Fatalf("%s: %v", path, err)
+	}
+	if errs := parser.Validate(resolved); errs != nil {
+		t.Fatalf("%s: invalid: %v", path, errs)
+	}
+	s, err := model.Build(doc)
+	if err != nil {
+		t.Fatalf("%s: %v", path, err)
+	}
+	if err := analysis.Analyze(s); err != nil {
+		t.Fatalf("%s: %v", path, err)
+	}
+	return s
+}
+
+// genModule renders one already-built schema and returns its message.ts.
+func genModule(t *testing.T, s *ir.Schema, cfg map[string]any) string {
+	t.Helper()
+	files, err := (&Backend{}).Generate(s, cfg)
+	if err != nil {
+		t.Fatalf("generate: %v", err)
+	}
+	for _, f := range files {
+		if f.Path == "message.ts" {
+			return string(f.Content)
+		}
+	}
+	t.Fatal("no message.ts")
+	return ""
 }
 
 func genTS(t *testing.T) string {
@@ -152,12 +194,13 @@ func TestTSOverIndexWrapperArray(t *testing.T) {
 		// the length word — before the payload, and before the destination grows.
 		`this._q1 = new StringSeq(_t, this.a, 4, 16, "bs", MAX_DYN_ARRAY_COUNT, MAX_DYN_STRING_LEN);`,
 		`this._q2 = new BlobSeq(_t, this.a, 3, 16, "bb", MAX_DYN_ARRAY_COUNT, 1048576);`,
-		// A FRAMED element opens a scope, so generated code places it — and the
-		// guard runs before the gap-fill, so an over-index id extends nothing
-		// (generator#247, CORELIB_PLAN §7.2 item 8).
-		"        const _t = this.o.bp;\n" +
-			"        if (id >= 2) throw new SofabError(SofabErrorCode.InvalidMsg, \"bp: array index above schema capacity 2\");\n" +
-			"        while (_t.length <= id) _t.push(new MBpElem());\n",
+		// A FRAMED element opens a scope, and its index bound and gap-fill are the
+		// corelib's too — the same two exclusive bounds, taken in the same order
+		// (generator#247, CORELIB_PLAN §7.2 item 8, ARCHITECTURE §8). The schema
+		// reaches the collector as arguments: the capacity, the field name and,
+		// behind them, the receiver cap for an array the schema left open.
+		`this._q3 = new FramedSeq<MBpElem>(_t, _MK_MBpElem, 2, "bp", MAX_DYN_ARRAY_COUNT);`,
+		"        this._q3!.reserve(id);\n",
 		// A dynamic array has no schema capacity, so the receiver cap governs
 		// instead (§6.2.1) — never both.
 		`this._q5 = new StringSeq(_t, this.a, -1, -1, "ds", MAX_DYN_ARRAY_COUNT, MAX_DYN_STRING_LEN);`,
@@ -166,10 +209,25 @@ func TestTSOverIndexWrapperArray(t *testing.T) {
 			t.Errorf("message.ts missing over-index guard %q:\n%s", want, mod)
 		}
 	}
-	// A schema-bounded array must NOT also carry the receiver cap as a rejection of
-	// its own: §6.2.1 keeps a cap off a field the schema already bounds.
-	if strings.Contains(mod, `if (id >= MAX_DYN_ARRAY_COUNT) throw new SofabError(SofabErrorCode.LimitExceeded, "bp:`) {
-		t.Error("a schema-bounded wrapper array must not also apply the receiver cap (§6.2.1)")
+	// The bound is PASSED, never re-stated: no module may still carry the compare
+	// itself, for either verdict. §6.2.1's which-verdict rule has exactly one
+	// implementation and it is in the corelib (corelib-ts `overIndex`).
+	for _, gone := range []string{
+		"array index above schema capacity",
+		"exceeds the receiver cap",
+		"while (_t.length <= id)",
+	} {
+		if strings.Contains(mod, gone) {
+			t.Errorf("the index bound must not be re-emitted (%q):\n%s", gone, mod)
+		}
+	}
+	// A schema-BOUNDED array still hands the receiver cap over -- it is inert
+	// beside a declared capacity (§6.2.1), and an omitted argument would not be
+	// "the corelib's default" but no receiver bound at all. What must not happen
+	// is the cap governing: `bp` declares count 2, so 2 is what its collector
+	// judges by, and the cap sits behind it unread.
+	if strings.Contains(mod, `new FramedSeq<MBpElem>(_t, _MK_MBpElem, -1,`) {
+		t.Error("a schema-bounded wrapper array must not hand its collector UNBOUNDED (§6.2.1)")
 	}
 }
 
@@ -350,7 +408,7 @@ func TestTSMaxlenReject(t *testing.T) {
 func TestTSStructural(t *testing.T) {
 	mod := genTS(t)
 	for _, want := range []string{
-		`import { OStream, FixlenSubtype, ArrayKind, DecodeStatus, SofabError, SofabErrorCode, elementsEqual, Visitor, ArrayTarget, IntegerArrayTarget, FloatArrayTarget, BoolArrayTarget, IStream, PayloadAcc, decodeUtf8, StringSeq, BlobSeq, decode as _decode } from "@sofa-buffers/corelib";`, // FixlenSubtype: fixlen §7.3 guard; SofabError: over-count reject (generator#100); ArrayTarget and its two shapes: the array hand-off, the only way elements are delivered (corelib-ts#177); the rest is the generated layer's support, owned by the corelib (corelib-ts#151/#161)
+		`import { OStream, FixlenSubtype, ArrayKind, DecodeStatus, SofabError, SofabErrorCode, elementsEqual, fp32RawBytes, Visitor, ArrayTarget, IntegerArrayTarget, FloatArrayTarget, BoolArrayTarget, IStream, PayloadAcc, decodeUtf8, StringSeq, BlobSeq, ElementSeq, FramedSeq, decode as _decode } from "@sofa-buffers/corelib";`, // FixlenSubtype: fixlen §7.3 guard; SofabError: over-count reject (generator#100); ArrayTarget and its two shapes: the array hand-off, the only way elements are delivered (corelib-ts#177); the four collectors and fp32RawBytes: the generated layer's support, owned by the corelib (corelib-ts#151/#161, generator#587)
 		"export class Myfirstmessage {",
 		"serialize(os: OStream): void {",
 		// decode(bytes) is the corelib's one-shot decode driving THIS type's flat
@@ -581,12 +639,169 @@ func genTSWith(t *testing.T, src string, cfg map[string]any) string {
 	return ""
 }
 
+// TestTSEmitsNoStaticHelper is the generator#587 sweep: over every corpus
+// definition, in both emit modes and all three int64 representations, a
+// generated module must declare no helper of its own and must not restate a
+// rule the corelib takes as an argument.
+//
+// It is a sweep over EMITTED TEXT rather than over the emitters, because that is
+// the property that matters: a helper comes back the moment some arm emits one,
+// whatever the emitter that produced it looks like. What the module may still
+// carry is a FACTORY (`_MK_*`), which is a single expression naming a generated
+// type -- ARCHITECTURE §8's own line between the two layers -- and the shared
+// empty typed arrays, which are values and not code.
+//
+// The int64 axis is load-bearing and not decoration: `long` and `number` are the
+// only modes in which a 64-bit matrix row is a `Long[]`, whose gap value is a
+// fresh mutable array and whose collector is therefore a different one from the
+// `bigint` mode's typed row (see TestTSLongBackedMatrixRowTakesAFactory).
+func TestTSEmitsNoStaticHelper(t *testing.T) {
+	defs, _ := filepath.Glob(filepath.Join("..", "..", "tests", "matrix", "corpus", "defs", "*.yaml"))
+	defs = append(defs,
+		filepath.Join("..", "..", "examples", "messages", "example.yaml"),
+		filepath.Join("..", "..", "examples", "messages", "realworld", "vehicle_telemetry.yaml"))
+	if len(defs) < 3 {
+		t.Fatal("no defs found")
+	}
+	// A module-level `function` is the shape every emitted static helper had.
+	topLevelFunc := regexp.MustCompile(`(?m)^function `)
+	for _, def := range defs {
+		// Loaded by PATH, not from the bytes: a corpus definition may $ref another
+		// file beside it, which only the loader resolves.
+		sc := schemaFile(t, def)
+		for _, mode := range []string{"bigint", "long", "number"} {
+			for _, emit := range []string{"sources", "project"} {
+				cfg := map[string]any{"int64": mode, "emit": emit, "timestamp": false}
+				mod := genModule(t, sc, cfg)
+				if loc := topLevelFunc.FindStringIndex(mod); loc != nil {
+					line := mod[loc[0]:]
+					if i := strings.IndexByte(line, '\n'); i > 0 {
+						line = line[:i]
+					}
+					t.Errorf("[%s int64=%s %s] a generated module must declare no helper: %q",
+						def, mode, emit, line)
+				}
+				// The rules the corelib now takes as arguments, in the spellings the
+				// backend used to emit them in.
+				for _, gone := range []string{
+					"while (_t.length <= id)",              // the gap fill
+					"array index above schema capacity",    // the schema-capacity verdict
+					"exceeds the receiver cap",             // the receiver-cap verdict
+					"function longArrEq", "function _fp32", // the two module helpers
+				} {
+					if strings.Contains(mod, gone) {
+						t.Errorf("[%s int64=%s %s] emitted %q, which the corelib owns", def, mode, emit, gone)
+					}
+				}
+			}
+		}
+	}
+}
+
+// TestTSLongBackedMatrixRowTakesAFactory pins the one shape that differs BETWEEN
+// int64 modes, and it is the reason the sweep above runs all three.
+//
+// A native matrix row is a typed array in `bigint` mode (`BigUint64Array`), and
+// a zero-length typed array may be shared across every gap of the matrix -- it
+// holds nothing and cannot be grown -- so that row takes ElementSeq and the
+// module's shared empty instance. Under `long` / `number` the same row is a
+// `Long[]`: a plain, growable, caller-reachable array, so one shared instance
+// would alias every gap of the matrix onto it. That row takes FramedSeq and a
+// factory instead.
+func TestTSLongBackedMatrixRowTakesAFactory(t *testing.T) {
+	const def = `
+version: 1
+messages:
+  M:
+    payload:
+      rows: { id: 0, type: array, items: { type: array, count: 3, items: { type: u64, count: 4 } } }
+      dyn:  { id: 1, type: array, items: { type: array, items: { type: i64 } } }
+`
+	big := genTSWith(t, def, map[string]any{"int64": "bigint"})
+	for _, want := range []string{
+		`this._q1 = new ElementSeq<BigUint64Array>(_t, _E_BigUint64Array, 3, "rows", MAX_DYN_ARRAY_COUNT);`,
+		`this._q2 = new ElementSeq<BigInt64Array>(_t, _E_BigInt64Array, -1, "dyn", MAX_DYN_ARRAY_COUNT);`,
+		"const _r = new BigUint64Array(count); this._q1!.place(id, _r); this._row1 = _r;",
+	} {
+		if !strings.Contains(big, want) {
+			t.Errorf("int64: bigint — a typed row must share its gap value: missing %q\n%s", want, big)
+		}
+	}
+	if strings.Contains(big, "_MK_ARR") {
+		t.Errorf("int64: bigint — a typed row needs no factory:\n%s", big)
+	}
+	// The UNBOUNDED twin, where the two bounds a row carries answer with DIFFERENT
+	// verdicts: the index is the receiver's cap (LIMIT_EXCEEDED, inside the
+	// collector) and so is the element count (LIMIT_EXCEEDED, emitted here). Pinned
+	// as an ordered block, because the index has to be taken first for §7.2 item 8
+	// — without `checkIndex` an over-index row on a schema-unbounded matrix would
+	// take its verdict from `place` only after the count reject had already run,
+	// which is the wrong bound answering first.
+	const dynRow = "" +
+		"        this._q2!.checkIndex(id);\n" +
+		"        if (count > MAX_DYN_ARRAY_COUNT) throw new SofabError(SofabErrorCode.LimitExceeded, \"dyn element: array count above configured limit \" + MAX_DYN_ARRAY_COUNT);\n" +
+		"        const _r = new BigInt64Array(count); this._q2!.place(id, _r); this._row2 = _r;\n"
+	if !strings.Contains(big, dynRow) {
+		t.Errorf("int64: bigint — an unbounded matrix row must take the index bound first; missing\n%s\nin:\n%s", dynRow, big)
+	}
+	for _, mode := range []string{"long", "number"} {
+		mod := genTSWith(t, def, map[string]any{"int64": mode})
+		for _, want := range []string{
+			"const _MK_ARR = (): never[] => [];",
+			`this._q1 = new FramedSeq<Long[]>(_t, _MK_ARR, 3, "rows", MAX_DYN_ARRAY_COUNT);`,
+			`this._q2 = new FramedSeq<Long[]>(_t, _MK_ARR, -1, "dyn", MAX_DYN_ARRAY_COUNT);`,
+			// The row itself is still allocated here: a destination sized from a
+			// checked wire count is the generated layer's, not the codec's.
+			"const _r: Long[] = []; this._q1!.place(id, _r); this._row1 = _r;",
+		} {
+			if !strings.Contains(mod, want) {
+				t.Errorf("int64: %s — a Long[] row must take a factory: missing %q\n%s", mode, want, mod)
+			}
+		}
+		// One factory, however many arrays take it.
+		if n := strings.Count(mod, "const _MK_ARR ="); n != 1 {
+			t.Errorf("int64: %s — the array factory must be declared once, got %d:\n%s", mode, n, mod)
+		}
+	}
+}
+
+// TestTSCollectorIsBoundBeforeTheScopeIsEntered: the collector slot is written in
+// the arm that opens the wrapper array's own sequence, over the destination that
+// arm just built -- so by the time an element id arrives at the array scope, the
+// slot holds a collector bound to the CURRENT destination.
+//
+// The ordering is what makes the non-null assertion at the element arm sound, and
+// it is also §7.4: an array wrapper REPLACES, so a re-opened array field builds a
+// fresh destination and must not keep collecting into the old one.
+func TestTSCollectorIsBoundBeforeTheScopeIsEntered(t *testing.T) {
+	mod := genTSWith(t, `
+version: 1
+messages:
+  M:
+    payload:
+      objs: { id: 0, type: array, items: { type: struct, count: 2, fields: { k: { id: 0, type: u32 } } } }
+`, map[string]any{})
+	// Every array in this schema is schema-bounded, so no MAX_DYN_ARRAY_COUNT
+	// constant is emitted and the configured cap goes in as a literal -- it is
+	// inert beside the declared capacity 2 either way (§6.2.1), but it is still
+	// STATED, because an omitted argument would be no receiver bound at all.
+	want := `case 0: { const _t: MObjsElem[] = []; this.o.objs = _t; ` +
+		`this._q1 = new FramedSeq<MObjsElem>(_t, _MK_MObjsElem, 2, "objs", 16384); ` +
+		`this._c = _L_M_objs; return true; }`
+	if !strings.Contains(mod, want) {
+		t.Errorf("the collector must be bound to the fresh destination in the same arm:\n%s", mod)
+	}
+	if !strings.Contains(mod, "private _q1: FramedSeq<MObjsElem> | null = null;") {
+		t.Errorf("the collector slot must be declared with its element type:\n%s", mod)
+	}
+}
+
 func TestTSInt64Long(t *testing.T) {
 	mod := genTSWith(t, int64Def, map[string]any{"int64": "long"})
 	for _, want := range []string{
-		// No elementsEqual: every array here is Long-backed and compared by
-		// longArrEq, whose comment merely names it.
-		`import { OStream, ArrayKind, DecodeStatus, Long, SofabError, SofabErrorCode, Visitor, ArrayTarget, IntegerArrayTarget, IStream, PayloadAcc, decode as _decode } from "@sofa-buffers/corelib";`,
+		// No elementsEqual: every array here is Long-backed and compared by the
+		// corelib's longElementsEqual, whose comment merely names the other one.
+		`import { OStream, ArrayKind, DecodeStatus, Long, SofabError, SofabErrorCode, longElementsEqual, Visitor, ArrayTarget, IntegerArrayTarget, IStream, PayloadAcc, FramedSeq, decode as _decode } from "@sofa-buffers/corelib";`,
 		// Long[] backing field + accessor pair; setter converts once. `count: 8` is a
 		// CAPACITY, not a length (§3), so a fresh us is the EMPTY array — not 8
 		// Long zeros.
@@ -604,10 +819,12 @@ func TestTSInt64Long(t *testing.T) {
 		"if (this._us.length !== 0) {",
 		"os.writeUnsignedArrayLong(0, this._us);",
 		"os.writeSignedArrayLong(1, this._is);",
-		// Defaulted Long array: materialized Long default + longArrEq guard.
+		// Defaulted Long array: materialized Long default + the corelib's
+		// longElementsEqual. The compare itself is no longer emitted: a Long is a
+		// corelib type and a (low, high) walk over two of them is the same code for
+		// every schema (ARCHITECTURE §8, generator#587).
 		`private _ud: Long[] = [Long.fromValue(1n), Long.fromValue(18446744073709551615n)];`,
-		"if (!longArrEq(this._ud, [Long.fromValue(1n), Long.fromValue(18446744073709551615n)])) {",
-		"function longArrEq(a: readonly Long[], b: readonly Long[]): boolean {",
+		"if (!longElementsEqual(this._ud, [Long.fromValue(1n), Long.fromValue(18446744073709551615n)])) {",
 		// Decode bypasses the setter (the hot path writes the canonical Long[]
 		// directly); a wire count above the schema capacity rejects as INVALID at
 		// the count word (generator#100), and a wire count below it is simply the
@@ -759,7 +976,7 @@ messages:
 	// copy and nothing to convert.
 	for _, gone := range []string{
 		"arrayUnsigned", "arraySigned", "arrayFp32(", "arrayFp64(", "arrayEnd",
-		"_bv", "_bn", "Boolean(_s[", "BigInt(_v)", "_fp32RawInto",
+		"_bv", "_bn", "Boolean(_s[", "BigInt(_v)", "fp32RawInto",
 	} {
 		if strings.Contains(mod, gone) {
 			t.Errorf("no array path may still emit %q — the member IS the destination:\n%s", gone, mod)
@@ -1148,13 +1365,14 @@ func TestTSCountIsACapacityNotADefaultLength(t *testing.T) {
 }
 
 // TestTSCountIsACapacityNotADefaultLengthLong: the Long-backed 64-bit modes render
-// the same unpadded default as Long values (and compare it with longArrEq).
+// the same unpadded default as Long values (and compare it with the corelib's
+// longElementsEqual).
 func TestTSCountIsACapacityNotADefaultLengthLong(t *testing.T) {
 	for _, mode := range []string{"long", "number"} {
 		mod := genTSWith(t, fixedDefaultDef, map[string]any{"int64": mode})
 		for _, want := range []string{
 			"private _fu64: Long[] = [Long.fromValue(1n)];",
-			"if (!longArrEq(this._fu64, [Long.fromValue(1n)])) {",
+			"if (!longElementsEqual(this._fu64, [Long.fromValue(1n)])) {",
 		} {
 			if !strings.Contains(mod, want) {
 				t.Errorf("int64: %s fixed-default message.ts missing %q", mode, want)
@@ -1328,7 +1546,7 @@ func TestTSInt64Default(t *testing.T) {
 	for _, cfg := range []map[string]any{{}, {"int64": "bigint"}} {
 		mod := genTSWith(t, int64Def, cfg)
 		for _, want := range []string{
-			`import { OStream, ArrayKind, DecodeStatus, SofabError, SofabErrorCode, elementsEqual, Visitor, ArrayTarget, IntegerArrayTarget, IStream, PayloadAcc, decode as _decode } from "@sofa-buffers/corelib";`,
+			`import { OStream, ArrayKind, DecodeStatus, SofabError, SofabErrorCode, elementsEqual, Visitor, ArrayTarget, IntegerArrayTarget, IStream, PayloadAcc, ElementSeq, decode as _decode } from "@sofa-buffers/corelib";`,
 			// count: 8 is a CAPACITY, so a fresh array is empty (§3, af536c4).
 			"us: BigUint64Array = _E_BigUint64Array;",
 			// ...and the value goes out whole, the wire count being its length.
@@ -1392,16 +1610,20 @@ messages:
 	// A wrapper-array ELEMENT is not new per arrival either: the element id IS the
 	// array index (§5.1), so a REOPENED element id re-opens that element's scope
 	// and must merge into it exactly like a re-opened field (§7.4, generator#247).
-	// The gap-fill places an element at the index and the element scope decodes
-	// into whatever is there -- so a repeat lands on the same object.
-	if !strings.Contains(mod, "        while (_t.length <= id) _t.push(new MEElem());\n        this._ix3 = id;") {
+	// `reserve` is the verb that says so -- it leaves a slot that is already there
+	// alone -- and the element scope then decodes into whatever is at the index.
+	if !strings.Contains(mod, "        this._q3!.reserve(id);\n        this._ix3 = id;") {
 		t.Errorf("array elements must decode INTO the element at their id:\n%s", mod)
 	}
 	if !strings.Contains(mod, "this.o.e[this._ix3]!.x = _v;") {
 		t.Errorf("an element scope must write through the index register:\n%s", mod)
 	}
-	if strings.Contains(mod, "this._ix3 = id; _t[id] = new MEElem()") {
-		t.Errorf("a re-opened element id must not be replaced by a fresh object:\n%s", mod)
+	// `place` would be the wrong verb here: it REPLACES, which is what a nested
+	// row needs and what a struct/union element must never get.
+	for _, bad := range []string{"this._q3!.place(id", "this._ix3 = id; _t[id] = new MEElem()"} {
+		if strings.Contains(mod, bad) {
+			t.Errorf("a re-opened element id must not be replaced by a fresh object (%q):\n%s", bad, mod)
+		}
 	}
 }
 
@@ -1511,33 +1733,45 @@ messages:
 `, map[string]any{})
 
 	for _, want := range []string{
-		// Placement, not append — the gap-fill precedes it, and the index bound
-		// precedes the gap-fill so a rejected id extends nothing (§7.2 item 8).
-		"        if (id >= 4) throw new SofabError(SofabErrorCode.InvalidMsg, \"objs: array index above schema capacity 4\");\n" +
-			"        while (_t.length <= id) _t.push(new VecObjsElem());\n",
-		// A count-less array has no schema capacity, so the receiver cap governs
-		// instead — a policy rejection, not INVALID (§6.2.1).
-		"        if (id >= MAX_DYN_ARRAY_COUNT) throw new SofabError(SofabErrorCode.LimitExceeded, \"dyn: array index \" + id + \" exceeds the receiver cap \" + MAX_DYN_ARRAY_COUNT);\n" +
-			"        while (_t.length <= id) _t.push(new VecDynElem());\n",
+		// Placement, not append — and the whole of it is the corelib collector's:
+		// the index bound, then the gap-fill, in that order, so a rejected id
+		// extends nothing (§7.2 item 8). The schema reaches it as the capacity
+		// argument, 4.
+		`this._q1 = new FramedSeq<VecObjsElem>(_t, _MK_VecObjsElem, 4, "objs", MAX_DYN_ARRAY_COUNT);`,
+		"        this._q1!.reserve(id);\n",
+		// A count-less array has no schema capacity, so it hands over UNBOUNDED
+		// (-1) and the receiver cap behind it governs instead — a policy rejection,
+		// not INVALID (§6.2.1). Same class, same call: which verdict a breach gets
+		// is decided by the arguments, not by a second emitted shape.
+		`this._q3 = new FramedSeq<VecDynElem>(_t, _MK_VecDynElem, -1, "dyn", MAX_DYN_ARRAY_COUNT);`,
+		"        this._q3!.reserve(id);\n",
 		// A leaf element's placement is the corelib collector's, which does the
 		// same thing with the same ordering.
 		`this._q5 = new StringSeq(_t, this.a, 3, 8, "strs", MAX_DYN_ARRAY_COUNT, 262144);`,
 		// A native ROW is placed by id too. The id-blind append was unreachable
 		// while every row was written, and an interior gap makes it reachable,
-		// shifting every later row down one index.
-		"    while (_t.length <= id) _t.push(_E_Uint32Array);\n" +
-			"    const _r = new Uint32Array(count); _t[id] = _r; this._row6 = _r;",
+		// shifting every later row down one index. A typed row's gap may be the
+		// shared empty instance, so it is the collector that takes a shared default
+		// (ElementSeq) rather than a factory.
+		`this._q6 = new ElementSeq<Uint32Array>(_t, _E_Uint32Array, 3, "rows", MAX_DYN_ARRAY_COUNT);`,
+		"    const _r = new Uint32Array(count); this._q6!.place(id, _r); this._row6 = _r;",
 		// ...including a WRAPPER row, whose own collector is bound to the row the
-		// placement just made — a re-opened row index replaces (§7.4).
-		"        const _e: string[] = []; _t[id] = _e;\n" +
+		// placement just made — a re-opened row index replaces (§7.4), which is
+		// `place` and not `reserve`.
+		"        const _e: string[] = []; this._q7!.place(id, _e);\n" +
 			"        this._q8 = new StringSeq(_e, this.a, -1, 8, \"wrows row\", MAX_DYN_ARRAY_COUNT, 262144);",
 	} {
 		if !strings.Contains(mod, want) {
 			t.Errorf("message.ts missing %q:\n%s", want, mod)
 		}
 	}
-	// The defects this replaced: appending ignored the id entirely.
-	for _, bad := range []string{"_t.push(new VecObjsElem()); this._c", ".push(_r);", "_t.push(_e);"} {
+	// The defects this replaced: appending ignored the id entirely. The gap-fill
+	// that answered them is not emitted at all any more — it is the collector's,
+	// which is why none of these spellings may occur.
+	for _, bad := range []string{
+		"_t.push(new VecObjsElem()); this._c", ".push(_r);", "_t.push(_e);",
+		"while (_t.length <= id)",
+	} {
 		if strings.Contains(mod, bad) {
 			t.Errorf("elements must not be appended id-blind (%q):\n%s", bad, mod)
 		}
@@ -1741,22 +1975,29 @@ messages:
       structrows: { id: 2, type: array, items: { type: array, count: 2, items: { type: struct, count: 2, fields: { $ref: '#/$defs/struct/Point' } } } }
       strcube:    { id: 3, type: array, items: { type: array, count: 2, items: { type: array, count: 2, items: { type: string, count: 2, maxlen: 4 } } } }
       numrows:    { id: 4, type: array, items: { type: array, count: 2, items: { type: u32, count: 3 } } }
+      boundrows:  { id: 5, type: array, items: { type: array, count: 5, items: { type: array, count: 2, items: { type: u32, count: 3 } } } }
 `, map[string]any{})
 
 	// The FIELD is declared with the member's type; the ROW built inside its scope
 	// is one "[]" less. Depth 3 has two levels of row, so the outer one is
 	// string[][] and the inner one string[] — a row typed one level too high was
 	// the defect this pins.
-	for _, tc := range []struct{ member, row string }{
-		{"string[][]", "string[]"},
-		{"Uint8Array[][]", "Uint8Array[]"},
-		{"StructPoint[][]", "StructPoint[]"},
-		{"string[][][]", "string[][]"},
+	for _, tc := range []struct{ member, row, slot string }{
+		{"string[][]", "string[]", "_q1"},
+		{"Uint8Array[][]", "Uint8Array[]", "_q3"},
+		{"StructPoint[][]", "StructPoint[]", "_q5"},
+		{"string[][][]", "string[][]", "_q8"},
 	} {
 		if !strings.Contains(mod, "const _t: "+tc.member+" = [];") {
 			t.Fatalf("expected a member declared %q:\n%s", tc.member, mod)
 		}
-		if !strings.Contains(mod, "const _e: "+tc.row+" = []; _t[id] = _e;") {
+		// The ROW collector is typed by the ROW, not by the member: it is the outer
+		// array's slots it owns, one "[]" less than the field's own type. A row
+		// REPLACES on re-open (§7.4), so the verb is `place`.
+		if !strings.Contains(mod, "private "+tc.slot+": FramedSeq<"+tc.row+"> | null = null;") {
+			t.Errorf("the collector for %s must be a FramedSeq<%s>:\n%s", tc.member, tc.row, mod)
+		}
+		if !strings.Contains(mod, "const _e: "+tc.row+" = []; this."+tc.slot+"!.place(id, _e);") {
 			t.Errorf("row of %s must be typed %s:\n%s", tc.member, tc.row, mod)
 		}
 	}
@@ -1771,15 +2012,45 @@ messages:
 			t.Errorf("message.ts missing row collector %q:\n%s", want, mod)
 		}
 	}
-	// A FRAMED row opens a scope of its own instead, one level down, and its
-	// elements are placed there.
-	if !strings.Contains(mod, "      case _L_NestedRows_structrows_r: {\n        const _t = this.o.structrows[this._ix5]!;") {
-		t.Errorf("a struct row must open its own element scope:\n%s", mod)
+	// A FRAMED row opens a scope of its own instead, one level down, with a
+	// collector of its own over the row the placement just built — and its
+	// elements MERGE on re-open, so that one reserves.
+	for _, want := range []string{
+		`this._q6 = new FramedSeq<StructPoint>(_e, _MK_StructPoint, 2, "structrows row", 16384);`,
+		"      case _L_NestedRows_structrows_r: {\n        this._q6!.reserve(id);",
+	} {
+		if !strings.Contains(mod, want) {
+			t.Errorf("a struct row must open its own element scope: missing %q\n%s", want, mod)
+		}
 	}
-	// A NATIVE row needs no collector at all: its elements arrive on the array
-	// hooks in the row scope, and the row register carries the destination.
-	if !strings.Contains(mod, "const _r = new Uint32Array(count); _t[id] = _r; this._row11 = _r;") {
-		t.Errorf("a native row must be held in a row register:\n%s", mod)
+	// A NATIVE row's elements arrive on the array hooks in the row scope, and the
+	// row register carries the destination — but the row INDEX is the collector's
+	// like every other, taken before the row is placed into the matrix.
+	//
+	// Pinned as the whole ORDERED block, not as three separate substrings, because
+	// the order is the load-bearing part. A native row is the one element kind with
+	// a SECOND bound — the element count in its own array header — and CORELIB_PLAN
+	// §7.2 item 8 wants a rejection by EITHER of the two to leave the matrix exactly
+	// as it was, so a lower row id delivered afterwards still lands at its own index.
+	// That is why `checkIndex` is split out of `place` here: dropping it would leave
+	// this suite and the conformance suite green (no driver sends a row that breaks
+	// both bounds at once) while silently changing the verdict a doubly-violating
+	// message gets, and — for a matrix the schema left unbounded — turning a
+	// LIMIT_EXCEEDED into an INVALID.
+	for _, tc := range []struct{ what, want string }{
+		{"a bounded matrix", "" +
+			"        this._q11!.checkIndex(id);\n" +
+			"        if (count > 3) throw new SofabError(SofabErrorCode.InvalidMsg, \"numrows element: array count above schema capacity 3\");\n" +
+			"        const _r = new Uint32Array(count); this._q11!.place(id, _r); this._row11 = _r;\n"},
+		{"a matrix one level down", "" +
+			"        this._q13!.checkIndex(id);\n" +
+			"        if (count > 3) throw new SofabError(SofabErrorCode.InvalidMsg, \"boundrows row element: array count above schema capacity 3\");\n" +
+			"        const _r = new Uint32Array(count); this._q13!.place(id, _r); this._row13 = _r;\n"},
+	} {
+		if !strings.Contains(mod, tc.want) {
+			t.Errorf("%s must take the row INDEX before the row COUNT and grow after both; missing\n%s\nin:\n%s",
+				tc.what, tc.want, mod)
+		}
 	}
 	// The generated collectors this replaced are gone: the corelib owns the leaf
 	// ones, and a flat visitor routes the framed and native rows itself.
@@ -1823,7 +2094,7 @@ func TestTSFp32SignalingNaNRawChannel(t *testing.T) {
 		"f32Fp32Raw: Uint8Array | null = null;",
 		"f32dFp32Raw: Uint8Array | null = null;",
 		"innerFp32Raw: Uint8Array | null = null;",
-		`case 0: { this.o.f32 = v; this.o.f32Fp32Raw = Number.isNaN(v) ? _fp32Raw(bits) : null; break; }`,
+		`case 0: { this.o.f32 = v; this.o.f32Fp32Raw = Number.isNaN(v) ? fp32RawBytes(bits) : null; break; }`,
 		"if (Number.isNaN(this.f32) && this.f32Fp32Raw !== null && this.f32Fp32Raw.length === 4) {",
 		"os.writeFixlen(0, this.f32Fp32Raw, FixlenSubtype.Fp32);",
 		"os.writeFp32(0, this.f32);",
@@ -1839,7 +2110,6 @@ func TestTSFp32SignalingNaNRawChannel(t *testing.T) {
 		"d64: Float64Array = _E_Float64Array;",
 		"const _t = this._td; _t.f64 = this._a0D64;",
 		"os.writeFp64Array(5, this.d64);",
-		"function _fp32Raw(bits: number): Uint8Array {",
 	} {
 		if !strings.Contains(mod, want) {
 			t.Errorf("fp32 raw channel missing %q:\n%s", want, mod)
@@ -1895,15 +2165,22 @@ func TestTSFp32RawDoesNotMoveTheOmissionTest(t *testing.T) {
 	}
 }
 
-// TestTSFp32RawHelpersOnlyWhereNeeded: the helpers are module-level, so an
-// unconditional emit would put dead code in every module. They are emitted only
-// where the SCALAR position occurs — which, since an fp32 array became a
-// `Float32Array` that holds its own wire words, is the only position left that
-// needs them.
+// TestTSFp32RawHelpersOnlyWhereNeeded: the raw-bits companion is the corelib's
+// (generator#587) and is IMPORTED, not emitted — and only where the SCALAR
+// position occurs, since an fp32 array became a `Float32Array` that holds its own
+// wire words. An unconditional import is an unused one under noUnusedLocals.
 func TestTSFp32RawHelpersOnlyWhereNeeded(t *testing.T) {
 	scalarOnly := genTSWith(t, "version: 1\nmessages:\n  m:\n    payload:\n      a: { id: 0, type: fp32 }\n", map[string]any{})
-	if !strings.Contains(scalarOnly, "function _fp32Raw(") {
-		t.Errorf("an fp32 scalar needs _fp32Raw:\n%s", scalarOnly)
+	if !strings.Contains(scalarOnly, "fp32RawBytes") {
+		t.Errorf("an fp32 scalar needs fp32RawBytes:\n%s", scalarOnly)
+	}
+	// Not re-emitted beside the import: the four shifts are the same for every
+	// schema, so ARCHITECTURE §8 puts them in the corelib and the module carries a
+	// call, not a copy.
+	for _, gone := range []string{"function _fp32Raw", "function _fp32RawInto"} {
+		if strings.Contains(scalarOnly, gone) {
+			t.Errorf("the fp32 raw helper must not be emitted (%q):\n%s", gone, scalarOnly)
+		}
 	}
 	// ...and only that one. The widening half (_fp32FromRaw and its 4-byte
 	// scratch) lost its last caller when the array companion went: the fp32 hook
@@ -1920,11 +2197,11 @@ func TestTSFp32RawHelpersOnlyWhereNeeded(t *testing.T) {
 	// re-rendered. A module whose only fp32 position is an array must name the
 	// channel nowhere at all.
 	arrayOnly := genTSWith(t, "version: 1\nmessages:\n  m:\n    payload:\n      a: { id: 0, type: array, items: { type: fp32 } }\n", map[string]any{})
-	if strings.Contains(arrayOnly, "_fp32") {
+	if strings.Contains(arrayOnly, "_fp32") || strings.Contains(arrayOnly, "fp32Raw") {
 		t.Errorf("an fp32 array needs no raw helper at all:\n%s", arrayOnly)
 	}
 	none := genTSWith(t, "version: 1\nmessages:\n  m:\n    payload:\n      a: { id: 0, type: fp64 }\n      b: { id: 1, type: array, items: { type: fp64 } }\n", map[string]any{})
-	if strings.Contains(none, "_fp32") {
+	if strings.Contains(none, "_fp32") || strings.Contains(none, "fp32Raw") {
 		t.Errorf("an fp32-free schema must not name the fp32 raw channel at all:\n%s", none)
 	}
 }
@@ -2017,7 +2294,7 @@ messages:
 	}
 	// Nothing is captured, scanned or re-attached any more.
 	for _, gone := range []string{
-		"aFp32Raw", "bFp32Raw", "_fp32RawInto", "_fp32ArrayRaw", "Number.isNaN", "arrayEnd",
+		"aFp32Raw", "bFp32Raw", "fp32RawInto", "_fp32ArrayRaw", "Number.isNaN", "arrayEnd",
 	} {
 		if strings.Contains(out, gone) {
 			t.Errorf("the fp32 array companion machinery must be gone (%q):\n%s", gone, out)
@@ -2226,7 +2503,7 @@ messages:
 	// conversion pass follows the row.
 	for _, want := range []string{
 		"private _row3: BigUint64Array = _E_BigUint64Array;",
-		"const _r = new BigUint64Array(count); _t[id] = _r; this._row3 = _r;",
+		"const _r = new BigUint64Array(count); this._q3!.place(id, _r); this._row3 = _r;",
 		"const _t = this._tt; _t.typed = this._row3;\n        _t.minLo = 0; _t.minHi = 0; _t.maxLo = 4294967295; _t.maxHi = 4294967295;",
 	} {
 		if !strings.Contains(got, want) {
@@ -2808,8 +3085,12 @@ messages:
 		"private _a0E: MEElemArray = _E_Int8Array as MEElemArray;",
 		"e: MEElemArray = _E_Int8Array;",
 		"private _a0F: Float32Array = _E_Float32Array;",
-		// A matrix row's register and its gap padding.
-		"_t.push(_E_Uint32Array)",
+		// A matrix row's register and its gap padding — the latter now the element
+		// default its collector fills a gap with (generator#587). Sharing one
+		// instance is exactly what ElementSeq is for: a zero-length typed array
+		// holds nothing and cannot be grown, so it is the one gap value that may be
+		// shared (a mutable one takes FramedSeq and a factory).
+		"new ElementSeq<Uint32Array>(_t, _E_Uint32Array,",
 		// Each bulk target's initial slot.
 		"{ typed: _E_Uint8Array, minLo: 0, minHi: 0, maxLo: 0, maxHi: 0 }",
 		"{ bool: _E_Uint8Array }",

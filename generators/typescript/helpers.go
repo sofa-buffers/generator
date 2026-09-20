@@ -198,134 +198,6 @@ func blobHasNonEmptyDefault(f *ir.Field) bool {
 	return false
 }
 
-// helperUse records which module-level helpers/imports the schema's emitted
-// classes actually reference, so unused ones are not emitted.
-type helperUse struct {
-	elemEq      bool // element-wise !== compare: blob or non-Long native array with a value default
-	longArrEq   bool // (low, high) word compare: Long-backed 64-bit array with a value default
-	long        bool // any Long-backed field -> import Long from the corelib
-	countedArr  bool // count-bearing native array -> import SofabError for the over-count reject (generator#100)
-	overIdxArr  bool // count-bearing wrapper array -> import SofabError for the over-index reject (generator#142)
-	maxlenField bool // bounded string/blob (scalar or wrapper element) -> import SofabError for the over-maxlen reject (MESSAGE_SPEC §7.1)
-	narrowInt   bool // narrow integer destination (scalar or native array element) -> import SofabError for the over-width reject (MESSAGE_SPEC §7.1, generator#266)
-	fp32Raw     bool // fp32 SCALAR field -> emit _fp32Raw (the §4.6 bit-exact channel, generator#235)
-}
-
-// arrayOverIndexed reports whether an array field (recursively through nested
-// element items) is a fixed-count wrapper-sequence array (string/blob/struct/
-// union/nested-array element) — the shape whose decode emits the generator#142
-// over-index SofabError guard.
-func arrayOverIndexed(elem ir.Kind, items *ir.ArrayElem, hasCount bool) bool {
-	if hasCount && !nativeArrayElem(elem) {
-		return true
-	}
-	if elem == ir.KindArray && items != nil {
-		return arrayOverIndexed(items.Elem, items.ElemItems, items.HasCount)
-	}
-	return false
-}
-
-// arrayHasBoundedStrBlob reports whether an array field (recursively through
-// nested element items) has a string/blob element carrying a schema maxlen — the
-// shape whose decode emits the over-maxlen SofabError guard (MESSAGE_SPEC §7.1).
-func arrayHasBoundedStrBlob(elem ir.Kind, items *ir.ArrayElem, elemMaxHas bool) bool {
-	if (elem == ir.KindString || elem == ir.KindBlob) && elemMaxHas {
-		return true
-	}
-	if elem == ir.KindArray && items != nil {
-		return arrayHasBoundedStrBlob(items.Elem, items.ElemItems, items.ElemMaxHas)
-	}
-	return false
-}
-
-// arrayHasNarrowInt reports whether an array field (recursively through nested
-// element items) has a narrow-integer element — the shape whose decode emits the
-// over-width SofabError guard (MESSAGE_SPEC §7.1, generator#266).
-func arrayHasNarrowInt(elem ir.Kind, items *ir.ArrayElem) bool {
-	if ir.IsNarrow(elem) {
-		return true
-	}
-	if elem == ir.KindArray && items != nil {
-		return arrayHasNarrowInt(items.Elem, items.ElemItems)
-	}
-	return false
-}
-
-// scanHelpers walks every emitted class's fields and reports which helpers the
-// module needs. A Long-backed array with a value default needs longArrEq (Long
-// identity !== fails element-wise compare); other defaulted leaf arrays/blobs
-// take the corelib's elementsEqual.
-func (g *gen) scanHelpers(s *ir.Schema) helperUse {
-	var use helperUse
-	scan := func(fields []*ir.Field) {
-		for _, fld := range fields {
-			if blobHasNonEmptyDefault(fld) {
-				use.elemEq = true
-			}
-			if g.longBacked(fld) {
-				use.long = true
-			}
-			if fld.Kind == ir.KindArray && arrayOverIndexed(fld.Elem, fld.ElemItems, fld.HasCount) {
-				use.overIdxArr = true
-			}
-			// A bounded string/blob (scalar field or wrapper element) decodes with an
-			// over-maxlen reject that throws SofabError (MESSAGE_SPEC §7.1).
-			if (fld.Kind == ir.KindString || fld.Kind == ir.KindBlob) && fld.HasMaxlen {
-				use.maxlenField = true
-			}
-			if fld.Kind == ir.KindArray && arrayHasBoundedStrBlob(fld.Elem, fld.ElemItems, fld.ElemMaxHas) {
-				use.maxlenField = true
-			}
-			// A narrow integer destination decodes with the over-width reject, which
-			// throws SofabError (MESSAGE_SPEC §7.1, generator#266). Scalar fields and
-			// native array elements alike — nested rows reach this through their own
-			// field, so the element check follows the same recursion as the bounds
-			// above.
-			if ir.IsNarrow(fld.Kind) {
-				use.narrowInt = true
-			}
-			if fld.Kind == ir.KindArray && arrayHasNarrowInt(fld.Elem, fld.ElemItems) {
-				use.narrowInt = true
-			}
-			// The fp32 raw-bits channel (§4.6) is a SCALAR-only concern now. A JS
-			// number is a double and cannot carry an fp32 signaling NaN's payload,
-			// so a scalar keeps the four wire bytes beside the value, rendered from
-			// the 32-bit word the hook hands over. An fp32 ARRAY needs none of it:
-			// its member is a `Float32Array`, which holds the wire words themselves
-			// -- the decoder writes them through `bits` over that buffer and the
-			// encoder copies them straight back out, so the payload is bit-exact
-			// with nothing captured beside the numbers.
-			if fld.Kind == ir.KindFP32 {
-				use.fp32Raw = true
-			}
-			if fld.Kind == ir.KindArray && nativeArrayElem(fld.Elem) {
-				// A `count: N` native array decodes with the over-count reject, which
-				// throws SofabError (generator#100).
-				if fld.HasCount {
-					use.countedArr = true
-				}
-				if _, ok := g.nativeArrayDefault(fld); ok {
-					if g.longBacked(fld) {
-						use.longArrEq = true
-					} else {
-						use.elemEq = true
-					}
-				}
-			}
-		}
-	}
-	for _, key := range s.NamedOrder {
-		nt := s.Named[key]
-		if nt.Category == ir.CatStruct || nt.Category == ir.CatUnion {
-			scan(nt.Fields)
-		}
-	}
-	for _, m := range s.Messages {
-		scan(m.Fields)
-	}
-	return use
-}
-
 // emitDoc writes a TSDoc/JSDoc `/** ... */` block immediately before the
 // declaration it documents, at the given indent. Single-line text becomes
 // `/** text */`; multi-line text becomes a starred block. Any `*/` inside the
@@ -689,10 +561,10 @@ func (g *gen) bitfieldDefault(f *ir.Field) uint64 {
 }
 
 // longScalarIsDefault is the "this 64-bit scalar equals its default" test for a
-// Long-backed scalar: a (low, high) word-pair compare, as longArrEq performs per
+// Long-backed scalar: a (low, high) word-pair compare, as longElementsEqual performs per
 // element on the array side. `===` cannot serve — a Long is an object, so it
 // compares identity — and the halves are computed HERE, at generation time, so
-// the test allocates nothing per call (the array side's longArrEq(acc, [...])
+// the test allocates nothing per call (the array side's longElementsEqual(acc, [...])
 // builds its default array per evaluation; a scalar need not).
 //
 // A default the literal parser cannot place in the 64-bit domain falls back to
