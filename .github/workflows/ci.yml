@@ -167,6 +167,12 @@ jobs:
   # against the shared vectors. tests/conformance/typescript/run.sh clones + builds corelib.
   lang-typescript:
     runs-on: ubuntu-latest
+    # The formatter gate (ARCHITECTURE §12 gate 10) is optional on a box without
+    # prettier -- the suite then says loudly that it skipped it. Here it is not
+    # optional: this job installs prettier, so SOFAB_FORMAT_STRICT turns that
+    # skip into a failure.
+    env:
+      SOFAB_FORMAT_STRICT: "1"
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-go@v7
@@ -175,6 +181,12 @@ jobs:
       - uses: actions/setup-node@v7
         with:
           node-version: "24"
+      # The formatter run.sh generates with (--format=require) and checks the
+      # result against (gate 10). Skippable on a box without prettier and not
+      # here, where SOFAB_FORMAT_STRICT is set. The pin must match
+      # PRETTIER_VERSION in run.sh, which refuses any other version.
+      - name: prettier (formats generated TypeScript)
+        run: npm install -g prettier@3.9.8
       - uses: ./.github/actions/corelib-refs
       - name: TypeScript backend — build, typecheck, round-trip, conformance
         run: ./tests/conformance/typescript/run.sh

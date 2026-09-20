@@ -10,6 +10,11 @@ set -eu
 . "$(dirname "$0")/../lib/corelib.sh"
 # Shared MAX_SIZE fill check (ARCHITECTURE §9.6).
 . "$(dirname "$0")/../lib/maxsize_fill.sh"
+# Shared canonical-formatter check (ARCHITECTURE §12 gate 10). Also what keeps
+# this suite honest on a box without prettier.
+. "$(dirname "$0")/../lib/check_format.sh"
+# Runs the backend's Go test package unfiltered against the real toolchain.
+. "$(dirname "$0")/../lib/backend_tests.sh"
 
 ROOT=$(cd "$(dirname "$0")/../../.." && pwd)
 CORELIB="${1:-${SOFAB_TS_CORELIB:-}}"
@@ -24,6 +29,49 @@ if [ -z "$CORELIB" ]; then
 fi
 echo "==> corelib-ts: $CORELIB"
 [ -f "$CORELIB/dist/index.js" ] || { echo "FAIL: corelib-ts not built (no dist/)"; exit 1; }
+
+# The formatter generated TypeScript is held to (ARCHITECTURE §12 gate 10).
+# prettier's output changes between releases, so the version is pinned here and
+# the lang-typescript job installs that one.
+PRETTIER_VERSION=3.9.8
+PRETTIER="${SOFAB_PRETTIER:-prettier}"
+# Non-empty only on a box without prettier: it is what the format gate and the
+# backend-test runner below key their skip off.
+PRETTIER_ABSENT=""
+_prettier_have=$("$PRETTIER" --version 2>/dev/null || true)
+if [ -z "$_prettier_have" ]; then
+    # prettier is NOT part of the TypeScript toolchain -- having node, npm and
+    # tsc says nothing about having it -- and this suite must be runnable on a
+    # box with none of the external formatters. Nothing is refused here: the
+    # generations below switch to --format=off, check_format and the
+    # prettier-gated backend tests print the loud skip banner, and everything
+    # else still runs. SOFAB_FORMAT_STRICT=1 turns those skips into failures;
+    # the lang-typescript job installs prettier and sets it, so nothing is
+    # optional there.
+    PRETTIER_ABSENT=prettier
+elif [ "$_prettier_have" != "$PRETTIER_VERSION" ]; then
+    # Installed, but not the pinned one: a misconfiguration, not an absent tool,
+    # and not skippable -- prettier's layout moves between releases, so another
+    # version answers another question.
+    echo "FAIL: this suite formats generated code with prettier $PRETTIER_VERSION, but '$PRETTIER --version' says '$_prettier_have'." >&2
+    echo "      npm install -g prettier@$PRETTIER_VERSION, or point SOFAB_PRETTIER at that binary." >&2
+    exit 1
+else
+    # sofabgen resolves `prettier` off PATH and the gate at the end checks the
+    # result with $PRETTIER. Since prettier's formatting changes between
+    # releases, the two have to be the SAME binary: put $PRETTIER's directory
+    # first rather than trust that whatever `prettier` resolves to elsewhere
+    # happens to be the pinned one.
+    PRETTIER=$(command -v "$PRETTIER")
+    PATH="$(dirname "$PRETTIER"):$PATH"
+    export PATH PRETTIER
+fi
+
+# What every `sofabgen` run below passes as its --format argument:
+# --format=require when prettier is there, so a format pass that stopped
+# reaching a file fails the generation rather than the gate at the end, and
+# --format=off when it is not (tests/conformance/lib/check_format.sh).
+FMT=$(format_flag typescript)
 
 # Every typecheck of generated code runs under the checks a strict consumer
 # turns on (ARCHITECTURE §12 gate 9). tsc has no warning class: these make the
@@ -71,7 +119,7 @@ YAML
 # gen <def> <outdir> [config]  — config defaults to the shared $WORK/cfg.yaml.
 # The int64-mode loop MUST pass its own config: without it every mode project is
 # generated with the default (bigint) and the mode comparison is vacuous.
-gen() { ( cd "$ROOT" && go run ./cmd/sofabgen --config "${3:-$WORK/cfg.yaml}" --lang typescript --in "$1" --out "$2" ); }
+gen() { ( cd "$ROOT" && go run ./cmd/sofabgen --config "${3:-$WORK/cfg.yaml}" "$FMT" --lang typescript --in "$1" --out "$2" ); }
 
 # Instantiate the differential decode harness into a generated project. Defined
 # here rather than beside its first heavy use: the int64 legs above the streaming
@@ -476,7 +524,7 @@ cat > "$WORK/cfg_lim.yaml" <<'YAML'
 generic: { emit: project, max_dyn_array_count: 4 }
 targets: { typescript: {} }
 YAML
-( cd "$ROOT" && go run ./cmd/sofabgen --config "$WORK/cfg_lim.yaml" --lang typescript --in "$WORK/dyn.yaml" --out "$WORK/lim" )
+( cd "$ROOT" && go run ./cmd/sofabgen --config "$WORK/cfg_lim.yaml" "$FMT" --lang typescript --in "$WORK/dyn.yaml" --out "$WORK/lim" )
 gen "$WORK/dyn.yaml" "$WORK/nolim"
 ln -s "$WORK/ex/node_modules" "$WORK/lim/node_modules"
 ln -s "$WORK/ex/node_modules" "$WORK/nolim/node_modules"
@@ -597,7 +645,7 @@ cat > "$WORK/cfg_wlim.yaml" <<'YAML'
 generic: { emit: project, max_dyn_string_len: 4 }
 targets: { typescript: {} }
 YAML
-( cd "$ROOT" && go run ./cmd/sofabgen --config "$WORK/cfg_wlim.yaml" --lang typescript --in "$WORK/wrap.yaml" --out "$WORK/wlim" )
+( cd "$ROOT" && go run ./cmd/sofabgen --config "$WORK/cfg_wlim.yaml" "$FMT" --lang typescript --in "$WORK/wrap.yaml" --out "$WORK/wlim" )
 gen "$WORK/wrap.yaml" "$WORK/wnolim"
 ln -s "$WORK/ex/node_modules" "$WORK/wlim/node_modules"
 ln -s "$WORK/ex/node_modules" "$WORK/wnolim/node_modules"
@@ -1068,7 +1116,7 @@ echo "==> declared-width reject OK"
 echo "==> sequence_growth: a wrapper array grows to its highest id, and the index is the bound"
 printf 'version: 1\nmessages:\n' > "$WORK/growth.yaml"
 python3 "$ROOT/tests/conformance/lib/check_growth.py" --emit-schema >> "$WORK/growth.yaml"
-( cd "$ROOT" && go run ./cmd/sofabgen --config "$WORK/cfg_lim.yaml" --lang typescript --in "$WORK/growth.yaml" --out "$WORK/growth" )
+( cd "$ROOT" && go run ./cmd/sofabgen --config "$WORK/cfg_lim.yaml" "$FMT" --lang typescript --in "$WORK/growth.yaml" --out "$WORK/growth" )
 ln -s "$WORK/ex/node_modules" "$WORK/growth/node_modules"
 # --cap must equal the max_dyn_array_count the config above generated with:
 # the cases' indices are offsets onto it, so a mismatch moves the boundary.
@@ -1184,5 +1232,18 @@ for cfg in $(find "$WORK" -name tsconfig.json -not -path '*/node_modules/*' -not
 done
 [ "$_total" -gt 0 ] || { echo "FAIL: the tsc sweep found no generated project"; exit 1; }
 echo "==> tsc: $_total projects clean ($_swept checked only by the sweep)"
+
+# The backend's own Go tests, unfiltered, with the toolchain present: the ones
+# gated on a real prettier have nothing to drive without it, and $PRETTIER_ABSENT
+# is what lets those -- and only those -- skip (tests/conformance/lib/
+# backend_tests.sh). This package needs no corelib; the variable is passed for
+# the helper's signature.
+run_backend_tests generators/typescript SOFAB_TS_CORELIB "$CORELIB" "$PRETTIER_ABSENT"
+
+# Every generated .ts in the run against prettier (ARCHITECTURE §12 gate 10).
+# The whole work dir, so a project a later block adds is covered the day it is
+# written; the driver picks out the files sofabgen wrote and leaves this suite's
+# own hand-written .ts fixtures alone.
+check_format typescript "$WORK"
 
 echo "PASS"
