@@ -3239,18 +3239,20 @@ backend:
     - **Zig refuses in several different ways** — an error return from
       `fixlenBegin`, the sticky `self.lim` in the payload callback, a break to the
       dead scope in `sequenceBegin`, an early return from `arrayBegin` — so its
-      helper returns the *test* and the *category* and each site spells its own
-      refusal. For an **unbounded array's index** the *test* is corelib-zig's
-      (corelib-zig#81): the cap is an argument to `arrays.allocNCapped` /
-      `growCapped` / `setElemCapped`, and each site only translates that call's
-      `error.LimitExceeded` into its own refusal — so generated code emits no
-      index test at all, including the one that used to sit in `fixlenBegin`
-      beside the element length cap ("one implementation, wherever it runs"). What
-      stays in `fixlenBegin` is the element **length** cap, which has no corelib
-      call of its own at that word and must still be decided there rather than at
-      payload completion. The helper still decides which bound applies, because a
-      schema `count` is unchanged — INVALID, compared in generated code, and routed
-      to the *uncapped* entry points.
+      helper returns the *category* and each site spells its own refusal. The
+      *test* itself is corelib-zig's for **both** bounds (corelib-zig#81, then
+      generator#587): the number and the category travel together as a `comptime
+      arrays.Bound` — `.{ .schema = n }` or `.{ .receiver = n }` — into the call
+      the decode path already makes (`arrays.placeElem`, `reserveElem`,
+      `reserveRow`, `allocCounted`), and each site only translates that call's
+      `error.InvalidMessage` / `error.LimitExceeded` into its own refusal. Because
+      the bound is `comptime`, `.{ .schema = 5 }` folds to the same comparison
+      against the same constant the emitted `if (id >= 5)` produced, which is why
+      the move is free on this maxspeed target. What stays in `fixlenBegin` is the
+      element **length** bound, which has no corelib call of its own at that word,
+      beside a call to `arrays.overIndex` — exposed on its own for exactly that
+      site, so the index verdict is still taken at the length word without the rule
+      being stated twice.
 
     **Three backends could not take it generator-side at all**, because their
     gap-fill is not generated: **Go**, **Dart** and pure **C++** hand the whole
@@ -3345,7 +3347,7 @@ what remains is the arithmetic of the design rather than a hole in it.
 Every backend that admits an unbounded array grows the container to `id + 1` under
 the same cap, in generated code (Rust, C#, Java, Kotlin, Python, TypeScript) or in
 the corelib (`for len(*s.out) <= int(id)` in corelib-go, `rcap`-bounded collectors
-in corelib-dart, `growCapped`/`setElemCapped` in corelib-zig, `MessageSeq`/
+in corelib-dart, `reserveElem`/`placeElem` in corelib-zig, `MessageSeq`/
 `StringSeq` in corelib-cpp); the statically bounded profiles (`c`, `cpp` with
 `corelib: c-cpp`, `rust` with `rs-no-std`) reject the field at schema validation and
 never reach it. Go was measured as well as read, and amplifies *more* than Rust on
@@ -3612,7 +3614,7 @@ never a number the corelib knows:
 | target | compared in the corelib, on this existing call | compared in generated code |
 |---|---|---|
 | **C++** (`corelib: cpp`) | all three kinds, on the `…Capped` twin of the call that carries the schema bound — `readStringCapped`/`readBlobCapped`/`readArrayCapped` — plus `indexCap`/`elemLenCap` on the `StringSeq`/`BlobSeq` collectors and `dynCap` (element id) / `rowDynCap` (a native row's element count) on `MessageSeq` | one shape only: the element index of an array of wrapper **rows**, which a *generated* placer gathers (above) |
-| **Zig** | array counts and wrapper element indices: `arrays.allocNCapped` / `growCapped` / `setElemCapped`; and string and blob lengths, in `PayloadAcc.takeCapped` — the bind the payload passes through, compared at the announced length before a byte is copied or appended (generator#432) | string and blob lengths a second time, but only as the length-word *verdict* in the generated `fixlenBegin` — what keeps a truncated over-cap header LimitExceeded rather than INCOMPLETE (#438); no generated arithmetic is left in the payload arm |
+| **Zig** | array counts and wrapper element indices: `arrays.allocCounted` / `reserveElem` / `reserveRow` / `placeElem`, each taking the bound as a `comptime arrays.Bound` that also names the verdict; and string and blob lengths, in `PayloadAcc.takeCapped` — the bind the payload passes through, compared at the announced length before a byte is copied or appended (generator#432) | string and blob lengths a second time, but only as the length-word *verdict* in the generated `fixlenBegin` — what keeps a truncated over-cap header LimitExceeded rather than INCOMPLETE (#438); no generated arithmetic is left in the payload arm |
 | **Go**, **Dart** | wrapper arrays — the element index, the element length and a matrix **row**'s own element count — as the collector's receiver-cap constructor arguments (`sofab.Caps`; `rcap`/`relemMax`/`rowCap`), beside the `sofab.Bounds` carrying the schema's | scalar string/blob lengths and native array counts: Go in the generated `FixlenBegin`/`ArrayBegin` — the accumulator is one callback too late, above; Dart in the one header call that also returns the field's destination (`onString`/`onBlob`/`on…Array`), before it is sized |
 | **Java** | string and blob lengths, in `PayloadAcc` — `checkStringLength`/`checkBlobLength` from the generated `fixlenBegin`, and the same routine again inside the `acc.string`/`acc.blob` the payload passes through; plus a wrapper **row**'s element index, on the `Seq.reserveRow*` call that places the row — §9.5.3 | native array counts, a matrix row's own element count, and a **flat** wrapper array's element index, whose gap fill is generated code |
 | **Kotlin** | string and blob lengths, in `PayloadAcc` — `checkStringLength`/`checkBlobLength` from the generated `fixlenBegin`, and the same routine again inside the `acc.string`/`acc.blob` the payload passes through; plus a wrapper **row**'s element index — a native matrix row and an array-of-arrays row alike — on the `Seq.reserveRow*` / `Seq.reserveRowList` call that reserves the row before the outer list grows — §9.5.4 | native array counts, a matrix row's own element count, and a **flat** wrapper array's element index, whose gap fill is generated code |
@@ -3650,7 +3652,7 @@ element's byte **length** was in the same position, bounded by the decoder-wide 
 and nothing else, and now rides the collector beside the index.
 
 A deliberate split *within* one port is the normal case, not an anomaly: Zig's
-arrays go one way and its strings the other because `arrays.allocNCapped` exists at
+arrays go one way and its strings the other because `arrays.allocCounted` exists at
 the array's count header and nothing equivalent exists at a string's length word.
 Inventing a new helper purely to hold a check is what this design rejects — it
 costs 1–2.5 percentage points of decode and buys nothing that the guard in place
@@ -4133,7 +4135,7 @@ CORELIB_PLAN §6.2.1 (doc PR #86) settles that a corelib **MAY** take a receiver
 as an argument and run the comparison itself, and that the cheap way to do it is to
 hang the number on a call generated code already makes — the compare then folds in
 beside a bound test already there. Every other target has such a call: C++
-`readString`/`readBlob`/`readArray`, Zig `arrays.allocN`/`grow`/`setElem`, Go's, Dart's and
+`readString`/`readBlob`/`readArray`, Zig `arrays.allocCounted`/`reserveElem`/`placeElem`, Go's, Dart's and
 TypeScript's collectors, Java's, Kotlin's and C#'s `PayloadAcc`, Python's decode
 entry — see the table in §9.5 for which kinds each one carries.
 

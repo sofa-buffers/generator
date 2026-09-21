@@ -215,15 +215,32 @@ messages:
 	}
 	m := string(files[0].Content)
 	for _, want := range []string{
-		// The count:N over-index guard (#142) wraps the maxlen:16 over-length
-		// element reject (MESSAGE_SPEC §7.1); both flag self.inv before sofab.arrays.setElem grows.
-		`.root_bs => if (id >= 4) { self.inv = true; } else if (total > 16) { self.inv = true; } else { const chunk = self._takeStr(total, offset, _chunk) orelse return; sofab.arrays.setElem`, // string element: strict UTF-8 inside the string bind
-		`.root_bb => if (id >= 3) { self.inv = true; } else if (total > 16) { self.inv = true; } else { const chunk = self._take(total, offset, _chunk) orelse return; sofab.arrays.setElem`,    // blob element: opaque, stored verbatim
-		".root_bp => blk: {\n                if (id >= 2) { self.inv = true; break :blk .dead; }\n",                                                                                             // bounded struct: rejected BEFORE the gap-fill grows
+		// The count:N over-index bound (#142) travels INTO the placement as a
+		// comptime .{ .schema = N }, so the comparison is the corelib's and only
+		// the refusal is emitted; the maxlen:16 over-length element reject
+		// (MESSAGE_SPEC §7.1) stays a generated guard in front of it. Both flag
+		// self.inv, and both decide before the destination grows.
+		`.root_bs => if (total > 16) { self.inv = true; } else { const chunk = self._takeStr(total, offset, _chunk) orelse return; sofab.arrays.placeElem([]const u8, .{ .schema = 4 }, self.alloc, &(self.m.bs), id, "", chunk) catch { self.inv = true; }; },`, // string element: strict UTF-8 inside the string bind
+		`.root_bb => if (total > 16) { self.inv = true; } else { const chunk = self._take(total, offset, _chunk) orelse return; sofab.arrays.placeElem([]const u8, .{ .schema = 3 }, self.alloc, &(self.m.bb), id, "", chunk) catch { self.inv = true; }; },`,    // blob element: opaque, stored verbatim
+		// bounded struct: reserveElem bounds the index BEFORE it grows, and `id`
+		// reaches it unincremented -- forming id + 1 in front of the bound is
+		// exactly what §6.2.1 rules out.
+		`.root_bp => blk: { if (!(sofab.arrays.reserveElem(MBpElem, .{ .schema = 2 }, self.alloc, &(self.m.bp), id, .{}) catch { self.inv = true; break :blk .dead; })) break :blk .dead;`,
+		// and the same bound is still latched at the element's LENGTH WORD, where
+		// §5.2 wants the verdict for a message truncated right after it.
+		`.root_bs => { try sofab.arrays.overIndex(.{ .schema = 4 }, id); if (total > 16) return sofab.Error.InvalidMessage; },`,
 		`if (v.inv) return error.InvalidMessage;`, // surfaced as INVALID
 	} {
 		if !containsCode(m, want) {
 			t.Errorf("message.zig missing over-index guard %q", want)
+		}
+	}
+	// The comparison has ONE implementation and it is not here (§6.2.1,
+	// ARCHITECTURE §8): a schema count is a number the generated layer passes,
+	// never a test it spells out.
+	for _, gone := range []string{"id >= 4", "id >= 3", "id >= 2"} {
+		if containsCode(m, gone) {
+			t.Errorf("the schema index bound must ride the corelib call, not be emitted as %q:\n%s", gone, m)
 		}
 	}
 	// The dynamic string array is bounded too, and at the same point -- what
@@ -231,12 +248,12 @@ messages:
 	// highest INDEX, so the receiver cap binds the index (self.lim, generator#387)
 	// where a count:N binds it as INVALID; the element's own length is capped
 	// beside it (§9.5, generator#385). BOTH caps are handed to a corelib call --
-	// the index to setElemCapped, which refuses before it grows the destination,
+	// the index to placeElem, which refuses before it grows the destination,
 	// the length to _takeCapped, which refuses before it buffers a byte
 	// (CORELIB_PLAN §6.2.1, generator#432) -- so no guard is emitted in front of
 	// either. Its bind is the string one, which decides strict UTF-8 (issue
 	// #85) before the element is materialized.
-	if !containsCode(m, `.root_ds => { const chunk = self._takeStrCapped(total, offset, _chunk, max_dyn_string_len) orelse return; sofab.arrays.setElemCapped([]const u8, self.alloc, &(self.m.ds), id, "", chunk, max_dyn_array_count) catch { self.lim = true; }; },`) {
+	if !containsCode(m, `.root_ds => { const chunk = self._takeStrCapped(total, offset, _chunk, max_dyn_string_len) orelse return; sofab.arrays.placeElem([]const u8, .{ .receiver = max_dyn_array_count }, self.alloc, &(self.m.ds), id, "", chunk) catch { self.lim = true; }; },`) {
 		t.Errorf("a dynamic wrapper array must cap its element index:\n%s", m)
 	}
 	// And the rule has ONE implementation (§6.2.1): with the cap passed in, the
@@ -276,7 +293,7 @@ messages:
 		// the schema-bounded string bind (strict UTF-8 inside it), then the
 		// placement -- which carries the array's receiver cap on the element
 		// index as an argument (CORELIB_PLAN §6.2.1).
-		`if (total > 5) { self.inv = true; } else { const chunk = self._takeStr(total, offset, _chunk) orelse return; sofab.arrays.setElemCapped([]const u8, self.alloc, &(self.m.ws), id, "", chunk, max_dyn_array_count) catch { self.lim = true; }; }`,
+		`if (total > 5) { self.inv = true; } else { const chunk = self._takeStr(total, offset, _chunk) orelse return; sofab.arrays.placeElem([]const u8, .{ .receiver = max_dyn_array_count }, self.alloc, &(self.m.ws), id, "", chunk) catch { self.lim = true; }; }`,
 		// Surfaced as INVALID.
 		`if (v.inv) return error.InvalidMessage;`,
 	} {
@@ -485,10 +502,10 @@ messages:
 		"const max_dyn_string_len: usize = 4096;",
 		// Unbounded fields are guarded at the count/length header, before the
 		// field's storage is taken.
-		"1 => if (kind == .unsigned) { self.m.arr = sofab.arrays.allocNCapped(u64, self.alloc, count, max_dyn_array_count) catch { self.lim = true; self.an = 0; return; }; },",
+		"1 => if (kind == .unsigned) { self.m.arr = sofab.arrays.allocCounted(u64, .{ .receiver = max_dyn_array_count }, self.alloc, count) catch { self.lim = true; self.an = 0; return; }; },",
 		"0 => { const chunk = self._takeStrCapped(total, offset, _chunk, max_dyn_string_len) orelse return; self.m.s = chunk; },",
 		// The length cap rides the corelib bind for the same reason the count cap
-		// rides allocNCapped: it is compared at the announced length, before a byte
+		// rides allocCounted: it is compared at the announced length, before a byte
 		// is copied or appended, and generated code emits no test of its own
 		// (CORELIB_PLAN §6.2.1, generator#432).
 		"return self.acc.takeCapped(self.alloc, total, offset, chunk, false, cap) catch |e| {",
@@ -502,10 +519,10 @@ messages:
 		// generator#188 fill guard (a bare scalar at this array id is skipped).
 		"2 => { if (self.afill != 0) { self.afill -= 1; if (value < -2147483648 or value > 2147483647) { self.inv = true; return; } self.m.barr.push(@intCast(value), &self.inv); } },",
 		// The cap bounds the untrusted wire count INSIDE the allocation call --
-		// allocNCapped refuses above it and allocates exactly it below
+		// allocCounted refuses above it and allocates exactly it below
 		// (CORELIB_PLAN §6.2.1, ARCHITECTURE §9.5 shape A). One comparison, in
 		// the corelib, on a call the decode path already made.
-		"self.m.arr = sofab.arrays.allocNCapped(u64, self.alloc, count, max_dyn_array_count)",
+		"self.m.arr = sofab.arrays.allocCounted(u64, .{ .receiver = max_dyn_array_count }, self.alloc, count)",
 	} {
 		if !containsCode(m, want) {
 			t.Errorf("limits message.zig missing %q", want)
@@ -515,7 +532,7 @@ messages:
 		t.Error("inert blob limit must not be emitted (no unbounded blob)")
 	}
 	// Exactly the two unbounded fields are guarded (bounded barr is not): the
-	// array at allocNCapped, the string length in its bind. The length cap's
+	// array at allocCounted, the string length in its bind. The length cap's
 	// LimitExceeded maps to lim in both bind forms, _takeCapped (blob) and
 	// _takeStrCapped (string), hence three sites for two guards.
 	if got := countCode(m, "self.lim = true"); got != 3 {
@@ -552,7 +569,7 @@ messages:
 	// The cap is what bounds the count, so the allocation is exact with the
 	// default cap exactly as with a configured one -- and the capped reservation
 	// is gone entirely (§9.5, shape A).
-	if !containsCode(plain, "sofab.arrays.allocNCapped(u64, self.alloc, count, max_dyn_array_count)") || containsCode(plain, "allocCapped") {
+	if !containsCode(plain, "sofab.arrays.allocCounted(u64, .{ .receiver = max_dyn_array_count }, self.alloc, count)") || containsCode(plain, "allocCapped") {
 		t.Error("no-config output must allocate the checked count exactly")
 	}
 }
@@ -1160,17 +1177,17 @@ messages:
 // element id discards the earlier one -- while a re-opened STRUCT element
 // continues its scope and merges, retaining children whose ids do not recur.
 //
-// `grow` default-fills only UP TO the index, so before the fix a re-opened row
-// found the previous occurrence's elements still in place and wrote on top of
+// The growth default-fills only UP TO the index, so before the fix a re-opened
+// row found the previous occurrence's elements still in place and wrote on top of
 // them. Measured on `matstr: array<array<string>>` carrying element id 0 twice --
 // ["a","z"] then ["y"] -- as [["y", "z"]] where §7.4 wants [["y"]], and one level
 // down on array<array<array<u32>>> as [[[9], [3, 4]]] where it wants [[[9]]].
 //
 // The whole arm is asserted, so the ORDER is pinned with it: the reset may only
-// follow the over-index reject's `break` (in front of it, a refused element id
-// would wipe a valid earlier row -- the §7.3 interaction that turns a loud
-// failure into silent data loss) and the grow (in front of that, it would write
-// to a slot that does not exist yet).
+// follow the reservation -- which refuses an over-index element before it grows,
+// so a refused element id cannot wipe a valid earlier row (the §7.3 interaction
+// that turns a loud failure into silent data loss) and the slot it writes to
+// exists.
 func TestZigRepeatedWrapperRowIdReplaces(t *testing.T) {
 	s := buildSchema(t, `
 version: 1
@@ -1186,9 +1203,9 @@ messages:
 	}
 	m := string(files[0].Content)
 
-	// The WRAPPER row: reject, grow, record the index, then clear the row.
-	want := "                if (id >= 2) { self.inv = true; break :blk .dead; }\n" +
-		"                if (!sofab.arrays.grow([]const []const u8, self.alloc, &(self.m.matstr), @as(usize, id) + 1, &.{})) break :blk .dead;\n" +
+	// The WRAPPER row: reserve (which rejects, then grows), record the index,
+	// then clear the row.
+	want := "                if (!(sofab.arrays.reserveElem([]const []const u8, .{ .schema = 2 }, self.alloc, &(self.m.matstr), id, &.{}) catch { self.inv = true; break :blk .dead; })) break :blk .dead;\n" +
 		"                self.ei_root_matstr = id;\n" +
 		"                sofab.arrays.at(self.m.matstr, @as(usize, id)).* = &.{};\n" +
 		"                break :blk .root_matstr_e;"
@@ -1225,12 +1242,16 @@ messages:
 
 	for _, want := range []string{
 		// placement, not append -- and the gap-fill that precedes it
-		"                if (!sofab.arrays.grow(VecObjsElem, self.alloc, &(self.m.objs), @as(usize, id) + 1, .{})) break :blk .dead;\n                self.ei_root_objs = id;\n                break :blk .root_objs_e;",
+		"                if (!(sofab.arrays.reserveElem(VecObjsElem, .{ .schema = 4 }, self.alloc, &(self.m.objs), id, .{}) catch { self.inv = true; break :blk .dead; })) break :blk .dead;\n                self.ei_root_objs = id;\n                break :blk .root_objs_e;",
 		// the child stores address that element, never the last appended one
 		"sofab.arrays.at(self.m.objs, self.ei_root_objs).k = @intCast(value); },",
-		// the cap bound still rejects an out-of-range element id, which also
-		// bounds the gap-fill above
-		"                if (id >= 4) { self.inv = true; break :blk .dead; }",
+		// the schema bound still rejects an out-of-range element id, which also
+		// bounds the gap-fill above -- it rides the reservation as a comptime
+		// .{ .schema = 4 } and is decided before `id + 1` is ever formed
+		// (CORELIB_PLAN §6.2.1), which is why the call takes `id` itself
+		"self.alloc, &(self.m.objs), id, .{})",
+		// the unbounded twin takes the other category, at the same position
+		"sofab.arrays.reserveElem(VecDynElem, .{ .receiver = max_dyn_array_count }, self.alloc, &(self.m.dyn), id, .{})",
 	} {
 		if !containsCode(m, want) {
 			t.Errorf("message.zig missing %q:\n%s", want, m)
@@ -1241,7 +1262,7 @@ messages:
 		t.Errorf("a wrapper element must not be appended id-blind:\n%s", m)
 	}
 	// No fill-to-N survives, for either kind: `count` never adds elements.
-	if containsCode(m, "&(self.m.objs), 4") || containsCode(m, "=> _ = sofab.arrays.grow") {
+	if containsCode(m, "&(self.m.objs), 4") || containsCode(m, "=> _ = sofab.arrays.reserveElem") {
 		t.Errorf("a count:N wrapper array must not be default-filled to N:\n%s", m)
 	}
 }
@@ -1270,7 +1291,14 @@ messages:
 	for _, want := range []string{
 		// The row is placed at its element id, after the gap-fill, and the index is
 		// recorded so the element stores address THAT row.
-		".root_mat => if (kind == .unsigned) if (id >= 4) { self.inv = true; self.an = 0; } else if (count > 4) { self.inv = true; self.an = 0; } else { self.ei_root_mat = id; if (sofab.arrays.grow([]const u32, self.alloc, &(self.m.mat), @as(usize, id) + 1, &.{})) { sofab.arrays.at(self.m.mat, id).* = sofab.arrays.allocN(u32, self.alloc, count); } },",
+		// One call: the row INDEX is bounded, then the row's own COUNT, then the
+		// outer slice grows to id + 1 and the row is sized at exactly that count.
+		// The order is normative and it is now the corelib's (CORELIB_PLAN §7.2
+		// item 8); what stays here is the refusal and the index register.
+		".root_mat => if (kind == .unsigned) { sofab.arrays.reserveRow(u32, .{ .schema = 4 }, .{ .schema = 4 }, self.alloc, &(self.m.mat), id, count) catch { self.inv = true; self.an = 0; return; }; self.ei_root_mat = id; },",
+		// the unbounded twin: the same call, both bounds in the other category,
+		// so the refusal is LimitExceeded and never INVALID (§6.2.1)
+		".root_dyn => if (kind == .fp32) { sofab.arrays.reserveRow(f32, .{ .receiver = max_dyn_array_count }, .{ .receiver = max_dyn_array_count }, self.alloc, &(self.m.dyn), id, count) catch { self.lim = true; self.an = 0; return; }; self.ei_root_dyn = id; },",
 		"self.ei_root_mat < self.m.mat.len) sofab.arrays.putGrowing(sofab.arrays.at(self.m.mat, self.ei_root_mat), self.alloc, &self.ai, self.an,",
 		// The fp row collector is the same shape.
 		"if (self.ei_root_dyn < self.m.dyn.len) sofab.arrays.putGrowing(sofab.arrays.at(self.m.dyn, self.ei_root_dyn), self.alloc, &self.ai, self.an, value)",
@@ -1741,7 +1769,12 @@ messages:
 		!containsCode(m, "1 => if (total > 4) return sofab.Error.InvalidMessage,") {
 		t.Error("a scalar blob maxlen must be latched under .blob")
 	}
-	if !containsCode(m, ".root_sa => { if (id >= 3) return sofab.Error.InvalidMessage; if (total > 6) return sofab.Error.InvalidMessage; },") {
+	// The index bound is the corelib's comparison, called here rather than
+	// restated: overIndex is exposed on its own for exactly this site, which has
+	// no container operation to ride and still has to take the verdict at the
+	// length word. The element maxlen follows it, and stays a generated test --
+	// it has no corelib call at this word at all (#438).
+	if !containsCode(m, ".root_sa => { try sofab.arrays.overIndex(.{ .schema = 3 }, id); if (total > 6) return sofab.Error.InvalidMessage; },") {
 		t.Error("a wrapper element must latch over-index then element maxlen")
 	}
 	if countCode(m, "total > 8") < 2 {
@@ -1781,17 +1814,17 @@ messages:
 	for _, want := range []string{
 		// Schema-unbounded: the cap rides the allocation call, which decides it
 		// before it allocates (CORELIB_PLAN §6.2.1).
-		"self.m.dyn = sofab.arrays.allocNCapped(u32, self.alloc, count, max_dyn_array_count) catch { self.lim = true; self.an = 0; return; };",
-		"self.m.fps = sofab.arrays.allocNCapped(f32, self.alloc, count, max_dyn_array_count)",
+		"self.m.dyn = sofab.arrays.allocCounted(u32, .{ .receiver = max_dyn_array_count }, self.alloc, count) catch { self.lim = true; self.an = 0; return; };",
+		"self.m.fps = sofab.arrays.allocCounted(f32, .{ .receiver = max_dyn_array_count }, self.alloc, count)",
 		// A count:N field is INLINE storage: never allocated, never grown, and so
 		// untouched by this -- it clears at the header and pushes with a capacity
 		// check, exactly as before.
 		"if (count > 8) { self.inv = true; return; } self.m.bnd.clear();",
 		"self.m.bnd.push(@intCast(value), &self.inv)",
 		// A ROW: its id first, then its own element count -- two different bounds,
-		// the second of which the row did not have.
-		"if (id >= 3) { self.inv = true; self.an = 0; } else if (count > 4) { self.inv = true; self.an = 0; }",
-		"sofab.arrays.at(self.m.mat, id).* = sofab.arrays.allocN(u32, self.alloc, count);",
+		// carried as two separate comptime arguments in that order, and both
+		// decided before anything is sized.
+		"sofab.arrays.reserveRow(u32, .{ .schema = 3 }, .{ .schema = 4 }, self.alloc, &(self.m.mat), id, count) catch { self.inv = true; self.an = 0; return; };",
 	} {
 		if !containsCode(m, want) {
 			t.Errorf("message.zig missing %q:\n%s", want, m)
@@ -1810,11 +1843,11 @@ messages:
 // gap filling makes the array's length its highest present id, so two delivered
 // elements can be an arbitrarily large slice.
 //
-// The comparison itself is the corelib's: the cap is passed to the helper the
-// decode path already calls at that index -- setElemCapped for a string/blob
-// element, growCapped for a struct element and for a native matrix row -- which
-// refuses before it extends the destination (CORELIB_PLAN §6.2.1, "a corelib MAY
-// take a limit as an argument and perform the check itself"). Generated code
+// The comparison itself is the corelib's: the bound is passed to the helper the
+// decode path already calls at that index -- placeElem for a string/blob
+// element, reserveElem for a struct element, reserveRow for a native matrix row
+// -- which refuses before it extends the destination (CORELIB_PLAN §6.2.1, "a
+// corelib MAY take a limit as an argument and perform the check itself"). Generated code
 // therefore emits NO index guard of its own for an unbounded array: §6.2.1's
 // "one implementation, wherever it runs" makes a second test at the same index a
 // defect, not belt and braces.
@@ -1850,7 +1883,7 @@ messages:
 		// element LENGTH cap alone, and it is here for the VERDICT -- decided at
 		// the length word so a message truncated right after it is LimitExceeded
 		// rather than INCOMPLETE (#438, TestZigDynLenCapAtLengthWord). The index
-		// cap that used to sit in front of it has moved into setElemCapped below.
+		// cap that used to sit in front of it has moved into placeElem below.
 		".root_dstrs => { if (total > max_dyn_string_len) return sofab.Error.LimitExceeded; },",
 		".root_dblbs => { if (total > max_dyn_blob_len) return sofab.Error.LimitExceeded; },",
 		// the payload callback: BOTH caps go into a corelib call, and each refusal
@@ -1858,15 +1891,15 @@ messages:
 		// payload it refuses is never buffered even when the callback is reached
 		// without the length-word hook in front of it (generator#432); the index
 		// cap rides the placement.
-		`.root_dstrs => { const chunk = self._takeStrCapped(total, offset, _chunk, max_dyn_string_len) orelse return; sofab.arrays.setElemCapped([]const u8, self.alloc, &(self.m.dstrs), id, "", chunk, max_dyn_array_count) catch { self.lim = true; }; },`,
-		`.root_dblbs => { const chunk = self._takeCapped(total, offset, _chunk, max_dyn_blob_len) orelse return; sofab.arrays.setElemCapped([]const u8, self.alloc, &(self.m.dblbs), id, "", chunk, max_dyn_array_count) catch { self.lim = true; }; },`,
-		// sequenceBegin: the cap goes into the growth, and the refusal breaks to
-		// the dead scope.
-		"if (!(sofab.arrays.growCapped(MDobjsElem, self.alloc, &(self.m.dobjs), @as(usize, id) + 1, .{}, max_dyn_array_count) catch { self.lim = true; break :blk .dead; })) break :blk .dead;",
-		// a native matrix ROW: its id is the outer array's length, bounded by
-		// growCapped before the outer slice is extended, and its own element count
-		// by allocNCapped before the row is sized (#386).
-		".root_dmat => if (kind == .unsigned) { self.ei_root_dmat = id; if (sofab.arrays.growCapped([]const u32, self.alloc, &(self.m.dmat), @as(usize, id) + 1, &.{}, max_dyn_array_count) catch { self.lim = true; self.an = 0; return; }) { sofab.arrays.at(self.m.dmat, id).* = sofab.arrays.allocNCapped(u32, self.alloc, count, max_dyn_array_count) catch { self.lim = true; self.an = 0; return; }; } },",
+		`.root_dstrs => { const chunk = self._takeStrCapped(total, offset, _chunk, max_dyn_string_len) orelse return; sofab.arrays.placeElem([]const u8, .{ .receiver = max_dyn_array_count }, self.alloc, &(self.m.dstrs), id, "", chunk) catch { self.lim = true; }; },`,
+		`.root_dblbs => { const chunk = self._takeCapped(total, offset, _chunk, max_dyn_blob_len) orelse return; sofab.arrays.placeElem([]const u8, .{ .receiver = max_dyn_array_count }, self.alloc, &(self.m.dblbs), id, "", chunk) catch { self.lim = true; }; },`,
+		// sequenceBegin: the cap goes into the reservation, and the refusal breaks
+		// to the dead scope.
+		"if (!(sofab.arrays.reserveElem(MDobjsElem, .{ .receiver = max_dyn_array_count }, self.alloc, &(self.m.dobjs), id, .{}) catch { self.lim = true; break :blk .dead; })) break :blk .dead;",
+		// a native matrix ROW: its id is the outer array's length and its own
+		// element count sizes the row, so reserveRow takes the cap twice -- once
+		// per bound -- and decides the index before the count (#386).
+		".root_dmat => if (kind == .unsigned) { sofab.arrays.reserveRow(u32, .{ .receiver = max_dyn_array_count }, .{ .receiver = max_dyn_array_count }, self.alloc, &(self.m.dmat), id, count) catch { self.lim = true; self.an = 0; return; }; self.ei_root_dmat = id; },",
 		// and the flag is surfaced as the policy category, never as INVALID.
 		"if (v.lim) return error.LimitExceeded;",
 	} {
@@ -1879,21 +1912,22 @@ messages:
 	if containsCode(m, "id >= max_dyn_array_count") {
 		t.Errorf("a receiver index cap must not also be a generated guard:\n%s", m)
 	}
-	// The uncapped helpers stay the SCHEMA-bounded entry points, so an unbounded
-	// array must not reach one: a plain grow/setElem here would be an index that
-	// nothing bounded.
+	// There is no unbounded entry point left to reach: `Bound` has no third tag,
+	// so growing or placing without a bound does not compile. What a defect would
+	// look like now is the WRONG tag -- an unbounded array carrying .schema, which
+	// would answer INVALID for bytes that are well formed (§6.2.1).
 	for _, gone := range []string{
-		"sofab.arrays.setElem([]const u8, self.alloc, &(self.m.dstrs)",
-		"sofab.arrays.grow(MDobjsElem,",
-		"sofab.arrays.grow([]const u32, self.alloc, &(self.m.dmat)",
+		"&(self.m.dstrs), id, \"\", chunk) catch { self.inv",
+		"reserveElem(MDobjsElem, .{ .schema",
+		"reserveRow(u32, .{ .schema = ", // both of dmat's bounds are the cap
 	} {
 		if containsCode(m, gone) {
-			t.Errorf("an unbounded array must not use the uncapped helper %q:\n%s", gone, m)
+			t.Errorf("an unbounded array must not be bounded as if the schema bounded it %q:\n%s", gone, m)
 		}
 	}
 	// The cap governs only what the schema left unbounded (§9.5): a count:N array
-	// keeps its own bound and its own category.
-	if !containsCode(m, ".root_bstrs => if (id >= 4) { self.inv = true; }") {
+	// keeps its own bound and its own category, in the same call shape.
+	if !containsCode(m, `.root_bstrs => { const chunk = self._takeStrCapped(total, offset, _chunk, max_dyn_string_len) orelse return; sofab.arrays.placeElem([]const u8, .{ .schema = 4 }, self.alloc, &(self.m.bstrs), id, "", chunk) catch { self.inv = true; }; },`) {
 		t.Errorf("a count:N wrapper array must keep its INVALID schema bound:\n%s", m)
 	}
 }
