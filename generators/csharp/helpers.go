@@ -189,24 +189,6 @@ func (g *gen) csArrayElemType(elem ir.Kind, ref *ir.TypeRef, items *ir.ArrayElem
 	}
 }
 
-// csSeqElemDefault renders the element default of a WRAPPER (sequence) array:
-// the value the decode-side gap-fill puts at an index no wire element reached —
-// which is exactly the value the encoder omitted there (MESSAGE_SPEC §2).
-// ("", false) for a native element, which is not a wrapper.
-func (g *gen) csSeqElemDefault(elem ir.Kind, ref *ir.TypeRef, items *ir.ArrayElem) (string, bool) {
-	switch elem {
-	case ir.KindString:
-		return `""`, true
-	case ir.KindBlob:
-		return "Array.Empty<byte>()", true
-	case ir.KindStruct, ir.KindUnion:
-		return fmt.Sprintf("new %s()", g.typeName(ref.Key)), true
-	case ir.KindArray:
-		return fmt.Sprintf("new List<%s>()", g.csArrayElemType(items.Elem, items.ElemRef, items.ElemItems)), true
-	}
-	return "", false
-}
-
 func numCsType(k ir.Kind) string {
 	switch k {
 	case ir.KindU8:
