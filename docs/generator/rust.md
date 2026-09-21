@@ -58,7 +58,9 @@ allocate what a message carries than its declared worst case).
 
 Two things worth knowing before switching it off under `corelib: rs`:
 
-- **It adds a `heapless` dependency** to the generated crate.
+- **It adds a `heapless` dependency** to the generated crate, and turns on the
+  corelib's `heapless` feature, which lets the corelib grow and fill those
+  fixed-capacity arrays while decoding.
 - **Unbounded fields are unaffected.** They stay in `String` / `Vec`, so the
   switch applies per field wherever a bound exists and static storage can be
   turned on without changing the schema.
