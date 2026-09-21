@@ -171,40 +171,22 @@ func limitThrow(name, noun string, limit int64) string {
 		ktStringLit(fmt.Sprintf("%s: %s %d", name, noun, limit)))
 }
 
-// overIndexGuard returns the reject clause for a wrapper array's element id,
-// emitted ahead of the grow it bounds.
+// seqCap renders the schema half of a wrapper array's index bound as the
+// argument the corelib's Seq.placeElem / Seq.reserveElem / Seq.checkIndex /
+// Seq.reserveRow* take: the schema `count`, or -1 where the schema declares
+// none.
 //
 // A wrapper array carries no count HEADER: its elements are keyed by an
-// unbounded varint index and the collector grows the list to id + 1, so the
-// index IS the array's length (MESSAGE_SPEC §5.1 — two elements at id 0 and id
-// 16383 are a 16384-slot list). A single over-index element is therefore an
-// amplification vector by itself, and it is the INDEX that has to be bounded:
-// capping how many elements arrived would not bound the allocation, because a
-// sparse array allocates by its highest id.
-//
-// Which bound applies depends on whether the schema counts the array, and the
-// two differ only in that and in what the failure is called (ARCHITECTURE §9.5):
-// `count: N` makes id >= N INVALID_MSG (the bytes contradict the agreed schema),
-// no count makes id >= MAX_DYN_ARRAY_COUNT LIMIT_EXCEEDED (the bytes are well
-// formed and the same message decodes under a looser cap — folding the two
-// together is forbidden by CORELIB_PLAN §6.2.1).
-//
-// This is the half of the index bound that is still GENERATED code: the frames
-// whose gap fill is emitted here -- a string/blob leaf, a struct element. A
-// matrix row's index rides `Seq.reserveRow*`/`Seq.reserveRowList` instead, which
-// take both numbers and reject the id before they grow the outer list; the two
-// routes are exclusive, so no frame kind is bounded twice (§6.2.1, "one
-// implementation, wherever it runs").
-func (g *gen) overIndexGuard(cap int64, name string) string {
-	if cap < 0 {
-		if !g.limArr {
-			panic("kotlin: uncounted wrapper array with no cap constant -- every target has a finite default (§9.5)")
-		}
-		return fmt.Sprintf("if (id >= MAX_DYN_ARRAY_COUNT) %s; ",
-			limitThrow(locName(name)+" element", "array index above configured limit", g.limits.arrayCount))
-	}
-	return fmt.Sprintf("if (id >= %d) %s; ", cap,
-		invalidThrow(fmt.Sprintf("%s element: array index above schema capacity %d", locName(name), cap)))
+// unbounded varint index and the list grows to id + 1, so the index IS the
+// array's length (MESSAGE_SPEC §5.1 -- two elements at id 0 and id 16383 are a
+// 16384-slot list). It is therefore the INDEX that is bounded, before the list
+// grows (CORELIB_PLAN §7.2 item 8). The corelib compares it against exactly one
+// of two numbers, both passed in beside each other (ARCHITECTURE §9.5): a
+// schema `count: N` makes id >= N INVALID_MSG, no count makes
+// id >= MAX_DYN_ARRAY_COUNT LIMIT_EXCEEDED (§6.2.1 -- never both, never folded).
+// Generated code emits no index compare of its own.
+func seqCap(fr frame) string {
+	return itoa64(ktCap(fr.cap))
 }
 
 // widthThrow renders the §7.1 rejection for a store into a destination the schema
@@ -398,7 +380,6 @@ func (g *gen) emitVisitor(f *kfile, name string, fields []*ir.Field) {
 	primTypes := primArrayTypesUsed(fs)
 	rowTypes := primRowTypesUsed(fs)
 	limArr, limStr, limBlob := g.activeLimits(fs)
-	g.limArr = limArr // for overIndexGuard, which cannot reach fs
 	// A native array is the only thing that fills an array destination, and a
 	// string or blob destination is the only thing that ever reassembles a split
 	// payload -- so a message with neither carries neither piece of state. The
@@ -604,14 +585,13 @@ func (g *gen) emitDestGuard(f *kfile, dests []destFrame) {
 //
 // Two sources, and the second is what changed (CORELIB_PLAN §6.2.1):
 //
-//   - a guard this visitor still writes itself -- a native array's count header,
-//     a wrapper element's index where the gap fill is generated code. Live only
-//     where the schema left the field unbounded, as before;
+//   - a guard this visitor still writes itself -- a native array's count
+//     header. Live only where the schema left the field unbounded, as before;
 //   - a bound this visitor now STATES to the corelib: every `acc.string` /
 //     `acc.blob` call carries `max_dyn_string_len` / `max_dyn_blob_len`, every
-//     `Seq.reserveRow*` and `Seq.reserveRowList` call carries
-//     `max_dyn_array_count`. Those arguments are required and are always passed,
-//     including where the schema bound handed in beside one makes it inert:
+//     wrapper-array call (`Seq.placeElem`, `Seq.reserveElem`, `Seq.checkIndex`,
+//     `Seq.reserveRow*`, `Seq.reserveRowList`) carries `max_dyn_array_count`.
+//     Those arguments are required and are always passed, including where the schema bound handed in beside one makes it inert:
 //     omitting it would leave the codec to read silence as "unlimited", which
 //     §6.2.1 forbids, and there is nothing for it to fall back to.
 //
@@ -632,14 +612,10 @@ func (g *gen) activeLimits(fs []frame) (limArr, limStr, limBlob bool) {
 					limArr = true // the count guard this visitor still writes
 				}
 			}
-		case fkNativeMat, fkSeqMat:
-			limArr = true // Seq.reserveRow* / Seq.reserveRowList state the cap
-		}
-		// A wrapper array the schema leaves uncounted bounds its element INDEX,
-		// which is the array's length (§9.5, generator#387). Where the gap fill is
-		// generated -- a string/blob leaf, a struct element -- that guard is still
-		// this visitor's and names the constant.
-		if fr.kind != fkNormal && fr.cap < 0 {
+		case fkSeqLeaf, fkSeqObj, fkNativeMat, fkSeqMat:
+			// Every wrapper-array call -- Seq.placeElem, Seq.reserveElem,
+			// Seq.checkIndex, Seq.reserveRow*, Seq.reserveRowList -- states the
+			// receiver cap beside the schema count.
 			limArr = true
 		}
 	}
@@ -813,7 +789,7 @@ func (g *gen) fixlenBeginArms(fs []frame, kind ir.Kind, noun, constName string) 
 	for _, fr := range fs {
 		elemCapped := constName != "" && fr.emax < 0
 		if fr.kind == fkSeqLeaf && fr.elemKind == kind && (fr.cap >= 0 || fr.emax >= 0 || elemCapped) {
-			body := g.overIndexGuard(fr.cap, fr.loc)
+			body := fmt.Sprintf("Seq.checkIndex(id, %s, MAX_DYN_ARRAY_COUNT); ", seqCap(fr))
 			switch {
 			case fr.emax >= 0:
 				body += fmt.Sprintf("if (total > %d) %s", fr.emax,
@@ -888,8 +864,9 @@ func (g *gen) emitStringCb(f *kfile, fs []frame) {
 			// Elements are keyed by index id (MESSAGE_SPEC §2/§5.1): a default
 			// (empty) element is omitted on the wire, so the value is PLACED at
 			// its id and any gap filled with the element default ("").
-			f.line("            %d -> { %swhile (%s.size <= id) %s.add(\"\"); %s[id] = s }",
-				fr.idx, g.overIndexGuard(fr.cap, fr.loc), fr.listExpr, fr.listExpr, fr.listExpr)
+			// The corelib bounds the index before it grows the list.
+			f.line("            %d -> Seq.placeElem(%s, id, \"\", s, %s, MAX_DYN_ARRAY_COUNT)",
+				fr.idx, fr.listExpr, seqCap(fr))
 			continue
 		}
 		if fr.kind != fkNormal {
@@ -929,8 +906,8 @@ func (g *gen) emitBlobCb(f *kfile, fs []frame) {
 	f.line("        when (cur) {")
 	for _, fr := range fs {
 		if fr.kind == fkSeqLeaf && fr.elemKind == ir.KindBlob {
-			f.line("            %d -> { %swhile (%s.size <= id) %s.add(Seq.EMPTY_BYTES); %s[id] = b }",
-				fr.idx, g.overIndexGuard(fr.cap, fr.loc), fr.listExpr, fr.listExpr, fr.listExpr)
+			f.line("            %d -> Seq.placeElem(%s, id, Seq.EMPTY_BYTES, b, %s, MAX_DYN_ARRAY_COUNT)",
+				fr.idx, fr.listExpr, seqCap(fr))
 			continue
 		}
 		if fr.kind != fkNormal {
@@ -1019,7 +996,7 @@ func (g *gen) emitArrayBegin(f *kfile, fs []frame, limArr, hasArray bool) {
 			// Sized at exactly the wire count, once: the guard above bounded it
 			// (§9.5, shape A). The wire already said how big the row is.
 			f.line("            %d -> if (kind == ArrayKind.%s) { %s%s = Seq.reserveRow%s(%s, id, count, %s, MAX_DYN_ARRAY_COUNT); %s = id }",
-				fr.idx, arrayWireKind(fr.innerElem), body, rowCursor(arrType), seqSuffix(arrType), fr.listExpr, itoa64(ktCap(fr.cap)), elemIdxVar(fr.loc))
+				fr.idx, arrayWireKind(fr.innerElem), body, rowCursor(arrType), seqSuffix(arrType), fr.listExpr, seqCap(*fr), elemIdxVar(fr.loc))
 			continue
 		}
 		if fr.kind != fkNormal {
@@ -1219,8 +1196,12 @@ func (g *gen) emitSequenceCbs(f *kfile, fs []frame) {
 			// Appending shortened the array by the size of any interior id gap
 			// and decoded a REOPENED id as a second element instead of merging
 			// into the first (§7.4 struct-merge, which placement gives for free).
-			f.line("            %d -> { %swhile (%s.size <= id) %s.add(%s()); %s = id; cur = %d }",
-				fr.idx, g.overIndexGuard(fr.cap, fr.loc), fr.listExpr, fr.listExpr, fr.elemType, elemIdxVar(fr.loc), locIndex(fs, fr.childLoc))
+			//
+			// Seq.reserveElem owns the bound and the growth (one fresh element
+			// per new slot, an existing slot left alone so a re-opened id
+			// merges); the routing into the element stays generated.
+			f.line("            %d -> { Seq.reserveElem(%s, id, %s, MAX_DYN_ARRAY_COUNT) { %s() }; %s = id; cur = %d }",
+				fr.idx, fr.listExpr, seqCap(fr), fr.elemType, elemIdxVar(fr.loc), locIndex(fs, fr.childLoc))
 		case fkSeqMat:
 			// A row of an array-of-wrapper-arrays is placed at the index its
 			// element id names, for the same reason as the struct element above.
@@ -1231,7 +1212,7 @@ func (g *gen) emitSequenceCbs(f *kfile, fs []frame) {
 			// matrix row: reserveRowList takes the schema `count` and the receiver
 			// cap and rejects the id before it grows the outer list (§6.2.1).
 			f.line("            %d -> { Seq.reserveRowList(%s, id, %s, MAX_DYN_ARRAY_COUNT); %s = id; cur = %d }",
-				fr.idx, fr.listExpr, itoa64(ktCap(fr.cap)), elemIdxVar(fr.loc), locIndex(fs, fr.childLoc))
+				fr.idx, fr.listExpr, seqCap(fr), elemIdxVar(fr.loc), locIndex(fs, fr.childLoc))
 		case fkNormal:
 			var arms []string
 			for _, fld := range fr.fields {
