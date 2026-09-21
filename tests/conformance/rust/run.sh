@@ -1471,9 +1471,11 @@ cp "$WORK/no-std-static/Cargo.toml" "$WORK/no-std-static/Cargo.toml.bak"
 guard_case() {  # missing-feature  "remaining features, comma-separated and quoted"
     missing=$1; remain=$2
     cp "$WORK/no-std-static/Cargo.toml.bak" "$WORK/no-std-static/Cargo.toml"
-    sed -i "s/features = \[\"array\", \"fixlen\", \"fp64\", \"sequence\", \"value64\"\]/features = [$remain]/" \
+    # Only the five wire features are rewritten; the container feature that
+    # follows them (`heapless`, the sofab::seq SeqVec impl) stays as generated.
+    sed -i "s/features = \[\"array\", \"fixlen\", \"fp64\", \"sequence\", \"value64\", \"heapless\"\]/features = [$remain, \"heapless\"]/" \
         "$WORK/no-std-static/Cargo.toml"
-    grep -q "features = \[$remain\]" "$WORK/no-std-static/Cargo.toml" || {
+    grep -q "features = \[$remain, \"heapless\"\]" "$WORK/no-std-static/Cargo.toml" || {
         echo "FAIL: [$missing] could not rewrite the feature list -- the generated form changed"
         mv "$WORK/no-std-static/Cargo.toml.bak" "$WORK/no-std-static/Cargo.toml"; exit 1
     }

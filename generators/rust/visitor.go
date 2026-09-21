@@ -84,36 +84,47 @@ func boundOf(has bool, v int64) int64 {
 	return -1
 }
 
-// overIndexGuard returns the reject clause for a wrapper array's element id,
-// emitted ahead of the grow it bounds.
+// seqBound renders the bound on a wrapper array's element index as the
+// `sofab::seq::Bound` every seq call takes (generator#587).
 //
 // A wrapper array carries no count HEADER: its elements are keyed by an
 // unbounded varint index and the destination grows to id + 1, so the index IS
 // the array's length (MESSAGE_SPEC §5.1 — two elements at id 0 and id 16383 are
-// a 16384-slot Vec). A single over-index element is therefore an amplification
-// vector by itself, and it is the INDEX that has to be bounded: capping how many
-// elements arrived would not bound the allocation, because a sparse array
-// allocates by its highest id.
+// a 16384-slot Vec). It is the INDEX that has to be bounded, before the
+// container grows, and that comparison, the growth, the gap fill and the
+// verdict category all live in the corelib's `sofab::seq` layer, identical in
+// corelib-rs and corelib-rs-no-std (ARCHITECTURE §8). What stays generated is
+// the one per-field fact: WHICH bound governs this array.
 //
-// Which bound applies depends on whether the schema counts the array, and the
-// two differ only in that and in what the failure is called (ARCHITECTURE §9.5):
+//   - `count: N` -> Bound::Schema(N): a breach is Error::InvalidMsg (§7.1), the
+//     bytes contradict the schema both peers agreed on. The literal N folds
+//     after inlining exactly as the `id >= N` this backend used to emit did.
+//   - no count -> Bound::Cap(MAX_DYN_ARRAY_COUNT): the receiver cap, passed in
+//     per call and never held by the corelib; a breach is Error::LimitExceeded
+//     (CORELIB_PLAN §6.2.1). std only: corelib-rs-no-std refuses an unbounded
+//     field at validation (checkBounded) and g.limits stays zero there.
 //
-//   - `count: N` -> id >= N sets self.inv, surfaced as Error::InvalidMsg (issue
-//     #142). The bytes contradict the schema both peers agreed on. Emitted on
-//     BOTH profiles: on no_std it fires ahead of the heapless Vec<_, N> capacity
-//     drop (issue #126), so an over-index element is INVALID rather than silently
-//     dropped — the convergence §7.1 requires across memory models (#149/F-0013).
-//   - no count -> id >= MAX_DYN_ARRAY_COUNT sets self.lim, surfaced as
-//     Error::LimitExceeded (issue #387). The bytes are well formed and the same
-//     message decodes under a looser cap, so folding this into INVALID is
-//     forbidden by CORELIB_PLAN §6.2.1. std only: corelib-rs-no-std has no
-//     LimitExceeded, and checkBounded has already refused an unbounded field
-//     there, so the case cannot arise — g.limits is left zero for that profile
-//     and this returns "" for it.
+// Exactly one of the two, never both: the enum makes that a type rule.
 //
-// Both bounds are followed by limRefuse, which answers the OTHER half of the
-// same question: this element's index is inside the bound, but a cap crossed
-// EARLIER in the same message has already refused it (generator#518).
+// The bound is a ceiling, never a size: a growable destination is NOT reserved
+// to the schema `count` up front. `count` is a capacity (MESSAGE_SPEC §5.1), so
+// reserving it would allocate the declared worst case on every decode, which is
+// what allow_dynamic: true exists to avoid; the corelib grows to what the
+// message actually holds.
+func (g *gen) seqBound(cap int64) string {
+	switch {
+	case cap >= 0:
+		return fmt.Sprintf("sofab::seq::Bound::Schema(%d)", cap)
+	case g.limits.arrayHas:
+		return "sofab::seq::Bound::Cap(MAX_DYN_ARRAY_COUNT)"
+	}
+	panic("rust: a count-less wrapper array with no receiver cap (checkBounded should have refused it)")
+}
+
+// seqRefuse is the clause a failed seq call routes its verdict through: the
+// corelib decides the category, `refuse` records it in the sticky flags.
+const seqRefuse = "self.refuse(_e);"
+
 // visitorClippyAllow sits on the flat visitor's impl. Its arms are stamped
 // from one template per field kind and storage mode, so a shape clippy's style
 // lints would rewrite for one field is the shape every field shares: a match
@@ -127,25 +138,14 @@ func boundOf(has bool, v int64) int64 {
 // suspicious is allowed.
 const visitorClippyAllow = "#[allow(clippy::single_match, clippy::match_single_binding, clippy::collapsible_match, clippy::needless_return, clippy::unnecessary_cast, clippy::let_unit_value, clippy::unnecessary_operation, clippy::manual_range_contains)] // arms are stamped per field from one template"
 
-func (g *gen) overIndexGuard(cap int64) string {
-	var out string
-	switch {
-	case cap >= 0:
-		out = fmt.Sprintf("if id as usize >= %d { self.inv = true; return; }; ", cap)
-	case g.limits.arrayHas:
-		out = "if id as usize >= MAX_DYN_ARRAY_COUNT { self.lim = true; return; }; "
-	}
-	return out + g.limRefuse()
-}
-
-// limRefuse returns the clause that turns an ALREADY-crossed receiver cap into a
+// limGate returns the clause that turns an ALREADY-crossed receiver cap into a
 // refusal of the arm that follows it: the wrapper-element arms and the native-row
 // header, every one of which MATERIALISES a container before it stores anything.
 //
 // generator#518. The sticky `lim` flag has stopped a later count-less array's
 // ELEMENTS since generator#102 (limArrayStore), and nothing else: the gap fill in
-// seqElemGrow, a wrapper element's own store, and the container growth those two
-// drive all ran on for the rest of a refused message's bytes. Measured on
+// front of a wrapper element (now sofab::seq's), the element's own store, and the
+// container growth those two drive all ran on for the rest of a refused message's bytes. Measured on
 // corelib-rs 7599f9a at max_dyn_array_count 65536, bytes handed out by a counting
 // GlobalAlloc per try_decode, behind an 11-byte over-cap string -- the left column
 // is the refused message, the right the same tail with no breach in front of it:
@@ -183,11 +183,21 @@ func (g *gen) overIndexGuard(cap int64) string {
 //
 // Emitted only where a cap can be crossed at all -- the std profile with at least
 // one unbounded field, which is exactly when the `lim` slot exists.
-func (g *gen) limRefuse() string {
+//
+// `cap` is the governing array's schema count (-1 for none). A schema-bounded
+// index is still checked in front of the refusal, through the corelib, so an
+// over-count element keeps its INVALID verdict (which dominates `lim`) even in a
+// message a cap already refused; a cap-bounded index needs no check, because its
+// breach would only set the `lim` that is already set. A native row passes -1:
+// its index was checked at the top of the arm.
+func (g *gen) limGate(cap int64) string {
 	if !g.limits.any() {
 		return ""
 	}
-	return "if self.lim { return; }; "
+	if cap < 0 {
+		return "if self.lim { return; }; "
+	}
+	return fmt.Sprintf("if self.lim { if let Err(_e) = sofab::seq::check_index(id, %s) { %s } return; }; ", g.seqBound(cap), seqRefuse)
 }
 
 // reserveCount emits the sizing half of a schema-bounded native array's
@@ -275,117 +285,42 @@ func (g *gen) reserveArg(bound int64) string {
 	return fmt.Sprintf("count.min(%d)", g.reserveCap)
 }
 
-// rowReset opens a NATIVE ROW frame's row (fkNestedNative) for the occurrence
-// that just announced itself: the row a nested array's array_begin opened at
+// rowReserve opens a NATIVE ROW frame's row (fkNestedNative) for the occurrence
+// that just announced itself: the row a nested array's array_begin opens at
 // out[id] is itself a native array, and its elements arrive through the same
-// scalar callbacks. It CLEARS the row, and -- where the profile and the bound
-// allow -- pre-sizes it to the count that header carries.
+// scalar callbacks. `sofab::seq::reserve_row` grows the outer container to the
+// index and CLEARS the row; this adds -- where the profile and the bound allow --
+// the pre-size to the count the header carries.
 //
-// It reaches the row through get_mut rather than indexing because the growth loop
-// it follows can legitimately fail to reach the index -- seqElemGrow breaks out
-// when a fixed-capacity outer container is full -- so a bare [id] would panic on
-// untrusted input where the store one level down already does the Some-guarded
-// thing (rowStore).
+// THE CLEAR IS §7.4 (generator#509): MESSAGE_SPEC §7.4 makes an ARRAY WRAPPER
+// the exception to scope-merging, so a repeated row id REPLACES the row rather
+// than pushing on top of the previous occurrence -- which would also let the row
+// grow past its declared `count: M` across repeats. The corelib's reserve_row
+// owns that now; the wrapper-row frame (fkArrArr, generator#523) takes the same
+// call, and only the struct element (fkStructArr), which merges, takes
+// reserve_elem instead.
 //
-// THE CLEAR IS §7.4, and it is generator#509. seqElemGrow only pushes
-// Default::default() rows up TO the index, so a row id that repeats within one
-// message -- legal on the wire, and something a decoder MUST process
-// deterministically rather than reject -- used to find a row still holding the
-// previous occurrence's elements and push on top of them. MESSAGE_SPEC §7.4 makes
-// an ARRAY WRAPPER the exception to scope-merging: the wrapper *is* the value of
-// its array field, so a later occurrence REPLACES it. A row is an array, so it
-// replaces; only a struct/union element merges, and that one is a different frame
-// (fkStructArr) which correctly does not reset.
+// THE PRE-SIZE follows the clear, so the row's length is 0 and reserve_exact
+// asks for exactly M. It is emitted only when the row's inner bound is a schema
+// `count` (fr.ecap >= 0) and the container is dynamic: a count-less row's
+// elements are bounded by MAX_DYN_ARRAY_COUNT, a refusal threshold and not a
+// size hint (see reserveCount), and a fixed-capacity heapless::Vec has no
+// reserve_exact and needs none.
 //
-// Measured on `corelib: rs`, schema `mat: array<array<u32>>` (outer count 2,
-// inner count 3), one message carrying write_array_unsigned(0, ..) twice over --
-// [1,2,3] then [4,5,6]:
-//
-//	before   mat = [[1, 2, 3, 4, 5, 6]]   row 0 len 6
-//	after    mat = [[4, 5, 6]]            row 0 len 3
-//
-// where go (measured the same way), csharp, java and zig all already produced
-// [[4, 5, 6]]. Note the len: the inner `count: 3` is checked per occurrence at the
-// header, so merging also let a row grow past its declared capacity across
-// repeats. Clearing re-arms that bound as well as restoring the value.
-//
-// THE PRE-SIZE FOLLOWS THE CLEAR, unconditionally. It used to be wrapped in an
-// `if _r.is_empty()`, added by generator#505's review precisely BECAUSE the row
-// was never cleared: `reserve_exact` is capacity on top of the current LENGTH, so
-// reserving into a merged row asked for len + M -- one exact realloc per repeated
-// header, slower than doing nothing. With the clear in front, len is 0 whenever
-// this runs, the guard could only ever be true, and the reserve is exactly M
-// again. A guard whose reason has been removed is dead weight, so it is gone.
-//
-// The pre-size itself is still emitted only when the row's inner bound is a schema
-// `count` (fr.ecap >= 0) and the container is dynamic. A count-less row's elements
-// are bounded by MAX_DYN_ARRAY_COUNT, which is a refusal threshold and not a size
-// hint; see reserveCount. A fixed-capacity heapless::Vec has no reserve_exact and
-// needs none. The CLEAR is emitted in every one of those cases regardless -- §7.4
-// is a semantics rule, not an optimization, and a heapless::Vec clears just as
-// well as a Vec does.
-//
-// ORDER IS LOAD-BEARING, in two directions. rowGuards runs BEFORE this and
-// returns, so an over-index or over-count header cannot wipe a valid earlier row
-// -- the §7.3 interaction ARCHITECTURE calls a trap, where a destructive reset in
-// front of the type decision turns a loud failure into silent data loss. And the
-// arm itself is keyed on the row's own ArrayKind, so a mistyped row header lands
-// on no arm at all and the clear never runs for it.
-func (g *gen) rowReset(fr frame) string {
-	body := "_r.clear();"
+// ORDER IS LOAD-BEARING. The row id, the inner count and the lim refusal
+// (rowGuards) run BEFORE this and return, so an over-index or over-count header
+// cannot wipe a valid earlier row -- the §7.3 interaction where a destructive
+// reset in front of the decision turns a loud failure into silent data loss.
+// reserve_row compares the index once more; with the bound a literal the second
+// compare folds against the first. A refusal here is a full fixed-capacity
+// container (Error::Argument -> err); it disarms the fill like any other reject.
+func (g *gen) rowReserve(fr frame) string {
+	call := fmt.Sprintf("sofab::seq::reserve_row(&mut %s, id, %s)", fr.path, g.seqBound(fr.cap))
+	fail := fmt.Sprintf("%s self.afill = 0; return;", seqRefuse)
 	if fr.ecap >= 0 && g.boundedSeqIsDynamic() {
-		body += fmt.Sprintf(" _r.reserve_exact(%s);", g.reserveArg(fr.ecap))
+		return fmt.Sprintf("match %s { Ok(_r) => _r.reserve_exact(%s), Err(_e) => { %s } }", call, g.reserveArg(fr.ecap), fail)
 	}
-	return fmt.Sprintf(" if let Some(_r) = %s.get_mut(id as usize) { %s }", fr.path, body)
-}
-
-// wrapperRowReset opens a WRAPPER ROW frame's row (fkArrArr) for the element
-// sequence that just announced itself: a row whose own elements are
-// string/blob/struct or a further nested array, delivered through a scope of
-// their own rather than through the scalar array callbacks.
-//
-// It is rowReset's twin, and it is generator#523. The row a wrapper array's
-// per-element sequence_begin descends into is ITSELF an array field, so
-// MESSAGE_SPEC §7.4 makes it the replacing kind and not the merging one: the
-// wrapper *is* the value of its field, and a later occurrence of the element id
-// replaces it whole. seqElemGrow only pushes Default::default() rows up TO the
-// index, so a repeated element id used to find the previous occurrence's
-// elements still in place and write on top of them. Measured on `corelib: rs`,
-// `matstr: array<array<string>>` carrying element id 0 twice -- ["a","z"] then
-// ["y"]:
-//
-//	before   matstr = [["y", "z"]]   row 0 len 2
-//	after    matstr = [["y"]]        row 0 len 1
-//
-// and the same one level down, `deep: array<array<array<u32>>>` re-opening
-// element 0 with a different row id: [[[9], [3, 4]]] before, [[[9]]] after.
-// generator#509 fixed exactly this rule for a NATIVE row (fkNestedNative) and
-// left rust internally inconsistent in the meantime -- array<array<u32>>
-// replaced its row while array<array<string>> merged it, which is one field
-// shape apart. The two arms now agree.
-//
-// There is NO pre-size here, which is the one way it differs from rowReset. A
-// native row announces its element count in a real array header, so rowReset can
-// reserve exactly that; a wrapper row carries no count anywhere on the wire --
-// its length is highest present element id + 1 (§5.1) -- so there is no number
-// to reserve at the moment the row opens.
-//
-// Reached through get_mut for rowReset's reason: seqElemGrow breaks out when a
-// fixed-capacity outer container is full, so the index it grew towards may not
-// exist and a bare [id] would panic on untrusted input.
-//
-// ORDER IS LOAD-BEARING, the same two ways. overIndexGuard runs BEFORE this and
-// returns, so an over-index element id cannot wipe a valid earlier row -- the
-// §7.3 interaction where a destructive reset in front of the decision turns a
-// loud failure into silent data loss. And the reset sits in sequence_begin,
-// which the corelib invokes only for an actual sequence header, so an element
-// arriving as some other wire type never reaches it (ARCHITECTURE §7.4).
-//
-// The STRUCT-element frame (fkStructArr) deliberately does NOT get this: a
-// re-opened struct continues its scope and merges, which is the other half of
-// §7.4 and the reason the two frames keep separate arms.
-func (g *gen) wrapperRowReset(path string) string {
-	return fmt.Sprintf(" if let Some(_r) = %s.get_mut(id as usize) { _r.clear(); }", path)
+	return fmt.Sprintf("if let Err(_e) = %s { %s }", call, fail)
 }
 
 // fillReject builds one reject clause for a NATIVE ARRAY — a leaf field's own
@@ -424,15 +359,10 @@ func fillReject(cond, flag string) string {
 // or filled, so INVALID dominates a truncated tail (generator#216).
 func (g *gen) rowGuards(fr frame) string {
 	var out string
-	switch {
-	case fr.cap >= 0:
-		out += fillReject(fmt.Sprintf("id as usize >= %d", fr.cap), "inv")
-	case g.limits.arrayHas:
-		// A row of a count-less matrix: its ID is the outer array's length, so
-		// the receiver cap binds it exactly as it binds a leaf wrapper element
-		// (issue #387, see overIndexGuard).
-		out += fillReject("id as usize >= MAX_DYN_ARRAY_COUNT", "lim")
-	}
+	// The row id: the corelib compares it against the outer count, or -- for a
+	// count-less matrix, whose row ID is the outer array's length -- the
+	// receiver cap, exactly as it bounds a leaf wrapper element (see seqBound).
+	out += fmt.Sprintf("if let Err(_e) = sofab::seq::check_index(id, %s) { %s self.afill = 0; return; }; ", g.seqBound(fr.cap), seqRefuse)
 	switch {
 	case fr.ecap >= 0:
 		out += fillReject(fmt.Sprintf("count > %d", fr.ecap), "inv")
@@ -441,11 +371,11 @@ func (g *gen) rowGuards(fr frame) string {
 	}
 	// ...and last, the cap that was crossed BEFORE this header: the gap fill and
 	// the row reserve that follow are the largest single allocation a refused
-	// message still paid for (generator#518, see limRefuse). It comes after both
+	// message still paid for (generator#518, see limGate). It comes after both
 	// rejects so neither verdict moves, and it does not disarm the fill -- the
 	// row's element store carries limArrayStore, so the elements that keep
 	// arriving are already dropped there.
-	out += g.limRefuse()
+	out += g.limGate(-1)
 	return out
 }
 
@@ -968,7 +898,7 @@ func (g *gen) emitVisitor(f *rfile, name string, fields []*ir.Field) {
 	// (the root, held while its skipped subtree is open).
 	//
 	// One path can still push repeatedly without descending: an over-index wrapper
-	// element (overIndexGuard) returns with cur left on the array frame so its own
+	// element (a refused sofab::seq::reserve_elem) returns with cur left on the array frame so its own
 	// sequence_end pops the entry back off. It has set self.inv by then, so such a
 	// message is InvalidMsg whatever the stack does -- and an overflow there is
 	// reported (err) rather than silently dropped.
@@ -1262,6 +1192,27 @@ func (g *gen) emitVisitor(f *rfile, name string, fields []*ir.Field) {
 	f.line("}")
 	f.blank()
 
+	// refuse records a sofab::seq verdict in the sticky flags try_decode surfaces.
+	// The corelib decides the CATEGORY (Schema bound -> InvalidMsg, receiver cap ->
+	// LimitExceeded, a full fixed-capacity container -> Argument); the generated
+	// code only files it. Emitted only where a wrapper array exists, so a message
+	// without one carries no dead method.
+	if hasSeqFrame(fs) {
+		f.line("impl V<'_> {")
+		f.line("    #[inline]")
+		f.line("    fn refuse(&mut self, e: sofab::Error) {")
+		f.line("        match e {")
+		f.line("            sofab::Error::InvalidMsg => self.inv = true,")
+		if g.limits.any() {
+			f.line("            sofab::Error::LimitExceeded => self.lim = true,")
+		}
+		f.line("            _ => self.err = true,")
+		f.line("        }")
+		f.line("    }")
+		f.line("}")
+		f.blank()
+	}
+
 	f.line(visitorClippyAllow)
 	// The flat visitor assigns into deprecated fields (self.m.<path>) directly, so
 	// suppress the deprecated lint over the whole impl when any reachable field is
@@ -1386,7 +1337,7 @@ func (g *gen) emitVisitor(f *rfile, name string, fields []*ir.Field) {
 					// concatenated onto the first, and the capacity check below — written
 					// for an empty destination — then tripped into Error::BufferFull on
 					// any repeat at any size (generator#273 / Crucible F-0048).
-					f.line("            (_Loc::%s, _) => { %s%s if let Some(_e) = %s.get_mut(id as usize) { _e.clear(); let _ = _e.push_str(_s); if _e.len() != _s.len() { self.err = true; } } }", fr.loc, g.overIndexGuard(fr.cap), g.seqElemGrow(fr.path), fr.path)
+					f.line("            (_Loc::%s, _) => { %smatch sofab::seq::reserve_elem(&mut %s, id, %s) { Ok(_e) => { _e.clear(); let _ = _e.push_str(_s); if _e.len() != _s.len() { self.err = true; } } Err(_e) => { %s } } }", fr.loc, g.limGate(fr.cap), fr.path, g.seqBound(fr.cap), seqRefuse)
 				}
 				for _, fld := range fr.fields {
 					if fld.Kind == ir.KindString {
@@ -1408,7 +1359,7 @@ func (g *gen) emitVisitor(f *rfile, name string, fields []*ir.Field) {
 			f.line("        match (self.cur, id) {")
 			for _, fr := range fs {
 				if fr.kind == fkSeqArr && fr.elemKind == ir.KindString {
-					f.line("            (_Loc::%s, _) => { %s%s %s[id as usize] = _s; }", fr.loc, g.overIndexGuard(fr.cap), g.seqElemGrow(fr.path), fr.path)
+					f.line("            (_Loc::%s, _) => { %sif let Err(_e) = sofab::seq::place_elem(&mut %s, id, %s, _s) { %s } }", fr.loc, g.limGate(fr.cap), fr.path, g.seqBound(fr.cap), seqRefuse)
 				}
 				for _, fld := range fr.fields {
 					if fld.Kind == ir.KindString {
@@ -1456,7 +1407,7 @@ func (g *gen) emitVisitor(f *rfile, name string, fields []*ir.Field) {
 				if fr.kind == fkSeqArr && fr.elemKind == ir.KindBlob {
 					// The blob twin of the string arm above: replace, never append
 					// (generator#273 / F-0048).
-					f.line("            (_Loc::%s, _) => { %s%s if let Some(_e) = %s.get_mut(id as usize) { _e.clear(); let _ = _e.extend_from_slice(_b); if _e.len() != total { self.err = true; } } }", fr.loc, g.overIndexGuard(fr.cap), g.seqElemGrow(fr.path), fr.path)
+					f.line("            (_Loc::%s, _) => { %smatch sofab::seq::reserve_elem(&mut %s, id, %s) { Ok(_e) => { _e.clear(); let _ = _e.extend_from_slice(_b); if _e.len() != total { self.err = true; } } Err(_e) => { %s } } }", fr.loc, g.limGate(fr.cap), fr.path, g.seqBound(fr.cap), seqRefuse)
 				}
 				for _, fld := range fr.fields {
 					if fld.Kind == ir.KindBlob {
@@ -1473,7 +1424,7 @@ func (g *gen) emitVisitor(f *rfile, name string, fields []*ir.Field) {
 			f.line("        match (self.cur, id) {")
 			for _, fr := range fs {
 				if fr.kind == fkSeqArr && fr.elemKind == ir.KindBlob {
-					f.line("            (_Loc::%s, _) => { %s%s %s[id as usize] = _b; }", fr.loc, g.overIndexGuard(fr.cap), g.seqElemGrow(fr.path), fr.path)
+					f.line("            (_Loc::%s, _) => { %sif let Err(_e) = sofab::seq::place_elem(&mut %s, id, %s, _b) { %s } }", fr.loc, g.limGate(fr.cap), fr.path, g.seqBound(fr.cap), seqRefuse)
 				}
 				for _, fld := range fr.fields {
 					if fld.Kind == ir.KindBlob {
@@ -1601,7 +1552,7 @@ func (g *gen) emitVisitor(f *rfile, name string, fields []*ir.Field) {
 				// leaf arms: an fp64 row header at a declared fp32 row is a skipped
 				// field, so neither of these bounds is its bound.
 				//
-				// The row is RESET last, once it exists (rowReset): cleared, because
+				// The row is RESET last (rowReserve, sofab::seq::reserve_row): cleared, because
 				// §7.4 makes an array wrapper replace rather than merge and a repeated
 				// row id used to push on top of the previous occurrence
 				// (generator#509), then pre-sized to the count rowGuards just checked,
@@ -1610,8 +1561,8 @@ func (g *gen) emitVisitor(f *rfile, name string, fields []*ir.Field) {
 				// The clear is emitted for every profile; the pre-size is silent when
 				// the inner bound is a receiver cap rather than a schema `count`, for
 				// the reason reserveCount gives.
-				f.line("            (%s, _Loc::%s, _) => { %s%s self.%s = id as usize;%s },",
-					arrayKindPat(fr.elemKind), fr.loc, g.rowGuards(fr), g.seqElemGrow(fr.path), fr.ixVar, g.rowReset(fr))
+				f.line("            (%s, _Loc::%s, _) => { %s%s self.%s = id as usize; },",
+					arrayKindPat(fr.elemKind), fr.loc, g.rowGuards(fr), g.rowReserve(fr), fr.ixVar)
 			}
 		}
 		f.line("            _ => {}")
@@ -1646,26 +1597,28 @@ func (g *gen) emitVisitor(f *rfile, name string, fields []*ir.Field) {
 				// generator#247: the element id IS the array index (§5.1), so the
 				// element is PLACED at out[id] after gap-filling with default
 				// elements -- exactly like the leaf string/blob path above -- and
-				// never appended. The over-index reject runs FIRST, so it bounds the
-				// gap-fill (and, on no_std, keeps the index inside the heapless
-				// capacity); returning early leaves cur on the array frame, which the
-				// element's own sequence_end pops back off the already-pushed stack.
-				add("            (_Loc::%s, _) => { %s%s self.%s = id as usize; _Loc::%s },",
-					fr.loc, g.overIndexGuard(fr.cap), g.seqElemGrow(fr.path), fr.ixVar, fr.elemLoc)
+				// never appended. sofab::seq::reserve_elem checks the index FIRST, so
+				// the bound also bounds the gap-fill (and, on no_std, keeps the index
+				// inside the heapless capacity); an existing element is left alone, so
+				// a re-opened struct merges (§7.4). Returning early on a refusal leaves
+				// cur on the array frame, which the element's own sequence_end pops
+				// back off the already-pushed stack.
+				add("            (_Loc::%s, _) => { %sif let Err(_e) = sofab::seq::reserve_elem(&mut %s, id, %s) { %s return; } self.%s = id as usize; _Loc::%s },",
+					fr.loc, g.limGate(fr.cap), fr.path, g.seqBound(fr.cap), seqRefuse, fr.ixVar, fr.elemLoc)
 			case fkArrArr:
 				// Same rule as fkStructArr above: the element id IS the row's index
 				// (§5.1), so the row is placed at out[id] rather than appended -- an
 				// interior all-default row is omitted (§2) and leaves an id gap that
 				// an appending collector would close, shifting every later row down.
 				//
-				// And then, unlike fkStructArr, the row is RESET (wrapperRowReset,
-				// generator#523): this frame's element is itself an ARRAY, so §7.4
-				// makes a repeated element id REPLACE it whole, where the struct
-				// element one arm up continues its scope and merges. The reset runs
-				// after the growth, so the row exists, and after overIndexGuard's
-				// return, so a rejected element id cannot wipe a valid earlier row.
-				add("            (_Loc::%s, _) => { %s%s self.%s = id as usize;%s _Loc::%s },",
-					fr.loc, g.overIndexGuard(fr.cap), g.seqElemGrow(fr.path), fr.ixVar, g.wrapperRowReset(fr.path), fr.elemLoc)
+				// And then, unlike fkStructArr, the row is RESET (reserve_row rather
+				// than reserve_elem, generator#523): this frame's element is itself an
+				// ARRAY, so §7.4 makes a repeated element id REPLACE it whole, where
+				// the struct element one arm up continues its scope and merges. The
+				// corelib clears only after its index check passed, so a rejected
+				// element id cannot wipe a valid earlier row.
+				add("            (_Loc::%s, _) => { %sif let Err(_e) = sofab::seq::reserve_row(&mut %s, id, %s) { %s return; } self.%s = id as usize; _Loc::%s },",
+					fr.loc, g.limGate(fr.cap), fr.path, g.seqBound(fr.cap), seqRefuse, fr.ixVar, fr.elemLoc)
 			}
 		}
 		// The default arm is a SKIP, not "stay where you are". An id the schema does
@@ -1934,7 +1887,7 @@ func (g *gen) fixlenBeginArms(fs []frame, kind ir.Kind, capName string) []string
 		if fr.kind == fkSeqArr && fr.elemKind == kind && (fr.cap >= 0 || fr.emax >= 0 || (capped && fr.elemDyn)) {
 			body := ""
 			if fr.cap >= 0 {
-				body += fmt.Sprintf("if id as usize >= %d { self.inv = true; return; }; ", fr.cap)
+				body += fmt.Sprintf("if let Err(_e) = sofab::seq::check_index(id, %s) { %s return; }; ", g.seqBound(fr.cap), seqRefuse)
 			}
 			switch {
 			case fr.emax >= 0:
@@ -2187,7 +2140,7 @@ func arrayWidthGuard(k ir.Kind, ref *ir.TypeRef) string {
 // `rust-rs-unbounded` decode. IT DID NOT, and the redundancy is not even close to
 // total — three arms set the sticky flag and disarm NOTHING, because no fill is
 // armed at them: a wrapper element's over-cap index and a nested wrapper
-// element's (overIndexGuard, which returns rather than rejecting a fill that does
+// element's (the sofab::seq refusal, which returns rather than rejecting a fill that does
 // not exist) and an over-cap string/blob length. After any of those, a
 // well-formed count-less array LATER in the same message arrives with its own
 // fill armed and the store is all that stands between it and the destination.
@@ -2216,7 +2169,7 @@ func arrayWidthGuard(k ir.Kind, ref *ir.TypeRef) string {
 // and an array<string> element there 1,572,875, breach or no breach. That is the
 // generator#512 ceiling (cap × sizeof(slot), verdict Ok) reached by a message that
 // also happens to be refused, not a bound this guard was ever holding. It is
-// limRefuse that holds it now (generator#518), at the HEADER rather than per
+// limGate that holds it now (generator#518), at the HEADER rather than per
 // element; the two do not overlap, because a header refusal cannot reach a native
 // array whose own header arrived before the breach.
 //
@@ -2284,26 +2237,6 @@ func (g *gen) pushFieldStmt(target, val string) string {
 		return fmt.Sprintf("let _ = %s.push(%s);", target, val)
 	}
 	return fmt.Sprintf("%s.push(%s);", target, val)
-}
-
-// seqElemGrow emits the id-indexed growth prefix for a wrapper-sequence string/
-// blob element collector: grow the container to id+1, filling the gap with the
-// element default (empty), so a decoded element lands at index = its wire id and
-// omitted default elements leave the right gaps (MESSAGE_SPEC S2). Under no_std the
-// container is a fixed-capacity heapless::Vec (or an alloc fallback under
-// allow_dynamic): push may be a no-op when full, so the loop breaks when the length
-// stops growing to avoid spinning on an out-of-capacity id; get_mut then no-ops.
-//
-// The dynamic Vec is deliberately NOT reserved to the schema `count` up front. A
-// wrapper array has no count header, and `count` is a capacity (MESSAGE_SPEC
-// §5.1), not the length the message carries: reserving it would allocate the
-// declared worst case on every decode, which is what allow_dynamic: true exists
-// to avoid. It grows by push to what the message actually holds.
-func (g *gen) seqElemGrow(path string) string {
-	if g.fixedFields() {
-		return fmt.Sprintf("while %s.len() <= id as usize { let _n = %s.len(); let _ = %s.push(Default::default()); if %s.len() == _n { break; } }", path, path, path, path)
-	}
-	return fmt.Sprintf("while %s.len() <= id as usize { %s.push(Default::default()); }", path, path)
 }
 
 func isUnsignedElem(k ir.Kind) bool {
@@ -2389,4 +2322,16 @@ func stdStackCap(fs []frame) int {
 		}
 	}
 	return d + 1
+}
+
+// hasSeqFrame reports whether any frame is a wrapper array -- the frames whose
+// arms call into sofab::seq and route a refusal through V::refuse.
+func hasSeqFrame(fs []frame) bool {
+	for _, fr := range fs {
+		switch fr.kind {
+		case fkSeqArr, fkStructArr, fkNestedNative, fkArrArr:
+			return true
+		}
+	}
+	return false
 }

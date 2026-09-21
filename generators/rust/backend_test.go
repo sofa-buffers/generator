@@ -103,11 +103,11 @@ func TestRustStructural(t *testing.T) {
 		"ArrayKind",                            // example has arrays -> array_begin imports it
 		"pub someu64: u64,",
 		"#[serde(default)]",
-		"pub someuintarray: Vec<u32>,",                                // bounded native array -> the profile's dynamic container
-		"pub somefloatarray: Vec<f32>,",                               // bounded fp array
-		"pub someboolarray: Vec<bool>,",                               // bounded bool array
-		"someuintarray: vec![0, 1, 1000, 4294967295],",                // default is an N-element array literal
-		"someboolarray: vec![true, true, false],",                     // the declared default exactly as written -- `count` never pads it
+		"pub someuintarray: Vec<u32>,",                 // bounded native array -> the profile's dynamic container
+		"pub somefloatarray: Vec<f32>,",                // bounded fp array
+		"pub someboolarray: Vec<bool>,",                // bounded bool array
+		"someuintarray: vec![0, 1, 1000, 4294967295],", // default is an N-element array literal
+		"someboolarray: vec![true, true, false],",      // the declared default exactly as written -- `count` never pads it
 		"if self.someuintarray[..] != [0, 1, 1000, 4294967295][..] {", // omit-guard is a default compare
 		// Over-count rejects (generator#100/#216), then the container is sized to the
 		// count the reject just approved and the wire's M elements are collected into
@@ -279,7 +279,7 @@ messages:
 		// CLEARED on open even here: §7.4 replacement is a semantics rule, so it does
 		// not depend on the bound being a schema `count` (generator#509). What the
 		// missing bound suppresses is the pre-size, and only that.
-		"(ArrayKind::Unsigned, _Loc::Root_mat, _) => { if id as usize >= MAX_DYN_ARRAY_COUNT { self.lim = true; self.afill = 0; return; }; if count > MAX_DYN_ARRAY_COUNT { self.lim = true; self.afill = 0; return; }; if self.lim { return; }; while self.m.mat.len() <= id as usize { self.m.mat.push(Default::default()); } self._ix0 = id as usize; if let Some(_r) = self.m.mat.get_mut(id as usize) { _r.clear(); } },",
+		"(ArrayKind::Unsigned, _Loc::Root_mat, _) => { if let Err(_e) = sofab::seq::check_index(id, sofab::seq::Bound::Cap(MAX_DYN_ARRAY_COUNT)) { self.refuse(_e); self.afill = 0; return; }; if count > MAX_DYN_ARRAY_COUNT { self.lim = true; self.afill = 0; return; }; if self.lim { return; }; if let Err(_e) = sofab::seq::reserve_row(&mut self.m.mat, id, sofab::seq::Bound::Cap(MAX_DYN_ARRAY_COUNT)) { self.refuse(_e); self.afill = 0; return; } self._ix0 = id as usize; },",
 		"(_Loc::Root_mat, _) => { if self.afill == 0 { return; } self.afill -= 1; if value > 4294967295 { self.inv = true; self.afill = 0; return; }; { if !self.lim { if let Some(_r) = self.m.mat.get_mut(self._ix0) { _r.push(value as u32); }; } }; },",
 		// Unbounded string/blob: declared total checked at the top of the callback,
 		// scalar fields and wrapper-sequence string elements alike.
@@ -598,20 +598,18 @@ messages:
 	// than elided: the ORDER is the property -- the inv reject first, so a
 	// doubly-bad message keeps answering InvalidMsg.
 	for _, want := range []string{
-		"if id as usize >= 4 { self.inv = true; return; }; if self.lim { return; }; while self.m.bs.len()", // bounded string
-		"if id as usize >= 3 { self.inv = true; return; }; if self.lim { return; }; while self.m.bb.len()", // bounded blob
-		"if id as usize >= 2 { self.inv = true; return; }; if self.lim { return; }; while self.m.bp.len()", // bounded struct
+		"if self.lim { if let Err(_e) = sofab::seq::check_index(id, sofab::seq::Bound::Schema(4)) { self.refuse(_e); } return; }; if let Err(_e) = sofab::seq::place_elem(&mut self.m.bs, id, sofab::seq::Bound::Schema(4), _s)", // bounded string
+		"if self.lim { if let Err(_e) = sofab::seq::check_index(id, sofab::seq::Bound::Schema(3)) { self.refuse(_e); } return; }; if let Err(_e) = sofab::seq::place_elem(&mut self.m.bb, id, sofab::seq::Bound::Schema(3), _b)", // bounded blob
+		"if self.lim { if let Err(_e) = sofab::seq::check_index(id, sofab::seq::Bound::Schema(2)) { self.refuse(_e); } return; }; if let Err(_e) = sofab::seq::reserve_elem(&mut self.m.bp, id, sofab::seq::Bound::Schema(2))",   // bounded struct
 	} {
 		if !strings.Contains(m, want) {
 			t.Errorf("std message.rs missing over-index guard %q", want)
 		}
 	}
-	// Dynamic string array keeps every index (no guard on the ds arm).
-	if strings.Contains(m, "self.m.ds.len() <= id as usize") && strings.Contains(m, "ds.len() <= id as usize { self.m.ds.push(Default::default()); } self.m.ds[id as usize] = _s; }") {
-		// ds fill present; ensure it is NOT preceded by an inv guard on the same arm.
-		if strings.Contains(m, "self.inv = true; return; }; while self.m.ds.len()") {
-			t.Errorf("dynamic string array must not carry an over-index guard")
-		}
+	// The dynamic string array is bounded by the receiver cap, never by a
+	// schema count it does not have (§6.2.1: exactly one of the two).
+	if !strings.Contains(m, "sofab::seq::place_elem(&mut self.m.ds, id, sofab::seq::Bound::Cap(MAX_DYN_ARRAY_COUNT), _s)") {
+		t.Errorf("dynamic string array must be bounded by the receiver cap:\n%s", m)
 	}
 	// no_std profile: a string/blob element rejects an over-index id ahead of the
 	// heapless capacity drop, converging with std (issue #149 / F-0013).
@@ -621,9 +619,9 @@ messages:
 	srcNoStd := strings.Replace(src, "      ds: { id: 3, type: array, items: { type: string } }\n", "", 1)
 	mn := moduleFromYAML(t, srcNoStd, map[string]any{"corelib": "rs-no-std", "allow_dynamic": true})
 	for _, want := range []string{
-		"if id as usize >= 4 { self.inv = true; return; }; while self.m.bs.len()", // bounded string
-		"if id as usize >= 3 { self.inv = true; return; }; while self.m.bb.len()", // bounded blob
-		"if id as usize >= 2 { self.inv = true; return; }; while self.m.bp.len()", // bounded struct (generator#247)
+		"(_Loc::Root_bs, _) => { match sofab::seq::reserve_elem(&mut self.m.bs, id, sofab::seq::Bound::Schema(4)) { Ok(_e) => { _e.clear(); let _ = _e.push_str(_s);",          // bounded string
+		"(_Loc::Root_bb, _) => { match sofab::seq::reserve_elem(&mut self.m.bb, id, sofab::seq::Bound::Schema(3)) { Ok(_e) => { _e.clear(); let _ = _e.extend_from_slice(_b);", // bounded blob
+		"(_Loc::Root_bp, _) => { if let Err(_e) = sofab::seq::reserve_elem(&mut self.m.bp, id, sofab::seq::Bound::Schema(2))",                                                  // bounded struct (generator#247)
 	} {
 		if !strings.Contains(mn, want) {
 			t.Errorf("no_std message.rs missing over-index guard %q:\n%s", want, mn)
@@ -631,8 +629,8 @@ messages:
 	}
 	// Dynamic string array (ds) is the alloc fallback under allow_dynamic (cap -1),
 	// so it still carries no over-index guard.
-	if strings.Contains(mn, "self.inv = true; return; }; while self.m.ds.len()") {
-		t.Errorf("no_std dynamic string array must not carry an over-index guard:\n%s", mn)
+	if strings.Contains(mn, "self.m.ds") {
+		t.Errorf("no_std leg must not carry the dropped count-less array:\n%s", mn)
 	}
 }
 
@@ -670,22 +668,23 @@ messages:
 	for _, want := range []string{
 		// A wrapper element's own store, string and blob: the refusal sits between
 		// the over-index reject and the gap fill it fronts.
-		"(_Loc::Root_strs, _) => { if id as usize >= MAX_DYN_ARRAY_COUNT { self.lim = true; return; }; if self.lim { return; }; while self.m.strs.len() <= id as usize",
-		"(_Loc::Root_blbs, _) => { if id as usize >= MAX_DYN_ARRAY_COUNT { self.lim = true; return; }; if self.lim { return; }; while self.m.blbs.len() <= id as usize",
+		"(_Loc::Root_strs, _) => { if self.lim { return; }; if let Err(_e) = sofab::seq::place_elem(&mut self.m.strs, id, sofab::seq::Bound::Cap(MAX_DYN_ARRAY_COUNT), _s)",
+		"(_Loc::Root_blbs, _) => { if self.lim { return; }; if let Err(_e) = sofab::seq::place_elem(&mut self.m.blbs, id, sofab::seq::Bound::Cap(MAX_DYN_ARRAY_COUNT), _b)",
 		// A struct element and a wrapper ROW are placed by sequence_begin, which
 		// grows the outer container before descending; refusing there is what keeps
 		// the gap fill from running.
-		"(_Loc::Root_objs, _) => { if id as usize >= MAX_DYN_ARRAY_COUNT { self.lim = true; return; }; if self.lim { return; }; while self.m.objs.len() <= id as usize",
-		"(_Loc::Root_rows, _) => { if id as usize >= MAX_DYN_ARRAY_COUNT { self.lim = true; return; }; if self.lim { return; }; while self.m.rows.len() <= id as usize",
+		"(_Loc::Root_objs, _) => { if self.lim { return; }; if let Err(_e) = sofab::seq::reserve_elem(&mut self.m.objs, id, sofab::seq::Bound::Cap(MAX_DYN_ARRAY_COUNT))",
+		"(_Loc::Root_rows, _) => { if self.lim { return; }; if let Err(_e) = sofab::seq::reserve_row(&mut self.m.rows, id, sofab::seq::Bound::Cap(MAX_DYN_ARRAY_COUNT))",
 		// The inner string element of that row, one level down.
-		"(_Loc::Root_rows_e, _) => { if id as usize >= MAX_DYN_ARRAY_COUNT { self.lim = true; return; }; if self.lim { return; }; while self.m.rows[self._ix",
+		"(_Loc::Root_rows_e, _) => { if self.lim { return; }; if let Err(_e) = sofab::seq::place_elem(&mut self.m.rows[self._ix",
 		// A NATIVE row header: both of its own rejects first (each disarming the
-		// fill, generator#508), then the refusal, then the gap fill.
-		"_Loc::Root_mat, _) => { if id as usize >= MAX_DYN_ARRAY_COUNT { self.lim = true; self.afill = 0; return; }; if count > MAX_DYN_ARRAY_COUNT { self.lim = true; self.afill = 0; return; }; if self.lim { return; }; while self.m.mat.len() <= id as usize",
-		// A schema-COUNTED wrapper array keeps its own InvalidMsg bound and takes
-		// the refusal behind it: the gap fill it would run is bounded by the schema,
-		// but it is still work for a message already refused.
-		"(_Loc::Root_bstr, _) => { if id as usize >= 4 { self.inv = true; return; }; if self.lim { return; }; while self.m.bstr.len() <= id as usize",
+		// fill, generator#508), then the refusal, then the reservation.
+		"_Loc::Root_mat, _) => { if let Err(_e) = sofab::seq::check_index(id, sofab::seq::Bound::Cap(MAX_DYN_ARRAY_COUNT)) { self.refuse(_e); self.afill = 0; return; }; if count > MAX_DYN_ARRAY_COUNT { self.lim = true; self.afill = 0; return; }; if self.lim { return; }; if let Err(_e) = sofab::seq::reserve_row(&mut self.m.mat, id, sofab::seq::Bound::Cap(MAX_DYN_ARRAY_COUNT))",
+		// A schema-COUNTED wrapper array keeps its own InvalidMsg bound INSIDE
+		// the refusal: the index is still checked through the corelib, so an
+		// over-count element keeps answering InvalidMsg in a refused message,
+		// and nothing grows.
+		"(_Loc::Root_bstr, _) => { if self.lim { if let Err(_e) = sofab::seq::check_index(id, sofab::seq::Bound::Schema(4)) { self.refuse(_e); } return; }; if let Err(_e) = sofab::seq::place_elem(&mut self.m.bstr, id, sofab::seq::Bound::Schema(4), _s)",
 	} {
 		if !strings.Contains(m, want) {
 			t.Errorf("message.rs missing post-limit refusal %q:\n%s", want, m)
@@ -694,7 +693,7 @@ messages:
 	// It never precedes a reject that would have set inv, which is what keeps the
 	// verdict where it was.
 	for _, bad := range []string{
-		"if self.lim { return; }; if id as usize >=",
+		"if self.lim { return; }; if let Err(_e) = sofab::seq::check_index(",
 		"if self.lim { return; }; if count >",
 	} {
 		if strings.Contains(m, bad) {
@@ -1077,8 +1076,8 @@ messages:
 		for _, want := range []string{
 			// row id vs the OUTER count, then element count vs the INNER count,
 			// both before the row is opened or grown, both disarming the fill.
-			"(ArrayKind::Unsigned, _Loc::Root_mat, _) => { if id as usize >= 2 { self.inv = true; self.afill = 0; return; }; if count > 3 { self.inv = true; self.afill = 0; return; }; while self.m.mat.len() <= id as usize {",
-			"(ArrayKind::Fp32, _Loc::Root_fmat, _) => { if id as usize >= 2 { self.inv = true; self.afill = 0; return; }; if count > 4 { self.inv = true; self.afill = 0; return; }; while self.m.fmat.len() <= id as usize {",
+			"(ArrayKind::Unsigned, _Loc::Root_mat, _) => { if let Err(_e) = sofab::seq::check_index(id, sofab::seq::Bound::Schema(2)) { self.refuse(_e); self.afill = 0; return; }; if count > 3 { self.inv = true; self.afill = 0; return; }; ",
+			"(ArrayKind::Fp32, _Loc::Root_fmat, _) => { if let Err(_e) = sofab::seq::check_index(id, sofab::seq::Bound::Schema(2)) { self.refuse(_e); self.afill = 0; return; }; if count > 4 { self.inv = true; self.afill = 0; return; }; ",
 		} {
 			if !strings.Contains(m, want) {
 				t.Errorf("message.rs (%v) missing %q:\n%s", cfg, want, m)
@@ -1527,7 +1526,7 @@ messages:
 // §7.4 makes an array wrapper the exception to scope-merging -- the wrapper IS the
 // value of its array field, so a later occurrence discards the earlier one -- and a
 // matrix row is an array. The row arm was the one position in this backend that
-// did not honour it: seqElemGrow pushes Default::default() rows only UP TO the
+// did not honour it: the growth pushed Default::default() rows only UP TO the
 // index, so a repeating row id found the previous occurrence's elements still
 // there and pushed on top of them.
 //
@@ -1537,6 +1536,9 @@ messages:
 // pinned by tests/conformance/rust/repeated_id.rs, which builds such a message
 // with sofab::OStream; this asserts the emitted SHAPE, on every profile, because
 // the clear is easy to lose again in whichever branch the next sizing change adds.
+// The clear itself now lives in the corelib (sofab::seq::reserve_row, pinned by
+// its own seq_tests); what is pinned here is that every profile opens a row
+// through reserve_row -- never reserve_elem, which merges -- and sizes it after.
 //
 // All three shapes are checked, because the clear must NOT follow the pre-size:
 //
@@ -1562,18 +1564,18 @@ messages:
 	}{
 		{
 			map[string]any{"corelib": "rs"},
-			"self._ix0 = id as usize; if let Some(_r) = self.m.mat.get_mut(id as usize) { _r.clear(); _r.reserve_exact(count); } },",
-			"self._ix1 = id as usize; if let Some(_r) = self.m.free.get_mut(id as usize) { _r.clear(); } },",
+			"match sofab::seq::reserve_row(&mut self.m.mat, id, sofab::seq::Bound::Schema(2)) { Ok(_r) => _r.reserve_exact(count), Err(_e) => { self.refuse(_e); self.afill = 0; return; } } self._ix0 = id as usize; },",
+			"if let Err(_e) = sofab::seq::reserve_row(&mut self.m.free, id, sofab::seq::Bound::Schema(2)) { self.refuse(_e); self.afill = 0; return; } self._ix1 = id as usize; },",
 		},
 		{
 			map[string]any{"corelib": "rs", "allow_dynamic": false},
-			"self._ix0 = id as usize; if let Some(_r) = self.m.mat.get_mut(id as usize) { _r.clear(); } },",
+			"if let Err(_e) = sofab::seq::reserve_row(&mut self.m.mat, id, sofab::seq::Bound::Schema(2)) { self.refuse(_e); self.afill = 0; return; } self._ix0 = id as usize; },",
 			"", // a count-less row cannot exist on a fixed-capacity profile
 		},
 		{
 			map[string]any{"corelib": "rs-no-std", "allow_dynamic": true},
-			"self._ix0 = id as usize; if let Some(_r) = self.m.mat.get_mut(id as usize) { _r.clear(); _r.reserve_exact(count); } },",
-			"self._ix1 = id as usize; if let Some(_r) = self.m.free.get_mut(id as usize) { _r.clear(); } },",
+			"match sofab::seq::reserve_row(&mut self.m.mat, id, sofab::seq::Bound::Schema(2)) { Ok(_r) => _r.reserve_exact(count), Err(_e) => { self.refuse(_e); self.afill = 0; return; } } self._ix0 = id as usize; },",
+			"if let Err(_e) = sofab::seq::reserve_row(&mut self.m.free, id, sofab::seq::Bound::Schema(2)) { self.refuse(_e); self.afill = 0; return; } self._ix1 = id as usize; },",
 		},
 	} {
 		yaml := src
@@ -1610,8 +1612,8 @@ messages:
 	if !strings.Contains(o, "self._ix0 = id as usize; _Loc::Root_objs_e },") {
 		t.Errorf("a struct element must be placed and descended into, nothing more:\n%s", o)
 	}
-	if strings.Contains(o, "self.m.objs.get_mut(id as usize) { _r.clear()") ||
-		strings.Contains(o, "self.m.objs[id as usize] = Default::default()") {
+	if !strings.Contains(o, "sofab::seq::reserve_elem(&mut self.m.objs, id, sofab::seq::Bound::Schema(2))") ||
+		strings.Contains(o, "sofab::seq::reserve_row(&mut self.m.objs") {
 		t.Errorf("a re-opened struct element MERGES (§7.4) and must not be reset:\n%s", o)
 	}
 }
@@ -1633,11 +1635,12 @@ messages:
 // [[[9], [3, 4]]] where it wants [[[9]]]. go, dart, zig and python merged the same
 // way; c, cpp, csharp, java, kotlin and typescript did not.
 //
-// What is asserted is the whole arm, so the ORDER is pinned with it: the clear may
-// only ever follow the over-index reject and the growth. In front of the reject it
+// The clear lives in the corelib now (sofab::seq::reserve_row), which runs it only
+// after its index check passed and the container grew: in front of the check it
 // would wipe a valid earlier row on a refused element id -- the §7.3 interaction
-// that turns a loud failure into silent data loss -- and in front of the growth it
-// would index a slot that does not exist yet.
+// that turns a loud failure into silent data loss. Its seq_tests pin that order;
+// what is asserted here is that every profile opens a wrapper row through
+// reserve_row, never through reserve_elem (which merges).
 //
 // Every profile, because the clear is semantics and not sizing: a fixed-capacity
 // heapless::Vec row must clear exactly as a Vec row does, or the two profiles
@@ -1659,18 +1662,16 @@ messages:
 	} {
 		m := moduleFromYAML(t, src, cfg)
 		for _, want := range []string{
-			// The string row: reject an over-index element FIRST, grow to it, record
-			// the index, THEN clear the row that id names.
-			"(_Loc::Root_matstr, _) => { if id as usize >= 2 { self.inv = true; return; }; " +
-				"while self.m.matstr.len() <= id as usize { ",
-			"self._ix0 = id as usize; if let Some(_r) = self.m.matstr.get_mut(id as usize) { _r.clear(); } _Loc::Root_matstr_e },",
+			// The string row: the corelib checks the element id, grows to it and
+			// clears the row; then the index is recorded and the element descended.
+			"(_Loc::Root_matstr, _) => { if let Err(_e) = sofab::seq::reserve_row(&mut self.m.matstr, id, sofab::seq::Bound::Schema(2)) { self.refuse(_e); return; } self._ix0 = id as usize; _Loc::Root_matstr_e },",
 			// ...and one level down, where the row's own elements are native rows:
 			// re-opening the MIDDLE wrapper element replaces it whole, so the native
 			// row it held at some other id goes with it.
-			"self._ix1 = id as usize; if let Some(_r) = self.m.deep.get_mut(id as usize) { _r.clear(); } _Loc::Root_deep_e },",
+			"(_Loc::Root_deep, _) => { if let Err(_e) = sofab::seq::reserve_row(&mut self.m.deep, id, sofab::seq::Bound::Schema(2)) { self.refuse(_e); return; } self._ix1 = id as usize; _Loc::Root_deep_e },",
 		} {
 			if !strings.Contains(m, want) {
-				t.Errorf("(%v) a wrapper row must be CLEARED on open, after the reject and the growth; missing %q:\n%s", cfg, want, m)
+				t.Errorf("(%v) a wrapper row must be opened through reserve_row; missing %q:\n%s", cfg, want, m)
 			}
 		}
 		// There is no pre-size to pair with the clear here, and there must not be: a
@@ -1678,7 +1679,7 @@ messages:
 		// present element id + 1 (§5.1) -- so at the moment the row opens there is no
 		// number to reserve. A reserve_exact on this arm would be reserving the OUTER
 		// array's count for the inner one.
-		if strings.Contains(m, "self.m.matstr.get_mut(id as usize) { _r.clear(); _r.reserve_exact") {
+		if strings.Contains(m, "reserve_row(&mut self.m.matstr, id, sofab::seq::Bound::Schema(2)) { Ok(_r) => _r.reserve_exact") {
 			t.Errorf("(%v) a wrapper row has no count to pre-size from:\n%s", cfg, m)
 		}
 	}
@@ -1708,10 +1709,10 @@ messages:
 		{"corelib": "rs-no-std", "allow_dynamic": true}, // no_std, alloc
 	} {
 		got := moduleFromYAML(t, src, cfg)
-		// Struct elements: gap-fill to id under the over-index guard, then descend
+		// Struct elements: the corelib gap-fills to id under the index bound, then descend
 		// into out[id].
-		if !strings.Contains(got, "(_Loc::Root_objs, _) => { if id as usize >= 4 { self.inv = true; return; }; while self.m.objs.len() <= id as usize {") {
-			t.Errorf("(%v) struct element must gap-fill under the over-index guard:\n%s", cfg, got)
+		if !strings.Contains(got, "(_Loc::Root_objs, _) => { if let Err(_e) = sofab::seq::reserve_elem(&mut self.m.objs, id, sofab::seq::Bound::Schema(4)) { self.refuse(_e); return; }") {
+			t.Errorf("(%v) struct element must be reserved through sofab::seq under its schema bound:\n%s", cfg, got)
 		}
 		if !strings.Contains(got, "self._ix0 = id as usize; _Loc::Root_objs_e },") {
 			t.Errorf("(%v) struct element must record the element id as its index:\n%s", cfg, got)
@@ -1721,12 +1722,12 @@ messages:
 		}
 		// Matrix rows: array_begin opens the row the id names, and elements push into
 		// THAT row rather than into the last one appended.
-		if !strings.Contains(got, "(ArrayKind::Unsigned, _Loc::Root_mat, _) => { if id as usize >= 4 { self.inv = true; self.afill = 0; return; }; if count > 3 { self.inv = true; self.afill = 0; return; }; while self.m.mat.len() <= id as usize {") ||
+		if !strings.Contains(got, "(ArrayKind::Unsigned, _Loc::Root_mat, _) => { if let Err(_e) = sofab::seq::check_index(id, sofab::seq::Bound::Schema(4)) { self.refuse(_e); self.afill = 0; return; }; if count > 3 { self.inv = true; self.afill = 0; return; }; ") ||
 			// Pinned to the closing brace: all three configs here have DYNAMIC rows,
-			// so all three CLEAR the row -- a repeated row id replaces rather than
-			// merges (§7.4, generator#509) -- and then size it from the inner count
-			// the guard above just approved (generator#505). Nothing else follows.
-			!strings.Contains(got, "self._ix1 = id as usize; if let Some(_r) = self.m.mat.get_mut(id as usize) { _r.clear(); _r.reserve_exact(count); } },") {
+			// so all three CLEAR the row through reserve_row -- a repeated row id
+			// replaces rather than merges (§7.4, generator#509) -- and then size it
+			// from the inner count the guard above just approved (generator#505).
+			!strings.Contains(got, "match sofab::seq::reserve_row(&mut self.m.mat, id, sofab::seq::Bound::Schema(4)) { Ok(_r) => _r.reserve_exact(count), Err(_e) => { self.refuse(_e); self.afill = 0; return; } } self._ix1 = id as usize; },") {
 			t.Errorf("(%v) a matrix row must be opened at out[id], bounded by the outer count:\n%s", cfg, got)
 		}
 		if !strings.Contains(got, "if let Some(_r) = self.m.mat.get_mut(self._ix1) {") {
@@ -1735,12 +1736,11 @@ messages:
 		// Wrapper rows: same, through the row's own sequence_begin -- and pinned to
 		// the closing brace, because the row is also CLEARED there. A wrapper row is
 		// an array field, so a repeated element id REPLACES it rather than merging
-		// into it (§7.4, generator#523); the clear sits after the growth, so the row
-		// exists, and after the over-index reject's `return`, so a refused element id
-		// cannot wipe a valid earlier row. There is no pre-size to pair with it: a
-		// wrapper row announces no count anywhere on the wire (§5.1).
-		if !strings.Contains(got, "(_Loc::Root_rows, _) => { if id as usize >= 4 { self.inv = true; return; }; while self.m.rows.len() <= id as usize {") ||
-			!strings.Contains(got, "self._ix2 = id as usize; if let Some(_r) = self.m.rows.get_mut(id as usize) { _r.clear(); } _Loc::Root_rows_e },") {
+		// into it (§7.4, generator#523); reserve_row clears only after its index
+		// check passed, so a refused element id cannot wipe a valid earlier row.
+		// There is no pre-size to pair with it: a wrapper row announces no count
+		// anywhere on the wire (§5.1).
+		if !strings.Contains(got, "(_Loc::Root_rows, _) => { if let Err(_e) = sofab::seq::reserve_row(&mut self.m.rows, id, sofab::seq::Bound::Schema(4)) { self.refuse(_e); return; } self._ix2 = id as usize; _Loc::Root_rows_e },") {
 			t.Errorf("(%v) a wrapper row must be placed at out[id] and cleared there:\n%s", cfg, got)
 		}
 		if !strings.Contains(got, "self.m.rows[self._ix2]") {
@@ -2347,8 +2347,8 @@ messages:
 `
 	got := moduleFromYAML(t, src, map[string]any{"corelib": "rs-no-std"})
 	for _, want := range []string{
-		"if let Some(_e) = self.m.string_array.get_mut(id as usize) { _e.clear(); let _ = _e.push_str(_s);",
-		"if let Some(_e) = self.m.blob_array.get_mut(id as usize) { _e.clear(); let _ = _e.extend_from_slice(_b);",
+		"match sofab::seq::reserve_elem(&mut self.m.string_array, id, sofab::seq::Bound::Schema(5)) { Ok(_e) => { _e.clear(); let _ = _e.push_str(_s);",
+		"match sofab::seq::reserve_elem(&mut self.m.blob_array, id, sofab::seq::Bound::Schema(5)) { Ok(_e) => { _e.clear(); let _ = _e.extend_from_slice(_b);",
 	} {
 		if !strings.Contains(got, want) {
 			t.Errorf("a wrapper element must be replaced, not appended to, missing %q:\n%s", want, got)
@@ -2356,8 +2356,8 @@ messages:
 	}
 	// The defect: a push into an element that was never cleared.
 	for _, bad := range []string{
-		"get_mut(id as usize) { let _ = _e.push_str(_s);",
-		"get_mut(id as usize) { let _ = _e.extend_from_slice(_b);",
+		"Ok(_e) => { let _ = _e.push_str(_s);",
+		"Ok(_e) => { let _ = _e.extend_from_slice(_b);",
 	} {
 		if strings.Contains(got, bad) {
 			t.Errorf("a wrapper element must not be appended to (%q):\n%s", bad, got)
@@ -2731,7 +2731,7 @@ messages:
 	}
 	// A wrapper element carries BOTH bounds, over-index first: an element that is
 	// not this array's element at all must not be measured against its bound.
-	if !strings.Contains(m, "(_Loc::Root_sa, _) => { if id as usize >= 3 { self.inv = true; return; }; if total > 6 { self.inv = true; return; }; },") {
+	if !strings.Contains(m, "(_Loc::Root_sa, _) => { if let Err(_e) = sofab::seq::check_index(id, sofab::seq::Bound::Schema(3)) { self.refuse(_e); return; }; if total > 6 { self.inv = true; return; }; },") {
 		t.Error("a wrapper element must latch over-index then element maxlen")
 	}
 	// The payload-side guards STAY: unreachable now, but the only thing still
@@ -2793,12 +2793,14 @@ messages:
 	}
 
 	for _, want := range []string{
-		"(_Loc::Root_dstrs, _) => { if id as usize >= MAX_DYN_ARRAY_COUNT { self.lim = true; return; }; if self.lim { return; }; while self.m.dstrs.len() <= id as usize",
-		"(_Loc::Root_dblbs, _) => { if id as usize >= MAX_DYN_ARRAY_COUNT { self.lim = true; return; }; if self.lim { return; }; while self.m.dblbs.len() <= id as usize",
-		"(_Loc::Root_dobjs, _) => { if id as usize >= MAX_DYN_ARRAY_COUNT { self.lim = true; return; }; if self.lim { return; }; while self.m.dobjs.len() <= id as usize",
+		"(_Loc::Root_dstrs, _) => { if self.lim { return; }; if let Err(_e) = sofab::seq::place_elem(&mut self.m.dstrs, id, sofab::seq::Bound::Cap(MAX_DYN_ARRAY_COUNT), _s)",
+		"(_Loc::Root_dblbs, _) => { if self.lim { return; }; if let Err(_e) = sofab::seq::place_elem(&mut self.m.dblbs, id, sofab::seq::Bound::Cap(MAX_DYN_ARRAY_COUNT), _b)",
+		"(_Loc::Root_dobjs, _) => { if self.lim { return; }; if let Err(_e) = sofab::seq::reserve_elem(&mut self.m.dobjs, id, sofab::seq::Bound::Cap(MAX_DYN_ARRAY_COUNT))",
 		// A native matrix ROW takes the index cap too: its id is the outer array's
 		// length. Its own element count is capped beside it, id first.
-		"_Loc::Root_dmat, _) => { if id as usize >= MAX_DYN_ARRAY_COUNT { self.lim = true; self.afill = 0; return; }; if count > MAX_DYN_ARRAY_COUNT",
+		"_Loc::Root_dmat, _) => { if let Err(_e) = sofab::seq::check_index(id, sofab::seq::Bound::Cap(MAX_DYN_ARRAY_COUNT)) { self.refuse(_e); self.afill = 0; return; }; if count > MAX_DYN_ARRAY_COUNT",
+		// The corelib's LimitExceeded is filed as `lim`, never folded into inv...
+		"sofab::Error::LimitExceeded => self.lim = true,",
 		// and the flag is surfaced as the policy category, never as InvalidMsg.
 		"if limited { return Err(DecodeError::Sofab(sofab::Error::LimitExceeded)); }",
 	} {
@@ -2808,7 +2810,7 @@ messages:
 	}
 	// The cap governs only what the schema left unbounded (§9.5): a count:N array
 	// keeps its own bound and its own category.
-	if !strings.Contains(m, "(_Loc::Root_bstrs, _) => { if id as usize >= 4 { self.inv = true; return; }; if self.lim { return; }") {
+	if !strings.Contains(m, "(_Loc::Root_bstrs, _) => { if self.lim { if let Err(_e) = sofab::seq::check_index(id, sofab::seq::Bound::Schema(4)) { self.refuse(_e); } return; }; if let Err(_e) = sofab::seq::place_elem(&mut self.m.bstrs, id, sofab::seq::Bound::Schema(4), _s)") {
 		t.Errorf("a count:N wrapper array must keep its InvalidMsg schema bound:\n%s", m)
 	}
 }
@@ -3049,15 +3051,14 @@ messages:
 			// claim; csharp emits `new ulong[count]` at the identical shape.
 			"(ArrayKind::Unsigned, _Loc::Root_rows_e, 0) => { if count > 7 { self.inv = true; self.afill = 0; return; }; self.m.rows[self._ix1].vs.clear(); self.m.rows[self._ix1].vs.reserve_exact(count) },",
 			// A nested row is the same field one level down: its INNER count is
-			// checked by the row guards, so the row it just opened is CLEARED and then
-			// sized from it. Through get_mut, because the growth loop above can
-			// legitimately stop short of the index on a fixed-capacity outer
-			// container. The reserve is UNCONDITIONAL: it once sat behind an
-			// `is_empty()` guard, which existed only because this arm did not clear
-			// and a repeated row id would otherwise have reserved len + M -- with the
-			// clear in front, len is always 0 here (see rowReset, generator#509).
-			"if count > 6 { self.inv = true; self.afill = 0; return; }; while self.m.mat.len() <= id as usize {",
-			"self._ix0 = id as usize; if let Some(_r) = self.m.mat.get_mut(id as usize) { _r.clear(); _r.reserve_exact(count); } },",
+			// checked by the row guards, so the row reserve_row just opened -- and
+			// CLEARED -- is sized from it, on the Ok arm only: a full fixed-capacity
+			// outer container refuses instead. The reserve is UNCONDITIONAL: it once
+			// sat behind an `is_empty()` guard, which existed only because this arm
+			// did not clear and a repeated row id would otherwise have reserved
+			// len + M -- with the clear in front, len is always 0 here (see
+			// rowReserve, generator#509).
+			"if count > 6 { self.inv = true; self.afill = 0; return; }; match sofab::seq::reserve_row(&mut self.m.mat, id, sofab::seq::Bound::Schema(2)) { Ok(_r) => _r.reserve_exact(count), Err(_e) => { self.refuse(_e); self.afill = 0; return; } } self._ix0 = id as usize; },",
 		} {
 			if !strings.Contains(m, want) {
 				t.Errorf("message.rs (%v) missing %q:\n%s", cfg, want, m)
@@ -3108,10 +3109,10 @@ messages:
 	// carrying a schema bound, so dropping it on the count-less arm would leave
 	// exactly one shape in the backend that still merges a repeated row id
 	// (generator#509).
-	if !strings.Contains(d, "self._ix0 = id as usize; if let Some(_r) = self.m.matfree.get_mut(id as usize) { _r.clear(); } },") {
+	if !strings.Contains(d, "if let Err(_e) = sofab::seq::reserve_row(&mut self.m.matfree, id, sofab::seq::Bound::Schema(2)) { self.refuse(_e); self.afill = 0; return; } self._ix0 = id as usize; },") {
 		t.Errorf("a count-less row must be opened and cleared, and left unsized:\n%s", d)
 	}
-	if strings.Contains(d, "self.m.matfree.get_mut(id as usize) { _r.clear(); _r.reserve") {
+	if strings.Contains(d, "reserve_row(&mut self.m.matfree, id, sofab::seq::Bound::Schema(2)) { Ok(_r) => _r.reserve") {
 		t.Errorf("a count-less row must never be pre-sized from an untrusted count:\n%s", d)
 	}
 	// ...while the bounded field in the very same message still is.
@@ -3217,7 +3218,7 @@ messages:
 			// A native ROW's two bounds — the row id against the outer count, and the
 			// row's own element count against the inner one. These already disarmed;
 			// pinned so they stay that way.
-			"(ArrayKind::Unsigned, _Loc::Root_mat, _) => { if id as usize >= 2 { self.inv = true; self.afill = 0; return; }; if count > 4 { self.inv = true; self.afill = 0; return; }",
+			"(ArrayKind::Unsigned, _Loc::Root_mat, _) => { if let Err(_e) = sofab::seq::check_index(id, sofab::seq::Bound::Schema(2)) { self.refuse(_e); self.afill = 0; return; }; if count > 4 { self.inv = true; self.afill = 0; return; }",
 			// The MID-ARRAY width trip: an element that breaches its declared width
 			// invalidates the message, and every later element of that same array
 			// still arrives. Unsigned and signed forms both; the push that follows is
@@ -3360,7 +3361,7 @@ func TestRustStdDecodeStackIsFixed(t *testing.T) {
 }
 
 // TestRustWrapperStringArrayNoPresize: a string/blob wrapper array on growable
-// storage grows by push to what the message carries. It is NOT reserved to its
+// storage grows (sofab::seq, Vec::resize_with) to what the message carries. It is NOT reserved to its
 // schema `count` up front: `count` is a capacity (MESSAGE_SPEC §5.1), so doing
 // that would allocate the declared worst case on every decode -- up to
 // max_dyn_array_count elements for one element on the wire -- which is what
@@ -3377,8 +3378,8 @@ messages:
 `
 	m := moduleFromYAML(t, src, map[string]any{"corelib": "rs"})
 	for _, want := range []string{
-		"(_Loc::Root_bs, _) => { if id as usize >= 5 { self.inv = true; return; }; while self.m.bs.len() <= id as usize",
-		"(_Loc::Root_bb, _) => { if id as usize >= 3 { self.inv = true; return; }; while self.m.bb.len() <= id as usize",
+		"(_Loc::Root_bs, _) => { if let Err(_e) = sofab::seq::place_elem(&mut self.m.bs, id, sofab::seq::Bound::Schema(5), _s) { self.refuse(_e); } }",
+		"(_Loc::Root_bb, _) => { if let Err(_e) = sofab::seq::place_elem(&mut self.m.bb, id, sofab::seq::Bound::Schema(3), _b) { self.refuse(_e); } }",
 	} {
 		if !strings.Contains(m, want) {
 			t.Errorf("std dynamic message.rs missing %q:\n%s", want, m)

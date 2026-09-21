@@ -124,10 +124,16 @@ const rustReadme = "# Generated SofaBuffers Rust crate\n\n" +
 	"cargo run -- decode <Message> < bytes.bin\n```\n"
 
 func (g *gen) cargoToml(s *ir.Schema) string {
-	// corelib-rs (std) has no Cargo features — every wire type is always compiled
-	// in and the value type is always 64-bit. Its crate is published as the
+	// corelib-rs (std) has no wire-type Cargo features — every wire type is always
+	// compiled in and the value type is always 64-bit. Its crate is published as the
 	// package "sofa-buffers-corelib" (importable as `sofab`).
 	dep := `sofab = { package = "sofa-buffers-corelib", path = "${SOFAB_RS_CORELIB}" }`
+	if g.staticStore {
+		// The one corelib-rs feature adds a container, not wire code: it
+		// implements sofab::seq::SeqVec for heapless::Vec, the destination every
+		// schema-bounded wrapper array has under static storage.
+		dep = `sofab = { package = "sofa-buffers-corelib", path = "${SOFAB_RS_CORELIB}", features = ["heapless"] }`
+	}
 	if !g.std() {
 		// corelib-rs-no-std gates every wire type behind a Cargo feature. Provision
 		// the full wire-type set (not just the wire types the schema declares): the
@@ -137,7 +143,18 @@ func (g *gen) cargoToml(s *ir.Schema) string {
 		// make the decoder reject a well-formed skippable field (generator#215 /
 		// Crucible F-0027). require!() in the module asserts the same set.
 		feats := ""
-		if caps := g.capabilities(s); len(caps) > 0 {
+		caps := g.capabilities(s)
+		// The container half of sofab::seq (generator#587): the SeqVec impl for the
+		// wrapper-array destination this crate declares -- heapless::Vec under
+		// static storage, alloc::vec::Vec under allow_dynamic. Neither adds wire
+		// code; an impl the crate never calls is not monomorphised.
+		switch {
+		case g.staticStore:
+			caps = append(caps, "heapless")
+		case g.usesAlloc(s):
+			caps = append(caps, "alloc")
+		}
+		if len(caps) > 0 {
 			quoted := make([]string, len(caps))
 			for i, c := range caps {
 				quoted[i] = `"` + c + `"`

@@ -177,8 +177,8 @@
       "//        ": "kind, which is the thing being measured: cpp rides all three kinds into",
       "//         ": "the corelib reads; zig rides its arrays into the corelib and keeps",
       "//          ": "strings/blobs generated; go hands the wrapper arrays to corelib",
-      "//           ": "collectors; rust is 9.5.2's exemption and checks entirely in generated",
-      "//            ": "code. A fifth shape -- java/kotlin/csharp's PayloadAcc -- has no row",
+      "//           ": "collectors; rust hands its wrapper-array indices to sofab::seq and keeps",
+      "//            ": "the rest generated (9.5.2). A fifth shape -- java/kotlin/csharp's PayloadAcc -- has no row",
       "//             ": "because those are `subtract` rows at ~1 min each and the shape is",
       "//              ": "already covered qualitatively; add one if that path starts moving.",
       "id": "cpp-cpp-unbounded",
@@ -220,9 +220,9 @@
       "archs": []
     },
     {
-      "//": "The exempt port (ARCHITECTURE 9.5.2): corelib-rs takes no cap argument --",
-      "// ": "the borrow checker forbids the collector shape -- so every one of these",
-      "//  ": "guards is generated code, and this row is where their cost is visible.",
+      "//": "ARCHITECTURE 9.5.2: corelib-rs takes the cap only on its sofab::seq calls",
+      "// ": "(a wrapper array's element index); the string/blob length and native",
+      "//  ": "count guards stay generated code, and this row is where both costs show.",
       "//   ": "Default (heap) storage, matching the `rust-rs` row it pairs with:",
       "//    ": "allow_dynamic is a separate axis with its own pair.",
       "id": "rust-rs-unbounded",
