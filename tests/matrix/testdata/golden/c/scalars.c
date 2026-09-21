@@ -18,6 +18,7 @@ static const sofab_object_descr_field_t _message_fields_message_Scalars[] = {
     SOFAB_OBJECT_FIELD(5, message_Scalars_t, f32, SOFAB_OBJECT_FIELDTYPE_FP32),
     SOFAB_OBJECT_FIELD(6, message_Scalars_t, f64, SOFAB_OBJECT_FIELDTYPE_FP64),
     SOFAB_OBJECT_FIELD(7, message_Scalars_t, flag, SOFAB_OBJECT_FIELDTYPE_BOOLEAN),
+    SOFAB_OBJECT_FIELD_ARRAY_SIZED(8, message_Scalars_t, flags, flags_len, SOFAB_OBJECT_FIELDTYPE_ARRAY_BOOLEAN),
 };
 static const message_Scalars_t _message_defaults_message_Scalars = {
     .u8max = 255,
@@ -28,7 +29,7 @@ static const message_Scalars_t _message_defaults_message_Scalars = {
     .f64 = -2.5,
     .flag = 1,
 };
-const sofab_object_descr_t _message_descr_message_Scalars = SOFAB_OBJECT_DESCR_WITH_DEFAULTS(_message_fields_message_Scalars, 8, NULL, 0, &_message_defaults_message_Scalars);
+const sofab_object_descr_t _message_descr_message_Scalars = SOFAB_OBJECT_DESCR_WITH_DEFAULTS(_message_fields_message_Scalars, 9, NULL, 0, &_message_defaults_message_Scalars);
 
 void message_scalars_init(message_Scalars_t *msg) {
     memset(msg, 0, sizeof(*msg));

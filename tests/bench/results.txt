@@ -16,7 +16,7 @@
 #
 # Numbers shift when anything below shifts. Check here FIRST: if the header is
 # unchanged and a number moved, the generator caused it.
-# corelib:   c-cpp 89e4e7f | cpp 45466d7 | cs 1055f1b | dart c5da6ad | go 7cf03af | java a00e05a | kotlin-mp 3b065d0 | py fbc48b8 | rs 29311a5 | rs-no-std 311960d | ts e94bdbf | zig 1eb2e69
+# corelib:   c-cpp 89e4e7f | cpp 45466d7 | cs 1055f1b | dart c5da6ad | go 7cf03af | java a00e05a | kotlin-mp 3b065d0 | py 39d80db | rs 29311a5 | rs-no-std 311960d | ts e94bdbf | zig 1eb2e69
 #
 ## instruction cost
 row                profile    method    encode_ir/op  decode_ir/op
@@ -32,8 +32,8 @@ go                 maxspeed   toggle    18495         45056
 go-unbounded       maxspeed   toggle    13156         39526
 java               maxspeed   subtract  17006         31511
 kotlin             maxspeed   subtract  17203         33036
-python             maxspeed   subtract  1081554       1942478
-python-native      maxspeed   subtract  130483        433968
+python             maxspeed   subtract  1077921       1949312
+python-native      maxspeed   subtract  129232        433968
 rust-rs            maxspeed   toggle    8273          22514
 rust-rs-no-std     footprint  toggle    8078          29998
 rust-rs-no-std-dyn footprint  toggle    8280          38452

@@ -49,6 +49,8 @@ pub struct Scalars {
     pub f32: f32,
     pub f64: f64,
     pub flag: bool,
+    /// Schema bound: count 4 is a CAPACITY, not a length -- starts empty; over 4 elements is INVALID, never truncated.
+    pub flags: Vec<bool>,
 }
 
 #[allow(clippy::derivable_impls)] // one Default shape whether or not the schema declares defaults
@@ -64,6 +66,7 @@ impl Default for Scalars {
             f32: 3.14,
             f64: -2.5,
             flag: true,
+            flags: Vec::new(),
         }
     }
 }
@@ -71,7 +74,7 @@ impl Default for Scalars {
 #[allow(clippy::approx_constant)] // float defaults are the schema's values, written as declared
 impl Scalars {
     /// Worst-case encoded size of this message, derived from the schema.
-    pub const MAX_SIZE: usize = 49;
+    pub const MAX_SIZE: usize = 55;
     pub fn serialize<_F: sofab::Flush>(&self, os: &mut OStream<'_, _F>) {
         if self.u8min != 0 { let _ = os.write_unsigned(0, self.u8min as Unsigned); }
         if self.u8max != 255 { let _ = os.write_unsigned(1, self.u8max as Unsigned); }
@@ -81,6 +84,9 @@ impl Scalars {
         if self.f32 != 3.14 { let _ = os.write_fp32(5, self.f32); }
         if self.f64 != -2.5 { let _ = os.write_fp64(6, self.f64); }
         if !self.flag { let _ = os.write_boolean(7, self.flag); }
+        if !self.flags.is_empty() {
+            { let _t0: Vec<u8> = self.flags.iter().map(|_v| *_v as u8).collect(); let _ = os.write_array_unsigned(8, &_t0); }
+        }
     }
     pub fn encode(&self) -> Vec<u8> {
         let mut buf = vec![0u8; Self::MAX_SIZE];
@@ -112,7 +118,7 @@ mod scalars_dec {
     pub fn decode(data: &[u8]) -> Scalars {
         let mut m = Scalars::default();
         {
-            let mut v = V { m: &mut m, stack: [_Loc::Root; 1], sp: 0, cur: _Loc::Root, dead: 0, err: false, inv: false, askip: 0 };
+            let mut v = V { m: &mut m, stack: [_Loc::Root; 1], sp: 0, cur: _Loc::Root, dead: 0, err: false, inv: false, askip: 0, afill: 0 };
             let mut is = IStream::new();
             let _ = is.feed(data, &mut v);
         }
@@ -125,7 +131,7 @@ mod scalars_dec {
         let invalid;
         let fed;
         {
-            let mut v = V { m: &mut m, stack: [_Loc::Root; 1], sp: 0, cur: _Loc::Root, dead: 0, err: false, inv: false, askip: 0 };
+            let mut v = V { m: &mut m, stack: [_Loc::Root; 1], sp: 0, cur: _Loc::Root, dead: 0, err: false, inv: false, askip: 0, afill: 0 };
             let mut is = IStream::new();
             fed = is.feed(data, &mut v);
             overflow = v.err;
@@ -173,11 +179,12 @@ mod scalars_dec {
         err: bool,
         inv: bool,
         askip: usize,
+        afill: usize,
     }
 
     impl Decoder {
         pub fn new() -> Self {
-            Self { m: Scalars::default(), is: IStream::new(), stack: [_Loc::Root; 1], sp: 0, cur: _Loc::Root, dead: 0, err: false, inv: false, askip: 0 }
+            Self { m: Scalars::default(), is: IStream::new(), stack: [_Loc::Root; 1], sp: 0, cur: _Loc::Root, dead: 0, err: false, inv: false, askip: 0, afill: 0 }
         }
 
         /// Feed the next chunk. `Ok(Status::Complete)` if it ended on a field
@@ -186,10 +193,10 @@ mod scalars_dec {
         /// these bytes were. `Err` is a refusal, and it is terminal.
         pub fn feed(&mut self, chunk: &[u8]) -> Result<sofab::Status, sofab::Error> {
             let fed = {
-                let mut v = V { m: &mut self.m, stack: self.stack, sp: self.sp, cur: self.cur, dead: self.dead, err: self.err, inv: self.inv, askip: self.askip };
+                let mut v = V { m: &mut self.m, stack: self.stack, sp: self.sp, cur: self.cur, dead: self.dead, err: self.err, inv: self.inv, askip: self.askip, afill: self.afill };
                 let r = self.is.feed(chunk, &mut v);
                 // `..` covers `m`, ending its borrow before the write-back.
-                let V { stack, sp, cur, dead, err, inv, askip, .. } = v;
+                let V { stack, sp, cur, dead, err, inv, askip, afill, .. } = v;
                 self.stack = stack;
                 self.sp = sp;
                 self.cur = cur;
@@ -197,6 +204,7 @@ mod scalars_dec {
                 self.err = err;
                 self.inv = inv;
                 self.askip = askip;
+                self.afill = afill;
                 r
             };
             // INVALID dominates a truncated tail (S5.2), so it is reported
@@ -243,6 +251,7 @@ struct V<'a> {
     err: bool,
     inv: bool,
     askip: usize, // elements left to discard from a wire-type-contradictory array
+    afill: usize, // elements still expected by an armed native-array fill (S7.3)
 }
 
 #[allow(clippy::single_match, clippy::match_single_binding, clippy::collapsible_match, clippy::needless_return, clippy::unnecessary_cast, clippy::let_unit_value, clippy::unnecessary_operation, clippy::manual_range_contains)] // arms are stamped per field from one template
@@ -254,6 +263,7 @@ impl<'a> Visitor for V<'a> {
             (_Loc::Root, 1) => { if value > 255 { self.inv = true; return; }; self.m.u8max = value as u8 },
             (_Loc::Root, 2) => { self.m.u64max = value as u64 },
             (_Loc::Root, 7) => self.m.flag = value != 0,
+            (_Loc::Root, 8) => { if self.afill == 0 { return; } self.afill -= 1; self.m.flags.push(value != 0); },
             _ => {}
         }
     }
@@ -282,6 +292,7 @@ impl<'a> Visitor for V<'a> {
     fn array_begin(&mut self, id: Id, kind: ArrayKind, count: usize) {
         self.askip = match kind {
             ArrayKind::Unsigned => match (self.cur, id) {
+                (_Loc::Root, 8) => 0,
                 _ => count,
             },
             ArrayKind::Signed => match (self.cur, id) {
@@ -289,7 +300,18 @@ impl<'a> Visitor for V<'a> {
             },
             _ => count,
         };
+        self.afill = match kind {
+            ArrayKind::Unsigned => match (self.cur, id) {
+                (_Loc::Root, 8) => count,
+                _ => 0,
+            },
+            ArrayKind::Signed => match (self.cur, id) {
+                _ => 0,
+            },
+            _ => 0,
+        };
         match (kind, self.cur, id) {
+            (ArrayKind::Unsigned, _Loc::Root, 8) => { if count > 4 { self.inv = true; self.afill = 0; return; }; self.m.flags.clear(); self.m.flags.reserve_exact(count) },
             _ => {}
         }
     }

@@ -11,18 +11,71 @@
 static_assert(sofab::API_VERSION == 1,
     "SofaBuffers: generated against C++ API v1, but the linked corelib differs.");
 
+#ifndef SOFABGEN_RAW_ARRAY_HELPER
+#define SOFABGEN_RAW_ARRAY_HELPER
+/// Native-array element view shared by every sofabgen-generated header.
+namespace sofabgen {
+
+/**
+ * @brief Views a native array member as a sequence of its WIRE element type.
+ *
+ * An enum array's member elements are the scoped enum; the wire elements are
+ * the enum's backing integer. The two have the same size and the same object
+ * representation, so the member's own storage IS a valid destination. A boolean
+ * array's member elements are std::uint8_t, viewed as bool so the corelib reads
+ * each element under the boolean rule (non-zero is true, normalized to 1). Either
+ * way the decode has to land in the member and not in a temporary:
+ * corelib-c-cpp binds a destination by ADDRESS and fills it after the field
+ * callback returns, and corelib-cpp resumes a field split across feed chunks
+ * into the destination it was handed, once per chunk that carries part of it.
+ *
+ * The view forwards `resize()`/`size()` to the member and exposes `data()`
+ * as the wire element type, which is all `IStreamImpl::readArray` needs: it
+ * keeps the tag check, the schema-count check, the reset and the bind, in
+ * that order. The view itself is never used after readArray returns -- only
+ * the member's storage stays bound.
+ *
+ * @tparam Container Destination container (the member).
+ * @tparam Wire      Element type the corelib reads (the enum's backing integer, or bool).
+ */
+template <typename Container, typename Wire>
+struct RawArray {
+    static_assert(sizeof(Wire) == sizeof(typename Container::value_type),
+                  "the view must have the member's element size");
+    using value_type = Wire;
+    Container *out;  ///< The member this view writes through.
+
+    /** @brief Prepare the member for @p n elements, as readArray would itself. */
+    void resize(std::size_t n) noexcept {
+        if constexpr (requires { out->resize(n); }) { out->resize(n); }
+        else { *out = Container{}; (void)n; }
+    }
+    std::size_t size() const noexcept { return out->size(); }
+    Wire *data() noexcept { return reinterpret_cast<Wire *>(out->data()); }
+    const Wire *data() const noexcept { return reinterpret_cast<const Wire *>(out->data()); }
+    Wire *begin() noexcept { return data(); }
+    Wire *end() noexcept { return data() + size(); }
+    const Wire *begin() const noexcept { return data(); }
+    const Wire *end() const noexcept { return data() + size(); }
+};
+
+} // namespace sofabgen
+#endif // SOFABGEN_RAW_ARRAY_HELPER
+
 namespace message {
 
 struct Scalars : sofab::Message {
     std::uint64_t u64max = 18446744073709551615ULL;
     std::int64_t i64min = (-9223372036854775807LL - 1);
     double f64 = -2.5;
+    /// Schema bound: count 4 is a CAPACITY, not a length -- starts empty; over 4 elements is INVALID, never truncated.
+    std::vector<std::uint8_t> flags = {};
     float f32 = 3.14f;
     std::uint8_t u8min = 0;
     std::uint8_t u8max = 255;
     std::int8_t i8min = -128;
     bool flag = true;
-    static constexpr std::size_t _maxSize = 49;
+    static constexpr std::size_t _maxSize = 55;
 
     /**
      * @brief Put every field back to its declared default, in place.
@@ -50,6 +103,7 @@ struct Scalars : sofab::Message {
         f32 = 3.14f;
         f64 = -2.5;
         flag = true;
+        flags = {};
     }
 
     /**
@@ -136,6 +190,7 @@ struct Scalars : sofab::Message {
         if (!(f32 == 3.14f)) { return false; }
         if (!(f64 == -2.5)) { return false; }
         if (!(flag == true)) { return false; }
+        if (!(flags.empty())) { return false; }
         return true;
     }
 
@@ -157,6 +212,9 @@ struct Scalars : sofab::Message {
         if (f32 != 3.14f) { (void)os.write(5, f32); }
         if (f64 != -2.5) { (void)os.write(6, f64); }
         if (flag != true) { (void)os.write(7, flag); }
+        if (!flags.empty()) {
+            (void)os.write(8, flags);
+        }
         return os.writeIf(0, false, false);
     }
 
@@ -195,6 +253,9 @@ struct Scalars : sofab::Message {
             break;
         case 7:
             sofab::read(is, flag);
+            break;
+        case 8:
+            { sofabgen::RawArray<std::vector<std::uint8_t>, bool> _t0{&flags}; sofab::readArray(is, _t0, 4); }
             break;
         default: break;
         }

@@ -14,6 +14,8 @@ public class Scalars {
     public float f32 = 3.14f;
     public double f64 = -2.5;
     public boolean flag = true;
+    /** Schema bound: count 4 is a CAPACITY, not a length -- starts empty; over 4 elements is INVALID, never truncated. */
+    public List<Boolean> flags = new ArrayList<>();
 
     public void serialize(OStream os) throws IOException {
         if (this.u8min != 0L) { os.writeUnsigned(0, this.u8min); }
@@ -24,6 +26,9 @@ public class Scalars {
         if (this.f32 != 3.14f) { os.writeFp32(5, this.f32); }
         if (this.f64 != -2.5) { os.writeFp64(6, this.f64); }
         if (this.flag != true) { os.writeBoolean(7, this.flag); }
+        if (this.flags != null && !this.flags.isEmpty()) {
+            os.writeArrayUnsigned(8, Seq.boolsToLongs(this.flags));
+        }
     }
     /** True when every field still equals its declared default, compared per field and recursively -- i.e. serialize would write nothing at all. */
     boolean isDefault() {
@@ -35,6 +40,7 @@ public class Scalars {
         if (this.f32 != 3.14f) return false;
         if (this.f64 != -2.5) return false;
         if (this.flag != true) return false;
+        if (this.flags != null && !this.flags.isEmpty()) return false;
         return true;
     }
     /** Restores every field to its declared default, in place; call before reusing an instance as a decode destination. */
@@ -47,8 +53,9 @@ public class Scalars {
         this.f32 = 3.14f;
         this.f64 = -2.5;
         this.flag = true;
+        this.flags = Seq.reset(this.flags);
     }
-    public static final int MAX_SIZE = 49;
+    public static final int MAX_SIZE = 55;
     public byte[] encode() {
         try {
             OStream os = OStream.overScratch(MAX_SIZE);
@@ -161,12 +168,23 @@ class ScalarsVisitor implements Visitor {
     private int ai = 0;                 // index into the primitive array currently being filled
     private int askip = 0;              // elements left to discard from a wire-type-contradictory array (S7.3)
     private int afill = 0;              // elements still expected by an armed native-array fill (S7.3)
+    private int atgt = 0;               // which destination the armed fill writes into
     private int[] stk = new int[16];    // sequence scope stack (unboxed, was ArrayDeque<Integer>)
     private int sp = 0;
     private final PayloadAcc acc = new PayloadAcc();
     ScalarsVisitor(Scalars msg) { m = msg; }
 
     public void unsigned(int id, long value) {
+        // An element of the array arrayBegin armed: its destination is already
+        // resolved, so it is stored against that target rather than routed by
+        // (scope, id) again. Self-terminating on the announced count.
+        if (afill != 0) {
+            afill--;
+            switch (atgt) {
+            case 1: m.flags.add(value != 0); return;
+            }
+            return;
+        }
         // Drop an element of an array whose id does
         // not declare one -- armed by arrayBegin, self-terminating on count.
         if (askip > 0) { askip--; return; }
@@ -227,6 +245,9 @@ class ScalarsVisitor implements Visitor {
         askip = count;
         afill = 0;
         switch (cur) {
+        case 0: switch (id) {
+            case 8: if (kind != ArrayKind.UNSIGNED) break; if (count > 4) throw Sofab.invalid("flags: array count above schema capacity 4"); askip = 0; afill = count; atgt = 1; m.flags.clear(); break;
+        } break;
         }
     }
     public void sequenceBegin(int id) {

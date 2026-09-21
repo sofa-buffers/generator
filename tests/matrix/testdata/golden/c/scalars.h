@@ -25,17 +25,20 @@
 #if defined(SOFAB_DISABLE_FP64_SUPPORT)
 # error "SofaBuffers: message Scalars uses fp64/double, but the corelib was built with SOFAB_DISABLE_FP64_SUPPORT."
 #endif
+#if defined(SOFAB_DISABLE_ARRAY_SUPPORT)
+# error "SofaBuffers: message Scalars uses numeric arrays, but the corelib was built with SOFAB_DISABLE_ARRAY_SUPPORT."
+#endif
 #if defined(SOFAB_DISABLE_INT64_SUPPORT)
 # error "SofaBuffers: message Scalars uses 64-bit integers, but the corelib was built with SOFAB_DISABLE_INT64_SUPPORT."
 #endif
 
 /* --- descriptor width guard: field ids must fit the configured profile --- */
-#if 7 > SOFAB_OBJECT_DESCR_ID_MAX
+#if 8 > SOFAB_OBJECT_DESCR_ID_MAX
 # error "SofaBuffers: field ids in Scalars exceed the configured SOFAB_OBJECT_DESCR_PROFILE id width."
 #endif
 
 /* --- value-width guard: field ids must fit the corelib's id ceiling --- */
-#if 7 > SOFAB_ID_MAX
+#if 8 > SOFAB_ID_MAX
 # error "SofaBuffers: field ids in Scalars exceed SOFAB_ID_MAX for this value width (see SOFAB_DISABLE_INT64_SUPPORT)."
 #endif
 
@@ -43,6 +46,10 @@ typedef struct {
     uint64_t u64max;
     int64_t i64min;
     double f64;
+    /**
+     * Schema bound: count 4 is a capacity; flags_len carries the length -- elements set without it encode an EMPTY array. Over 4 is INVALID.
+     */
+    uint8_t flags_len; uint8_t flags[4];
     float f32;
     uint8_t u8min;
     uint8_t u8max;
@@ -51,7 +58,7 @@ typedef struct {
 } message_Scalars_t;
 
 /*! Worst-case serialized size of Scalars (every field present, all maxlen/count). */
-#define MESSAGE_SCALARS_MAX_SIZE 49
+#define MESSAGE_SCALARS_MAX_SIZE 55
 
 /*! Initialize a Scalars with its schema defaults (non-default fields zeroed). */
 void message_scalars_init(message_Scalars_t *msg);

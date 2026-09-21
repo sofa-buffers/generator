@@ -22,8 +22,8 @@ go                 maxspeed   toggle    18495         45056
 go-unbounded       maxspeed   toggle    13156         39526
 java               maxspeed   subtract  17006         31503
 kotlin             maxspeed   subtract  17196         33029
-python             maxspeed   subtract  1081741       1942478
-python-native      maxspeed   subtract  130742        433968
+python             maxspeed   subtract  1077921       1949312
+python-native      maxspeed   subtract  129232        434090
 rust-rs            maxspeed   toggle    8273          22514
 rust-rs-no-std     footprint  toggle    8067          30045
 rust-rs-no-std-dyn footprint  toggle    8292          38495

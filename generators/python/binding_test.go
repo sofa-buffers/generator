@@ -40,6 +40,7 @@ messages:
       dyn:     { id: 12, type: array, items: { type: u16 } }
       wrapped: { id: 13, type: array, items: { type: string, count: 2 } }
       wide:    { id: 14, type: array, items: { type: u8, count: 4096 } }
+      flags:   { id: 15, type: array, items: { type: boolean, count: 4 } }
 `
 	mod := string(genPy(t, schema(t, src), map[string]any{})["message.py"])
 
@@ -63,6 +64,13 @@ messages:
 		// A COUNTED native array: the destination is `cap` slots, and the element
 		// width rides the entry, where the decoder applies it at each element.
 		"    .unsigned_array(11, at=20, cap=4, count_at=24, elem_max=65535)",
+		// An array of BOOLEAN takes the element half of the `boolean` above
+		// (corelib-py#158, generator#590), and takes it with NO elem_max: §4.4
+		// gives a boolean no width at all, so 256 is `true` and never INVALID.
+		// `boolean_array` has no such argument to pass, which is what puts #581 --
+		// an array of boolean stored through a width-limited unsigned element --
+		// out of reach here rather than merely leaving it unwritten.
+		"    .boolean_array(15, at=25, cap=4, count_at=29)",
 	} {
 		if !strings.Contains(mod, want) {
 			t.Errorf("message.py missing table row %q:\n%s", want, mod)
@@ -83,6 +91,18 @@ messages:
 		// And one whose declared count is past pyBindArrayMax: a table
 		// materializes an array twice, so a big one is a measured loss.
 		".unsigned_array(14,",
+		// The boolean array binds, but never under the unsigned binder and never
+		// with a ceiling: either spelling is the #581 bug.
+		".unsigned_array(15,",
+		"elem_max=1",
+		// A bound boolean is read `!= 0`, never `== 1`. The two are
+		// INDISTINGUISHABLE against corelib-py as it stands -- the binder stores
+		// 0/1, so no round trip, conformance driver or shared vector can tell them
+		// apart -- which is exactly why the spelling has to be pinned HERE. `== 1`
+		// silently turns a non-canonical true into FALSE the moment the bound route
+		// stops normalizing, and that is the class of bug #581 was (generator#590).
+		"== 1 for _v in",
+		"m.flag = U[8] == 1",
 	} {
 		if strings.Contains(mod, gone) {
 			t.Errorf("the table must not carry %q:\n%s", gone, mod)

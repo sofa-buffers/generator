@@ -7,6 +7,16 @@ import 'package:sofa_buffers_corelib/sofa_buffers_corelib.dart' as sofab;
 double _f32FromBits(int bits) =>
     (ByteData(4)..setUint32(0, bits, Endian.little)).getFloat32(0, Endian.little);
 
+// Normalizes a bool array to its canonical 0/1 elements in place (any
+// non-zero element is `true`) and returns its storage.
+Int64List _bools01(sofab.InlineInt64Array a) {
+  final s = a.storage;
+  for (var i = 0; i < a.length; i++) {
+    if (s[i] != 0) s[i] = 1;
+  }
+  return s;
+}
+
 class Scalars {
   int u8min = 0;
   int u8max = 255;
@@ -17,6 +27,8 @@ class Scalars {
   int? f32Fp32Bits;
   double f64 = -2.5;
   bool flag = true;
+  /// Schema bound: count 4 is a CAPACITY, not a length -- starts empty; over 4 elements is INVALID, never truncated.
+  final sofab.InlineInt64Array flags = sofab.InlineInt64Array(4);
 
   void serialize(sofab.Encoder e) {
     if (u8min != 0) { e.writeUnsigned(0, u8min); }
@@ -29,6 +41,7 @@ class Scalars {
     }
     if (f64 != -2.5) { e.writeFp64(6, f64); }
     if (flag != true) { e.writeBool(7, flag); }
+    if (flags.length != 0) { e.writeUnsignedArray(8, _bools01(flags), flags.length); }
   }
 
   /// Restores every field to its declared default, in place.
@@ -51,12 +64,13 @@ class Scalars {
     f32Fp32Bits = null;
     f64 = -2.5;
     flag = true;
+    flags.length = 0;
   }
 
   /// Worst-case serialized size, derived from the schema: no value of this
   /// message can encode to more, which is why [encode] can size one exact
   /// buffer from it.
-  static const int maxSize = 49;
+  static const int maxSize = 55;
   /// Deepest sequence nesting [serialize] opens, derived from the schema: no
   /// value of this message nests deeper, so [encode] builds its encoder for
   /// exactly this depth.
@@ -226,6 +240,15 @@ class _ScalarsVisitor extends sofab.MessageVisitor {
         o.f64 = value;
         return;
     }
+  }
+  @override
+  sofab.InlineInt64Array? onUnsignedArray(int id, int count) {
+    switch (id) {
+      case 8:
+        if (count > 4) invalidate();
+        return o.flags;
+    }
+    return null;
   }
 }
 

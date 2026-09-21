@@ -1011,7 +1011,10 @@ func (g *gen) marshalArray(f *pyfile, ind, idExpr, val string, elem ir.Kind, ref
 	case ir.KindEnum:
 		f.line("%se.write_signed_array(%s, [int(_v) for _v in %s])", ind, idExpr, val)
 	case ir.KindBool:
-		f.line("%se.write_unsigned_array(%s, [1 if _v else 0 for _v in %s])", ind, idExpr, val)
+		// The corelib's own canonical writer (corelib-py#158): it tests each
+		// element for truth exactly as `if` would and emits 1/0, which is what the
+		// intermediate list here used to build. Byte-identical, on both engines.
+		f.line("%se.write_bool_array(%s, %s)", ind, idExpr, val)
 	case ir.KindBitfield:
 		f.line("%se.write_unsigned_array(%s, [int(_v) for _v in %s])", ind, idExpr, val)
 	case ir.KindFP32:

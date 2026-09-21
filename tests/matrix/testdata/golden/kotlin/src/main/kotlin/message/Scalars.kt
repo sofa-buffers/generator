@@ -15,6 +15,8 @@ public class Scalars {
     public var f32: Float = 3.14f
     public var f64: Double = -2.5
     public var flag: Boolean = true
+    /** Schema bound: count 4 is a CAPACITY, not a length -- starts empty; over 4 elements is INVALID, never truncated. */
+    public var flags: BooleanArray = Seq.EMPTY_BOOLEANS
 
     /** Write this object's fields into [os]. Streaming out: nothing is flushed -- see [encodeTo]. */
     public fun serialize(os: OStream) {
@@ -26,6 +28,9 @@ public class Scalars {
         if (this.f32 != 3.14f) os.writeFp32(5, this.f32)
         if (this.f64 != -2.5) os.writeFp64(6, this.f64)
         if (this.flag != true) os.writeBoolean(7, this.flag)
+        if (this.flags.isNotEmpty()) {
+            os.writeArrayUnsigned(8, Seq.boolsToBytes(this.flags))
+        }
     }
 
     /** True when every field still equals its declared default, compared per field and recursively -- i.e. serialize would write nothing at all. */
@@ -38,6 +43,7 @@ public class Scalars {
         if (this.f32 != 3.14f) return false
         if (this.f64 != -2.5) return false
         if (this.flag != true) return false
+        if (this.flags.isNotEmpty()) return false
         return true
     }
 
@@ -51,6 +57,7 @@ public class Scalars {
         this.f32 = 3.14f
         this.f64 = -2.5
         this.flag = true
+        this.flags = Seq.EMPTY_BOOLEANS
     }
 
     /**
@@ -134,7 +141,7 @@ public class Scalars {
 
     public companion object {
         /** Worst-case encoded size of this message, derived from the schema. */
-        public const val MAX_SIZE = 49
+        public const val MAX_SIZE = 55
 
         /**
          * Build a Scalars from a COMPLETE message.
@@ -189,7 +196,10 @@ public class Scalars {
  */
 internal class ScalarsVisitor(private val m: Scalars) : Visitor {
     private var cur = 0
+    private var ai = 0                  // index into the primitive array currently being filled
     private var askip = 0               // elements left to discard from a wire-type-contradictory array (S7.3)
+    private var afill = 0               // elements still expected by an armed native-array fill (S7.3)
+    private var atgt = 0                // which destination the armed fill writes into
     private var stk = IntArray(16)      // sequence scope stack
     private var sp = 0
 
@@ -198,6 +208,16 @@ internal class ScalarsVisitor(private val m: Scalars) : Visitor {
     }
 
     override fun unsigned(id: Int, value: Long) {
+        // An element of the array arrayBegin armed: its destination is already
+        // resolved, so it is stored against that target rather than routed by
+        // (scope, id) again. Self-terminating on the announced count.
+        if (afill != 0) {
+            afill--
+            when (atgt) {
+                1 -> { m.flags[ai] = value != 0L; ai++ }
+            }
+            return
+        }
         // Drop an element of an array whose id does not declare one -- armed by
         // arrayBegin, self-terminating on count.
         if (askip > 0) { askip--; return }
@@ -260,12 +280,17 @@ internal class ScalarsVisitor(private val m: Scalars) : Visitor {
     }
 
     override fun arrayBegin(id: Int, kind: ArrayKind, count: Int) {
+        ai = 0
         // An array delivered at an id that does not declare one of the SAME array
         // kind is a wire-type contradiction: drop exactly `count` elements and
         // leave the declared field untouched (S7.3). Every arm below that runs is
         // a declared array at a matching kind, and disarms this.
         askip = count
+        afill = 0
         when (cur) {
+            0 -> when (id) {
+                8 -> if (kind == ArrayKind.UNSIGNED) { if (count > 4) throw SofabException(SofabError.INVALID_MSG, "flags: array count above schema capacity 4"); askip = 0; afill = count; atgt = 1; m.flags = BooleanArray(count) }
+            }
             else -> {}
         }
     }

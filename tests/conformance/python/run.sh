@@ -231,6 +231,32 @@ sed 's/"f_str": *"[^"]*"/"f_str": "'"$(printf 'x%.0s' $(seq 1 400))"'"/' \
     "$ROOT/tests/conformance/lib/maxsize_fill.json" > "$OVERFILL"
 grep -q 'xxxxxxxxxx' "$OVERFILL" || { echo "FAIL: could not build the over-filled input (f_str renamed?)"; exit 1; }
 
+# CORELIB_PLAN §4.4's fixture (generator#590). Its three fields are the three
+# ROUTES a boolean takes through generated Python -- a bound scalar, a bound
+# array and an unbound one -- because the rule is applied in three different
+# places and a check on one says nothing about the others. Generated out here:
+# the module is the same source on both engines, and the ruff gate at the end
+# sweeps every .py under $WORK, so this one is linted with the rest.
+( cd "$ROOT" && go run ./cmd/sofabgen --format=off --config "$WORK/cfg.yaml" --lang python \
+    --in "$ROOT/tests/conformance/python/bool_tolerant.yaml" --out "$WORK/bools" )
+# The fixture only asks its question while the two bound routes are actually
+# BOUND: a table under the backend's row minimum is not emitted at all and the
+# whole file quietly moves onto the visitor, which would leave `.boolean_array`
+# -- the route #590 is about -- untested while every case still passed.
+for _row in '.boolean(0, at=' '.boolean_array(1, at='; do
+    grep -q -- "$_row" "$WORK/bools/message.py" || {
+        echo "FAIL: bool_tolerant.yaml no longer generates the bound row \"$_row\";"
+        echo "      its two bound routes would silently fall back to the visitor."; exit 1
+    }
+done
+if grep -q "elem_max" "$WORK/bools/message.py"; then
+    echo "FAIL: the §4.4 fixture generated an element-width bound; a boolean has none (§4.4, #581)"; exit 1
+fi
+# ...and the unbound route must stay on the visitor, or `many` stops covering it.
+grep -q "def on_unsigned_array" "$WORK/bools/message.py" || {
+    echo "FAIL: bool_tolerant.yaml no longer reaches the visitor's array hook (route 'many')"; exit 1
+}
+
 ENGINES="native python"
 [ "$NATIVE" = yes ] || ENGINES=python
 for ENGINE in $ENGINES; do
@@ -315,6 +341,21 @@ for ENGINE in $ENGINES; do
     python3 "$ROOT/tests/conformance/python/fp32_nan_check.py" "$WORK/proj" "$ENGINE" \
         "$ROOT/examples/messages/example.yaml" \
         || { echo "FAIL: [$ENGINE] an fp32 payload did not survive the materialized-value or streaming oracle (§6.5)"; exit 1; }
+
+    # CORELIB_PLAN §4.4 -- tolerant on decode, canonical on encode -- driven from
+    # the shared `boolean_tolerant` vectors (crucible#189) through all three
+    # routes a boolean takes in generated Python, one-shot and one byte per feed.
+    #
+    # In the loop for the reason every leg above is, and here it is not a
+    # formality: the two bound routes are the CORELIB's `boolean()` /
+    # `boolean_array()` read kinds (corelib-py#158), and the pure decoder's
+    # normalization pass (`decoder.py`) and the accelerator's are separate code.
+    # `write_bool_array` likewise exists twice. A single-engine leg would prove
+    # nothing about the other half of the library a user actually gets.
+    echo "==> boolean §4.4 tolerant decode / canonical encode, engine=$ENGINE (generator#590)"
+    python3 "$ROOT/tests/conformance/python/bool_tolerant_check.py" "$WORK/bools" "$ENGINE" \
+        "$CORELIB/assets/test_vectors.json" \
+        || { echo "FAIL: [$ENGINE] a boolean did not follow CORELIB_PLAN §4.4 (generator#590)"; exit 1; }
 done
 
 # Everything below runs on ONE engine -- the shared-vector byte-exactness check
@@ -1218,6 +1259,7 @@ format_gen python "$WORK/fmt/growth" --config "$WORK/limit-cfg.yaml" --in "$WORK
 format_gen python "$WORK/fmt/closed" --config "$WORK/cfg.yaml" --in "$WORK/closed.yaml"
 format_gen python "$WORK/fmt/repeated" --config "$WORK/cfg.yaml" --in "$WORK/repeated.yaml"
 format_gen python "$WORK/fmt/table" --config "$WORK/cfg.yaml" --in "$WORK/table.yaml"
+format_gen python "$WORK/fmt/bools" --config "$WORK/cfg.yaml" --in "$ROOT/tests/conformance/python/bool_tolerant.yaml"
 format_gen_corpus python "$WORK/fmt" --config "$WORK/cfg.yaml"
 check_format python "$WORK/fmt"
 
