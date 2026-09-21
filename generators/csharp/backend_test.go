@@ -55,7 +55,9 @@ func exampleModule(t *testing.T) string {
 
 // TestCsOverIndexWrapperArray: a fixed-count wrapper array (string/blob/struct
 // elements) throws InvalidMessage for an element id >= N before the List grows
-// (issue #142 / MESSAGE_SPEC §5.1/§7). A dynamic array keeps every index.
+// (issue #142 / MESSAGE_SPEC §5.1/§7). The comparison is corelib-cs's Seq
+// (generator#587): generated code passes the schema count and the receiver cap
+// and emits no index compare of its own.
 func TestCsOverIndexWrapperArray(t *testing.T) {
 	src := []byte("version: 1\nmessages:\n  M:\n    payload:\n" +
 		"      bs: { id: 0, type: array, items: { type: string, count: 4, maxlen: 16 } }\n" +
@@ -64,20 +66,28 @@ func TestCsOverIndexWrapperArray(t *testing.T) {
 		"      ds: { id: 3, type: array, items: { type: string } }\n")
 	m := buildModule(t, src, "in.yaml", map[string]any{"namespace": "S"})
 	for _, want := range []string{
-		`case (Root_bs, _): if (id >= 4) throw new SofabException(SofabError.InvalidMessage,`,
-		`case (Root_bb, _): if (id >= 3) throw new SofabException(SofabError.InvalidMessage,`,
-		`case (Root_bp, _): if (id >= 2) throw new SofabException(SofabError.InvalidMessage,`,
+		// at the length word, then at placement
+		`case (Root_bs, _): global::sofab.Seq.CheckIndex(id, 4, MaxDynArrayCount);`,
+		`case (Root_bs, _): global::sofab.Seq.PlaceElem(m.bs, id, "", _s, 4, MaxDynArrayCount); break;`,
+		`case (Root_bb, _): global::sofab.Seq.CheckIndex(id, 3, MaxDynArrayCount);`,
+		`case (Root_bb, _): global::sofab.Seq.PlaceElem(m.bb, id, Array.Empty<byte>(), _b, 3, MaxDynArrayCount); break;`,
+		`case (Root_bp, _): global::sofab.Seq.CheckIndex(id, 2, MaxDynArrayCount); while (m.bp.Count <= id) m.bp.Add(new `,
+		`()); _ixRoot_bp = id; cur = Root_bp_e; break;`,
 	} {
 		if !strings.Contains(m, want) {
-			t.Errorf("Message.cs missing over-index guard %q", want)
+			t.Errorf("Message.cs missing over-index bound %q", want)
 		}
 	}
-	// A DYNAMIC wrapper array is bounded too, and by the same test in the same
+	if n := strings.Count(m, "if (id >= "); n != 0 {
+		t.Errorf("generated code must not compare an element index itself (%d sites):\n%s", n, m)
+	}
+	// A DYNAMIC wrapper array is bounded too, and by the same call in the same
 	// place -- what differs is the bound and the category. Its length is its
 	// highest index, so the receiver cap binds the index; the bytes are well
 	// formed and decode under a looser cap, so the verdict is LimitExceeded and
-	// not InvalidMessage (generator#387, CORELIB_PLAN §6.2.1).
-	if !strings.Contains(m, `case (Root_ds, _): if (id >= MaxDynArrayCount) throw new SofabException(SofabError.LimitExceeded, "Root_ds element: array index above configured limit 65536"); while (m.ds.Count <= id) m.ds.Add(""); m.ds[id] = _s; break;`) {
+	// not InvalidMessage (generator#387, CORELIB_PLAN §6.2.1). The -1 tells the
+	// corelib the schema declares no count, so it compares the cap instead.
+	if !strings.Contains(m, `case (Root_ds, _): global::sofab.Seq.PlaceElem(m.ds, id, "", _s, -1, MaxDynArrayCount); break;`) {
 		t.Errorf("a dynamic wrapper array's element index must be capped:\n%s", m)
 	}
 }
@@ -803,16 +813,13 @@ messages:
 	for _, want := range []string{
 		// struct element: gap-fill, latch the id, descend — the element scope then
 		// addresses the element the id named, not the last one.
-		"case (Root_fixed, _): if (id >= 5) throw new SofabException(SofabError.InvalidMessage, " +
-			"\"Root_fixed element: array index above schema capacity 5\"); " +
+		"case (Root_fixed, _): global::sofab.Seq.CheckIndex(id, 5, MaxDynArrayCount); " +
 			"while (m.@fixed.Count <= id) m.@fixed.Add(new VecFixedElem()); _ixRoot_fixed = id; cur = Root_fixed_e; break;",
 		"m.@fixed[_ixRoot_fixed].k = (uint)value; break;",
 		// a count-less array is placed by id too: its length is highest id + 1.
-		"while (m.dynamic.Count <= id) m.dynamic.Add(new VecDynamicElem()); _ixRoot_dynamic = id;",
+		"global::sofab.Seq.CheckIndex(id, -1, MaxDynArrayCount); while (m.dynamic.Count <= id) m.dynamic.Add(new VecDynamicElem()); _ixRoot_dynamic = id;",
 		// string leaf element: placed, with the gap filled from the element default.
-		"case (Root_fstrs, _): if (id >= 3) throw new SofabException(SofabError.InvalidMessage, " +
-			"\"Root_fstrs element: array index above schema capacity 3\"); " +
-			"while (m.fstrs.Count <= id) m.fstrs.Add(\"\"); m.fstrs[id] = _s; break;",
+		"case (Root_fstrs, _): global::sofab.Seq.PlaceElem(m.fstrs, id, \"\", _s, 3, MaxDynArrayCount); break;",
 		// NATIVE row (the id-blind collector): placed at out[id], bounded by the outer
 		// array's count, and the fill then addresses the latched row. The §7.3 kind
 		// test fronts both (generator#254): a mis-typed row is skipped whole.
@@ -820,23 +827,18 @@ messages:
 		// target's finite default cap (§9.5, generator#385) -- a bound on the
 		// inner array, distinct from the outer index bound beside it.
 		"case (Root_rows, _): if (kind != ArrayKind.Unsigned) break; " +
-			"if (id >= 2) throw new SofabException(SofabError.InvalidMessage, " +
-			"\"Root_rows element: array index above schema capacity 2\"); " +
+			"global::sofab.Seq.ReserveRow(m.rows, id, 2, MaxDynArrayCount); " +
 			"if (count > MaxDynArrayCount) throw new SofabException(SofabError.LimitExceeded, " +
 			"\"Root_rows element: array count above configured limit 65536\"); " +
-			"while (m.rows.Count <= id) m.rows.Add(new List<uint>()); m.rows[id] = new List<uint>(); _ixRoot_rows = id; break;",
+			"_ixRoot_rows = id; break;",
 		// the §7.1 width guard for the u32 element follows afill-- and precedes the
 		// store (see TestCsDeclaredWidthIsAValidityBound)
 		"case (Root_rows, _): if (afill == 0) break; afill--; if (value > 4294967295) throw new SofabException(SofabError.InvalidMessage, " +
 			"\"Root_rows element: value outside declared width u32\"); m.rows[_ixRoot_rows].Add((uint)value); break;",
 		// WRAPPER row: same placement, then the descent.
-		"case (Root_srows, _): if (id >= MaxDynArrayCount) throw new SofabException(SofabError.LimitExceeded, " +
-			"\"Root_srows element: array index above configured limit 65536\"); " +
-			"while (m.srows.Count <= id) m.srows.Add(new List<string>()); " +
-			"m.srows[id] = new List<string>(); _ixRoot_srows = id; cur = Root_srows_e; break;",
-		"case (Root_srows_e, _): if (id >= MaxDynArrayCount) throw new SofabException(SofabError.LimitExceeded, " +
-			"\"Root_srows_e element: array index above configured limit 65536\"); " +
-			"while (m.srows[_ixRoot_srows].Count <= id) m.srows[_ixRoot_srows].Add(\"\"); m.srows[_ixRoot_srows][id] = _s; break;",
+		"case (Root_srows, _): global::sofab.Seq.ReserveRow(m.srows, id, -1, MaxDynArrayCount); " +
+			"_ixRoot_srows = id; cur = Root_srows_e; break;",
+		"case (Root_srows_e, _): global::sofab.Seq.PlaceElem(m.srows[_ixRoot_srows], id, \"\", _s, -1, MaxDynArrayCount); break;",
 	} {
 		if !strings.Contains(m, want) {
 			t.Errorf("Message.cs missing %q:\n%s", want, m)
@@ -1282,8 +1284,7 @@ messages:
 	}
 	// Over-index first, then the element maxlen -- an element that is not this
 	// array's element must not be measured against its bound.
-	if !strings.Contains(m, "case (Root_sa, _): if (id >= 3) throw") ||
-		!strings.Contains(m, "if (total > 6) throw") {
+	if !strings.Contains(m, "case (Root_sa, _): global::sofab.Seq.CheckIndex(id, 3, MaxDynArrayCount); if (total > 6) throw") {
 		t.Error("a wrapper element must latch over-index then element maxlen")
 	}
 	if strings.Count(m, "total > 8") < 2 {
@@ -1318,8 +1319,8 @@ messages:
 		`if (count > MaxDynArrayCount) throw new SofabException(SofabError.LimitExceeded, "dyn: array count above configured limit 65536"); m.dyn = new uint[count];`,
 		`if (count > 8) throw new SofabException(SofabError.InvalidMessage, "bnd: array count above schema capacity 8"); m.bnd = new uint[count];`,
 		`m.fps = new float[count];`,
-		// The row's id, then the row's own element count.
-		`if (id >= 3) throw new SofabException(SofabError.InvalidMessage, "Root_mat element: array index above schema capacity 3"); if (count > 4) throw new SofabException(SofabError.InvalidMessage, "Root_mat element: array count above schema capacity 4");`,
+		// The row's id (the corelib's compare), then the row's own element count.
+		`global::sofab.Seq.ReserveRow(m.mat, id, 3, MaxDynArrayCount); if (count > 4) throw new SofabException(SofabError.InvalidMessage, "Root_mat element: array count above schema capacity 4");`,
 		// A plain indexed store: the destination is already exactly `count` long.
 		`m.dyn[ai++] = (uint)value;`,
 	} {
@@ -1335,8 +1336,8 @@ messages:
 }
 
 // TestCsWrapperIndexCap: a DYNAMIC wrapper array's element index is bounded by
-// the receiver cap, checked before the List grows (ARCHITECTURE §9.5,
-// generator#387). See the Java twin for why the INDEX and not the element count:
+// the receiver cap, checked by the corelib before the List grows (ARCHITECTURE
+// §9.5, generator#387, #587). See the Java twin for why the INDEX and not the element count:
 // gap filling makes the array's length its highest present id, so two delivered
 // elements can be an arbitrarily large List.
 func TestCsWrapperIndexCap(t *testing.T) {
@@ -1354,20 +1355,23 @@ messages:
 	m := buildModule(t, []byte(src), "m.yaml", map[string]any{})
 
 	for _, want := range []string{
-		`if (id >= MaxDynArrayCount) throw new SofabException(SofabError.LimitExceeded, "Root_dstrs element: array index above configured limit 65536"); while (m.dstrs.Count <= id)`,
-		`"Root_dblbs element: array index above configured limit 65536"); while (m.dblbs.Count <= id)`,
-		`"Root_dobjs element: array index above configured limit 65536"); while (m.dobjs.Count <= id)`,
-		`"Root_dmat element: array index above configured limit 65536");`,
+		"private const long MaxDynArrayCount = 65536;",
+		`global::sofab.Seq.PlaceElem(m.dstrs, id, "", _s, -1, MaxDynArrayCount);`,
+		`global::sofab.Seq.PlaceElem(m.dblbs, id, Array.Empty<byte>(), _b, -1, MaxDynArrayCount);`,
+		`global::sofab.Seq.CheckIndex(id, -1, MaxDynArrayCount); while (m.dobjs.Count <= id) m.dobjs.Add(new `,
+		`global::sofab.Seq.ReserveRow(m.dmat, id, -1, MaxDynArrayCount);`,
 	} {
 		if !strings.Contains(m, want) {
 			t.Errorf("Message.cs missing wrapper index cap %q:\n%s", want, m)
 		}
 	}
-	if !strings.Contains(m, `if (id >= 4) throw new SofabException(SofabError.InvalidMessage, "Root_bstrs element: array index above schema capacity 4")`) {
-		t.Errorf("a count:N wrapper array must keep its InvalidMessage schema bound:\n%s", m)
+	// A count:N array hands the corelib its schema count; the corelib then
+	// compares that and never the receiver cap passed beside it (§6.2.1).
+	if !strings.Contains(m, `global::sofab.Seq.PlaceElem(m.bstrs, id, "", _s, 4, MaxDynArrayCount);`) {
+		t.Errorf("a count:N wrapper array must hand its schema count to the corelib:\n%s", m)
 	}
-	if strings.Contains(m, `"Root_bstrs element: array index above configured limit`) {
-		t.Errorf("a schema-bounded array must not also carry the receiver cap:\n%s", m)
+	if n := strings.Count(m, "if (id >= "); n != 0 {
+		t.Errorf("generated code must not compare an element index itself (%d sites):\n%s", n, m)
 	}
 }
 
@@ -1410,7 +1414,7 @@ messages:
 		// A schema-unbounded wrapper element carries both its array's index cap
 		// and its own length cap, over-index first: an element that is not this
 		// array's element at all must not have its length measured here.
-		`case (Root_sa, _): if (id >= MaxDynArrayCount) throw new SofabException(SofabError.LimitExceeded, "Root_sa element: array index above configured limit 4"); PayloadAcc.CheckStringLength(total, MaxDynStringLen); break;`,
+		`case (Root_sa, _): global::sofab.Seq.CheckIndex(id, -1, MaxDynArrayCount); PayloadAcc.CheckStringLength(total, MaxDynStringLen); break;`,
 		// ...all of it behind the §7.3 declared-subtype gate.
 		"if (subtype == FixlenType.String) {",
 		"if (subtype == FixlenType.Blob) {",
@@ -1906,6 +1910,54 @@ func TestCsHarnessWithoutMessagesLeavesNothingUnread(t *testing.T) {
 	for _, want := range []string{"static long benchSink = 0;", "static readonly int Warmup", "        return 0;\n    }\n}"} {
 		if !strings.Contains(one, want) {
 			t.Errorf("Program.cs with a message lacks %q", want)
+		}
+	}
+}
+
+// TestCsNoLiteralIndexCheck: every wrapper-array element index -- string/blob
+// leaf, struct/union element, wrapper row, native matrix row -- is bounded by
+// corelib-cs's Seq, which takes the schema count and the receiver cap as
+// arguments (ARCHITECTURE §8, generator#587). Generated code therefore compares
+// no element index itself, in any shipped schema or in an uncounted-row probe.
+// (vehicle_telemetry pulls cross-file $refs this in-memory build cannot resolve;
+// the bench and the conformance suite generate it.)
+func TestCsNoLiteralIndexCheck(t *testing.T) {
+	for _, path := range []string{
+		"../../examples/messages/example.yaml",
+		"../../tests/matrix/corpus/defs/nested_rows.yaml",
+		"../../tests/matrix/corpus/defs/seq_elements_dyn.yaml",
+	} {
+		b, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		m := buildModule(t, b, "in.yaml", map[string]any{})
+		if n := strings.Count(m, "if (id >= "); n != 0 {
+			t.Errorf("%s: %d literal index checks left in generated code", path, n)
+		}
+		if !strings.Contains(m, "global::sofab.Seq.") {
+			t.Errorf("%s: no Seq call -- the probe no longer exercises a wrapper array", path)
+		}
+	}
+	probe := buildModule(t, []byte(`version: 1
+messages:
+  M:
+    payload:
+      nrows: { id: 0, type: array, items: { type: array, items: { type: u32 } } }
+      srows: { id: 1, type: array, items: { type: array, items: { type: string } } }
+      orows: { id: 2, type: array, items: { type: array, items: { type: struct, fields: { x: { id: 0, type: u8 } } } } }
+`), "p.yaml", map[string]any{})
+	if n := strings.Count(probe, "if (id >= "); n != 0 {
+		t.Errorf("uncounted rows: %d literal index checks left:\n%s", n, probe)
+	}
+	for _, want := range []string{
+		"global::sofab.Seq.ReserveRow(m.nrows, id, -1, MaxDynArrayCount);",
+		"global::sofab.Seq.ReserveRow(m.srows, id, -1, MaxDynArrayCount);",
+		"global::sofab.Seq.ReserveRow(m.orows, id, -1, MaxDynArrayCount);",
+		"global::sofab.Seq.CheckIndex(id, -1, MaxDynArrayCount); while (m.orows[_ixRoot_orows].Count <= id) m.orows[_ixRoot_orows].Add(new ",
+	} {
+		if !strings.Contains(probe, want) {
+			t.Errorf("uncounted rows: missing %q:\n%s", want, probe)
 		}
 	}
 }

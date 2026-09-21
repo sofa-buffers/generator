@@ -28,7 +28,7 @@ type frame struct {
 	// CAPACITY, not a length: it never reaches the wire and never adds elements the
 	// wire did not carry. All it does here is bound the array — a wrapper element id
 	// >= N is a schema-bound violation (MESSAGE_SPEC §5.1/§7 — issue #142), rejected
-	// as INVALID before the List grows, which also bounds an over-index
+	// as INVALID by corelib-cs's Seq before the List grows, which also bounds an over-index
 	// heap-amplification fill.
 	cap int64
 	// emax is a string/blob element's schema maxlen L (-1 == no bound): an element
@@ -57,34 +57,28 @@ func boundOf(has bool, v int64) int64 {
 	return -1
 }
 
-// overIndexGuard returns the reject clause for a wrapper array's element id,
-// emitted ahead of the grow it bounds.
+// seqCap renders the schema half of a wrapper array's index bound as the
+// argument corelib-cs's Seq.PlaceElem / Seq.ReserveElem / Seq.ReserveRow /
+// Seq.CheckIndex take: the schema `count`, or -1 where the schema declares none.
 //
 // A wrapper array carries no count HEADER: its elements are keyed by an
-// unbounded varint index and the collector grows the List to id + 1, so the
-// index IS the array's length (MESSAGE_SPEC §5.1 — two elements at id 0 and id
-// 16383 are a 16384-slot List). A single over-index element is therefore an
-// amplification vector by itself, and it is the INDEX that has to be bounded:
-// capping how many elements arrived would not bound the allocation, because a
-// sparse array allocates by its highest id.
-//
-// Which bound applies depends on whether the schema counts the array, and the
-// two differ only in that and in what the failure is called (ARCHITECTURE §9.5):
+// unbounded varint index and the List grows to id + 1, so the index IS the
+// array's length (MESSAGE_SPEC §5.1 -- two elements at id 0 and id 16383 are a
+// 16384-slot List). A single over-index element is therefore an amplification
+// vector by itself, and it is the INDEX that is bounded, before the List grows
+// (CORELIB_PLAN §7.2 item 8). The corelib compares it against exactly one of two
+// numbers, both passed in beside each other (ARCHITECTURE §9.5): a schema
 // `count: N` makes id >= N InvalidMessage (the bytes contradict the agreed
-// schema, issue #142), no count makes id >= MaxDynArrayCount LimitExceeded (the
-// bytes are well formed and the same message decodes under a looser cap, issue
-// #387 — folding the two together is forbidden by CORELIB_PLAN §6.2.1).
-//
-// Empty only when the array is dynamic AND no cap is live for this schema.
-func (g *gen) overIndexGuard(cap int64, loc string) string {
-	if cap < 0 {
-		if !g.limits.arrayHas {
-			return ""
-		}
-		return fmt.Sprintf("if (id >= MaxDynArrayCount) throw new SofabException(SofabError.LimitExceeded, \"%s element: array index above configured limit %d\"); ",
-			loc, g.limits.arrayCount)
-	}
-	return fmt.Sprintf("if (id >= %d) throw new SofabException(SofabError.InvalidMessage, \"%s element: array index above schema capacity %d\"); ", cap, loc, cap)
+// schema), no count makes id >= MaxDynArrayCount LimitExceeded (the bytes are
+// well formed and decode under a looser cap -- §6.2.1, never both, never
+// folded). Generated code emits no index compare of its own.
+func seqCap(fr frame) string { return fmt.Sprintf("%d", fr.cap) }
+
+// seqCall renders one call into corelib-cs's Seq with the two index bounds
+// appended. It is qualified: a schema type named `seq` would otherwise shadow the
+// corelib class (the global::sofab.Utf8 precedent).
+func seqCall(method, args string, fr frame) string {
+	return fmt.Sprintf("global::sofab.Seq.%s(%s, %s, MaxDynArrayCount);", method, args, seqCap(fr))
 }
 
 func (g *gen) frames(m *ir.Message) []frame {
@@ -277,28 +271,28 @@ func nativeListFill(target, guard, rhs string) string {
 	return fillGuard + guard + fmt.Sprintf("%s.Add(%s);", target, rhs)
 }
 
-// placeRow is the statement that stores a decoded ROW of a nested array (an array
-// whose elements are themselves arrays) at the index its element id names, growing
-// the outer List with empty rows so an id GAP decodes as an empty row instead of
-// shifting every later row down by one. Gaps are ordinary here: an interior row
-// equal to the element default (the empty row) is omitted by a conformant encoder
-// (MESSAGE_SPEC §2), and only the LAST row is guaranteed present — which is what
-// makes the decoded length, highest present id + 1, exact. A re-opened id gets a
-// fresh row: an array wrapper IS the array's value and is replaced whole, not
-// merged (§7.4).
-//
-// The over-index guard runs first: `count: N` is a capacity, so a row id >= N is
-// INVALID (§5.1/§7) and rejecting before the grow also bounds the id-keyed fill
-// against an over-index amplification DoS.
-func (g *gen) placeRow(fr frame) string { return g.overIndexGuard(fr.cap, fr.loc) + g.placeRowAt(fr) }
+// reserveRow is the statement that reserves a decoded ROW of a nested array (an
+// array whose elements are themselves arrays) at the index its element id names
+// and latches that index for the row's own callbacks. Seq.ReserveRow bounds the
+// id first, then grows the outer List with empty rows so an id GAP decodes as an
+// empty row instead of shifting every later row down by one: an interior row
+// equal to the element default (the empty row) is omitted by a conformant
+// encoder (MESSAGE_SPEC §2), and only the LAST row is guaranteed present. A
+// re-opened id is emptied in place: an array wrapper IS the array's value and is
+// replaced whole, not merged (§7.4).
+func (g *gen) reserveRow(fr frame) string {
+	return seqCall("ReserveRow", fr.path+", id", fr) + fmt.Sprintf(" %s = id; ", ixVar(fr.loc))
+}
 
-// placeRowAt is placeRow without the over-index guard, for the one caller that
-// has a SECOND verdict to take between the two: a native row's own element count
-// (§7.1), which must be checked after the row's id and before the row is placed.
-func (g *gen) placeRowAt(fr frame) string {
-	row, _ := g.csSeqElemDefault(fr.elem, fr.ref, fr.items) // the empty row
-	return fmt.Sprintf("while (%s.Count <= id) %s.Add(%s); %s[id] = %s; %s = id; ",
-		fr.path, fr.path, row, fr.path, row, ixVar(fr.loc))
+// hasSeqFrame reports whether the message has a wrapper-array or matrix frame --
+// any frame whose element reaches a Seq call and so names MaxDynArrayCount.
+func hasSeqFrame(fs []frame) bool {
+	for _, fr := range fs {
+		if fr.isArr {
+			return true
+		}
+	}
+	return false
 }
 
 // payloadCapArms builds the (scope, id) arms of the String/Blob callback's
@@ -469,7 +463,8 @@ func (g *gen) emitStringCb(f *cfile, fs []frame) {
 				// Elements are keyed by index id (MESSAGE_SPEC S2): a default (empty)
 				// element is omitted on the wire, so place each value at its id and
 				// grow the list, filling any gap with the element default ("").
-				f.line("            case (%s, _): %swhile (%s.Count <= id) %s.Add(\"\"); %s[id] = _s; break;", fr.loc, g.overIndexGuard(fr.cap, fr.loc), fr.path, fr.path, fr.path)
+				// Seq.PlaceElem bounds the index before it grows the list.
+				f.line("            case (%s, _): %s break;", fr.loc, seqCall("PlaceElem", fr.path+", id, \"\", _s", fr))
 			}
 			continue
 		}
@@ -531,7 +526,7 @@ func (g *gen) emitBlobCb(f *cfile, fs []frame) {
 				// Elements are keyed by index id (MESSAGE_SPEC S2): a default (empty)
 				// element is omitted on the wire, so place each value at its id and
 				// grow the list, filling any gap with the element default (empty bytes).
-				f.line("            case (%s, _): %swhile (%s.Count <= id) %s.Add(Array.Empty<byte>()); %s[id] = _b; break;", fr.loc, g.overIndexGuard(fr.cap, fr.loc), fr.path, fr.path, fr.path)
+				f.line("            case (%s, _): %s break;", fr.loc, seqCall("PlaceElem", fr.path+", id, Array.Empty<byte>(), _b", fr))
 			}
 			continue
 		}
@@ -647,7 +642,10 @@ func capCheck(kind ir.Kind, constName string) string {
 // fixlenBeginArms builds the (scope, id) arms for one fixlen subtype. A wrapper
 // element carries its array's over-index bound AND its element bound, in that
 // order: an element that is not this array's element at all must not have its
-// length measured against the element bound.
+// length measured against the element bound. The index bound is the corelib's
+// (Seq.CheckIndex, both numbers passed in), so every wrapper element of this
+// kind gets an arm; the element-length half stays here when it is a schema
+// maxlen and is PayloadAcc's when it is the receiver cap.
 //
 // Which bound a destination gets is §6.2.1's exclusivity rule, and it settles the
 // CATEGORY with the number: a schema `maxlen` is a statement about validity, so
@@ -663,8 +661,8 @@ func (g *gen) fixlenBeginArms(fs []frame, kind ir.Kind, what, constName string) 
 	for _, fr := range fs {
 		if fr.isArr {
 			elemCapped := constName != "" && fr.emax < 0
-			if fr.elem == kind && (fr.cap >= 0 || fr.emax >= 0 || elemCapped) {
-				body := g.overIndexGuard(fr.cap, fr.loc)
+			if fr.elem == kind {
+				body := seqCall("CheckIndex", "id", fr) + " "
 				switch {
 				case fr.emax >= 0:
 					body += fmt.Sprintf("if (total > %d) throw new SofabException(SofabError.InvalidMessage, \"%s element: %s above schema maxlen %d\"); ", fr.emax, fr.loc, what, fr.emax)
@@ -811,6 +809,12 @@ func (g *gen) emitVisitor(f *cfile, name string, fields []*ir.Field) {
 	// source did not compile, which no substring assertion sees).
 	b := ir.Bounds(fields)
 	limArr := g.limits.arrayHas && b.HasDynArray
+	// Every wrapper-array call into Seq (PlaceElem, ReserveElem, ReserveRow,
+	// CheckIndex) states the receiver cap beside the schema count, including where
+	// the count makes it inert: the argument is required and there is nothing for
+	// the corelib to fall back to (§6.2.1). So a message with any wrapper frame
+	// declares the constant even when the schema counts every array.
+	seqArr := g.limits.arrayHas && hasSeqFrame(fs)
 	limStr := g.limits.stringHas && g.capLive(fs, ir.KindString)
 	limBlob := g.limits.blobHas && g.capLive(fs, ir.KindBlob)
 
@@ -862,14 +866,14 @@ func (g *gen) emitVisitor(f *cfile, name string, fields []*ir.Field) {
 			f.line("    private int %s = 0;   // element index this array scope decodes into", ixVar(fr.loc))
 		}
 	}
-	if limArr || limStr || limBlob {
+	if limArr || seqArr || limStr || limBlob {
 		// Receiver-side decode limits (generator#102): configured caps on the
 		// fields the schema leaves unbounded (array without count, string/blob
 		// without maxlen). Exceeding a cap fails decode with LimitExceeded at
 		// the count/total header, before any allocation.
 		f.line("    // Receiver-side decode limits: caps on schema-unbounded")
 		f.line("    // fields only; exceeding one throws SofabError.LimitExceeded.")
-		if limArr {
+		if limArr || seqArr {
 			f.line("    private const long MaxDynArrayCount = %d;", g.limits.arrayCount)
 		}
 		if limStr {
@@ -949,7 +953,7 @@ func (g *gen) emitVisitor(f *cfile, name string, fields []*ir.Field) {
 	// ArrayBegin: allocate a direct primitive array at the wire count (clear it,
 	// where the field is still a List); place a fresh inner row for a
 	// native-nested (array-of-array) scope (each row arrives as ArrayBegin(index),
-	// and the index IS the row's position, see placeRow).
+	// and the index IS the row's position, see reserveRow).
 	f.line("    public void ArrayBegin(int id, ArrayKind kind, int count) {")
 	if primArr {
 		f.line("        ai = 0;")
@@ -982,10 +986,12 @@ func (g *gen) emitVisitor(f *cfile, name string, fields []*ir.Field) {
 				// are already discarded by the skip counter above, and the row itself
 				// must not be materialized either. Checked FIRST, so any bound below
 				// only ever rejects a row that survives the kind test.
-				// Kind first (§7.3), then the row's ID, then its element count -- the
-				// order every backend takes the two INVALID verdicts in.
-				aArms = append(aArms, fmt.Sprintf("            case (%s, _): %s%s%s%sbreak;", fr.loc, arrayKindGuard(fr.items.Elem),
-					g.overIndexGuard(fr.cap, fr.loc), guard, g.placeRowAt(fr)))
+				// Kind first (§7.3), then the row's ID (Seq.ReserveRow rejects it
+				// before the outer List grows), then its element count -- the order
+				// every backend takes the two verdicts in. The row is a List<T>, so
+				// reserving it allocates nothing from the untrusted count.
+				aArms = append(aArms, fmt.Sprintf("            case (%s, _): %s%s %s%s = id; break;", fr.loc, arrayKindGuard(fr.items.Elem),
+					seqCall("ReserveRow", fr.path+", id", fr), guard, ixVar(fr.loc)))
 			}
 			continue
 		}
@@ -1054,15 +1060,23 @@ func (g *gen) emitVisitor(f *cfile, name string, fields []*ir.Field) {
 				// to id, then decode INTO element id -- never append (generator#247).
 				// Appending shortened the array by the size of any interior id gap and
 				// decoded a REOPENED id as a second element instead of merging into the
-				// first (§7.4 -- placement gives that merge for free). The over-index
-				// guard rejects id >= N first, which also bounds the gap-fill.
-				f.line("            case (%s, _): %swhile (%s.Count <= id) %s.Add(new %s()); %s = id; cur = %s; break;",
-					fr.loc, g.overIndexGuard(fr.cap, fr.loc), fr.path, fr.path, g.typeName(fr.ref.Key), ixVar(fr.loc), fr.childLoc)
+				// first (§7.4 -- placement gives that merge for free).
+				//
+				// The bound is the corelib's (Seq.CheckIndex, before the list grows,
+				// which also bounds the gap fill); the fill itself stays generated.
+				// That is the ARCHITECTURE §8 maxspeed override, measured: corelib-cs's
+				// Seq.ReserveElem needs a Func<T> factory, and the delegate call per new
+				// element cost +0.77% decode Ir/op on the csharp bench row (a
+				// `where T : new()` overload, which the JIT lowers to
+				// Activator.CreateInstance, cost +2.7%). A direct `new Elem()` here is
+				// free (ARCHITECTURE §9.5.5).
+				f.line("            case (%s, _): %s while (%s.Count <= id) %s.Add(new %s()); %s = id; cur = %s; break;",
+					fr.loc, seqCall("CheckIndex", "id", fr), fr.path, fr.path, g.typeName(fr.ref.Key), ixVar(fr.loc), fr.childLoc)
 			case fr.elem == ir.KindArray && seqArrayElem(fr.items.Elem):
-				// A wrapper ROW is placed at the index its id names too (see placeRow):
+				// A wrapper ROW is placed at the index its id names too (see reserveRow):
 				// an interior all-default row is omitted, so appending would shift every
 				// later row down by one.
-				f.line("            case (%s, _): %scur = %s; break;", fr.loc, g.placeRow(fr), fr.childLoc)
+				f.line("            case (%s, _): %scur = %s; break;", fr.loc, g.reserveRow(fr), fr.childLoc)
 			}
 			continue
 		}
