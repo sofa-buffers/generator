@@ -57,7 +57,7 @@ type gen struct {
 	// limArr is the ARRAY cap's liveness for the visitor being emitted right now,
 	// as activeLimits decided it. The cap CONSTANT is per-visitor (a message with
 	// no unbounded array must not carry one), so every guard that names it has to
-	// take the same decision, and the deepest of them -- overIndexGuard -- has no
+	// take the same decision, and the deepest of them -- indexBound -- has no
 	// path to `fs`. Set by emitVisitor before it emits anything.
 	limArr bool
 	// size is the max_message_size policy; sizeErr carries a violation out of

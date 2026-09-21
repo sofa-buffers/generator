@@ -163,23 +163,33 @@ func TestJavaOverIndexWrapperArray(t *testing.T) {
 		"      ds: { id: 3, type: array, items: { type: string } }\n"
 	m := genJavaFromYAML(t, src, map[string]any{})["src/main/java/message/M.java"]
 	for _, want := range []string{
-		`if (id >= 4) throw Sofab.invalid("Root_bs element: array index above schema capacity 4"); while (m.bs.size() <= id)`,
-		`if (id >= 3) throw Sofab.invalid("Root_bb element: array index above schema capacity 3"); while (m.bb.size() <= id)`,
-		// The struct-element arm gap-fills and PLACES by id (generator#247), so the
-		// guard is now followed by the same grow-to-id loop the leaf arms use.
-		`if (id >= 2) throw Sofab.invalid("Root_bp element: array index above schema capacity 2"); while (m.bp.size() <= id) m.bp.add(new`,
+		// The guard is emitted AHEAD of the placement, so a refused id never reaches
+		// the corelib and the container is not left partially extended
+		// (CORELIB_PLAN §7.2 item 8). Bound.SCHEMA_BOUNDED then tells the corelib
+		// that this array's ceiling is the schema's and there is no second number.
+		`if (id >= 4) throw Sofab.invalid("Root_bs element: array index above schema capacity 4"); Seq.placeElem(m.bs, id, "", _s, Bound.SCHEMA_BOUNDED);`,
+		`if (id >= 3) throw Sofab.invalid("Root_bb element: array index above schema capacity 3"); Seq.placeElem(m.bb, id, Seq.EMPTY_BYTES, _b, Bound.SCHEMA_BOUNDED);`,
+		// The struct-element arm reserves the slot by id (generator#247) through the
+		// same corelib layer, and keeps only the routing that follows it.
+		`if (id >= 2) throw Sofab.invalid("Root_bp element: array index above schema capacity 2"); Seq.reserveElem(m.bp, id, MBpElem::new, Bound.SCHEMA_BOUNDED);`,
 	} {
 		if !strings.Contains(m, want) {
 			t.Errorf("M.java missing over-index guard %q", want)
 		}
 	}
-	// Dynamic string array keeps every index (bare grow).
-	if !strings.Contains(m, `while (m.ds.size() <= id) m.ds.add(""); m.ds.set(id, _s); break;`) ||
-		strings.Contains(m, `array index above schema capacity`+" ds") {
-		// ensure ds arm has no guard prefix
-		if strings.Contains(m, `INVALID_MSG, "Root_ds element`) {
-			t.Errorf("dynamic string array must not carry an over-index guard")
-		}
+	// A dynamic array keeps every index the receiver cap allows, and the cap is the
+	// call's argument rather than a guard in front of it -- so no schema verdict is
+	// emitted for it at all.
+	if !strings.Contains(m, `Seq.placeElem(m.ds, id, "", _s, CAP_DYN_ARRAY_COUNT); break;`) {
+		t.Errorf("dynamic string array must place through the corelib with the receiver cap")
+	}
+	if strings.Contains(m, `"Root_ds element`) {
+		t.Errorf("dynamic string array must not carry an over-index guard")
+	}
+	// The gap fill and the grow loop are the corelib's now: no generated wrapper
+	// array re-implements them.
+	if strings.Contains(m, `.add(new byte[0])`) || strings.Contains(m, `.size() <= id`) {
+		t.Errorf("wrapper-array growth must not be emitted; it is Seq.placeElem/reserveElem's")
 	}
 }
 
@@ -328,9 +338,14 @@ func TestJavaMaxlenReject(t *testing.T) {
 	}
 	// The ARRAY cap is live, and `arr` is why. It is a WRAPPER array, so it
 	// carries no count header for arrayBegin to check -- but its element INDEX is
-	// its length, and that is what the cap binds here (generator#387).
-	if !strings.Contains(m, `if (id >= MAX_DYN_ARRAY_COUNT) throw new java.io.UncheckedIOException(new SofabException(SofabError.LIMIT_EXCEEDED, "Root_arr element: array index above configured limit 65536"));`) {
+	// its length, and that is what the cap binds (generator#387). The comparison
+	// rides the corelib call that grows the list (generator#587), so what is
+	// emitted is the Bound, not the rejection.
+	if !strings.Contains(m, "private static final Bound CAP_DYN_ARRAY_COUNT = Bound.receiver(MAX_DYN_ARRAY_COUNT);") {
 		t.Errorf("a dynamic wrapper array's element index must be capped:\n%s", m)
+	}
+	if !strings.Contains(m, `Seq.placeElem(m.arr, id, "", _s, CAP_DYN_ARRAY_COUNT);`) {
+		t.Errorf("the array cap must ride the placement call:\n%s", m)
 	}
 }
 
@@ -991,17 +1006,19 @@ func TestJavaWrapperElementsArePlacedByID(t *testing.T) {
 	got := genJavaFromYAML(t, wrapperArraySrc, map[string]any{})["src/main/java/message/Vec.java"]
 
 	for _, want := range []string{
-		// placement, not append -- and the gap-fill that precedes it
-		"while (m.fixed.size() <= id) m.fixed.add(new VecFixedElem()); _ex_Root_fixed = id;",
-		"while (m.dynamic.size() <= id) m.dynamic.add(new VecDynamicElem()); _ex_Root_dynamic = id;",
+		// placement, not append -- the reservation the corelib makes, and the
+		// element-index register the routing that follows reads back
+		"Seq.reserveElem(m.fixed, id, VecFixedElem::new, Bound.SCHEMA_BOUNDED); _ex_Root_fixed = id;",
+		"Seq.reserveElem(m.dynamic, id, VecDynamicElem::new, CAP_DYN_ARRAY_COUNT); _ex_Root_dynamic = id;",
 		// a child field of the element resolves through the PLACED index (the §7.1
 		// width guard for the u32 destination precedes the store; see
 		// TestJavaDeclaredWidthIsAValidityBound)
 		"m.fixed.get(_ex_Root_fixed).k = value; break;",
-		// leaf elements were always placed by id
-		"while (m.fstrs.size() <= id) m.fstrs.add(\"\"); m.fstrs.set(id, _s); break;",
-		"while (m.dblbs.size() <= id) m.dblbs.add(new byte[0]); m.dblbs.set(id, _b); break;",
-		// the over-index guard bounds both the placement and the gap-fill
+		// leaf elements were always placed by id, and the placement is one call
+		"Seq.placeElem(m.fstrs, id, \"\", _s, Bound.SCHEMA_BOUNDED); break;",
+		"Seq.placeElem(m.dblbs, id, Seq.EMPTY_BYTES, _b, CAP_DYN_ARRAY_COUNT); break;",
+		// the over-index guard bounds both the placement and the gap-fill, and is
+		// taken before the call so a refused id leaves the list unextended
 		`if (id >= 5) throw Sofab.invalid("Root_fixed element: array index above schema capacity 5");`,
 		// sequenceEnd is a bare pop: a capacity adds no elements.
 		"public void sequenceEnd() { cur = sp > 0 ? stk[--sp] : 0; }",
@@ -1014,6 +1031,10 @@ func TestJavaWrapperElementsArePlacedByID(t *testing.T) {
 	// The defect this replaced: appending ignored the id entirely.
 	if strings.Contains(got, "m.fixed.add(new VecFixedElem()); cur =") {
 		t.Errorf("struct-array elements must not be appended id-blind:\n%s", got)
+	}
+	// And the gap fill it needed is the corelib's, not emitted per array.
+	if strings.Contains(got, ".size() <= id") {
+		t.Errorf("no wrapper array may emit its own grow loop:\n%s", got)
 	}
 	// No wrapper array may be refilled to a schema count on sequenceEnd any more.
 	for _, gone := range []string{
@@ -1048,7 +1069,7 @@ func TestJavaMatrixRowsArePlacedByID(t *testing.T) {
 		"_arowInt[ai++] = (int) value; return;",
 		// wrapper rows: placed in sequenceBegin, same shape
 		`case 9: if (id >= 4) throw Sofab.invalid("Root_smat element: array index above schema capacity 4"); Seq.reserveRow(m.smat, id, Bound.SCHEMA_BOUNDED); _ex_Root_smat = id; cur = 10; break;`,
-		"while (m.smat.get(_ex_Root_smat).size() <= id) m.smat.get(_ex_Root_smat).add(\"\");",
+		`Seq.placeElem(m.smat.get(_ex_Root_smat), id, "", _s, CAP_DYN_ARRAY_COUNT);`,
 	} {
 		if !strings.Contains(got, want) {
 			t.Errorf("Vec.java missing %q:\n%s", want, got)
@@ -1586,16 +1607,29 @@ messages:
 `
 	m := genJavaFromYAML(t, src, map[string]any{})["src/main/java/message/M.java"]
 
-	// Where the GAP FILL is generated code -- the inline `while (list.size() <= id)`
-	// that places a string, blob or sub-message element -- the guard is generated
-	// code's too, ahead of the grow it bounds.
+	// The gap fill is the CORELIB's for every element kind (generator#587), so the
+	// cap travels as that call's last argument -- compared before anything is
+	// created and before the list grows to hold it -- and the LIMIT_EXCEEDED
+	// rejection is built there, not here.
 	for _, want := range []string{
-		`if (id >= MAX_DYN_ARRAY_COUNT) throw new java.io.UncheckedIOException(new SofabException(SofabError.LIMIT_EXCEEDED, "Root_dstrs element: array index above configured limit 65536")); while (m.dstrs.size() <= id)`,
-		`"Root_dblbs element: array index above configured limit 65536")); while (m.dblbs.size() <= id)`,
-		`"Root_dobjs element: array index above configured limit 65536")); while (m.dobjs.size() <= id)`,
+		"private static final Bound CAP_DYN_ARRAY_COUNT = Bound.receiver(MAX_DYN_ARRAY_COUNT);",
+		`Seq.placeElem(m.dstrs, id, "", _s, CAP_DYN_ARRAY_COUNT);`,
+		`Seq.placeElem(m.dblbs, id, Seq.EMPTY_BYTES, _b, CAP_DYN_ARRAY_COUNT);`,
+		`Seq.reserveElem(m.dobjs, id, MDobjsElem::new, CAP_DYN_ARRAY_COUNT);`,
 	} {
 		if !strings.Contains(m, want) {
 			t.Errorf("M.java missing wrapper index cap %q:\n%s", want, m)
+		}
+	}
+	// One implementation, wherever it runs (§6.2.1): no element index is ALSO
+	// guarded here.
+	for _, gone := range []string{
+		`"Root_dstrs element: array index above configured limit`,
+		`"Root_dblbs element: array index above configured limit`,
+		`"Root_dobjs element: array index above configured limit`,
+	} {
+		if strings.Contains(m, gone) {
+			t.Errorf("an element index must not be capped twice (%s):\n%s", gone, m)
 		}
 	}
 	// A native matrix ROW is placed by the CORELIB, so its index cap is that
@@ -1613,7 +1647,7 @@ messages:
 	// A SCHEMA-BOUNDED array keeps its own bound and its own category: the cap
 	// governs only what the schema left unbounded (§9.5), so `bstrs` must be
 	// INVALID at 4 and must not also carry the cap.
-	if !strings.Contains(m, `case 6: if (id >= 4) throw Sofab.invalid("Root_bstrs element: array index above schema capacity 4"); while (m.bstrs.size() <= id)`) {
+	if !strings.Contains(m, `case 6: if (id >= 4) throw Sofab.invalid("Root_bstrs element: array index above schema capacity 4"); Seq.placeElem(m.bstrs, id, "", _s, Bound.SCHEMA_BOUNDED);`) {
 		t.Errorf("a count:N wrapper array must keep its INVALID schema bound:\n%s", m)
 	}
 	if strings.Contains(m, `"Root_bstrs element: array index above configured limit`) {

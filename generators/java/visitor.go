@@ -135,7 +135,7 @@ func (g *gen) frames(m *ir.Message) []frame {
 //
 // A wrapper array's decoded length is *highest present id + 1* (MESSAGE_SPEC
 // §5.1) -- the elements that arrived are the whole value. A declared `count: N` is
-// a CAPACITY (§3): it bounds the element ids (see overIndexGuard) but never adds
+// a CAPACITY (§3): it bounds the element ids (see indexBound) but never adds
 // elements the wire did not carry, so there is nothing to fill in when the scope
 // closes.
 func (g *gen) emitSequenceEnd(f *jfile) {
@@ -163,8 +163,8 @@ func elemIdxVar(loc string) string {
 	return b.String()
 }
 
-// overIndexGuard returns the reject clause for a wrapper array's element id,
-// emitted ahead of the grow it bounds.
+// indexBound settles a wrapper array's element INDEX: which of the two bounds of
+// CORELIB_PLAN §6.2.1 governs it, and where that bound is taken.
 //
 // A wrapper array carries no count HEADER: its elements are keyed by an
 // unbounded varint index, and an id-keyed collector grows the container to
@@ -174,57 +174,34 @@ func elemIdxVar(loc string) string {
 // has to be bounded: capping how many elements arrived would not bound the
 // allocation at all, because a sparse array allocates by its highest id.
 //
-// Which bound applies depends on whether the schema counts the array, and the
-// two differ only in that and in what the failure is called (ARCHITECTURE §9.5):
+// It returns the guard to emit AHEAD of the placement and the bound to pass INTO
+// it, and exactly one of the two is ever live (ARCHITECTURE §9.5):
 //
-//   - `count: N` -> id >= N is INVALID_MSG (issue #142). The bytes contradict
-//     the schema both peers agreed on.
-//   - no count -> id >= MAX_DYN_ARRAY_COUNT is LIMIT_EXCEEDED (issue #387). The
-//     bytes are well-formed and the same message decodes under a looser cap, so
-//     folding this into INVALID is forbidden by CORELIB_PLAN §6.2.1.
-//
-// Empty only when the array is dynamic AND no cap is live for this schema.
-//
-// This is the GENERATED half of the split (§6.2.1's "one implementation,
-// wherever it runs"). It stays wherever the gap fill is generated code — the
-// inline `while (list.size() <= id) list.add(...)` that places a string, blob or
-// sub-message element, in string()/blob()/sequenceBegin/fixlenBegin. Where the
-// row is placed by a corelib call instead (Seq.reserveRow and the primitive
-// reserveRow* factories) the cap is that call's argument and this guard is NOT
-// emitted in front of it; see rowIndexBound.
-func (g *gen) overIndexGuard(cap int64, name string) string {
-	if cap >= 0 {
-		return fmt.Sprintf("if (id >= %d) throw Sofab.invalid(\"%s element: array index above schema capacity %d\"); ", cap, name, cap)
-	}
-	if !g.limArr {
-		return ""
-	}
-	return limitThrowGuard("id >= MAX_DYN_ARRAY_COUNT", name+" element", "array index above configured limit", g.limits.arrayCount) + " "
-}
-
-// rowIndexBound is overIndexGuard for a row whose placement goes through the
-// CORELIB — Seq.reserveRow, and the primitive Seq.reserveRow<B>s factories.
-// Since corelib-java 0.12.0 those take the receiver cap as their last argument
-// and compare it against the row index BEFORE they allocate the row and before
-// they grow the outer list (CORELIB_PLAN §6.2.1: "A corelib MAY take a limit as
-// an argument and perform the check itself, and a port that does is
-// conformant"). Hanging the number on a call generated code already makes is
-// also what keeps the check off the decode path as a call of its own.
-//
-// It returns the guard to emit AHEAD of the call and the cap to pass INTO it,
-// and exactly one of the two is ever live:
-//
-//   - schema `count: N` — the guard, INVALID (MESSAGE_SPEC §7.1). A schema bound
-//     is a statement about validity, so it can never travel as the receiver cap:
-//     the call is handed Bound.SCHEMA_BOUNDED, which says precisely that the
-//     schema's count governs this row and there is no second number.
+//   - schema `count: N` — the guard, INVALID_MSG (issue #142, MESSAGE_SPEC §7.1).
+//     The bytes contradict the schema both peers agreed on. A schema bound is a
+//     statement about validity, so it can never travel as the receiver cap: the
+//     call is handed Bound.SCHEMA_BOUNDED, which says precisely that the schema's
+//     count governs this array and there is no second number.
 //   - no count — no guard at all; the cap is the argument, and the corelib
-//     refuses an over-cap index with LIMIT_EXCEEDED before it sizes anything.
+//     refuses an over-cap index with LIMIT_EXCEEDED (issue #387) before it creates
+//     anything and before it grows the list to hold it. The bytes are well-formed
+//     and the same message decodes under a looser cap, so folding this into
+//     INVALID is forbidden by §6.2.1.
 //
-// The row's own element COUNT is a different number and stays in generated code
+// Since generator#587 every wrapper-array placement goes through the corelib —
+// Seq.placeElem for a string or blob element, Seq.reserveElem for a struct,
+// union or nested-array element, Seq.reserveRow and the primitive reserveRow*
+// factories for a matrix row — so the row rule and the element rule are the same
+// rule and are rendered by this one function. Each of those compares the bound it
+// is handed BEFORE it grows anything (CORELIB_PLAN §7.2 item 8), which is also
+// what keeps the check off the decode path as a call of its own. The one site
+// with no placement to ride is the length word of a string or blob element, and
+// it names the bound on Seq.checkIndex instead (see fixlenBeginArms).
+//
+// A row's own element COUNT is a different number and stays in generated code
 // beside this: one argument cannot carry both, and an inner array the schema
 // bounds can sit inside an outer one it does not.
-func (g *gen) rowIndexBound(cap int64, name string) (guard, arg string) {
+func (g *gen) indexBound(cap int64, name string) (guard, arg string) {
 	if cap >= 0 {
 		return fmt.Sprintf("if (id >= %d) throw Sofab.invalid(\"%s element: array index above schema capacity %d\"); ", cap, name, cap), "Bound.SCHEMA_BOUNDED"
 	}
@@ -234,16 +211,16 @@ func (g *gen) rowIndexBound(cap int64, name string) (guard, arg string) {
 	return "", "CAP_DYN_ARRAY_COUNT"
 }
 
-// needsRowCapBound reports whether any row placement in this message actually
-// takes the receiver cap as an argument — a native matrix row or a wrapper
-// matrix row the schema leaves uncounted. Only then is the `Bound` constant
-// emitted: the array cap can be live for a message whose every guard is
-// generated (a native array's count, a flat wrapper's element index), and a
-// Bound nothing references is a constant nobody can read the purpose of.
-
-func needsRowCapBound(fs []frame) bool {
+// needsArrayCapBound reports whether any wrapper-array placement in this message
+// actually takes the receiver cap as an argument — a string/blob element, a
+// struct/union element, a matrix row or a native matrix row the schema leaves
+// uncounted. Only then is the `Bound` constant emitted: the array cap can be live
+// for a message whose every array guard is generated (an unbounded native array's
+// COUNT is one), and a Bound nothing references is a constant nobody can read the
+// purpose of.
+func needsArrayCapBound(fs []frame) bool {
 	for _, fr := range fs {
-		if (fr.kind == fkNativeMat || fr.kind == fkSeqMat) && fr.cap < 0 {
+		if fr.kind != fkNormal && fr.cap < 0 {
 			return true
 		}
 	}
@@ -266,7 +243,7 @@ func locIndex(fs []frame, loc string) int {
 // (count header via arrayBegin), an unbounded string/blob (length via the
 // `total` parameter), or a wrapper array the schema leaves uncounted. Otherwise
 // the constant is not emitted at all, and neither is anything that would name
-// it: no guard, and no cap on a corelib call (see payloadCap, rowIndexBound).
+// it: no guard, and no cap on a corelib call (see payloadCap, indexBound).
 // An unset or inert key leaves the output byte-identical.
 func (g *gen) activeLimits(fs []frame) (limArr, limStr, limBlob bool) {
 	for _, fr := range fs {
@@ -503,9 +480,14 @@ func (g *gen) emitStringCb(f *jfile, fs []frame, limStr bool) {
 	for _, fr := range fs {
 		if fr.kind == fkSeqLeaf && fr.elemKind == ir.KindString {
 			// Elements are keyed by index id (MESSAGE_SPEC S2): a default (empty)
-			// element is omitted on the wire, so place the value at its id and fill
-			// any gap with the element default ("").
-			f.line("        case %d: %swhile (%s.size() <= id) %s.add(\"\"); %s.set(id, _s); break;", fr.idx, g.overIndexGuard(fr.cap, fr.loc), fr.listExpr, fr.listExpr, fr.listExpr)
+			// element is omitted on the wire, so the value is placed at its id and any
+			// gap below it filled with the element default (""). That is Seq.placeElem's
+			// whole job -- the same code for every schema, its schema dependence carried
+			// by the bound, the element type and the default (ARCHITECTURE §8) -- and it
+			// takes the bound of an uncounted array as its last argument, so the
+			// LIMIT_EXCEEDED rejection is the corelib's and never appears here.
+			idxGuard, idxCap := g.indexBound(fr.cap, fr.loc)
+			f.line("        case %d: %sSeq.placeElem(%s, id, \"\", _s, %s); break;", fr.idx, idxGuard, fr.listExpr, idxCap)
 			continue
 		}
 		if fr.kind != fkNormal {
@@ -576,10 +558,13 @@ func (g *gen) emitBlobCb(f *jfile, fs []frame, limBlob bool) {
 	f.line("        switch (cur) {")
 	for _, fr := range fs {
 		if fr.kind == fkSeqLeaf && fr.elemKind == ir.KindBlob {
-			// Elements are keyed by index id (MESSAGE_SPEC S2): a default (empty)
-			// element is omitted on the wire, so place the value at its id and fill
-			// any gap with the element default (empty bytes).
-			f.line("        case %d: %swhile (%s.size() <= id) %s.add(new byte[0]); %s.set(id, _b); break;", fr.idx, g.overIndexGuard(fr.cap, fr.loc), fr.listExpr, fr.listExpr, fr.listExpr)
+			// The twin of the string element above, down to the call: Seq.placeElem
+			// is generic, so one corelib method body serves both (Java erases the type
+			// parameter, so this costs no code size however many element types a schema
+			// uses). The gap value is the shared Seq.EMPTY_BYTES rather than a fresh
+			// `new byte[0]` per gap -- a zero-length array has no state to share.
+			idxGuard, idxCap := g.indexBound(fr.cap, fr.loc)
+			f.line("        case %d: %sSeq.placeElem(%s, id, Seq.EMPTY_BYTES, _b, %s); break;", fr.idx, idxGuard, fr.listExpr, idxCap)
 			continue
 		}
 		if fr.kind != fkNormal {
@@ -907,7 +892,17 @@ func (g *gen) fixlenBeginArms(fs []frame, kind ir.Kind, noun, capConst string) [
 	for _, fr := range fs {
 		elemCapped := capConst != "" && fr.emax < 0
 		if fr.kind == fkSeqLeaf && fr.elemKind == kind && (fr.cap >= 0 || fr.emax >= 0 || elemCapped) {
-			body := g.overIndexGuard(fr.cap, fr.loc)
+			// The one index bound with no placement to ride: the element's index is
+			// settled HERE, at the length word, so a message that ends right after it
+			// is refused rather than reported INCOMPLETE (MESSAGE_SPEC §5.2). A schema
+			// count is the guard; a receiver cap is named on Seq.checkIndex, the same
+			// comparison Seq.placeElem makes a moment later against the same folded
+			// constant, so the two sites cannot drift apart.
+			idxGuard, idxCap := g.indexBound(fr.cap, fr.loc)
+			body := idxGuard
+			if fr.cap < 0 {
+				body = "Seq.checkIndex(id, " + idxCap + "); "
+			}
 			switch {
 			case fr.emax >= 0:
 				body += fmt.Sprintf("if (total > %d) %s ", fr.emax, maxlenThrow(locName(fr.loc)+" element", noun, fr.emax))
@@ -1103,7 +1098,7 @@ func framesTouchDeprecated(fs []frame) bool {
 func (g *gen) emitVisitor(f *jfile, name string, fields []*ir.Field) {
 	fs := g.frames(&ir.Message{Name: name, Fields: fields})
 	limArr, limStr, limBlob := g.activeLimits(fs) // per-visitor decode limits (generator#102)
-	g.limArr = limArr                             // for overIndexGuard, which cannot reach fs
+	g.limArr = limArr                             // for indexBound, which cannot reach fs
 
 	if framesTouchDeprecated(fs) {
 		// The visitor is a separate top-level class, so writing a @Deprecated
@@ -1185,7 +1180,7 @@ func (g *gen) emitVisitor(f *jfile, name string, fields []*ir.Field) {
 		// final, never per call: a cap is a constant of the deployment.
 		if limArr {
 			f.line("    static final long MAX_DYN_ARRAY_COUNT = %dL;", g.limits.arrayCount)
-			if needsRowCapBound(fs) {
+			if needsArrayCapBound(fs) {
 				f.line("    private static final Bound CAP_DYN_ARRAY_COUNT = Bound.receiver(MAX_DYN_ARRAY_COUNT);")
 			}
 		}
@@ -1329,7 +1324,7 @@ func (g *gen) emitVisitor(f *jfile, name string, fields []*ir.Field) {
 			// is the guard below; a receiver cap is the last argument of the
 			// reserveRow call instead (§6.2.1), which compares it before it
 			// allocates the row or grows the outer list.
-			idxGuard, idxCap := g.rowIndexBound(fr.cap, fr.loc)
+			idxGuard, idxCap := g.indexBound(fr.cap, fr.loc)
 			arm := kindGuard + idxGuard + guard + armFill(fs, fr, nil)
 			// The row's element id IS its index in the outer array (§5.1), so it is
 			// PLACED there after gap-filling with empty rows -- never appended.
@@ -1438,16 +1433,24 @@ func (g *gen) emitVisitor(f *jfile, name string, fields []*ir.Field) {
 		switch fr.kind {
 		case fkSeqObj:
 			// MESSAGE_SPEC §5.1: the element id IS the array index, exactly as on the
-			// string/blob leaf-element paths above, so the element is PLACED at
-			// list.get(id) after gap-filling with default elements -- never appended.
+			// string/blob leaf-element paths above, so the slot the element decodes
+			// into is RESERVED at list.get(id) after gap-filling -- never appended.
 			// Appending shortened the array by the size of any interior id gap and
 			// decoded a REOPENED id as a second element instead of merging into the
-			// first (§7.4 struct-merge, which placement gives for free: the existing
-			// element is reused and the reopened frame's fields land on top of it).
-			// The over-index guard still rejects id >= N, which also bounds the
-			// gap-fill.
-			f.line("        case %d: %swhile (%s.size() <= id) %s.add(new %s()); %s = id; cur = %d; break;",
-				fr.idx, g.overIndexGuard(fr.cap, fr.loc), fr.listExpr, fr.listExpr, fr.elemType, elemIdxVar(fr.loc), locIndex(fs, fr.childLoc))
+			// first (§7.4 struct-merge, which reservation gives for free: a slot
+			// already present is left alone and the reopened frame's fields land on
+			// the object its earlier fields built).
+			//
+			// Seq.reserveElem owns the bound and the growth, and stops at the slot.
+			// What follows is the ROUTING, which has a different shape per schema and
+			// stays here: the element index parked in its own register, and the scope
+			// switch the child's field arms decode under. The factory is a method
+			// reference to a GENERATED type -- the schema dependence §8 allows a type
+			// parameter to carry -- and javac lowers a non-capturing one to a
+			// constant, so it allocates nothing per call.
+			elemGuard, elemCap := g.indexBound(fr.cap, fr.loc)
+			f.line("        case %d: %sSeq.reserveElem(%s, id, %s::new, %s); %s = id; cur = %d; break;",
+				fr.idx, elemGuard, fr.listExpr, fr.elemType, elemCap, elemIdxVar(fr.loc), locIndex(fs, fr.childLoc))
 		case fkSeqMat:
 			// A row of an array-of-wrapper-arrays is placed at the index its element
 			// id names, for the same reason as the struct element above and the
@@ -1457,7 +1460,7 @@ func (g *gen) emitVisitor(f *jfile, name string, fields []*ir.Field) {
 			// row id replaces the row rather than merging into it (§7.4).
 			// Placed by the corelib, so the receiver cap is that call's argument
 			// and only a SCHEMA count is a guard in front of it (§6.2.1).
-			rowGuard, rowCap := g.rowIndexBound(fr.cap, fr.loc)
+			rowGuard, rowCap := g.indexBound(fr.cap, fr.loc)
 			f.line("        case %d: %sSeq.reserveRow(%s, id, %s); %s = id; cur = %d; break;", fr.idx, rowGuard, fr.listExpr, rowCap, elemIdxVar(fr.loc), locIndex(fs, fr.childLoc))
 		case fkNormal:
 			var arms []string
