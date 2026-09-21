@@ -299,10 +299,11 @@ messages:
 	}
 }
 
-// TestKotlinOverIndexWrapperArray: a fixed-count wrapper array throws
-// INVALID_MSG for an element id >= N before the list grows -- which is both the
-// verdict a declared bound requires and what bounds an id-keyed gap fill against
-// an over-index heap-amplification DoS. A dynamic array keeps every index.
+// TestKotlinOverIndexWrapperArray: a fixed-count wrapper array hands its schema
+// count N to the corelib helper that grows the list, which throws INVALID_MSG for
+// an element id >= N before the list grows -- both the verdict a declared bound
+// requires and what bounds an id-keyed gap fill against an over-index
+// heap-amplification DoS. The generated code writes no index compare itself.
 func TestKotlinOverIndexWrapperArray(t *testing.T) {
 	src := "version: 1\nmessages:\n  M:\n    payload:\n" +
 		"      bs: { id: 0, type: array, items: { type: string, count: 4, maxlen: 16 } }\n" +
@@ -311,21 +312,24 @@ func TestKotlinOverIndexWrapperArray(t *testing.T) {
 		"      ds: { id: 3, type: array, items: { type: string } }\n"
 	m := genFromYAML(t, src, map[string]any{})["src/main/kotlin/message/M.kt"]
 	for _, want := range []string{
-		`if (id >= 4) throw SofabException(SofabError.INVALID_MSG, "bs element: array index above schema capacity 4"); while (m.bs.size <= id)`,
-		`if (id >= 3) throw SofabException(SofabError.INVALID_MSG, "bb element: array index above schema capacity 3"); while (m.bb.size <= id)`,
-		`if (id >= 2) throw SofabException(SofabError.INVALID_MSG, "bp element: array index above schema capacity 2"); while (m.bp.size <= id) m.bp.add(`,
+		`Seq.placeElem(m.bs, id, "", s, 4, MAX_DYN_ARRAY_COUNT)`,
+		`Seq.placeElem(m.bb, id, Seq.EMPTY_BYTES, b, 3, MAX_DYN_ARRAY_COUNT)`,
+		`Seq.reserveElem(m.bp, id, 2, MAX_DYN_ARRAY_COUNT) { MBpElem() }; _ex_Root_bp = id; cur = `,
 	} {
 		if !strings.Contains(m, want) {
 			t.Errorf("M.kt missing over-index guard %q", want)
 		}
 	}
-	// A DYNAMIC wrapper array is bounded too, and by the same test in the same
-	// place -- what differs is the bound and the category. Its length is its
-	// highest index, so the receiver cap binds the index; the bytes are well
-	// formed and decode under a looser cap, so the verdict is LIMIT_EXCEEDED and
-	// not INVALID_MSG (generator#387, CORELIB_PLAN §6.2.1).
-	if !strings.Contains(m, `if (id >= MAX_DYN_ARRAY_COUNT) throw SofabException(SofabError.LIMIT_EXCEEDED, "ds element: array index above configured limit 16384"); while (m.ds.size <= id) m.ds.add(""); m.ds[id] = s`) {
-		t.Errorf("a dynamic wrapper array must cap its element index, then place by id and gap-fill:\n%s", m)
+	// A DYNAMIC wrapper array is bounded too, by the same call in the same place
+	// -- what differs is the bound and the category. Its length is its highest
+	// index, so the receiver cap binds the index; the bytes are well formed and
+	// decode under a looser cap, so the verdict is LIMIT_EXCEEDED and not
+	// INVALID_MSG (CORELIB_PLAN §6.2.1). The -1 states "no schema count".
+	if !strings.Contains(m, `Seq.placeElem(m.ds, id, "", s, -1, MAX_DYN_ARRAY_COUNT)`) {
+		t.Errorf("a dynamic wrapper array must hand the receiver cap to the placement:\n%s", m)
+	}
+	if strings.Contains(m, "if (id >= ") {
+		t.Errorf("no wrapper-array index compare may remain in generated code:\n%s", m)
 	}
 }
 
@@ -376,7 +380,7 @@ func TestKotlinFixlenBeginLatchesBoundsAtTheLengthWord(t *testing.T) {
 		`1 -> if (total > 4) throw SofabException(SofabError.INVALID_MSG, "b: blob length above schema maxlen 4")`,
 		// Over-index FIRST: an element that is not this array's element at all
 		// must not have its length measured against the element bound.
-		`{ if (id >= 3) throw SofabException(SofabError.INVALID_MSG, "es element: array index above schema capacity 3"); if (total > 6) throw SofabException(SofabError.INVALID_MSG, "es element: string length above schema maxlen 6") }`,
+		`{ Seq.checkIndex(id, 3, MAX_DYN_ARRAY_COUNT); if (total > 6) throw SofabException(SofabError.INVALID_MSG, "es element: string length above schema maxlen 6") }`,
 	} {
 		if !strings.Contains(m, want) {
 			t.Errorf("fixlenBegin missing %q", want)
@@ -1220,9 +1224,9 @@ messages:
 	m := genFromYAML(t, src, map[string]any{})["src/main/kotlin/message/M.kt"]
 
 	for _, want := range []string{
-		`if (id >= MAX_DYN_ARRAY_COUNT) throw SofabException(SofabError.LIMIT_EXCEEDED, "dstrs element: array index above configured limit 16384"); while (m.dstrs.size <= id)`,
-		`"dblbs element: array index above configured limit 16384"); while (m.dblbs.size <= id)`,
-		`"dobjs element: array index above configured limit 16384"); while (m.dobjs.size <= id)`,
+		`Seq.placeElem(m.dstrs, id, "", s, -1, MAX_DYN_ARRAY_COUNT)`,
+		`Seq.placeElem(m.dblbs, id, Seq.EMPTY_BYTES, b, -1, MAX_DYN_ARRAY_COUNT)`,
+		`Seq.reserveElem(m.dobjs, id, -1, MAX_DYN_ARRAY_COUNT) { MDobjsElem() }`,
 		// A native matrix ROW takes the index cap too: its id is the outer array's
 		// length. It rides the reservation, which is the call that grows the outer
 		// list, so the cap arrives as an argument and no guard precedes it. Its own
@@ -1233,16 +1237,15 @@ messages:
 			t.Errorf("M.kt missing wrapper index cap %q:\n%s", want, m)
 		}
 	}
-	if strings.Contains(m, `"dmat element: array index above configured limit`) {
-		t.Errorf("a row index is bounded once, inside the reservation:\n%s", m)
+	// Every index is bounded once, inside the corelib call that grows the list.
+	if strings.Contains(m, "if (id >= ") {
+		t.Errorf("no wrapper-array index compare may remain in generated code:\n%s", m)
 	}
 	// The cap governs only what the schema left unbounded (§9.5): a count:N array
-	// keeps its own bound and its own category.
-	if !strings.Contains(m, `if (id >= 4) throw SofabException(SofabError.INVALID_MSG, "bstrs element: array index above schema capacity 4")`) {
-		t.Errorf("a count:N wrapper array must keep its INVALID schema bound:\n%s", m)
-	}
-	if strings.Contains(m, `"bstrs element: array index above configured limit`) {
-		t.Errorf("a schema-bounded array must not also carry the receiver cap:\n%s", m)
+	// hands its own count, which the corelib compares in place of the cap and
+	// answers with INVALID_MSG.
+	if !strings.Contains(m, `Seq.placeElem(m.bstrs, id, "", s, 4, MAX_DYN_ARRAY_COUNT)`) {
+		t.Errorf("a count:N wrapper array must hand its schema count to the placement:\n%s", m)
 	}
 }
 
