@@ -230,14 +230,23 @@ func (g *gen) module(s *ir.Schema) []byte {
 		"Decoder", "Encoder", "SofaDecodeError", "SofaIncompleteError",
 		"Status", "Visitor",
 	}
-	// SofaLimitError is raised by exactly one thing generated code still emits:
-	// the wrapper-array element INDEX bound, which is a field id and not a
-	// count/length word, so the Decoder that was handed the caps cannot see it.
-	// Read off the emitted text rather than re-derived, for the reason
-	// visitorNeeds is: a second walk over the schema has to agree with the
-	// emitter by hand.
+	// SofaLimitError is imported only if emitted text still raises it. The
+	// wrapper-array element INDEX bound -- a field id, not a count/length word, so
+	// the Decoder cannot see it -- is judged by the corelib's reserve_* helpers,
+	// which raise it themselves (reserveCall). Each helper, and the UNBOUNDED
+	// sentinel, is imported exactly where a call names it. Read off the emitted
+	// text rather than re-derived, for the reason visitorNeeds is: a second walk
+	// over the schema has to agree with the emitter by hand.
 	if strings.Contains(decodeSection, "SofaLimitError") {
 		names = append(names, "SofaLimitError")
+	}
+	for _, fn := range []string{"reserve_elem", "reserve_leaf", "reserve_row"} {
+		if strings.Contains(decodeSection, fn+"(") {
+			names = append(names, fn)
+		}
+	}
+	if strings.Contains(decodeSection, ", UNBOUNDED, ") {
+		names = append(names, "UNBOUNDED")
 	}
 	// Binding is the destination table (binding.go); a schema whose fields the
 	// table cannot carry emits none and imports none. Matched on the call's
@@ -314,8 +323,9 @@ func (g *gen) module(s *ir.Schema) []byte {
 	f.blank()
 
 	f.b.WriteString(typeSection)
-	// Decode last: an array scope gap-fills with an element CONSTRUCTOR, so every
-	// dataclass a visitor can name must already be defined.
+	// Decode last: an array scope hands the corelib an element CONSTRUCTOR to
+	// grow the list with, so every dataclass a visitor can name must already be
+	// defined.
 	f.b.WriteString(decodeSection)
 	return f.bytes()
 }
@@ -497,76 +507,6 @@ func (g *gen) emitStreamDecoder(f *pyfile) {
 	f.blank()
 }
 
-// schemaHasCountedNativeArray reports whether any field (recursively through
-// nested-array element items) is a native scalar array with a schema `count` —
-// the arrays whose decode emits the over-count SofaDecodeError guard
-// (generator#100). The recursion is what keeps this in lockstep with the
-// emitter: a nested native ROW carries its own capacity and is bounded at its
-// own count header, so a schema whose ONLY counted native array is such a row
-// (a count-less outer array of counted u32 rows) still needs the import — a
-// top-level-only scan would leave the raise NameError at decode time.
-func schemaHasCountedNativeArray(s *ir.Schema) bool {
-	var arrHas func(elem ir.Kind, items *ir.ArrayElem, hasCount bool) bool
-	arrHas = func(elem ir.Kind, items *ir.ArrayElem, hasCount bool) bool {
-		if hasCount && isNativeArrayElem(elem) {
-			return true
-		}
-		if elem == ir.KindArray && items != nil {
-			return arrHas(items.Elem, items.ElemItems, items.HasCount)
-		}
-		return false
-	}
-	return schemaHasField(s, func(fld *ir.Field) bool {
-		return fld.Kind == ir.KindArray && arrHas(fld.Elem, fld.ElemItems, fld.HasCount)
-	})
-}
-
-// schemaHasCountedWrapperArray reports whether any field (recursively through
-// nested-array element items) is a fixed-count wrapper-sequence array —
-// string/blob/struct/union/nested-array elements with a schema `count` — the
-// fields whose decode emits the over-index SofaDecodeError guard (generator#142).
-func schemaHasCountedWrapperArray(s *ir.Schema) bool {
-	var arrHas func(elem ir.Kind, items *ir.ArrayElem, hasCount bool) bool
-	arrHas = func(elem ir.Kind, items *ir.ArrayElem, hasCount bool) bool {
-		if hasCount && !isNativeArrayElem(elem) {
-			return true
-		}
-		if elem == ir.KindArray && items != nil {
-			return arrHas(items.Elem, items.ElemItems, items.HasCount)
-		}
-		return false
-	}
-	return schemaHasField(s, func(fld *ir.Field) bool {
-		return fld.Kind == ir.KindArray && arrHas(fld.Elem, fld.ElemItems, fld.HasCount)
-	})
-}
-
-// schemaHasMaxlenStringBlob reports whether any field (recursively through
-// nested-array element items) is a bounded (maxlen) string/blob — a scalar
-// string/blob carrying a schema `maxlen`, or a string/blob array element
-// carrying an element maxlen — the fields whose decode emits the over-length
-// SofaDecodeError guard (MESSAGE_SPEC §7.1). Kept in lockstep with the import
-// condition: a schema that rejects only on a bounded string/blob still needs
-// SofaDecodeError imported.
-func schemaHasMaxlenStringBlob(s *ir.Schema) bool {
-	var arrHas func(elem ir.Kind, items *ir.ArrayElem, elemMaxHas bool) bool
-	arrHas = func(elem ir.Kind, items *ir.ArrayElem, elemMaxHas bool) bool {
-		if elemMaxHas && (elem == ir.KindString || elem == ir.KindBlob) {
-			return true
-		}
-		if elem == ir.KindArray && items != nil {
-			return arrHas(items.Elem, items.ElemItems, items.ElemMaxHas)
-		}
-		return false
-	}
-	return schemaHasField(s, func(fld *ir.Field) bool {
-		if (fld.Kind == ir.KindString || fld.Kind == ir.KindBlob) && fld.HasMaxlen {
-			return true
-		}
-		return fld.Kind == ir.KindArray && arrHas(fld.Elem, fld.ElemItems, fld.ElemMaxHas)
-	})
-}
-
 // pyFixlenSubtype returns the FixlenSubtype member a fixlen kind must carry, or
 // "" for a kind that is not fixlen-framed.
 func pyFixlenSubtype(k ir.Kind) string {
@@ -613,29 +553,6 @@ func pyExpectedWire(fld *ir.Field) string {
 		}
 	}
 	return "WireType.SEQUENCE_START" // unreachable: keeps the switch total
-}
-
-// schemaHasField reports whether any message or named-type field satisfies pred.
-func schemaHasField(s *ir.Schema, pred func(*ir.Field) bool) bool {
-	any := func(fields []*ir.Field) bool {
-		for _, fld := range fields {
-			if pred(fld) {
-				return true
-			}
-		}
-		return false
-	}
-	for _, key := range s.NamedOrder {
-		if any(s.Named[key].Fields) {
-			return true
-		}
-	}
-	for _, m := range s.Messages {
-		if any(m.Fields) {
-			return true
-		}
-	}
-	return false
 }
 
 func (g *gen) emitEnum(f *pyfile, nt *ir.NamedType) {
