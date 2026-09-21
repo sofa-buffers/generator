@@ -520,10 +520,18 @@ a reimplementation should emit code that honors all of them:
   there: one whose code has the **same shape for every schema**, with its schema
   dependence carried entirely by arguments and type parameters. A `count`,
   `maxlen`, element width or capacity is then a runtime value like any other.
-  `sofab::StringSeq` / `sofab::MessageSeq`, `sofab.arrays.*` and corelib-ts's
-  `PayloadAcc` / `StringSeq` / `BlobSeq` / `decodeUtf8` / `elementsEqual` are the
+  `sofab::StringSeq` / `sofab::MessageSeq`, `sofab.arrays.*`, corelib-ts's
+  `PayloadAcc` / `StringSeq` / `BlobSeq` / `decodeUtf8` / `elementsEqual` and
+  corelib-java's `Seq.placeElem` / `reserveElem` / `reserveRow*` are the
   shape to copy — one collector in the corelib, the bounds passed per field; and
   `corelib-go/arrays.go` states the same test in its own file comment.
+  Java is the cheapest version of the argument and the clearest: generics are
+  **erased**, so `placeElem` has one body for every element type a schema can
+  declare, where a monomorphising target pays for each. Its one divergence is
+  which bound travels: `Bound.SCHEMA_BOUNDED` carries no number, so a schema
+  `count`'s `INVALID` verdict stays emitted in front of the call and only the
+  receiver cap is compared inside it — one implementation of §7.1, wherever it
+  runs, rather than two.
   The generator emits only what has a **different shape per schema** — the field
   arms, the id routing, the per-field guards, the declared types, the
   sized-array descriptors of §11 — and what **names a generated symbol** (Go's
@@ -3345,9 +3353,10 @@ what remains is the arithmetic of the design rather than a hole in it.
 
 **It is a family property, not one port's.**
 Every backend that admits an unbounded array grows the container to `id + 1` under
-the same cap, in generated code (Rust, C#, Java, Kotlin, Python, TypeScript) or in
+the same cap, in generated code (Rust, C#, Kotlin, Python) or in
 the corelib (`for len(*s.out) <= int(id)` in corelib-go, `rcap`-bounded collectors
-in corelib-dart, `reserveElem`/`placeElem` in corelib-zig, `MessageSeq`/
+in corelib-dart, `reserveElem`/`placeElem` in corelib-zig and in corelib-java,
+`ElementSeq`/`FramedSeq` in corelib-ts, `MessageSeq`/
 `StringSeq` in corelib-cpp); the statically bounded profiles (`c`, `cpp` with
 `corelib: c-cpp`, `rust` with `rs-no-std`) reject the field at schema validation and
 never reach it. Go was measured as well as read, and amplifies *more* than Rust on
@@ -3616,7 +3625,7 @@ never a number the corelib knows:
 | **C++** (`corelib: cpp`) | all three kinds, on the `…Capped` twin of the call that carries the schema bound — `readStringCapped`/`readBlobCapped`/`readArrayCapped` — plus `indexCap`/`elemLenCap` on the `StringSeq`/`BlobSeq` collectors and `dynCap` (element id) / `rowDynCap` (a native row's element count) on `MessageSeq` | one shape only: the element index of an array of wrapper **rows**, which a *generated* placer gathers (above) |
 | **Zig** | array counts and wrapper element indices: `arrays.allocCounted` / `reserveElem` / `reserveRow` / `placeElem`, each taking the bound as a `comptime arrays.Bound` that also names the verdict; and string and blob lengths, in `PayloadAcc.takeCapped` — the bind the payload passes through, compared at the announced length before a byte is copied or appended (generator#432) | string and blob lengths a second time, but only as the length-word *verdict* in the generated `fixlenBegin` — what keeps a truncated over-cap header LimitExceeded rather than INCOMPLETE (#438); no generated arithmetic is left in the payload arm |
 | **Go**, **Dart** | wrapper arrays — the element index, the element length and a matrix **row**'s own element count — as the collector's receiver-cap constructor arguments (`sofab.Caps`; `rcap`/`relemMax`/`rowCap`), beside the `sofab.Bounds` carrying the schema's | scalar string/blob lengths and native array counts: Go in the generated `FixlenBegin`/`ArrayBegin` — the accumulator is one callback too late, above; Dart in the one header call that also returns the field's destination (`onString`/`onBlob`/`on…Array`), before it is sized |
-| **Java** | string and blob lengths, in `PayloadAcc` — `checkStringLength`/`checkBlobLength` from the generated `fixlenBegin`, and the same routine again inside the `acc.string`/`acc.blob` the payload passes through; plus a wrapper **row**'s element index, on the `Seq.reserveRow*` call that places the row — §9.5.3 | native array counts, a matrix row's own element count, and a **flat** wrapper array's element index, whose gap fill is generated code |
+| **Java** | string and blob lengths, in `PayloadAcc` — `checkStringLength`/`checkBlobLength` from the generated `fixlenBegin`, and the same routine again inside the `acc.string`/`acc.blob` the payload passes through; plus **every** wrapper array's element index, on the `Seq` call that grows the list — `placeElem` for a string/blob element, `reserveElem` for a struct/union/nested-row element, `reserveRow*` for a matrix row, and `Seq.checkIndex` at the one site with no such call, the length word (§9.5.3) | native array counts and a matrix row's own element count, neither of which has a corelib call at its header to ride |
 | **Kotlin** | string and blob lengths, in `PayloadAcc` — `checkStringLength`/`checkBlobLength` from the generated `fixlenBegin`, and the same routine again inside the `acc.string`/`acc.blob` the payload passes through; plus a wrapper **row**'s element index — a native matrix row and an array-of-arrays row alike — on the `Seq.reserveRow*` / `Seq.reserveRowList` call that reserves the row before the outer list grows — §9.5.4 | native array counts, a matrix row's own element count, and a **flat** wrapper array's element index, whose gap fill is generated code |
 | **C#** | string and blob lengths, in `PayloadAcc` — `CheckStringLength`/`CheckBlobLength` from the generated `FixlenBegin`, and the same routine again inside the `PayloadAcc.String`/`.Blob` the payload passes through | array counts and wrapper element indices |
 | **Python** | all three kinds, in the corelib's own header walk: `Decoder(max_dyn_*=…)` takes the three numbers as **required** arguments (as it does the `reassembly` size, §9.5.1) and the schema bounds are *declared* to it (`on_schema_bound`, or a destination map's entry), so a bounded field is never capped — §9.5.1 | one number only: a wrapper array's element **index**, which is a field id and not a count word, so the codec never sees it as one — it stays in the array scope's own `on_field` arm |
@@ -4304,7 +4313,8 @@ at:
 |---|---|---|
 | `max_dyn_string_len` | `PayloadAcc.checkStringLength(total, bound)` from `fixlenBegin`, and `acc.string(total, offset, data, co, cl, bound)` | the announced `total`, at the length word and again before a byte is buffered or a `String` materialized |
 | `max_dyn_blob_len` | `PayloadAcc.checkBlobLength(total, bound)` from `fixlenBegin`, and `acc.blob(total, offset, data, co, cl, bound)` | the same, on the blob accumulator |
-| `max_dyn_array_count` | `Seq.reserveRow(rows, id, bound)` and `Seq.reserveRow<B>s(rows, id, n, bound)` | the row **index**, before the row is allocated and before the outer list grows |
+| `max_dyn_array_count` | `Seq.reserveRow(rows, id, bound)`, `Seq.reserveRow<B>s(rows, id, n, bound)`, and since generator#587 `Seq.placeElem(out, id, def, value, bound)` and `Seq.reserveElem(out, id, make, bound)` | the element **index**, before anything is created and before the list grows to hold it |
+| `max_dyn_array_count`, at the length word | `Seq.checkIndex(id, bound)` | the same index, one callback earlier — the one site with no reservation to ride (below) |
 
 **The first two rows carry two call sites for one rule, and that is the point.**
 `acc.string`/`acc.blob` alone is *before the buffer grows* but not *at the header*:
@@ -4337,16 +4347,69 @@ refuses both "forgot" values (`0`, `-1`) as §6.3 `ARGUMENT`, while
 so nothing is allocated per call and the JIT folds the constant into the
 comparison it guards.
 
-**Three checks stay in generated code, deliberately, and the split is per field
+**Two checks stay in generated code, deliberately, and the split is per field
 kind.** A native array's own element **count** is written straight into the
-message (`m.arr = new long[count]`) with no corelib call at that header at all; a
-matrix **row's** element count is a second number the one row-index argument
+message (`m.arr = new long[count]`) with no corelib call at that header at all,
+and a matrix **row's** element count is a second number the one row-index argument
 cannot carry (an inner array the schema bounds can sit inside an outer one it does
-not); and a **flat** wrapper array of strings, blobs or sub-messages is gap-filled
-by an inline `while (list.size() <= id) list.add(...)`, which is generated code
-too. Inventing a `Cap.check()` helper to hold any of them would add a call to the
+not). Inventing a `Cap.check()` helper to hold either would add a call to the
 decode path, which is the shape §6.2.1's measurements reject — 1–2.5 points
 against ~0–1% for a guard, and +0.11% for a cap folded into a call already there.
+
+The third used to be a **flat** wrapper array of strings, blobs or sub-messages,
+gap-filled by an inline `while (list.size() <= id) list.add(...)`. generator#587
+moved that loop itself into `Seq.placeElem` / `Seq.reserveElem`, so the cap rides
+those calls like every other array bound and no `Cap.check()` had to be invented
+for it. The one site left with nothing to ride is the **length word** of a
+string/blob element, where §5.2 wants the index verdict taken before the payload
+so a message truncated right there is refused rather than reported `INCOMPLETE`;
+it names `Seq.checkIndex` — the same routine `placeElem` runs a moment later
+against the same folded constant, published for exactly that site, which is how
+the rule is taken twice without being *written* twice.
+
+**What stays emitted, for a wrapper array, is the schema verdict and the
+routing.** `Bound.SCHEMA_BOUNDED` carries no number by design, so an `id >= N`
+against a declared `count` is still thrown here, one line ahead of the call —
+which is also what keeps the check before the growth (CORELIB_PLAN §7.2 item 8),
+so a refused id leaves the list unextended and a lower id delivered afterwards
+still lands. Beside it stays what has a different shape per schema: the `cur`
+scope switch, the `_ex_<loc>` element-index register the child's field arms read
+back, the element's own `maxlen`, and the generated element type — reached by the
+corelib only through a type parameter and a `SomeElem::new` method reference,
+which §8 allows. Java erasure makes this free in code size: one `placeElem` body
+serves every element type a schema declares.
+
+**Measured, because §8 makes a cost in instructions/op on a maxspeed target one of
+exactly three things that can block a helper move** (Callgrind, subtract method,
+§15, `vehicle_telemetry`, which exercises all three signatures on the
+schema-bounded side). Against the same corelib build, so the generator half is
+what moves:
+
+| shape | `decode` Ir/op | `encode` Ir/op |
+|---|---:|---:|
+| both loops emitted (before) | 31,511 | 17,006 |
+| `placeElem`, framed element still emitted | 31,230 | 17,006 |
+| `placeElem` **and** `reserveElem` (shipped) | 31,683 | 17,005 |
+
+Encode is the control: no wrapper-array growth runs on that path, and its ±2 Ir is
+this method's noise floor (two repeats of the shipped shape read 31,686 and
+31,679). The step as a whole is **+0.55 %** of decode, inside the ~0.7 % the family
+has accepted for this move elsewhere and well under the 2 % that turned a
+TypeScript shape down.
+
+The split is worth recording because the two signatures do not cost the same
+thing. Moving the **leaf** loop is *negative*: one call replaces a
+`while`/`add`/`set` sequence emitted per array, and C2 inlines a sub-35-bytecode
+static. Moving the **framed** loop costs about +1.45 % on its own, ~75 Ir per
+element created, and the reason is the one the design predicted: `new SomeElem()`
+inlined in the caller can have its allocation seen through, while the same
+allocation behind `Supplier.get()` in a shared corelib method cannot. The lever, if
+a future throughput push wants those points back, is to keep `placeElem` and hand
+the framed case only its **bound** (`Seq.checkIndex` ahead of an emitted grow) —
+which keeps §6.2.1's one implementation of the cap and gives up only §5.1's one
+implementation of the gap fill. It is not taken here: the family wants one
+recognisable shape per operation, and at +0.55 % the move is inside the budget
+that choice is measured against.
 
 **Where the cap is resolved matters as much as where it is compared.** The number
 depends on the destination, so it is picked in the dispatch that already resolves
