@@ -530,16 +530,15 @@ a reimplementation should emit code that honors all of them:
   `corelib-go/arrays.go` states the same test in its own file comment.
   Java is the cheapest version of the argument and the clearest: generics are
   **erased**, so `placeElem` has one body for every element type a schema can
-  declare, where a monomorphising target pays for each. Its one divergence is
-  which bound travels: `Bound.SCHEMA_BOUNDED` carries no number, so a schema
-  `count`'s `INVALID` verdict stays emitted in front of the call and only the
-  receiver cap is compared inside it — one implementation of §7.1, wherever it
-  runs, rather than two. Java is the only target left with that split: Kotlin's
-  `Seq` twins take the schema `count` and the receiver cap as two arguments
-  (`cap`, `rcap`, the first negative where the schema declares none), exactly as
-  TypeScript's collectors, Go's `Bounds`/`Caps` and Zig's comptime `Bound` do, so
-  Kotlin emits no index compare of its own at all (§9.5.4). C#'s `Seq` takes the
-  same `cap`, `rcap` pair and C# likewise emits none (§9.5.5).
+  declare, where a monomorphising target pays for each. The bound that travels
+  is one `Bound` carrying its number and its verdict — `Bound.schema(count)`
+  (`INVALID`) or `Bound.receiver(cap)` (`LIMIT_EXCEEDED`) — the shape of Rust's
+  `Bound::Schema`/`Bound::Cap` and Zig's comptime `Bound`, so Java emits no index
+  compare of its own (§9.5.3). Kotlin's `Seq` twins take the schema `count` and
+  the receiver cap as two arguments (`cap`, `rcap`, the first negative where the
+  schema declares none), as TypeScript's collectors and Go's `Bounds`/`Caps` do,
+  and emit none either (§9.5.4); C#'s `Seq` takes the same `cap`, `rcap` pair
+  (§9.5.5).
   The generator emits only what has a **different shape per schema** — the field
   arms, the id routing, the per-field guards, the declared types, the
   sized-array descriptors of §11 — and what **names a generated symbol** (Go's
@@ -3649,7 +3648,7 @@ never a number the corelib knows:
 | **C++** (`corelib: cpp`) | all three kinds, on the `…Capped` twin of the call that carries the schema bound — `readStringCapped`/`readBlobCapped`/`readArrayCapped` — plus `indexCap`/`elemLenCap` on the `StringSeq`/`BlobSeq` collectors and `dynCap` (element id) / `rowDynCap` (a native row's element count) on `MessageSeq` | one shape only: the element index of an array of wrapper **rows**, which a *generated* placer gathers (above) |
 | **Zig** | array counts and wrapper element indices: `arrays.allocCounted` / `reserveElem` / `reserveRow` / `placeElem`, each taking the bound as a `comptime arrays.Bound` that also names the verdict; and string and blob lengths, in `PayloadAcc.takeCapped` — the bind the payload passes through, compared at the announced length before a byte is copied or appended (generator#432) | string and blob lengths a second time, but only as the length-word *verdict* in the generated `fixlenBegin` — what keeps a truncated over-cap header LimitExceeded rather than INCOMPLETE (#438); no generated arithmetic is left in the payload arm |
 | **Go**, **Dart** | wrapper arrays — the element index, the element length and a matrix **row**'s own element count — as the collector's receiver-cap constructor arguments (`sofab.Caps`; `rcap`/`relemMax`/`rowCap`), beside the `sofab.Bounds` carrying the schema's | scalar string/blob lengths and native array counts: Go in the generated `FixlenBegin`/`ArrayBegin` — the accumulator is one callback too late, above; Dart in the one header call that also returns the field's destination (`onString`/`onBlob`/`on…Array`), before it is sized |
-| **Java** | string and blob lengths, in `PayloadAcc` — `checkStringLength`/`checkBlobLength` from the generated `fixlenBegin`, and the same routine again inside the `acc.string`/`acc.blob` the payload passes through; plus **every** wrapper array's element index, on the `Seq` call that grows the list — `placeElem` for a string/blob element, `reserveElem` for a struct/union/nested-row element, `reserveRow*` for a matrix row, and `Seq.checkIndex` at the one site with no such call, the length word (§9.5.3) | native array counts and a matrix row's own element count, neither of which has a corelib call at its header to ride |
+| **Java** | string and blob lengths, in `PayloadAcc` — `checkStringLength`/`checkBlobLength` from the generated `fixlenBegin`, and the same routine again inside the `acc.string`/`acc.blob` the payload passes through; plus **every** wrapper array's element index, on the `Seq` call that grows the list — `placeElem` for a string/blob element, `reserveElem` for a struct/union/nested-row element, `reserveRow*` for a matrix row, and `Seq.checkIndex` at the sites with no such call, the length word and a native row's header — each handed one `Bound`: `Bound.schema(count)` or `Bound.receiver(MAX_DYN_ARRAY_COUNT)`, so the schema verdict is compared there too (§9.5.3) | native array counts and a matrix row's own element count, neither of which has a corelib call at its header to ride |
 | **Kotlin** | string and blob lengths, in `PayloadAcc` — `checkStringLength`/`checkBlobLength` from the generated `fixlenBegin`, and the same routine again inside the `acc.string`/`acc.blob` the payload passes through; plus **every** wrapper array's element index, on the `Seq` call that grows the list — `placeElem` for a string/blob element, `reserveElem` for a struct/union/nested-row element, `reserveRow*` / `reserveRowList` for a matrix row, and `Seq.checkIndex` at the length word — each handed the schema `count` beside the cap, so the schema verdict is compared there too — §9.5.4 | native array counts and a matrix row's own element count |
 | **C#** | string and blob lengths, in `PayloadAcc` — `CheckStringLength`/`CheckBlobLength` from the generated `FixlenBegin`, and the same routine again inside the `PayloadAcc.String`/`.Blob` the payload passes through; wrapper element and matrix row indices, in `Seq.PlaceElem`/`ReserveRow`/`CheckIndex` (schema `count` and receiver cap both passed, exactly one compared) | native array counts and a matrix row's own element count |
 | **Python** | all three kinds, in the corelib's own header walk: `Decoder(max_dyn_*=…)` takes the three numbers as **required** arguments (as it does the `reassembly` size, §9.5.1) and the schema bounds are *declared* to it (`on_schema_bound`, or a destination map's entry), so a bounded field is never capped — §9.5.1 | nothing: a wrapper array's element **index** — a field id and not a count word, so the codec never sees it as one — is compared by the corelib's `reserve_leaf`/`reserve_elem`/`reserve_row` helpers, which generated code calls from the array scope's `on_field`/`on_sequence_begin` arm with the schema `count` (or `UNBOUNDED`) and the cap beside it (generator#587, §9.5.1) |
@@ -4393,12 +4392,18 @@ carry the identical pair (`PayloadAcc.checkStringLength`/`checkBlobLength`,
 `PayloadAcc.CheckStringLength`/`CheckBlobLength`), and corelib-go's collectors have
 always been built this way: `overLen` runs from `FixlenBegin` and from `String`.
 
-**A schema bound never travels through them.** Where the schema declares a
-`maxlen` or a `count` the call is handed `Bound.SCHEMA_BOUNDED`, and the guard
-that enforces the schema's number stays in generated code, where its verdict
-belongs (INVALID, MESSAGE_SPEC §7.1). That constant is **not** an "unlimited"
-mode: it states which of the two rules governs the field, so the two bounds can
-never both be in play and the format ceiling is never presented as a receiver cap.
+**A schema `count` travels through the index calls; a schema `maxlen` does not
+travel through the payload calls.** A wrapper array's declared `count` is handed to
+the `Seq` call as `Bound.schema(count)` and compared there, with its own verdict
+(INVALID, MESSAGE_SPEC §7.1) — see *What stays emitted* below. A `string`/`blob`
+whose schema declares a `maxlen` has that bound thrown by the generated length-word
+guard instead, and its `PayloadAcc` call is handed `Bound.SCHEMA_BOUNDED`, which
+carries no number because the guard beside it already ran. That constant is
+**not** an "unlimited" mode: it states which of the two rules governs the field,
+so the two bounds can never both be in play and the format ceiling is never
+presented as a receiver cap. It is also no longer accepted by any `Seq` call —
+it has no count to compare, so an index handed it is `ARGUMENT` rather than a list
+grown uncompared.
 
 **The argument is a `sofab.Bound`, not a number**, and that is the corelib's half
 of the §9.5 provenance rule made unwritable-around. The two answers shared one
@@ -4407,11 +4412,13 @@ of the §9.5 provenance rule made unwritable-around. The two answers shared one
 handed over the identical bit pattern, and the forgotten one decoded uncapped and
 unreported. `Bound.receiver(n)` is now the only way to make a number a cap and it
 refuses both "forgot" values (`0`, `-1`) as §6.3 `ARGUMENT`, while
-`Bound.SCHEMA_BOUNDED` carries no number at all. Generated code builds one
-`private static final Bound` per live cap — `CAP_DYN_STRING_LEN`,
+`Bound.SCHEMA_BOUNDED` carries no number at all; `Bound.schema(n)` is the schema's
+number with the schema's verdict, and refuses the same two values (`Bound` is a
+record so that a `static final` one folds into its compare; measured below). Generated code
+builds one `private static final Bound` per live cap — `CAP_DYN_STRING_LEN`,
 `CAP_DYN_BLOB_LEN`, `CAP_DYN_ARRAY_COUNT` — beside the `MAX_DYN_*` number it wraps,
-so nothing is allocated per call and the JIT folds the constant into the
-comparison it guards.
+and one `SCHEMA_COUNT_<n>` per distinct wrapper-array `count`, so nothing is
+allocated per call and the JIT folds the constant into the comparison it guards.
 
 **Two checks stay in generated code, deliberately, and the split is per field
 kind.** A native array's own element **count** is written straight into the
@@ -4433,17 +4440,24 @@ it names `Seq.checkIndex` — the same routine `placeElem` runs a moment later
 against the same folded constant, published for exactly that site, which is how
 the rule is taken twice without being *written* twice.
 
-**What stays emitted, for a wrapper array, is the schema verdict and the
-routing.** `Bound.SCHEMA_BOUNDED` carries no number by design, so an `id >= N`
-against a declared `count` is still thrown here, one line ahead of the call —
-which is also what keeps the check before the growth (CORELIB_PLAN §7.2 item 8),
-so a refused id leaves the list unextended and a lower id delivered afterwards
-still lands. Beside it stays what has a different shape per schema: the `cur`
-scope switch, the `_ex_<loc>` element-index register the child's field arms read
-back, the element's own `maxlen`, and the generated element type — reached by the
-corelib only through a type parameter and a `SomeElem::new` method reference,
-which §8 allows. Java erasure makes this free in code size: one `placeElem` body
-serves every element type a schema declares.
+**What stays emitted, for a wrapper array, is the routing — not the schema
+verdict.** A declared `count` is handed to the same `Seq` call as
+`Bound.schema(count)`, a `static final` of the visitor, and the corelib compares
+`id >= count` itself and throws `INVALID_MSG`; nothing is emitted in front of the
+call (generator#587 follow-up — before it, `Bound.SCHEMA_BOUNDED` carried no number,
+so Java was the one target still emitting a literal `if (id >= N)` ahead of the
+placement). The corelib compares before it grows (CORELIB_PLAN §7.2 item 8), so a
+refused id leaves the list unextended and a lower id delivered afterwards still
+lands. The two sites with no placement to ride — a string/blob element's length
+word, and a native matrix row's header, where the row's id is judged before its
+own element count — name the same constant on `Seq.checkIndex`. The refusal text
+lost the field name with the move: it reads `array element index 7 above schema
+capacity 4`, as Kotlin's does. What stays emitted is what has a different shape
+per schema: the `cur` scope switch, the `_ex_<loc>` element-index register the
+child's field arms read back, the element's own `maxlen`, and the generated
+element type — reached by the corelib only through a type parameter and a
+`SomeElem::new` method reference, which §8 allows. Java erasure makes this free in
+code size: one `placeElem` body serves every element type a schema declares.
 
 **Measured, because §8 makes a cost in instructions/op on a maxspeed target one of
 exactly three things that can block a helper move** (Callgrind, subtract method,
@@ -4476,6 +4490,25 @@ which keeps §6.2.1's one implementation of the cap and gives up only §5.1's on
 implementation of the gap fill. It is not taken here: the family wants one
 recognisable shape per operation, and at +0.55 % the move is inside the budget
 that choice is measured against.
+
+Moving the schema `count` into the same call (the follow-up that deleted the last
+literal `if (id >= N)`) was measured the same way, both corelib halves varied:
+
+| shape | `decode` Ir/op | `encode` Ir/op |
+|---|---:|---:|
+| literal guard + `Bound.SCHEMA_BOUNDED` (step 3, re-measured locally) | 31,685 | 17,007 |
+| `Bound.schema(n)`, `Bound` an ordinary class | 31,852 | 17,003 |
+| `Bound.schema(n)`, `Bound` a **record** (shipped) | 31,745 | 17,004 |
+
+The class shape cost +0.53 %, and the reason was not the call: C2's inlining
+decisions were identical (`-XX:+PrintInlining`), and running both sides with
+`-XX:+TrustFinalNonStaticFields` closed the gap to noise. HotSpot does not treat
+an ordinary class's `final` instance fields as constants, so every compare against
+a `static final Bound` loaded its number, where the literal guard had compared
+against an immediate. It does trust a **record's**, which is why `Bound` is one:
+`static final Bound SCHEMA_COUNT_4 = Bound.schema(4)` then folds to `id >= 4`
+again. What is left is +0.19 % over step 3 and +0.74 % over the original
+emitted loops (31,511). Encode is again the control.
 
 **Where the cap is resolved matters as much as where it is compared.** The number
 depends on the destination, so it is picked in the dispatch that already resolves
@@ -4575,8 +4608,8 @@ struct/union/nested-row element reserved by `Seq.reserveElem` (an `inline fun`,
 so the `{ Elem() }` factory lambda compiles to a direct constructor call), and a
 string/blob element's index is bounded at its length word by `Seq.checkIndex`.
 Each takes the same `(cap, rcap)` pair as `reserveRow*`, so the schema `count`'s
-INVALID verdict is compared in the corelib too. Unlike Java (§9.5.3), Kotlin emits
-no `if (id >= …)` of its own. The routing (`_ex_<loc> = id; cur = K`) stays
+INVALID verdict is compared in the corelib too, and Kotlin — like Java (§9.5.3)
+— emits no `if (id >= …)` of its own. The routing (`_ex_<loc> = id; cur = K`) stays
 generated. So does the element's own `maxlen` at the length word, which sits with
 the scalar fields' identical arms. The refusal message lost the field name here
 too: it reads `array index 7 above declared count 4`.
