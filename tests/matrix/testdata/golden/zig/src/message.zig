@@ -25,9 +25,11 @@ pub const Scalars = struct {
     f32: f32 = 3.14,
     f64: f64 = -2.5,
     flag: bool = true,
+    /// Schema bound: count 4 -- the capacity is in the type; the LENGTH starts at 0 and is what reaches the wire.
+    flags: sofab.FixedArray(bool, 4) = .{},
 
     /// Worst-case encoded size of this message, derived from the schema.
-    pub const MAX_SIZE: usize = 49;
+    pub const MAX_SIZE: usize = 55;
 
     /// Write this value's fields to `os` (sparse-canonical encoding).
     pub fn serialize(self: *const Scalars, os: *sofab.OStream) sofab.Error!void {
@@ -39,6 +41,9 @@ pub const Scalars = struct {
         if (self.f32 != 3.14) try os.writeFp32(5, self.f32);
         if (self.f64 != -2.5) try os.writeFp64(6, self.f64);
         if (self.flag != true) try os.writeBoolean(7, self.flag);
+        if (self.flags.len() != 0) {
+            try os.writeArrayUnsigned(8, std.mem.sliceAsBytes(self.flags.slice()));
+        }
     }
 
     /// True when every field equals its declared default, compared per field
@@ -52,6 +57,7 @@ pub const Scalars = struct {
         if (self.f32 != 3.14) return false;
         if (self.f64 != -2.5) return false;
         if (self.flag != true) return false;
+        if (self.flags.len() != 0) return false;
         return true;
     }
 
@@ -156,6 +162,7 @@ const _dec_Scalars = struct {
     acc: sofab.PayloadAcc = .{}, // only a payload split across feed chunks lands here
     inv: bool = false, // a scalar array over its schema count, or a wrapper element id >= count -> INVALID
     askip: usize = 0, // elements left to discard from a wire-type-contradictory array
+    afill: usize = 0, // elements still expected by an armed native-array fill (S7.3)
 
     const _Loc = enum {
         root,
@@ -185,6 +192,12 @@ const _dec_Scalars = struct {
                 },
                 2 => self.m.u64max = value,
                 7 => self.m.flag = value != 0,
+                8 => {
+                    if (self.afill != 0) {
+                        self.afill -= 1;
+                        self.m.flags.push(value != 0, &self.inv);
+                    }
+                },
                 else => {},
             },
             else => {},
@@ -240,9 +253,13 @@ const _dec_Scalars = struct {
         }
     }
 
-    pub fn arrayBegin(self: *_dec_Scalars, _: sofab.Id, kind: sofab.ArrayKind, count: usize) void {
+    pub fn arrayBegin(self: *_dec_Scalars, id: sofab.Id, kind: sofab.ArrayKind, count: usize) void {
         self.askip = switch (kind) {
             .unsigned => switch (self.cur) {
+                .root => switch (id) {
+                    8 => 0,
+                    else => count,
+                },
                 else => count,
             },
             .signed => switch (self.cur) {
@@ -255,6 +272,37 @@ const _dec_Scalars = struct {
                 else => count,
             },
         };
+        self.afill = switch (kind) {
+            .unsigned => switch (self.cur) {
+                .root => switch (id) {
+                    8 => count,
+                    else => 0,
+                },
+                else => 0,
+            },
+            .signed => switch (self.cur) {
+                else => 0,
+            },
+            .fp32 => switch (self.cur) {
+                else => 0,
+            },
+            .fp64 => switch (self.cur) {
+                else => 0,
+            },
+        };
+        switch (self.cur) {
+            .root => switch (id) {
+                8 => if (kind == .unsigned) {
+                    if (count > 4) {
+                        self.inv = true;
+                        return;
+                    }
+                    self.m.flags.clear();
+                },
+                else => {},
+            },
+            else => {},
+        }
     }
 
     /// Give a string/blob arm ONE contiguous payload, whatever the feed

@@ -1,0 +1,24 @@
+# CORELIB_PLAN §4.4 in every shape a boolean reaches in generated Python
+# (generator#590). The three fields are the three ROUTES, not three types:
+#
+#   flag  -- a bound scalar, read through the table's `.boolean` entry
+#   few   -- a bound array, read through `.boolean_array` (count <= the backend's
+#            binding ceiling of 32); the route #590 moved off `unsigned_array`
+#   many  -- an UNBOUND array (count > 32), read through the visitor's
+#            `on_unsigned_array`, which the corelib hands RAW values by design
+#            and which the generated `[bool(_v) for _v in value]` converts
+#
+# pad1/pad2 carry no boolean at all: they exist so the destination table has
+# more rows than the backend's `pyBindMin` (3) and is emitted, which is what
+# puts `flag` and `few` on the bound route rather than on the visitor. Deleting
+# them silently moves this whole fixture onto the visitor and the two bound
+# routes stop being tested.
+version: 1
+messages:
+  Bools:
+    payload:
+      flag:  { id: 0, type: boolean }
+      few:   { id: 1, type: array, items: { type: boolean, count: 8 } }
+      many:  { id: 2, type: array, items: { type: boolean, count: 64 } }
+      pad1:  { id: 3, type: u32 }
+      pad2:  { id: 4, type: u32 }

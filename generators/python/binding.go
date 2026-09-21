@@ -430,8 +430,22 @@ func bindScalarWidth(fld *ir.Field) string {
 
 // pyBindArrayMethod names the binder for a native array of `elem` -- the same
 // split pyArrayHook makes.
+//
+// A boolean element takes `boolean_array` (corelib-py#158), the element half of
+// the `boolean` the scalar takes: it is accepted under the array-of-unsigned tag,
+// because §4.4 gives a boolean no wire type of its own, and the corelib maps each
+// element to 0/1 as the array completes. Its slots stay in the UNSIGNED view --
+// bindArrayExpr's default -- so only the binder's name changes.
+//
+// Routing a boolean here is also what keeps §4.4's "no width at all" out of reach
+// of a mistake: `unsigned_array` HAS an `elem_max`, and binding a boolean with a
+// ceiling of 1 would make 256 INVALID, which §4.4 forbids. `boolean_array` takes
+// no such argument, so that bug -- #581, in the C++ backend -- cannot be written
+// here at all.
 func pyBindArrayMethod(elem ir.Kind) string {
 	switch elem {
+	case ir.KindBool:
+		return "boolean_array"
 	case ir.KindI8, ir.KindI16, ir.KindI32, ir.KindI64, ir.KindEnum:
 		return "signed_array"
 	case ir.KindFP32:
@@ -487,6 +501,11 @@ func bindArrayExpr(elem ir.Kind, at, cnt int64) string {
 	}
 	span := fmt.Sprintf("%s[%d:%d + U[%d]]", view, at, at, cnt)
 	if elem == ir.KindBool {
+		// The slot is an int and the field is a bool, so this CONVERTS; it no
+		// longer normalizes, `boolean_array` having stored 0/1 already. It stays
+		// `!= 0` rather than `== 1` deliberately: `== 1` is correct against the
+		// binder above and silently turns a non-canonical true into FALSE if that
+		// ever stops holding, which is the shape #581 had.
 		return fmt.Sprintf("[_v != 0 for _v in %s]", span)
 	}
 	return fmt.Sprintf("list(%s)", span)

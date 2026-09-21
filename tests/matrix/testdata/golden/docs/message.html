@@ -111,8 +111,10 @@ footer { margin-top: 3rem; padding-top: 1rem; border-top: 1px solid var(--line);
 <tr><td class="num">5</td><td><code>f32</code></td><td class="type">fp32</td><td><code>3.14</code></td><td class="desc"><span class="none">&ndash;</span></td></tr>
 <tr><td class="num">6</td><td><code>f64</code></td><td class="type">fp64</td><td><code>-2.5</code></td><td class="desc"><span class="none">&ndash;</span></td></tr>
 <tr><td class="num">7</td><td><code>flag</code></td><td class="type">boolean</td><td><code>true</code></td><td class="desc"><span class="none">&ndash;</span></td></tr>
+<tr><td class="num">8</td><td><code>flags</code></td><td class="type">boolean[4]</td><td><span class="none">&ndash;</span></td><td class="desc"><span class="none">&ndash;</span></td></tr>
 </tbody>
 </table></div>
+<p class="note">In the Type column, <code>[N]</code> is a <strong>capacity</strong>, not a length: the array holds at most N elements and starts at its declared default (empty when it has none), and the wire carries the length actually set. <code>maxlen N</code> bounds a string or blob in bytes. Exceeding either is rejected as INVALID &mdash; never truncated.</p>
 
 
 

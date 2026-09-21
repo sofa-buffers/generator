@@ -15,6 +15,10 @@ public sealed class Scalars {
     public float f32 = 3.14f;
     public double f64 = -2.5;
     public bool flag = true;
+    /// <summary>
+    /// Schema bound: count 4 is a CAPACITY, not a length -- starts empty; over 4 elements is INVALID, never truncated.
+    /// </summary>
+    public List<bool> flags = new(4);
 
     public void Serialize(OStream os) {
         if (this.u8min != 0) { os.WriteUnsigned(0, (ulong)this.u8min); }
@@ -25,6 +29,9 @@ public sealed class Scalars {
         if (this.f32 != 3.14f) { os.WriteFp32(5, this.f32); }
         if (this.f64 != -2.5) { os.WriteFp64(6, this.f64); }
         if (this.flag != true) { os.WriteBoolean(7, this.flag); }
+        if (this.flags.Count != 0) {
+            os.WriteArrayUnsigned(8, Array.ConvertAll(this.flags.ToArray(), _x => _x ? (byte)1 : (byte)0));
+        }
     }
     public bool IsDefault() {
         if (!(this.u8min == 0)) return false;
@@ -35,9 +42,10 @@ public sealed class Scalars {
         if (!(this.f32 == 3.14f)) return false;
         if (!(this.f64 == -2.5)) return false;
         if (!(this.flag == true)) return false;
+        if (!(this.flags.Count == 0)) return false;
         return true;
     }
-    public const int MaxSize = 49;
+    public const int MaxSize = 55;
     // Per-thread scratch buffer and encoder: Encode() serialises into the
     // buffer and returns an exact-size copy, so neither the worst-case
     // buffer nor the encoder's fixed state is re-allocated (and zeroed) on
@@ -140,6 +148,7 @@ internal sealed class ScalarsVisitor : IVisitor {
     private int cur = 0;
     private const int _DEAD = -1;
     private int askip = 0;             // elements left to discard from a wire-type-contradictory array
+    private int afill = 0;             // elements still expected by an armed native-array fill (S7.3)
     private int[] stk = new int[16];   // sequence scope stack (unboxed, was Stack<int>)
     private int sp = 0;
     public ScalarsVisitor(Scalars msg) { m = msg; }
@@ -152,6 +161,7 @@ internal sealed class ScalarsVisitor : IVisitor {
             case (Root, 1): if (value > 255) throw new SofabException(SofabError.InvalidMessage, "u8max: value outside declared width u8"); m.u8max = (byte)value; break;
             case (Root, 2): m.u64max = (ulong)value; break;
             case (Root, 7): m.flag = value != 0; break;
+            case (Root, 8): if (afill == 0) break; afill--; m.flags.Add(value != 0); break;
         }
     }
     public void Signed(int id, long value) {
@@ -187,6 +197,7 @@ internal sealed class ScalarsVisitor : IVisitor {
         // `count` elements, exactly as an unknown id would be skipped.
         askip = kind switch {
             ArrayKind.Unsigned => (cur, id) switch {
+                (Root, 8) => 0,
                 _ => count,
             },
             ArrayKind.Signed => (cur, id) switch {
@@ -200,6 +211,25 @@ internal sealed class ScalarsVisitor : IVisitor {
             },
             _ => 0,
         };
+        afill = kind switch {
+            ArrayKind.Unsigned => (cur, id) switch {
+                (Root, 8) => count,
+                _ => 0,
+            },
+            ArrayKind.Signed => (cur, id) switch {
+                _ => 0,
+            },
+            ArrayKind.Fp32 => (cur, id) switch {
+                _ => 0,
+            },
+            ArrayKind.Fp64 => (cur, id) switch {
+                _ => 0,
+            },
+            _ => 0,
+        };
+        switch ((cur, id)) {
+            case (Root, 8): if (kind != ArrayKind.Unsigned) break; if (count > 4) throw new SofabException(SofabError.InvalidMessage, "flags: array count above schema capacity 4"); m.flags.Clear(); break;
+        }
     }
     public void SequenceBegin(int id) {
         if (sp == stk.Length) System.Array.Resize(ref stk, sp * 2);

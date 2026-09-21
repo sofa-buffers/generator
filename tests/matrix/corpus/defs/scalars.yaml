@@ -10,3 +10,8 @@ messages:
       f32:    { id: 5, type: fp32, default: 3.14, decimals: 2 }
       f64:    { id: 6, type: fp64, default: -2.5 }
       flag:   { id: 7, type: boolean, default: true }
+      # An ARRAY of boolean, bounded small enough that every backend which binds
+      # a native array binds this one (Python's ceiling is the lowest, at 32), so
+      # the golden pins the bound decode path and its encode -- CORELIB_PLAN §4.4
+      # one level down, which a scalar boolean alone never reaches (#590).
+      flags:  { id: 8, type: array, items: { type: boolean, count: 4 } }

@@ -418,8 +418,10 @@ func TestDartHeaderVisitorReject(t *testing.T) {
 		}
 	}
 	// A message with no aggregate field overrides none of the header calls: it
-	// inherits the corelib's default, which skips.
-	plain := genFor(t, "../../tests/matrix/corpus/defs/scalars.yaml", map[string]any{})
+	// inherits the corelib's default, which skips. ids_and_meta.yaml is the
+	// aggregate-free definition by INTENT -- three bare integers; scalars.yaml
+	// carries an array of boolean since #590 and no longer answers this question.
+	plain := genFor(t, "../../tests/matrix/corpus/defs/ids_and_meta.yaml", map[string]any{})
 	for _, notWant := range []string{"onString(", "onBlob(", "onUnsignedArray(", "onSignedArray(", "onFp32Array(", "onFp64Array(", "onSequenceStart("} {
 		if strings.Contains(plain, notWant) {
 			t.Errorf("a message without that field kind must not override %q", notWant)

@@ -13,11 +13,13 @@ type Scalars struct {
 	U64max uint64  `json:"u64max"`
 	I64min int64   `json:"i64min"`
 	F64    float64 `json:"f64"`
-	F32    float32 `json:"f32"`
-	U8min  uint8   `json:"u8min"`
-	U8max  uint8   `json:"u8max"`
-	I8min  int8    `json:"i8min"`
-	Flag   bool    `json:"flag"`
+	// Schema bound: count 4 is a CAPACITY, not a length -- starts empty; over 4 elements is INVALID, never truncated.
+	Flags []bool  `json:"flags"`
+	F32   float32 `json:"f32"`
+	U8min uint8   `json:"u8min"`
+	U8max uint8   `json:"u8max"`
+	I8min int8    `json:"i8min"`
+	Flag  bool    `json:"flag"`
 }
 
 func (m *Scalars) Serialize(e *sofab.Encoder) {
@@ -45,6 +47,17 @@ func (m *Scalars) Serialize(e *sofab.Encoder) {
 	if m.Flag != true {
 		e.WriteBool(7, m.Flag)
 	}
+	if len(m.Flags) != 0 {
+		{
+			_b0 := make([]uint8, len(m.Flags))
+			for _i0, _e0 := range m.Flags {
+				if _e0 {
+					_b0[_i0] = 1
+				}
+			}
+			sofab.WriteUnsignedArray(e, 8, _b0)
+		}
+	}
 }
 
 func (m *Scalars) isDefault() bool {
@@ -70,6 +83,9 @@ func (m *Scalars) isDefault() bool {
 		return false
 	}
 	if !(m.Flag == true) {
+		return false
+	}
+	if !(len(m.Flags) == 0) {
 		return false
 	}
 	return true
@@ -124,6 +140,28 @@ func (m *Scalars) Float64(id sofab.ID, v float64) error {
 	return nil
 }
 
+func (m *Scalars) ArrayBegin(id sofab.ID, kind sofab.ArrayKind, count int) error {
+	switch id {
+	case 8:
+		if kind != sofab.ArrayUnsigned {
+			return nil
+		}
+		if count > 4 {
+			return sofab.ErrInvalidMsg
+		}
+		m.Flags = make([]bool, 0, count)
+	}
+	return nil
+}
+
+func (m *Scalars) ArrayUnsigned(id sofab.ID, _ int, v uint64) error {
+	switch id {
+	case 8:
+		m.Flags = append(m.Flags, v != 0)
+	}
+	return nil
+}
+
 // NewScalars returns a Scalars with schema defaults applied.
 func NewScalars() *Scalars {
 	m := &Scalars{}
@@ -140,7 +178,7 @@ func NewScalars() *Scalars {
 
 // ScalarsMaxSize is this message's worst-case encoded size, derived from the
 // schema: no value of it can encode to more.
-const ScalarsMaxSize = 49
+const ScalarsMaxSize = 55
 
 // ScalarsMaxDepth is the deepest sequence nesting encoding this message opens,
 // derived from the schema: no value of it nests deeper.

@@ -561,7 +561,10 @@ messages:
 		// Encode writes the value whole: no trim wrapper anywhere.
 		"e.write_unsigned_array(0, self.fixedU32)",
 		"e.write_float32_array(1, self.fixedF32)",
-		"e.write_unsigned_array(2, [1 if _v else 0 for _v in self.fixedBool])",
+		// A boolean array goes out through the corelib's own canonical writer
+		// (corelib-py#158, generator#590): §4.4's "true is written as 1" is the
+		// corelib's rule to apply, and generated code builds no 0/1 list for it.
+		"e.write_bool_array(2, self.fixedBool)",
 		"e.write_signed_array(3, [int(_v) for _v in self.fixedEnum])",
 		// The omit test is the ordinary != default, against the value as it stands:
 		// the EMPTY list when nothing is declared, the declared literal otherwise.
@@ -606,6 +609,13 @@ messages:
 		if strings.Contains(mod, bad) {
 			t.Errorf("message.py still carries the superseded fixed-length machinery %q:\n%s", bad, mod)
 		}
+	}
+	// Nor may generated code canonicalize a boolean array itself: §4.4's "true is
+	// written as 1" is write_bool_array's rule to apply (corelib-py#158,
+	// generator#590), and a second copy of it here would be the two routes to one
+	// rule §5.3.1 forbids.
+	if strings.Contains(mod, "[1 if _v else 0 for _v in") {
+		t.Errorf("message.py still builds a 0/1 list for a boolean array; write_bool_array does that:\n%s", mod)
 	}
 }
 
@@ -2317,7 +2327,10 @@ func TestPythonStdlibImportsFollowTheBody(t *testing.T) {
 	}
 	for _, c := range []struct{ path, want string }{
 		{"../../examples/messages/example.yaml", "from dataclasses import dataclass, field\nfrom enum import IntEnum, IntFlag\n"},
-		{"../../tests/matrix/corpus/defs/scalars.yaml", "from dataclasses import dataclass\n"},
+		// ids_and_meta.yaml is three bare integers: no enum, no bitfield and no
+		// mutable default, so `field` and the two enum names must all be absent.
+		// (scalars.yaml used to hold this row; it has a list field since #590.)
+		{"../../tests/matrix/corpus/defs/ids_and_meta.yaml", "from dataclasses import dataclass\n"},
 		{"../../tests/matrix/corpus/defs/enums.yaml", "from dataclasses import dataclass\nfrom enum import IntEnum\n"},
 		{"../../tests/matrix/corpus/defs/bitfields.yaml", "from dataclasses import dataclass, field\nfrom enum import IntFlag\n"},
 	} {
