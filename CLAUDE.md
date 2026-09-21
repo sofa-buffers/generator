@@ -86,6 +86,44 @@ Every implementation of a new target/corelib must include **all** of:
 
 A target is only done when its tests and CI job are green.
 
+## Generated code stays thin — no silent static helpers
+
+Generated code lands in the **user's** source tree, so it must stay clean,
+small and readable: made of what their schema actually says, and nothing else.
+
+A **static helper** is code whose shape is the same for every schema — its
+schema dependence is only a bound, an element type or a default value, all of
+which can be passed as an argument or a type parameter. Array placement, gap
+filling, index/length bound checks, payload reassembly and UTF-8 decoding are
+the typical cases. Such a helper belongs in the corelib (ARCHITECTURE §8).
+
+When a backend change needs one, **never emit it silently**:
+
+- **Say so.** State explicitly that the helper belongs in the corelib — in the
+  PR, the commit message or the report — instead of quietly generating it.
+- **Put it in the corelib first**, in its own file/namespace following the
+  pattern the other corelibs already use (`collectors.go`, `seq.dart`,
+  `decode/seq.ts`, `Seq.java`, `arrays.zig`), with its own tests; then make the
+  backend call it.
+- **If that corelib change is out of scope** for the task, raise it as an issue
+  and name it in the PR as a known gap. An emitted helper is never a temporary
+  shortcut: it reaches every user's tree, the corelib's own test suite cannot
+  reach it, and fixing it means every user regenerating.
+
+Emit only what differs per schema (field arms, id routing, per-field guards,
+declared types) or what names a generated symbol.
+
+The check is mechanical: generate two schemas that differ in bounds, element
+types and field count. A block that is identical once literals, field names and
+element types are normalised is a static helper. generator#587 is the cleanup
+that followed from not doing this — five backends had re-emitted, per field,
+logic that belonged in their corelib.
+
+The three §8 overrides still apply — footprint `.text`/`.data`, maxspeed
+instructions/op, and output-buffer allocation — but only when **measured**
+(`tests/bench/run.sh --rows <rows>`), and the measurement is stated, never
+assumed.
+
 ## General architectural rule
 
 Whenever an architectural change is made to the generator, or a change affects

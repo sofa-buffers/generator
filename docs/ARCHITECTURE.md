@@ -547,6 +547,21 @@ a reimplementation should emit code that honors all of them:
   assigns to the generated layer — the corelib may offer the mechanism, never the
   policy (`growingOStream` and `Encoder.encodeToBytes` allocate inside their
   corelibs and are therefore off-limits to generated code).
+  **Never emitted silently.** When a backend change needs a helper of this kind,
+  it does not quietly generate one. It says so — that the helper belongs in the
+  corelib — and the helper goes there first, in its own file or namespace beside
+  the family's existing ones, with its own tests; the backend then calls it. Where
+  that corelib change is out of scope for the task at hand, the need is raised as
+  an issue and named in the PR as a known gap, rather than shipped as generated
+  code. An emitted helper is never a temporary shortcut: it lands in every user's
+  source tree, the corelib's own test suite cannot reach it, and correcting it
+  means every user regenerating. The test is mechanical — generate two schemas
+  that differ in bounds, element types and field count; a block that is identical
+  once literals, field names and element types are normalised is a static helper.
+  generator#587 is the cleanup that followed from not applying it: five backends
+  had re-emitted, per field, placement and bound logic their corelib either
+  already held or should have. The aim is generated code a user can read — clean,
+  small, and made only of what their schema says.
   A helper that moves makes generated code require a corelib new enough to have
   it, and while SofaBuffers is `0.x` that needs no machinery: `API_VERSION` marks
   the *wire/API contract*, is 1 in every corelib, and is bumped only for a
