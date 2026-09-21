@@ -365,101 +365,91 @@ func (g *gen) objSeqArm(sc *pyScope, scopes []*pyScope) []string {
 	return out
 }
 
-// indexBound renders the reject for a wrapper array's element INDEX, emitted
-// ahead of the gap-fill it bounds. `idExpr` names the index in the caller's
-// scope (`fid` in the value hooks, `fld.id` in on_field).
+// reserveCall renders the corelib call that bounds a wrapper array's element
+// INDEX and grows the list up to it (sofab.reserve_leaf / reserve_elem /
+// reserve_row, ARCHITECTURE §8). `idExpr` names the index in the caller's scope
+// (`fid` in on_sequence_begin, `fld.id` in on_field).
 //
 // A wrapper array carries no count HEADER: its elements are keyed by an
-// unbounded varint index and the gap-fill extends the list to fid + 1, so the
-// index IS the array's length (MESSAGE_SPEC §5.1 -- two elements at id 0 and id
-// 16383 are a 16384-slot list). A single over-index element is therefore an
-// amplification vector by itself, and it is the INDEX that has to be bounded:
-// capping how many elements arrived would not bound the allocation, because a
-// sparse array allocates by its highest id.
+// unbounded varint index and the list grows to fid + 1, so the index IS the
+// array's length (MESSAGE_SPEC §5.1 -- two elements at id 0 and id 16383 are a
+// 16384-slot list). A single over-index element is therefore an amplification
+// vector by itself, and it is the INDEX that has to be bounded: capping how many
+// elements arrived would not bound the allocation, because a sparse array
+// allocates by its highest id.
 //
-// Which bound applies depends on whether the schema counts the array, and the
-// two differ only in that and in what the failure is called (ARCHITECTURE §9.5):
-// `count: N` makes fid >= N a SofaDecodeError (the bytes contradict the agreed
-// schema, issue #142), no count makes it a SofaLimitError against the configured
-// cap (the bytes are well formed and the same message decodes under a looser
-// cap, issue #387 -- folding the two together is forbidden by CORELIB_PLAN
-// §6.2.1).
+// Both bounds ride the call as arguments and the corelib picks the one that
+// applies (CORELIB_PLAN §6.2.1, never both): the schema `count` -- a CAPACITY,
+// so an id at it is a SofaDecodeError (INVALID, §7.1) -- or, where the schema
+// leaves the array open (UNBOUNDED), the receiver cap, whose breach is a
+// SofaLimitError. The cap is passed on every call because the helper takes it
+// positionally; it is compared only where the schema gives no count. The
+// comparison runs BEFORE any growth, so a refused id leaves the list as it was
+// (CORELIB_PLAN §7.2 item 8). Generated code emits no literal index test.
 //
-// Empty only when the array is dynamic AND no cap is live for this schema.
-func (g *gen) indexBound(cap int64, idExpr, loc string) []string {
-	if cap >= 0 {
-		return []string{
-			fmt.Sprintf("if %s >= %d:", idExpr, cap),
-			fmt.Sprintf("    raise SofaDecodeError(%q)",
-				fmt.Sprintf("%s: array index above schema capacity %d", loc, cap)),
+// Which call is a matter of what a new slot holds: a string/blob element shares
+// its immutable default, a struct/union element or a native row gets a fresh
+// object per slot, and a wrapper row is REPLACED at its id (§7.4).
+func (g *gen) reserveCall(sc *pyScope, idExpr string) string {
+	bound := "UNBOUNDED"
+	if sc.cap >= 0 {
+		bound = strconv.FormatInt(sc.cap, 10)
+	}
+	rcap := g.arrayCapArg()
+	switch sc.elem {
+	case ir.KindString:
+		return fmt.Sprintf(`reserve_leaf(%s, %s, "", %s, %s)`, sc.arrPath, idExpr, bound, rcap)
+	case ir.KindBlob:
+		return fmt.Sprintf(`reserve_leaf(%s, %s, b"", %s, %s)`, sc.arrPath, idExpr, bound, rcap)
+	case ir.KindArray:
+		if isNativeArrayElem(sc.elemItems.Elem) {
+			return fmt.Sprintf("reserve_elem(%s, %s, list, %s, %s)", sc.arrPath, idExpr, bound, rcap)
 		}
-	}
-	if !g.limits.arrayHas {
-		return nil
-	}
-	return []string{
-		fmt.Sprintf("if %s >= MAX_DYN_ARRAY_COUNT:", idExpr),
-		fmt.Sprintf(`    raise SofaLimitError("%s: array index %%d exceeds max_array_count %%d" %% (%s, MAX_DYN_ARRAY_COUNT))`, loc, idExpr),
+		return fmt.Sprintf("reserve_row(%s, %s, %s, %s)", sc.arrPath, idExpr, bound, rcap)
+	default: // struct / union
+		return fmt.Sprintf("reserve_elem(%s, %s, %s, %s, %s)",
+			sc.arrPath, idExpr, g.typeName(sc.elemRef.Key), bound, rcap)
 	}
 }
 
-// arrSeqArm renders an array scope's element arm. The id IS the index, so there
-// is no id test -- only the §5.1 capacity bound, then the gap-fill that places
-// the element at its index (an interior element equal to the element default is
-// omitted on the wire, MESSAGE_SPEC §2).
-func (g *gen) arrSeqArm(sc *pyScope, child *pyScope) []string {
-	out := g.indexBound(sc.cap, "fid", sc.loc)
-	out = append(out, fmt.Sprintf("_t = %s", sc.arrPath))
-	out = append(out, "while len(_t) <= fid:")
-	out = append(out, fmt.Sprintf("    _t.append(%s)", g.elemDefault(sc)))
-	// A WRAPPER ROW is RESET, a struct/union element is not (generator#523).
-	// This arm serves both kinds of element that open a scope of their own, and
-	// MESSAGE_SPEC §7.4 splits them: an element that is itself an ARRAY is the
-	// replacing kind -- the wrapper *is* the value of its field, so a repeated
-	// element id replaces it whole -- while a re-opened struct/union CONTINUES
-	// its scope, so children of an earlier opening whose ids do not recur must
-	// be retained. The gap fill above only extends the list UP TO the index, so
-	// a re-opened row used to find the previous occurrence's elements still in
-	// place and write on top of them: measured on `matstr: array<array<string>>`
-	// carrying element id 0 twice (["a","z"] then ["y"]) as [["y", "z"]] where
-	// §7.4 wants [["y"]], and on array<array<array<u32>>> one level down as
-	// [[[9], [3, 4]]] where it wants [[[9]]].
-	//
-	// A NATIVE row needs nothing here and gets nothing: it carries a real count
-	// header, arrives whole through one on_*_array call at this same scope, and
-	// that store already replaces (it never opens a scope, so sc.child is -1 and
-	// this arm is not even emitted for it).
-	//
-	// Rebinding the slot rather than clearing the list in place is deliberate:
-	// the child scope re-resolves its path through `_t[self._ixN]` on every
-	// delivery, so it cannot be holding the old list object.
-	//
-	// Order: after the gap fill, so the slot exists, and after indexBound, which
-	// RAISES -- so a refused element index cannot wipe a valid earlier row, the
-	// §7.3 interaction where a destructive reset in front of the decision turns
-	// a loud failure into silent data loss.
-	if sc.elem == ir.KindArray {
-		out = append(out, "_t[fid] = []")
+// arrayCapArg is the receiver array cap as the reserve_* calls take it: the
+// exported constant where the schema has an unbounded array to apply it to, else
+// the configured number as a literal -- the corelib then never compares it,
+// because every wrapper array in the schema declares its own count (the same
+// choice capsArgs makes, so the module grows no name nothing else reads).
+func (g *gen) arrayCapArg() string {
+	if g.limits.arrayHas {
+		return "MAX_DYN_ARRAY_COUNT"
 	}
-	out = append(out,
+	return strconv.FormatInt(g.limits.arrayCount, 10)
+}
+
+// arrSeqArm renders an array scope's element arm for an element that opens a
+// scope of its own -- a struct, a union, a wrapper row. The id IS the index, so
+// there is no id test: the corelib bounds the index and grows the list
+// (reserveCall), then generated code binds its index register and routes the
+// element's fields itself.
+//
+// A WRAPPER ROW is RESET, a struct/union element is not (generator#523), and the
+// choice of call carries that: MESSAGE_SPEC §7.4 makes an element that is itself
+// an ARRAY the replacing kind -- the wrapper *is* the value of its field, so a
+// repeated element id replaces it whole (reserve_row rebinds the slot to a fresh
+// list) -- while a re-opened struct/union CONTINUES its scope, so children of an
+// earlier opening whose ids do not recur must be retained (reserve_elem leaves an
+// existing slot alone). Rebinding rather than clearing in place is safe because
+// the child scope re-resolves its path through `[self._ixN]` on every delivery.
+// The reset happens only after the bound passed, so a refused element index
+// cannot wipe a valid earlier row.
+//
+// A NATIVE row never reaches this arm: it carries a real count header, arrives
+// whole through one on_*_array call, and is reserved from on_field.
+func (g *gen) arrSeqArm(sc *pyScope, child *pyScope) []string {
+	return []string{
+		g.reserveCall(sc, "fid"),
 		fmt.Sprintf("self.%s = fid", sc.ix),
 		"self._s.append(c)",
 		fmt.Sprintf("self._c = %s", child.name),
-		"return True")
-	return out
-}
-
-// elemDefault is the value a gap-filled element of an array scope takes.
-func (g *gen) elemDefault(sc *pyScope) string {
-	switch sc.elem {
-	case ir.KindString:
-		return `""`
-	case ir.KindBlob:
-		return `b""`
-	case ir.KindArray:
-		return "[]"
-	default: // struct / union
-		return g.typeName(sc.elemRef.Key) + "()"
+		"return True",
 	}
 }
 
@@ -684,27 +674,23 @@ func (g *gen) arrValueArm(sc *pyScope, hook string) []string {
 	switch sc.elem {
 	case ir.KindString, ir.KindBlob:
 		want = pyHook(sc.elem)
-		body = []string{"_t[fid] = value"}
+		body = []string{sc.arrPath + "[fid] = value"}
 	case ir.KindArray:
 		if !isNativeArrayElem(sc.elemItems.Elem) {
 			return nil
 		}
 		want = pyArrayHook(sc.elemItems.Elem)
-		body = g.storeNativeArray("_t[fid]", sc.elemItems.Elem)
+		body = g.storeNativeArray(sc.arrPath+"[fid]", sc.elemItems.Elem)
 	default:
 		return nil // struct/union elements arrive through on_sequence_begin
 	}
 	if want != hook {
 		return nil
 	}
-	// The §5.1 index bound is NOT repeated here: a value element is bounded in
-	// on_field, one step earlier, at the header (see arrFieldArm).
-	out := []string{
-		fmt.Sprintf("_t = %s", sc.arrPath),
-		"while len(_t) <= fid:",
-		fmt.Sprintf("    _t.append(%s)", g.elemDefault(sc)),
-	}
-	return append(out, body...)
+	// The slot is already there: a value element is bounded and reserved in
+	// on_field, one step earlier, at the header (see arrFieldArm), so the value
+	// is a plain indexed store -- which also makes a repeated id replace (§7.4).
+	return body
 }
 
 // --- on_field ---------------------------------------------------------------
@@ -828,9 +814,10 @@ func liveScopes(p *bindPlan, scopes []*pyScope) []*pyScope {
 // The caps themselves are NOT here. The Decoder is handed all three and compares
 // them at the count/length header, off any field on_schema_bound declares and off
 // any field this hook skips, so a second comparison in generated code would be
-// the two routes to one rule §6.2.1 forbids. What remains generated is the one
-// number the codec cannot see: a WRAPPER array's element index, which is a field
-// id and not a count (indexBound).
+// the two routes to one rule §6.2.1 forbids. What generated code still routes is
+// the one number the codec cannot see: a WRAPPER array's element index, which is
+// a field id and not a count -- handed, with the cap, to the corelib's reserve_*
+// call (reserveCall).
 //
 // Never on an id this scope does not declare, either: the caps used to sit in
 // the ELSE of this chain, where they also fired on an unknown id -- a field the
@@ -878,10 +865,14 @@ func (g *gen) objFieldArm(sc *pyScope) []string {
 //     mistyped element at an over-capacity index INVALID where §7.3 asks for a
 //     skip -- the same ordering corelib-go's and corelib-dart's collectors take
 //     for the wrapper arrays they own.
-//  2. the §5.1 index bound: the schema `count:` as INVALID, or the receiver cap
-//     as a policy rejection where the schema declares none. A wrapper array
-//     announces no count, so the INDEX is the length and the index is what
-//     bounds the allocation.
+//  2. the §5.1 index bound and the slot: a corelib reserve_* call (reserveCall)
+//     judges the index against the schema `count:` as INVALID, or against the
+//     receiver cap as a policy rejection where the schema declares none, and
+//     only then grows the list to it. A wrapper array announces no count, so the
+//     INDEX is the length and the index is what bounds the allocation. The slot
+//     is reserved HERE, at the header, rather than in the value hook, so the
+//     verdict lands before the payload is read (§5.2: INVALID outranks
+//     INCOMPLETE) and the value hook is left a plain indexed store.
 //
 // An element's own header number -- a string/blob element's byte LENGTH, a
 // matrix row's element COUNT -- is not bounded here. Both are count/length words
@@ -902,7 +893,7 @@ func (g *gen) arrFieldArm(sc *pyScope) []string {
 	if sc.child >= 0 {
 		return out
 	}
-	return append(out, g.indexBound(sc.cap, "fld.id", sc.loc)...)
+	return append(out, g.reserveCall(sc, "fld.id"))
 }
 
 // pyIDSet renders the scope's declared ids as a set display of literals. CPython

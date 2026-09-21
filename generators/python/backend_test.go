@@ -66,7 +66,7 @@ func TestPythonStructural(t *testing.T) {
 		// fields, so the flat visitor overrides on_field and needs Field/WireType/
 		// FixlenSubtype alongside the always-present decode names -- and it binds
 		// part of the message, which is what pulls Binding in (binding.go).
-		"from sofab import Binding, Decoder, Encoder, Field, FixlenSubtype, SofaDecodeError, SofaIncompleteError, SofaLimitError, Status, Visitor, WireType",
+		"from sofab import Binding, Decoder, Encoder, Field, FixlenSubtype, SofaDecodeError, SofaIncompleteError, Status, UNBOUNDED, Visitor, WireType, reserve_elem, reserve_leaf",
 		"@dataclass",
 		"class Myfirstmessage:",
 		"def serialize(self, e: Encoder)",
@@ -252,7 +252,10 @@ messages:
 // and a deprecated field carries a ".. deprecated::" directive in its doc.
 // TestPythonOverIndexWrapperArray: a fixed-count wrapper array (string/blob/
 // struct elements) raises SofaDecodeError for an element id >= N before the list
-// grows (issue #142 / MESSAGE_SPEC §5.1/§7). A dynamic array keeps every index.
+// grows (issue #142 / MESSAGE_SPEC §5.1/§7). The comparison is the corelib's:
+// generated code hands the schema count to sofab.reserve_* and emits no literal
+// index test of its own (generator#587). A dynamic array passes UNBOUNDED, so
+// only the receiver cap applies to it.
 func TestPythonOverIndexWrapperArray(t *testing.T) {
 	const src = `
 version: 1
@@ -265,37 +268,39 @@ messages:
       ds: { id: 3, type: array, items: { type: string } }
 `
 	mod := string(genPy(t, schema(t, src), map[string]any{})["message.py"])
-	// The over-index guard raises SofaDecodeError, so the on-demand import MUST be
-	// emitted even when the schema has no scalar over-count array (the #100 case) —
-	// a wrapper-only schema like this one. Missing it is a NameError at decode time.
-	// FixlenSubtype rides along: the string/blob ELEMENT bounds name it even though
-	// no *field* here is fixlen (generator#246), so the full line is asserted — a
-	// prefix match would pass either way and let the missing name through.
-	// WireType is the struct element's `x`, tag-tested by the visitor. And no
+	// Every helper a call names is imported, and nothing else: FixlenSubtype
+	// rides along because the string/blob ELEMENT tag tests name it even though no
+	// *field* here is fixlen (generator#246), so the full line is asserted — a
+	// prefix match would pass either way and let a missing name through.
+	// WireType is the struct element's `x`, tag-tested by the visitor. No
+	// SofaLimitError: the receiver cap is judged inside the corelib now. And no
 	// Binding: every field here is a wrapper array, which no destination table
 	// can carry, so this module emits none.
-	if !strings.Contains(mod, "from sofab import Decoder, Encoder, Field, FixlenSubtype, SofaDecodeError, SofaIncompleteError, SofaLimitError, Status, Visitor, WireType\n") {
-		t.Errorf("message.py needs SofaDecodeError (over-index guard) AND FixlenSubtype (element guard) imported, else NameError at decode:\n%s", mod)
+	const imports = "from sofab import Decoder, Encoder, Field, FixlenSubtype, SofaDecodeError, SofaIncompleteError, Status, UNBOUNDED, Visitor, WireType, reserve_elem, reserve_leaf\n"
+	if !strings.Contains(mod, imports) {
+		t.Errorf("message.py needs every reserve_* helper it calls imported, else NameError at decode:\n%s", mod)
 	}
 	for _, want := range []string{
 		// A VALUE element (string/blob) is bounded at the header, in on_field, so
 		// the verdict precedes the payload (§5.2).
-		`if fld.id >= 4:`,
-		`raise SofaDecodeError("bs: array index above schema capacity 4")`,
-		`raise SofaDecodeError("bb: array index above schema capacity 3")`,
+		`reserve_leaf(self._o.bs, fld.id, "", 4, MAX_DYN_ARRAY_COUNT)`,
+		`reserve_leaf(self._o.bb, fld.id, b"", 3, MAX_DYN_ARRAY_COUNT)`,
 		// A STRUCT element opens a scope instead, and no on_field precedes a
 		// sequence header — so its bound sits in on_sequence_begin, which is still
 		// ahead of every byte of the element.
-		`if fid >= 2:`,
-		`raise SofaDecodeError("bp: array index above schema capacity 2")`,
+		`reserve_elem(self._o.bp, fid, MBpElem, 2, MAX_DYN_ARRAY_COUNT)`,
+		// Dynamic string array: no schema count, so the receiver cap applies.
+		`reserve_leaf(self._o.ds, fld.id, "", UNBOUNDED, MAX_DYN_ARRAY_COUNT)`,
 	} {
 		if !strings.Contains(mod, want) {
-			t.Errorf("message.py missing over-index guard %q", want)
+			t.Errorf("message.py missing over-index bound %q:\n%s", want, mod)
 		}
 	}
-	// Dynamic string array keeps every index — no guard raised for it.
-	if strings.Contains(mod, `raise SofaDecodeError("ds: array index above schema capacity`) {
-		t.Errorf("dynamic string array must not carry an over-index guard")
+	// Zero literal index tests: the corelib compares, generated code routes.
+	for _, bad := range []string{"if fld.id >= ", "if fid >= ", "while len(_t)"} {
+		if strings.Contains(mod, bad) {
+			t.Errorf("generated code must leave the index bound and growth to the corelib, found %q:\n%s", bad, mod)
+		}
 	}
 }
 
@@ -327,7 +332,7 @@ messages:
 	// Asserted as the FULL line (FixlenSubtype included — this schema has string
 	// and blob fields, and a string wrapper element): a prefix match cannot tell a
 	// complete import line from a truncated one (generator#246).
-	if !strings.Contains(mod, "from sofab import Binding, Decoder, Encoder, Field, FixlenSubtype, SofaDecodeError, SofaIncompleteError, SofaLimitError, Status, Visitor\n") {
+	if !strings.Contains(mod, "from sofab import Binding, Decoder, Encoder, Field, FixlenSubtype, SofaDecodeError, SofaIncompleteError, Status, UNBOUNDED, Visitor, reserve_leaf\n") {
 		t.Errorf("message.py must import SofaDecodeError for the maxlen guard (else NameError at decode):\n%s", mod)
 	}
 
@@ -588,9 +593,10 @@ messages:
 		// The bound itself is untouched -- that is all `count` still does. A
 		// native array DECLARES it at the header, on its table entry where the
 		// table carries the array; a wrapper array has no count word on the wire,
-		// so its index is bounded in on_field instead.
+		// so its index is bounded in on_field instead, by the corelib helper the
+		// count is handed to.
 		"    .unsigned_array(4, at=17, cap=5, count_at=22, elem_max=4294967295)",
-		"if fld.id >= 3:",
+		`reserve_leaf(self._o.fixedStrs, fld.id, "", 3, `,
 	} {
 		if !strings.Contains(mod, want) {
 			t.Errorf("message.py missing %q:\n%s", want, mod)
@@ -910,9 +916,10 @@ messages:
       l: { id: 11, type: array, items: { type: string, count: 2, maxlen: 4 } }
 `)
 	mod := string(genPy(t, s, map[string]any{})["message.py"])
-	// No SofaLimitError: every field in this schema is bounded, so no receiver
-	// cap is live and the name would be dead (§9.5, generator#385).
-	if !strings.Contains(mod, "from sofab import Binding, Decoder, Encoder, Field, FixlenSubtype, SofaDecodeError, SofaIncompleteError, Status, Visitor, WireType\n") {
+	// No SofaLimitError and no UNBOUNDED: every field in this schema is bounded,
+	// so no receiver cap is live and the names would be dead (§9.5,
+	// generator#385). reserve_leaf is `l`'s element index bound.
+	if !strings.Contains(mod, "from sofab import Binding, Decoder, Encoder, Field, FixlenSubtype, SofaDecodeError, SofaIncompleteError, Status, Visitor, WireType, reserve_leaf\n") {
 		t.Errorf("message.py missing the full decode import line:\n%s", mod)
 	}
 	for _, want := range []string{
@@ -1231,7 +1238,8 @@ messages:
 }
 
 // A wrapper array's element id IS the array index (§5.1), so an element is PLACED
-// at target[id] after gap-filling from the element default -- never appended. That
+// at target[id] after the corelib's reserve_* call has gap-filled the list up to
+// it from the element default -- never appended. That
 // is what restores an interior element the sparse rule omitted; appending would
 // shorten the array by the size of every gap and would decode a REOPENED id as a
 // second element instead of merging into the first (§7.4).
@@ -1259,38 +1267,30 @@ messages:
 	mod := string(genPy(t, schema(t, src), map[string]any{})["message.py"])
 
 	for _, want := range []string{
-		// struct elements: gap-fill, then descend into the element the index names
-		// -- the index register is what carries it into the element scope, and
-		// decoding INTO the object already there gives the §7.4 merge for free.
-		"            _t = self._o.objs\n" +
-			"            while len(_t) <= fid:\n" +
-			"                _t.append(VecObjsElem())\n" +
+		// struct elements: reserve (bound, then gap-fill with a fresh element per
+		// slot), then descend into the element the index names -- the index
+		// register is what carries it into the element scope, and decoding INTO
+		// the object already there gives the §7.4 merge for free.
+		"            reserve_elem(self._o.objs, fid, VecObjsElem, 4, MAX_DYN_ARRAY_COUNT)\n" +
 			"            self._ix1 = fid\n",
 		"                self._o.objs[self._ix1].k = value",
-		// leaf elements: placed at the index, never appended
-		"            _t = self._o.strs\n" +
-			"            while len(_t) <= fid:\n" +
-			"                _t.append(\"\")\n" +
-			"            _t[fid] = value",
-		// native matrix rows: gap-fill, then place the row at its index. The row's
-		// elements were bounded against the declared u32 width one step earlier,
-		// in on_array_begin (§7.1).
-		"            _t = self._o.mat\n" +
-			"            while len(_t) <= fid:\n" +
-			"                _t.append([])\n" +
-			"            _t[fid] = value",
+		// leaf elements: reserved at the header, then stored at the index, never
+		// appended
+		`            reserve_leaf(self._o.strs, fld.id, "", 3, MAX_DYN_ARRAY_COUNT)`,
+		"            self._o.strs[fid] = value",
+		// native matrix rows: reserved at the header with a fresh list per gap,
+		// then the row is placed at its index. The row's elements were bounded
+		// against the declared u32 width one step earlier, in on_array_begin (§7.1).
+		"            reserve_elem(self._o.mat, fld.id, list, 2, MAX_DYN_ARRAY_COUNT)",
+		"            self._o.mat[fid] = value",
 		// wrapper rows: the row itself is a scope, and its own elements are placed
 		// through the row the outer index register selected
-		"            _t = self._o.rows[self._ix5]\n" +
-			"            while len(_t) <= fid:\n" +
-			"                _t.append(\"\")\n" +
-			"            _t[fid] = value",
-		// the over-index bound guards every id-keyed fill: at the header for a
-		// value element, in on_sequence_begin for one that opens a scope
-		"            if fid >= 4:",
-		"            if fld.id >= 2:",
-		// a count-less array is placed by id like every other, just unbounded
-		"            _t = self._o.dyn\n            while len(_t) <= fid:",
+		`            reserve_leaf(self._o.rows[self._ix5], fld.id, "", UNBOUNDED, MAX_DYN_ARRAY_COUNT)`,
+		"            self._o.rows[self._ix5][fid] = value",
+		"            reserve_row(self._o.rows, fid, 2, MAX_DYN_ARRAY_COUNT)",
+		// a count-less array is placed by id like every other, bounded by the
+		// receiver cap instead of a schema count
+		"            reserve_elem(self._o.dyn, fid, VecDynElem, UNBOUNDED, MAX_DYN_ARRAY_COUNT)",
 	} {
 		if !strings.Contains(mod, want) {
 			t.Errorf("message.py missing %q:\n%s", want, mod)
@@ -1304,6 +1304,10 @@ messages:
 		"while len(_t) < 4:",
 		"while len(_t) < 3:",
 		"_pad_to(",
+		// generator#587: the bound and the gap fill are the corelib's now
+		"while len(_t) <= fid:",
+		"if fid >= ",
+		"if fld.id >= ",
 	} {
 		if strings.Contains(mod, bad) {
 			t.Errorf("message.py must no longer contain %q:\n%s", bad, mod)
@@ -1320,7 +1324,7 @@ messages:
 // its scope, so children set by an earlier opening whose ids do not recur must be
 // RETAINED.
 //
-// The gap fill extends the list only UP TO the index, so before the fix a
+// A gap fill extends the list only UP TO the index, so before the fix a
 // re-opened row found the previous occurrence's elements still in place and wrote
 // on top of them. Measured on `matstr: array<array<string>>` carrying element id 0
 // twice -- ["a","z"] then ["y"] -- as [["y", "z"]] where §7.4 wants [["y"]], and
@@ -1328,11 +1332,11 @@ messages:
 // [[[9]]]. It is engine-independent by construction, being generated code, which
 // tests/conformance/python/run.sh measures on both engines rather than assuming.
 //
-// Whole arms are asserted, so the ORDER is pinned with them: the reset may only
-// follow the index bound (which RAISES -- in front of it, a refused element index
-// would wipe a valid earlier row, the §7.3 interaction that turns a loud failure
-// into silent data loss) and the gap fill (in front of that, it would index a slot
-// that does not exist yet).
+// The reset is corelib-py's reserve_row, which bounds the index (and RAISES)
+// before it grows or rebinds anything -- so a refused element index cannot wipe a
+// valid earlier row, the §7.3 interaction that turns a loud failure into silent
+// data loss. What is pinned here is that generated code picks reserve_row for a
+// wrapper row and reserve_elem, which leaves an existing slot alone, for a struct.
 //
 // A NATIVE row is absent from this test on purpose: it carries a real count header,
 // arrives whole through one on_*_array call, opens no scope at all, and its store
@@ -1350,33 +1354,27 @@ messages:
 	mod := string(genPy(t, schema(t, src), map[string]any{})["message.py"])
 
 	for _, want := range []string{
-		// The string row: bound the index, gap-fill, RESET the row, then descend.
-		"            if fid >= 2:\n" +
-			"                raise SofaDecodeError(\"matstr: array index above schema capacity 2\")\n" +
-			"            _t = self._o.matstr\n" +
-			"            while len(_t) <= fid:\n" +
-			"                _t.append([])\n" +
-			"            _t[fid] = []\n",
+		// The string row: reserve_row bounds the index, gap-fills and RESETS the
+		// row, then generated code descends.
+		"            reserve_row(self._o.matstr, fid, 2, 65536)\n" +
+			"            self._ix1 = fid\n",
 		// ...and one level down, where the row's own elements are native rows: the
 		// middle wrapper element is replaced whole, so a native row it held at some
 		// other id goes with it.
-		"            _t = self._o.deep\n" +
-			"            while len(_t) <= fid:\n" +
-			"                _t.append([])\n" +
-			"            _t[fid] = []\n",
+		"            reserve_row(self._o.deep, fid, 2, 65536)\n",
 	} {
 		if !strings.Contains(mod, want) {
 			t.Errorf("message.py missing %q:\n%s", want, mod)
 		}
 	}
 
-	// The MERGING half: a struct element is gap-filled and descended into, and
-	// nothing else. A backend that reset every re-opened element id would zero the
-	// fields the second opening does not mention.
-	if !strings.Contains(mod, "                _t.append(VecObjsElem())\n            self._ix") {
-		t.Errorf("a struct element must be gap-filled and descended into, nothing more:\n%s", mod)
+	// The MERGING half: a struct element is reserved (never reset) and descended
+	// into, and nothing else. A backend that reset every re-opened element id
+	// would zero the fields the second opening does not mention.
+	if !strings.Contains(mod, "            reserve_elem(self._o.objs, fid, VecObjsElem, 2, 65536)\n            self._ix") {
+		t.Errorf("a struct element must be reserved and descended into, nothing more:\n%s", mod)
 	}
-	if strings.Contains(mod, "_t.append(VecObjsElem())\n            _t[fid] =") {
+	if strings.Contains(mod, "reserve_row(self._o.objs") {
 		t.Errorf("a re-opened struct element MERGES (§7.4) and must not be reset:\n%s", mod)
 	}
 }
@@ -1605,7 +1603,7 @@ messages:
     payload:
       rows: { id: 0, type: array, items: { type: array, items: { type: u32, count: 3 } } }
 `), map[string]any{})["message.py"])
-	if !strings.Contains(rows, "from sofab import Decoder, Encoder, Field, SofaDecodeError, SofaIncompleteError, SofaLimitError, Status, Visitor, WireType\n") {
+	if !strings.Contains(rows, "from sofab import Decoder, Encoder, Field, SofaDecodeError, SofaIncompleteError, Status, UNBOUNDED, Visitor, WireType, reserve_elem\n") {
 		t.Errorf("a nested-row-only §7.3 tag test still needs WireType imported:\n%s", rows)
 	}
 
@@ -1886,7 +1884,8 @@ messages:
 
 // TestPythonWrapperIndexCap: a DYNAMIC wrapper array's element index is bounded
 // by the receiver cap, checked before the list is gap-filled (ARCHITECTURE §9.5,
-// generator#387).
+// generator#387). The check is corelib-py's reserve_*, handed UNBOUNDED for the
+// schema count and the cap beside it (generator#587).
 //
 // A wrapper array carries no count header, so MAX_DYN_ARRAY_COUNT never reached
 // it: its elements are keyed by an unbounded varint index and the gap-fill
@@ -1912,25 +1911,23 @@ messages:
 	for _, want := range []string{
 		// A VALUE element is bounded at the header, in on_field, one step ahead of
 		// the payload that would be placed.
-		`if fld.id >= MAX_DYN_ARRAY_COUNT:`,
-		`raise SofaLimitError("dstrs: array index %d exceeds max_array_count %d" % (fld.id, MAX_DYN_ARRAY_COUNT))`,
-		`raise SofaLimitError("dblbs: array index %d exceeds max_array_count %d" % (fld.id, MAX_DYN_ARRAY_COUNT))`,
+		`reserve_leaf(self._o.dstrs, fld.id, "", UNBOUNDED, MAX_DYN_ARRAY_COUNT)`,
+		`reserve_leaf(self._o.dblbs, fld.id, b"", UNBOUNDED, MAX_DYN_ARRAY_COUNT)`,
 		// An element that OPENS a scope has no on_field in front of it, so it is
 		// bounded in on_sequence_begin instead -- where fid names the index.
-		`if fid >= MAX_DYN_ARRAY_COUNT:`,
-		`raise SofaLimitError("dobjs: array index %d exceeds max_array_count %d" % (fid, MAX_DYN_ARRAY_COUNT))`,
+		`reserve_elem(self._o.dobjs, fid, MDobjsElem, UNBOUNDED, MAX_DYN_ARRAY_COUNT)`,
 	} {
 		if !strings.Contains(m, want) {
 			t.Errorf("message.py missing wrapper index cap %q:\n%s", want, m)
 		}
 	}
 	// The cap governs only what the schema left unbounded (§9.5): a count:N array
-	// keeps its own bound and its own category.
-	if !strings.Contains(m, `raise SofaDecodeError("bstrs: array index above schema capacity 4")`) {
-		t.Errorf("a count:N wrapper array must keep its SofaDecodeError schema bound:\n%s", m)
+	// hands its own count, which the corelib then compares INSTEAD of the cap.
+	if !strings.Contains(m, `reserve_leaf(self._o.bstrs, fld.id, "", 4, MAX_DYN_ARRAY_COUNT)`) {
+		t.Errorf("a count:N wrapper array must hand its schema count to the corelib:\n%s", m)
 	}
-	if strings.Contains(m, `"bstrs: array index %d exceeds max_array_count`) {
-		t.Errorf("a schema-bounded array must not also carry the receiver cap:\n%s", m)
+	if strings.Contains(m, "raise SofaLimitError") || strings.Contains(m, "if fld.id >= ") || strings.Contains(m, "if fid >= ") {
+		t.Errorf("generated code must emit no index test of its own:\n%s", m)
 	}
 }
 
