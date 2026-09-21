@@ -731,11 +731,12 @@ sb_expect '\072\112ABC'  IncompleteMessage "an over-cap string at the UNKNOWN id
 echo "==> string/blob cap enforcement point OK"
 # The receiver cap on a WRAPPER array's element INDEX, and on a matrix row's own
 # element count (CORELIB_PLAN 6.2.1). These are the caps corelib-zig compares --
-# generated code passes max_dyn_array_count into arrays.setElemCapped (string and
-# blob elements), arrays.growCapped (struct elements, and a matrix row's index)
-# and arrays.allocNCapped (the row's count), and emits no guard of its own -- so
-# a codegen change that stopped passing the number would look identical in review
-# and would be caught only here. Every case is driven as raw wire bytes, because
+# generated code passes max_dyn_array_count as the `.{ .receiver = ... }` bound of
+# arrays.placeElem (string and blob elements), arrays.reserveElem (struct
+# elements) and arrays.reserveRow (a matrix row's index AND its own count), and
+# emits no guard of its own -- so a codegen change that stopped passing the number,
+# or passed it under the .schema tag, would look identical in review and would be
+# caught only here. Every case is driven as raw wire bytes, because
 # an over-cap message is one the encoder will not produce.
 #
 #   s (id 0)  wrapper array of string: 06 = sequence start id 0; element header
