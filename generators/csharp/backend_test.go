@@ -71,8 +71,8 @@ func TestCsOverIndexWrapperArray(t *testing.T) {
 		`case (Root_bs, _): global::sofab.Seq.PlaceElem(m.bs, id, "", _s, 4, MaxDynArrayCount); break;`,
 		`case (Root_bb, _): global::sofab.Seq.CheckIndex(id, 3, MaxDynArrayCount);`,
 		`case (Root_bb, _): global::sofab.Seq.PlaceElem(m.bb, id, Array.Empty<byte>(), _b, 3, MaxDynArrayCount); break;`,
-		`case (Root_bp, _): global::sofab.Seq.CheckIndex(id, 2, MaxDynArrayCount); while (m.bp.Count <= id) m.bp.Add(new `,
-		`()); _ixRoot_bp = id; cur = Root_bp_e; break;`,
+		`case (Root_bp, _): global::sofab.Seq.ReserveElem(m.bp, id, static () => new `,
+		`(), 2, MaxDynArrayCount); _ixRoot_bp = id; cur = Root_bp_e; break;`,
 	} {
 		if !strings.Contains(m, want) {
 			t.Errorf("Message.cs missing over-index bound %q", want)
@@ -811,13 +811,14 @@ messages:
 	m := buildModule(t, []byte(src), "m.yaml", map[string]any{})
 
 	for _, want := range []string{
-		// struct element: gap-fill, latch the id, descend — the element scope then
-		// addresses the element the id named, not the last one.
-		"case (Root_fixed, _): global::sofab.Seq.CheckIndex(id, 5, MaxDynArrayCount); " +
-			"while (m.@fixed.Count <= id) m.@fixed.Add(new VecFixedElem()); _ixRoot_fixed = id; cur = Root_fixed_e; break;",
+		// struct element: the corelib bounds the id and gap-fills, then generated
+		// code latches the id and descends — the element scope then addresses the
+		// element the id named, not the last one.
+		"case (Root_fixed, _): global::sofab.Seq.ReserveElem(m.@fixed, id, static () => new VecFixedElem(), 5, MaxDynArrayCount); " +
+			"_ixRoot_fixed = id; cur = Root_fixed_e; break;",
 		"m.@fixed[_ixRoot_fixed].k = (uint)value; break;",
 		// a count-less array is placed by id too: its length is highest id + 1.
-		"global::sofab.Seq.CheckIndex(id, -1, MaxDynArrayCount); while (m.dynamic.Count <= id) m.dynamic.Add(new VecDynamicElem()); _ixRoot_dynamic = id;",
+		"global::sofab.Seq.ReserveElem(m.dynamic, id, static () => new VecDynamicElem(), -1, MaxDynArrayCount); _ixRoot_dynamic = id;",
 		// string leaf element: placed, with the gap filled from the element default.
 		"case (Root_fstrs, _): global::sofab.Seq.PlaceElem(m.fstrs, id, \"\", _s, 3, MaxDynArrayCount); break;",
 		// NATIVE row (the id-blind collector): placed at out[id], bounded by the outer
@@ -1358,7 +1359,7 @@ messages:
 		"private const long MaxDynArrayCount = 65536;",
 		`global::sofab.Seq.PlaceElem(m.dstrs, id, "", _s, -1, MaxDynArrayCount);`,
 		`global::sofab.Seq.PlaceElem(m.dblbs, id, Array.Empty<byte>(), _b, -1, MaxDynArrayCount);`,
-		`global::sofab.Seq.CheckIndex(id, -1, MaxDynArrayCount); while (m.dobjs.Count <= id) m.dobjs.Add(new `,
+		`global::sofab.Seq.ReserveElem(m.dobjs, id, static () => new `,
 		`global::sofab.Seq.ReserveRow(m.dmat, id, -1, MaxDynArrayCount);`,
 	} {
 		if !strings.Contains(m, want) {
@@ -1950,11 +1951,14 @@ messages:
 	if n := strings.Count(probe, "if (id >= "); n != 0 {
 		t.Errorf("uncounted rows: %d literal index checks left:\n%s", n, probe)
 	}
+	if n := strings.Count(probe, ".Count <= id)"); n != 0 {
+		t.Errorf("uncounted rows: %d generated gap-fill loops left; growth is Seq.ReserveElem's:\n%s", n, probe)
+	}
 	for _, want := range []string{
 		"global::sofab.Seq.ReserveRow(m.nrows, id, -1, MaxDynArrayCount);",
 		"global::sofab.Seq.ReserveRow(m.srows, id, -1, MaxDynArrayCount);",
 		"global::sofab.Seq.ReserveRow(m.orows, id, -1, MaxDynArrayCount);",
-		"global::sofab.Seq.CheckIndex(id, -1, MaxDynArrayCount); while (m.orows[_ixRoot_orows].Count <= id) m.orows[_ixRoot_orows].Add(new ",
+		"global::sofab.Seq.ReserveElem(m.orows[_ixRoot_orows], id, static () => new ",
 	} {
 		if !strings.Contains(probe, want) {
 			t.Errorf("uncounted rows: missing %q:\n%s", want, probe)

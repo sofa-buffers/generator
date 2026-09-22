@@ -1062,16 +1062,18 @@ func (g *gen) emitVisitor(f *cfile, name string, fields []*ir.Field) {
 				// decoded a REOPENED id as a second element instead of merging into the
 				// first (§7.4 -- placement gives that merge for free).
 				//
-				// The bound is the corelib's (Seq.CheckIndex, before the list grows,
-				// which also bounds the gap fill); the fill itself stays generated.
-				// That is the ARCHITECTURE §8 maxspeed override, measured: corelib-cs's
-				// Seq.ReserveElem needs a Func<T> factory, and the delegate call per new
-				// element cost +0.77% decode Ir/op on the csharp bench row (a
-				// `where T : new()` overload, which the JIT lowers to
-				// Activator.CreateInstance, cost +2.7%). A direct `new Elem()` here is
-				// free (ARCHITECTURE §9.5.5).
-				f.line("            case (%s, _): %s while (%s.Count <= id) %s.Add(new %s()); %s = id; cur = %s; break;",
-					fr.loc, seqCall("CheckIndex", "id", fr), fr.path, fr.path, g.typeName(fr.ref.Key), ixVar(fr.loc), fr.childLoc)
+				// Growth and the bound are the corelib's: Seq.ReserveElem checks the index
+				// against the schema count (or the receiver cap) BEFORE the list grows,
+				// then fills the gap with fresh elements. The element's constructor
+				// travels as a `static` lambda, which the compiler caches, so a slot costs
+				// one delegate call and no allocation beyond the element itself. That call
+				// is the whole price of keeping the fill out of generated code, measured
+				// at +0.77% decode Ir/op on the csharp bench row (ARCHITECTURE §9.5.5).
+				// What stays generated is the routing: binding the element index and
+				// switching into the element's scope.
+				f.line("            case (%s, _): %s %s = id; cur = %s; break;",
+					fr.loc, seqCall("ReserveElem", fmt.Sprintf("%s, id, static () => new %s()", fr.path, g.typeName(fr.ref.Key)), fr),
+					ixVar(fr.loc), fr.childLoc)
 			case fr.elem == ir.KindArray && seqArrayElem(fr.items.Elem):
 				// A wrapper ROW is placed at the index its id names too (see reserveRow):
 				// an interior all-default row is omitted, so appending would shift every
