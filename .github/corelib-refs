@@ -1,16 +1,10 @@
 # Corelib branches this branch is developed against (docs/CI.md).
 # Delete before merging: every entry pins a corelib to unmerged code.
 #
-# generator#587 moves the wrapper-array helpers into these eight corelibs; the
-# generated code on this branch calls them, so lang-<x> must build against the
-# branches until each corelib PR has merged. Drop an entry as its PR lands:
-#   corelib-ts#195  corelib-zig#90  corelib-java#126  corelib-kotlin-mp#51
-#   corelib-py#159  corelib-cs#114  corelib-rs#110    corelib-rs-no-std#120
-SOFAB_CORELIB_TS_REF=feat/generic-seq-helpers-587
+# generator#587 moves the wrapper-array helpers into eight corelibs. Six have
+# merged (corelib-ts#195, corelib-kotlin-mp#51, corelib-py#159, corelib-cs#114,
+# corelib-rs#110, corelib-rs-no-std#120) and build from main again. These two
+# remove API generator main still emits, so they merge in lockstep with this PR:
+#   corelib-zig#90  corelib-java#126
 SOFAB_CORELIB_ZIG_REF=feat/generic-seq-helpers-587
 SOFAB_CORELIB_JAVA_REF=feat/generic-seq-helpers-587
-SOFAB_CORELIB_KOTLIN_MP_REF=feat/generic-seq-helpers-587
-SOFAB_CORELIB_PY_REF=feat/generic-seq-helpers-587
-SOFAB_CORELIB_CS_REF=feat/generic-seq-helpers-587
-SOFAB_CORELIB_RS_REF=feat/generic-seq-helpers-587
-SOFAB_CORELIB_RS_NO_STD_REF=feat/generic-seq-helpers-587
