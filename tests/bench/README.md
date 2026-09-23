@@ -581,22 +581,24 @@ debug-only assertions, so a debug build measures code that does not ship.
 
 | row | corelib | arches | shape |
 | - | - | - | - |
-| `c` | corelib-c-cpp | ARMv6-M, ARMv7-M+fp.dp, RV32IMC | `emit: sources` → compile `.c` + the corelib's `object.c`/`ostream.c`/`istream.c`/`utf8.c` → link (`-nostdlib -nostartfiles`, `--gc-sections`) → `size` the image |
-| `cpp-c-cpp` | corelib-c-cpp | ARMv6-M, ARMv7-M+fp.dp | header-only, so a driver TU instantiates `encodeTo`/`try_decode`, linked against the same four corelib `.c` files |
+| `c` | corelib-c-cpp | ARMv6-M, ARMv7-M+fp.dp, RV32IMC | `emit: sources` → compile `.c` + the corelib's `object.c`/`ostream.c`/`istream.c`/`utf8.c` → link (`-nostdlib -nostartfiles`, `--gc-sections`) → sum the SofaBuffers symbols |
+| `cpp-c-cpp` | corelib-c-cpp | ARMv6-M, ARMv7-M+fp.dp | header-only, so a driver TU instantiates `encodeTo`/`try_decode`, linked against the same four corelib `.c` files, same symbol sum |
 | `rust-rs-no-std` | corelib-rs-no-std | thumbv6m | staticlib + `rust-lld --gc-sections`, then size the linked ELF |
 
 Each lives in `lang/<lang>.sh` and implements `bench_size`. The differences are not
 arbitrary — see the header comment in each file. In particular:
 
-* **C and C++ link, then size the linked image.** Both compile the generated
-  sources together with corelib-c-cpp's `object.c`/`ostream.c`/`istream.c`/
-  `utf8.c`, link them into a freestanding image (`-nostdlib -nostartfiles`, a
-  minimal linker script, `--gc-sections`, plus the handful of libc/runtime
-  symbols the corelib and libstdc++ actually call, as the plainest
-  implementations that could work), and size that. Sizing an unlinked object of
-  the generated sources alone would leave the corelib out of the number
-  entirely and go blind to code that moves between generated code and the
-  corelib.
+* **C and C++ link, then sum the SofaBuffers symbols in the linked image**
+  (`lib/sum_syms.py`). Both compile the generated sources together with
+  corelib-c-cpp's `object.c`/`ostream.c`/`istream.c`/`utf8.c`, link them into a
+  freestanding image (`-nostdlib -nostartfiles`, a minimal linker script,
+  `--gc-sections`, plus the handful of libc/runtime symbols the corelib and
+  libstdc++ actually call, as the plainest implementations that could work),
+  and sum every retained symbol except those and whatever `-lgcc` supplied.
+  Sizing an unlinked object of the generated sources alone would leave the
+  corelib out of the number entirely and go blind to code that moves between
+  generated code and the corelib; sizing the whole linked image would instead
+  count the freestanding glue as if it were SofaBuffers cost.
 * **Rust needs the link step for a different reason.** Quoting
   `corelib-rs-no-std/tools/footprint.sh`: *"A bare staticlib archive is NOT
   dead-stripped, so measuring it directly massively over-counts; the link step
@@ -642,15 +644,15 @@ The pair is the measurement; neither number alone is a verdict. Turning it on tr
 static bytes for an allocator, and on the two targets that goes in opposite
 directions:
 
-* **cpp-c-cpp** `.text` 10244 → 17276, `.bss` 1220 → 5444 on ARMv6-m. The
-  driver builds `-nostdlib -nostartfiles`, so it supplies its own trivial bump
-  allocator for `operator new` — always present, since a polymorphic base's
-  virtual-destructor thunk references `operator delete` unconditionally, but
-  only reachable at what would be runtime once `allow_dynamic` moves the
-  fields to real `std::vector`s, whose default member initializers (non-empty
-  defaults) call `operator new` for real, plus the `libstdc++`
-  bound/allocation-failure paths (`std::__throw_length_error` and siblings)
-  that `<vector>` compiles in even under `-fno-exceptions`.
+* **cpp-c-cpp** `.text` 9118 → 12296, `.bss` 180 → 300 on ARMv6-m. The inline
+  build's containers (`InlineVector<T,N>`) never touch an allocator. Switching
+  to `allow_dynamic` moves the fields to real `std::vector`s, and the delta is
+  their own template-instantiated methods (`_M_default_append`,
+  `_M_realloc_append`, `operator=`, …) — real SofaBuffers cost in the sense
+  that the corelib's `allow_dynamic` choice is exactly what pulls them in, even
+  though the code itself lives in libstdc++'s headers. The allocator that
+  backs them (`operator new`/`delete`, the driver's own bump allocator) is
+  freestanding glue the row does not count — see the previous section.
 * **rust-rs-no-std** `.text` 9961 → 11741, `.bss` 0 → 4. Bare metal ships no
   allocator at all, so the footprint driver supplies the most trivial bump allocator
   that can work (`lang/rust.sh`, appended only when the generated crate pulls in
