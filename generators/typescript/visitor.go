@@ -834,10 +834,12 @@ func (g *gen) emitFixlenBegin(f *tsfile, scopes []*tsScope) {
 
 // emitPayloadCb writes the string/blob callback.
 //
-// The maxlen verdict is taken against `total` -- the word that establishes the
-// violation -- not against the assembled payload, so an over-maxlen field stays
-// INVALID even when the message is truncated inside it and an over-long payload
-// is never buffered (§5.2, issue #267).
+// It states no schema bound of its own. The maxlen verdict is taken one hook
+// earlier, in fixlenBegin, against `total` -- the word that establishes the
+// violation -- and it THROWS, which ends the decode, so this callback is never
+// entered for a field that breached it (§5.2, issues #267 and #594). That is
+// also what keeps an over-maxlen field INVALID when the message is truncated
+// inside it, and what keeps an over-long payload from ever being buffered.
 func (g *gen) emitPayloadCb(f *tsfile, scopes []*tsScope, cb string) {
 	want := ir.KindString
 	if cb == "blob" {
@@ -860,11 +862,6 @@ func (g *gen) emitPayloadCb(f *tsfile, scopes []*tsScope, cb string) {
 				continue
 			}
 			acc := g.visStorage(sc.path, x)
-			var pre string
-			if x.HasMaxlen {
-				pre = fmt.Sprintf("if (total > %d) throw new SofabError(SofabErrorCode.InvalidMsg, %q); ",
-					x.Maxlen, fmt.Sprintf("%s: %s byte length above schema maxlen %d", x.Name, cb, x.Maxlen))
-			}
 			var store string
 			if want == ir.KindString {
 				// A payload that arrived whole is transcoded straight out of the
@@ -879,7 +876,7 @@ func (g *gen) emitPayloadCb(f *tsfile, scopes []*tsScope, cb string) {
 			} else {
 				store = fmt.Sprintf("{ const _p = this.a.take(total, offset, src, start, end); if (_p !== null) %s = _p; }", acc)
 			}
-			ids = append(ids, fmt.Sprintf("    case %d: { %s%s break; }", x.ID, pre, store))
+			ids = append(ids, fmt.Sprintf("    case %d: { %s break; }", x.ID, store))
 		}
 		if body := idSwitch(ids); body != nil {
 			arms[sc.id] = body

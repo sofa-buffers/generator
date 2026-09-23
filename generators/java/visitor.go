@@ -497,7 +497,6 @@ func (g *gen) emitStringCb(f *jfile, fs []frame, limStr bool) {
 		capConst = "CAP_DYN_STRING_LEN"
 	}
 	g.emitDestGuard(f, fs, dests, capConst)
-	g.emitMaxlenGuard(f, fs, ir.KindString, "string length")
 	// The accumulator answers a whole-in-one-chunk payload straight out of the
 	// input array and buffers only a split one, validates UTF-8 once the payload
 	// is complete, and refuses an announced length above the cap it is handed
@@ -576,7 +575,6 @@ func (g *gen) emitBlobCb(f *jfile, fs []frame, limBlob bool) {
 		capConst = "CAP_DYN_BLOB_LEN"
 	}
 	g.emitDestGuard(f, fs, dests, capConst)
-	g.emitMaxlenGuard(f, fs, ir.KindBlob, "blob length")
 	// The accumulator answers a whole-in-one-chunk payload straight out of the
 	// input array and buffers only a split one, and refuses an announced length
 	// above the cap it is handed before it does either; null means more chunks
@@ -677,8 +675,9 @@ func kindDests(fs []frame, kind ir.Kind) []destFrame {
 // valid message into INVALID_MSG, and a 1 MiB blob at an undeclared id was copied
 // out of the input whole.
 //
-// Placed ahead of the maxlen guard, which is already destination-scoped and
-// therefore unaffected — §5.2's INVALID-over-INCOMPLETE ordering is preserved.
+// Placed ahead of the accumulator call, so §5.2's INVALID-over-INCOMPLETE
+// ordering is unaffected: the schema bound was already decided one hook earlier,
+// at the length word.
 //
 // A schema with no field of this kind at all has no destination *anywhere*, so
 // the callback body is empty rather than guarded — see kindDests, whose empty
@@ -775,7 +774,7 @@ func boundedIDs(d destFrame, split bool) []int64 {
 //   - no cap live for this kind — every destination is schema-bounded, so the
 //     schema's maxlen governs and there is no second number:
 //     Bound.SCHEMA_BOUNDED. That is not "unlimited"; it says which of the two
-//     rules applies, and the maxlen guard beside it is what enforces it
+//     rules applies, and fixlenBegin's length-word guard is what enforces it
 //     (INVALID, §7.1).
 //   - every destination unbounded AND the callback has already gated
 //     non-destinations away — the constant travels as a literal, no dispatch.
@@ -835,8 +834,11 @@ func emitCapDecl(f *jfile, constName string) {
 // cannot know what was declared -- so a contradicting subtype is a §7.3 skip and
 // must not be measured against this field's bound (#224/#259, one position over).
 //
-// The payload-side guards stay: unreachable for a message that gets this far, and
-// the only thing still bounding a consumer built against an older corelib.
+// This is the ONLY place a schema maxlen is compared in generated Java. The
+// payload callbacks used to repeat it; they no longer do (#594). The repeat was
+// unreachable -- this hook throws, which ends the decode, so string()/blob() are
+// never entered for a field it refused -- and ARCHITECTURE §8 does not count a
+// second copy at the call site as defence in depth.
 func (g *gen) emitFixlenBegin(f *jfile, fs []frame) {
 	_, limStr, limBlob := g.activeLimits(fs)
 	str := g.fixlenBeginArms(fs, ir.KindString, "string length", capConstFor(limStr, "CAP_DYN_STRING_LEN"))
@@ -958,67 +960,6 @@ func (g *gen) fixlenBeginArms(fs []frame, kind ir.Kind, noun, capConst string) [
 		}
 	}
 	return arms
-}
-
-// emitMaxlenGuard writes the schema-maxlen reject (MESSAGE_SPEC §7.1) at the top
-// of the string()/blob() callback: every field of this kind that declares a
-// schema `maxlen` (scalar fields and wrapper-sequence elements alike) gets a
-// (cur, id) arm that rejects a declared `total` above its own maxlen with
-// INVALID_MSG — before any byte is accumulated, so an oversized split payload is
-// rejected on its first chunk, and never truncated. Emitted unconditionally:
-// with no bounded field of this kind the guard is absent, leaving the output
-// byte-identical.
-//
-// This is the half of the pair that stays in GENERATED code. A schema bound is a
-// statement about validity and its breach is INVALID, so it can never route
-// through the corelib argument that carries the receiver cap — whose breach is
-// LIMIT_EXCEEDED (CORELIB_PLAN §6.2.1). Schema-unbounded fields fall through
-// here and are governed by that argument instead (see payloadCap).
-func (g *gen) emitMaxlenGuard(f *jfile, fs []frame, kind ir.Kind, noun string) {
-	// Detect whether any bounded field of this kind exists before emitting.
-	any := false
-	for _, fr := range fs {
-		if fr.kind == fkSeqLeaf && fr.elemKind == kind && fr.emax >= 0 {
-			any = true
-		}
-		if fr.kind == fkNormal {
-			for _, fld := range fr.fields {
-				if fld.Kind == kind && fld.HasMaxlen {
-					any = true
-				}
-			}
-		}
-	}
-	if !any {
-		return
-	}
-	f.line("        // Bounded fields (schema maxlen): a wire byte length above the")
-	f.line("        // declared maxlen is malformed input, INVALID before any byte is")
-	f.line("        // accumulated -- never a truncation.")
-	f.line("        switch (cur) {")
-	for _, fr := range fs {
-		if fr.kind == fkSeqLeaf && fr.elemKind == kind && fr.emax >= 0 {
-			f.line("        case %d: if (total > %d) %s break;", fr.idx, fr.emax, maxlenThrow(locName(fr.loc)+" element", noun, fr.emax))
-			continue
-		}
-		if fr.kind != fkNormal {
-			continue
-		}
-		var arms []string
-		for _, fld := range fr.fields {
-			if fld.Kind == kind && fld.HasMaxlen {
-				arms = append(arms, fmt.Sprintf("case %d: if (total > %d) %s break;", fld.ID, fld.Maxlen, maxlenThrow(fld.Name, noun, fld.Maxlen)))
-			}
-		}
-		if len(arms) > 0 {
-			f.line("        case %d: switch (id) {", fr.idx)
-			for _, a := range arms {
-				f.line("            %s", a)
-			}
-			f.line("        } break;")
-		}
-	}
-	f.line("        }")
 }
 
 // emitArraySkipArm arms the §7.3 discard counter at the top of arrayBegin

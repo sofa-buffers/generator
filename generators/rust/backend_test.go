@@ -734,8 +734,11 @@ messages:
 
 // TestRustMaxlenReject: a bounded string/blob (scalar or wrapper-array element)
 // rejects a wire byte length above its schema maxlen as INVALID (self.inv) before
-// the read, never truncated (MESSAGE_SPEC §7.1). Emitted on BOTH profiles — on
-// no_std the guard supersedes the heapless BufferFull path (outcome is INVALID).
+// the read, never truncated (MESSAGE_SPEC §7.1). The comparison happens ONCE, in
+// fixlen_begin at the LENGTH WORD (#594), on BOTH profiles — on no_std `inv` is
+// what outranks the heapless BufferFull the accumulator would otherwise report
+// for the same payload, at feed() and at finish() alike, so the outcome stays
+// INVALID.
 func TestRustMaxlenReject(t *testing.T) {
 	const src = `
 version: 1
@@ -760,13 +763,23 @@ messages:
 		}
 		m := moduleFromYAML(t, in, cfg)
 		for _, want := range []string{
-			"(_Loc::Root, 0) => if total > 8 { self.inv = true; return; },",    // scalar string
-			"(_Loc::Root, 1) => if total > 8 { self.inv = true; return; },",    // scalar blob
-			"(_Loc::Root_sa, _) => if total > 5 { self.inv = true; return; },", // wrapper string element
+			"(_Loc::Root, 0) => if total > 8 { self.inv = true; return; },", // scalar string
+			"(_Loc::Root, 1) => if total > 8 { self.inv = true; return; },", // scalar blob
+			// The wrapper element's bound rides the same length-word arm as its
+			// array's over-index bound, over-index first.
+			"(_Loc::Root_sa, _) => { if let Err(_e) = sofab::seq::check_index(id, sofab::seq::Bound::Schema(3)) { self.refuse(_e); return; }; if total > 5 { self.inv = true; return; }; },",
 		} {
 			if !strings.Contains(m, want) {
 				t.Errorf("message.rs (%v) missing maxlen guard %q", cfg, want)
 			}
+		}
+		// Each bound is compared exactly once, and only in fixlen_begin (#594):
+		// the payload callbacks restate none of them.
+		if n := strings.Count(m, "if total > 5"); n != 1 {
+			t.Errorf("(%v) the element maxlen must be compared exactly once, got %d", cfg, n)
+		}
+		if n := strings.Count(m, "if total > 8"); n != 2 {
+			t.Errorf("(%v) want one comparison per bounded scalar (2), got %d", cfg, n)
 		}
 		// The unbounded string field ds carries no SCHEMA maxlen guard -- what it
 		// does carry is the receiver cap, which is a different bound with a
@@ -1831,10 +1844,12 @@ messages:
 		if ai := strings.Index(fn, "self.acc"); ai >= 0 && gi > ai {
 			t.Errorf("string() (%v): the destination guard must precede the accumulator:\n%s", cfg, fn)
 		}
-		// The maxlen guard stays destination-scoped behind it, so a declared
-		// over-maxlen payload is still INVALID before any byte accumulates.
-		if mi := strings.Index(fn, "self.inv = true; return; },"); mi < 0 || gi > mi {
-			t.Errorf("string() (%v): the maxlen reject must survive behind the guard:\n%s", cfg, fn)
+		// The schema maxlen is not restated here at all (#594): fixlen_begin
+		// already set `inv` at the LENGTH WORD, which is what keeps a declared
+		// over-maxlen payload INVALID -- and `inv` outranks the accumulator's own
+		// refusal at both feed() and finish().
+		if strings.Contains(fn, "self.inv = true; return; },") {
+			t.Errorf("string() (%v): the schema maxlen must be compared only at the length word:\n%s", cfg, fn)
 		}
 	}
 }
@@ -1892,9 +1907,10 @@ messages:
 		if gi > ai {
 			t.Errorf("blob() (%v): the destination guard must precede the accumulator:\n%s", cfg, fn)
 		}
-		// The schema maxlen stays destination-scoped behind it.
-		if mi := strings.Index(fn, "self.inv = true; return; },"); mi < 0 || gi > mi {
-			t.Errorf("blob() (%v): the maxlen reject must survive behind the guard:\n%s", cfg, fn)
+		// The schema maxlen is not restated here at all (#594) -- it belongs to the
+		// length word, in fixlen_begin.
+		if strings.Contains(fn, "self.inv = true; return; },") {
+			t.Errorf("blob() (%v): the schema maxlen must be compared only at the length word:\n%s", cfg, fn)
 		}
 	}
 }
@@ -2734,11 +2750,16 @@ messages:
 	if !strings.Contains(m, "(_Loc::Root_sa, _) => { if let Err(_e) = sofab::seq::check_index(id, sofab::seq::Bound::Schema(3)) { self.refuse(_e); return; }; if total > 6 { self.inv = true; return; }; },") {
 		t.Error("a wrapper element must latch over-index then element maxlen")
 	}
-	// The payload-side guards STAY: unreachable now, but the only thing still
-	// bounding a consumer built against a corelib without the hook.
-	if !strings.Contains(m, "fn string(&mut self, id: Id, total: usize, offset: usize, chunk: &[u8]) {") ||
-		strings.Count(m, "total > 8") < 2 {
-		t.Error("the payload-side maxlen guard must remain as defense")
+	// And each bound is compared exactly once, at that word (#594): the payload
+	// callbacks restate none of them.
+	if !strings.Contains(m, "fn string(&mut self, id: Id, total: usize, offset: usize, chunk: &[u8]) {") {
+		t.Error("the string callback must still be emitted")
+	}
+	if n := strings.Count(m, "total > 8"); n != 1 {
+		t.Errorf("a scalar maxlen must be compared exactly once, got %d", n)
+	}
+	if n := strings.Count(m, "total > 6"); n != 1 {
+		t.Errorf("an element maxlen must be compared exactly once, got %d", n)
 	}
 }
 

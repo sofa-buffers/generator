@@ -805,11 +805,12 @@ func (g *gen) emitArrayFillArm(f *rfile, fs []frame, fillArm bool) {
 //
 // The no_std accumulator holds finite storage, so it has a third answer: a split
 // payload larger than that storage can never be assembled and is BufferFull, the
-// same verdict a fixed-capacity destination gives when it overflows. The maxlen
-// guard emitted above already keeps every declared field under the bound, so the
-// arm is a backstop rather than a reachable outcome -- and a backstop that
-// rejects, where the previous inline form would have waited for a completion that
-// could not arrive and dropped the field in silence.
+// same verdict a fixed-capacity destination gives when it overflows. fixlen_begin
+// has already latched every declared field's schema maxlen at its LENGTH WORD and
+// set `inv`, which outranks this arm at both feed() and finish(), so the arm is a
+// backstop rather than a reachable verdict -- and a backstop that rejects, where
+// the previous inline form would have waited for a completion that could not
+// arrive and dropped the field in silence.
 //
 // Keyed on the CORELIB rather than the no_std build flag, for the same reason the
 // accumulator's TYPE is: corelib-rs-no-std returns the Result whichever way the
@@ -845,9 +846,11 @@ func (g *gen) emitVisitor(f *rfile, name string, fields []*ir.Field) {
 	// The no-std twin keeps its storage in the caller, so its capacity is named
 	// here: the message's max encoded size, which bounds any single payload
 	// inside it. corelib-rs-no-std requires a maxlen on every string/blob in BOTH
-	// storage modes, so that bound always resolves from the schema, and the
-	// per-field maxlen guard rejects an over-long payload before a byte ever
-	// reaches the accumulator.
+	// storage modes, so that bound always resolves from the schema, and
+	// fixlen_begin has already refused an over-long payload at its LENGTH WORD
+	// before a byte reaches the accumulator. A payload that gets past that word
+	// therefore fits; the accumulator's own Err(Argument) arm below stays a
+	// backstop, and `inv` outranks it wherever both could be set.
 	//
 	// Keyed on the CORELIB, not on the no_std build flag: PayloadAcc<N> is what
 	// corelib-rs-no-std declares whichever way the crate is built, so
@@ -1312,7 +1315,6 @@ func (g *gen) emitVisitor(f *rfile, name string, fields []*ir.Field) {
 		// string: scalar strings + string-array elements
 		f.line("    fn string(&mut self, id: Id, total: usize, offset: usize, chunk: &[u8]) {")
 		g.emitDestGuard(f, fs, ir.KindString)
-		g.emitMaxlenGuard(f, fs, ir.KindString)
 		if g.limits.stringHas {
 			g.emitLimitGuard(f, fs, ir.KindString, "MAX_DYN_STRING_LEN")
 		}
@@ -1396,7 +1398,6 @@ func (g *gen) emitVisitor(f *rfile, name string, fields []*ir.Field) {
 		// question from whether a skipped field is materialized at all.
 		f.line("    fn blob(&mut self, id: Id, total: usize, offset: usize, chunk: &[u8]) {")
 		g.emitDestGuard(f, fs, ir.KindBlob)
-		g.emitMaxlenGuard(f, fs, ir.KindBlob)
 		if g.limits.blobHas {
 			g.emitLimitGuard(f, fs, ir.KindBlob, "MAX_DYN_BLOB_LEN")
 		}
@@ -1716,7 +1717,7 @@ func (g *gen) emitVisitor(f *rfile, name string, fields []*ir.Field) {
 // continuation byte at an undeclared id turned an otherwise valid message into
 // INVALID, and a 1 MiB blob at an undeclared id was copied out whole.
 //
-// Placed ahead of the maxlen/limit guards, which are already destination-scoped
+// Placed ahead of the receiver-cap guard, which is already destination-scoped
 // and therefore unaffected — §5.2's INVALID-over-INCOMPLETE ordering is
 // preserved.
 func (g *gen) emitDestGuard(f *rfile, fs []frame, kind ir.Kind) {
@@ -1910,39 +1911,6 @@ func (g *gen) fixlenBeginArms(fs []frame, kind ir.Kind, capName string) []string
 		}
 	}
 	return arms
-}
-
-// emitMaxlenGuard emits the schema-maxlen reject (MESSAGE_SPEC §7.1) at the top
-// of the string/blob callback, the bounded-field twin of emitLimitGuard: every
-// field of that kind with a schema `maxlen` (scalar fields and wrapper-sequence
-// elements alike) gets a (loc, id) arm that rejects a declared `total` above its
-// own maxlen with the sticky `inv` flag (Error::InvalidMsg) — before any bytes
-// accumulate and never truncated. Emitted on BOTH profiles: on no_std it also
-// supersedes the heapless BufferFull path so the outcome is INVALID, not a
-// capacity error.
-func (g *gen) emitMaxlenGuard(f *rfile, fs []frame, kind ir.Kind) {
-	var arms []string
-	for _, fr := range fs {
-		if fr.kind == fkSeqArr && fr.elemKind == kind && fr.emax >= 0 {
-			arms = append(arms, fmt.Sprintf("            (_Loc::%s, _) => if total > %d { self.inv = true; return; },", fr.loc, fr.emax))
-		}
-		for _, fld := range fr.fields {
-			if fld.Kind == kind && fld.HasMaxlen {
-				arms = append(arms, fmt.Sprintf("            (_Loc::%s, %d) => if total > %d { self.inv = true; return; },", fr.loc, fld.ID, fld.Maxlen))
-			}
-		}
-	}
-	if len(arms) == 0 {
-		return
-	}
-	f.line("        // Bounded fields: a wire byte length above the schema maxlen is")
-	f.line("        // malformed input, INVALID before any bytes accumulate (never truncated).")
-	f.line("        match (self.cur, id) {")
-	for _, a := range arms {
-		f.line("%s", a)
-	}
-	f.line("            _ => {}")
-	f.line("        }")
 }
 
 // emitNativeArrayStore emits one match arm for a direct native array element: a

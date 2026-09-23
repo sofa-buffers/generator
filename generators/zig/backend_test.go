@@ -97,11 +97,11 @@ func TestZigStructural(t *testing.T) {
 		// after the streaming path stopped borrowing -- so one sentence of it is
 		// pinned here.
 		"/// stitched item overwrites it. And decode() copies too, though it could",
-		// Bounded string: over-maxlen -> INVALID (§7.1), decided on the announced
-		// `total` BEFORE the payload is taken; then the string bind, which
-		// decides strict UTF-8 -> INVALID (issue #85) and hands back the copy;
-		// else stored.
-		"11 => if (total > 50) { self.inv = true; } else { const chunk = self._takeStr(total, offset, _chunk) orelse return; self.m.somestring = chunk; },",
+		// Bounded string: over-maxlen -> INVALID (§7.1) was decided on the
+		// announced `total` at the LENGTH WORD, in fixlenBegin, and nowhere else
+		// (#594). The arm is the string bind alone, which decides strict UTF-8 ->
+		// INVALID (issue #85) and hands back the copy; else stored.
+		"11 => { const chunk = self._takeStr(total, offset, _chunk) orelse return; self.m.somestring = chunk; },",
 		"/// Unsigned 8-bit integer", // descriptions as doc comments
 	} {
 		if !containsCode(m, want) {
@@ -218,10 +218,10 @@ messages:
 		// The count:N over-index bound (#142) travels INTO the placement as a
 		// comptime .{ .schema = N }, so the comparison is the corelib's and only
 		// the refusal is emitted; the maxlen:16 over-length element reject
-		// (MESSAGE_SPEC §7.1) stays a generated guard in front of it. Both flag
-		// self.inv, and both decide before the destination grows.
-		`.root_bs => if (total > 16) { self.inv = true; } else { const chunk = self._takeStr(total, offset, _chunk) orelse return; sofab.arrays.placeElem([]const u8, .{ .schema = 4 }, self.alloc, &(self.m.bs), id, "", chunk) catch { self.inv = true; }; },`, // string element: strict UTF-8 inside the string bind
-		`.root_bb => if (total > 16) { self.inv = true; } else { const chunk = self._take(total, offset, _chunk) orelse return; sofab.arrays.placeElem([]const u8, .{ .schema = 3 }, self.alloc, &(self.m.bb), id, "", chunk) catch { self.inv = true; }; },`,    // blob element: opaque, stored verbatim
+		// (MESSAGE_SPEC §7.1) is taken at the element's LENGTH WORD and nowhere
+		// else (#594), so the payload arm carries no length test at all.
+		`.root_bs => { const chunk = self._takeStr(total, offset, _chunk) orelse return; sofab.arrays.placeElem([]const u8, .{ .schema = 4 }, self.alloc, &(self.m.bs), id, "", chunk) catch { self.inv = true; }; },`, // string element: strict UTF-8 inside the string bind
+		`.root_bb => { const chunk = self._take(total, offset, _chunk) orelse return; sofab.arrays.placeElem([]const u8, .{ .schema = 3 }, self.alloc, &(self.m.bb), id, "", chunk) catch { self.inv = true; }; },`,    // blob element: opaque, stored verbatim
 		// bounded struct: reserveElem bounds the index BEFORE it grows, and `id`
 		// reaches it unincremented -- forming id + 1 in front of the bound is
 		// exactly what §6.2.1 rules out.
@@ -286,14 +286,19 @@ messages:
 	}
 	m := string(files[0].Content)
 	for _, want := range []string{
-		// Bounded scalar string and blob: reject over-maxlen before storing.
-		`0 => if (total > 8) { self.inv = true; } else { const chunk = self._takeStr(total, offset, _chunk) orelse return; self.m.bs = chunk; },`, // string: strict UTF-8 inside the bind
-		`1 => if (total > 8) { self.inv = true; } else { const chunk = self._take(total, offset, _chunk) orelse return; self.m.bb = chunk; },`,    // blob: opaque, verbatim
-		// Bounded wrapper string element in an UNCOUNTED array: maxlen guard, then
-		// the schema-bounded string bind (strict UTF-8 inside it), then the
-		// placement -- which carries the array's receiver cap on the element
-		// index as an argument (CORELIB_PLAN §6.2.1).
-		`if (total > 5) { self.inv = true; } else { const chunk = self._takeStr(total, offset, _chunk) orelse return; sofab.arrays.placeElem([]const u8, .{ .receiver = max_dyn_array_count }, self.alloc, &(self.m.ws), id, "", chunk) catch { self.lim = true; }; }`,
+		// Bounded scalar string and blob: over-maxlen is rejected at the LENGTH
+		// WORD (fixlenBegin), so the payload arm is the bind and the store.
+		`0 => { const chunk = self._takeStr(total, offset, _chunk) orelse return; self.m.bs = chunk; },`, // string: strict UTF-8 inside the bind
+		`1 => { const chunk = self._take(total, offset, _chunk) orelse return; self.m.bb = chunk; },`,    // blob: opaque, verbatim
+		// Bounded wrapper string element in an UNCOUNTED array: the schema-bounded
+		// string bind (strict UTF-8 inside it), then the placement -- which carries
+		// the array's receiver cap on the element index as an argument
+		// (CORELIB_PLAN §6.2.1). The element maxlen is the length word's, not here.
+		`.root_ws => { const chunk = self._takeStr(total, offset, _chunk) orelse return; sofab.arrays.placeElem([]const u8, .{ .receiver = max_dyn_array_count }, self.alloc, &(self.m.ws), id, "", chunk) catch { self.lim = true; }; },`,
+		// And the bounds themselves, each compared exactly once, at its length word.
+		`0 => if (total > 8) return sofab.Error.InvalidMessage,`,
+		`1 => if (total > 8) return sofab.Error.InvalidMessage,`,
+		`.root_ws => { if (total > 5) return sofab.Error.InvalidMessage; },`,
 		// Surfaced as INVALID.
 		`if (v.inv) return error.InvalidMessage;`,
 	} {
@@ -1777,8 +1782,13 @@ messages:
 	if !containsCode(m, ".root_sa => { try sofab.arrays.overIndex(.{ .schema = 3 }, id); if (total > 6) return sofab.Error.InvalidMessage; },") {
 		t.Error("a wrapper element must latch over-index then element maxlen")
 	}
-	if countCode(m, "total > 8") < 2 {
-		t.Error("the payload-side maxlen guard must remain as defense")
+	// Exactly one comparison per bound (#594): the length word's. The payload
+	// callbacks restate none of them.
+	if n := countCode(m, "total > 8"); n != 1 {
+		t.Errorf("a scalar maxlen must be compared exactly once, got %d", n)
+	}
+	if n := countCode(m, "total > 6"); n != 1 {
+		t.Errorf("an element maxlen must be compared exactly once, got %d", n)
 	}
 }
 
@@ -2062,7 +2072,7 @@ messages:
 	}
 	blob := m[strings.Index(m, "pub fn blob("):]
 	blob = blob[:strings.Index(blob, "\n    }")]
-	if !containsCode(blob, "2 => if (total > 8) { self.inv = true; } else { const chunk = self._take(total, offset, _chunk) orelse return; self.m.bb = chunk; },") {
+	if !containsCode(blob, "2 => { const chunk = self._take(total, offset, _chunk) orelse return; self.m.bb = chunk; },") {
 		t.Errorf("blob must stay on the plain _take bind, stored verbatim:\n%s", blob)
 	}
 }

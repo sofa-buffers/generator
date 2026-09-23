@@ -924,8 +924,12 @@ func (g *gen) emitFloatVisit(f *zfile, fs []frame, name string, kind ir.Kind, cb
 // subtype arrived at a field id, and a contradicting one is a §7.3 skip rather
 // than this field's length (#224/#259, one position over).
 //
-// The payload-side guards stay -- unreachable for a message that gets this far,
-// and the only thing still bounding a consumer built against an older corelib.
+// This is the ONLY place a schema maxlen is compared in generated Zig. The
+// payload callbacks used to repeat it; they no longer do (#594). The repeat was
+// unreachable -- this hook RETURNS an error, which fails the field and ends the
+// decode, so the payload callback is never entered for a length word it refused
+// -- and ARCHITECTURE §8 does not count a second copy at the call site as
+// defence in depth.
 func (g *gen) emitFixlenBegin(f *zfile, fs []frame, name string) {
 	str, strID, strTotal := g.fixlenBeginArms(fs, ir.KindString)
 	blob, blobID, blobTotal := g.fixlenBeginArms(fs, ir.KindBlob)
@@ -1137,17 +1141,19 @@ func (g *gen) fixlenBeginArms(fs []frame, kind ir.Kind) (arms []string, usesID, 
 //
 // Every arm binds its own payload, and binds it LAST (generator#432): the id has
 // matched, the location is this field's, and the arm's bound -- a schema
-// `maxlen` decided here, a receiver cap handed to the corelib -- has already
-// been applied to the announced `total`. Nothing above the switch touches the
-// bytes, so a payload MESSAGE_SPEC §7.3 walks over costs nothing and a payload
-// CORELIB_PLAN §6.2.1 refuses is never committed.
+// `maxlen` decided at the length word, a receiver cap handed to the corelib --
+// has already been applied to the announced `total`. Nothing above the switch
+// touches the bytes, so a payload MESSAGE_SPEC §7.3 walks over costs nothing and
+// a payload CORELIB_PLAN §6.2.1 refuses is never committed.
 //
 // Which bind an arm takes follows the same split as everywhere else in this
 // backend:
 //
-//   - `_take` -- the SCHEMA-bounded entry point. A `maxlen` is a validity bound
-//     (MESSAGE_SPEC §7.1 -> INVALID) and stays generated code's own test, in
-//     front of the call, because the caller owns that verdict.
+//   - `_take` -- the uncapped entry point, for a field the SCHEMA bounds. Its
+//     `maxlen` is a validity bound (MESSAGE_SPEC §7.1 -> INVALID) and was
+//     already decided one hook earlier, at the LENGTH WORD in fixlenBegin, whose
+//     refusal is an error return and therefore terminal. No arm here repeats it
+//     (#594).
 //   - `_takeCapped` -- for a field the schema leaves unbounded, carrying
 //     max_dyn_string_len / max_dyn_blob_len (generator#102) as an ARGUMENT. The
 //     corelib compares it at the announced length and refuses with
@@ -1155,9 +1161,10 @@ func (g *gen) fixlenBeginArms(fs []frame, kind ir.Kind) (arms []string, usesID, 
 //     enforcement point §6.2.1 names; generated code emits no length test of its
 //     own, so the rule has one implementation.
 //
-// The length-word latch in fixlenBegin is not that second implementation: it
-// owns the VERDICT's timing (a message truncated right after an over-cap header
-// is LimitExceeded, not INCOMPLETE -- #438), while the bind owns the bytes.
+// The length-word latch in fixlenBegin is not a second implementation of either
+// rule: it owns the VERDICT's timing (a message truncated right after an
+// over-bound header is INVALID / LimitExceeded, not INCOMPLETE -- #267, #438),
+// while the bind owns the bytes.
 func (g *gen) emitPayloadVisit(f *zfile, fs []frame, name string, kind ir.Kind, cb string) {
 	active, capName := g.limits.stringHas, "max_dyn_string_len"
 	if kind == ir.KindBlob {
@@ -1224,16 +1231,13 @@ func (g *gen) emitPayloadVisit(f *zfile, fs []frame, name string, kind ir.Kind, 
 			// test of its own (CORELIB_PLAN §6.2.1, generator#432).
 			// A string element is UTF-8-validated inside its bind; blob is
 			// stored verbatim.
+			// A bounded element (schema maxlen) carries no length test here: its
+			// bound was decided at the element's LENGTH WORD by the fixlenBegin arm,
+			// which RETURNS an error and so ends the decode -- this callback is not
+			// reached for a payload it refused (#594). A bounded element takes the
+			// uncapped `_take` because the schema bound and the receiver cap are
+			// mutually exclusive (CORELIB_PLAN §6.2.1).
 			body := "{ " + bind(active && fr.elemDynLen) + " " + set + "; }"
-			// Bounded element (schema maxlen): a wire byte length above the maxlen
-			// is malformed input, rejected as INVALID before the payload is taken,
-			// never truncated (MESSAGE_SPEC §7.1). A validity bound is generated
-			// code's to decide, which is why it sits in front of the uncapped
-			// `_take` rather than riding a capped call. Mutually exclusive with the
-			// cap above, which only governs an unbounded element.
-			if fr.emax >= 0 {
-				body = fmt.Sprintf("if (total > %d) { self.inv = true; } else %s", fr.emax, body)
-			}
 			// No index test is emitted here for either flavour: placeElem holds the
 			// comparison (see arrayBound), and for a schema-counted array the same
 			// bound was already decided at the element's LENGTH WORD by the
@@ -1252,13 +1256,14 @@ func (g *gen) emitPayloadVisit(f *zfile, fs []frame, name string, kind ir.Kind, 
 			store := fr.path + "." + zigIdent(fld.Name) + " = chunk;"
 			switch {
 			case fld.HasMaxlen:
-				// Bounded scalar string/blob: a wire byte length above the schema
-				// maxlen is malformed input, rejected as INVALID before the payload
-				// is taken, never truncated (MESSAGE_SPEC §7.1). A validity bound is
-				// generated code's own, decided on the announced `total`, and only a
-				// field that clears it reaches the uncapped `_take`. A string is then
-				// UTF-8-validated inside its bind; blob is stored verbatim.
-				fa.arms = append(fa.arms, fmt.Sprintf("%d => if (total > %d) { self.inv = true; } else { %s %s },", fld.ID, fld.Maxlen, bind(false), store))
+				// Bounded scalar string/blob: no length test here either. The schema
+				// maxlen was decided at the LENGTH WORD by fixlenBegin, whose refusal
+				// is an error return and therefore terminal, so this arm only ever
+				// runs for a `total` that already cleared the bound (#594). It takes
+				// the uncapped `_take` because a schema bound and a receiver cap are
+				// mutually exclusive (CORELIB_PLAN §6.2.1). A string is UTF-8-validated
+				// inside its bind; blob is stored verbatim.
+				fa.arms = append(fa.arms, fmt.Sprintf("%d => { %s %s },", fld.ID, bind(false), store))
 			case active:
 				// Unbounded scalar under a configured cap (#102): the number rides
 				// the corelib call, which compares it at the announced length and
