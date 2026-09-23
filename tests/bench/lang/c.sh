@@ -14,15 +14,19 @@
 # corelib it calls, same as every other row.
 #
 # bench_size below now links generated sources + corelib-c-cpp's
-# object.c/ostream.c/istream.c/utf8.c into one freestanding image and sizes
-# THAT, mirroring what rust.sh already had to do (and documents why). This is
-# a real methodology change: the `c` row's numbers jump by several KB and are
-# not comparable with what was committed before generator#589.
+# object.c/ostream.c/istream.c/utf8.c into one freestanding image, the same
+# link step rust.sh already had to do, and then sums the SofaBuffers symbols
+# that survived --gc-sections in it (tests/bench/lib/sum_syms.py) -- the
+# linked image also carries libc/libgcc/harness glue that is not SofaBuffers
+# code, so sizing the whole image would not price the package either. This is
+# a real methodology change: the `c` row's numbers are not comparable with
+# what was committed before generator#589.
 #
 # This is now a DIFFERENT question from what corelib-c-cpp/tools/footprint.sh
 # answers for the corelib alone (`size` on the unlinked static-library archive,
 # no driver, no --gc-sections -- "how big is the corelib on its own"). This
-# recipe answers "how big is what a c-cpp consumer ships", which needs a link.
+# recipe answers "how much SofaBuffers code does a c-cpp consumer ship",
+# which needs a link to be reachability-correct.
 
 # ---- Ir/op (method: toggle) -------------------------------------------------
 #
@@ -53,24 +57,30 @@ bench_cmd_ir() {
 #   echoes "<text> <data> <bss>"
 #
 # Links the generated sources with corelib-c-cpp's object.c/ostream.c/istream.c/
-# utf8.c into one freestanding image, then sizes the linked ELF -- see the
-# generator#589 note above for why an unlinked object of the generated sources
-# alone is the wrong thing to size.
+# utf8.c into one freestanding image, then sums the SofaBuffers symbols in the
+# linked, gc-sectioned ELF (tests/bench/lib/sum_syms.py) -- not an unlinked
+# object of the generated sources alone, which would leave the corelib out of
+# the number entirely and go blind to code moving between generated code and
+# the corelib; and not the whole linked image either, which would count the
+# freestanding glue below as if it were SofaBuffers cost.
 #
 # -nostdlib -nostartfiles: no libc, no crt0. footprint_root.c below defines the
 # handful of libc symbols object.c/istream.c actually call (memset/memcpy/
 # memcmp/strncmp/strlen) as the plainest byte-loop implementations that could
 # work -- a floor on their cost, not an estimate (the same idea as the bump
-# allocator in tests/bench/lang/rust.sh). -DNDEBUG voids every assert() call
-# (ARCHITECTURE §8: bounds checks are debug-only assertions, so a debug build
-# measures code that never ships), which is what keeps __assert_func off that
-# list.
+# allocator in tests/bench/lang/rust.sh) -- and sum_syms.py excludes them (and
+# whatever -lgcc pulled in) by name, so their floor only has to be small enough
+# not to change *reachability* through --gc-sections, not small enough to be
+# uncounted. -DNDEBUG voids every assert() call (ARCHITECTURE §8: bounds
+# checks are debug-only assertions, so a debug build measures code that never
+# ships), which is what keeps __assert_func off the freestanding symbol list.
 #
 # footprint.ld is a minimal FLASH+RAM layout for linking only: nothing produced
 # here is ever flashed or run, only linked and sized, the same as rust.sh's
 # link.x. reset() is the single --gc-sections root, hardcoded to the default
 # bench schema/message (tests/bench/rows.json), the same as the cpp and rust
-# drivers.
+# drivers; its own symbol, and the static `buf` it declares, are excluded the
+# same way as the libc stubs.
 #
 # --specs=picolibc.specs (RV32IMC's `flags`, needed at compile time so the
 # compiler can find <assert.h>/<string.h>/... -- see
@@ -79,9 +89,6 @@ bench_cmd_ir() {
 # is still present at link time. link_flags below drops any --specs=* token
 # before the link step; -march/-mabi stay, since they select the -lgcc
 # multilib.
-#
-# .data should read 0: the generated code holds only const descriptor tables
-# (.rodata, i.e. flash). A nonzero .data means one of them landed in RAM.
 bench_size() {
     local cc="$1" size_tool="$2" flags="$3" gen="$4" corelib="$5" work="$6"
     local build="$work/c-fp" hdr
@@ -183,5 +190,18 @@ EOF
         -Wl,-T,"$build/footprint.ld" "${objs[@]}" -lgcc \
         -o "$build/out.elf" 2>>"$work/c.err" || return 1
 
-    "$size_tool" "$build/out.elf" | awk 'NR==2 {print $1, $2, $3}'
+    # The linked image also carries footprint_root.c's own symbols (the libc
+    # stubs, `buf`, `reset` itself) and whatever -lgcc pulled in for a
+    # compiler-emitted helper call (64-bit shift/divide on a core with no
+    # hardware support) -- neither is SofaBuffers code. sum_syms.py sums
+    # .text/.rodata/.data/.bss by SYMBOL over the linked, gc-sectioned image,
+    # excluding exactly those two sets, rather than sizing the whole image:
+    # gc-sections is still what makes the numbers reachability-correct, this
+    # just decides which of the surviving bytes count.
+    local nm_tool="${size_tool%size}nm" libgcc
+    # shellcheck disable=SC2086
+    libgcc="$("$cc" $link_flags -print-libgcc-file-name)"
+    python3 "$(dirname "${BASH_SOURCE[0]}")/../lib/sum_syms.py" \
+        "$nm_tool" "$build/out.elf" "$libgcc" 0x20000000 \
+        memset memcpy memcmp strncmp strlen reset buf
 }

@@ -65,12 +65,12 @@ zig                       0.16.0        zig,zig-unbounded
 
 ## footprint
 row                profile    arch            text    data   bss
-c                  footprint  ARMv6-m         6640    0      1037
-c                  footprint  ARMv7-m+fp.dp   5776    0      1037
-c                  footprint  RV32IMC         6576    0      1037
-cpp-c-cpp          footprint  ARMv6-m         10244   0      1220
-cpp-c-cpp          footprint  ARMv7-m+fp.dp   9028    0      1220
-cpp-c-cpp-dyn      footprint  ARMv6-m         17276   0      5444
-cpp-c-cpp-dyn      footprint  ARMv7-m+fp.dp   15160   0      5444
+c                  footprint  ARMv6-m         5538    0      0
+c                  footprint  ARMv7-m+fp.dp   5552    0      0
+c                  footprint  RV32IMC         6066    0      0
+cpp-c-cpp          footprint  ARMv6-m         9118    0      180
+cpp-c-cpp          footprint  ARMv7-m+fp.dp   8710    0      180
+cpp-c-cpp-dyn      footprint  ARMv6-m         12296   0      300
+cpp-c-cpp-dyn      footprint  ARMv7-m+fp.dp   12022   0      300
 rust-rs-no-std     footprint  thumbv6m        9961    0      0
 rust-rs-no-std-dyn footprint  thumbv6m        11741   0      4

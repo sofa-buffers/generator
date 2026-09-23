@@ -25,10 +25,11 @@
 # unlinked object, which never pulled corelib-c-cpp's four .c files in at all --
 # the same undercount c.sh had, and the same blind spot for code moving between
 # generated code and the corelib (generator#587). bench_size now links the
-# driver against object.c/ostream.c/istream.c/utf8.c and sizes the linked
-# image, mirroring c.sh and rust.sh. Both cpp-c-cpp rows' numbers jump by
-# several KB and are not comparable with what was committed before
-# generator#589.
+# driver against object.c/ostream.c/istream.c/utf8.c and sums the SofaBuffers
+# symbols that survived --gc-sections (tests/bench/lib/sum_syms.py), mirroring
+# c.sh and rust.sh -- the linked image also carries libc/libgcc/driver glue
+# that is not SofaBuffers code. Both cpp-c-cpp rows' numbers are not
+# comparable with what was committed before generator#589.
 
 # ---- Ir/op (method: toggle) -------------------------------------------------
 #
@@ -84,9 +85,10 @@ bench_cmd_ir() {
 # (non-empty std::vector fields) actually call it at what-would-be runtime.
 # Read the pair, not either row alone (rows.json's own note on -dyn).
 #
-# footprint.ld / --gc-sections / .data=0 expectation: see c.sh, which this
-# mirrors. RV32IMC's --specs=picolibc.specs special-case does not apply here --
-# ARM is the only arch this row ever runs on.
+# footprint.ld / --gc-sections / summing by symbol instead of sizing the whole
+# image (tests/bench/lib/sum_syms.py): see c.sh, which this mirrors. RV32IMC's
+# --specs=picolibc.specs special-case does not apply here -- ARM is the only
+# arch this row ever runs on.
 bench_size() {
     local cxx="$1" size_tool="$2" flags="$3" gen="$4" corelib="$5" work="$6"
     local cc="${cxx/g++/gcc}"
@@ -230,5 +232,30 @@ EOF
         -Wl,--gc-sections -Wl,-T,"$build/footprint.ld" "${objs[@]}" -lgcc \
         -o "$build/out.elf" 2>>"$work/cpp.err" || return 1
 
-    "$size_tool" "$build/out.elf" | awk 'NR==2 {print $1, $2, $3}'
+    # Sum only the SofaBuffers symbols in the linked, gc-sectioned image (see
+    # c.sh's matching comment): exclude the driver's own freestanding glue --
+    # at -Os, GCC inlines most of it away (operator delete, the guard
+    # functions and the __throw_* stubs are typically gone by the time nm sees
+    # this; only operator new and the libc loops usually survive as their own
+    # symbols, since each has more than one call site) -- and whatever -lgcc
+    # pulled in. Names not present in a given build simply match nothing.
+    local nm_tool="${size_tool%size}nm" libgcc
+    # shellcheck disable=SC2086
+    libgcc="$("$cxx" $flags -print-libgcc-file-name)"
+    local exclude=(
+        memset memcpy memmove memcmp strncmp strlen
+        reset "reset::buf"
+        "operator new(unsigned int)" "operator new[](unsigned int)"
+        "operator delete(void*)" "operator delete(void*, unsigned int)"
+        "operator delete[](void*)" "operator delete[](void*, unsigned int)"
+        __cxa_guard_acquire __cxa_guard_release __cxa_guard_abort
+        "std::__throw_length_error(char const*)" "std::__throw_bad_alloc()"
+        "std::__throw_out_of_range(char const*)"
+        "std::__throw_out_of_range_fmt(char const*, ...)"
+        "std::__throw_logic_error(char const*)"
+        "std::__throw_bad_array_new_length()"
+        "(anonymous namespace)::arena" "(anonymous namespace)::arena_used"
+    )
+    python3 "$(dirname "${BASH_SOURCE[0]}")/../lib/sum_syms.py" \
+        "$nm_tool" "$build/out.elf" "$libgcc" 0x20000000 "${exclude[@]}"
 }
