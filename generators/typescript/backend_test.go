@@ -374,21 +374,27 @@ func TestTSMaxlenReject(t *testing.T) {
 			t.Errorf("message.ts must take the maxlen verdict at the length word: missing %q", want)
 		}
 	}
+	// (b) The payload callback does NOT re-take the verdict (#594): fixlenBegin
+	// throws, which ends the decode, so string()/blob() are never entered for a
+	// length word it refused -- one comparison per bounded field, at the word
+	// that established the violation, which is also what keeps the verdict
+	// INVALID when the message is truncated inside the payload (#267).
 	for _, want := range []string{
-		// (b) The payload callback re-takes the same verdict against `total`, the
-		// word that established the violation -- not against the assembled payload
-		// -- so an over-maxlen field stays INVALID even when the message is
-		// truncated inside it, and an over-long payload is never buffered (#267).
-		`case 0: { if (total > 8) throw new SofabError(SofabErrorCode.InvalidMsg, "s: string byte length above schema maxlen 8");`,
-		`case 1: { if (total > 8) throw new SofabError(SofabErrorCode.InvalidMsg, "b: blob byte length above schema maxlen 8");`,
-		// (c) A bounded wrapper-string ELEMENT carries its maxlen into the corelib
-		// collector, which takes the verdict at the element's length word rather
-		// than after its payload -- generator#300's larger half.
-		`new StringSeq(_t, this.a, -1, 5, "es", MAX_DYN_ARRAY_COUNT, MAX_DYN_STRING_LEN)`,
+		`case 0: { if (offset === 0 && end - start === total) { this.o.s = decodeUtf8(src, start, end); }`,
+		`case 1: { { const _p = this.a.take(total, offset, src, start, end); if (_p !== null) this.o.b = _p; } break; }`,
 	} {
 		if !strings.Contains(mod, want) {
-			t.Errorf("message.ts missing maxlen guard %q\n%s", want, mod)
+			t.Errorf("message.ts payload arm must carry no maxlen test: missing %q\n%s", want, mod)
 		}
+	}
+	if n := strings.Count(mod, "above schema maxlen"); n != 2 {
+		t.Errorf("expected exactly 2 maxlen comparisons (one per bounded scalar), got %d\n%s", n, mod)
+	}
+	// (c) A bounded wrapper-string ELEMENT carries its maxlen into the corelib
+	// collector, which takes the verdict at the element's length word rather
+	// than after its payload -- generator#300's larger half.
+	if want := `new StringSeq(_t, this.a, -1, 5, "es", MAX_DYN_ARRAY_COUNT, MAX_DYN_STRING_LEN)`; !strings.Contains(mod, want) {
+		t.Errorf("message.ts missing maxlen guard %q\n%s", want, mod)
 	}
 	// (d) An unbounded string keeps the bare store: never truncated, no guard.
 	if !strings.Contains(mod, `case 2: { if (offset === 0 && end - start === total) { this.o.u = decodeUtf8(src, start, end); }`) {

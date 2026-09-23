@@ -316,8 +316,10 @@ messages:
 // length exceeds its maxlen is malformed input (MESSAGE_SPEC §7.1) and must be
 // rejected as INVALID_MSG at the length header, before any byte accumulates --
 // never truncated. This covers scalar fields and wrapper-array string/blob
-// elements alike. A schema-unbounded field carries no maxlen guard (it keeps
-// only the generator#102 configured-limit behavior).
+// elements alike. The comparison happens ONCE, in fixlenBegin at the length word
+// (#594); the payload callbacks restate nothing. A schema-unbounded field
+// carries no maxlen guard (it keeps only the generator#102 configured-limit
+// behavior).
 func TestJavaMaxlenReject(t *testing.T) {
 	src := "version: 1\nmessages:\n  M:\n    payload:\n" +
 		"      s:   { id: 0, type: string, maxlen: 8 }\n" +
@@ -326,9 +328,9 @@ func TestJavaMaxlenReject(t *testing.T) {
 		"      arr: { id: 3, type: array, items: { type: string, maxlen: 5 } }\n"
 	m := genJavaFromYAML(t, src, map[string]any{})["src/main/java/message/M.java"]
 	for _, want := range []string{
-		// Bounded scalar string: reject total > maxlen at the top of string().
+		// Bounded scalar string: reject total > maxlen at its LENGTH WORD.
 		`case 0: if (total > 8) throw Sofab.invalid("s: string length above schema maxlen 8"); break;`,
-		// Bounded scalar blob: reject total > maxlen at the top of blob().
+		// Bounded scalar blob: reject total > maxlen at its LENGTH WORD.
 		`case 1: if (total > 8) throw Sofab.invalid("b: blob length above schema maxlen 8"); break;`,
 		// Bounded wrapper string element: reject total > element maxlen.
 		`if (total > 5) throw Sofab.invalid("arr element: string length above schema maxlen 5"); break;`,
@@ -336,6 +338,14 @@ func TestJavaMaxlenReject(t *testing.T) {
 		if !strings.Contains(m, want) {
 			t.Errorf("M.java missing maxlen reject %q", want)
 		}
+	}
+	// All three sit in fixlenBegin and only there: three bounded destinations,
+	// three comparisons (#594).
+	if n := strings.Count(m, "above schema maxlen"); n != 3 {
+		t.Errorf("expected 3 maxlen comparisons (one per bounded destination), got %d", n)
+	}
+	if i := strings.Index(m, "public void fixlenBegin("); i < 0 || strings.Index(m, "above schema maxlen") < i {
+		t.Error("the maxlen comparison must live in fixlenBegin")
 	}
 	// The unbounded string `u` (id 2) gets no maxlen guard.
 	if strings.Contains(m, `"u: string length above schema maxlen`) {
@@ -1207,9 +1217,11 @@ messages:
 			t.Errorf("string(): the destination guard must precede %q:\n%s", after, fn)
 		}
 	}
-	// The maxlen reject stays destination-scoped behind it.
-	if i := strings.Index(fn, "above schema maxlen"); i < 0 || guardEnd > i {
-		t.Errorf("string(): the maxlen reject must survive behind the guard:\n%s", fn)
+	// No schema-maxlen comparison is emitted in the payload callback at all
+	// (#594): the one comparison is fixlenBegin's, at the length word, and its
+	// throw ends the decode before string() is entered.
+	if strings.Contains(fn, "above schema maxlen") {
+		t.Errorf("string(): the schema maxlen must be compared only at the length word:\n%s", fn)
 	}
 }
 
@@ -1259,9 +1271,10 @@ messages:
 			t.Errorf("blob(): the destination guard must precede %q:\n%s", after, fn)
 		}
 	}
-	// The maxlen reject stays destination-scoped behind it.
-	if i := strings.Index(fn, "above schema maxlen"); i < 0 || guardEnd > i {
-		t.Errorf("blob(): the maxlen reject must survive behind the guard:\n%s", fn)
+	// No schema-maxlen comparison in the payload callback (#594) -- the one
+	// comparison is fixlenBegin's, at the length word.
+	if strings.Contains(fn, "above schema maxlen") {
+		t.Errorf("blob(): the schema maxlen must be compared only at the length word:\n%s", fn)
 	}
 	// Every blob here declares a maxlen, so no receiver cap governs any of them:
 	// the accumulator is handed Bound.SCHEMA_BOUNDED, which names the rule that
@@ -1531,9 +1544,13 @@ messages:
 	if !strings.Contains(m, "Seq.checkIndex(id, SCHEMA_COUNT_3); if (total > 6) throw") {
 		t.Error("a wrapper element must latch over-index and element maxlen")
 	}
-	// The payload-side guard stays as defense for an older corelib.
-	if strings.Count(m, "total > 8") < 2 {
-		t.Error("the payload-side maxlen guard must remain")
+	// Exactly one comparison per bound (#594): the length word's. The payload
+	// callbacks restate none of them.
+	if n := strings.Count(m, "total > 8"); n != 1 {
+		t.Errorf("a scalar maxlen must be compared exactly once, got %d", n)
+	}
+	if n := strings.Count(m, "total > 6"); n != 1 {
+		t.Errorf("an element maxlen must be compared exactly once, got %d", n)
 	}
 }
 

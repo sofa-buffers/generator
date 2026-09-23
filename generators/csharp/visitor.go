@@ -296,11 +296,11 @@ func hasSeqFrame(fs []frame) bool {
 }
 
 // payloadCapArms builds the (scope, id) arms of the String/Blob callback's
-// single dispatch: they resolve the DESTINATION, apply the schema bound, and
-// carry the receiver cap into the PayloadAcc call that follows.
+// single dispatch: they resolve the DESTINATION and carry the bound that governs
+// it into the PayloadAcc call that follows.
 //
-// One switch, three jobs, because all three answer the same question -- *what is
-// this (scope, id), and what is it read under?*
+// One switch, two jobs, because both answer the same question -- *what is this
+// (scope, id), and what is it read under?*
 //
 //   - Destination. An id this scope does not declare gets no arm, so the
 //     `default: return` skips it before a byte is buffered, decoded or checked.
@@ -309,15 +309,14 @@ func hasSeqFrame(fs []frame) bool {
 //     contradicts the declared one arrives at an id this callback does not bind
 //     and leaves here -- ahead of everything below, so a skipped field is never
 //     bounded and never capped (§6.2.1, "a skipped field is never capped").
-//   - Schema bound. A field the schema bounds carries its own `maxlen`, and a
-//     wire `total` above it is malformed input: InvalidMessage at the length
-//     header, before any bytes accumulate, never truncated (MESSAGE_SPEC §7.1).
-//   - Receiver cap. `_cap` is the number PayloadAcc compares `total` against.
-//     For a schema-unbounded field it is the configured max_dyn_* constant; for a
-//     bounded one it is that field's own `maxlen`, which the arm has just
-//     enforced and under which the corelib's comparison can no longer fire -- the
-//     schema bound governs there, and its category is INVALID, not LimitExceeded
-//     (CORELIB_PLAN §6.3).
+//   - Bound. `_cap` is the number PayloadAcc compares `total` against. For a
+//     schema-unbounded field it is the configured max_dyn_* constant; for a
+//     bounded one it is that field's own `maxlen`, under which the corelib's
+//     comparison can no longer fire -- FixlenBegin already threw InvalidMessage
+//     at the LENGTH WORD for anything above it, and that throw ends the decode,
+//     so this callback is not even entered (#594). No arm restates the schema
+//     bound: its category is INVALID, not LimitExceeded (CORELIB_PLAN §6.3), and
+//     it has one comparison, at the length word.
 //
 // Why the cap travels rather than being compared here: §6.2.1 fixes the
 // PROVENANCE of the number (generated code's, always) separately from the SITE of
@@ -328,11 +327,10 @@ func hasSeqFrame(fs []frame) bool {
 // of standing as a branch in front of it. The number stays this layer's: passed
 // per call, retained nowhere, and with no omitted-argument spelling of
 // "unlimited" -- the parameter is required (corelib-cs#101).
-func (g *gen) payloadCapArms(fs []frame, kind ir.Kind, constName, what string) []string {
+func (g *gen) payloadCapArms(fs []frame, kind ir.Kind, constName string) []string {
 	var arms []string
-	bounded := func(loc, id, name string, max int64) string {
-		return fmt.Sprintf("            case (%s, %s): if (total > %d) throw new SofabException(SofabError.InvalidMessage, \"%s: %s above schema maxlen %d\"); _cap = %d; break;",
-			loc, id, max, name, what, max, max)
+	bounded := func(loc, id string, max int64) string {
+		return fmt.Sprintf("            case (%s, %s): _cap = %d; break;", loc, id, max)
 	}
 	for _, fr := range fs {
 		if fr.isArr {
@@ -340,7 +338,7 @@ func (g *gen) payloadCapArms(fs []frame, kind ir.Kind, constName, what string) [
 				continue
 			}
 			if fr.emax >= 0 {
-				arms = append(arms, bounded(fr.loc, "_", fr.loc+" element", fr.emax))
+				arms = append(arms, bounded(fr.loc, "_", fr.emax))
 			} else {
 				arms = append(arms, fmt.Sprintf("            case (%s, _): _cap = %s; break;", fr.loc, constName))
 			}
@@ -351,7 +349,7 @@ func (g *gen) payloadCapArms(fs []frame, kind ir.Kind, constName, what string) [
 				continue
 			}
 			if fld.HasMaxlen {
-				arms = append(arms, bounded(fr.loc, fmt.Sprintf("%d", fld.ID), fld.Name, fld.Maxlen))
+				arms = append(arms, bounded(fr.loc, fmt.Sprintf("%d", fld.ID), fld.Maxlen))
 			} else {
 				arms = append(arms, fmt.Sprintf("            case (%s, %d): _cap = %s; break;", fr.loc, fld.ID, constName))
 			}
@@ -363,11 +361,12 @@ func (g *gen) payloadCapArms(fs []frame, kind ir.Kind, constName, what string) [
 // emitPayloadDispatch writes the arms payloadCapArms built as the one switch at
 // the top of the String/Blob callback.
 func (g *gen) emitPayloadDispatch(f *cfile, arms []string) {
-	f.line("        // Destination, schema bound and receiver cap, resolved in one dispatch.")
+	f.line("        // Destination and the bound it is read under, resolved in one dispatch.")
 	f.line("        // An id this scope does not declare leaves at `default` -- before a byte is")
-	f.line("        // buffered and before either bound applies, which is the S7.3 skip and is")
+	f.line("        // buffered and before any bound applies, which is the S7.3 skip and is")
 	f.line("        // why a skipped field is never capped. _cap is what PayloadAcc measures")
-	f.line("        // `total` against below: the configured cap, or a maxlen already enforced.")
+	f.line("        // `total` against below: the configured receiver cap, or the field's own")
+	f.line("        // schema maxlen, which FixlenBegin already enforced at the LENGTH WORD.")
 	f.line("        long _cap;")
 	f.line("        switch ((cur, id)) {")
 	for _, a := range arms {
@@ -436,7 +435,7 @@ func (g *gen) emitStringCb(f *cfile, fs []frame) {
 	f.line("    public void String(int id, int total, int offset, byte[] data, int chunkOffset, int chunkLength) {")
 	defer f.line("    }")
 
-	arms := g.payloadCapArms(fs, ir.KindString, "MaxDynStringLen", "string length")
+	arms := g.payloadCapArms(fs, ir.KindString, "MaxDynStringLen")
 	if len(arms) == 0 {
 		f.line("        // No field of this message is a string, so every string payload the")
 		f.line("        // decoder delivers is skipped whole -- its bytes are never inspected.")
@@ -502,7 +501,7 @@ func (g *gen) emitBlobCb(f *cfile, fs []frame) {
 	f.line("    public void Blob(int id, int total, int offset, byte[] data, int chunkOffset, int chunkLength) {")
 	defer f.line("    }")
 
-	arms := g.payloadCapArms(fs, ir.KindBlob, "MaxDynBlobLen", "blob length")
+	arms := g.payloadCapArms(fs, ir.KindBlob, "MaxDynBlobLen")
 	if len(arms) == 0 {
 		f.line("        // No field of this message is a blob, so every blob payload the decoder")
 		f.line("        // delivers is skipped whole -- its bytes are never copied out.")
@@ -573,8 +572,11 @@ func wholeCapCheck(arms []string, kind ir.Kind, constName string) string {
 // subtype arrived at a field id, and a contradicting one is a §7.3 skip rather
 // than this field's length (#224/#259, one position over).
 //
-// The payload-side guards stay -- unreachable for a message that gets this far,
-// and the only thing still bounding a consumer built against an older corelib.
+// This is the ONLY place a schema maxlen is compared in generated C#. The
+// payload callbacks used to repeat it; they no longer do (#594). The repeat was
+// unreachable -- this hook throws, which ends the decode, so String()/Blob() are
+// never entered for a length word it refused -- and ARCHITECTURE §8 does not
+// count a second copy at the call site as defence in depth.
 func (g *gen) emitFixlenBegin(f *cfile, fs []frame) {
 	str := g.fixlenBeginArms(fs, ir.KindString, "string length", g.capConst(fs, ir.KindString))
 	blob := g.fixlenBeginArms(fs, ir.KindBlob, "blob length", g.capConst(fs, ir.KindBlob))

@@ -698,19 +698,23 @@ func (g *gen) emitMaxlenArg(f *kfile, fs []frame, kind ir.Kind) bool {
 // already decides, at that word (CORELIB_PLAN §5.2, generator#267).
 //
 // The bounds are not new -- a scalar/element `maxlen` and a wrapper element's
-// `id >= count` are both rejected in the payload callback too -- but that
-// callback only fires once payload bytes arrive. A message truncated immediately
-// after the length word would therefore report INCOMPLETE, while the same bytes
-// read whole are INVALID. §5.2 makes INVALID dominate INCOMPLETE precisely
-// because the violation is already established by the bytes seen.
+// `id >= count` are refused on the payload path as well, by the corelib: the
+// maxlen travels as the `maxlen` argument of `acc.string` / `acc.blob` and the
+// index as `Seq.placeElem`'s bound. But that path only runs once payload bytes
+// arrive. A message truncated immediately after the length word would therefore
+// report INCOMPLETE, while the same bytes read whole are INVALID. §5.2 makes
+// INVALID dominate INCOMPLETE precisely because the violation is already
+// established by the bytes seen.
 //
 // Every guard sits inside the DECLARED-subtype test. The hook fires for whatever
 // fixlen subtype arrived at a field id -- the corelib resolves what arrived but
 // cannot know what was declared -- so a contradicting subtype is a §7.3 skip and
 // must not be measured against this field's bound.
 //
-// The payload-side guards stay: unreachable for a message that gets this far,
-// and the only thing still bounding a consumer built against an older corelib.
+// This is the ONLY place generated Kotlin compares a schema maxlen itself. The
+// payload callbacks state no bound of their own: they hand the number to the
+// corelib (`acc.string` / `acc.blob`, `Seq.placeElem`), which is unreachable for
+// a message that got past this hook, since the throw here ends the decode.
 func (g *gen) emitFixlenBegin(f *kfile, fs []frame) {
 	limStr, limBlob := kindDests(fs, ir.KindString), kindDests(fs, ir.KindBlob)
 	str := g.fixlenBeginArms(fs, ir.KindString, "string length", capConstFor(len(limStr) > 0, "MAX_DYN_STRING_LEN"))

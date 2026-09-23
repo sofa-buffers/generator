@@ -569,6 +569,39 @@ a reimplementation should emit code that honors all of them:
   had re-emitted, per field, placement and bound logic their corelib either
   already held or should have. The aim is generated code a user can read — clean,
   small, and made only of what their schema says.
+  **Where a literal `maxlen`/`count` guard stays, and why (generator#593).** The
+  rule above is not a direction of travel: §8 keeps a call-site check wherever the
+  corelib has no argument to take the bound, and a backend that keeps one owes a
+  *measured* reason, not an argument. Every backend still emitting one was
+  A/B-measured on `vehicle_telemetry` (Callgrind Ir/op, the same generated source
+  with only the guard sites changed, every variant proved to still reject and to
+  pass its conformance suite):
+  | backend | handing the bound to the corelib | verdict |
+  |---|---|---|
+  | rust `rs`, `rs-static` | `seq::check_len`, 0.00 % (binary identical) | move |
+  | rust `rs-no-std`, `-dyn` | `seq::check_len`, 0.00 %, ROM −4 B / −16 B | move |
+  | zig | counts on `FixedArray.reset`, lengths as the `arrays.exceedsLen` predicate, −0.11 % | move |
+  | kotlin | lean `Seq.checkLength`/`checkCount`, refusal built out of line, −0.42 % | move |
+  | typescript | the bound returned from `fixlenBegin`/`arrayBegin` into the corelib's header walk, −0.26 % | move |
+  | go | `CheckLen` returning `error`, **+0.13 %** | keep |
+  | java | `PayloadAcc.check*Length` + `Seq.checkCount`, **+1.25 %** | keep |
+  | csharp | lean `CheckMaxlen`/`CheckCount`, **+0.03 %**; every ride shape +0.24 % or worse | keep |
+  | dart | `maxCount` on the array destination, **+0.32 %** | keep |
+  Two results generalise past the table. The **shape decides, not the language**:
+  the same idea is free where it folds back to the literal compare (an inlined
+  Rust/Zig helper, a Kotlin call whose refusal is built out of line) and costs
+  where the call frame survives — an `error`-interface return, a message built
+  inline, a bound loaded from a field. And on a **footprint** target there is no
+  crossover to find: on Cortex-M0 the `bl` alone is already the size of the whole
+  inline guard (4 B), so only shapes the compiler inlines back can compete, and
+  `#[inline(never)]` costs +2.3…3.3 % ROM and +4.9…6.3 % decode.
+  **One shape is excluded on correctness, at any price**: hanging the bound on
+  the payload accumulator (Go's `Take`, Java/Kotlin's `acc.string`, C#'s
+  `pay.String`, TypeScript's `PayloadAcc.take`). Those calls run only once the
+  first payload byte arrives, so a message truncated immediately after an
+  over-bound length word answers INCOMPLETE where §5.2 and CORELIB_PLAN §6.2.1
+  require INVALID — reproduced on Go and Java. The verdict belongs at the
+  length/count word whatever layer takes it.
   A helper that moves makes generated code require a corelib new enough to have
   it, and while SofaBuffers is `0.x` that needs no machinery: `API_VERSION` marks
   the *wire/API contract*, is 1 in every corelib, and is bumped only for a
@@ -1793,9 +1826,36 @@ Two per-target details are load-bearing rather than incidental:
   INCOMPLETE. Reading that as a single status word is what a first attempt at
   those legs got wrong.
 
-The payload-side guards stay in every backend. They are unreachable for a message
-that reaches the header hook, and they are the only thing still bounding a
-consumer built against a corelib predating it.
+**The payload-side copies are gone** (generator#594). For a while every one of
+these five backends compared the same `maxlen` twice — once at the length word
+and once more at the top of `string()` / `blob()` — on the reasoning that the
+second copy still bounded a consumer built against a corelib predating the hook.
+That reasoning does not survive §8: generated code cannot even compile against a
+corelib missing a symbol it calls, so the build it defended cannot exist, and §8
+does not count a second copy at the call site as defence in depth. The second
+copy was also unreachable by construction — the corelib calls `fixlen_begin`
+first for the same field, and every one of the five refuses there terminally (a
+throw in java/csharp/ts, an error return in zig, the sticky `inv` in rust, which
+outranks every other flag at both `feed()` and `finish()`).
+
+Deleting it is free of behaviour and cheap in instructions. Measured over the
+whole `vehicle_telemetry` corpus — the over-bound scalar string, scalar blob,
+wrapper string element, wrapper blob element and matrix row, each whole and each
+truncated exactly at its length word, one-shot and byte-at-a-time — the verdicts
+after the deletion are **identical, case for case, to the ones before it**, and
+identical in category as well as in outcome. The rust legs carry the sharpest
+version of that claim: on `rs-no-std` the destination is a fixed `heapless`
+container and the `PayloadAcc` is a fixed arena, so an over-long payload that now
+reaches them answers `BufferFull` where the deleted guard used to return first.
+It changes nothing, because `inv` is read ahead of that flag on both surfaces —
+including for a `total` announced past the arena's own size, which is the one
+input where the accumulator, not the destination, is what refuses.
+
+The one comparison left is the length word's, which is also where §5.2 wants it:
+a message truncated immediately after an over-bound header is INVALID, not
+INCOMPLETE. **Kotlin** never emitted the payload-side copy at all — it hands the
+bound to `acc.string` / `acc.blob` instead — and **go** and **dart** have always
+compared once.
 
 **One position deeper: an array ELEMENT's declared width, in the four pull
 corelibs.** With the fixlen positions closed, one row of Crucible F-0043 stayed

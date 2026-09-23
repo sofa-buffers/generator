@@ -95,7 +95,9 @@ func TestCsOverIndexWrapperArray(t *testing.T) {
 // TestCsMaxlenReject: a bounded string/blob whose wire byte length exceeds its
 // schema maxlen is malformed input, rejected as INVALID at the `total` length
 // header (MESSAGE_SPEC §7.1) — for scalar fields and wrapper-array elements
-// alike, never truncated. An unbounded field gets no maxlen arm.
+// alike, never truncated. The comparison happens ONCE, in FixlenBegin at the
+// length word (#594); the payload callback only carries the number on to
+// PayloadAcc as `_cap`. An unbounded field gets no maxlen arm.
 func TestCsMaxlenReject(t *testing.T) {
 	src := []byte("version: 1\nmessages:\n  M:\n    payload:\n" +
 		"      s:  { id: 0, type: string, maxlen: 8 }\n" +
@@ -104,18 +106,38 @@ func TestCsMaxlenReject(t *testing.T) {
 		"      us: { id: 3, type: string }\n")
 	m := buildModule(t, src, "in.yaml", map[string]any{"namespace": "S"})
 	for _, want := range []string{
-		// Bounded scalar string + blob: per-field maxlen check at `total`. The arm
-		// closes by handing PayloadAcc that same maxlen as the cap -- the schema
-		// bound governs a bounded field, so the receiver cap must not reach it and
-		// the corelib's comparison can no longer fire (CORELIB_PLAN §6.2.1/§6.3).
-		`case (Root, 0): if (total > 8) throw new SofabException(SofabError.InvalidMessage, "s: string length above schema maxlen 8"); _cap = 8; break;`,
-		`case (Root, 1): if (total > 8) throw new SofabException(SofabError.InvalidMessage, "b: blob length above schema maxlen 8"); _cap = 8; break;`,
+		// Bounded scalar string + blob: the per-field maxlen check sits at the
+		// LENGTH WORD, in FixlenBegin, and nowhere else.
+		`case (Root, 0): if (total > 8) throw new SofabException(SofabError.InvalidMessage, "s: string length above schema maxlen 8"); break;`,
+		`case (Root, 1): if (total > 8) throw new SofabException(SofabError.InvalidMessage, "b: blob length above schema maxlen 8"); break;`,
 		// Bounded wrapper string element: keyed by the array location, element id agnostic.
-		`case (Root_ws, _): if (total > 5) throw new SofabException(SofabError.InvalidMessage, "Root_ws element: string length above schema maxlen 5"); _cap = 5; break;`,
+		`case (Root_ws, _): global::sofab.Seq.CheckIndex(id, -1, MaxDynArrayCount); if (total > 5) throw new SofabException(SofabError.InvalidMessage, "Root_ws element: string length above schema maxlen 5"); break;`,
 	} {
 		if !strings.Contains(m, want) {
 			t.Errorf("Message.cs missing maxlen guard %q\n%s", want, m)
 		}
+	}
+	// The payload callback states NO bound of its own: its dispatch resolves the
+	// destination and hands PayloadAcc that same maxlen as `_cap` -- the schema
+	// bound governs a bounded field, so the receiver cap must not reach it and
+	// the corelib's comparison can no longer fire (CORELIB_PLAN §6.2.1/§6.3).
+	for _, want := range []string{
+		"case (Root, 0): _cap = 8; break;",
+		"case (Root, 1): _cap = 8; break;",
+		"case (Root_ws, _): _cap = 5; break;",
+	} {
+		if !strings.Contains(m, want) {
+			t.Errorf("Message.cs missing payload cap arm %q\n%s", want, m)
+		}
+	}
+	// Exactly one comparison per bounded destination (#594): the length word's.
+	// Three bounded destinations here, so three -- the payload callbacks restate
+	// none of them.
+	if n := strings.Count(m, "above schema maxlen"); n != 3 {
+		t.Errorf("expected 3 maxlen comparisons (one per bounded destination), got %d:\n%s", n, m)
+	}
+	if n := strings.Count(m, "total > 5"); n != 1 {
+		t.Errorf("the element maxlen must be compared exactly once, got %d:\n%s", n, m)
 	}
 	// The unbounded string carries no maxlen reject (only its plain store arm).
 	if strings.Contains(m, "us: string length above schema maxlen") {
@@ -921,13 +943,11 @@ messages:
 			t.Errorf("String(): the destination guard must precede %q:\n%s", after, fn)
 		}
 	}
-	// The maxlen reject is destination-scoped, and it is now scoped by BEING one
-	// of the guard's arms: the same switch resolves the destination, applies the
-	// schema bound and picks the cap, so an id with no arm never reaches either
-	// test. It must therefore sit inside the guard and ahead of the accumulator.
-	i := strings.Index(fn, "above schema maxlen")
-	if i < 0 || i > guardEnd {
-		t.Errorf("String(): the maxlen reject must be an arm of the destination guard:\n%s", fn)
+	// No schema-maxlen comparison is emitted in the payload callback at all
+	// (#594): the one comparison is FixlenBegin's, at the length word, and its
+	// throw ends the decode before String() is entered.
+	if strings.Contains(fn, "above schema maxlen") {
+		t.Errorf("String(): the schema maxlen must be compared only at the length word:\n%s", fn)
 	}
 }
 
@@ -978,13 +998,14 @@ messages:
 			t.Errorf("Blob() missing destination arm %q:\n%s", want, fn)
 		}
 	}
-	// The same arms carry the two bounds. A schema-bounded blob is rejected
-	// against its own maxlen and then hands PayloadAcc that same maxlen as the
-	// cap, under which the corelib's comparison can no longer fire (§6.2.1
-	// forbids a receiver cap on a field the schema bounds; §6.3 gives the two
-	// categories). An unbounded one hands over the configured constant.
+	// The same arms carry whichever bound governs. A schema-bounded blob hands
+	// PayloadAcc its own maxlen as the cap, under which the corelib's comparison
+	// can no longer fire (§6.2.1 forbids a receiver cap on a field the schema
+	// bounds; §6.3 gives the two categories) -- and which FixlenBegin already
+	// enforced at the length word. An unbounded one hands over the configured
+	// constant.
 	for _, want := range []string{
-		`case (Root, 0): if (total > 16) throw new SofabException(SofabError.InvalidMessage, "b: blob length above schema maxlen 16"); _cap = 16; break;`,
+		"case (Root, 0): _cap = 16; break;",
 		"case (Root, 1): _cap = MaxDynBlobLen; break;",
 		"_b = new byte[total]; Array.Copy(data, chunkOffset, _b, 0, total);",
 		"else _b = (pay ??= new PayloadAcc()).Blob(total, offset, data, chunkOffset, chunkLength, _cap);",
@@ -1005,10 +1026,10 @@ messages:
 			t.Errorf("Blob(): the destination guard must precede %q:\n%s", after, fn)
 		}
 	}
-	// The maxlen reject is destination-scoped by BEING one of the guard's arms,
-	// so it sits inside the guard and ahead of the accumulator.
-	if i := strings.Index(fn, "above schema maxlen"); i < 0 || i > guardEnd {
-		t.Errorf("Blob(): the maxlen reject must be an arm of the destination guard:\n%s", fn)
+	// No schema-maxlen comparison in the payload callback (#594) -- the one
+	// comparison is FixlenBegin's, at the length word.
+	if strings.Contains(fn, "above schema maxlen") {
+		t.Errorf("Blob(): the schema maxlen must be compared only at the length word:\n%s", fn)
 	}
 }
 
@@ -1288,8 +1309,13 @@ messages:
 	if !strings.Contains(m, "case (Root_sa, _): global::sofab.Seq.CheckIndex(id, 3, MaxDynArrayCount); if (total > 6) throw") {
 		t.Error("a wrapper element must latch over-index then element maxlen")
 	}
-	if strings.Count(m, "total > 8") < 2 {
-		t.Error("the payload-side maxlen guard must remain as defense")
+	// Exactly one comparison per bound (#594): the length word's. The payload
+	// callback restates none of them.
+	if n := strings.Count(m, "total > 8"); n != 1 {
+		t.Errorf("a scalar maxlen must be compared exactly once, got %d", n)
+	}
+	if n := strings.Count(m, "total > 6"); n != 1 {
+		t.Errorf("an element maxlen must be compared exactly once, got %d", n)
 	}
 }
 
