@@ -561,11 +561,8 @@ the generated code for the bench schemas, which is a different thing. Do not put
 the two tables side by side.
 
 Likewise `corelib-c-cpp/tools/footprint.sh` measures the corelib library alone,
-unlinked, with every switch built in regardless of whether a real consumer's
-`--gc-sections` link would keep it; this measures generated code plus the
-corelib it calls, linked and gc-sectioned, as it ships. Complementary, not
-comparable — and if the two ever need reconciling, note that the corelib's own
-script is answering "how big can it get", not "what does this consumer pay".
+unlinked; this measures generated code plus the corelib it calls, linked and
+gc-sectioned, as it ships. Complementary, not comparable.
 
 ## Not the same as conformance
 
@@ -591,30 +588,21 @@ debug-only assertions, so a debug build measures code that does not ship.
 Each lives in `lang/<lang>.sh` and implements `bench_size`. The differences are not
 arbitrary — see the header comment in each file. In particular:
 
-* **C and C++ link, and size the linked image, for the same reason Rust does.**
-  That used not to be true: `c` and `cpp-c-cpp` sized an unlinked object of the
-  generated sources alone, on the theory that "everything reachable in it is
-  generated code, so there is no dead weight to strip, unlike Rust." The
-  reasoning was correct and beside the point — corelib-c-cpp's four `.c` files
-  were never *in* that object, so the row was blind to ~75% of what a real
-  `c-cpp` build ships, and specifically blind to code migrating between
-  generated code and the corelib in the one direction that matters (the
-  generator#587 kind of move: the row would go *down* while the shipped image
-  stayed the same or grew). generator#589 fixed it: both recipes now link the
-  generated sources against the corelib's `.c` files into a freestanding image
-  (`-nostdlib -nostartfiles`, a minimal linker script, `--gc-sections`, plus the
-  handful of libc/runtime symbols the corelib and libstdc++ actually call, as
-  the plainest implementations that could work) and size that. **The `c`,
-  `cpp-c-cpp` and `cpp-c-cpp-dyn` numbers in this file jumped by several KB when
-  generator#589 landed and are not comparable with what was committed before
-  it.**
-* **Rust could never have used the old C/C++ shape.** Quoting
+* **C and C++ link, then size the linked image.** Both compile the generated
+  sources together with corelib-c-cpp's `object.c`/`ostream.c`/`istream.c`/
+  `utf8.c`, link them into a freestanding image (`-nostdlib -nostartfiles`, a
+  minimal linker script, `--gc-sections`, plus the handful of libc/runtime
+  symbols the corelib and libstdc++ actually call, as the plainest
+  implementations that could work), and size that. Sizing an unlinked object of
+  the generated sources alone would leave the corelib out of the number
+  entirely and go blind to code that moves between generated code and the
+  corelib.
+* **Rust needs the link step for a different reason.** Quoting
   `corelib-rs-no-std/tools/footprint.sh`: *"A bare staticlib archive is NOT
   dead-stripped, so measuring it directly massively over-counts; the link step
   is what makes the code numbers meaningful."* Measured here: the rlib reports
-  ~14 KB against ~8.2 KB linked — a 42% over-count. C's unlinked object never had
-  that problem (no monomorphisation, no panic machinery to strip) — it had the
-  opposite one, of leaving the corelib out entirely.
+  ~14 KB against ~8.2 KB linked — a 42% over-count from monomorphisation and
+  panic machinery `--gc-sections` strips.
 * **C++** emits a header-only `.hpp`; an empty TU including it sizes to 0, because
   nothing instantiates until something calls the API. Hence the driver TU. It calls
   only `encodeTo`/`try_decode` — the convenience `encode()` returns `std::vector`
@@ -654,16 +642,15 @@ The pair is the measurement; neither number alone is a verdict. Turning it on tr
 static bytes for an allocator, and on the two targets that goes in opposite
 directions:
 
-* **cpp-c-cpp** `.text` 10244 → 17276, `.bss` 1220 → 5444 on ARMv6-m. The inline
-  build's containers (`InlineVector<T,N>`) never call `operator new` at what would
-  be runtime, but the driver's own `operator new`/`operator delete` are always
-  present regardless — a polymorphic base's virtual-destructor thunk references
-  `operator delete` unconditionally, whether or not anything actually deletes
-  through it. Switching to `allow_dynamic` moves the fields to real
-  `std::vector`s, whose default member initializers (non-empty defaults) call
-  `operator new` for real, plus the `libstdc++` bound/allocation-failure paths
-  (`std::__throw_length_error` and siblings) that `<vector>` compiles in even
-  under `-fno-exceptions`.
+* **cpp-c-cpp** `.text` 10244 → 17276, `.bss` 1220 → 5444 on ARMv6-m. The
+  driver builds `-nostdlib -nostartfiles`, so it supplies its own trivial bump
+  allocator for `operator new` — always present, since a polymorphic base's
+  virtual-destructor thunk references `operator delete` unconditionally, but
+  only reachable at what would be runtime once `allow_dynamic` moves the
+  fields to real `std::vector`s, whose default member initializers (non-empty
+  defaults) call `operator new` for real, plus the `libstdc++`
+  bound/allocation-failure paths (`std::__throw_length_error` and siblings)
+  that `<vector>` compiles in even under `-fno-exceptions`.
 * **rust-rs-no-std** `.text` 9961 → 11741, `.bss` 0 → 4. Bare metal ships no
   allocator at all, so the footprint driver supplies the most trivial bump allocator
   that can work (`lang/rust.sh`, appended only when the generated crate pulls in
@@ -671,13 +658,6 @@ directions:
   allocator costs more, never less. The arena sits at a fixed address rather than in a
   static array, so an arbitrary heap size cannot land in `.bss` and pose as a
   measurement — the 4 bytes are the bump cursor.
-
-  `cpp-c-cpp`'s driver (`lang/cpp.sh`) now does the same thing for the same
-  reason (generator#589): `-nostdlib -nostartfiles` means there is no newlib
-  `malloc` to drag in even on the dyn row, so the driver supplies its own bump
-  allocator, always present (per the previous paragraph) and never freeing —
-  the same floor-not-estimate shape as Rust's, just reachable unconditionally
-  here instead of only when the generated code needs it.
 
 What neither number can show is the heap those builds now need at runtime.
 `.text`/`.data`/`.bss` is a static-section measurement; a dynamic build that looks
