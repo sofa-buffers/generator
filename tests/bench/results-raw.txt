@@ -10,9 +10,9 @@
 # tests/bench/README.md, "Measured jitter, per row".
 #
 row                profile    method    encode_ir/op  decode_ir/op
-c                  footprint  toggle    26035         52890
-cpp-c-cpp          footprint  toggle    33624         40302
-cpp-c-cpp-dyn      footprint  toggle    33874         51359
+c                  footprint  toggle    26035         53254
+cpp-c-cpp          footprint  toggle    33624         40849
+cpp-c-cpp-dyn      footprint  toggle    33874         51837
 cpp-cpp            maxspeed   toggle    12525         27944
 cpp-cpp-static     maxspeed   toggle    11269         21284
 cpp-cpp-unbounded  maxspeed   toggle    8476          21663

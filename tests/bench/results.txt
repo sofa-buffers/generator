@@ -16,13 +16,13 @@
 #
 # Numbers shift when anything below shifts. Check here FIRST: if the header is
 # unchanged and a number moved, the generator caused it.
-# corelib:   c-cpp 89e4e7f | cpp 45466d7 | cs 1055f1b | dart c5da6ad | go 7cf03af | java a00e05a | kotlin-mp 3b065d0 | py 39d80db | rs 29311a5 | rs-no-std 311960d | ts e94bdbf | zig 1eb2e69
+# corelib:   c-cpp 35f2df7 | cpp 45466d7 | cs 1055f1b | dart c5da6ad | go 7cf03af | java a00e05a | kotlin-mp 3b065d0 | py 39d80db | rs 29311a5 | rs-no-std 311960d | ts e94bdbf | zig 1eb2e69
 #
 ## instruction cost
 row                profile    method    encode_ir/op  decode_ir/op
-c                  footprint  toggle    25986         52890
-cpp-c-cpp          footprint  toggle    33650         40302
-cpp-c-cpp-dyn      footprint  toggle    33874         51359
+c                  footprint  toggle    25986         53254
+cpp-c-cpp          footprint  toggle    33650         40849
+cpp-c-cpp-dyn      footprint  toggle    33874         51837
 cpp-cpp            maxspeed   toggle    12544         27944
 cpp-cpp-static     maxspeed   toggle    11269         21284
 cpp-cpp-unbounded  maxspeed   toggle    8476          21663
@@ -65,12 +65,12 @@ zig                       0.16.0        zig,zig-unbounded
 
 ## footprint
 row                profile    arch            text    data   bss
-c                  footprint  ARMv6-m         1808    0      0
-c                  footprint  ARMv7-m+fp.dp   1796    0      0
-c                  footprint  RV32IMC         1878    0      0
-cpp-c-cpp          footprint  ARMv6-m         6748    0      180
-cpp-c-cpp          footprint  ARMv7-m+fp.dp   6370    0      180
-cpp-c-cpp-dyn      footprint  ARMv6-m         15825   0      300
-cpp-c-cpp-dyn      footprint  ARMv7-m+fp.dp   14249   0      300
+c                  footprint  ARMv6-m         6640    0      1037
+c                  footprint  ARMv7-m+fp.dp   5776    0      1037
+c                  footprint  RV32IMC         6576    0      1037
+cpp-c-cpp          footprint  ARMv6-m         10244   0      1220
+cpp-c-cpp          footprint  ARMv7-m+fp.dp   9028    0      1220
+cpp-c-cpp-dyn      footprint  ARMv6-m         17276   0      5444
+cpp-c-cpp-dyn      footprint  ARMv7-m+fp.dp   15160   0      5444
 rust-rs-no-std     footprint  thumbv6m        9961    0      0
 rust-rs-no-std-dyn footprint  thumbv6m        11741   0      4
