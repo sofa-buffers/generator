@@ -569,24 +569,35 @@ a reimplementation should emit code that honors all of them:
   had re-emitted, per field, placement and bound logic their corelib either
   already held or should have. The aim is generated code a user can read — clean,
   small, and made only of what their schema says.
-  **Where a literal `maxlen`/`count` guard stays, and why (generator#593).** The
-  rule above is not a direction of travel: §8 keeps a call-site check wherever the
-  corelib has no argument to take the bound, and a backend that keeps one owes a
-  *measured* reason, not an argument. Every backend still emitting one was
-  A/B-measured on `vehicle_telemetry` (Callgrind Ir/op, the same generated source
-  with only the guard sites changed, every variant proved to still reject and to
-  pass its conformance suite):
-  | backend | handing the bound to the corelib | verdict |
+  **The literal `maxlen`/`count` guards stay generated, in every backend
+  (generator#593, settled).** The rule above is not a direction of travel: §8
+  keeps a call-site check wherever the corelib has no argument to take the bound,
+  and a backend that keeps one owes a *measured* reason, not an argument. So every
+  backend still emitting one was A/B-measured on `vehicle_telemetry` (Callgrind
+  Ir/op, the same generated source with only the guard sites changed, every
+  variant proved to still reject and to pass its conformance suite):
+  | backend | best shape for handing the bound to the corelib | decode |
   |---|---|---|
-  | rust `rs`, `rs-static` | `seq::check_len`, 0.00 % (binary identical) | move |
-  | rust `rs-no-std`, `-dyn` | `seq::check_len`, 0.00 %, ROM −4 B / −16 B | move |
-  | zig | counts on `FixedArray.reset`, lengths as the `arrays.exceedsLen` predicate, −0.11 % | move |
-  | kotlin | lean `Seq.checkLength`/`checkCount`, refusal built out of line, −0.42 % | move |
-  | typescript | the bound returned from `fixlenBegin`/`arrayBegin` into the corelib's header walk, −0.26 % | move |
-  | go | `CheckLen` returning `error`, **+0.13 %** | keep |
-  | java | `PayloadAcc.check*Length` + `Seq.checkCount`, **+1.25 %** | keep |
-  | csharp | lean `CheckMaxlen`/`CheckCount`, **+0.03 %**; every ride shape +0.24 % or worse | keep |
-  | dart | `maxCount` on the array destination, **+0.32 %** | keep |
+  | rust `rs`, `rs-static` | `seq::check_len` | 0.00 % (binary identical) |
+  | rust `rs-no-std`, `-dyn` | `seq::check_len` | 0.00 %, ROM −4 B / −16 B |
+  | zig | counts on `FixedArray.reset`, lengths as the `arrays.exceedsLen` predicate | −0.11 % |
+  | kotlin | lean `Seq.checkLength`/`checkCount`, refusal built out of line | −0.42 % |
+  | typescript | the bound returned from `fixlenBegin`/`arrayBegin` into the corelib's header walk | −0.26 % |
+  | go | `CheckLen` returning `error` | **+0.13 %** |
+  | java | `PayloadAcc.check*Length` + `Seq.checkCount` | **+1.25 %** |
+  | csharp | lean `CheckMaxlen`/`CheckCount`; every ride shape +0.24 % or worse | **+0.03 %** |
+  | dart | `maxCount` on the array destination | **+0.32 %** |
+  Four backends cost instructions outright, which §8's own override settles: the
+  guard stays. The other five range from free to −0.42 % — and that is the whole
+  case against moving them, because the price of collecting it is an API change in
+  five corelib repos (`corelib-rs`, `-rs-no-std`, `-zig`, `-kotlin-mp`, `-ts`), one
+  of them to a public `Visitor` signature, for a saving at or below the noise of a
+  release. The number that would have justified it is not there, so the move was
+  **dropped rather than deferred**: the guards are a per-schema field arm, the
+  thing §8 tells the generator to emit, and this is the measured reason for
+  keeping them, on record so the question is not reopened without a new number.
+  What is left of the epic is the half that did pay: generator#594 deleted the
+  *second*, unreachable copy of the same comparison.
   Two results generalise past the table. The **shape decides, not the language**:
   the same idea is free where it folds back to the literal compare (an inlined
   Rust/Zig helper, a Kotlin call whose refusal is built out of line) and costs
