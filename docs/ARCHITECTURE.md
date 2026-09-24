@@ -6685,7 +6685,9 @@ tests/                   conformance/<lang>/run.sh harnesses + matrix/ hermetic 
                          npm-publish + pypi-publish + verify-published),
                          action.yml + npm.yml + pypi.yml (distribution smoke
                          tests), verify-published.yml (post-publish: install from
-                         the registries and use it)
+                         the registries and use it), version-consistency.yml
+                         (on a v* tag: every doc's "pin to the latest release"
+                         example must equal the tag)
 .github/actions/         setup-sofabgen/ composite action (installs the CLI in CI;
                          thin wrapper over install.sh)
 install.sh               one-line installer: OS/arch detect + release download +
@@ -6722,6 +6724,17 @@ cannot drift:
 - Two guards back this up: `check-version` fails the release early if the tag is not
   a well-formed `vMAJOR.MINOR.PATCH[-prerelease]`, and after injection the
   `npm-publish` job asserts every package's version equals the tag before publishing.
+- The one thing *not* injected is documentation: every place that tells a reader
+  to pin `setup-sofabgen` to "the latest release" (`README.md`, the composite
+  action's own usage comment) is a plain string `release.yml` never touches, so it
+  can drift from the actual latest tag — it did, by three releases, before this was
+  caught. `version-consistency.yml` closes that gap: on a `v*` tag push it greps the
+  tree for two anchors (a `setup-sofabgen@vX.Y.Z` pin, and a `version: vX.Y.Z` input
+  example tagged with a trailing "defaults to the latest release" comment — that
+  comment is what tells it apart from `action.yml`'s deliberate old-version pin in
+  its own smoke test) and fails if any found version isn't the tag. The `/release`
+  skill keeps this green by syncing those examples through a PR before the tag is
+  pushed, since the gate only runs after.
 
 The consumers of the release assets:
 

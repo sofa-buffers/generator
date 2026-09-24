@@ -1,0 +1,106 @@
+name: "Version consistency"
+
+# The git tag is the single source of truth for the release version (see
+# packaging/npm/PUBLISHING.md and packaging/pypi/PUBLISHING.md, "Version ↔
+# release coupling"): nothing in this repo is bumped in-tree for a release, and
+# release.yml's npm/PyPI jobs inject the tag at publish time and guard that
+# injection themselves. What those guards do NOT cover is documentation: every
+# place that shows a reader "pin the setup-sofabgen action to the latest
+# release" is a plain string that release.yml never touches, so it drifts
+# silently — README.md already pinned v0.22.0 while
+# .github/actions/setup-sofabgen/action.yml's own usage example pinned v0.19.4,
+# three releases apart, until this gate was added.
+#
+# Modelled on the corelib repos' workflow of the same name, adapted to this
+# repo's shape: instead of one package-manifest literal, the "same version"
+# appears as repeated "pin to latest" examples across docs. Rather than
+# hardcode file:line locations, this greps the tracked tree for two anchors so
+# a new occurrence introduced anywhere is picked up automatically:
+#
+#   1. `setup-sofabgen@vX.Y.Z`            — a versioned `uses:` pin.
+#   2. `version: vX.Y.Z   # ... defaults to the latest release` — the paired
+#      composite-action `with:` example, tagged with that exact trailing
+#      comment so it can be told apart from a *deliberate* pin to an old
+#      version (e.g. .github/workflows/action.yml's "install a pinned version"
+#      smoke-test step, which pins v0.19.3 on purpose and carries no such
+#      comment — the gate must not "fix" that one).
+#
+# docs/generator/<lang>.md and CLAUDE.md are user/config documentation with no
+# "current version" claims (docs-generator-is-user-documentation), so nothing
+# there is expected to match and this gate does not look for it. If a future
+# doc adds another "pin to the latest release" example, mark it the same way
+# (an `@vX.Y.Z` suffix, or a `version: vX.Y.Z` line commented "defaults to the
+# latest release") so this gate — and the /release skill, which uses the same
+# two anchors — finds it too.
+#
+# Tags only: between releases these examples may legitimately sit behind the
+# next unreleased version, so running this on every push/PR would be noise.
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  check-versions:
+    name: Check doc-pinned versions against the tag
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Reference version (git tag)
+        shell: bash
+        run: |
+          set -euo pipefail
+          ref_version="${GITHUB_REF_NAME#v}"
+          [[ -n "$ref_version" ]] || { echo "::error::empty tag name"; exit 1; }
+          echo "reference version: $ref_version"
+          echo "REF_VERSION=$ref_version" >> "$GITHUB_ENV"
+
+      - name: Check every "pin to the latest release" example
+        shell: bash
+        run: |
+          set -euo pipefail
+          fail=0
+          total=0
+
+          check_match() {
+            local file="$1" lineno="$2" found="$3"
+            total=$((total + 1))
+            if [[ "$found" != "$REF_VERSION" ]]; then
+              echo "::error file=$file,line=$lineno::pinned example version 'v$found' != tag version 'v$REF_VERSION'"
+              fail=1
+            fi
+          }
+
+          # Anchor 1: a `…/setup-sofabgen@vX.Y.Z` usage pin, anywhere in the tree.
+          while IFS=: read -r file lineno rest; do
+            found="$(grep -oP 'setup-sofabgen@v\K[0-9]+\.[0-9]+\.[0-9]+' <<<"$rest")"
+            check_match "$file" "$lineno" "$found"
+          done < <(git grep -nP 'setup-sofabgen@v[0-9]+\.[0-9]+\.[0-9]+' -- . || true)
+
+          # Anchor 2: the paired `version: vX.Y.Z` input example, identified by
+          # its trailing "defaults to the latest release" comment — NOT every
+          # `version: vX.Y.Z` line (a deliberate old-version pin in a smoke test
+          # carries no such comment and must be left alone).
+          while IFS=: read -r file lineno rest; do
+            found="$(grep -oP 'version:\s*"?v\K[0-9]+\.[0-9]+\.[0-9]+' <<<"$rest")"
+            check_match "$file" "$lineno" "$found"
+          done < <(git grep -nP 'version:\s*"?v[0-9]+\.[0-9]+\.[0-9]+.*defaults to the latest release' -- . || true)
+
+          # A gate that silently matches nothing is worse than no gate: it means
+          # the anchor text moved (reworded, renamed action, ...) and every doc
+          # example is now unchecked. Fail loudly instead of passing empty.
+          if [[ "$total" -eq 0 ]]; then
+            echo "::error::no 'pin to the latest release' example matched either anchor — the gate is blind, fix the anchors in this workflow" >&2
+            exit 1
+          fi
+
+          echo "checked $total pinned example(s) against v$REF_VERSION"
+          [[ "$fail" -eq 0 ]] || exit 1
