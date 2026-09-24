@@ -90,8 +90,47 @@ jobs:
           name: sofabgen-${{ matrix.goos }}-${{ matrix.goarch }}
           path: dist/*
 
+  # Package cmake/ as its own tiny release asset: a CMake consumer's
+  # FetchContent then extracts a handful of KB (sofab_generate() and the
+  # fetch logic, see cmake/CMakeLists.txt for the exact snippet) instead of
+  # shallow-cloning this whole Go repository just to reach it.
+  #
+  # FetchSofabgen.cmake's SOFABGEN_VERSION_DEFAULT placeholder is substituted
+  # with this tag, so the packaged asset resolves its own matching binary
+  # version with no separate pin needed — a copy taken from the source tree
+  # instead keeps the placeholder and falls back to "latest" (see that
+  # file's header for why that is the safe default there, not a hard error).
+  cmake-package:
+    needs: check-version
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/')
+    steps:
+      - uses: actions/checkout@v7
+      - name: Build sofabgen-cmake.tar.gz
+        run: |
+          set -euo pipefail
+          work="$(mktemp -d)"
+          cp cmake/CMakeLists.txt cmake/SofabGenerate.cmake "$work/"
+          sed "s/@SOFABGEN_VERSION_DEFAULT@/${GITHUB_REF_NAME}/" \
+            cmake/FetchSofabgen.cmake > "$work/FetchSofabgen.cmake"
+          # A silently no-op'd sed would ship a tarball indistinguishable from
+          # an un-substituted source copy — check the placeholder is actually
+          # gone, not just trust the command that was supposed to remove it.
+          if grep -q '@SOFABGEN_VERSION_DEFAULT@' "$work/FetchSofabgen.cmake"; then
+            echo "::error::sed did not substitute the version placeholder in FetchSofabgen.cmake" >&2
+            exit 1
+          fi
+          mkdir -p dist
+          tar -czf dist/sofabgen-cmake.tar.gz -C "$work" \
+            CMakeLists.txt FetchSofabgen.cmake SofabGenerate.cmake
+          (cd dist && sha256sum sofabgen-cmake.tar.gz > sofabgen-cmake.tar.gz.sha256)
+      - uses: actions/upload-artifact@v7
+        with:
+          name: sofabgen-cmake
+          path: dist/*
+
   release:
-    needs: build
+    needs: [build, cmake-package]
     runs-on: ubuntu-latest
     if: startsWith(github.ref, 'refs/tags/')
     steps:
@@ -112,6 +151,19 @@ jobs:
           echo "binary reports: '$got' (expected '$tag_version')"
           if [ "$got" != "$tag_version" ]; then
             echo "::error::sofabgen --version ($got) does not match tag ($tag_version); refusing to publish" >&2
+            exit 1
+          fi
+      - name: Guard — the cmake package must carry the tag, not the placeholder
+        run: |
+          set -euo pipefail
+          work="$(mktemp -d)"
+          tar -xzf dist/sofabgen-cmake.tar.gz -C "$work"
+          if grep -q '@SOFABGEN_VERSION_DEFAULT@' "$work/FetchSofabgen.cmake"; then
+            echo "::error::sofabgen-cmake.tar.gz still carries the unsubstituted placeholder" >&2
+            exit 1
+          fi
+          if ! grep -q "\"${GITHUB_REF_NAME}\"" "$work/FetchSofabgen.cmake"; then
+            echo "::error::sofabgen-cmake.tar.gz's default version does not match the tag ${GITHUB_REF_NAME}" >&2
             exit 1
           fi
       - name: Publish release
