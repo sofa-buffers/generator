@@ -2,23 +2,15 @@
 # step, the same way install.sh does it: a prebuilt binary from this repo's
 # GitHub releases, checksum-verified.
 #
-# This is the canonical copy. A consumer (a corelib's CMake project, an
-# example project, anything that wants generated code at build time without
-# asking the user to install sofabgen first) does not FetchContent this
-# whole repo just to reach one file — that would clone the generator's
-# source tree for a handful of lines of CMake. Instead, pull the raw file
-# directly and include() it:
-#
-#   set(SOFABUFFERS_GENERATOR_REF "main" CACHE STRING
-#       "generator ref to fetch cmake helpers from")
-#   file(DOWNLOAD
-#       "https://raw.githubusercontent.com/sofa-buffers/generator/${SOFABUFFERS_GENERATOR_REF}/cmake/FetchSofabgen.cmake"
-#       "${CMAKE_BINARY_DIR}/FetchSofabgen.cmake")
-#   include("${CMAKE_BINARY_DIR}/FetchSofabgen.cmake")
-#
-# SOFABUFFERS_GENERATOR_REF (which version of *this file*) is deliberately a
-# separate knob from SOFABGEN_VERSION below (which version of the *binary*
-# it fetches) — pin one without the other.
+# Most consumers want SofabGenerate.cmake instead (same directory): it
+# include()s this file for you and adds sofab_generate(), a function that
+# wires sofabgen straight into a CMake target. Use this file directly only
+# if you want the resolved SOFABGEN_EXECUTABLE and nothing else — e.g. to
+# drive it yourself outside of add_custom_command. Both files are meant to
+# be reached together via one FetchContent of this repo (see
+# SofabGenerate.cmake's own header for the exact snippet); this repo is a
+# CMake-less Go project, so FetchContent populates the source without also
+# trying to add_subdirectory() it.
 #
 # Resolution order once included:
 #   1. A `sofabgen` already on PATH (or -DSOFABGEN_EXECUTABLE=... by hand) —
