@@ -182,7 +182,7 @@ jobs:
           echo "== npm: the launcher pins exactly those nine =="
           pinned="$(npm view "@sofa-buffers/generator@$npm_v" optionalDependencies --json | node -e \
             'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{const o=JSON.parse(s);
-             console.log(Object.entries(o).map(([k,v])=>k+"@"+v).sort().join("\n"))})')
+             console.log(Object.entries(o).map(([k,v])=>k+"@"+v).sort().join("\n"))})')"
           echo "$pinned"
           test "$(echo "$pinned" | grep -c "@$npm_v\$")" -eq 9 || {
             echo "::error::the launcher does not pin nine platform packages at $npm_v" >&2; fail=1; }
