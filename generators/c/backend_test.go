@@ -987,6 +987,94 @@ messages:
 	}
 }
 
+// TestCBitfieldFlagConstants (generator#606): the FIELD stays a raw integer —
+// MESSAGE_SPEC §1 admits any value inside the declared width, named or not,
+// so a closed type would reject a value a newer peer's vocabulary produced —
+// but the declared bit POSITIONS get named #defines beside it, the same way
+// Go emits typed consts and Kotlin emits const vals next to an equally raw
+// field. Before this, C emitted neither: a caller had to know the schema by
+// heart to set/test any bit (see docs/ARCHITECTURE.md's "C and Java lower
+// enum/bitfield fields to a raw integer and emit no named constants").
+func TestCBitfieldFlagConstants(t *testing.T) {
+	files := genCFromYAML(t, `
+version: 1
+messages:
+  fridge:
+    payload:
+      alarms:
+        id: 0
+        type: bitfield
+        description: Active alarm conditions
+        bits:
+          door_open_too_long: { pos: 0, default: false, description: "A door has been open past the timeout" }
+          temp_high: { pos: 1, description: "A zone is above its warning threshold" }
+`)
+	h := files["fridge.h"]
+
+	// The field itself is unchanged: still a raw, permissive integer.
+	if !strings.Contains(h, "uint8_t alarms;") {
+		t.Fatalf("alarms must stay a raw uint8_t, not narrow to the declared flags:\n%s", h)
+	}
+
+	for _, want := range []string{
+		"#define MESSAGE_FRIDGE_ALARMS_DOOR_OPEN_TOO_LONG (1u << 0)",
+		"#define MESSAGE_FRIDGE_ALARMS_TEMP_HIGH (1u << 1)",
+		"/*! A door has been open past the timeout (default: false) */",
+	} {
+		if !strings.Contains(h, want) {
+			t.Errorf("missing %q:\n%s", want, h)
+		}
+	}
+	// A flag with no declared default carries no (default: ...) note — nothing
+	// to claim, unlike Go's which always states one because a Go field always
+	// has a zero value.
+	if strings.Contains(h, "temp_high") && strings.Contains(h, "A zone is above its warning threshold (default:") {
+		t.Errorf("temp_high has no declared default and must not claim one:\n%s", h)
+	}
+}
+
+// TestCBitfieldFlagConstantsDedupSharedRef: a $ref-shared bitfield used by two
+// fields must emit its #define block once, not once per field — a second
+// copy would be a duplicate-macro-definition compile error, not just noise.
+func TestCBitfieldFlagConstantsDedupSharedRef(t *testing.T) {
+	files := genCFromYAML(t, `
+version: 1
+$defs:
+  bitfield:
+    Shared:
+      a: { pos: 0 }
+messages:
+  m:
+    payload:
+      first: { id: 0, type: bitfield, bits: { $ref: "#/$defs/bitfield/Shared" } }
+      second: { id: 1, type: bitfield, bits: { $ref: "#/$defs/bitfield/Shared" } }
+`)
+	h := files["m.h"]
+	if n := strings.Count(h, "_A (1u << 0)"); n != 1 {
+		t.Errorf("expected the shared bitfield's #define exactly once, got %d:\n%s", n, h)
+	}
+}
+
+// TestCBitfieldFlagConstantsInArray: a native array of bitfield (each element
+// the same raw integer type) must still name the flags once, from the
+// element's ref, not skip them the way an unrelated composite kind should.
+func TestCBitfieldFlagConstantsInArray(t *testing.T) {
+	files := genCFromYAML(t, `
+version: 1
+messages:
+  m:
+    payload:
+      flags:
+        id: 0
+        type: array
+        items: { type: bitfield, count: 3, bits: { ready: { pos: 0 } } }
+`)
+	h := files["m.h"]
+	if !strings.Contains(h, "_READY (1u << 0)") {
+		t.Errorf("array-of-bitfield element flags must still be named:\n%s", h)
+	}
+}
+
 // TestScalarFP64DoesNotNeedValue64: `double` is 8 bytes too, but its descriptor
 // type is FP64 — it never reaches _load_uint and has SOFAB_DISABLE_FP64_SUPPORT
 // of its own. Deriving value64 from the storage width must not swallow it.
