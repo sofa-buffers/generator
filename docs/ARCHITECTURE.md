@@ -5118,7 +5118,11 @@ enum/bitfield fields lower to a raw integer** and emit no named constants, so
 they carry only the field-level metadata above. **C's bitfield fields lower to
 a raw integer too and still carry the constants** (generator#606): the field
 stays whatever width the declared bit positions imply, while each position gets
-a documented `#define <PREFIX>_<FLAG>` beside it. **Kotlin lowers enum and
+a documented `#define <PREFIX>_<FLAG>` beside it, shifted in the field's own
+width (at least `uint32_t`, so `~FLAG` never clears a uint64_t field's high
+half); since C has one macro namespace across every included header, the
+backend rejects a flag macro equal to any other generated macro schema-wide
+(another message's include guard or `_MAX_SIZE`, or another flag). **Kotlin lowers enum and
 bitfield fields to a raw integer too and still carries the constants**: the
 field stays an `Int`/`ULong`, while the declared members are emitted as
 documented `const val`s in an `object` beside it. A closed

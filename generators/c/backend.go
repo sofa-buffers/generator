@@ -34,6 +34,9 @@ func (*Backend) Generate(s *ir.Schema, cfg map[string]any) ([]generator.File, er
 	if err := checkBounded(s); err != nil {
 		return nil, err
 	}
+	if err := g.checkMacroNames(s); err != nil {
+		return nil, err
+	}
 	project := cfgString(cfg, "emit", "sources") == "project"
 	srcDir := ""
 	if project {
@@ -184,6 +187,7 @@ type fieldEntry struct {
 type bitfieldPlan struct {
 	key    string
 	prefix string // macro prefix, e.g. MESSAGE_FRIDGE_ALARMS
+	one    string // the shifted literal: (uint32_t)1, or (uint64_t)1 for a uint64_t field
 	flags  []*ir.BitfieldFlag
 }
 
@@ -199,28 +203,102 @@ func (g *gen) registerBitfield(ref *ir.TypeRef, bitfields map[string]*bitfieldPl
 	if _, ok := bitfields[key]; ok {
 		return
 	}
+	// The literal takes the FIELD's width, never less than 32 bits. A bare `1u`
+	// is only guaranteed 16 bits, so `1u << 15` and up is undefined on a
+	// 16-bit-int target, and uint32_t has rank >= int, so it is never promoted.
+	// It must not be narrower than the field either: in a uint64_t field,
+	// `v &= ~FLAG` with a 32-bit FLAG zero-extends the complement and clears
+	// bits 32..63 along with the one flag.
+	one := "(uint32_t)1"
+	if bitfieldC(ref) == "uint64_t" {
+		one = "(uint64_t)1"
+	}
 	bitfields[key] = &bitfieldPlan{
 		key:    key,
 		prefix: strings.ToUpper(g.prefix + sanitize(key, "")),
+		one:    one,
 		flags:  ref.Target.Flags,
 	}
 	*order = append(*order, key)
 }
 
+// macro is the #define name of one declared flag.
+func (bp *bitfieldPlan) macro(fl *ir.BitfieldFlag) string {
+	return bp.prefix + "_" + strings.ToUpper(sanitizeKey(fl.Name))
+}
+
+// messagePlans collects m's object plans in post-order (nested before
+// parents) and the bitfield named types referenced anywhere in its tree, both
+// deduped: one #define block per unique bitfield, however many fields share it.
+func (g *gen) messagePlans(m *ir.Message) (plans map[string]*objectPlan, order []string, bitfields map[string]*bitfieldPlan, bitfieldOrder []string, err error) {
+	plans = map[string]*objectPlan{}
+	bitfields = map[string]*bitfieldPlan{}
+	msgKey := "message/" + m.Name
+	err = g.collect(msgKey, g.cType(msgKey, m.Name), m.Fields, plans, &order, bitfields, &bitfieldOrder)
+	return plans, order, bitfields, bitfieldOrder, err
+}
+
+// checkMacroNames rejects a schema whose generated macros would collide. C has
+// one flat macro namespace across every header a translation unit includes, so
+// the check spans the whole schema, not one message: a flag macro is
+// <PREFIX><owner path>_<FLAG>, and message "a"'s field "b" with flag "h" is
+// MESSAGE_A_B_H — the include guard of a sibling message "a_b", which then
+// silently skips its whole header. The same goes for another message's
+// _MAX_SIZE, and for two field/flag splits that join to one identifier (field
+// "a_b" flag "c" vs field "a" flag "b_c"). A $ref-shared bitfield emitted in
+// two headers is not a clash: both copies are the identical definition, which
+// C admits, so owners are keyed by bitfield, not by message.
+func (g *gen) checkMacroNames(s *ir.Schema) error {
+	owners := map[string]string{}
+	claim := func(name, owner string) error {
+		if prev, ok := owners[name]; ok && prev != owner {
+			return fmt.Errorf("generated C macro %s would be defined for both %s and %s; rename one of them", name, prev, owner)
+		}
+		owners[name] = owner
+		return nil
+	}
+	for _, m := range s.Messages {
+		if err := claim(strings.ToUpper(g.prefix+m.Name+"_H"), fmt.Sprintf("message %q's include guard", m.Name)); err != nil {
+			return err
+		}
+		if err := claim(strings.ToUpper(g.prefix+m.Name+"_MAX_SIZE"), fmt.Sprintf("message %q's MAX_SIZE", m.Name)); err != nil {
+			return err
+		}
+		ms, err := g.size.Resolve(m.Name, m.Fields)
+		if err != nil {
+			return err
+		}
+		if !ms.Bounded {
+			if err := claim(strings.ToUpper(g.prefix+m.Name+"_MAX_SIZE_LIMIT"), fmt.Sprintf("message %q's MAX_SIZE_LIMIT", m.Name)); err != nil {
+				return err
+			}
+		}
+	}
+	for _, m := range s.Messages {
+		_, _, bitfields, bitfieldOrder, err := g.messagePlans(m)
+		if err != nil {
+			return err
+		}
+		for _, k := range bitfieldOrder {
+			bp := bitfields[k]
+			for _, fl := range bp.flags {
+				if err := claim(bp.macro(fl), fmt.Sprintf("flag %q of bitfield %s", fl.Name, strings.TrimPrefix(bp.key, "named/"))); err != nil {
+					return err
+				}
+			}
+		}
+	}
+	return nil
+}
+
 // ---- message emission ---------------------------------------------------
 
 func (g *gen) message(m *ir.Message) (hdr, src []byte, err error) {
-	// Collect objects in post-order (nested before parents), deduped.
-	plans := map[string]*objectPlan{}
-	var order []string
-	// Bitfield named types referenced anywhere in the tree, deduped the same
-	// way: one #define block per unique type, however many fields share it.
-	bitfields := map[string]*bitfieldPlan{}
-	var bitfieldOrder []string
-	msgKey := "message/" + m.Name
-	if err := g.collect(msgKey, g.cType(msgKey, m.Name), m.Fields, plans, &order, bitfields, &bitfieldOrder); err != nil {
+	plans, order, bitfields, bitfieldOrder, err := g.messagePlans(m)
+	if err != nil {
 		return nil, nil, err
 	}
+	msgKey := "message/" + m.Name
 
 	caps := g.capabilities(m)
 	guardName := strings.ToUpper(g.prefix + m.Name + "_H")
@@ -236,6 +314,11 @@ func (g *gen) message(m *ir.Message) (hdr, src []byte, err error) {
 			maxField = plans[k].maxField
 		}
 	}
+
+	// checkMacroNames (run once over the schema in Generate) already proved
+	// these and every flag macro unique across all headers.
+	sizeMacro := strings.ToUpper(g.prefix + m.Name + "_MAX_SIZE")
+	sizeLimitMacro := strings.ToUpper(g.prefix + m.Name + "_MAX_SIZE_LIMIT")
 
 	h := &cfile{}
 	h.banner(g.banner, g.license, strings.ToLower(m.Name)+".h", m.Name)
@@ -269,15 +352,14 @@ func (g *gen) message(m *ir.Message) (hdr, src []byte, err error) {
 	}
 	if ms.Bounded {
 		h.line("/*! Worst-case serialized size of %s (every field present, all maxlen/count). */", m.Name)
-		h.line("#define %s %d", strings.ToUpper(g.prefix+m.Name+"_MAX_SIZE"), ms.Size)
+		h.line("#define %s %d", sizeMacro, ms.Size)
 	} else {
 		// Unreachable for C today: the fixed-storage target already rejects an
 		// unbounded field before this point. Kept so the two constants stay
 		// distinguishable if that ever changes.
 		h.line("/*! Configured ceiling: %s has an unbounded field, so its size is imposed, not derived. */", m.Name)
-		h.line("#define %s %d", strings.ToUpper(g.prefix+m.Name+"_MAX_SIZE_LIMIT"), ms.Size)
-		h.line("#define %s %s", strings.ToUpper(g.prefix+m.Name+"_MAX_SIZE"),
-			strings.ToUpper(g.prefix+m.Name+"_MAX_SIZE_LIMIT"))
+		h.line("#define %s %d", sizeLimitMacro, ms.Size)
+		h.line("#define %s %s", sizeMacro, sizeLimitMacro)
 	}
 	h.blank()
 	// public API prototypes
@@ -663,7 +745,7 @@ func (g *gen) emitBitfieldConsts(h *cfile, bp *bitfieldPlan) {
 		if doc != "" {
 			h.doc("%s", doc)
 		}
-		h.line("#define %s_%s (1u << %d)", bp.prefix, strings.ToUpper(sanitizeKey(fl.Name)), fl.Pos)
+		h.line("#define %s (%s << %d)", bp.macro(fl), bp.one, fl.Pos)
 	}
 	h.blank()
 }
