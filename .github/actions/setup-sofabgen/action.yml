@@ -3,9 +3,9 @@
 #
 # Usage (pin to a release tag or commit for reproducible CI):
 #
-#   - uses: sofa-buffers/generator/.github/actions/setup-sofabgen@v0.24.0
+#   - uses: sofa-buffers/generator/.github/actions/setup-sofabgen@v0.24.1
 #     with:
-#       version: v0.24.0   # optional; defaults to the latest release
+#       version: v0.24.1   # optional; defaults to the latest release
 #   - run: sofabgen --version
 #
 # It is a thin wrapper over the repository's install.sh so there is a single
