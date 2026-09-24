@@ -6742,6 +6742,18 @@ The consumers of the release assets:
 - **`.github/actions/setup-sofabgen`** — a composite action that runs the *same*
   `install.sh` (from the action's own checked-out ref) and adds the binary to
   `$GITHUB_PATH`, so downstream CI can `uses:` it instead of hand-rolling downloads.
+- **`cmake/FetchSofabgen.cmake`** — the CMake path, for a C/C++ project that wants
+  generated code at build time without asking the user to install anything first.
+  `find_program(sofabgen)` first; only if that comes up empty does it
+  `FetchContent`-fetch the matching release asset (`URL` + `DOWNLOAD_NO_EXTRACT`,
+  not a repo clone) and verify it against the published `.sha256` — same trust
+  model as `install.sh`, expressed as CMake. A consumer never `FetchContent`s this
+  whole repo just to reach the one file: it pulls the raw file
+  (`raw.githubusercontent.com/.../cmake/FetchSofabgen.cmake`) and `include()`s it,
+  version-pinned independently of `SOFABGEN_VERSION` via its own
+  `SOFABUFFERS_GENERATOR_REF`. See `sofa-buffers/circus`'s `examples/c-cmake` and
+  `examples/cpp-cmake` for the consumer side, alongside their own corelib
+  `FetchContent` (a separate, ordinary git-tag fetch — the two are independent).
 - **`go install github.com/sofa-buffers/generator/cmd/sofabgen@vX.Y.Z`** — builds from
   source; the CLI reports the module version via `runtime/debug.ReadBuildInfo()`
   (`cmd/sofabgen`), so an install-by-version self-reports that version. It falls back
