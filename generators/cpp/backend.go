@@ -951,8 +951,8 @@ func (g *gen) emitStruct(f *hfile, name, summary string, fields []*ir.Field, isM
 		// §7.3): a contradicting field is skipped, exactly like an unknown id.
 		//
 		// On the pure-corelib-cpp path the corelib now decides this inside the typed
-		// read itself (the seam, docs/models/type-reconciliation.md), so no guard is
-		// emitted for a scalar, fixlen or struct/union field. It is still emitted
+		// read itself (the seam), so no guard is emitted for a scalar, fixlen or
+		// struct/union field. It is still emitted
 		// where the decision has to precede a side effect the arm performs — see
 		// cppNeedsWireGuard.
 		if cppNeedsWireGuard(fld, g.clib) {

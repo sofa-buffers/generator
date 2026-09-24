@@ -161,8 +161,8 @@ func cppFixSubtype(k ir.Kind) string {
 //
 // It never does any more. The comparison belongs in the corelib, where a typed
 // read knows both the tag it declares and the one that was delivered, and both
-// C++ corelibs now make it there: corelib-cpp inside every typed read (the seam,
-// docs/models/type-reconciliation.md), and the corelib-c-cpp wrapper either in
+// C++ corelibs now make it there: corelib-cpp inside every typed read (the seam),
+// and the corelib-c-cpp wrapper either in
 // the C decoder — which unbinds a contradicting read and skips the field like an
 // unknown id — or, where the arm has to touch its destination before binding it,
 // in readString/readBlob/readArray/readSequence, which check the tag before that

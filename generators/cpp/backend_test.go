@@ -1051,8 +1051,7 @@ func g_containsInOrder(s string, needles ...string) bool {
 // pure-corelib-cpp path. It used to be a generated compare in every case arm
 // (generator#174); the corelib now makes it inside the typed read itself, which
 // compares the delivered field's whole wire tag against the one the read declares
-// and leaves a contradicting field unconsumed for the driver to skip (the seam,
-// docs/models/type-reconciliation.md).
+// and leaves a contradicting field unconsumed for the driver to skip (the seam).
 //
 // So a scalar, fixlen or struct/union arm carries NO guard, and the fixlen kinds
 // state their subtype by calling readString/readBlob rather than a bare read().
