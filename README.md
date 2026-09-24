@@ -37,7 +37,7 @@ interchangeable — pick whichever fits how you already manage tools.
 | [Script](#one-line-install) | `curl -fsSL …/install.sh \| sh` | a workstation or a container image |
 | [npm](#npm) | `npm install --save-dev @sofa-buffers/generator` | JS/TS projects, pinned per project |
 | [PyPI](#pypi) | `uv tool install sofabgen` | Python projects, or a standalone CLI |
-| [GitHub Actions](#github-actions) | `uses: …/setup-sofabgen@v0.24.0` | CI |
+| [GitHub Actions](#github-actions) | `uses: …/setup-sofabgen@v0.24.1` | CI |
 | [Go toolchain](#go-toolchain) | `go install …/cmd/sofabgen@latest` | you already build Go |
 | [From source](#from-source) | `go build -o sofabgen ./cmd/sofabgen` | hacking on the generator |
 
@@ -84,9 +84,9 @@ The bundled composite action installs the CLI and puts it on `PATH` for later
 steps:
 
 ```yaml
-- uses: sofa-buffers/generator/.github/actions/setup-sofabgen@v0.24.0
+- uses: sofa-buffers/generator/.github/actions/setup-sofabgen@v0.24.1
   with:
-    version: v0.24.0   # optional; defaults to the latest release
+    version: v0.24.1   # optional; defaults to the latest release
 - run: sofabgen --version
 ```
 
