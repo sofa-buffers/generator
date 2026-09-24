@@ -1017,8 +1017,8 @@ messages:
 	}
 
 	for _, want := range []string{
-		"#define MESSAGE_FRIDGE_ALARMS_DOOR_OPEN_TOO_LONG (1u << 0)",
-		"#define MESSAGE_FRIDGE_ALARMS_TEMP_HIGH (1u << 1)",
+		"#define MESSAGE_FRIDGE_ALARMS_DOOR_OPEN_TOO_LONG ((uint32_t)1 << 0)",
+		"#define MESSAGE_FRIDGE_ALARMS_TEMP_HIGH ((uint32_t)1 << 1)",
 		"/*! A door has been open past the timeout (default: false) */",
 	} {
 		if !strings.Contains(h, want) {
@@ -1050,7 +1050,7 @@ messages:
       second: { id: 1, type: bitfield, bits: { $ref: "#/$defs/bitfield/Shared" } }
 `)
 	h := files["m.h"]
-	if n := strings.Count(h, "_A (1u << 0)"); n != 1 {
+	if n := strings.Count(h, "#define MESSAGE_BITFIELD_SHARED_A ((uint32_t)1 << 0)"); n != 1 {
 		t.Errorf("expected the shared bitfield's #define exactly once, got %d:\n%s", n, h)
 	}
 }
@@ -1070,8 +1070,140 @@ messages:
         items: { type: bitfield, count: 3, bits: { ready: { pos: 0 } } }
 `)
 	h := files["m.h"]
-	if !strings.Contains(h, "_READY (1u << 0)") {
+	if !strings.Contains(h, "#define MESSAGE_M_FLAGS_ELEM_READY ((uint32_t)1 << 0)") {
 		t.Errorf("array-of-bitfield element flags must still be named:\n%s", h)
+	}
+}
+
+// TestCBitfieldFlagConstantsWidePos: the shifted literal takes the FIELD's
+// width, not the flag's. A bare `1u` is only guaranteed 16 bits, so shifting it
+// to pos 40 is undefined; and a 32-bit literal for the low flag of a uint64_t
+// field breaks `v &= ~FLAG`, whose zero-extended complement clears bits 32..63
+// too. Every flag of a uint64_t field is therefore a uint64_t.
+func TestCBitfieldFlagConstantsWidePos(t *testing.T) {
+	files := genCFromYAML(t, `
+version: 1
+messages:
+  m:
+    payload:
+      wide:
+        id: 0
+        type: bitfield
+        bits:
+          low: { pos: 1 }
+          high: { pos: 40 }
+`)
+	h := files["m.h"]
+	if !strings.Contains(h, "uint64_t wide;") {
+		t.Fatalf("a pos-40 flag must widen the field to uint64_t:\n%s", h)
+	}
+	for _, want := range []string{
+		"#define MESSAGE_M_WIDE_LOW ((uint64_t)1 << 1)",
+		"#define MESSAGE_M_WIDE_HIGH ((uint64_t)1 << 40)",
+	} {
+		if !strings.Contains(h, want) {
+			t.Errorf("missing %q:\n%s", want, h)
+		}
+	}
+}
+
+// TestCBitfieldFlagConstantsCollideWithSizeMacro: a field/flag name pair that
+// joins to the same identifier as the message's own MAX_SIZE macro must be a
+// generate-time error, not a silently redefined #define (one of the two
+// symbols would otherwise quietly take the wrong value).
+func TestCBitfieldFlagConstantsCollideWithSizeMacro(t *testing.T) {
+	err := genCErr(t, `
+version: 1
+messages:
+  m:
+    payload:
+      max:
+        id: 0
+        type: bitfield
+        bits:
+          size: { pos: 0 }
+`)
+	if err == nil {
+		t.Fatal("expected a generate-time error for a flag macro colliding with MAX_SIZE")
+	}
+	if !strings.Contains(err.Error(), "MESSAGE_M_MAX_SIZE") {
+		t.Errorf("error %q should name the colliding macro", err)
+	}
+}
+
+// TestCBitfieldFlagConstantsCollideAcrossFields: two differently-split
+// field/flag names can join to the identical macro identifier (field "a_b"
+// flag "c" vs. field "a" flag "b_c") — same collision, same required error.
+func TestCBitfieldFlagConstantsCollideAcrossFields(t *testing.T) {
+	err := genCErr(t, `
+version: 1
+messages:
+  m:
+    payload:
+      a_b:
+        id: 0
+        type: bitfield
+        bits:
+          c: { pos: 0 }
+      a:
+        id: 1
+        type: bitfield
+        bits:
+          b_c: { pos: 0 }
+`)
+	if err == nil {
+		t.Fatal("expected a generate-time error for two flags joining to the same macro name")
+	}
+	if !strings.Contains(err.Error(), "MESSAGE_M_A_B_C") {
+		t.Errorf("error %q should name the colliding macro", err)
+	}
+}
+
+// TestCBitfieldFlagConstantsCollideWithSiblingGuard: C's macro namespace spans
+// every header a translation unit includes, so the collision check spans the
+// schema. Message "a"'s field "b" with flag "h" is MESSAGE_A_B_H, the include
+// guard of message "a_b": including a.h first would silently skip a_b.h.
+func TestCBitfieldFlagConstantsCollideWithSiblingGuard(t *testing.T) {
+	err := genCErr(t, `
+version: 1
+messages:
+  a:
+    payload:
+      b: { id: 0, type: bitfield, bits: { h: { pos: 0 } } }
+  a_b:
+    payload:
+      x: { id: 0, type: u8 }
+`)
+	if err == nil {
+		t.Fatal("expected a generate-time error for a flag macro equal to another message's include guard")
+	}
+	if !strings.Contains(err.Error(), "MESSAGE_A_B_H") {
+		t.Errorf("error %q should name the colliding macro", err)
+	}
+}
+
+// TestCBitfieldFlagConstantsSharedAcrossMessages: a $ref-shared bitfield used
+// by two messages emits the same #define in both headers. That is an identical
+// redefinition, which C admits, so it must not trip the collision check.
+func TestCBitfieldFlagConstantsSharedAcrossMessages(t *testing.T) {
+	files := genCFromYAML(t, `
+version: 1
+$defs:
+  bitfield:
+    Shared:
+      a: { pos: 0 }
+messages:
+  m:
+    payload:
+      f: { id: 0, type: bitfield, bits: { $ref: "#/$defs/bitfield/Shared" } }
+  n:
+    payload:
+      f: { id: 0, type: bitfield, bits: { $ref: "#/$defs/bitfield/Shared" } }
+`)
+	for _, name := range []string{"m.h", "n.h"} {
+		if !strings.Contains(files[name], "#define MESSAGE_BITFIELD_SHARED_A ((uint32_t)1 << 0)") {
+			t.Errorf("%s must carry the shared flag macro:\n%s", name, files[name])
+		}
 	}
 }
 
