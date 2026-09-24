@@ -154,8 +154,8 @@ def sha256(path):
 # Ir counts as unchanged while it stays inside this band of the committed value.
 #
 # It has to sit above the measurement's own noise and below the smallest regression
-# worth seeing. The perf changes this tool exists to catch are 1%+ (see
-# docs/perf-patches/, where the wins are tens of percent), and every row's jitter has
+# worth seeing. The perf changes this tool exists to catch are 1%+ (real codegen
+# wins run tens of percent), and every row's jitter has
 # now been measured: three or more back-to-back `run.sh --rows <id>` on an unchanged
 # tree, raw readings in tests/bench/README.md, "Measured jitter, per row".
 #

@@ -77,7 +77,7 @@ compare it against is `max |reading - committed| / committed`, not a max-min spr
 The widest that has been measured is 0.122% (`kotlin` encode: a 17221 against the
 17200 its readings cluster on; 0.105% against the 17203 the file happens to commit
 today). So 0.3% sits ~2.5x above the measurement and an order of magnitude below the
-smallest change worth seeing (1%; the wins in `docs/perf-patches/` are tens of
+smallest change worth seeing (1%; real codegen wins run tens of
 percent). If a row ever flips on its own *jitter*, raise **that row's reps** — which
 tightens that jitter — rather than widening the band.
 
@@ -993,8 +993,9 @@ found the hard way while building this.
 
 It is **generated**, not hand-written — a hand-written driver cannot compile against
 two generator revisions, and the API-changing commits are precisely the ones worth
-measuring (`docs/perf-patches/rust-fixed-arrays.md` changed the emitted struct from
-`Vec<T>` to `[T; N]`, since reverted by `count`-is-a-capacity; `java-primitive-arrays` changed `List<Long>` to `long[]`). It
+measuring (a rust codegen change once flipped the emitted struct from `Vec<T>` to
+`[T; N]`, since reverted by `count`-is-a-capacity; a java change flipped `List<Long>`
+to `long[]`). It
 lives in each backend's `project.go` beside the `encode`/`decode` verbs and is
 IR-driven like them, so it needs no new config key and no schema coupling.
 

@@ -2419,9 +2419,9 @@ by family (generator#174, Crucible F-0020):
   arm actually calls (§9.3 family 4), and the ordering survived the move intact:
   the helper consults the tag, the schema bound and the receiver cap itself before
   it sizes anything, so a mistyped or over-long occurrence still reaches no
-  allocator and leaves the destination as it was. This is the "seam"
-  (`docs/models/type-reconciliation.md`); it replaced a generated guard per field
-  arm, whose earlier failure mode in C++ was *silent*: `read<T>` zig-zags on
+  allocator and leaves the destination as it was. This is the "seam"; it
+  replaced a generated guard per field arm, whose earlier failure mode in
+  C++ was *silent*: `read<T>` zig-zags on
   `T`'s signedness rather than the wire type, so a `Signed` header on a `u8`
   field yielded the raw un-zig-zagged varint.
 - **C** — the C object API is descriptor-driven, so the corelib makes the
@@ -6674,8 +6674,7 @@ schema/                  message-definition schema + config schema (+ README spe
 schemas.go               embeds the schema files into the binary
 docs/                    ARCHITECTURE.md (this — living source of truth), generator/ (per-lang config),
                          PLAN.md (HISTORICAL original plan; rationale lifted into this file),
-                         plans/ (feature design docs), perf-patches/ (generated-code performance
-                         fixes: rationale + reference diffs, now folded into the backends)
+                         plans/ (feature design docs)
 examples/                example config + message definitions (incl. the multi-file realworld/ set)
 assets/                  project logo/icon (README images)
 tests/                   conformance/<lang>/run.sh harnesses + matrix/ hermetic Go tests (+ README);

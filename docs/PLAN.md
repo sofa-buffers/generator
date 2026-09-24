@@ -422,7 +422,7 @@ There are really only **two optimization axes**, and every backend sits on one o
 
 - Header-only C++20: keep serialize/deserialize **`noexcept` and trivially inlinable**; let the compiler fuse the generated wrapper into the corelib's `if constexpr` paths so the abstraction vanishes.
 - **Stack buffers via `OStreamInline<_maxSize>`** — compute `_maxSize` as a tight compile-time upper bound (sum of per-field header + worst-case payload incl. `maxlen`) so no heap and no reallocation.
-- **Zero-copy decode** where the field's lifetime allows: read strings as `std::string_view` into the source buffer instead of copying; arrays into `std::span`/`std::array`. *(Superseded as a codegen technique: a decoded message owns its bytes on every target (CORELIB_PLAN §6.7.1, generator#412), and corelib-cpp `static_assert`s a `std::string_view` destination away. The zero-copy read survives only in that corelib's pull API, which generated code does not use — see `docs/models/decode-reader-models.md`.)*
+- **Zero-copy decode** where the field's lifetime allows: read strings as `std::string_view` into the source buffer instead of copying; arrays into `std::span`/`std::array`. *(Superseded as a codegen technique: a decoded message owns its bytes on every target (CORELIB_PLAN §6.7.1, generator#412), and corelib-cpp `static_assert`s a `std::string_view` destination away. The zero-copy read survives only in that corelib's pull API, which generated code does not use.)*
 - Chain writes through the corelib's `Result` so the first error short-circuits without per-call branching in user code.
 - Build the example/tests at `-O2`/`-O3` (the library targets speed).
 
