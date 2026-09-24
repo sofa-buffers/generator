@@ -170,14 +170,55 @@ type fieldEntry struct {
 	macro string // a full SOFAB_OBJECT_FIELD* invocation line
 }
 
+// bitfieldPlan is one bitfield named type discovered while collecting a
+// message's fields, deduped by its NamedType key so a $ref-shared bitfield
+// gets one #define block regardless of how many fields use it (generator#606:
+// C previously lowered a bitfield to a raw integer member with no named
+// constant for any of its declared bit positions — MESSAGE_SPEC §1 is right
+// that the FIELD can't be narrowed to a closed type (any value inside the
+// declared width is valid, named or not: a peer with a newer bit vocabulary
+// must still round-trip), but that says nothing about ALSO naming the known
+// positions, which every other backend already does (Go's typed consts,
+// Kotlin's `const val`s beside a still-raw field) precisely because the two
+// are independent).
+type bitfieldPlan struct {
+	key    string
+	prefix string // macro prefix, e.g. MESSAGE_FRIDGE_ALARMS
+	flags  []*ir.BitfieldFlag
+}
+
+// registerBitfield records ref's bitfield named type for #define emission,
+// once per unique key. A field passes its own f.Ref (a scalar bitfield) or
+// f.ElemRef (a native array of bitfield) — nil for anything else, in which
+// case this is a no-op so call sites don't need their own kind guard.
+func (g *gen) registerBitfield(ref *ir.TypeRef, bitfields map[string]*bitfieldPlan, order *[]string) {
+	if ref == nil || ref.Target == nil {
+		return
+	}
+	key := "named/" + ref.Key
+	if _, ok := bitfields[key]; ok {
+		return
+	}
+	bitfields[key] = &bitfieldPlan{
+		key:    key,
+		prefix: strings.ToUpper(g.prefix + sanitize(key, "")),
+		flags:  ref.Target.Flags,
+	}
+	*order = append(*order, key)
+}
+
 // ---- message emission ---------------------------------------------------
 
 func (g *gen) message(m *ir.Message) (hdr, src []byte, err error) {
 	// Collect objects in post-order (nested before parents), deduped.
 	plans := map[string]*objectPlan{}
 	var order []string
+	// Bitfield named types referenced anywhere in the tree, deduped the same
+	// way: one #define block per unique type, however many fields share it.
+	bitfields := map[string]*bitfieldPlan{}
+	var bitfieldOrder []string
 	msgKey := "message/" + m.Name
-	if err := g.collect(msgKey, g.cType(msgKey, m.Name), m.Fields, plans, &order); err != nil {
+	if err := g.collect(msgKey, g.cType(msgKey, m.Name), m.Fields, plans, &order, bitfields, &bitfieldOrder); err != nil {
 		return nil, nil, err
 	}
 
@@ -214,6 +255,12 @@ func (g *gen) message(m *ir.Message) (hdr, src []byte, err error) {
 	// struct typedefs (post-order so nested types precede their users)
 	for _, k := range order {
 		g.emitStruct(h, plans[k])
+	}
+	// bitfield flag constants: the field itself stays a raw integer (§1 — any
+	// value inside the declared width is valid, named or not), but the KNOWN
+	// bit positions get names, same as every other backend.
+	for _, k := range bitfieldOrder {
+		g.emitBitfieldConsts(h, bitfields[k])
 	}
 	// max serialized size (ir.MaxWireSize — one walk shared by every backend)
 	ms, err := g.size.Resolve(m.Name, m.Fields)
@@ -253,7 +300,7 @@ func (g *gen) message(m *ir.Message) (hdr, src []byte, err error) {
 }
 
 // collect walks an id scope, appending object plans in post-order.
-func (g *gen) collect(key, cType string, fields []*ir.Field, plans map[string]*objectPlan, order *[]string) error {
+func (g *gen) collect(key, cType string, fields []*ir.Field, plans map[string]*objectPlan, order *[]string, bitfields map[string]*bitfieldPlan, bitfieldOrder *[]string) error {
 	if _, done := plans[key]; done {
 		return nil
 	}
@@ -267,10 +314,21 @@ func (g *gen) collect(key, cType string, fields []*ir.Field, plans map[string]*o
 		if f.Deprecated {
 			p.hasDeprecated = true
 		}
+		// A scalar bitfield field or a native array of bitfield each name a
+		// bitfield named type. The explicit Kind checks matter: f.Ref/f.ElemRef
+		// are ALSO set for enum/struct/union, whose NamedType carries Consts/
+		// Fields instead of Flags — registering those here would track them
+		// under an empty flags list rather than skip them.
+		if f.Kind == ir.KindBitfield {
+			g.registerBitfield(f.Ref, bitfields, bitfieldOrder)
+		}
+		if f.Kind == ir.KindArray && f.Elem == ir.KindBitfield {
+			g.registerBitfield(f.ElemRef, bitfields, bitfieldOrder)
+		}
 		switch {
 		case f.Kind == ir.KindStruct || f.Kind == ir.KindUnion:
 			ck := "named/" + f.Ref.Key
-			if err := g.collect(ck, g.cType(ck, f.Ref.Target.Name), f.Ref.Target.Fields, plans, order); err != nil {
+			if err := g.collect(ck, g.cType(ck, f.Ref.Target.Name), f.Ref.Target.Fields, plans, order, bitfields, bitfieldOrder); err != nil {
 				return err
 			}
 			if _, ok := nestedIdx[ck]; !ok {
@@ -285,7 +343,7 @@ func (g *gen) collect(key, cType string, fields []*ir.Field, plans map[string]*o
 			// string/blob/struct/union/nested-array elements lower to a wrapper
 			// sequence: a synthetic holder object with one field per element.
 			ck := key + "/" + f.Name + "#elems"
-			ep := g.buildHolder(ck, specOfField(f), plans, order)
+			ep := g.buildHolder(ck, specOfField(f), plans, order, bitfields, bitfieldOrder)
 			if _, ok := nestedIdx[ck]; !ok {
 				nestedIdx[ck] = len(p.nested)
 				p.nested = append(p.nested, ck)
@@ -364,7 +422,7 @@ func isHolderElem(k ir.Kind) bool {
 // per element, id = 0-based index (per MESSAGE_SPEC). It handles string/blob
 // (a fixlen field each), struct/union (a nested sequence each) and nested arrays
 // (an inner array, or an inner holder sequence, each). Recurses for deep nesting.
-func (g *gen) buildHolder(key string, spec arraySpec, plans map[string]*objectPlan, order *[]string) *objectPlan {
+func (g *gen) buildHolder(key string, spec arraySpec, plans map[string]*objectPlan, order *[]string, bitfields map[string]*bitfieldPlan, bitfieldOrder *[]string) *objectPlan {
 	// A holder's fields are the fixed element slots 0..N-1, so an over-index element
 	// id (>= N) is INVALID, not an unknown-field skip: mark it a fixed-seq holder.
 	p := &objectPlan{key: key, cType: g.cType(key, "elems"), descr: g.descrSym(key), fixedSeq: true}
@@ -418,7 +476,7 @@ func (g *gen) buildHolder(key string, spec arraySpec, plans map[string]*objectPl
 		// is emitted as a normal named object, and every holder slot is a sequence
 		// referencing that one descriptor (nested_idx 0).
 		ek := "named/" + spec.ref.Key
-		if err := g.collect(ek, g.cType(ek, spec.ref.Target.Name), spec.ref.Target.Fields, plans, order); err == nil {
+		if err := g.collect(ek, g.cType(ek, spec.ref.Target.Name), spec.ref.Target.Fields, plans, order, bitfields, bitfieldOrder); err == nil {
 			p.nested = append(p.nested, ek)
 		}
 		p.members = append(p.members, member{decl: fmt.Sprintf("%s%s items[%d];", lead, plans[ek].cType, cap)})
@@ -431,7 +489,7 @@ func (g *gen) buildHolder(key string, spec arraySpec, plans map[string]*objectPl
 		if isHolderElem(inner.elem) {
 			// Inner element is itself a holder: each slot is a sequence to it.
 			ik := key + "/inner"
-			ip := g.buildHolder(ik, inner, plans, order)
+			ip := g.buildHolder(ik, inner, plans, order, bitfields, bitfieldOrder)
 			p.nested = append(p.nested, ik)
 			p.members = append(p.members, member{decl: fmt.Sprintf("%s%s items[%d];", lead, ip.cType, cap)})
 			for i := int64(0); i < cap; i++ {
@@ -446,6 +504,9 @@ func (g *gen) buildHolder(key string, spec arraySpec, plans map[string]*objectPl
 			// length occupies the byte before items[0].vals, which is why this kind
 			// could not carry a holder count until the anchor moved to offset 0;
 			// `lead` is that count, and at offset 0 the two never meet.
+			if inner.elem == ir.KindBitfield {
+				g.registerBitfield(inner.ref, bitfields, bitfieldOrder)
+			}
 			icap := inner.count
 			et := g.arrayElemCType(inner.elem, inner.ref)
 			iw := lenWidth(icap, cScalarWidth(et))
@@ -577,6 +638,33 @@ func (g *gen) emitStruct(h *cfile, p *objectPlan) {
 		}
 	}
 	h.line("} %s;", p.cType)
+	h.blank()
+}
+
+// emitBitfieldConsts emits one #define per declared bit position: the FIELD
+// stays whatever raw integer type holds the declared width (bitfieldC), since
+// MESSAGE_SPEC §1 admits any value inside that width, named or not — a peer
+// with a newer bit vocabulary still has to round-trip. Naming the KNOWN
+// positions is a separate, unrelated question: Go's typed consts and Kotlin's
+// `const val`s already answer it beside an equally raw field, so C does too.
+func (g *gen) emitBitfieldConsts(h *cfile, bp *bitfieldPlan) {
+	for _, fl := range bp.flags {
+		doc := strings.NewReplacer("\r\n", " ", "\r", " ", "\n", " ").Replace(fl.Description)
+		if fl.HasDefault {
+			note := "(default: false)"
+			if fl.Default {
+				note = "(default: true)"
+			}
+			if doc != "" {
+				doc += " "
+			}
+			doc += note
+		}
+		if doc != "" {
+			h.doc("%s", doc)
+		}
+		h.line("#define %s_%s (1u << %d)", bp.prefix, strings.ToUpper(sanitizeKey(fl.Name)), fl.Pos)
+	}
 	h.blank()
 }
 

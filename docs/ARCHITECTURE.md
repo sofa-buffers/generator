@@ -710,9 +710,14 @@ a reimplementation should emit code that honors all of them:
     `@Suppress("DEPRECATION")`) so generated code stays warning-clean;
   - enum constant `description` and bitfield flag `description` (+ a
     `(default: true|false)` note from the flag's `default`) → a doc comment on each
-    generated constant. C and Java lower enum/bitfield fields to a raw integer and
-    emit no named constants, so there is no symbol to document — they carry only the
-    field-level metadata above;
+    generated constant. C's bitfield FIELD stays a raw integer either way — §1 admits
+    any value inside the declared width, named or not, so the field itself cannot
+    narrow to a closed type — but each declared bit position gets a
+    `#define <PREFIX>_<FLAG>` beside it (generator#606), the same relationship Go's
+    typed consts and Kotlin's `const val`s already have with their own still-raw
+    field. C's enum fields and Java's enum/bitfield fields remain the one case with
+    no symbol at all: they lower to a raw integer and carry only the field-level
+    metadata above;
   - field **bounds** — an array's `count`, a string/blob's `maxlen`, and an array
     element's `maxlen` → a `Schema bound: …` line on the **field's own** doc. The
     bound is enforced in every target and used to be stated only in internal decode
@@ -5108,11 +5113,15 @@ language's native deprecation marker: `[[deprecated]]` (C++),
 `Deprecated:` paragraph (Go), a Sphinx `.. deprecated::` directive (Python), a
 `/// Deprecated.` note (Zig), and `@Deprecated("…")` (Kotlin). Because the
 generated encode/decode still touches a deprecated field, C/C++/C#/Rust/Java/Kotlin locally suppress the resulting self-use
-warning so generated code stays warning-clean. **C and Java lower enum/bitfield
-fields to a raw integer** and emit no named constants, so they carry only the
-field-level metadata above. **Kotlin lowers them to a raw integer too and still
-carries the constants**: the field stays an `Int`/`ULong`, while the declared
-members are emitted as documented `const val`s in an `object` beside it. A closed
+warning so generated code stays warning-clean. **C's enum fields and Java's
+enum/bitfield fields lower to a raw integer** and emit no named constants, so
+they carry only the field-level metadata above. **C's bitfield fields lower to
+a raw integer too and still carry the constants** (generator#606): the field
+stays whatever width the declared bit positions imply, while each position gets
+a documented `#define <PREFIX>_<FLAG>` beside it. **Kotlin lowers enum and
+bitfield fields to a raw integer too and still carries the constants**: the
+field stays an `Int`/`ULong`, while the declared members are emitted as
+documented `const val`s in an `object` beside it. A closed
 `enum class` cannot hold a bitfield's flag COMBINATIONS at all, and it could not
 hold an `enum` either: §1 admits every value inside the width the declaration
 implies, named or not, so a raw integer is the only member type that can express

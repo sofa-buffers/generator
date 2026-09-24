@@ -34,3 +34,22 @@ A `boolean` field, and each element of a `boolean` array, is a `uint8_t`.
 - **Decode.** Every non-zero wire value, however wide, is stored as `1`.
 - **Encode.** The member is written as it is stored. Keep it at `0` or `1` so
   the message carries the canonical `true`.
+
+## Bitfields
+
+A `bitfield` field is a raw unsigned integer, sized from the highest declared
+`pos` — it is never narrowed to only the declared flags, so a value a newer
+peer's vocabulary set (a bit position this schema doesn't name) still
+round-trips instead of being rejected or masked away.
+
+Each declared bit still gets a name: a `#define <PREFIX><MESSAGE>_<FIELD>_<FLAG>
+(1u << <pos>)` beside the struct, so a caller sets/tests bits by name instead
+of by position:
+
+```c
+out.alarms = MESSAGE_FRIDGE_ALARMS_TEMP_HIGH | MESSAGE_FRIDGE_ALARMS_POWER_LOSS;
+if (in.alarms & MESSAGE_FRIDGE_ALARMS_TEMP_HIGH) { ... }
+```
+
+A `bits: { $ref: ... }` bitfield shared by more than one field emits its
+`#define` block once, not once per field.
