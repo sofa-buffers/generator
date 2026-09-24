@@ -6742,18 +6742,53 @@ The consumers of the release assets:
 - **`.github/actions/setup-sofabgen`** — a composite action that runs the *same*
   `install.sh` (from the action's own checked-out ref) and adds the binary to
   `$GITHUB_PATH`, so downstream CI can `uses:` it instead of hand-rolling downloads.
-- **`cmake/FetchSofabgen.cmake`** — the CMake path, for a C/C++ project that wants
-  generated code at build time without asking the user to install anything first.
-  `find_program(sofabgen)` first; only if that comes up empty does it
-  `FetchContent`-fetch the matching release asset (`URL` + `DOWNLOAD_NO_EXTRACT`,
-  not a repo clone) and verify it against the published `.sha256` — same trust
-  model as `install.sh`, expressed as CMake. A consumer never `FetchContent`s this
-  whole repo just to reach the one file: it pulls the raw file
-  (`raw.githubusercontent.com/.../cmake/FetchSofabgen.cmake`) and `include()`s it,
-  version-pinned independently of `SOFABGEN_VERSION` via its own
-  `SOFABUFFERS_GENERATOR_REF`. See `sofa-buffers/circus`'s `examples/c-cmake` and
-  `examples/cpp-cmake` for the consumer side, alongside their own corelib
-  `FetchContent` (a separate, ordinary git-tag fetch — the two are independent).
+- **`cmake/`** — the CMake path, for a C/C++ project that wants generated code
+  at build time without asking the user to install anything first. Packaged as
+  its own release asset, `sofabgen-cmake.tar.gz` (built by the `cmake-package`
+  job in `release.yml`, from `cmake/CMakeLists.txt` + `FetchSofabgen.cmake` +
+  `SofabGenerate.cmake`), so a consumer's `FetchContent` extracts a few KB
+  instead of shallow-cloning this whole Go repository just to reach three
+  files:
+  ```cmake
+  FetchContent_Declare(sofabuffers_cmake
+      URL https://github.com/sofa-buffers/generator/releases/download/<tag>/sofabgen-cmake.tar.gz)
+  FetchContent_MakeAvailable(sofabuffers_cmake)
+  add_executable(app src/main.c)
+  sofab_generate(app LANG c IN schema.yaml OUT generated OUTPUTS message.c message.h)
+  ```
+  The tarball's own `CMakeLists.txt` is the `FetchContent` entry point (this
+  repo's real root has none, being Go, so a plain repo-clone `FetchContent`
+  would populate without building anything — the tarball is a small, separate
+  "project" built specifically to be `add_subdirectory()`-able). Inside:
+  - **`FetchSofabgen.cmake`** resolves `SOFABGEN_EXECUTABLE`: `find_program(sofabgen)`
+    first; only if that is empty does it fetch the matching release binary and
+    verify it against the published `.sha256` (or a caller-pinned
+    `SOFABGEN_FETCH_SHA256`) — retried against a flaky network, never left
+    half-written (verified, then renamed from a `.part` file), re-verified by
+    digest whenever the resolution runs again, not blindly trusted because a
+    file already exists. Same trust model as `install.sh`, expressed as CMake.
+    Its `SOFABGEN_VERSION` default is a placeholder,
+    `@SOFABGEN_VERSION_DEFAULT@`, that `cmake-package` substitutes with the
+    exact tag — so the packaged asset resolves its own matching binary version
+    for free; an un-substituted copy (straight from the source tree) falls
+    back to `"latest"` instead of failing, same as before.
+  - **`SofabGenerate.cmake`** adds `sofab_generate(<target> LANG ... IN ...
+    OUT ... OUTPUTS ...)`: one function call instead of a hand-written
+    `add_custom_command()`, wired straight into the target's sources and
+    include directories. `OUTPUTS` stays an explicit, required argument —
+    what sofabgen writes for a schema depends on the target language (the
+    message name for most, a fixed name for some), so this function has no
+    business guessing it. Guards against a `cmake_parse_arguments` pitfall:
+    an omitted keyword's `SOFAB_<KEYWORD>` variable is explicitly re-cleared
+    rather than left to `cmake_parse_arguments`'s own clearing, which a
+    same-named cache variable could otherwise show through unnoticed.
+
+  See `sofa-buffers/circus`'s `examples/c-cmake` for the consumer side,
+  alongside its own corelib `FetchContent` (a separate, ordinary git-tag
+  fetch — the two are independent). This design mirrors a reference
+  implementation the same author already shipped for an unrelated tool
+  (`Andste82/sbomb`'s `cmake/`), adapted here rather than invented from
+  scratch.
 - **`go install github.com/sofa-buffers/generator/cmd/sofabgen@vX.Y.Z`** — builds from
   source; the CLI reports the module version via `runtime/debug.ReadBuildInfo()`
   (`cmd/sofabgen`), so an install-by-version self-reports that version. It falls back
