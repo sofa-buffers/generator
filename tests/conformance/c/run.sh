@@ -869,4 +869,16 @@ make -C "$WORK/repeated" SOFAB_C_CORELIB="$CORELIB" >/dev/null
 python3 "$ROOT/tests/conformance/lib/check_repeated_id.py" "C" \
     -- "$WORK/repeated/harness/harness"
 
+# Nested defaults (generator#609): a default declared inside a struct, at any
+# depth and inside a struct array's element, is what absence means -- asserted
+# against the driver's own schema, never against this harness's own baseline.
+echo "==> nested defaults: absence reads as the schema's defaults (generator#609)"
+printf 'version: 1\nmessages:\n' > "$WORK/defaults.yaml"
+python3 "$ROOT/tests/conformance/lib/check_defaults.py" --emit-schema >> "$WORK/defaults.yaml"
+( cd "$ROOT" && go run ./cmd/sofabgen --config "$WORK/proj.yaml" --lang c \
+    --in "$WORK/defaults.yaml" --out "$WORK/defaults" )
+make -C "$WORK/defaults" SOFAB_C_CORELIB="$CORELIB" >/dev/null
+python3 "$ROOT/tests/conformance/lib/check_defaults.py" "C" \
+    -- "$WORK/defaults/harness/harness"
+
 echo "PASS"

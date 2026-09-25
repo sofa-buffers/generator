@@ -982,4 +982,14 @@ build "$WORK/repeated.yaml" "$WORK/repeated"
 python3 "$ROOT/tests/conformance/lib/check_repeated_id.py" "C#" \
     -- dotnet "$WORK/repeated/bin/Debug/net9.0/harness.dll"
 
+# Nested defaults (generator#609): absence reads as the schema's defaults at every
+# depth and inside a struct array's element -- asserted against the driver's own
+# schema, never this harness's baseline.
+echo "==> nested defaults: absence reads as the schema's defaults (generator#609)"
+printf 'version: 1\nmessages:\n' > "$WORK/defaults.yaml"
+python3 "$ROOT/tests/conformance/lib/check_defaults.py" --emit-schema >> "$WORK/defaults.yaml"
+build "$WORK/defaults.yaml" "$WORK/defaults"
+python3 "$ROOT/tests/conformance/lib/check_defaults.py" "C#" \
+    -- dotnet "$WORK/defaults/bin/Debug/net9.0/harness.dll"
+
 echo "PASS"

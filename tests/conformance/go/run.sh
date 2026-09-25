@@ -1254,6 +1254,21 @@ sed -i "s#\${SOFAB_GO_CORELIB}#$CORELIB#" "$WORK/repeated/go.mod"
 python3 "$ROOT/tests/conformance/lib/check_repeated_id.py" "Go" \
     -- "$WORK/repeated-harness"
 
+# Nested defaults (generator#609): a default declared inside a struct, at any
+# depth and inside a struct array's element, is what absence means. This backend
+# left them at Go's zero value while its encoder compared against them, and the
+# round-trip block above could not see it: its baseline is `{}` encoded and
+# decoded by THIS harness. The shared driver takes its expectations from its own
+# schema and asserts wire facts -- a fresh message is zero bytes.
+echo "==> nested defaults: absence reads as the schema's defaults (generator#609)"
+printf 'version: 1\nmessages:\n' > "$WORK/defaults.yaml"
+python3 "$ROOT/tests/conformance/lib/check_defaults.py" --emit-schema >> "$WORK/defaults.yaml"
+( cd "$ROOT" && go run ./cmd/sofabgen --config "$WORK/cfg.yaml" --lang go --in "$WORK/defaults.yaml" --out "$WORK/defaults" )
+sed -i "s#\${SOFAB_GO_CORELIB}#$CORELIB#" "$WORK/defaults/go.mod"
+( cd "$WORK/defaults" && GOFLAGS=-mod=mod go build -o "$WORK/defaults-harness" ./harness )
+python3 "$ROOT/tests/conformance/lib/check_defaults.py" "Go" \
+    -- "$WORK/defaults-harness"
+
 # go vet over every module this run generated (ARCHITECTURE §12 gate 9). The
 # compiler already rejects an unused import or variable; vet is Go's warning
 # class, and a finding in generated code is one a user's CI would trip over.

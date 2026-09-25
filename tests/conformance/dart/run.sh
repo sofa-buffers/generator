@@ -1010,6 +1010,18 @@ compile_project "$WORK/repeated"
 python3 "$ROOT/tests/conformance/lib/check_repeated_id.py" "Dart" \
     -- "$WORK/repeated/harness"
 
+# Nested defaults (generator#609): absence reads as the schema's defaults at every
+# depth and inside a struct array's element -- asserted against the driver's own
+# schema, never this harness's baseline.
+echo "==> nested defaults: absence reads as the schema's defaults (generator#609)"
+printf 'version: 1\nmessages:\n' > "$WORK/defaults.yaml"
+python3 "$ROOT/tests/conformance/lib/check_defaults.py" --emit-schema >> "$WORK/defaults.yaml"
+( cd "$ROOT" && go run ./cmd/sofabgen --format=off --config "$WORK/cfg.yaml" --lang dart --in "$WORK/defaults.yaml" --out "$WORK/defaults" )
+sed -i "s#\${SOFAB_DART_CORELIB}#$CORELIB#" "$WORK/defaults/pubspec.yaml"
+compile_project "$WORK/defaults"
+python3 "$ROOT/tests/conformance/lib/check_defaults.py" "Dart" \
+    -- "$WORK/defaults/harness"
+
 # Every backend test, against the real corelib, with no skip allowed: the tests
 # that drive `dart format` for real live there, and the lang-dart job is the
 # only place a Dart SDK exists to run them (tests/conformance/lib/backend_tests.sh).
