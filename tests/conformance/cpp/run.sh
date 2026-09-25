@@ -974,6 +974,18 @@ YAML
     make -C "$WORK/repeated-$label" "$@" >/dev/null
     python3 "$ROOT/tests/conformance/lib/check_repeated_id.py" "C++ [$label]" \
         -- "$WORK/repeated-$label/harness/harness"
+
+    # Nested defaults (generator#609): absence reads as the schema's defaults at
+    # every depth and inside a struct array's element, on every profile --
+    # asserted against the driver's own schema, never this harness's baseline.
+    echo "==> [$label] nested defaults: absence reads as the schema's defaults (generator#609)"
+    printf 'version: 1\nmessages:\n' > "$WORK/defaults.yaml"
+    python3 "$ROOT/tests/conformance/lib/check_defaults.py" --emit-schema >> "$WORK/defaults.yaml"
+    ( cd "$ROOT" && go run ./cmd/sofabgen --config "$WORK/cfg-$label.yaml" --lang cpp \
+        --in "$WORK/defaults.yaml" --out "$WORK/defaults-$label" )
+    make -C "$WORK/defaults-$label" "$@" >/dev/null
+    python3 "$ROOT/tests/conformance/lib/check_defaults.py" "C++ [$label]" \
+        -- "$WORK/defaults-$label/harness/harness"
 }
 
 # Pure C++20 corelib-cpp (default).

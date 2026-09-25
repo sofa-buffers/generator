@@ -23,12 +23,13 @@ func (*Backend) Lang() string { return "go" }
 // with an encode/decode JSON harness.
 func (*Backend) Generate(s *ir.Schema, cfg map[string]any) ([]generator.File, error) {
 	g := &gen{
-		schema:  s,
-		pkg:     cfgString(cfg, "package", "message"),
-		banner:  cfgString(cfg, "tool_banner", "sofabgen"),
-		license: generator.LicenseID(cfg),
-		limits:  resolveLimits(s, cfg),
-		size:    generator.NewSizePolicy(cfg),
+		schema:   s,
+		pkg:      cfgString(cfg, "package", "message"),
+		banner:   cfgString(cfg, "tool_banner", "sofabgen"),
+		license:  generator.LicenseID(cfg),
+		limits:   resolveLimits(s, cfg),
+		size:     generator.NewSizePolicy(cfg),
+		needsDef: map[string]bool{},
 	}
 	project := cfgString(cfg, "emit", "sources") == "project"
 	// In a project the package gets its own directory so the harness can import
@@ -71,6 +72,8 @@ type gen struct {
 	sizeErr error
 	// fmtErr carries the first file go/format could not parse (see render).
 	fmtErr error
+	// needsDef memoises needsDefaults per named struct/union key.
+	needsDef map[string]bool
 }
 
 // render finishes a file through gofile.bytes. The emit path has no error
@@ -323,6 +326,7 @@ func (g *gen) typesFile() []byte {
 			g.emitBitfield(f, nt)
 		case ir.CatStruct, ir.CatUnion:
 			g.emitObject(f, g.typeName(key), nt.Fields)
+			g.emitSetDefaults(f, key, g.typeName(key), nt.Fields)
 		}
 	}
 	return g.render(f, "types.go")
@@ -1184,6 +1188,13 @@ func (g *gen) arrayCollector(ptr string, elem ir.Kind, ref *ir.TypeRef, items *i
 		return fmt.Sprintf("sofab.NewBlobSeq(%s, %s, %s)", ptr, bounds, g.capsExpr())
 	case ir.KindStruct, ir.KindUnion:
 		t := g.typeName(ref.Key)
+		if g.needsDefaults(ref.Key) {
+			// An element whose declared defaults are not Go's zero value: every slot
+			// the collector creates starts at them, so an interior element the
+			// encoder omitted for being at its default reads back as that default
+			// (MESSAGE_SPEC §5.1, generator#609).
+			return fmt.Sprintf("sofab.NewMessageSeqInit[%s, *%s](%s, %s, %s, (*%s).setDefaults)", t, t, ptr, bounds, g.capsExpr(), t)
+		}
 		return fmt.Sprintf("sofab.NewMessageSeq[%s, *%s](%s, %s, %s)", t, t, ptr, bounds, g.capsExpr())
 	case ir.KindArray:
 		if isNativeArrayElem(items.Elem) {
@@ -1588,10 +1599,79 @@ func arrayDepth(elem ir.Kind, ref *ir.TypeRef, items *ir.ArrayElem, onPath map[s
 // EMPTY array -- not N element defaults -- and a `default` shorter than N stands
 // for itself rather than being padded out to N. That is also what the field's
 // omit test compares against, and what an absent field decodes back to.
+//
+// A struct/union field is seeded through its type's setDefaults, which reaches
+// every nested level (generator#609): the field's own Serialize compares its
+// members against their schema defaults, so a member left at Go's zero value
+// would be written from a fresh message and decode back as 0 when absent.
 func (g *gen) emitDefaults(f *gofile, fields []*ir.Field) {
 	for _, fld := range fields {
 		if lit, ok := g.defaultLiteral(fld); ok {
 			f.line("\tm.%s = %s", goFieldName(fld.Name), lit)
+			continue
+		}
+		if (fld.Kind == ir.KindStruct || fld.Kind == ir.KindUnion) && g.needsDefaults(fld.Ref.Key) {
+			f.line("\tm.%s.setDefaults()", goFieldName(fld.Name))
 		}
 	}
+}
+
+// emitSetDefaults emits the seeding a struct/union type needs when any of its
+// members, at any depth, declares a default Go's zero value does not already
+// hold. A type that declares none gets no method: its zero value IS its default.
+// New<Msg> calls it for a struct/union field, and a struct/union array hands it
+// to sofab.NewMessageSeqInit so every element the collector creates -- the gap
+// an omitted default element leaves included (MESSAGE_SPEC §5.1) -- starts at it.
+func (g *gen) emitSetDefaults(f *gofile, key, typeName string, fields []*ir.Field) {
+	if !g.needsDefaults(key) {
+		return
+	}
+	f.line("// setDefaults seeds the schema defaults %s's members declare, at every", typeName)
+	f.line("// nested level, in place.")
+	f.line("func (m *%s) setDefaults() {", typeName)
+	g.emitDefaults(f, fields)
+	f.line("}")
+	f.blank()
+}
+
+// needsDefaults reports whether the struct/union type key declares, at any
+// nested level, a member default that differs from Go's zero value -- i.e.
+// whether a zero-valued instance is NOT already at its schema defaults.
+func (g *gen) needsDefaults(key string) bool {
+	if v, ok := g.needsDef[key]; ok {
+		return v
+	}
+	// Provisional answer while this type's members are walked, so a type that
+	// reaches itself terminates. The walk never enters an array (its default is
+	// the empty array, which needs no seeding), which is the only way a Go
+	// struct can contain itself.
+	g.needsDef[key] = false
+	nt := g.schema.Named[key]
+	need := false
+	if nt != nil {
+		for _, fld := range nt.Fields {
+			if lit, ok := g.defaultLiteral(fld); ok && !isZeroLiteral(lit) {
+				need = true
+				break
+			}
+			if (fld.Kind == ir.KindStruct || fld.Kind == ir.KindUnion) && g.needsDefaults(fld.Ref.Key) {
+				need = true
+				break
+			}
+		}
+	}
+	g.needsDef[key] = need
+	return need
+}
+
+// isZeroLiteral reports whether a defaultLiteral rendering is Go's zero value
+// for its type -- an explicitly declared `default: 0`, `false`, `""`, enum
+// constant 0 or empty array -- so declaring it asks for no seeding at all. A
+// negative zero ("-0") is deliberately not one: its bits differ from +0.
+func isZeroLiteral(lit string) bool {
+	switch lit {
+	case "0", "false", `""`:
+		return true
+	}
+	return strings.HasSuffix(lit, "(0)") || strings.HasSuffix(lit, "{}")
 }

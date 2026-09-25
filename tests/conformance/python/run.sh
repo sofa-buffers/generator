@@ -1162,6 +1162,23 @@ done
 unset SOFAB_PUREPYTHON || true
 if [ "$NATIVE" = yes ]; then require_engine native; else require_engine python; fi
 
+# Nested defaults (generator#609): absence reads as the schema's defaults at every
+# depth and inside a struct array's element -- asserted against the driver's own
+# schema, never this harness's baseline. Both engines: the native one decodes
+# through the destination table, which seeds nothing of its own.
+echo "==> nested defaults: absence reads as the schema's defaults (generator#609)"
+printf 'version: 1\nmessages:\n' > "$WORK/defaults.yaml"
+python3 "$ROOT/tests/conformance/lib/check_defaults.py" --emit-schema >> "$WORK/defaults.yaml"
+( cd "$ROOT" && go run ./cmd/sofabgen --format=off --config "$WORK/cfg.yaml" --lang python --in "$WORK/defaults.yaml" --out "$WORK/defaults" >/dev/null )
+for ENGINE in $ENGINES; do
+    if [ "$ENGINE" = python ]; then export SOFAB_PUREPYTHON=1; else unset SOFAB_PUREPYTHON || true; fi
+    require_engine "$ENGINE"
+    python3 "$ROOT/tests/conformance/lib/check_defaults.py" "python/$ENGINE" \
+        --cwd "$WORK/defaults" -- python3 harness.py
+done
+unset SOFAB_PUREPYTHON || true
+if [ "$NATIVE" = yes ]; then require_engine native; else require_engine python; fi
+
 # The DESTINATION TABLE (ARCHITECTURE §9.5.1, generator#561): part of a class is
 # decoded through a corelib-py `Binding` instead of through the visitor's hooks,
 # and the two run in one decoder. A round-trip cannot see the difference -- which

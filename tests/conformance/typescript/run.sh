@@ -1219,6 +1219,17 @@ ln -s "$WORK/ex/node_modules" "$WORK/repeated/node_modules"
 python3 "$ROOT/tests/conformance/lib/check_repeated_id.py" "TypeScript" \
     --cwd "$WORK/repeated" -- npx tsx harness.ts
 
+# Nested defaults (generator#609): absence reads as the schema's defaults at every
+# depth and inside a struct array's element -- asserted against the driver's own
+# schema, never this harness's baseline.
+echo "==> nested defaults: absence reads as the schema's defaults (generator#609)"
+printf 'version: 1\nmessages:\n' > "$WORK/defaults.yaml"
+python3 "$ROOT/tests/conformance/lib/check_defaults.py" --emit-schema >> "$WORK/defaults.yaml"
+gen "$WORK/defaults.yaml" "$WORK/defaults"
+ln -s "$WORK/ex/node_modules" "$WORK/defaults/node_modules"
+python3 "$ROOT/tests/conformance/lib/check_defaults.py" "TypeScript" \
+    --cwd "$WORK/defaults" -- npx tsx harness.ts
+
 # Every generated project in the run, typechecked under $TSC_STRICT (ARCHITECTURE
 # §12 gate 9). Several legs only RUN their project through tsx, which does not
 # typecheck, so they are swept here rather than trusted to a per-leg call: the

@@ -916,6 +916,16 @@ zig_build "$WORK/repeated.yaml" "$WORK/repeated"
 python3 "$ROOT/tests/conformance/lib/check_repeated_id.py" "Zig" \
     -- "$WORK/repeated/zig-out/bin/harness"
 
+# Nested defaults (generator#609): absence reads as the schema's defaults at every
+# depth and inside a struct array's element -- asserted against the driver's own
+# schema, never this harness's baseline.
+echo "==> nested defaults: absence reads as the schema's defaults (generator#609)"
+printf 'version: 1\nmessages:\n' > "$WORK/defaults.yaml"
+python3 "$ROOT/tests/conformance/lib/check_defaults.py" --emit-schema >> "$WORK/defaults.yaml"
+zig_build "$WORK/defaults.yaml" "$WORK/defaults"
+python3 "$ROOT/tests/conformance/lib/check_defaults.py" "Zig" \
+    -- "$WORK/defaults/zig-out/bin/harness"
+
 # Gate 10 (ARCHITECTURE §12): every generated file -- message.zig, the harness,
 # build.zig and build.zig.zon -- must pass `zig fmt --check`, so a user's own
 # zig fmt gate over a tree holding generated code passes. The backend emits zig

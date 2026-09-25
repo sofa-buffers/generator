@@ -1487,3 +1487,108 @@ func TestGoHarnessWithoutMessagesImportsNothingUnused(t *testing.T) {
 		}
 	}
 }
+
+// TestGoNestedDefaultsAreSeeded pins generator#609: a default declared inside a
+// struct -- at any depth, and inside a struct array's element -- must be what a
+// fresh message and an absent field hold, because the struct's own Serialize
+// compares against it. A type whose declared defaults are all Go's zero value
+// needs no seeding, and gets none.
+func TestGoNestedDefaultsAreSeeded(t *testing.T) {
+	s := schemaFromYAMLString(t, `
+version: 1
+messages:
+  M:
+    payload:
+      s:
+        id: 0
+        type: struct
+        fields:
+          a: { id: 0, type: u8, default: 5 }
+          t: { id: 1, type: string, maxlen: 8, default: "hi" }
+          inner:
+            id: 2
+            type: struct
+            fields:
+              b: { id: 0, type: i32, default: -3 }
+      arr:
+        id: 1
+        type: array
+        items:
+          type: struct
+          count: 3
+          fields:
+            c: { id: 0, type: u8, default: 9 }
+      z:
+        id: 2
+        type: struct
+        fields:
+          q: { id: 0, type: u8, default: 0 }
+      zarr:
+        id: 3
+        type: array
+        items:
+          type: struct
+          count: 2
+          fields:
+            r: { id: 0, type: string, maxlen: 4, default: "" }
+`)
+	files := genGo(t, s, map[string]any{"package": "messages"})
+	msg, types := files["m.go"], files["types.go"]
+	if msg == "" || types == "" {
+		t.Fatalf("expected m.go and types.go, got %d file(s)", len(files))
+	}
+
+	ctor := between(msg, "func NewM() *M {", "\n}")
+	if !strings.Contains(ctor, "m.S.setDefaults()") {
+		t.Errorf("NewM must seed the struct field's nested defaults:\n%s", ctor)
+	}
+	if strings.Contains(ctor, "m.Z.setDefaults()") {
+		t.Errorf("a struct whose defaults are all zero needs no seeding:\n%s", ctor)
+	}
+
+	for typ, want := range map[string][]string{
+		"MS":       {"m.A = 5", `m.T = "hi"`, "m.Inner.setDefaults()"},
+		"MSInner":  {"m.B = -3"},
+		"MArrElem": {"m.C = 9"},
+	} {
+		body := between(types, "func (m *"+typ+") setDefaults() {", "\n}")
+		if body == "" {
+			t.Errorf("%s has no setDefaults", typ)
+			continue
+		}
+		for _, w := range want {
+			if !strings.Contains(body, w) {
+				t.Errorf("%s.setDefaults lacks %q:\n%s", typ, w, body)
+			}
+		}
+	}
+	for _, typ := range []string{"MZ", "MZarrElem"} {
+		if strings.Contains(types, "func (m *"+typ+") setDefaults()") {
+			t.Errorf("%s declares only zero defaults and must get no setDefaults", typ)
+		}
+	}
+
+	if !strings.Contains(msg, "sofab.NewMessageSeqInit[MArrElem, *MArrElem](") ||
+		!strings.Contains(msg, "(*MArrElem).setDefaults)") {
+		t.Errorf("a struct array whose element declares non-zero defaults must seed every created slot:\n%s",
+			firstLines(msg, 80))
+	}
+	if !strings.Contains(msg, "sofab.NewMessageSeq[MZarrElem, *MZarrElem](") {
+		t.Errorf("a struct array whose element defaults are all zero keeps the plain collector:\n%s",
+			firstLines(msg, 80))
+	}
+}
+
+// between returns the text from the first occurrence of start up to (not
+// including) the first occurrence of end after it, or "" when start is absent.
+func between(src, start, end string) string {
+	i := strings.Index(src, start)
+	if i < 0 {
+		return ""
+	}
+	rest := src[i:]
+	if j := strings.Index(rest, end); j >= 0 {
+		return rest[:j]
+	}
+	return rest
+}

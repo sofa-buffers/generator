@@ -464,6 +464,16 @@ run_variant() {
     python3 "$ROOT/tests/conformance/lib/check_repeated_id.py" "Rust [$label]" \
         --cwd "$WORK/repeated-$label" -- cargo run -q --
 
+    # Nested defaults (generator#609): absence reads as the schema's defaults at
+    # every depth and inside a struct array's element, on every profile --
+    # asserted against the driver's own schema, never this harness's baseline.
+    echo "==> [$label] nested defaults: absence reads as the schema's defaults (generator#609)"
+    printf 'version: 1\nmessages:\n' > "$WORK/defaults.yaml"
+    python3 "$ROOT/tests/conformance/lib/check_defaults.py" --emit-schema >> "$WORK/defaults.yaml"
+    rust_build "$WORK/defaults.yaml" "$WORK/defaults-$label"
+    python3 "$ROOT/tests/conformance/lib/check_defaults.py" "Rust [$label]" \
+        --cwd "$WORK/defaults-$label" -- cargo run -q --
+
     # Over-maxlen scalar blob (Option B / MESSAGE_SPEC S7.1): someblob (id 12)
     # declares maxlen: 16; a 17-byte blob exceeds it -> INVALID, never truncated.
     # Wire: 62 (blob id12) 8b 01 (fixlen word len 17, blob subtype 3) + 17 bytes;
