@@ -18,6 +18,15 @@ TypeScript typed slots, GC ownership/aliasing, `reset()`/`clear()` naming and
 the hand-written sources per milestone (§5); C prefix default image and
 select-at-default (§5.2).
 
+Revised after design review round 2: the 64-bit JSON input dialect is an explicit
+driver flag `--int64-json number|string` with a per-language table, and
+`--int64-safe` names its exact values (§2, §2.4); the driver schema gains unions
+whose `D` is a union, a compact array and a wrapper array (`r`/`r2`/`r3`), and a
+union element two array levels down (`g`), with E35–E44, D36–D37 and the D0
+defaults (§2.1–§2.3); a repeated wrapper-array option inside a union (D34/D35);
+`SOFAB_OBJECT_DESCR_UNION` takes the image as a pointer (or `NULL`) and the C
+image rule is restated as one "NULL iff" condition (§5.1, §5.2).
+
 ---
 
 ## 0. The rule in one page (identical in every target)
@@ -300,26 +309,50 @@ Usage:
 check_union.py --emit-schema                   # the WHOLE document: version, $defs, messages
 check_union.py --self-test                     # builders vs. hand-written hex, no harness
 check_union.py <label> [--cwd DIR] [--sizes 1,2,3,5,0] [--no-stream]
-               [--int64-safe] [--known-gap CASE=REASON]...
-               [--message NAME] -- <harness argv...>
+               [--int64-json number|string] [--int64-safe]
+               [--known-gap CASE=REASON]... [--message NAME] -- <harness argv...>
 ```
 Verbs used: `encode <msg>` (JSON on stdin → wire on stdout), `decode <msg>` (wire
 → JSON), `streamdecode <msg> <chunk>` (as in `check_repeated_id.py`). Loud, never
 quiet: every case must run, a harness failure is a failure, the case count is
 printed, and the summary names what was covered.
 
+* `--int64-json number|string` picks how a 64-bit scalar (`q.big`, `q.sig`) is
+  **spelled in the encode input**. `number` (the default) writes it as a bare JSON
+  integer — `json.dumps` of a Python `int`, exactly the dialect of
+  `maxsize_fill.json` (`"f_u64":18446744073709551615`, `"f_i64":-9223372036854775808`),
+  which every harness already encodes byte-exactly in all 11 `run.sh`. `string`
+  writes the decimal string (`"18446744073709551615"`). The flag exists because the
+  two dialects are **not** interchangeable: C and C++ read a 64-bit value through
+  `sofab_json_u64`/`sofab_json_i64` (corelib `test/shared/sofab_test_json.c`,
+  `if (v->type != SOFAB_JSON_NUMBER) return 0`) and Zig through
+  `jsonU64`/`jsonI64` (`generators/zig/project.go`, `.string` → `else => return
+  0`), so a quoted value silently reads as 0 there; the TypeScript harness parses
+  its input with plain `JSON.parse` (`generators/typescript/project.go`), so a bare
+  integer above 2^53 is rounded before `fromJSON` sees it, while its `fromJSON`
+  takes `string | number` through `BigInt()`/`Number()` in every int64 mode. A
+  harness is therefore driven in the one dialect it reads exactly (§2.4), and a
+  wrong-dialect run fails loudly (E23 would still pass by accident on a quoted 0,
+  E25–E28 would not) instead of being "fixed" inside the harness. The summary
+  prints the dialect used. Nothing else in the driver's input is 64-bit.
 * `--int64-safe` is for a harness whose 64-bit scalar is a JS `number` (TS
-  `int64: number`, documented as lossy above 2^53): the wide values of
-  E26–E28 are replaced by `±9007199254740991`; E25 (`2^32`, low word zero) stays.
-  The summary prints that the substitution happened.
+  `int64: number`, documented as lossy above 2^53). It replaces exactly three
+  values, input and expectation alike: **E26** `sig` → `9007199254740991`
+  (wire `seq(4, signed(1, 2**53-1))`), **E27** `sig` → `-9007199254740991`
+  (wire `seq(4, signed(1, -(2**53-1)))`), **E28** `big` (u64) →
+  `9007199254740991` (wire `seq(4, unsigned(0, 2**53-1))`). E23–E25 are exact
+  in a double and stay (E25 = `2^32`, low word zero). The summary prints that the
+  substitution happened.
 * `--known-gap CASE=REASON` runs the case anyway and prints its verdict and the
   reason under a `KNOWN GAP` heading instead of failing on it; a known gap that
   **passes** is reported as `KNOWN GAP NOW PASSES — drop the flag`. It exists for
   exactly one case (D27 on cpp, if §8 item 2 applies) and is never used silently.
 
-64-bit values travel as JSON **strings** on the way in (the dialect every harness
-already accepts, as in `check_array_lengths.py`) and are compared by value across
-the string/number spelling on the way out.
+64-bit values travel in the dialect `--int64-json` names on the way in (bare
+integers by default; strings for TypeScript only, §2.4) and are compared **by
+value** across the string/number spelling on the way out, whichever spelling the
+harness prints (the rule of `check_array_lengths.py`, whose quoted input is
+TypeScript-only for the reason above).
 
 ### 2.1 The schema (`--emit-schema`, message `uni`)
 
@@ -387,6 +420,31 @@ messages:
       pf: { id: 5, type: union, default_id: 1, oneof: { $ref: "#/$defs/union/Pick" } }             # -> Pick_default_t
       pe: { id: 6, type: array, items: { type: union, count: 3, default_id: 0, oneof: { $ref: "#/$defs/union/Pick" } } }  # -> Pick_default_n
       po: { id: 7, type: union, oneof: { $ref: "#/$defs/union/Pick" } }                            # omitted = lowest id 0 -> Pick_default_n
+      r:                                   # D is itself a UNION whose own D is NOT its first option
+        id: 8
+        type: union
+        default_id: 0
+        oneof:
+          nu: { id: 0, type: union, default_id: 1, oneof: { a: { id: 0, type: u8 }, b: { id: 1, type: u8, default: 4 } } }
+          ar: { id: 1, type: array, items: { type: u8, count: 2 } }
+      r2:                                  # D is a COMPACT ARRAY
+        id: 9
+        type: union
+        default_id: 0
+        oneof:
+          ca: { id: 0, type: array, items: { type: u8, count: 2 } }
+          x:  { id: 1, type: u8 }
+      g:                                   # union ELEMENT two array levels down, non-first D at a non-zero default
+        id: 10
+        type: array
+        items: { type: array, count: 2, items: { type: union, count: 2, default_id: 1, oneof: { lo: { id: 0, type: u8 }, hi: { id: 1, type: u32, default: 4 } } } }
+      r3:                                  # D is a WRAPPER ARRAY
+        id: 11
+        type: union
+        default_id: 0
+        oneof:
+          ws: { id: 0, type: array, items: { type: string, count: 2, maxlen: 4 } }
+          x:  { id: 1, type: u8 }
 ```
 Everything is bounded, so C, C++ `c-cpp` and Rust `no_std` build it. `pt.x`
 defaults to 7, `box.z` to 3, `p.q` to 9 and `Pick`'s `n` to 6 / `t.k` to 2, so
@@ -398,9 +456,24 @@ and a field with `default_id` omitted (lowest id → `n`, sharing the element's
 type). `e`/`fl`/`f`/`bo` are the kinds whose ≠-default guard is special-cased in
 some backend; `fa` is the fp array that must keep its `fixlen_word` when empty.
 
+`D` covers every kind that the §0 predicate `isDefault(union) = held == D &&
+D.isDefault` treats differently: a struct (`u`, `v2`, `pf`), a leaf (`v`, `q`,
+`pe`/`po`), a **union** (`r`: `nu`, whose own `D` is its non-first option `b` = 4),
+a **compact array** (`r2`) and a **wrapper array** (`r3`). `r` is the one that
+executes the recursion: `r` holding `nu` which holds its non-`D` option `a` = 0
+is **not** default (E36) — a backend that tests only the held option's value, or
+C without the `_UNION_FORCED` line in `_field_is_default` (§5.1 item 1), omits
+`r` and decodes `nu = {"b":4}`: silent data loss that no other field shows (E10
+does not, because `inner` is a non-`D` option of `u` and is forced anyway). `g`
+runs the gap fill of an **inner** array of unions (Rust `reserve_elem`, Go
+`NewMessageSeqInit`, the GC factories, the C holder) with a non-first `D` at a
+non-zero default, through the nested `ArrayElem.ElemRef` that §1.1 fixes — the
+corpus `grid` only generates it.
+
 Default value of the message (what `decode(b"")` must print — case D0):
 `u = {"pt": {"x": 7, "y": 0}}`, `v = []` (or `null`), `w = 0`, `v2 = []`,
-`q = {"sig": 0}`, `pf = {"t": {"k": 2}}`, `pe = []`, `po = {"n": 6}`.
+`q = {"sig": 0}`, `pf = {"t": {"k": 2}}`, `pe = []`, `po = {"n": 6}`,
+`r = {"nu": {"b": 4}}`, `r2 = {"ca": []}`, `g = []`, `r3 = {"ws": []}`.
 
 ### 2.2 Encode cases — JSON in, exact wire out, then decode(wire) == JSON
 
@@ -432,23 +505,36 @@ also a streamed decode case.
 | E20 struct `D` element last, all-default | `{"v2":[{"a":1},{"p":{"q":9}}]}` | `seq(3, seq(0,unsigned(0,1)), seq(1))` | `D` struct at default closes with `end` (elided) inside, the last element with `end_keep` |
 | E21 struct `D` element interior gap | `{"v2":[{"p":{"q":9}},{"a":2}]}` | `seq(3, seq(1,unsigned(0,2)))` | gap = `D` at its **non-zero** default |
 | E22 struct `D` element set | `{"v2":[{"p":{"q":4}}]}` | `seq(3, seq(0, seq(1,unsigned(0,4))))` | `D` framed normally inside an element |
-| E23 u64 non-`D` at 0 | `{"q":{"big":"0"}}` | `seq(4, unsigned(0,0))` | forced write of a 64-bit option |
-| E24 i64 `D` at default | `{"q":{"sig":"0"}}` | `b""` | 64-bit `D` omitted |
-| E25 i64 `D`, low word zero | `{"q":{"sig":"4294967296"}}` | `seq(4, signed(1,2**32))` | the TS `long` `(low, high)` omission test must look at `high` |
-| E26 i64 `D` wide | `{"q":{"sig":"1152921504606846977"}}` | `seq(4, signed(1,2**60+1))` | exact above 2^53 |
-| E27 i64 `D` wide negative | `{"q":{"sig":"-1152921504606846977"}}` | `seq(4, signed(1,-(2**60+1)))` | |
-| E28 u64 non-`D` max | `{"q":{"big":"18446744073709551615"}}` | `seq(4, unsigned(0,2**64-1))` | |
+| E23 u64 non-`D` at 0 | `{"q":{"big":0}}` | `seq(4, unsigned(0,0))` | forced write of a 64-bit option |
+| E24 i64 `D` at default | `{"q":{"sig":0}}` | `b""` | 64-bit `D` omitted |
+| E25 i64 `D`, low word zero | `{"q":{"sig":4294967296}}` | `seq(4, signed(1,2**32))` | the TS `long` `(low, high)` omission test must look at `high` |
+| E26 i64 `D` wide | `{"q":{"sig":1152921504606846977}}` | `seq(4, signed(1,2**60+1))` | exact above 2^53 |
+| E27 i64 `D` wide negative | `{"q":{"sig":-1152921504606846977}}` | `seq(4, signed(1,-(2**60+1)))` | |
+| E28 u64 non-`D` max | `{"q":{"big":18446744073709551615}}` | `seq(4, unsigned(0,2**64-1))` | |
 | E29 `$defs` field, its `D` at default | `{"pf":{"t":{"k":2}}}` | `b""` | the field's type is `Pick_default_t` |
 | E30 `$defs` field holding the other site's `D` | `{"pf":{"n":6}}` | `seq(5, unsigned(0,6))` | `n` is **not** `D` here: forced |
 | E31 `$defs` omitted-`default_id` site, its `D` | `{"po":{"n":6}}` | `b""` | omitted = lowest id |
 | E32 `$defs` omitted site holding `t` at default | `{"po":{"t":{"k":2}}}` | `seq(7, seq(1))` | `end_keep` |
 | E33 `$defs` element holding the field's `D` | `{"pe":[{"t":{"k":2}}]}` | `seq(6, seq(0, seq(1)))` | option `end_keep`, last element `end_keep` |
 | E34 `$defs` element gap = the element site's `D` | `{"pe":[{"n":6},{"s":"x"}]}` | `seq(6, seq(1, string(2,"x")))` | gap fill is `n` = 6, not `t` |
+| E35 union `D` holding its own `D` at default | `{"r":{"nu":{"b":4}}}` | `b""` | recursive `isDefault` true |
+| E36 union `D` holding its non-`D` at 0 | `{"r":{"nu":{"a":0}}}` | `seq(8, seq(0, unsigned(0,0)))` | recursive `isDefault` **false**: `r` is written although `nu`'s held value is 0 (C: `_UNION_FORCED` in `_field_is_default`) |
+| E37 union `D`, its `D` set | `{"r":{"nu":{"b":5}}}` | `seq(8, seq(0, unsigned(1,5)))` | `D` framed normally |
+| E38 non-`D` compact array empty beside a union `D` | `{"r":{"ar":[]}}` | `seq(8, uarray(1,[]))` | forced write, count 0 |
+| E39 compact-array `D` empty | `{"r2":{"ca":[]}}` | `b""` | array `D` at its (empty) default is omitted |
+| E40 compact-array `D` set | `{"r2":{"ca":[1]}}` | `seq(9, uarray(0,[1]))` | |
+| E41 scalar non-`D` beside an array `D` | `{"r2":{"x":0}}` | `seq(9, unsigned(1,0))` | forced write |
+| E42 wrapper-array `D` empty | `{"r3":{"ws":[]}}` | `b""` | wrapper `D` at its default is omitted |
+| E43 wrapper-array `D` set | `{"r3":{"ws":["a"]}}` | `seq(11, seq(0, string(0,"a")))` | wrapper `D` framed, closed with `end` (present: it has a child) |
+| E44 union element two levels down | `{"g":[[{"hi":4},{"lo":1}]]}` | `seq(10, seq(0, seq(1, unsigned(0,1))))` | inner element 0 = `D` `hi` at 4 → gap; inner element 1 non-`D` → framed; the inner array is the outer's last element |
 
 (E14 is a decode: `decode(seq(0, seq(7)))` → `u={"box":{"z":3}}` — the empty frame
 selects `box` at its own (non-zero) default, not zero.)
 
-Under `--int64-safe` E26–E28 use `±9007199254740991` instead (§2 usage).
+The 64-bit inputs of E23–E28 are shown as bare integers, the `--int64-json number`
+spelling; under `string` the same values are quoted. Under `--int64-safe` E26 →
+`9007199254740991`, E27 → `-9007199254740991`, E28 → `9007199254740991` (u64),
+with the wires given in §2 usage.
 
 ### 2.3 Decode cases — forged wire in, JSON out, one-shot AND streamed
 
@@ -458,7 +544,7 @@ re-encode the decoded JSON and compare against the canonical wire given.
 
 | case | wire | expected | pins |
 |---|---|---|---|
-| D0 empty message | `b""` | the §2.1 default value, every field | per-site `D` (`pf` vs `po`) |
+| D0 empty message | `b""` | the §2.1 default value, every field | per-site `D` (`pf` vs `po`); union/array `D`s (`r`, `r2`, `r3`) |
 | D1 multi-child, last wins (**re** → `seq(0, string(1,"x"))`) | `seq(0, unsigned(0,9), string(1,"x"))` | `u={"s":"x"}` | §4.2 several children, §7.4.1 |
 | D2 three children, switch to struct starts at default | `seq(0, unsigned(0,9), string(1,"x"), seq(2, signed(1,3)))` | `u={"pt":{"x":7,"y":3}}` | new option from its default |
 | D3 re-opened frame, other option | `seq(0, unsigned(0,9)) seq(0, string(1,"x"))` | `u={"s":"x"}` | switch across frames |
@@ -492,10 +578,16 @@ re-encode the decoded JSON and compare against the canonical wire given.
 | D31 wrapper option after a switch, streamed | `seq(0, unsigned(0,9), seq(4, string(0,"ab"), string(1,"cd")))` | `u={"strs":["ab","cd"]}` | a sequence arm **re-entered on resume** (cpp) must not reset the option |
 | D32 `$defs` omitted site, struct option empty frame | `seq(7, seq(1))` | `po={"t":{"k":2}}` | the empty frame selects `t` at its default on the `Pick_default_n` type |
 | D33 `$defs` element gaps | `seq(6, seq(0), seq(1, seq(1)))` | `pe=[{"n":6},{"t":{"k":2}}]` | an empty element frame = **that site's** `D` (`n`, not `pf`'s `t`) |
+| D34 wrapper option repeated in one frame (**re** → `seq(0, seq(4, string(0,"x")))`) | `seq(0, seq(4, string(0,"ab"), string(1,"cd")), seq(4, string(0,"x")))` | `u={"strs":["x"]}` | §7.4 wrapper **replace** (not merge) survives the union sequence-begin arm, which routes through `mutable<Opt>()` / `<opt>_mut()` / `Mut<Opt>()` and must not bypass the existing wrapper reset |
+| D35 wrapper option repeated across re-opened frames | `seq(0, seq(4, string(0,"ab"), string(1,"cd"))) seq(0, seq(4, string(0,"x")))` | `u={"strs":["x"]}` | same, the held option continuing across frames |
+| D36 union `D` in an empty frame | `seq(8, seq(0))` | `r={"nu":{"b":4}}` | an empty `nu` frame is `nu` at **its** default (its `D` `b` = 4), not its first option |
+| D37 inner-array gap of union elements | `seq(10, seq(0, seq(1, unsigned(0,1))))` | `g=[[{"hi":4},{"lo":1}]]` | the inner-row gap fill = the element type's `D` (`hi` = 4), two array levels down |
 
-D29–D31 are ordinary cases (every case is streamed); they are listed because the
-split at `--sizes 1` lands **inside** the payload after a switch, which is where a
-non-idempotent switch loses data (§0 "select if not held").
+D29–D31 and D34/D35 are ordinary cases (every case is streamed); they are listed
+because the split at `--sizes 1` lands **inside** the payload after a switch or
+inside a repeated wrapper, which is where a non-idempotent switch loses data (§0
+"select if not held") and where a resume-replayed sequence arm could clear the
+wrapper a second time or not at all.
 
 Comparison: a **union level is strict** — the decoded union must be an object with
 exactly the expected single key (a product-type harness that prints every arm
@@ -506,8 +598,8 @@ empty blob accepts `""`, `[]` and `null`. A float compares by bit pattern of the
 declared width.
 
 `--self-test` asserts, without a harness, that the builders produce the documented
-hex for E4, E7, E12, E19, E25, E33, D6 and D24 (hand-written hex in the file), so
-the driver itself is tested in the Core milestone.
+hex for E4, E7, E12, E19, E25, E33, E36, E44, D6, D24 and D34 (hand-written hex in
+the file), so the driver itself is tested in the Core milestone.
 
 ### 2.4 How a language opts in
 
@@ -527,6 +619,23 @@ Rust for `std` and `no_std`; TypeScript for `bigint`, `long` and `number` (the
 last with `--int64-safe`), each mode generated separately — the `q` union makes
 the three runs execute different code (the Long `(low, high)` test, a Long vs
 bigint vs number option slot and setter).
+
+64-bit input dialect per language (§2 `--int64-json`), each backed by the
+harness's own 64-bit reader and, for `number`, by the byte-exact
+`maxsize_fill.json` check the same `run.sh` already passes:
+
+| language | `--int64-json` | why |
+|---|---|---|
+| c, cpp (both corelibs) | `number` (default) | `sofab_json_u64`/`_i64` read `SOFAB_JSON_NUMBER` only; a string reads 0 |
+| zig | `number` (default) | `jsonU64`/`jsonI64` read `.integer`/`.number_string`; `.string` reads 0 |
+| rust (std, no_std) | `number` (default) | serde `u64`/`i64` from a JSON integer |
+| go, java, kotlin, csharp, dart | `number` (default) | the dialect of `maxsize_fill.json`, encoded byte-exactly by every one of them |
+| python (both engines) | `number` (default) | `json.loads` yields an exact `int` |
+| typescript (`bigint`, `long`, `number`) | **`string`**, all three modes | `JSON.parse` rounds a bare integer above 2^53; `fromJSON` reads `string \| number` through `BigInt()` / `Number()`; `number` mode adds `--int64-safe` |
+
+A milestone that finds its harness reads the other dialect exactly as well does
+not switch; the table is what the `run.sh` passes. The output comparison is by
+value in both dialects.
 
 ### 2.5 The other shared drivers
 
@@ -619,7 +728,9 @@ parse-checked; nothing is compiled or run), so `UnRef` proves that the split typ
 generate everywhere, not that they behave. The runtime proof of the split — a
 `$defs` union shared by a field, an array element and an omitted-`default_id` site
 with two different `D`s — is the driver's `Pick` (§2.1, D0/D32/D33/E29–E34), run on
-every configuration of every language.
+every configuration of every language. Likewise the runtime counterparts of
+`nested` (union `D`), `empties` (array `D`) and `grid` (union element two array
+levels down) are the driver's `r`, `r2`/`r3` and `g` (E35–E44, D36, D37).
 
 ---
 
@@ -664,7 +775,9 @@ that full run only.
 appears in the `c` / `cpp-c-cpp` rows. The C milestone therefore also measures the
 generated object (`size` on the `-Os` `arm-none-eabi` object, `.rodata`/`.data`)
 of the driver schema (§2.1: `u` has a struct `D` with `default_id: 2`, `q` a leaf
-`D` with `default_id: 1`, `Pick_default_t` a struct `D`) and of the corpus `UnRef`,
+`D` with `default_id: 1`, `Pick_default_t` a struct `D`; `r`/`r2`/`r3` are the
+`NULL`-image controls — `default_id: 0` with a union, compact-array and wrapper `D`)
+and of the corpus `UnRef`,
 before and after, and states the image bytes per union in its result. The same
 holds for the struct-option path on every target: its cost is argued from the
 emitted code and proven by conformance, not measured by a row.
@@ -816,9 +929,19 @@ Work only in `/root/corelibs/wt-c-cpp-union` (branch `feat/tagged-union`,
      `if (_UNION_FORCED(ninfo, nsrc)) return 0;` — a union holding a non-default
      option is never default.
    * `sofab_object_init`: the tag comes from `_DEFAULT_TAG(info)` — a **NULL image
-     now means tag 0**, so a union whose `default_id` is 0 and whose options all
-     default to zero needs no image and costs no `.rodata` (the generator emits the
-     plain `SOFAB_OBJECT_DESCR_UNION` with a NULL image then; see 5.2).
+     now means tag 0**, so a union whose image would carry nothing but zeros needs
+     no image and costs no `.rodata` (the exact condition is in 5.2).
+   * **`SOFAB_OBJECT_DESCR_UNION` takes the image as a pointer.** Today it expands
+     `(const void *)&(default_struct)`, so `NULL` cannot be passed. Change the
+     parameter to `default_image` — a pointer, or `NULL` — expanded as
+     `(const void *)(default_image)`, exactly as `SOFAB_OBJECT_DESCR_WITH_DEFAULTS`
+     already takes its `default_struct` (the generator emits `&<image>` there,
+     `generators/c/backend.go`). One macro, no `_NODEFAULTS` twin: the image is a
+     prefix type, not `obj` (5.2), so a pointer is the natural form anyway, and #182
+     is an unmerged draft, so no caller breaks. Update the in-tree callers
+     (`test/c/test_object.c`) to pass `&image`; `union_null_image_holds_id_0` builds
+     its descriptor with `NULL` through the macro, so a regression to the
+     address-of form fails to compile in the corelib's own suite.
    * Verify the empty explicit forms with tests: a zero-length string/blob, a
      count-0 sized array (and a count-0 fp array keeping its `fixlen_word`), an
      empty wrapper frame.
@@ -875,11 +998,17 @@ Work only in `/root/corelibs/wt-c-cpp-union` (branch `feat/tagged-union`,
   The tag is first (`SOFAB_OBJECT_ASSERT_LEN_FIRST`); the widest-first rule applies
   inside nothing (the union overlays). A sized option's companion width follows the
   existing rule (at least the element's alignment).
-* **Descriptor**: `SOFAB_OBJECT_DESCR_UNION(fields, n, nested, k, <image>, T, which)`
-  with option fields addressed as `u.<opt>` (sized: `u.<opt>.data`/`u.<opt>.items`
-  with length `u.<opt>.len`). The image is emitted only when `default_id != 0` or
-  the default option has a non-zero default; it sets `.which = default_id` and
-  that option's default. Otherwise the image pointer is NULL (5.1 item 1).
+* **Descriptor**: `SOFAB_OBJECT_DESCR_UNION(fields, n, nested, k, <&image or NULL>,
+  T, which)` (the pointer form of 5.1 item 1) with option fields addressed as
+  `u.<opt>` (sized: `u.<opt>.data`/`u.<opt>.items` with length `u.<opt>.len`).
+  **The image pointer is `NULL` iff `default_id == 0` and either `D` is a sequence
+  option (struct / union / wrapper array — seeded through its own descriptor, never
+  from the parent image) or `D` is a leaf option (scalar, string, blob, compact
+  array) whose default is all-zero / empty.** In every other case the prefix image
+  below is emitted — including `default_id != 0` with a sequence `D` whose nested
+  defaults are non-zero (the tag-only image), and `default_id == 0` with a leaf `D`
+  at a non-zero default (tag 0 + `D`). A tag-only image with tag 0 is never
+  emitted: it is byte-for-byte what `NULL` means.
 * **The image is a prefix, never a full `T`.** For a union the corelib reads the
   image at exactly two places: the tag (`_DEFAULT_TAG`) and `D`'s own
   `(offset, size)` plus `D`'s companion length (init, and the ≠-default test of a
@@ -919,8 +1048,10 @@ Work only in `/root/corelibs/wt-c-cpp-union` (branch `feat/tagged-union`,
 * **JSON harness** (`generators/c/project.go`, and
   `tests/conformance/c/example_roundtrip.c`): print/parse only the held option.
 * **Tests** (`generators/c/backend_test.go`): the type shape above, descriptor macro
-  and image rules (NULL when all-zero with id 0; tag-only image for a sequence
-  `D`; tag + `D` prefix image with the offset assertion for a leaf `D`), macro
+  and the image rule, one case per branch (`NULL` for id 0 with a sequence `D`
+  whose nested defaults are non-zero, and for id 0 with an all-zero leaf `D`;
+  tag-only image for id ≠ 0 with a sequence `D`; tag + `D` prefix image with the
+  offset assertion for a leaf `D`, at id 0 with a non-zero default and at id ≠ 0), macro
   names + collision check, split variants get two descriptors, the `extern`
   option descriptors, guard emitted.
 * **Conformance**: `SOFAB_C_CORELIB=/root/corelibs/wt-c-cpp-union
