@@ -1,0 +1,3 @@
+# A union holds exactly one option, so an empty oneof has nothing to hold.
+version: 1
+messages: { M: { payload: { u: { id: 0, type: union, oneof: {} } } } }

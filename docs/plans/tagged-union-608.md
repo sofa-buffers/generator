@@ -723,9 +723,15 @@ and `Shape_default_pt`, `Shape` used with `default_id` 0 and 2),
 the latter with a struct option `pt`, `Shape` used with `default_id` 0 and 2). The
 corpus README's union bullet is updated.
 
-The corpus is **generate-only** (every backend generates it, Go output is
-parse-checked; nothing is compiled or run), so `UnRef` proves that the split types
-generate everywhere, not that they behave. The runtime proof of the split — a
+The corpus is **compiled, never run**: `go test ./tests/matrix` only generates it
+(Go output parse-checked), but every conformance `run.sh` also builds or
+typechecks each corpus definition (c, java, rust + clippy, zig, dart analyze,
+tsc, …). So `UnRef` proves that the split types generate and compile everywhere,
+not that they behave. (Core found three pre-existing backend defects this way, all
+unrelated to unions and fixed in the Core commit: TypeScript bound a wrapper array
+inside a nested struct to the message's member instead of the struct's; Rust
+compared a `default: []` native array against a bare `[]` literal, which does not
+infer; Dart let a field named `e` shadow `serialize`'s encoder parameter.) The runtime proof of the split — a
 `$defs` union shared by a field, an array element and an omitted-`default_id` site
 with two different `D`s — is the driver's `Pick` (§2.1, D0/D32/D33/E29–E34), run on
 every configuration of every language. Likewise the runtime counterparts of

@@ -157,7 +157,11 @@ func (b *builder) buildField(name string, f map[string]any, parentKey string) *i
 	case "union":
 		fld.Ref = b.refForComposite(f["oneof"], ir.CatUnion, name, parentKey)
 		if id, ok := asInt(f["default_id"]); ok {
+			// Default keeps the raw schema value for the docs target; the
+			// site's default_id travels on the TypeRef to analysis, which
+			// binds it to the union type (NamedType.DefaultID).
 			fld.Default = id
+			fld.Ref.DefaultID = &id
 		}
 	case "array":
 		b.buildArray(fld, f, name, parentKey)
@@ -197,7 +201,11 @@ func (b *builder) elemRef(etyp string, items map[string]any, name, parentKey str
 	case "struct":
 		return b.refForComposite(items["fields"], ir.CatStruct, name+"_elem", parentKey)
 	case "union":
-		return b.refForComposite(items["oneof"], ir.CatUnion, name+"_elem", parentKey)
+		ref := b.refForComposite(items["oneof"], ir.CatUnion, name+"_elem", parentKey)
+		if id, ok := asInt(items["default_id"]); ok {
+			ref.DefaultID = &id // the element site's default_id (bound in analysis)
+		}
+		return ref
 	}
 	return nil
 }

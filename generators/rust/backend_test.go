@@ -3612,3 +3612,27 @@ func TestRustHarnessWithoutMessagesLeavesNothingUnread(t *testing.T) {
 		}
 	}
 }
+
+// An explicitly empty default (`default: []` on a native array) IS the empty
+// value, so it takes the no-default path: the omit guard is the empty test. A slice compare against a bare `[]` literal has no element type
+// to infer and does not compile once a second PartialEq impl is in scope.
+func TestRustExplicitEmptyDefaultIsTheEmptyTest(t *testing.T) {
+	const src = `
+version: 1
+messages:
+  m:
+    payload:
+      a: { id: 0, type: array, items: { type: u8, count: 2 }, default: [] }
+`
+	for _, cfg := range []map[string]any{{}, {"corelib": "rs-no-std"}} {
+		m := moduleFromYAML(t, src, cfg)
+		for _, want := range []string{"if !self.a.is_empty() {"} {
+			if !strings.Contains(m, want) {
+				t.Errorf("cfg %v: message.rs missing %q:\n%s", cfg, want, m)
+			}
+		}
+		if strings.Contains(m, "[][..]") {
+			t.Errorf("cfg %v: an empty default must not become a `[]` slice compare:\n%s", cfg, m)
+		}
+	}
+}

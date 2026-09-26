@@ -180,7 +180,7 @@ and every backend's generic `(unit: …)` rendering applies unchanged. All ident
 | Bitfield | `type: bitfield` + `bits: {FLAG: {pos 0–63, default?}}` or `{$ref}` | each `pos` unique |
 | Array | `type: array` + `items: {type, count?, ...}` | element `type` ∈ numeric \| `string` \| `blob` \| `boolean` \| `enum` \| `bitfield` \| `struct` \| `union` \| `array` (composite/nested elements carry their own `fields`/`oneof`/`enum`/`bits`/`items`); `count` is **optional** — it is a **capacity**: the array may carry `0 .. count` elements and `count` never reaches the wire (§11 *`count` is a capacity*), so a `default` shorter than `count` stays that length and is **not** padded; without it the array is unbounded; `maxlen` only for string/blob elements |
 | Struct | `type: struct` + `fields: {...}` or `{$ref}` | nested; **own id scope** |
-| Union | `type: union` + `oneof: {...}` or `{$ref}`, optional `default_id` | exactly one option; **own id scope** |
+| Union | `type: union` + `oneof: {...}` or `{$ref}`, optional `default_id` | holds **exactly one** option (MESSAGE_SPEC §4.2): a fresh union holds `default_id` at that option's own default; an omitted `default_id` means the option with the **lowest id**. `oneof` declares at least one option, and a `string`/`blob`/`array` option declares no non-empty `default`; **own id scope** (§11 *Tagged unions*) |
 
 **Bounds and fixed-storage targets.** `maxlen` and array `count` are optional
 at the schema level, but the fixed-storage backends (C, the C++ `c-cpp`
@@ -292,6 +292,15 @@ validator must reproduce all of `schema/README.md` §Validation. Checklist:
    - `defaultIdMatchesUnion` — union `default_id` matches an option id (presence test).
    - `blobDefaultLength` — base64-decode the blob `default`, compare **byte** length to `maxlen`.
    - `int64Range` — exact 64-bit range for `i64`/`u64` `default`, accepting an integer or a quoted **decimal** string, checked with a big-integer type. A number spelled with a decimal point or an exponent is refused even when its value is an exact integer: JSON cannot tell `1000000.0` from `1000000`, but YAML can, and the generator renders the float through the shortest decimal form, which becomes `1e+06` — a literal eight of the eleven targets reject (§8 of `schema/README.md`).
+   - **Union options** (`checkUnionOptions`, not an Ajv keyword): `oneof` declares
+     at least one option (a union holds exactly one), and an option of type
+     `string`, `blob` or `array` declares no **non-empty** `default` (`""` and
+     `[]` stay legal) — a held option other than `default_id` is always written
+     (MESSAGE_SPEC §4.2/§6), so a non-empty default would be sent in full. Called
+     from `checkUnionField` (which a union array element also reaches) and from the
+     `union` branch of `validateDefs`, so a `$defs` violation is reported once at
+     `#/$defs/…` and once per referencing site, never twice at one location
+     (`schema/README.md` *Union options*).
 5. **Enum values are signed 32-bit** (−2³¹ … 2³¹−1), values and `default` alike.
 6. **Nesting-depth cap** (`MaxNestingDepth = 256`) and recursive-ref rejection.
    Recursive/dangling refs are rejected fail-fast during `$ref` resolution
@@ -318,9 +327,23 @@ needs equivalent data structures:
   `Name`/`Key`, an optional `Summary`, an `Inline` flag (marks hoisted inline
   definitions; synthetic keys `<parentKey>_<fieldName>` / `<name>_elem`), and
   one of `Fields` (struct/union), `Consts` (enum), `Flags` (bitfield). A
-  union's `default_id` is carried on the **referencing field's** `Default` —
-  the `NamedType.DefaultID` member exists in the Go structs but is never
-  populated; do not rely on it.
+  union's default option is a property of the **type**: `NamedType.DefaultID`
+  is always set after analysis (the site's `default_id`, else the lowest option
+  id), and `DefaultOption()` / `IsDefaultOption(f)` (`internal/ir/union.go`) are
+  the only way a backend asks for it. Analysis (`bindUnionDefaults`) collects
+  every union site — `Field.Ref`, `Field.ElemRef` and each nested
+  `ArrayElem.ElemRef`, whose raw `default_id` the model carries on
+  `TypeRef.DefaultID` — and a `$defs` union used with several distinct
+  effective `default_id`s is **split** into one `NamedType` per id, named
+  `<Name>_default_<option>` (key `<Key>_default_<option>`), registered at the
+  original's `NamedOrder` position in ascending id order, with every site
+  repointed; the variants share the original's `Fields`. A variant whose name
+  **folds** (lowercase, non-alphanumerics dropped) onto an existing type's key or
+  name is a located analysis error, because every backend derives identifiers
+  from the key by case changes and separator removal. So a constructor, an
+  array-of-union gap fill and an omission test all bake in the one default of
+  their type. `Field.Default` on a union field is the raw schema `default_id`,
+  kept for the `docs` target only.
 - **`Field`** — `Name`, `ID`, `Kind`, metadata (`Description`/`Unit`/
   `Deprecated`), and kind-specific data: `Default` (typed per kind), `Maxlen`,
   `Decimals` (scalars/string/blob); `Elem`/`Count`/`ElemMax` (array) — the
@@ -335,7 +358,9 @@ needs equivalent data structures:
   zero-value `Invalid` sentinel). Width per kind
   is intrinsic (1/2/4/8 bytes; enum/bitfield width derived from value range / max
   position) — see `internal/ir/layout.go` `AlignRank`.
-- **`TypeRef`** — `{Key, Target}`; post-Analysis `Target` is always resolved.
+- **`TypeRef`** — `{Key, Target, DefaultID}`; post-Analysis `Target` is always
+  resolved. `DefaultID` is a union site's raw `default_id` (nil when omitted),
+  consumed by analysis only — backends read `Target.DefaultID`.
 
 **Determinism (required).** Model/analysis sort messages by name, fields by id
 (name as tiebreak), enum consts by value, bitfield flags by pos. `NamedOrder`
@@ -2928,6 +2953,56 @@ behind the type decision, though by different means:
 - **c** resets in `object.c`'s `FIELDTYPE_SEQUENCE` case, which sits after the
   descriptor wire-type check.
 
+#### Decode verdict: a union holds one option (§7.4.1)
+
+MESSAGE_SPEC §4.2 makes a union hold **exactly one** option and §7.4.1 says which
+one a decoder keeps. A child whose id names option `o` and whose header **passed
+the §7.3 gate for `o`'s declared kind** — wire type, fixlen subtype (`string` vs
+`blob`, `fp32` vs `fp64`) **and** array kind (unsigned / signed / fixlen compact
+array vs wrapper sequence):
+
+1. if `o` is not the held option, `o` becomes held; a `struct`/`union` option is
+   put at **its own** default (constructed or reset in place) before its payload.
+   Every other kind is replaced whole by its payload anyway, so needs no reset.
+2. the payload is applied exactly as for an ordinary field of that kind: a
+   `struct`/`union` option continues its scope (the §7.4 merge), everything else
+   is replaced.
+
+A child skipped under §7.3 and a child with an unknown id **do nothing** — no
+switch, no discard. Several children in one frame, a re-opened frame and an empty
+frame are all legal, never `INVALID`.
+
+**The switch is "select if not held".** It acts only when `o` is not held and
+never resets, clears, re-emplaces or re-binds an option that already is, so it is
+idempotent — which it must be, because the hook it lives in can fire **more than
+once per occurrence**: per chunk (corelib-cpp delivers a split string/blob/array
+once per chunk into the bound destination), on resume (corelib-cpp replays the ids
+of the open sequence levels after a `feed` boundary; corelib-py replays
+`on_*_begin`), and per delivery (Rust's `(total, offset, chunk)` callbacks). An
+unconditional `emplace`/`set`/`reset()` there wipes the chunks already delivered —
+the resumable-temporary trap. The §7.4 replacement of a held leaf or array option
+by a *new* occurrence is not part of the switch: it stays that kind's existing,
+already resume-safe per-occurrence logic.
+
+**Placement.** The switch runs at the hook reached **only past the §7.3 gate**:
+
+| option kind | hook that switches |
+|---|---|
+| scalar | the typed value callback, together with the store (after the width check) |
+| string / blob, assembled then assigned (go, java, kotlin, csharp, rust, zig, typescript) | the completion store — never `fixlenBegin`, never a per-chunk branch |
+| string / blob, bound in place (c via corelib, cpp, dart) | the header hook that binds the destination, after the subtype gate |
+| any option, python | the typed value hook of that kind, or `on_sequence_begin` — never `on_field` / `on_schema_bound` / `on_array_begin` / `on_*_begin`, which a resumed read replays |
+| compact array | the array header hook, after the kind/subtype gate |
+| wrapper array, `struct`, `union` | the sequence-begin arm |
+
+Where a corelib routes by id alone (TS `fixlenBegin`/`arrayBulk`, Go
+`FixlenBegin`/`ArrayBegin`, Java/Kotlin/C# `afill`, cpp `is.fixType()`), the
+generated subtype/kind gate runs **first** and the switch sits behind it. A
+zero-length string/blob must still switch; a corelib that does not call the
+payload callback for `total == 0` switches at the header for that case only.
+`tests/conformance/lib/check_union.py` (§12) forges every one of these shapes;
+which backends pass it is the per-target table in §11 *Tagged unions*.
+
 #### Decode verdict: invalid-UTF-8 strings are INVALID (strict, config-gated)
 
 MESSAGE_SPEC §8 + CORELIB_PLAN §6.4 make a `string` **UTF-8 text** (`blob` is the
@@ -5237,6 +5312,7 @@ target renders the same metadata as HTML page content
   |---|---|
   | `struct`/`union` field, array field (the wrapper) | `end` |
   | wrapper-array **element** (`struct`/`union`/nested row) | `end_keep` |
+  | union **option** other than `default_id` (`struct`/`union`/wrapper array) | `end_keep` |
   The two failure directions are asymmetric, which makes `end_keep` the safe
   default: the wrong `end_keep` costs one non-canonical empty frame a decoder
   normalizes away, the wrong `end` silently changes an array's length. In C++ the
@@ -5295,6 +5371,52 @@ target renders the same metadata as HTML page content
   used by the conformance tests; field-type ↔ JSON conventions are fixed per
   backend (a few known cross-language JSON discrepancies remain — see §13/open
   items).
+- **Tagged unions** (MESSAGE_SPEC §4.2, §7.4.1; generator#608; the binding design
+  is `docs/plans/tagged-union-608.md`). A union holds **exactly one** option. A
+  fresh union holds `default_id` (`D`) at that option's own default; selecting
+  another option discards the held one and the new option starts from its own
+  default.
+  - **One type per (union, `default_id`).** The default is carried by the union
+    **type** (`NamedType.DefaultID`, §6), never by the site, so a `$defs` union
+    referenced with different `default_id`s is split by analysis into
+    `<Name>_default_<option>` types. That is what makes every type-level default
+    correct without a site parameter: a constructor, Rust `T: Default`, a Go zero
+    value plus `setDefaults`, a C default image, a GC corelib's element factory,
+    and an array-of-union gap fill.
+  - **Encode.** One `switch` over the held option, one arm per option:
+    | held option | written inside the union frame |
+    |---|---|
+    | `D` | like an ordinary field of its kind: omitted iff equal to its default; a `struct`/`union`/wrapper-array `D` closes with `end` |
+    | other, scalar (`u*`/`i*`/`fp*`/`boolean`/`enum`/`bitfield`) | the value, **no ≠-default guard** |
+    | other, `string` / `blob` | the value, no guard — empty is a zero-length payload |
+    | other, compact array | count + elements, no guard — empty is count 0 (an fp array keeps its `fixlen_word`) |
+    | other, wrapper array / `struct` / `union` | `begin_lazy(id)` … **`end_keep`** (normal per-field omission inside) |
+    `isDefault(union)` ≡ held is `D` **and** `D` equals its own default — the
+    existing predicate of `D`'s kind, recursively for a union `D`. The union
+    field keeps its framing (`begin_lazy … end`), a union element the §5.1 element
+    rules, so a union frame is never empty on a conformant encoder's output. The
+    forced write is why a `string`/`blob`/`array` option may declare no non-empty
+    default (§5).
+  - **Decode.** §9.3 *Decode verdict: a union holds one option*.
+  - **JSON.** `{"<option name>": value}` with exactly the held option, printed
+    even when it is `D` at its default; an omitted union member means the default.
+  - **Storage.** Native tagged types where the language has one (C `which` +
+    `union`, C++ variant storage, Rust `enum`, Zig `union(enum)`); Go holds
+    options by value. Java/Kotlin/C#/Dart/TypeScript keep `which` plus **one
+    typed private slot per option** — primitives stay unboxed and each property
+    keeps one representation (V8 would otherwise generalise a shared slot to
+    `Tagged` and allocate a HeapNumber per store); a reference option is created
+    on first selection and, on the GC targets with a reuse path, reset in place
+    when re-selected. Python keeps one `_value` slot (every attribute is an
+    object reference there). No generic union helper is emitted per schema — only
+    option arms, id routing and option types.
+  - **`MAX_SIZE`** charges the **sum** of all options until every backend writes
+    one option, then header + the **largest** option + terminator (§9.6).
+  - **Per target** (one row per landed backend; a target not listed still emits a
+    record holding every option side by side):
+    | target | representation | status |
+    |---|---|---|
+    | — | — | no backend has landed yet |
 
 ---
 
@@ -5416,6 +5538,34 @@ A reimplementation is **conformant** when it reproduces these gates:
    python engines for exactly that reason. Before it existed the family's only
    §7.4 guard was rust's own, and the family had drifted behind it: five of eleven
    backends merged a wrapper row, four of them found by this driver's first run.
+   The schema also carries a union field `uni`; under `--union` two more cases
+   check that a re-opened union continuing the same struct option merges and one
+   carrying another option replaces it (§7.4.1), compared strictly at the union
+   level. A backend's run.sh passes `--union` once its tagged union lands.
+
+   *Tagged unions* (`tests/conformance/lib/check_union.py`, generator#608): a
+   union holds exactly one option (MESSAGE_SPEC §4.2, §7.4.1; §11 *Tagged
+   unions*). The driver prints its whole document (`--emit-schema`: a `$defs`
+   union `Pick` used at three sites with two `default_id`s, so the split types
+   run; union `D`s of every kind — struct, leaf, union, compact array, wrapper
+   array; a union element two array levels down; 64-bit options), forges its
+   wire images with its own builders, and checks those builders against
+   hand-written hex (`--self-test`, which every run repeats). *Encode* cases put
+   JSON in and compare the exact wire — `D` omitted at its default, every other
+   option forced even at its own default, `end_keep` on a non-`D` sequence
+   option, gaps in arrays of unions — and then decode that wire one-shot and
+   streamed. *Decode* cases forge several children in one frame, re-opened and
+   empty frames, a §7.3 mistype at a union option id (wire type, string/blob and
+   fp32/fp64 subtype, array kind), an unknown id, and a switch followed by a
+   payload split across feeds, where a non-idempotent switch would wipe earlier
+   chunks. The whole decoded message is compared, strictly at every union level
+   (exactly one member), tolerantly below it. `--int64-json number|string` names
+   the harness's 64-bit input dialect (TypeScript reads `string`, everything else
+   `number`), `--int64-safe` swaps the three values above 2^53 for a JS-`number`
+   int64, and `--known-gap CASE=REASON` reports a case under KNOWN GAP instead of
+   failing on it (and says so when it starts passing). It is wired into a
+   language's run.sh by that language's #608 milestone, for every configuration
+   the script builds.
 
    *Nested defaults* (`tests/conformance/lib/check_defaults.py`, generator#609):
    a default declared inside a struct — one and two levels down, and inside a

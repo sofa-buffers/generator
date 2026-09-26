@@ -125,6 +125,9 @@ func (v *validator) validateDefs(node any, loc string) {
 				v.checkName(name, dloc)
 				// struct/union $defs are id-scopes of fields
 				v.validateIDScope(def, dloc)
+				if k == "union" {
+					v.checkUnionOptions(def, dloc)
+				}
 			}
 		case "enum":
 			for name, def := range asMapOf(v, val, kloc) {
@@ -1167,6 +1170,7 @@ func (v *validator) checkUnionField(f map[string]any, loc string) {
 		return
 	}
 	v.validateIDScope(oneof, loc+"/oneof")
+	v.checkUnionOptions(oneof, loc+"/oneof")
 	// defaultIdMatchesUnion (README §7): presence test on default_id.
 	if d, ok := f["default_id"]; ok {
 		dn, ok := asInt(d)
@@ -1188,6 +1192,52 @@ func (v *validator) checkUnionField(f map[string]any, loc string) {
 			v.add(loc+"/default_id", "default_id %d matches no option id in the union", dn)
 		}
 	}
+}
+
+// checkUnionOptions applies the union option rules (README "Union options"):
+// a oneof declares at least one option, and a string, blob or array option
+// declares no non-empty default (MESSAGE_SPEC §4.2 / §6). It is called from
+// exactly two places — checkUnionField (a union field and, through
+// checkArrayItems, a union element) and the union branch of validateDefs — so
+// every location is reported once.
+func (v *validator) checkUnionOptions(oneof any, loc string) {
+	m, ok := oneof.(map[string]any)
+	if !ok {
+		return // validateIDScope reports a non-mapping
+	}
+	if len(m) == 0 {
+		v.add(loc, "a union holds exactly one option; \"oneof\" must declare at least one")
+		return
+	}
+	for name, opt := range m {
+		o, ok := opt.(map[string]any)
+		if !ok {
+			continue
+		}
+		typ, _ := o["type"].(string)
+		d, has := o["default"]
+		if !has || !nonEmptyDefault(typ, d) {
+			continue
+		}
+		v.add(loc+"/"+name+"/default", "a union option of type %s must not declare a non-empty default (MESSAGE_SPEC §4.2): a held option other than default_id is always written, so a non-empty default would be sent in full", typ)
+	}
+}
+
+// nonEmptyDefault reports whether d is a non-empty default of a string, blob or
+// array option. A default of the wrong shape is left to the per-type checks.
+func nonEmptyDefault(typ string, d any) bool {
+	switch typ {
+	case "string":
+		s, ok := d.(string)
+		return ok && s != ""
+	case "blob": // base64; whitespace alone decodes to zero bytes
+		s, ok := d.(string)
+		return ok && strings.TrimSpace(s) != ""
+	case "array":
+		a, ok := d.([]any)
+		return ok && len(a) > 0
+	}
+	return false
 }
 
 // ---- generic helpers ----------------------------------------------------
