@@ -11,6 +11,13 @@ spec disagree, the spec wins and this document is fixed.
 Generator base: `main` @ `aa3609f` (includes the #609 Go nested-defaults fix and
 corelib-go `NewMessageSeqInit`, corelib-go @ `7dc2f68`).
 
+Revised after design review round 1: select-if-not-held switch rule (§0); §7.3
+subtype/kind, `$defs`-split, struct-`D` element, 64-bit and forced-kind driver
+cases (§2); folded split-name collision check and validator call sites (§1);
+TypeScript typed slots, GC ownership/aliasing, `reset()`/`clear()` naming and
+the hand-written sources per milestone (§5); C prefix default image and
+select-at-default (§5.2).
+
 ---
 
 ## 0. The rule in one page (identical in every target)
@@ -37,7 +44,9 @@ the element rules of §5.1 (interior gap iff `isDefault`, last element `end_keep
 A union frame is therefore never empty on a conformant encoder's output.
 
 **Decode** (MESSAGE_SPEC §7.4.1). A child whose id names option `o` and whose
-header **passed the §7.3 gate for `o`'s declared kind**:
+header **passed the §7.3 gate for `o`'s declared kind** — wire type, fixlen
+subtype (`string` vs `blob`, `fp32` vs `fp64`) **and** array kind (unsigned /
+signed / fixlen compact array vs wrapper sequence):
 
 1. if `o != held`: `held := o`, and a `struct`/`union` option is put at its own
    default (construct / reset in place) before its payload. Every other kind is
@@ -51,24 +60,52 @@ A child skipped under §7.3 and a child with an unknown id **do nothing** (no
 switch, no discard). Several children in one frame, a re-opened frame and an empty
 frame are all legal and never `INVALID`.
 
-**Switch placement (every visitor backend).** The switch runs at the one hook
-that fires **exactly once per occurrence** and is reached **only past the §7.3
-gate** for that option:
+**The switch is "select if not held" (binding in every backend).** It is exactly
+step 1: it acts only when `o != held`, and it **never resets, clears, re-emplaces
+or re-binds an option that is already held**. It is therefore idempotent, and it
+must stay correct in a hook that fires **more than once per occurrence**:
+
+* per chunk — corelib-cpp delivers a split string/blob/array once per chunk and
+  continues into the destination (`progress() > 0` on every delivery after the
+  first);
+* on resume — corelib-cpp replays the ids of the open sequence levels after a
+  `feed` boundary (the re-entered-sequence flag, `sofab.hpp` ~5939–5955), so a
+  union's sequence-begin arm runs again for the same occurrence; corelib-py
+  replays `on_*_begin`;
+* per delivery — Rust's `string`/`blob` callbacks take `(total, offset, chunk)`.
+
+An unconditional `emplace` / `set` / `= Variant(…)` / `reset()` in such a hook
+wipes the chunks already delivered — the resumable-temporary trap. The §7.4
+replacement of a held **leaf or array** option by a *new* occurrence is not part
+of the switch: it stays the existing per-occurrence logic of that kind (the
+payload store, or the array header's first-delivery clear), which the backend
+already makes resume-safe.
+
+**Switch placement (every visitor backend).** The switch runs at the hook that is
+reached **only past the §7.3 gate** for that option; where that hook can fire
+several times per occurrence, the select-if-not-held rule above makes that
+harmless:
 
 | option kind | hook that switches |
 |---|---|
 | scalar | the typed value callback, together with the store (after the width check) |
-| string / blob, assembled then assigned (go, java, kotlin, csharp, rust, zig, typescript) | the completion store — never `fixlenBegin` |
-| string / blob, bound in place (c via corelib, cpp, dart) | the header hook that binds the destination, after the subtype gate |
+| string / blob, assembled then assigned (go, java, kotlin, csharp, rust, zig, typescript) | the completion store — never `fixlenBegin`, never a per-chunk branch |
+| string / blob, bound in place (c via corelib, cpp, dart) | the header hook that binds the destination, after the subtype gate (per chunk on cpp: select-if-not-held) |
 | any option, python | the typed value hook of that kind, or `on_sequence_begin` (below) |
 | compact array | the array header hook, after the kind/subtype gate, where the destination is opened/cleared today |
-| wrapper array, `struct`, `union` | the sequence-begin arm |
+| wrapper array, `struct`, `union` | the sequence-begin arm (re-entered on resume on cpp: select-if-not-held) |
+
+Where a corelib routes by id alone (TS `fixlenBegin` / `arrayBulk`, Go
+`FixlenBegin` / `ArrayBegin`, Java/Kotlin/C# `afill`, cpp `is.fixType()`), the
+generated subtype/kind gate that exists today runs **first** and the switch sits
+behind it. The driver cases D20–D27 (§2.3) put a subtype or kind mismatch at a
+union option id, so a switch placed before the gate fails.
 
 Python additionally follows issue §5: the switch belongs in the typed value hooks
 and `on_sequence_begin` only — never in `on_field` / `on_schema_bound` /
 `on_array_begin` / `on_*_begin`, which a resumed read can replay.
 
-Verify per backend (the driver cases E5/E8/D19 catch it): a **zero-length**
+Verify per backend (the driver cases E5/E8 decoded back, and D19, catch it): a **zero-length**
 string/blob must still switch. If a corelib does not call the payload callback for
 `total == 0`, that backend switches at the header for `total == 0` only.
 
@@ -122,11 +159,27 @@ Changes:
      `Key  = orig.Key  + "_default_" + opt(d).Name`, `DefaultID = &d`; register it
      in `Named` and in `NamedOrder` **at the original's position** (variants in
      ascending id order); repoint each site's `Key`/`Target`; delete the original.
-     A variant key that already exists is an analysis error at the site:
-     `union %q is used with default_id %d and %d; the generated type %q for one of
-     them collides with an existing type — rename one`.
+     A variant that collides with an existing type is an analysis error at the
+     site: `union %q is used with default_id %d and %d; the generated type %q for
+     one of them collides with the existing type %q — rename one`. The collision
+     test is **folded**, not raw: two names collide when they are equal after
+     lowercasing and dropping every character that is not a letter or digit.
+     Every backend derives its type identifiers from the key by case changes and
+     separator removal (Go/Java/Kotlin/C#/Dart/TS PascalCase, C/Rust/Zig
+     sanitising), so a folded match is the conservative superset of every
+     backend's own clash — e.g. variant `union/Shape_default_pt` against the
+     inline option type `union/ShapeDefault_pt` of a `$defs` union `ShapeDefault`
+     (both Go `UnionShapeDefaultPt`). The check runs only for split variants, so
+     no schema that generates today starts failing.
   Only `$defs` unions can split: an inline union has exactly one site (a union
   field inside a shared struct is still one `Field`).
+  Per-backend identifiers that the Core check cannot see — the option-id
+  constants (Go package-level `<Type><Opt>ID`, C `<PREFIX>_<OPTION>_ID`, and the
+  class-scoped constants of the other targets) — are collision-checked by that
+  backend in its milestone against every identifier it emits in the same scope,
+  with a located error and a backend unit test (C: the existing `checkMacroNames`;
+  Go: a new package-scope check, since a package-level constant can clash with a
+  type name).
 * `internal/ir/union.go` (new) — the two helpers every backend uses, so no backend
   re-derives them:
   ```go
@@ -142,8 +195,19 @@ Changes:
 ### 1.2 Validator rules (new)
 
 In `internal/parser/validate.go`, one helper `checkUnionOptions(oneof any, loc
-string)` called from all three union definition sites — `checkUnionField`, the
-`union` branch of `checkArrayItems`, and the `union` branch of `validateDefs`:
+string)` called from exactly **two** places: `checkUnionField` (which already
+serves both a union field and, through the `union` branch of `checkArrayItems`,
+a union element — calling it from `checkArrayItems` as well would report every
+element error twice) and the `union` branch of `validateDefs`.
+
+Validation runs on the `$ref`-resolved document (`parser.Document.Resolve`
+copies the target into every site), so a violation inside a `$defs` union is
+reported at `#/$defs/union/<Name>/…` **and** at each site that references it —
+exactly how every existing `$defs`-level check (duplicate option ids, …) already
+reports. That is kept: one report **per location**, never two at the same
+location. A test pins it (§1.4).
+
+The rules:
 
 1. `oneof` must declare **at least one option** — `a union holds exactly one
    option; "oneof" must declare at least one` (an empty `oneof` has no option to
@@ -194,14 +258,19 @@ larger than that option's maximum, so max stays safe under the forced write.
 
 * `internal/parser/validate_test.go` — rule 2 for string/blob/array × field /
   element / `$defs` union, plus the empty-default controls (`""`, `[]`) that stay
-  valid; rule 1 (empty `oneof`) at all three sites.
+  valid; rule 1 (empty `oneof`) at all three sites; and
+  `TestUnionOptionErrorOncePerLocation`: an element union's violation is reported
+  exactly once, and a `$defs` union's exactly once at `#/$defs/…` plus once per
+  referencing site (no location twice).
 * `internal/model/model_test.go` — a union element and a union two array levels
   down carry their `default_id` on the `TypeRef`.
 * `internal/analysis/analysis_test.go` — `TestUnionDefaultIDBound` (explicit,
   omitted → lowest id, element, nested element), `TestUnionSplitByDefaultID`
   (names `Shape_default_num` / `Shape_default_pt`, `NamedOrder` position, both
   sites repointed, an omitted and an explicit-equal site do **not** split),
-  `TestUnionSplitCollision`.
+  `TestUnionSplitCollision` (raw key clash) and `TestUnionSplitFoldedCollision`
+  (`Shape_default_pt` against the inline option type of a `$defs` union
+  `ShapeDefault` with option `pt`).
 * `internal/ir/union_test.go` — the two helpers.
 * IR golden (`internal/ir/golden_test.go`) regenerated for `default_id`.
 * Corpus (§3) valid and invalid files.
@@ -214,16 +283,24 @@ larger than that option's maximum, so max stays safe under the forced write.
 
 One driver, one concern, its own schema printed by itself (`--emit-schema`),
 exactly the shape of `check_repeated_id.py` / `check_defaults.py`. It forges wire
-images from MESSAGE_SPEC §4.3–§4.9 with its own `varint`/`header`/`signed`/
-`unsigned`/`string`/`blob`/`uarray`/`seq` builders (copy the builders of
-`check_repeated_id.py`; add `unsigned(fid, n)` = `header(fid, 0) + varint(n)` and
-`blob(fid, b)` with fixlen subtype `0b011` = 3, CORELIB_PLAN §4.6).
+images from MESSAGE_SPEC §4.3–§4.9 with its own builders (copy the builders of
+`check_repeated_id.py`: `varint`/`header`/`signed`/`string`/`uarray`/`seq`, and
+add, all from CORELIB_PLAN §4.4–§4.8):
+
+* `unsigned(fid, n)` = `header(fid, 0) + varint(n)`;
+* `blob(fid, b)` — fixlen subtype `0b011` = 3;
+* `fp32(fid, x)` / `fp64(fid, x)` — fixlen, `fixlen_word` `0x20` / `0x41`, payload
+  `struct.pack("<f"/"<d")`;
+* `sarray(fid, values)` — wire type 4, zig-zag elements;
+* `farray(fid, values, sub)` — wire type 5, count, **one** `fixlen_word` (`0x20`
+  fp32 / `0x41` fp64) **even when the count is 0**, then the packed elements.
 
 Usage:
 ```
-check_union.py --emit-schema
+check_union.py --emit-schema                   # the WHOLE document: version, $defs, messages
 check_union.py --self-test                     # builders vs. hand-written hex, no harness
 check_union.py <label> [--cwd DIR] [--sizes 1,2,3,5,0] [--no-stream]
+               [--int64-safe] [--known-gap CASE=REASON]...
                [--message NAME] -- <harness argv...>
 ```
 Verbs used: `encode <msg>` (JSON on stdin → wire on stdout), `decode <msg>` (wire
@@ -231,9 +308,34 @@ Verbs used: `encode <msg>` (JSON on stdin → wire on stdout), `decode <msg>` (w
 quiet: every case must run, a harness failure is a failure, the case count is
 printed, and the summary names what was covered.
 
+* `--int64-safe` is for a harness whose 64-bit scalar is a JS `number` (TS
+  `int64: number`, documented as lossy above 2^53): the wide values of
+  E26–E28 are replaced by `±9007199254740991`; E25 (`2^32`, low word zero) stays.
+  The summary prints that the substitution happened.
+* `--known-gap CASE=REASON` runs the case anyway and prints its verdict and the
+  reason under a `KNOWN GAP` heading instead of failing on it; a known gap that
+  **passes** is reported as `KNOWN GAP NOW PASSES — drop the flag`. It exists for
+  exactly one case (D27 on cpp, if §8 item 2 applies) and is never used silently.
+
+64-bit values travel as JSON **strings** on the way in (the dialect every harness
+already accepts, as in `check_array_lengths.py`) and are compared by value across
+the string/number spelling on the way out.
+
 ### 2.1 The schema (`--emit-schema`, message `uni`)
 
+`--emit-schema` prints the **complete** document — `version`, the `$defs` block and
+`messages` — so the `run.sh` block (§2.4) writes it with one redirect and no
+header of its own.
+
 ```yaml
+version: 1
+$defs:
+  union:
+    Pick:                                  # ONE $defs union, three sites, two default_ids -> split (§1.1)
+      n: { id: 0, type: u16, default: 6 }
+      t: { id: 1, type: struct, fields: { k: { id: 0, type: u8, default: 2 } } }
+      s: { id: 2, type: string, maxlen: 4 }
+messages:
   uni:
     payload:
       u:                                   # default_id on a STRUCT option that is NOT the first
@@ -249,6 +351,11 @@ printed, and the summary names what was covered.
           bl:    { id: 5, type: blob, maxlen: 4 }
           inner: { id: 6, type: union, default_id: 1, oneof: { a: { id: 0, type: u8 }, b: { id: 1, type: i8, default: -2 } } }
           box:   { id: 7, type: struct, fields: { z: { id: 0, type: u8, default: 3 } } }
+          e:     { id: 8, type: enum, enum: { A: 0, B: 1, C: 2 }, default: 2 }
+          fl:    { id: 9, type: bitfield, bits: { r: { pos: 0 }, w: { pos: 1, default: true } } }
+          f:     { id: 10, type: fp32, default: 1.5 }
+          fa:    { id: 11, type: array, items: { type: fp32, count: 2 } }
+          bo:    { id: 12, type: boolean, default: true }
       v:                                   # array of unions, default_id on the NON-first option
         id: 1
         type: array
@@ -259,18 +366,48 @@ printed, and the summary names what was covered.
           oneof:
             i: { id: 0, type: i32 }
             s: { id: 1, type: string, maxlen: 8 }
-      w: { id: 2, type: u8 }               # a sibling after the unions: a frame desync shows up here
+      w: { id: 2, type: u8 }               # a sibling right after u and v: a frame desync shows up here
+      v2:                                  # array of unions whose D is a STRUCT with a NON-ZERO default
+        id: 3
+        type: array
+        items:
+          type: union
+          count: 3
+          default_id: 1
+          oneof:
+            a: { id: 0, type: u8 }
+            p: { id: 1, type: struct, fields: { q: { id: 0, type: u8, default: 9 } } }
+      q:                                   # 64-bit options: a u64 non-D and an i64 D
+        id: 4
+        type: union
+        default_id: 1
+        oneof:
+          big: { id: 0, type: u64 }
+          sig: { id: 1, type: i64 }
+      pf: { id: 5, type: union, default_id: 1, oneof: { $ref: "#/$defs/union/Pick" } }             # -> Pick_default_t
+      pe: { id: 6, type: array, items: { type: union, count: 3, default_id: 0, oneof: { $ref: "#/$defs/union/Pick" } } }  # -> Pick_default_n
+      po: { id: 7, type: union, oneof: { $ref: "#/$defs/union/Pick" } }                            # omitted = lowest id 0 -> Pick_default_n
 ```
-Everything is bounded, so C, C++ `c-cpp` and Rust `no_std` build it; no 64-bit
-values, so the TS int64 modes do not matter. `pt.x` defaults to 7 so "starts from
-its default" is distinguishable from "starts from zero" and from "kept stale".
+Everything is bounded, so C, C++ `c-cpp` and Rust `no_std` build it. `pt.x`
+defaults to 7, `box.z` to 3, `p.q` to 9 and `Pick`'s `n` to 6 / `t.k` to 2, so
+"starts from its default" is distinguishable from "starts from zero" and from
+"kept stale" at a field, inside a union, and at an **element gap**. `Pick` is the
+runtime proof of the per-(union, `default_id`) split (§1.1): the same `$defs`
+union is a field whose `D` is the struct `t`, an array element whose `D` is `n`,
+and a field with `default_id` omitted (lowest id → `n`, sharing the element's
+type). `e`/`fl`/`f`/`bo` are the kinds whose ≠-default guard is special-cased in
+some backend; `fa` is the fp array that must keep its `fixlen_word` when empty.
 
-Default value of the message (what `decode(b"")` must print):
-`u = {"pt": {"x": 7, "y": 0}}`, `v = []` (or `null`), `w = 0`.
+Default value of the message (what `decode(b"")` must print — case D0):
+`u = {"pt": {"x": 7, "y": 0}}`, `v = []` (or `null`), `w = 0`, `v2 = []`,
+`q = {"sig": 0}`, `pf = {"t": {"k": 2}}`, `pe = []`, `po = {"n": 6}`.
 
 ### 2.2 Encode cases — JSON in, exact wire out, then decode(wire) == JSON
 
 `seq(id, …)` = header(id, 6) … `07`. All expectations are built with the builders.
+After each encode, `decode(wire)` **and** `streamdecode(wire)` at every `--sizes`
+split must equal the input with the defaults filled in — so every encode case is
+also a streamed decode case.
 
 | case | JSON `encode` input | expected wire | pins |
 |---|---|---|---|
@@ -287,11 +424,31 @@ Default value of the message (what `decode(b"")` must print):
 | E11 struct option at its default | `{"u":{"box":{"z":3}}}` | `seq(0, seq(7))` | `end_keep` on a non-`D` struct option: present, empty |
 | E12 array of unions, gaps | `{"v":[{"i":4},{"s":""},{"i":0},{"s":"z"}]}` | `seq(1, seq(0,signed(0,4)), seq(2,signed(0,0)), seq(3,string(1,"z")))` | element 1 = element default (gap); element 2 = non-`D` at own default, framed with its child |
 | E13 last element all-default | `{"v":[{"i":1},{"s":""}]}` | `seq(1, seq(0,signed(0,1)), seq(1))` | last element `end_keep` |
+| E15 enum at own default | `{"u":{"e":2}}` | `seq(0, signed(8,2))` | forced write through the enum guard |
+| E16 bitfield at own default | `{"u":{"fl":2}}` | `seq(0, unsigned(9,2))` | forced write through the bitfield guard |
+| E17 fp32 at own default | `{"u":{"f":1.5}}` | `seq(0, fp32(10,1.5))` | forced write through the float (bit-pattern) guard |
+| E18 boolean at own default | `{"u":{"bo":true}}` | `seq(0, unsigned(12,1))` | forced write through the boolean guard |
+| E19 fp32 array empty | `{"u":{"fa":[]}}` | `seq(0, farray(11,[],fp32))` = `… 5d 00 20 …` | count 0 **keeps** its `fixlen_word` (CORELIB_PLAN §4.8) |
+| E20 struct `D` element last, all-default | `{"v2":[{"a":1},{"p":{"q":9}}]}` | `seq(3, seq(0,unsigned(0,1)), seq(1))` | `D` struct at default closes with `end` (elided) inside, the last element with `end_keep` |
+| E21 struct `D` element interior gap | `{"v2":[{"p":{"q":9}},{"a":2}]}` | `seq(3, seq(1,unsigned(0,2)))` | gap = `D` at its **non-zero** default |
+| E22 struct `D` element set | `{"v2":[{"p":{"q":4}}]}` | `seq(3, seq(0, seq(1,unsigned(0,4))))` | `D` framed normally inside an element |
+| E23 u64 non-`D` at 0 | `{"q":{"big":"0"}}` | `seq(4, unsigned(0,0))` | forced write of a 64-bit option |
+| E24 i64 `D` at default | `{"q":{"sig":"0"}}` | `b""` | 64-bit `D` omitted |
+| E25 i64 `D`, low word zero | `{"q":{"sig":"4294967296"}}` | `seq(4, signed(1,2**32))` | the TS `long` `(low, high)` omission test must look at `high` |
+| E26 i64 `D` wide | `{"q":{"sig":"1152921504606846977"}}` | `seq(4, signed(1,2**60+1))` | exact above 2^53 |
+| E27 i64 `D` wide negative | `{"q":{"sig":"-1152921504606846977"}}` | `seq(4, signed(1,-(2**60+1)))` | |
+| E28 u64 non-`D` max | `{"q":{"big":"18446744073709551615"}}` | `seq(4, unsigned(0,2**64-1))` | |
+| E29 `$defs` field, its `D` at default | `{"pf":{"t":{"k":2}}}` | `b""` | the field's type is `Pick_default_t` |
+| E30 `$defs` field holding the other site's `D` | `{"pf":{"n":6}}` | `seq(5, unsigned(0,6))` | `n` is **not** `D` here: forced |
+| E31 `$defs` omitted-`default_id` site, its `D` | `{"po":{"n":6}}` | `b""` | omitted = lowest id |
+| E32 `$defs` omitted site holding `t` at default | `{"po":{"t":{"k":2}}}` | `seq(7, seq(1))` | `end_keep` |
+| E33 `$defs` element holding the field's `D` | `{"pe":[{"t":{"k":2}}]}` | `seq(6, seq(0, seq(1)))` | option `end_keep`, last element `end_keep` |
+| E34 `$defs` element gap = the element site's `D` | `{"pe":[{"n":6},{"s":"x"}]}` | `seq(6, seq(1, string(2,"x")))` | gap fill is `n` = 6, not `t` |
 
-Also E14: `decode(seq(0, seq(7)))` → `u={"box":{"z":3}}` — the empty frame selects
-`box` at its own (non-zero) default, not zero.
+(E14 is a decode: `decode(seq(0, seq(7)))` → `u={"box":{"z":3}}` — the empty frame
+selects `box` at its own (non-zero) default, not zero.)
 
-After each encode, `decode(wire)` must equal the input with the defaults filled in.
+Under `--int64-safe` E26–E28 use `±9007199254740991` instead (§2 usage).
 
 ### 2.3 Decode cases — forged wire in, JSON out, one-shot AND streamed
 
@@ -301,6 +458,7 @@ re-encode the decoded JSON and compare against the canonical wire given.
 
 | case | wire | expected | pins |
 |---|---|---|---|
+| D0 empty message | `b""` | the §2.1 default value, every field | per-site `D` (`pf` vs `po`) |
 | D1 multi-child, last wins (**re** → `seq(0, string(1,"x"))`) | `seq(0, unsigned(0,9), string(1,"x"))` | `u={"s":"x"}` | §4.2 several children, §7.4.1 |
 | D2 three children, switch to struct starts at default | `seq(0, unsigned(0,9), string(1,"x"), seq(2, signed(1,3)))` | `u={"pt":{"x":7,"y":3}}` | new option from its default |
 | D3 re-opened frame, other option | `seq(0, unsigned(0,9)) seq(0, string(1,"x"))` | `u={"s":"x"}` | switch across frames |
@@ -310,7 +468,7 @@ re-encode the decoded JSON and compare against the canonical wire given.
 | D7 §7.3-mistyped other option does not switch | `seq(0, string(1,"ab"), string(0,"zz"))` | `u={"s":"ab"}` | string at a `u16` option id is skipped |
 | D8 §7.3-mistyped held option keeps value | `seq(0, string(1,"ab"), unsigned(1,4))` | `u={"s":"ab"}` | |
 | D9 sequence at a string option id | `seq(0, unsigned(0,9), seq(1, signed(0,1)))` | `u={"num":9}` | skip of a whole subtree, no switch |
-| D10 unknown id does not switch | `seq(0, unsigned(0,9), unsigned(9,1))` | `u={"num":9}` | |
+| D10 unknown id does not switch | `seq(0, unsigned(0,9), unsigned(99,1))` | `u={"num":9}` | |
 | D11 empty union frame (**re** → `b""`) | `seq(0)` | `u` = default | accepted, treated as omitted |
 | D12 empty re-opened frame keeps held | `seq(0, unsigned(0,9)) seq(0)` | `u={"num":9}` | no occurrence, no discard |
 | D13 repeated string option replaced | `seq(0, string(1,"ab"), string(1,"c"))` | `u={"s":"c"}` | |
@@ -320,34 +478,55 @@ re-encode the decoded JSON and compare against the canonical wire given.
 | D17 empty element frame | `seq(1, seq(0), seq(1, signed(0,3)))` | `v=[{"s":""},{"i":3}]` | |
 | D18 nested union switch | `seq(0, seq(6, unsigned(0,1)), seq(6, signed(1,-5)))` | `u={"inner":{"b":-5}}` | union of union |
 | D19 chunked string after a switch | `seq(0, unsigned(0,9), string(1,"abcdefgh")) + unsigned(2,3)` | `u={"s":"abcdefgh"}`, `w=3` | a string option split across feeds |
+| D20 blob at a string option, other held | `seq(0, unsigned(0,9), blob(1,b"\x01"))` | `u={"num":9}` | **subtype** gate (string vs blob) before the switch |
+| D21 blob at the held string option | `seq(0, string(1,"ab"), blob(1,b"\x01"))` | `u={"s":"ab"}` | the mistyped payload is not bound into the held destination |
+| D22 string at a blob option | `seq(0, unsigned(0,9), string(5,"q"))` | `u={"num":9}` | subtype gate (blob vs string) |
+| D23 signed array at a `u16` array option | `seq(0, unsigned(0,9), sarray(3,[1]))` | `u={"num":9}` | **array-kind** gate (TS `arrayBulk`, Go `ArrayBegin`, `afill`) |
+| D24 fp32 fixlen array at a `u16` array option | `seq(0, unsigned(0,9), farray(3,[1.0],fp32))` | `u={"num":9}` | array-kind gate (compact integer vs fixlen) |
+| D25 compact array at a wrapper option | `seq(0, unsigned(0,9), uarray(4,[1]))` | `u={"num":9}` | array vs sequence at a wrapper option |
+| D26 fp64 scalar at an fp32 option | `seq(0, unsigned(0,9), fp64(10,2.0))` | `u={"num":9}` | fp subtype gate (TS/Go `fixlenBegin`) |
+| D27 fp64 array at an fp32 array option | `seq(0, unsigned(0,9), farray(11,[2.0],fp64))` | `u={"num":9}` | fixlen-array subtype gate (cpp `is.fixType()`; `--known-gap` only if §8 item 2 applies) |
+| D28 union option away and back | `seq(0, seq(6, unsigned(0,1))) seq(0, unsigned(0,5)) seq(0, seq(6))` | `u={"inner":{"b":-2}}` | a re-selected union option restarts at **its** default (the kept-slot reset on GC targets) |
+| D29 compact array after a switch, streamed | `seq(0, unsigned(0,9), uarray(3,[1,2,3]))` | `u={"arr":[1,2,3]}` | per-chunk array delivery: select-if-not-held must not wipe earlier chunks |
+| D30 blob after a switch, streamed | `seq(0, unsigned(0,9), blob(5,b"\x01\x02\x03\x04"))` | `u={"bl":…01020304}` | per-chunk blob delivery (cpp binds in place) |
+| D31 wrapper option after a switch, streamed | `seq(0, unsigned(0,9), seq(4, string(0,"ab"), string(1,"cd")))` | `u={"strs":["ab","cd"]}` | a sequence arm **re-entered on resume** (cpp) must not reset the option |
+| D32 `$defs` omitted site, struct option empty frame | `seq(7, seq(1))` | `po={"t":{"k":2}}` | the empty frame selects `t` at its default on the `Pick_default_n` type |
+| D33 `$defs` element gaps | `seq(6, seq(0), seq(1, seq(1)))` | `pe=[{"n":6},{"t":{"k":2}}]` | an empty element frame = **that site's** `D` (`n`, not `pf`'s `t`) |
+
+D29–D31 are ordinary cases (every case is streamed); they are listed because the
+split at `--sizes 1` lands **inside** the payload after a switch, which is where a
+non-idempotent switch loses data (§0 "select if not held").
 
 Comparison: a **union level is strict** — the decoded union must be an object with
 exactly the expected single key (a product-type harness that prints every arm
 fails here, which is the point). Below the union, the tolerant `same()` of
 `check_repeated_id.py` applies (member order, `null` for an empty list, integers
 as strings). A blob compares through `as_container()` (base64 or list), and an
-empty blob accepts `""`, `[]` and `null`.
+empty blob accepts `""`, `[]` and `null`. A float compares by bit pattern of the
+declared width.
 
 `--self-test` asserts, without a harness, that the builders produce the documented
-hex for E4, E7, E12 and D6 (hand-written hex in the file), so the driver itself is
-tested in the Core milestone.
+hex for E4, E7, E12, E19, E25, E33, D6 and D24 (hand-written hex in the file), so
+the driver itself is tested in the Core milestone.
 
 ### 2.4 How a language opts in
 
 In the language's milestone, `tests/conformance/<lang>/run.sh` gains a block
 modelled on its `check_repeated_id.py` block (same generator config, same harness
 build, Python on **both** engines through the existing `for ENGINE in $ENGINES`
-loop):
+loop). The driver prints the whole document, so there is no `printf` header:
 ```sh
 echo "==> §4.2/§7.4.1 tagged unions: one option held, last option wins (generator#608)"
-printf 'version: 1\nmessages:\n' > "$WORK/union.yaml"
-python3 "$ROOT/tests/conformance/lib/check_union.py" --emit-schema >> "$WORK/union.yaml"
+python3 "$ROOT/tests/conformance/lib/check_union.py" --emit-schema > "$WORK/union.yaml"
 <generate + build exactly as the repeated-id block does>
 python3 "$ROOT/tests/conformance/lib/check_union.py" "<Label>" -- <harness argv>
 ```
 C, C++ run it for **every** corelib/config the script already loops over (cpp:
 `corelib: cpp` and `corelib: c-cpp`, static/dynamic where the script builds both);
-Rust for `std` and `no_std`; TypeScript for `bigint`, `long` and `number`.
+Rust for `std` and `no_std`; TypeScript for `bigint`, `long` and `number` (the
+last with `--int64-safe`), each mode generated separately — the `q` union makes
+the three runs execute different code (the Long `(low, high)` test, a Long vs
+bigint vs number option slot and setter).
 
 ### 2.5 The other shared drivers
 
@@ -430,8 +609,17 @@ messages:
 `union_option_blob_default.yaml` (element union), `union_option_array_default.yaml`
 (`$defs` union, `default: [0, 0]` — all-zero is not empty),
 `union_empty_oneof.yaml`, `union_split_name_collision.yaml` (`$defs` unions `Shape`
-and `Shape_default_pt`, `Shape` used with `default_id` 0 and 2). The corpus
-README's union bullet is updated.
+and `Shape_default_pt`, `Shape` used with `default_id` 0 and 2),
+`union_split_folded_collision.yaml` (`$defs` unions `Shape` and `ShapeDefault`,
+the latter with a struct option `pt`, `Shape` used with `default_id` 0 and 2). The
+corpus README's union bullet is updated.
+
+The corpus is **generate-only** (every backend generates it, Go output is
+parse-checked; nothing is compiled or run), so `UnRef` proves that the split types
+generate everywhere, not that they behave. The runtime proof of the split — a
+`$defs` union shared by a field, an array element and an omitted-`default_id` site
+with two different `D`s — is the driver's `Pick` (§2.1, D0/D32/D33/E29–E34), run on
+every configuration of every language.
 
 ---
 
@@ -471,6 +659,16 @@ compared and written instead of three) and ≈ 0 on decode (one tag store per
 option occurrence). Finish runs the **full** bench and commits `results.txt` from
 that full run only.
 
+**What the bench cannot see, measured separately.** Both bench unions use
+`default_id: 0` with all-zero option defaults, so the C default image (§5.2) never
+appears in the `c` / `cpp-c-cpp` rows. The C milestone therefore also measures the
+generated object (`size` on the `-Os` `arm-none-eabi` object, `.rodata`/`.data`)
+of the driver schema (§2.1: `u` has a struct `D` with `default_id: 2`, `q` a leaf
+`D` with `default_id: 1`, `Pick_default_t` a struct `D`) and of the corpus `UnRef`,
+before and after, and states the image bytes per union in its result. The same
+holds for the struct-option path on every target: its cost is argued from the
+emitted code and proven by conformance, not measured by a row.
+
 ---
 
 ## 5. Per language
@@ -498,7 +696,7 @@ Common to every backend below:
 
 | target | tag read | option id constant | read | write (select) | test | struct/union/array option in place | back to default |
 |---|---|---|---|---|---|---|---|
-| c | `u.which` (`sofab_object_descr_id_t`) | `#define <PREFIX>_<OPTION>_ID n` | `u.u.<opt>` | assign `which` + value | `which == …_ID` | `u.u.<opt>` | `<msg>_init` |
+| c | `u.which` (`sofab_object_descr_id_t`) | `#define <PREFIX>_<OPTION>_ID n` | `u.u.<opt>` | assign `which` + value; a sequence option at its default: `sofab_object_init(&<option descr>, &u.u.<opt>)` (5.2) | `which == …_ID` | `u.u.<opt>` | `<msg>_init` |
 | cpp (both) | `which()` → `Which` | `enum class Which : sofab::id { <opt> = n, … }` | `<opt>()` | `set_<opt>(v)` | `has_<opt>()` | `mutable_<opt>()` | `reset()` |
 | rust (both) | `which() -> Id` | `pub const <OPT>_ID: Id` | `match` / `<opt>()` → `Option<&T>` | assign the variant | `matches!` | `<opt>_mut()` | `= Default::default()` |
 | zig | `which() sofab.Id` | `pub const <opt>_id: sofab.Id` | `switch` on the tagged union | assign `.{ .<opt> = v }` | `u == .<opt>` | `<opt>Mut()` | `= .init` |
@@ -520,17 +718,82 @@ by design, which is what the mutable accessor is for. A write selects: the optio
 becomes held, the previous one is discarded.
 
 **GC-target storage decision** (deviates from issue §6's `prim`/`ref` slots for
-Java/Kotlin/C#/Dart): `which` + **one typed private slot per option**. Primitives
-stay unboxed and typed (no cast, no bit conversion on any access), and a
+Java/Kotlin/C#/Dart/TypeScript): `which` + **one typed private slot per option**.
+Primitives stay unboxed and typed (no cast, no bit conversion on any access), and a
 reference-typed option (struct/union/array/string/blob destination) is created
 **on first selection and kept** when another option is selected; re-selecting it
 resets it to its default **in place**. So a reused destination (`reset()` +
 decode, the Dart/Java/Kotlin reuse path) re-selects without allocating, and a
 fresh object allocates only the options that are actually held — never all of
 them eagerly as today. The cost against `prim`/`ref` is one 4–8-byte slot per
-extra option; the win is zero casts and zero per-decode allocations. TypeScript
-and Python keep the issue's single `value` slot: dynamic typing gains nothing
-from typed slots, and their decode builds fresh objects.
+extra option; the win is zero casts and zero per-decode allocations.
+
+* **TypeScript uses typed slots too** (one per option, every slot initialised in
+  the constructor — scalars to their default, reference slots to `null` — so the
+  hidden class is fixed at construction). A single `_v` slot would not be "free
+  under dynamic typing": V8 tracks a field representation per property, and a
+  property that holds a number at one time and a boolean, string or object at
+  another is generalised to `Tagged`, after which **every store of a non-Smi
+  double allocates a fresh HeapNumber** — a per-set and per-decode allocation on a
+  maxspeed target (the bench's `aux_sensor` holds `3.875` in a union whose other
+  options are `boolean` and `u32`), and `serialize`/`isDefault` loads turn
+  polymorphic. With one slot per option each property keeps one representation
+  (`Double` for an fp option, `Smi` for a small integer, `HeapObject` for bigint/
+  Long/string/object). TypeScript has no destination-reuse path, so on a **real**
+  switch to a reference option a fresh default instance is created and the slot of
+  the option left behind is set to `null` (releases it; an object slot's
+  representation does not change); a scalar slot left behind keeps its stale
+  value, which `which` makes unreachable. The `ts-*` rows (§4) confirm it; if a
+  row misses the ±1 % budget, the milestone reports the measured numbers of both
+  layouts before choosing.
+* **Python keeps the issue's single `_value` slot.** CPython stores every
+  attribute as an object reference, so there is no representation to keep
+  monomorphic and a typed slot per option would only add dataclass fields. On a
+  real switch a fresh default instance is created.
+
+**Ownership and aliasing (stated in every GC target's Unions chapter).** A setter
+stores the **reference** it is given (no copy), exactly as assigning a plain
+field of that type does today; a getter of the held reference option returns the
+slot itself. On Java/Kotlin/C#/Dart a kept reference slot is **reset in place**
+when its option is selected again (by the user through the setter/mutable
+accessor, or by decode), so a struct, list or destination obtained earlier from
+`get<Opt>()`/`mutable<Opt>()` — or passed to `set<Opt>(v)` — is reset and then
+overwritten at that point. This is the same aliasing the message-level `reset()`
+of Java/Kotlin/Dart already has for nested messages (it resets them in place,
+`generators/java/backend.go` `emitResetField`), and it is what keeps same-option
+and reuse decodes allocation-free; a caller that needs an independent value copies
+it. Go stores options **by value** (5.6): `Set<Opt>(v)` copies, `<Opt>()` returns a
+copy, and only a pointer from `Mut<Opt>()` aliases the slot (and sees the reset on
+re-selection). TypeScript and Python allocate fresh on a real switch, so a
+reference obtained earlier is never reset behind the caller's back (it is merely
+no longer held).
+
+**`reset()` vs `clear()`.** Java, Kotlin and Dart already emit a message-level
+`reset()` on every generated class — the destination-reuse API — and a union type
+is such a class, so its "back to default" **is** that `reset()`; adding a
+`clear()` beside it would give one class two names for the same operation. Go,
+C#, TypeScript and Python have no message-level reset, so the union gets the
+issue's `clear()` in the target's casing (`Clear()` in Go/C#).
+
+**Hand-written sources that use a union option as a product-type field.** Each
+milestone rewrites its own to the new API (they fail to compile or run otherwise):
+
+| milestone | files |
+|---|---|
+| c | `tests/conformance/c/example_roundtrip.c:28,69`; `c/bool_check.c:135-136` and the `choice` union in `c/run.sh` (`boolchk`) |
+| cpp | `tests/conformance/cpp/sample.hpp:107-108`; `cpp/bool_check.cpp:143-144,199-200` and the `choice` union in `cpp/run.sh` |
+| rust | `tests/conformance/rust/streaming_check.rs:127` |
+| zig | `tests/conformance/zig/ownership_check.zig:81-83` |
+| go | the Go program embedded in `tests/conformance/go/run.sh` (~1046-1048) |
+| java | `tests/conformance/java/OwnershipCheck.java:102-106` |
+| kotlin | `tests/conformance/kotlin/OwnershipCheck.kt:96-99` |
+| csharp | `tests/conformance/csharp/OwnershipCheck.cs:102-105`; the `only_union` / `union_mixed` schemas in `csharp/run.sh` (~826-845) and whatever drives them |
+| dart | `tests/conformance/dart/ownership_check.dart:74-88` |
+| python | `tests/conformance/python/ownership_check.py:103-146` |
+
+Each milestone re-greps its language directory for the union's option names
+(`someunion`, `someunionarray`, `choice`, `as_…`) before it starts, because this
+table is a snapshot of `aa3609f`.
 
 ### 5.1 corelib-c-cpp (C object API) — finish draft #182
 
@@ -568,8 +831,11 @@ Work only in `/root/corelibs/wt-c-cpp-union` (branch `feat/tagged-union`,
    descriptor and a leaf option is overwritten whole by its payload. Replace the
    `@warning PROTOTYPE LIMITATION` in `object.h` with that invariant, stated as the
    reason (a)/(c) are not needed. C's public API has no setter, so selecting a
-   leaf option with a non-zero declared default is the caller writing the value —
-   documented in `docs/generator/c.md`.
+   leaf option with a non-zero declared default is the caller writing the value,
+   and selecting a sequence option at its default is `sofab_object_init` on its
+   descriptor — both documented in `docs/generator/c.md` (5.2). The image contract
+   becomes "the tag and the default option only" (5.2, prefix image); `object.h`
+   states it and `union_prefix_image` tests it.
 3. **Build switch.** CMake option `SOFAB_DISABLE_UNION_SUPPORT` + README row
    (with the §6.2.2 profile-variation statement: without it a union descriptor
    behaves as a plain struct, so the switch must be configured identically for the
@@ -614,6 +880,37 @@ Work only in `/root/corelibs/wt-c-cpp-union` (branch `feat/tagged-union`,
   with length `u.<opt>.len`). The image is emitted only when `default_id != 0` or
   the default option has a non-zero default; it sets `.which = default_id` and
   that option's default. Otherwise the image pointer is NULL (5.1 item 1).
+* **The image is a prefix, never a full `T`.** For a union the corelib reads the
+  image at exactly two places: the tag (`_DEFAULT_TAG`) and `D`'s own
+  `(offset, size)` plus `D`'s companion length (init, and the ≠-default test of a
+  held `D`); a held non-`D` option is forced and never compared, and a sequence
+  option is seeded through its own descriptor, never from the parent's image
+  (object.c init/`_field_is_default`, the three `default_values` uses). So a full
+  `sizeof(T)` image — which scales with the **largest** option (e.g. a 64-byte
+  string option) although only the tag is needed — is not emitted. Instead:
+  * `D` is a struct/union/wrapper option → the image type is
+    `struct { sofab_object_descr_id_t which; }` (2 or 4 B, the profile's id width);
+  * `D` is a leaf option → `struct { sofab_object_descr_id_t which; union {
+    <D's member type> <d>; <A> _align; } u; }`, where `<A>` is the scalar with the
+    alignment of `T`'s option union (the backend's existing alignment computation)
+    so that `offsetof(image, u) == offsetof(T, u)`; the `.c` file asserts that
+    with the negative-array-size idiom the corelib macros already use. Cost: tag
+    + `D`'s member, rounded to the union's alignment — never the largest option.
+
+  Item 1 of 5.1 documents this in `object.h` as the contract ("a union's image
+  covers the tag and the default option only") and adds a Unity test that runs a
+  union whose image object is exactly the prefix size under ASan
+  (`union_prefix_image`). The measured bytes (§4) are stated in the C result.
+* **Selecting a sequence option at its declared default.** `which = …_ID` alone
+  leaves the previous option's overlay bytes in `u.<opt>`. For a
+  struct/union/wrapper option the header therefore declares the option type's
+  descriptor `extern const sofab_object_descr_t <descr>;` (it already has external
+  linkage; the declaration costs nothing) and `docs/generator/c.md` documents the
+  two-statement select:
+  `u.which = <PREFIX>_<OPT>_ID; sofab_object_init(&<descr>, &u.u.<opt>);`. A leaf
+  option is selected by writing `which` and the value (a string/blob/array option
+  has an empty declared default by the §1.2 rule, so "the value" is its content
+  and length). No per-option code or macro is emitted.
 * **Macros**: one `#define <PREFIX>_<OPTION>_ID <id>` block per union named type,
   `<PREFIX>` built exactly like the bitfield prefix (`g.prefix` + sanitized
   `"named/" + key`), deduped per key, covered by `checkMacroNames`.
@@ -622,13 +919,17 @@ Work only in `/root/corelibs/wt-c-cpp-union` (branch `feat/tagged-union`,
 * **JSON harness** (`generators/c/project.go`, and
   `tests/conformance/c/example_roundtrip.c`): print/parse only the held option.
 * **Tests** (`generators/c/backend_test.go`): the type shape above, descriptor macro
-  and image rules (NULL when all-zero with id 0), macro names + collision check,
-  split variants get two descriptors, guard emitted.
+  and image rules (NULL when all-zero with id 0; tag-only image for a sequence
+  `D`; tag + `D` prefix image with the offset assertion for a leaf `D`), macro
+  names + collision check, split variants get two descriptors, the `extern`
+  option descriptors, guard emitted.
 * **Conformance**: `SOFAB_C_CORELIB=/root/corelibs/wt-c-cpp-union
   tests/conformance/c/run.sh` with the `check_union.py` block and `--union` on
   `check_repeated_id.py`. CI `lang-c` stays red until #182 merges — expected.
 * **Cost**: generated `.data` ±0 on the bench (no union there needs an image),
   `.bss` −4 B (`SensorSample` 12 → 8 B), `.text` ±0 (C emits no per-field code).
+  Image `.rodata` for `default_id != 0` measured on the driver schema and `UnRef`
+  (§4) — expected 2–4 B per union with a struct `D` and tag + `D` for a leaf `D`.
   Ir/op: `_NOT_HELD`/`_IS_UNION` bit tests on every object walk; if the `c` row
   moves by more than +0.3 % hoist `_IS_UNION(info)` out of the three loops.
 
@@ -655,9 +956,17 @@ Work only in `/root/corelibs/wt-c-cpp-union` (branch `feat/tagged-union`,
 * **Decode** (`deserialize` arms): where the corelib's read returns a bound flag
   (corelib-cpp scalar `read(v)` → `bool`), switch inside the `if`; everywhere
   else gate on `is.wire()` (and `is.fixType()` for fixlen) **before** switching and
-  binding in place. Record in the milestone result whether `is.fixType()` is valid
-  for an `ArrayFixlen` at callback time; if not, an fp32/fp64-array mismatch at a
-  union option id is the known #232 asymmetry and is documented, not fixed here.
+  binding in place. The switch is **select if not held** (§0): `if (which() !=
+  Which::<opt>) { emplace/placement-new at default }`, never an unconditional
+  `emplace`/`set_<opt>()`. corelib-cpp calls the same arm once **per chunk** of a
+  split string/blob/array (`progress() > 0` after the first) and **again on
+  resume** for every open sequence level (the re-entered-sequence flag), so an
+  unconditional emplace would wipe the chunks already bound — D29–D31 at
+  `--sizes 1` catch it. The existing first-delivery clear of a repeated leaf/array
+  (§7.4) stays where it is, keyed on `progress() == 0`. Record in the milestone
+  result whether `is.fixType()` is valid for an `ArrayFixlen` at callback time; if
+  not, D27 (an fp64 array at an fp32 array option) is the known #232 asymmetry:
+  documented, run with `--known-gap D27=…`, not fixed here (§8 item 2).
 * Arrays of unions: `MessageSeq` / `FixedMessageSeq` default-construct elements →
   the element type's `D` (per-type default via the split).
 * **JSON harness** (`generators/cpp/project.go`): only the held option.
@@ -683,12 +992,17 @@ Work only in `/root/corelibs/wt-c-cpp-union` (branch `feat/tagged-union`,
   `no_std` uses the same enum over its heapless storage types. `Default` is the
   `D` variant — so `seq::reserve_elem`'s `T: Default` gap fill is right per type.
 * **Encode**: `match self` with the §0 arms.
-* **Decode** (`generators/rust/visitor.go`): a scalar or string store assigns the
-  variant (`self.m.a = UnionShape::Num(v as u16)`) — the switch and the store are
-  one statement; the sequence-begin arm of a struct/union/wrapper option calls
-  `<opt>_mut()` (selects at default when not held); every path below a union
-  option goes through `<opt>_mut()`. A compact array option switches in
-  `array_begin` after the `askip` gate.
+* **Decode** (`generators/rust/visitor.go`): a scalar store assigns the variant
+  (`self.m.a = UnionShape::Num(v as u16)`) — the switch and the store are one
+  statement. A string/blob option is assigned **only at the completion store**,
+  after the existing payload accumulator has the whole value (`string`/`blob`
+  take `(total, offset, chunk)` and fire per chunk; the per-chunk part never
+  touches the variant). The sequence-begin arm of a struct/union/wrapper option
+  calls `<opt>_mut()`, and a compact array option calls `<opt>_mut()` in
+  `array_begin` after the `askip` gate; `<opt>_mut()` is **select if not held**
+  (constructs the variant at its default only when another one is held, §0), so a
+  repeated or resumed call keeps what was decoded. Every path below a union option
+  goes through `<opt>_mut()`.
 * **Tests**: enum shape + serde renames, `Default` = `D`, arms, `_mut` paths,
   split variants.
 * **Conformance**: both corelibs. **Cost**: no_std `.text` ≤ +64 B, std Ir/op ±1 %.
@@ -712,7 +1026,12 @@ Work only in `/root/corelibs/wt-c-cpp-union` (branch `feat/tagged-union`,
   decode; memory = the sum of the struct options, exactly today's). By pointer
   would add one allocation per switch/decode for nothing the bench can see — the
   bench has no struct option, so the bench only confirms that the scalar-option
-  path does not regress.
+  path does not regress. Issue §9 asked for this choice to be **measured**; it is
+  decided by argument instead (listed as a deviation in §8 item 3): by value is
+  never slower (no allocation, no indirection, same memory as today's product
+  type), so a measurement could only confirm it. If the Go milestone finds a case
+  where by value costs (e.g. a very large struct option copied by `<Opt>()`), it
+  measures both on the driver schema and reports.
 * **Zero value is the default** (Go convention): the tag is stored **relative to
   `D`** — `which` holds `id ^ <DefaultID>`, so the zero value holds `D`, and for
   `default_id: 0` the XOR folds away. `setDefaults()` (the #609 mechanism) is
@@ -723,14 +1042,17 @@ Work only in `/root/corelibs/wt-c-cpp-union` (branch `feat/tagged-union`,
 * **API** per the table; `<Opt>()` of a struct option returns a copy (the held
   value or a fresh default), `Mut<Opt>()` returns a pointer into the slot.
   `reservedGoMethod` gains `Which`, `Clear`, and the union type's `Has*`/`Set*`/
-  `Mut*` names are checked for collisions.
+  `Mut*` names are checked for collisions. The package-level option-id constants
+  `<Type><Opt>ID` are checked against every other package-level identifier the
+  backend emits (types, constants), a located error with a unit test (§1.1).
 * **JSON**: generated `MarshalJSON` (value receiver) / `UnmarshalJSON` (pointer
   receiver) on each union type — per-schema option arms, the only JSON code Go
   emits, because the fields are unexported.
 * **Decode**: the union type is its own child visitor: `Unsigned`/`Signed`/…
   arms switch and store; `String`/`Bytes` switch at completion; `ArrayBegin`
-  switches after the kind gate; `BeginSequence` switches (resetting a struct option
-  to `T{}` + `setDefaults`) and returns `&m.<opt>`.
+  switches after the kind gate; `BeginSequence` switches — select if not held
+  (§0): only when another option is held is the struct option reset to `T{}` +
+  `setDefaults` — and returns `&m.<opt>`.
 * **Tests**: shapes, XOR tag, `setDefaults` only when needed, JSON methods,
   collision error. **Conformance**: `SOFAB_GO_CORELIB=/root/corelibs/corelib-go`.
   **Cost**: `go` row Ir/op ±1 %, allocs/op unchanged. gofmt with the 1.27
@@ -788,19 +1110,29 @@ its `JsonSerializerOptions` (STJ would otherwise serialize every property).
 
 ### 5.11 typescript — int64 `bigint` / `long` / `number`
 
-* **Storage**: `private _which: number = <D>; private _v: <T0> | <T1> | …` (one
-  value slot); getters/setters per option (typed per the int64 mode exactly as a
-  field of that kind is today), `mutable<Opt>()`, `has<Opt>()`, `clear()`,
-  `static readonly <OPT>_ID`. `toJSON()` returns `{ "<opt>": … }` for the held
-  option only; `fromJSON` reads the one member.
+* **Storage**: `private _which: number = <D>;` + **one typed private slot per
+  option** (§5 GC decision: a shared slot would generalise V8's field
+  representation to `Tagged` and box every non-Smi double store), each typed per
+  the int64 mode exactly as a field of that kind is today and initialised in the
+  constructor (scalar → its default, reference → `null`, `D` → its default
+  instance). Getters/setters per option, `mutable<Opt>()`, `has<Opt>()`,
+  `clear()`, `static readonly <OPT>_ID`. A real switch to a reference option
+  creates a fresh default instance and nulls the reference slot left behind.
+  `toJSON()` returns `{ "<opt>": … }` for the held option only; `fromJSON` reads
+  the one member.
 * **Decode** (`visitor.go`): the switch goes **after** the generated kind/subtype
   gate in `arrayBegin`/`fixlenBegin`/`sequenceBegin` arms (`arrayBulk` and
   `fixlenBegin` route by id alone — issue §5); a string/blob switches at the
   payload completion store; paths into an option use `mutable<Opt>()`.
   `FramedSeq<T>(out, () => new T(), …)` per type.
 * **Encode**: `switch (this._which)`; a u64/i64 `D` option under `long` keeps the
-  `(low, high)` omission test. **Cost**: all three `ts-*` rows ±1 %. Rebuild
-  `corelib-ts` `dist/` before the suite.
+  `(low, high)` omission test (the driver's `q`, E24/E25, pins it). **Cost**: all
+  three `ts-*` rows ±1 %, decode and encode Ir/op; the per-option slots are the
+  layout measured — if a row misses the budget, the milestone also measures a
+  per-representation layout (number / bigint-or-Long / object slot) on the same
+  rows and reports both before choosing. Rebuild `corelib-ts` `dist/` before the
+  suite. Conformance runs the driver in all three modes (`number` with
+  `--int64-safe`).
 
 ### 5.12 python — native and pure engines
 
@@ -843,8 +1175,10 @@ Review checklist for the per-language review pass (all must hold):
 1. One option held; fresh value = `D` at its default; `D` from `Target.DefaultID`.
 2. Encode arms exactly §0 (forced write for non-`D`, `end_keep` for sequence-framed
    non-`D`, `D` guarded + `end`); `isDefault` and `serialize` agree.
-3. Decode switch placement per §0, behind the §7.3 gate, once per occurrence;
-   struct/union options reset to their default on switch, merge when held.
+3. Decode switch placement per §0, behind the §7.3 gate (wire type, subtype,
+   array kind); the switch is **select if not held** — idempotent, never resets a
+   held option, safe in a per-chunk or resume-replayed hook; struct/union options
+   reset to their default on a real switch, merge when held.
 4. Array-of-union gap fill = `D` at its default (per type).
 5. JSON: exactly one member.
 6. No generic union helper emitted (CLAUDE.md static-helper rule): only option
@@ -852,7 +1186,12 @@ Review checklist for the per-language review pass (all must hold):
 7. Backend unit tests, `check_union.py`, `check_repeated_id.py --union`, and the
    whole existing suite green locally for every config of that language.
 8. Bench rows measured, within budget or explained; results files restored.
-9. Docs updated (user chapter + ARCHITECTURE rows).
+9. Docs updated (user chapter + ARCHITECTURE rows); the Unions chapter states the
+   setter's ownership and the in-place-reset aliasing of that target (§5).
+10. Every hand-written source of that language that used a union option as a
+   product-type field (§5 table, re-grepped) is on the new API.
+11. Split variants and option-id constants cannot clash in that backend's emitted
+   names (§1.1: Core folded check + the backend's own constant check).
 
 ---
 
@@ -928,7 +1267,14 @@ against the branch is the proof for C.
 2. **cpp fixlen-array subtype at a union option** (§5.3): if `is.fixType()` is not
    known at an `ArrayFixlen` callback, an fp32/fp64-array mismatch at a union
    option id cannot be gated; this is the existing #232 asymmetry, not a new one.
-3. **Deviations from issue #608**, all argued above: GC targets use one typed slot
-   per option instead of `prim`/`ref` (§5); no corelib-go change (§5.6); no
-   corelib-c-cpp shared vector (§5.1 item 5); no bench schema change (§4); the
-   default-image fix is the spec-backed validator rule, not (a)/(c) (§5.1 item 2).
+   The driver case is D27; it would run under `--known-gap D27=…` on cpp only.
+3. **Deviations from issue #608**, all argued above: GC targets **and TypeScript**
+   use one typed slot per option instead of `prim`/`ref` / a single `value` (§5,
+   §5.11 — V8 field representations); Go stores struct/union options **by value**,
+   decided by argument, not by the measurement issue §9 asked for (§5.6); the
+   "back to default" operation is the existing message-level `reset()` on
+   Java/Kotlin/Dart and `clear()`/`Clear()` elsewhere, not a uniform `clear()`
+   (§5); no corelib-go change (§5.6); no corelib-c-cpp shared vector (§5.1
+   item 5); no bench schema change (§4); the default-image fix is the spec-backed
+   validator rule, not (a)/(c) (§5.1 item 2), and the C image is a prefix of the
+   tag and `D` only (§5.2).
