@@ -1,0 +1,17 @@
+# Shape splits into union/Shape_default_pt, which differs from the inline option
+# type union/ShapeDefault_pt only by case and separators: both derive the same
+# identifier in a target (Go UnionShapeDefaultPt), so the split is refused.
+version: 1
+$defs:
+  union:
+    Shape:
+      a:  { id: 0, type: u8 }
+      pt: { id: 2, type: u8 }
+    ShapeDefault:
+      pt: { id: 0, type: struct, fields: { x: { id: 0, type: u8 } } }
+messages:
+  M:
+    payload:
+      x: { id: 0, type: union, default_id: 0, oneof: { $ref: "#/$defs/union/Shape" } }
+      y: { id: 1, type: union, default_id: 2, oneof: { $ref: "#/$defs/union/Shape" } }
+      z: { id: 2, type: union, oneof: { $ref: "#/$defs/union/ShapeDefault" } }

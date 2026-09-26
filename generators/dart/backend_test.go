@@ -1479,7 +1479,7 @@ func TestDartEnumBitfieldWidthElisions(t *testing.T) {
 	}
 	// {R:0, G:1, B:2} implies i8, NOT the 0..2 hull of its constants: 5 is a valid
 	// wire value for this field and must decode.
-	if !strings.Contains(got, "        if (value < -128 || value > 127) { invalidate(); return; }\n        o.e = value;") {
+	if !strings.Contains(got, "        if (value < -128 || value > 127) { invalidate(); return; }\n        o.e_ = value;") {
 		t.Errorf("a contiguous enum must take the implied i8 width, not its constant hull:\n%s", got)
 	}
 }
@@ -1666,5 +1666,15 @@ func TestDartCodeStripsLineComments(t *testing.T) {
 		if got := dartCode(c.in); got != c.want {
 			t.Errorf("dartCode(%q) = %q, want %q", c.in, got, c.want)
 		}
+	}
+}
+
+// A field named `e` would shadow serialize's encoder parameter, so it is mangled
+// like a reserved word.
+func TestDartFieldNamedEIsMangled(t *testing.T) {
+	out := genFor(t, writeDef(t, "version: 1\nmessages:\n  m:\n    payload:\n"+
+		"      e: { id: 0, type: u8, default: 1 }\n"), map[string]any{})
+	if !strings.Contains(out, "if (e_ != 1) { e.writeUnsigned(0, e_); }") {
+		t.Errorf("field `e` must be mangled to `e_` so the encoder parameter stays reachable:\n%s", out)
 	}
 }

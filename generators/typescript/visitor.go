@@ -458,8 +458,10 @@ func (g *gen) objSeqArm(sc *tsScope, scopes []*tsScope) []string {
 		var b string
 		if fld.Kind == ir.KindArray {
 			// §7.4: an array wrapper REPLACES the value, so the destination starts
-			// empty rather than merging into whatever the defaults put there.
-			acc := g.visStorage("this.o", fld)
+			// empty rather than merging into whatever the defaults put there. The
+			// destination is the field on THIS scope's object (sc.path), not on the
+			// message: a wrapper array inside a nested struct/union lands there.
+			acc := g.visStorage(sc.path, fld)
 			b = fmt.Sprintf("    case %d: { const _t: %s = []; %s = _t; ", fld.ID, g.arrElemType(ch), acc)
 			// The collector is bound HERE, over the destination this arm just
 			// built, so the element arm below always finds one bound to the current

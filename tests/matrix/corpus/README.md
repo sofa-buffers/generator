@@ -19,7 +19,13 @@ Corner-case SofaBuffers definitions, exercised hermetically by `tests/matrix`
   reaches each backend's default renderer, plus arrays of bitfield — the one
   place a mask is written as a **number** — in every accepted spelling, and a
   narrow bitfield whose mask fills its one-byte backing), nested structs, unions
-  with `default_id`, large/non-contiguous field ids, metadata
+  (`unions.yaml`: `default_id` on a non-first and on a struct option, an omitted
+  `default_id` meaning the lowest option id, a `$defs` union used with two
+  different `default_id`s — which analysis splits into one generated type per
+  `default_id`, `Shape_default_pt` / `Shape_default_num` — a union of unions, an
+  array of unions and a union element two array levels down, non-contiguous
+  option ids, and the explicit empty `""` / `[]` option defaults that stay legal),
+  large/non-contiguous field ids, metadata
   (`deprecated`/`unit`/`description`), and `$ref` reuse.
 - **`invalid/`** — definitions that **must be rejected** by the hard gate
   (duplicate ids, out-of-range defaults, enum/union default mismatch, bitfield
@@ -38,7 +44,10 @@ Corner-case SofaBuffers definitions, exercised hermetically by `tests/matrix`
   `items.maxlen` on a numeric array, array-of-struct, a `default` on an array
   whose element type is lowered to a **wrapper sequence** — `string`, `blob`,
   `struct`, `union` or a nested `array`, the five kinds no backend emits an
-  initializer for — recursive `$ref`, a
+  initializer for — an empty union `oneof`, a non-empty `default` on a
+  `string`/`blob`/`array` union option (field, element and `$defs` union), a
+  split `$defs` union whose generated name clashes with an existing type raw or
+  once case and separators are folded away, recursive `$ref`, a
   cross-file `$ref` to a missing definition, …).
 - **`shared/`** — definitions referenced from `defs/` via **cross-file `$ref`**
   (e.g. `common.yaml`); not validated standalone.

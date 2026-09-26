@@ -3309,3 +3309,39 @@ func TestDropUnreadRegister(t *testing.T) {
 		t.Error("a read of _ix10 counted as a read of _ix1")
 	}
 }
+
+// A wrapper array inside a nested struct is collected into THAT struct's member,
+// not into a same-named member of the message: the flat visitor's sequence arm
+// names the destination through its scope's path.
+func TestTSNestedWrapperArrayLandsOnItsOwner(t *testing.T) {
+	const src = `
+version: 1
+messages:
+  m:
+    payload:
+      a: { id: 0, type: struct, fields: { names: { id: 4, type: array, items: { type: string, count: 2, maxlen: 8 } } } }
+      list:
+        id: 1
+        type: array
+        items: { type: struct, count: 2, fields: { names: { id: 4, type: array, items: { type: string, count: 2, maxlen: 8 } } } }
+`
+	m := genTSWith(t, src, map[string]any{})
+	for _, want := range []string{"this.o.a.names = _t;", "this.o.list[this._ix"} {
+		if !strings.Contains(m, want) {
+			t.Errorf("message.ts missing %q:\n%s", want, m)
+		}
+	}
+	// The nested types' own visitors bind `this.o.names` legitimately; the
+	// message's visitor never does.
+	i := strings.Index(m, "class _MVis ")
+	if i < 0 {
+		t.Fatalf("no message visitor:\n%s", m)
+	}
+	vis := m[i:]
+	if j := strings.Index(vis[1:], "\nclass "); j >= 0 {
+		vis = vis[:j+1]
+	}
+	if strings.Contains(vis, "this.o.names = _t;") {
+		t.Errorf("a nested wrapper array must not be bound to the message's member:\n%s", vis)
+	}
+}

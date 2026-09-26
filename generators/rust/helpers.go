@@ -163,7 +163,10 @@ func (g *gen) rustFieldDefault(f *ir.Field) string {
 // array distinct from the empty one.
 func (g *gen) rustNativeArrayParts(f *ir.Field) (string, bool) {
 	vals, ok := f.Default.([]any)
-	if !ok {
+	if !ok || len(vals) == 0 {
+		// `default: []` IS the empty container: treat it as no default, so every
+		// caller takes its empty path (a bare `[]` literal would leave a slice
+		// compare's element type uninferable).
 		return "", false
 	}
 	parts := make([]string, len(vals))
@@ -188,7 +191,8 @@ func (g *gen) blobBytes(f *ir.Field) ([]byte, bool) {
 		return nil, false
 	}
 	raw, err := base64.StdEncoding.DecodeString(strings.Join(strings.Fields(s), ""))
-	if err != nil {
+	if err != nil || len(raw) == 0 {
+		// An empty default is the empty blob: the no-default path, as above.
 		return nil, false
 	}
 	return raw, true

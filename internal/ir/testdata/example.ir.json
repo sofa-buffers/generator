@@ -396,6 +396,7 @@
       "category": "union",
       "key": "myfirstmessage_someunion",
       "inline": true,
+      "default_id": 0,
       "fields": [
         {
           "name": "option1",
@@ -438,6 +439,7 @@
       "category": "union",
       "key": "myfirstmessage_someunionarray_elem",
       "inline": true,
+      "default_id": 0,
       "fields": [
         {
           "name": "asint",

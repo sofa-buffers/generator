@@ -45,6 +45,9 @@ var dartKeywords = map[string]bool{
 	"List": true, "Map": true, "Set": true, "Object": true, "Iterable": true,
 	"Null": true, "Never": true, "Function": true, "Uint8List": true,
 	"Symbol": true, "Type": true, "Enum": true, "Record": true,
+	// The encoder parameter of serialize/encodeTo: a field named `e` would shadow
+	// it inside those bodies (the field's own read then names the encoder).
+	"e": true,
 }
 
 // fp32BitsField is the companion `int?` holding the raw 32 wire bits of an fp32

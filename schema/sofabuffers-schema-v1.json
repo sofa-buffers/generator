@@ -153,7 +153,7 @@
         },
         "default_id": {
           "type": "integer", "minimum": 0, "maximum": 2147483647,
-          "description": "Default option id when 'type' is union."
+          "description": "When 'type' is union: the id of the option a fresh union holds. Omitted: the option with the lowest id."
         },
         "items": {
           "$ref": "#/$defs/arrayItems",
@@ -305,14 +305,34 @@
 
     "union": {
       "type": "object",
-      "description": "Defines the schema and constraints for union elements.",
+      "description": "Defines the options of a union. A union holds exactly one option, so it declares at least one.",
       "uniqueIds": true,
+      "minProperties": 1,
       "patternProperties": {
         "^[A-Za-z][A-Za-z0-9_]*$": {
-          "$ref": "#/$defs/field"
+          "$ref": "#/$defs/unionOption"
         }
       },
       "additionalProperties": false
+    },
+
+    "unionOption": {
+      "description": "A union option: an ordinary field, except that an option of type string, blob or array declares no non-empty default. A held option other than default_id is always written, even at its own default, so a non-empty default would be sent in full (MESSAGE_SPEC 4.2, 6; README section 7.1). The empty forms stay legal.",
+      "allOf": [
+        { "$ref": "#/$defs/field" },
+        {
+          "if": { "properties": { "type": { "const": "string" } }, "required": ["type"] },
+          "then": { "properties": { "default": { "maxLength": 0 } } }
+        },
+        {
+          "if": { "properties": { "type": { "const": "blob" } }, "required": ["type"] },
+          "then": { "properties": { "default": { "pattern": "^\\s*$" } } }
+        },
+        {
+          "if": { "properties": { "type": { "const": "array" } }, "required": ["type"] },
+          "then": { "properties": { "default": { "maxItems": 0 } } }
+        }
+      ]
     },
 
     "field": {
@@ -1015,7 +1035,7 @@
                 "type": "integer",
                 "minimum": 0,
                 "maximum": 2147483647,
-                "description": "Optional: ID of the default option if none of the defined options match."
+                "description": "Optional: the id of the option a fresh union holds (the union's default value is that option at its own default). Omitted: the option with the lowest id."
               },
               "description": { },
               "deprecated": { }

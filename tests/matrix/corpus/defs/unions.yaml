@@ -1,4 +1,19 @@
 version: 1
+$defs:
+  union:
+    # One $defs union at three sites with two effective default_ids: analysis
+    # splits it into Shape_default_pt and Shape_default_num (an omitted
+    # default_id means the lowest option id, 0 -> num).
+    Shape:
+      num:   { id: 0, type: u16, default: 5 }
+      name:  { id: 1, type: string, maxlen: 16 }
+      pt:    { id: 2, type: struct, fields: { x: { id: 0, type: i32, default: 7 }, y: { id: 1, type: i32 } } }
+      vals:  { id: 3, type: array, items: { type: u16, count: 4 } }
+      names: { id: 4, type: array, items: { type: string, count: 2, maxlen: 8 } }
+      raw:   { id: 5, type: blob, maxlen: 8 }
+      e:     { id: 6, type: enum, enum: { A: 0, B: 1, C: 2 }, default: 1 }
+      flags: { id: 7, type: bitfield, bits: { r: { pos: 0 }, w: { pos: 1, default: true } } }
+      f:     { id: 8, type: fp32, default: 1.5 }
 messages:
   Un:
     payload:
@@ -9,3 +24,32 @@ messages:
         oneof:
           x: { id: 0, type: u16 }
           y: { id: 1, type: string, maxlen: 16 }
+  UnRef:
+    payload:
+      first:  { id: 0, type: union, default_id: 2, oneof: { $ref: "#/$defs/union/Shape" } }  # -> Shape_default_pt
+      second: { id: 1, type: union, default_id: 0, oneof: { $ref: "#/$defs/union/Shape" } }  # -> Shape_default_num
+      third:  { id: 2, type: union, oneof: { $ref: "#/$defs/union/Shape" } }                 # omitted = lowest id 0 -> Shape_default_num
+      nested:                                                                               # union of union
+        id: 3
+        type: union
+        default_id: 1
+        oneof:
+          flag:  { id: 0, type: boolean }
+          inner: { id: 1, type: union, default_id: 1, oneof: { a: { id: 0, type: i8 }, b: { id: 1, type: fp64, default: 2.5 } } }
+      list:                                                                                 # array of unions, default_id on a struct option
+        id: 4
+        type: array
+        items:
+          type: union
+          count: 4
+          default_id: 2
+          oneof:
+            i: { id: 0, type: i32 }
+            s: { id: 1, type: string, maxlen: 8 }
+            p: { id: 2, type: struct, fields: { q: { id: 0, type: u8, default: 9 } } }
+      grid:                                                                                 # union element two array levels down
+        id: 5
+        type: array
+        items: { type: array, count: 2, items: { type: union, count: 2, default_id: 1, oneof: { lo: { id: 0, type: u8 }, hi: { id: 1, type: u32, default: 4 } } } }
+      sparse:  { id: 6, type: union, default_id: 7, oneof: { a: { id: 3, type: u8 }, b: { id: 7, type: string, maxlen: 4 } } }  # non-contiguous option ids
+      empties: { id: 7, type: union, default_id: 1, oneof: { s: { id: 0, type: string, maxlen: 4, default: "" }, a: { id: 1, type: array, items: { type: u8, count: 2 }, default: [] } } }  # explicit empty defaults stay legal

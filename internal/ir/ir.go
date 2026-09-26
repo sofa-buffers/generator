@@ -137,10 +137,14 @@ type NamedType struct {
 	Summary  string
 	Inline   bool // true if it originated inline (not from $defs)
 
-	Fields    []*Field        // struct/union
-	Consts    []*EnumConst    // enum
-	Flags     []*BitfieldFlag // bitfield
-	DefaultID *int64          // union default_id (optional)
+	Fields []*Field        // struct/union
+	Consts []*EnumConst    // enum
+	Flags  []*BitfieldFlag // bitfield
+	// DefaultID is, for a union, the option id a fresh value holds; always
+	// set after analysis (the site's `default_id`, else the lowest option id).
+	// A $defs union referenced with different default_ids is split into one
+	// NamedType per default_id, so the type alone determines its default.
+	DefaultID *int64
 }
 
 func (n *NamedType) Accept(v Visitor) { v.VisitNamedType(n) }
@@ -221,6 +225,9 @@ func (f *Field) Children() []Node {
 type TypeRef struct {
 	Key    string
 	Target *NamedType
+	// DefaultID is a union site's raw `default_id` as written; nil when
+	// absent. Consumed by analysis only: backends read Target.DefaultID.
+	DefaultID *int64
 }
 
 // EnumConst is one enum constant.

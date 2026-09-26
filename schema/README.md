@@ -57,7 +57,7 @@ rejected rather than ignored.
 | `enum` | inline map or `{ $ref }`; values are **signed 32-bit** and may be negative (signed zig-zag varint on the wire — see below); `default` must match a value |
 | `bitfield` | inline `bits` map or `{ $ref }`; each flag has `pos` 0–63 + optional `default` |
 | `struct` | nested; `fields:` inline or `{ $ref }`; recursive |
-| `union` | `oneof:` inline or `{ $ref }`; optional `default_id` |
+| `union` | `oneof:` inline or `{ $ref }`, at least one option; optional `default_id` — the option a fresh union holds; **omitted, it is the option with the lowest id**. A `string`/`blob`/`array` option takes no non-empty `default` (see [§7.1](#71-union-options)) |
 
 Common optional metadata on every field: `description`, `deprecated`. **`unit`
 is allowed only on the numeric types** (`u8…u64`, `i8…i64`, `fp32`, `fp64`);
@@ -284,6 +284,32 @@ ajv.addKeyword({
 > Reads `data.oneof`, so — like `defaultMatchesEnum` — it must run **after** `$ref`
 > resolution (a `{ $ref }` union is only a map of options once dereferenced). Uses
 > a presence test so `default_id: 0` (a valid option id) is not skipped.
+
+#### 7.1 Union options
+
+A union holds **exactly one** option (MESSAGE_SPEC §4.2): a fresh union holds
+`default_id` at that option's own default, and an omitted `default_id` means the
+option with the **lowest id**. Two rules follow, applied to every union — a union
+field, a union array element and a `$defs` union alike:
+
+1. **`oneof` declares at least one option.** An empty `oneof` has nothing to hold.
+2. **A `string`, `blob` or `array` option declares no non-empty `default`.** An
+   encoder writes a held option other than `default_id` **even at its own
+   default** — that write is how the receiver learns which option is held — so a
+   non-empty default there would be sent in full every time (MESSAGE_SPEC §4.2,
+   §6). The empty forms stay legal: `default: ""` and `default: []`.
+
+| definition | error |
+|---|---|
+| `oneof: {}` | `a union holds exactly one option; "oneof" must declare at least one` |
+| `oneof: { s: { id: 1, type: string, default: "ab" } }` | `a union option of type string must not declare a non-empty default` |
+| `oneof: { a: { id: 1, type: array, items: { type: u8, count: 2 }, default: [0, 0] } }` | the same for `array` — all-zero is still not empty |
+
+Rule 2 is expressible in stock JSON Schema and the shipped schema carries it
+(`$defs/unionOption`); rule 1 is `minProperties: 1` on `$defs/union`. Both are
+also enforced by the generator. Like every other check here they run on the
+dereferenced document, so a violation inside a `$defs` union is reported at
+`#/$defs/union/…` and once at each site that references it.
 
 ### 8. Custom keyword: `int64Range`
 
@@ -559,6 +585,8 @@ A validator is only conformant if it does **all** of:
 - [ ] enforce `blob` **default byte-length** by base64-decoding and comparing to `maxlen` (§5);
 - [ ] enforce `bitfield` **`pos` uniqueness** across a bitfield's flags (§6);
 - [ ] enforce `union` **`default_id` membership** against the declared option ids (§7);
+- [ ] refuse an **empty `oneof`**, and a **non-empty `default`** on a union option of type `string`, `blob` or `array` — in a union field, a union array element and a `$defs` union alike (§7.1);
+- [ ] treat an omitted `default_id` as the option with the **lowest id** (§7.1);
 - [ ] enforce **exact 64-bit range** for `i64`/`u64` `default`s, accepting an integer or string and range-checking with a big-integer type (§8);
 - [ ] enforce **array-of-`bitfield` element defaults** as non-negative decimal masks — an integer or a quoted decimal string, within the bitfield's **declared mask** (one bit per declared `pos`, which subsumes the exact 64-bit top), an authoring bound narrower than the wire one §1 states (§8.1);
 - [ ] enforce **array-of-`u64`/`i64`** element defaults by the same rule as the field default of that type — an integer or a quoted decimal string, exact-64-bit-range-checked, no fractional or exponent spelling, and no sign for a `u64` (§8, §8.2);

@@ -4,7 +4,7 @@
 Usage:
   check_repeated_id.py --emit-schema
   check_repeated_id.py <label> [--cwd DIR] [--sizes 1,2,3,5,0]
-                       [--no-stream] [--message NAME] -- <harness argv...>
+                       [--no-stream] [--union] [--message NAME] -- <harness argv...>
 
 §7.4 says the **last occurrence wins, per field id**, and then splits on what
 the field *is*:
@@ -50,6 +50,7 @@ backend can get one right and the next wrong:
     matstr array<array<string>>        a WRAPPER ROW (generator#523)
     deep   array<array<array<u32>>>    a wrapper row one level further down
     objs   array<struct>               the MERGING half
+    uni    union                       one option held (§7.4.1), `--union` only
 
 Every array is schema-bounded (`count`, and `maxlen` on the payload elements) so
 the statically bounded profiles — C, C++ `corelib: c-cpp`, Rust `no_std` — can
@@ -74,6 +75,16 @@ can carry a repeated id. So each case is also fed through `streamdecode` at
 several splits and compared against the one-shot answer. `--no-stream` exists
 for a harness that has no streaming verb; it is reported, never silent.
 
+## The union half (`--union`)
+
+A union field `uni` repeated with the SAME struct option continues that
+option's scope (§7.4 merge), and repeated with ANOTHER option replaces the held
+one (§7.4.1). Both cases need a backend that holds exactly one option, so they
+run only under `--union`, which each backend's run.sh passes once its tagged
+union lands (generator#608); the field itself is harmless to a backend that
+still renders every option. The union level is compared STRICTLY: the decoded
+union must be an object with exactly the one expected member.
+
 ## Loud, never quiet
 
 A coverage test's failure mode is passing while checking nothing, so: a case
@@ -89,10 +100,10 @@ import sys
 MSG = "rid"
 
 # Field ids, which the forged headers below and the emitted schema share.
-NUMS, STRS, MAT, MATSTR, DEEP, OBJS = 0, 1, 2, 3, 4, 5
+NUMS, STRS, MAT, MATSTR, DEEP, OBJS, UNI = 0, 1, 2, 3, 4, 5, 6
 
 # Wire types (CORELIB_PLAN §4.3). Normative; do not renumber.
-WT_SIGNED, WT_FIXLEN, WT_ARR_U, WT_SEQ = 1, 2, 3, 6
+WT_UNSIGNED, WT_SIGNED, WT_FIXLEN, WT_ARR_U, WT_SEQ = 0, 1, 2, 3, 6
 END = b"\x07"                 # sequence end marker (§4.9)
 SUB_STRING = 2                # fixlen subtype for `string` (§4.6)
 
@@ -119,6 +130,9 @@ def emit_schema() -> int:
           " items: { type: array, count: 2, items: { type: u32, count: 3 } } } }")
     print(f"      objs:   {{ id: {OBJS}, type: array, items: {{ type: struct, count: 2,"
           " fields: { x: { id: 0, type: i32 }, y: { id: 1, type: i32 } } } }")
+    print(f"      uni:    {{ id: {UNI}, type: union, default_id: 0, oneof: {{"
+          " n: { id: 0, type: u32 },"
+          " p: { id: 1, type: struct, fields: { x: { id: 0, type: i32 }, y: { id: 1, type: i32 } } } } }")
     return 0
 
 
@@ -153,6 +167,11 @@ def string(fid: int, s: str) -> bytes:
 def signed(fid: int, n: int) -> bytes:
     """A signed integer, zig-zag encoded (§4.5)."""
     return header(fid, WT_SIGNED) + varint((n << 1) ^ (n >> 63) if n < 0 else n << 1)
+
+
+def unsigned(fid: int, n: int) -> bytes:
+    """An unsigned integer (§4.4)."""
+    return header(fid, WT_UNSIGNED) + varint(n)
 
 
 def seq(fid: int, *parts: bytes) -> bytes:
@@ -213,6 +232,22 @@ CASES = [
         [{"x": 33, "y": 22}],
         "THE OTHER HALF: a re-opened STRUCT element continues its scope, so y "
         "survives from the first opening while x is overwritten by the second",
+    ),
+]
+
+# The union half, run only under `--union` (a backend that holds one option).
+UNION_CASES = [
+    (
+        "union_same_option_merges", "uni",
+        seq(UNI, seq(1, signed(0, 11))) + seq(UNI, seq(1, signed(1, 22))),
+        {"p": {"x": 11, "y": 22}},
+        "a re-opened union continuing the SAME struct option merges it (§7.4, §7.4.1)",
+    ),
+    (
+        "union_other_option_replaces", "uni",
+        seq(UNI, seq(1, signed(0, 11))) + seq(UNI, unsigned(0, 5)),
+        {"n": 5},
+        "a re-opened union carrying ANOTHER option replaces the held one (§7.4.1)",
     ),
 ]
 
@@ -290,9 +325,17 @@ def main() -> int:
     msg = opt(head, "--message", MSG)
     stream = "--no-stream" not in head
     sizes = [int(s) for s in opt(head, "--sizes", "1,2,3,5,0").split(",")]
+    union = "--union" in head
+    cases = CASES + (UNION_CASES if union else [])
+
+    def matches(field, want, got):
+        # A union level is strict: exactly the one expected member.
+        if field == "uni" and not (isinstance(got, dict) and set(got) == set(want)):
+            return False
+        return same(want, got)
 
     ran = 0
-    for name, field, wire, want, why in CASES:
+    for name, field, wire, want, why in cases:
         obj, err = run(cmd, ["decode", msg], wire, cwd)
         if obj is None:
             print(f"FAIL case {name}: a repeated id is WELL DEFINED, never a refusal "
@@ -301,7 +344,7 @@ def main() -> int:
         if field not in obj:
             print(f"FAIL case {name}: decoded object has no field {field!r}: {sorted(obj)}")
             return 1
-        if not same(want, obj[field]):
+        if not matches(field, want, obj[field]):
             print(f"FAIL case {name}: {why}\n"
                   f"  got  {field} = {json.dumps(obj[field])}\n"
                   f"  want {field} = {json.dumps(want)}")
@@ -317,7 +360,7 @@ def main() -> int:
                 if got is None:
                     print(f"FAIL case {name}: chunk size {size}: harness {err}")
                     return 1
-                if not same(want, got.get(field)):
+                if not matches(field, want, got.get(field)):
                     print(f"FAIL case {name}: the §7.4 answer must not depend on the "
                           f"chunk split -- {why}\n"
                           f"  chunk size {size}: {field} = {json.dumps(got.get(field))}\n"
@@ -325,16 +368,18 @@ def main() -> int:
                     return 1
         ran += 1
 
-    if ran != len(CASES):
-        print(f"FAIL: ran {ran} of {len(CASES)} repeated-id cases")
+    if ran != len(cases):
+        print(f"FAIL: ran {ran} of {len(cases)} repeated-id cases")
         return 1
+    unions = ("union: same option merges, other option replaces; " if union
+              else "union cases NOT run (no --union); ")
     chunks = (f"one-shot and streamed at splits {','.join(str(s) for s in sizes)}"
               if stream else "one-shot ONLY (--no-stream: this harness has no "
                              "streaming verb, so the destructive resets are "
                              "unchecked on resume)")
     print(f"{label} §7.4 repeated id: {ran} cases -- wrappers replace (leaf array, "
           f"value element, native row, wrapper row, depth-3 row) and scopes merge; "
-          f"{chunks}")
+          f"{unions}{chunks}")
     return 0
 
 

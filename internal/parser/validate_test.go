@@ -765,3 +765,91 @@ messages:
 		t.Fatalf("ref-using doc should validate, got:\n%s", errs.Error())
 	}
 }
+
+// unionSites wraps one union definition (`oneof` body) at each of the three
+// places a union can be declared: a field, an array element, and a $defs union
+// referenced by a field.
+func unionSites(oneof string) map[string]string {
+	return map[string]string{
+		"field":   "version: 1\nmessages:\n  M:\n    payload:\n      u: {id: 0, type: union, oneof: " + oneof + "}\n",
+		"element": "version: 1\nmessages:\n  M:\n    payload:\n      v: {id: 0, type: array, items: {type: union, count: 2, oneof: " + oneof + "}}\n",
+		"defs":    "version: 1\n$defs:\n  union:\n    U: " + oneof + "\nmessages:\n  M:\n    payload:\n      u: {id: 0, type: union, oneof: {$ref: '#/$defs/union/U'}}\n",
+	}
+}
+
+func TestUnionOptionNonEmptyDefaultRejected(t *testing.T) {
+	const msg = "must not declare a non-empty default"
+	for _, opt := range []struct{ name, def string }{
+		{"string", "{id: 1, type: string, maxlen: 4, default: \"ab\"}"},
+		{"blob", "{id: 1, type: blob, maxlen: 4, default: \"AQI=\"}"},
+		{"array", "{id: 1, type: array, items: {type: u8, count: 2}, default: [0, 0]}"},
+	} {
+		for site, src := range unionSites("{a: {id: 0, type: u8}, b: " + opt.def + "}") {
+			errs := validateString(t, src)
+			if errs == nil || !strings.Contains(errs.Error(), msg) || !strings.Contains(errs.Error(), "of type "+opt.name) {
+				t.Errorf("%s option at a %s union: want %q, got: %v", opt.name, site, msg, errs)
+			}
+		}
+	}
+}
+
+func TestUnionOptionEmptyDefaultStaysValid(t *testing.T) {
+	for _, def := range []string{
+		"{id: 1, type: string, maxlen: 4, default: \"\"}",
+		"{id: 1, type: array, items: {type: u8, count: 2}, default: []}",
+		"{id: 1, type: string, maxlen: 4}",
+		"{id: 1, type: u8, default: 7}", // a scalar option keeps its default
+	} {
+		for site, src := range unionSites("{a: {id: 0, type: u8}, b: " + def + "}") {
+			if errs := validateString(t, src); errs != nil {
+				t.Errorf("%s at a %s union should validate, got:\n%s", def, site, errs.Error())
+			}
+		}
+	}
+}
+
+func TestUnionEmptyOneofRejected(t *testing.T) {
+	for site, src := range unionSites("{}") {
+		errs := validateString(t, src)
+		if errs == nil || !strings.Contains(errs.Error(), "must declare at least one") {
+			t.Errorf("empty oneof at a %s union: got %v", site, errs)
+		}
+	}
+}
+
+// TestUnionOptionErrorOncePerLocation pins the reporting shape: an element
+// union's violation is reported once, a $defs union's once at #/$defs/... and
+// once per referencing site, never twice at the same location.
+func TestUnionOptionErrorOncePerLocation(t *testing.T) {
+	const bad = "{a: {id: 0, type: u8}, s: {id: 1, type: string, default: \"x\"}}"
+	count := func(errs Errors) map[string]int {
+		n := map[string]int{}
+		for _, e := range errs {
+			if strings.Contains(e.Msg, "non-empty default") {
+				n[e.Loc]++
+			}
+		}
+		return n
+	}
+	elem := count(validateString(t, unionSites(bad)["element"]))
+	if len(elem) != 1 || elem["#/messages/M/payload/v/items/oneof/s/default"] != 1 {
+		t.Errorf("element union: want exactly one report at the element option, got %v", elem)
+	}
+	src := "version: 1\n$defs:\n  union:\n    U: " + bad + "\nmessages:\n  M:\n    payload:\n" +
+		"      u: {id: 0, type: union, oneof: {$ref: '#/$defs/union/U'}}\n" +
+		"      v: {id: 1, type: array, items: {type: union, count: 2, oneof: {$ref: '#/$defs/union/U'}}}\n"
+	defs := count(validateString(t, src))
+	want := map[string]int{
+		"#/$defs/union/U/s/default":                    1,
+		"#/messages/M/payload/u/oneof/s/default":       1,
+		"#/messages/M/payload/v/items/oneof/s/default": 1,
+	}
+	if len(defs) != len(want) {
+		t.Fatalf("$defs union: want %v, got %v", want, defs)
+	}
+	for loc, n := range want {
+		if defs[loc] != n {
+			t.Errorf("$defs union: %s reported %d times, want %d (all: %v)", loc, defs[loc], n, defs)
+		}
+	}
+}
