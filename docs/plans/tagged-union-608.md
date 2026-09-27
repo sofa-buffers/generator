@@ -1125,6 +1125,31 @@ Work only in `/root/corelibs/wt-c-cpp-union` (branch `feat/tagged-union`,
   placement-new the held member (inline in the header, so unused ones cost no
   `.text`); a switch placement-news the new option at its default (`<new>` is
   freestanding).
+  *Corrected in the cpp milestone:* "all trivially destructible" holds for the
+  default static storage only. `corelib: c-cpp, allow_dynamic: true` stores
+  `std::string` / `std::vector` options (and struct options holding them), so
+  there the union type also gets a destructor and a switch ends the held
+  option's lifetime first (`_clear()`: one `std::destroy_at` arm per non-scalar
+  option, `<memory>`); under static storage neither is emitted and the type stays
+  trivially destructible. The members are `_which` and a **named** member `_u` of
+  a nested `union _Opts` (not an anonymous union, whose member names would be
+  injected into the class scope and collide with the option accessors). The copy
+  operations are `noexcept` in both modes, like every other generated member.
+  *Corrected in the cpp milestone — no user-provided default constructor:* a
+  user-provided constructor gives up the zero-initialization `T{}` performs on a
+  class without one, and corelib-c-cpp resets an `InlineVector` element with
+  `buf_[i] = T{}`: the implicit move then copies the temporary's indeterminate
+  `IStreamMessage` decoder state (GCC `-Wmaybe-uninitialized`, `-Werror` in the
+  harness build, on every array of unions under static storage). So `D` is placed
+  by a default member initializer inside the nested union (`<type> <D>{<default>};`
+  under `_Opts() noexcept = default;`), the tag — declared first, as in the C
+  layout — has one too (`Which _which = Which::<D>;`), and the
+  class keeps the implicit default constructor — `= default` beside a
+  user-declared copy constructor, which starts `_u` with no option alive through
+  `explicit _Opts(std::nullptr_t)` before `_copy` places the held one.
+  Value-initializing the base (`: sofab::Message()`) also silences it but
+  zero-fills every union on every construction: measured +114 B `.text` on
+  `cpp-c-cpp` over this form.
 * **Encode**: `serialize` switches on the held option; `D` arm = today's guarded
   write (`writeLazy` for a struct/union `D`); other arms unguarded: `os.write(id,
   v)` for scalars/strings/blobs/arrays (verify an empty container writes count 0),
@@ -1144,6 +1169,34 @@ Work only in `/root/corelibs/wt-c-cpp-union` (branch `feat/tagged-union`,
   result whether `is.fixType()` is valid for an `ArrayFixlen` at callback time; if
   not, D27 (an fp64 array at an fp32 array option) is the known #232 asymmetry:
   documented, run with `--known-gap D27=…`, not fixed here (§8 item 2).
+  *Recorded (cpp milestone):* it is valid on both corelibs — corelib-cpp's own
+  `detail::arrayTagMatches` reads it at that point, and D27 passes on all four
+  profiles without `--known-gap`. corelib-cpp keeps the tag types in
+  `sofab::detail` (only corelib-c-cpp exports `sofab::Wire` / `sofab::Fix`), and
+  documents `wire()`/`fixType()` for code that branches on the delivered form, so
+  the generated gate spells `sofab::detail::Wire::…` on `corelib: cpp`; corelib-cpp
+  is unchanged.
+  *Footprint leg (`corelib: c-cpp`, review round 1):* a gate spelled in front of
+  every arm is the one thing a union adds to decode, and the footprint profile
+  pays for it per arm, so the test rides on the read wherever corelib-c-cpp can
+  make it. Three additions to its C++ wrapper (`sofab.hpp`, header-only; the C
+  library and every union-free program are byte-identical):
+  `IStreamImpl::readMatch(T&)` binds a scalar as `read()` does and returns the
+  §7.3 tag test the stream applies to that bind — out of line, one shared copy
+  (`bindMatch_`, 26 B on ARMv6-m/ARMv7-m) — and, since the deferred value arrives
+  only after the callback, the arm sets the tag behind it:
+  `if (is.readMatch(_u.x)) { _which = Which::x; }`. Scalar options with the same
+  bind type share one arm and take the tag from the id
+  (`case 0: case 1: if (is.readMatch(_u.a)) { _which = static_cast<Which>(id); }`
+  — the `Which` enumerators are the ids). `readString` / `readBlob` / `readArray`
+  / `readSequence` gained overloads that take a callable and call it — i.e.
+  select the option — behind their own test, so a string/blob/array/wrapper-array
+  option spells no gate at all (a gate in front made the test twice: the
+  placement-new in between is a store GCC cannot prove leaves the stream state
+  alone — measured 22 B per string/blob arm on ARMv6-m). The remaining gated arms
+  (struct/union options; enum/boolean arrays, bound through a view; a dynamic
+  struct array, which reserves its destination first) use
+  `IStreamImpl::delivered(Wire[, Fix])`, the wire type and subtype as ONE compare.
 * Arrays of unions: `MessageSeq` / `FixedMessageSeq` default-construct elements →
   the element type's `D` (per-type default via the split).
 * **JSON harness** (`generators/cpp/project.go`): only the held option.
@@ -1154,6 +1207,35 @@ Work only in `/root/corelibs/wt-c-cpp-union` (branch `feat/tagged-union`,
   /root/corelibs/wt-c-cpp-union` (every config the script builds).
 * **Cost**: `cpp-c-cpp*` `.text` ≤ +64 B (switch arms replace three guarded
   writes; copy/placement code only if used); `cpp-cpp*` Ir/op ±1 %.
+  *Measured (cpp milestone, after review round 2), against the product-type
+  generator on the same corelibs (`tests/bench/run.sh --rows c,cpp-c-cpp,cpp-c-cpp-dyn,cpp-cpp,cpp-cpp-static,cpp-cpp-unbounded`,
+  plus the whole image's `.text` from the bench recipe's `out.elf`), ARMv6-m / ARMv7-m:*
+  `cpp-c-cpp` `.text` 9118 → 9136 B (+18) / 8710 → 8732 B (+22); `cpp-c-cpp-dyn`
+  12296 → 12312 B (+16) / 12022 → 12044 B (+22) — inside the budget. Per symbol:
+  `bindMatch_` +26; the unions' decode −2/+2 (ARMv7-m −8/+4), their encode +2/−8
+  (+6/−6), the thunks −4 (ARMv6-m), the element collector +2 (static, ARMv6-m
+  only) — the union code
+  itself is at or below the product type's, and what is left is the one shared
+  bind. The first cut (gate spelled per arm, rejected in review) was 9202 / 8792 B.
+  The bench does not count the driver root `reset`, into which GCC inlines the
+  message's constructor/encode/decode (generator#611). The whole image: static
+  10244 → 10268 B (+24) / 9028 → 9052 B (+24), `reset` unchanged; `allow_dynamic`
+  17276 → 17268 B (−8) / 15160 → 15200 B (+40), `reset` 4186 → 4162 B /
+  3136 → 3152 B.
+  Round 2 found what decided `reset`: the union's default constructor. With a
+  user-provided `_Opts() noexcept : <D>(<default>) {}` GCC no longer merged the
+  inlined constructor's constant stores into word stores (`reset` +60 / +120 B,
+  image +80 / +144 B on `allow_dynamic`). The defaulted constructor with a default
+  member initializer on `D` keeps them merged. Once it does, member order is
+  neutral (tag first or last: identical images on both rows; tag first is kept,
+  matching the C layout); the field offsets were never the cause (a 4 B pad
+  restoring every later offset left `reset` +84 / +104 B). The std::string C1/C2
+  double count the dyn row showed under the user-provided constructor is gone
+  as well (the `.isra` clone is back). `.data`/`.bss` unchanged on both rows; `c`
+  unchanged; corelib-c-cpp `tools/footprint.sh` unaffected (header-only C++
+  change, the C library is untouched). Ir/op (raw): `cpp-c-cpp` encode −0.01 %,
+  decode +0.03 %; `cpp-c-cpp-dyn` +0.03 % / +0.01 %; `cpp-cpp` −1.07 % / +0.11 %,
+  `cpp-cpp-static` −0.03 % / +0.18 %, `cpp-cpp-unbounded` identical.
 
 ### 5.4 rust — std and no_std
 
@@ -1445,6 +1527,8 @@ against the branch is the proof for C.
    known at an `ArrayFixlen` callback, an fp32/fp64-array mismatch at a union
    option id cannot be gated; this is the existing #232 asymmetry, not a new one.
    The driver case is D27; it would run under `--known-gap D27=…` on cpp only.
+   *Resolved in the cpp milestone:* `fixType()` is valid there on both corelibs,
+   D27 passes everywhere, and no `--known-gap` is used.
 3. **Deviations from issue #608**, all argued above: GC targets **and TypeScript**
    use one typed slot per option instead of `prim`/`ref` / a single `value` (§5,
    §5.11 — V8 field representations); Go stores struct/union options **by value**,

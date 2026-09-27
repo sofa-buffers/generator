@@ -2852,9 +2852,10 @@ func TestCppEnumAndBitfieldWidthBoundAtEverySixPositions(t *testing.T) {
 		// 4. member of a struct-array element
 		enRej + "sa_en = static_cast<ClosedCsaElemSaEn>(_v); } }",
 		bfRej + "sa_bf = static_cast<std::uint8_t>(_v); } }",
-		// 5. union member
-		enRej + "un_en = static_cast<ClosedCunUnEn>(_v); } }",
-		bfRej + "un_bf = static_cast<std::uint8_t>(_v); } }",
+		// 5. union option: the same temporary and guard; the store is the
+		// option's select (mutable_<opt>()), reached only past both.
+		enRej + "mutable_un_en() = static_cast<ClosedCunUnEn>(_v); } }",
+		bfRej + "mutable_un_bf() = static_cast<std::uint8_t>(_v); } }",
 		// 2. native array element. The elements are converted inside
 		// sofab::readArray, so the bound rides in as its ElemBound argument, and
 		// NOTHING follows the call: the interval states the width whole.

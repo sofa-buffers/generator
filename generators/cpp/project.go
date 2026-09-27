@@ -215,7 +215,11 @@ func (g *gen) jsonHeader(s *ir.Schema) []byte {
 			nt := s.Named[key]
 			if (nt.Category == ir.CatStruct || nt.Category == ir.CatUnion) && !emitted[key] {
 				emitted[key] = true
-				g.emitJSONFns(f, g.typeName(key), nt.Fields)
+				if nt.Category == ir.CatUnion {
+					g.emitUnionJSONFns(f, g.typeName(key), nt)
+				} else {
+					g.emitJSONFns(f, g.typeName(key), nt.Fields)
+				}
 			}
 		}
 		g.emitJSONFns(f, exported(m.Name), m.Fields)
@@ -261,9 +265,48 @@ func deprecatedAccess(f *hfile, fld *ir.Field) func() {
 	return func() { f.line("#pragma GCC diagnostic pop") }
 }
 
+// emitUnionJSONFns renders a union as the object of its ONE held option,
+// {"<option>": value} -- printed even when that is default_id at its default --
+// and reads one back by selecting the option its member names. An absent union
+// member is the union's default; a multi-member object is never sent by a
+// driver, and the last member in schema order would win.
+func (g *gen) emitUnionJSONFns(f *hfile, typeName string, nt *ir.NamedType) {
+	opts := g.unionOptions(nt)
+	f.line("inline void to_json(const %s &o, std::ostream &out) {", typeName)
+	f.line("    out << '{';")
+	f.line("    switch (o.which()) {")
+	for _, o := range opts {
+		f.line("    case %s::Which::%s:", typeName, o.base)
+		f.line("        out << \"\\\"%s\\\":\";", o.f.Name)
+		g.emitToJSONAt(f, o.f, "o."+o.base+"()")
+		f.line("        break;")
+	}
+	f.line("    }")
+	f.line("    out << '}';")
+	f.line("}")
+	f.line("inline void from_json(const sofab_json_t *j, %s &o) {", typeName)
+	f.line("    const sofab_json_t *c;")
+	for _, o := range opts {
+		f.line("    c = sofab_json_get(j, %q);", o.f.Name)
+		f.line("    if (c) {")
+		func() {
+			defer deprecatedAccess(f, o.f)()
+			f.line("        auto &_o = o.mutable_%s();", o.base)
+		}()
+		g.emitFromJSONBody(f, o.f, "_o")
+		f.line("    }")
+	}
+	f.line("}")
+	f.blank()
+}
+
 func (g *gen) emitToJSON(f *hfile, fld *ir.Field) {
+	g.emitToJSONAt(f, fld, "o."+cppIdent(fld.Name))
+}
+
+// emitToJSONAt renders the value of fld read through the expression acc.
+func (g *gen) emitToJSONAt(f *hfile, fld *ir.Field, acc string) {
 	defer deprecatedAccess(f, fld)()
-	acc := "o." + cppIdent(fld.Name)
 	switch fld.Kind {
 	case ir.KindU8, ir.KindU16, ir.KindU32, ir.KindU64, ir.KindBitfield:
 		f.line("    out << static_cast<unsigned long long>(%s);", acc)
@@ -318,10 +361,15 @@ func (g *gen) toJSONArray(f *hfile, ind, expr string, elem ir.Kind, ref *ir.Type
 }
 
 func (g *gen) emitFromJSON(f *hfile, fld *ir.Field) {
-	defer deprecatedAccess(f, fld)()
-	acc := "o." + cppIdent(fld.Name)
 	f.line("    c = sofab_json_get(j, %q);", fld.Name)
 	f.line("    if (c) {")
+	g.emitFromJSONBody(f, fld, "o."+cppIdent(fld.Name))
+	f.line("    }")
+}
+
+// emitFromJSONBody assigns the JSON node c to the destination expression acc.
+func (g *gen) emitFromJSONBody(f *hfile, fld *ir.Field, acc string) {
+	defer deprecatedAccess(f, fld)()
 	switch fld.Kind {
 	case ir.KindU8, ir.KindU16, ir.KindU32, ir.KindU64, ir.KindBitfield:
 		f.line("        %s = static_cast<%s>(sofab_json_u64(c));", acc, g.cppType(fld))
@@ -345,7 +393,6 @@ func (g *gen) emitFromJSON(f *hfile, fld *ir.Field) {
 	case ir.KindArray:
 		g.emitFromJSONArray(f, fld, acc)
 	}
-	f.line("    }")
 }
 
 func (g *gen) emitFromJSONArray(f *hfile, fld *ir.Field, acc string) {

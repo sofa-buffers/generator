@@ -291,8 +291,8 @@ YAML
     # back is a full-coverage pass that grows with the schema by itself.
     #
     # A string comparison cannot do this job: member order is the backend's choice
-    # (cpp orders by schema id, go alphabetically), a union renders every arm, and a
-    # blob is base64 here and a byte array there -- all rendering, no wire fact.
+    # (cpp orders by schema id, go alphabetically), and a blob is base64 here and a
+    # byte array there -- all rendering, no wire fact.
     FULL="$OUT"
     OUT2=$(printf '%s' "$FULL" | "$WORK/ex-$label/harness/harness" encode myfirstmessage | "$WORK/ex-$label/harness/harness" decode myfirstmessage)
     python3 "$ROOT/tests/conformance/lib/json_equal.py" "$FULL" "$OUT2" \
@@ -300,11 +300,9 @@ YAML
     echo "==> full-message round-trip OK ($(python3 -c "import json,sys;print(len(json.loads(sys.argv[1])))" "$FULL") fields compared as data)"
     # Every field must sit OFF its schema default, or the round trip above compares
     # a default with itself and cannot tell a working decode from a broken one.
-    # The union arms beside the selected one are excepted: a union carries exactly
-    # one, so the others reading as their default is the rule, not a hole.
     BASE=$(printf '%s' '{}' | "$WORK/ex-$label/harness/harness" encode myfirstmessage | "$WORK/ex-$label/harness/harness" decode myfirstmessage)
     python3 "$ROOT/tests/conformance/lib/check_nondefault.py" "$BASE" "$FULL" \
-        --except '$.someunion.option2,$.someunion.option3,$.someunion.option3.unionstructint,$.someunion.option3.unionstructbool' --label "cpp: round-trip fixture" || exit 1
+        --label "cpp: round-trip fixture" || exit 1
     echo "==> round-trip fixture OK (no field sits on its schema default)"
 
     # Over-count scalar array (generator#100): someuintarray declares count: 4
@@ -972,8 +970,26 @@ YAML
     ( cd "$ROOT" && go run ./cmd/sofabgen --config "$WORK/cfg-$label.yaml" --lang cpp \
         --in "$WORK/repeated.yaml" --out "$WORK/repeated-$label" )
     make -C "$WORK/repeated-$label" "$@" >/dev/null
-    python3 "$ROOT/tests/conformance/lib/check_repeated_id.py" "C++ [$label]" \
+    python3 "$ROOT/tests/conformance/lib/check_repeated_id.py" "C++ [$label]" --union \
         -- "$WORK/repeated-$label/harness/harness"
+
+    # MESSAGE_SPEC §4.2 / §7.4.1 (generator#608): a union holds exactly ONE option.
+    # A fresh one holds default_id at that option's default; a held option other
+    # than default_id is written even at its own default (a struct/union/wrapper
+    # option as a present frame); on decode the last correctly-typed option wins,
+    # a §7.3-skipped or unknown id never switches, and several children or
+    # re-opened frames are legal. The driver forges the frames no encoder emits and
+    # prints its own schema. Every profile, because the storage differs --
+    # std::variant on corelib-cpp, a tag and a union on corelib-c-cpp -- and so
+    # does the decode: corelib-cpp re-delivers a split payload per chunk and
+    # re-enters an open sequence on resume, which the streamed splits exercise.
+    echo "==> [$label] §4.2/§7.4.1 tagged unions: one option held, last option wins (generator#608)"
+    python3 "$ROOT/tests/conformance/lib/check_union.py" --emit-schema > "$WORK/union.yaml"
+    ( cd "$ROOT" && go run ./cmd/sofabgen --config "$WORK/cfg-$label.yaml" --lang cpp \
+        --in "$WORK/union.yaml" --out "$WORK/union-$label" )
+    make -C "$WORK/union-$label" "$@" >/dev/null
+    python3 "$ROOT/tests/conformance/lib/check_union.py" "C++ [$label]" \
+        -- "$WORK/union-$label/harness/harness"
 
     # Nested defaults (generator#609): absence reads as the schema's defaults at
     # every depth and inside a struct array's element, on every profile --

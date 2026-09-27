@@ -70,6 +70,9 @@ func (*Backend) Generate(s *ir.Schema, cfg map[string]any) ([]generator.File, er
 			return nil, err
 		}
 	}
+	if err := g.checkUnionNames(s); err != nil {
+		return nil, err
+	}
 	g.resolveLimits(s, cfg)
 	var files []generator.File
 	for _, m := range s.Messages {
@@ -257,6 +260,19 @@ func (g *gen) header(m *ir.Message) []byte {
 	f.line("#include <cstddef>")
 	// <utility> backs the std::move in decode().
 	f.line("#include <utility>")
+	// A union's storage: std::variant on corelib-cpp; on c-cpp a tag and a C++
+	// union whose options are placement-new'd (<new>) and, where one can own heap
+	// storage (allow_dynamic), ended with std::destroy_at (<memory>).
+	if g.unionHas(m) {
+		if !g.clib {
+			f.line("#include <variant>")
+		} else {
+			f.line("#include <new>")
+			if !g.fixed {
+				f.line("#include <memory>")
+			}
+		}
+	}
 	f.line("#include %q", "sofab/sofab.hpp")
 	f.blank()
 	f.line("static_assert(sofab::API_VERSION == 1,")
@@ -327,8 +343,11 @@ func (g *gen) header(m *ir.Message) []byte {
 	}
 	for _, key := range order {
 		nt := g.schema.Named[key]
-		if nt.Category == ir.CatStruct || nt.Category == ir.CatUnion {
+		switch nt.Category {
+		case ir.CatStruct:
 			g.emitStruct(f, g.typeName(key), nt.Summary, nt.Fields, false)
+		case ir.CatUnion:
+			g.emitUnion(f, g.typeName(key), nt)
 		}
 	}
 	g.emitStruct(f, exported(m.Name), m.Summary, m.Fields, true)
@@ -909,30 +928,7 @@ func (g *gen) emitStruct(f *hfile, name, summary string, fields []*ir.Field, isM
 	// named only when a string or blob arm reads it: a message without one would
 	// otherwise carry an unused parameter, which -Wextra reports and a user's
 	// -Werror build turns into an error.
-	sizeParam := "std::size_t"
-	if g.clib {
-		for _, fld := range fields {
-			if fld.Kind == ir.KindString || fld.Kind == ir.KindBlob {
-				sizeParam = "std::size_t _size"
-				break
-			}
-		}
-	}
-	// The wire element count (_count) is passed to the c-cpp wrapper's readArray,
-	// which takes it in both storage modes: it bounds the count before a dynamic
-	// resize, and is what a fixed array is filled to. The pure path never reads
-	// it -- sofab::readArray reads the count off the stream and applies the schema
-	// count, the §6.2.1 cap and the element bound itself, all behind the §7.3 tag
-	// test -- so the parameter stays unnamed there, for the same reason _size does.
-	countParam := "std::size_t"
-	if g.clib {
-		for _, fld := range fields {
-			if fld.Kind == ir.KindArray && isNativeArrayElem(fld.Elem) {
-				countParam = "std::size_t _count"
-				break
-			}
-		}
-	}
+	sizeParam, countParam := g.deserializeParams(fields)
 	f.line("    /**")
 	f.line("     * @brief Bind one decoded field to its member.")
 	f.line("     *")
@@ -969,6 +965,36 @@ func (g *gen) emitStruct(f *hfile, name, summary string, fields []*ir.Field, isM
 		f.line("#pragma GCC diagnostic pop")
 	}
 	f.blank()
+}
+
+// deserializeParams names deserialize()'s size and count parameters: named
+// only where an arm reads them, unnamed otherwise (see emitStruct).
+func (g *gen) deserializeParams(fields []*ir.Field) (string, string) {
+	sizeParam := "std::size_t"
+	if g.clib {
+		for _, fld := range fields {
+			if fld.Kind == ir.KindString || fld.Kind == ir.KindBlob {
+				sizeParam = "std::size_t _size"
+				break
+			}
+		}
+	}
+	// The wire element count (_count) is passed to the c-cpp wrapper's readArray,
+	// which takes it in both storage modes: it bounds the count before a dynamic
+	// resize, and is what a fixed array is filled to. The pure path never reads
+	// it -- sofab::readArray reads the count off the stream and applies the schema
+	// count, the §6.2.1 cap and the element bound itself, all behind the §7.3 tag
+	// test -- so the parameter stays unnamed there, for the same reason _size does.
+	countParam := "std::size_t"
+	if g.clib {
+		for _, fld := range fields {
+			if fld.Kind == ir.KindArray && isNativeArrayElem(fld.Elem) {
+				countParam = "std::size_t _count"
+				break
+			}
+		}
+	}
+	return sizeParam, countParam
 }
 
 // emitStructDoc writes a Doxygen @brief block before a struct, when the summary
@@ -1103,7 +1129,12 @@ func (g *gen) emptyDefault(f *ir.Field) bool {
 // fieldIsDefaultExpr is the boolean expression "this field equals its default",
 // i.e. the negation of emitSerialize's write guard for the same field.
 func (g *gen) fieldIsDefaultExpr(fld *ir.Field) string {
-	acc := cppIdent(fld.Name)
+	return g.fieldIsDefaultExprAt(fld, cppIdent(fld.Name))
+}
+
+// fieldIsDefaultExprAt is fieldIsDefaultExpr over the storage expression acc
+// (a union option's storage rather than a struct member).
+func (g *gen) fieldIsDefaultExprAt(fld *ir.Field, acc string) string {
 	if g.emptyDefault(fld) {
 		return fmt.Sprintf("%s.empty()", acc)
 	}
@@ -1137,7 +1168,16 @@ func (g *gen) fieldIsDefaultExpr(fld *ir.Field) string {
 }
 
 func (g *gen) emitSerialize(f *hfile, fld *ir.Field) {
-	acc := cppIdent(fld.Name)
+	g.emitSerializeAt(f, fld, cppIdent(fld.Name), "        ", false)
+}
+
+// emitSerializeAt writes one field's encode over the storage expression acc at
+// indentation ind. forced drops the ≠-default guard and closes a sequence-framed
+// value with the KEEPING closer: it is how a union writes a held option other
+// than its default_id, which MESSAGE_SPEC §2/§4.2 put on the wire even at the
+// option's own default (a scalar as its value, a string/blob/compact array in
+// its explicit empty form, a struct/union/wrapper array as a present frame).
+func (g *gen) emitSerializeAt(f *hfile, fld *ir.Field, acc, ind string, forced bool) {
 	var write string
 	switch fld.Kind {
 	// Write each integer at its natural width (not a forced 64-bit cast): the
@@ -1161,7 +1201,12 @@ func (g *gen) emitSerialize(f *hfile, fld *ir.Field) {
 		// A blob is a leaf: sparse-canonical encoding (MESSAGE_SPEC S2) omits it
 		// when it equals its default (empty if none). The decoder reconstructs the
 		// omitted blob from the member's construction default.
-		f.line("        if (%s) { (void)os.write(%d, %s.data(), static_cast<std::int32_t>(%s.size())); }", g.fieldIsNotDefaultExpr(fld), fld.ID, acc, acc)
+		blob := fmt.Sprintf("(void)os.write(%d, %s.data(), static_cast<std::int32_t>(%s.size()));", fld.ID, acc, acc)
+		if forced {
+			f.line("%s%s", ind, blob)
+			return
+		}
+		f.line("%sif (%s) { %s }", ind, g.fieldIsNotDefaultExprAt(fld, acc), blob)
 		return
 	case ir.KindStruct, ir.KindUnion:
 		// MESSAGE_SPEC S2: the != default test is per field and a sequence is no
@@ -1170,16 +1215,26 @@ func (g *gen) emitSerialize(f *hfile, fld *ir.Field) {
 		// child that equals its default, so "no child was written" IS "the object
 		// equals its declared default", per field and recursively. An all-default
 		// nested object is dropped, not emitted as an empty wrapper.
-		f.line("        (void)os.writeLazy(%d, %s);", fld.ID, acc)
+		if forced {
+			// The KEEP form: a held non-default option is present even when every
+			// child it has is at its default -- the frame is what selects it.
+			f.line("%s(void)os.write(%d, %s);", ind, fld.ID, acc)
+			return
+		}
+		f.line("%s(void)os.writeLazy(%d, %s);", ind, fld.ID, acc)
 		return
 	case ir.KindArray:
-		g.emitSerializeArray(f, fld, acc)
+		g.emitSerializeArrayAt(f, fld, acc, ind, forced)
+		return
+	}
+	if forced {
+		f.line("%s%s", ind, write)
 		return
 	}
 	// Scalar/string/enum/bitfield leaf: always omit when equal to the default.
 	// Sparse encoding is canonical (MESSAGE_SPEC S2); the decoder reconstructs the
 	// omitted field from its member construction default.
-	f.line("        if (%s) { %s }", g.fieldIsNotDefaultExpr(fld), write)
+	f.line("%sif (%s) { %s }", ind, g.fieldIsNotDefaultExprAt(fld, acc), write)
 }
 
 // fieldIsNotDefaultExpr is the write guard: the negation of fieldIsDefaultExpr,
@@ -1187,7 +1242,11 @@ func (g *gen) emitSerialize(f *hfile, fld *ir.Field) {
 // plain expression route through here; struct/union and wrapper arrays carry
 // their own framing-based test.
 func (g *gen) fieldIsNotDefaultExpr(fld *ir.Field) string {
-	acc := cppIdent(fld.Name)
+	return g.fieldIsNotDefaultExprAt(fld, cppIdent(fld.Name))
+}
+
+// fieldIsNotDefaultExprAt is fieldIsNotDefaultExpr over the storage expression acc.
+func (g *gen) fieldIsNotDefaultExprAt(fld *ir.Field, acc string) string {
 	if g.emptyDefault(fld) {
 		return fmt.Sprintf("!%s.empty()", acc)
 	}
@@ -1198,6 +1257,14 @@ func (g *gen) fieldIsNotDefaultExpr(fld *ir.Field) string {
 }
 
 func (g *gen) emitSerializeArray(f *hfile, fld *ir.Field, acc string) {
+	g.emitSerializeArrayAt(f, fld, acc, "        ", false)
+}
+
+// emitSerializeArrayAt is emitSerializeArray at indentation ind; forced is
+// emitSerializeAt's: no guard on a compact array (an empty one is written as
+// count 0, an fp one keeping its fixlen_word), and the keeping closer on a
+// wrapper array (an empty one is a present, empty frame).
+func (g *gen) emitSerializeArrayAt(f *hfile, fld *ir.Field, acc, ind string, forced bool) {
 	// A native scalar array is a leaf: omit the whole field when it equals its
 	// default (materialized at construction). A composite/dynamic-element array is
 	// a wrapper sequence, opened lazily and closed with the dropping end
@@ -1214,9 +1281,17 @@ func (g *gen) emitSerializeArray(f *hfile, fld *ir.Field, acc string) {
 			// No declared default: the test is simply "holds anything".
 			guard = fmt.Sprintf("!%s.empty()", acc)
 		}
-		f.line("        if (%s) {", guard)
-		g.serializeArray(f, "            ", fmt.Sprintf("%d", fld.ID), acc, fld.Elem, fld.ElemRef, fld.ElemItems, fld.Count, 0, "")
-		f.line("        }")
+		if forced {
+			g.serializeArray(f, ind, fmt.Sprintf("%d", fld.ID), acc, fld.Elem, fld.ElemRef, fld.ElemItems, fld.Count, 0, "")
+			return
+		}
+		f.line("%sif (%s) {", ind, guard)
+		g.serializeArray(f, ind+"    ", fmt.Sprintf("%d", fld.ID), acc, fld.Elem, fld.ElemRef, fld.ElemItems, fld.Count, 0, "")
+		f.line("%s}", ind)
+		return
+	}
+	if forced {
+		g.serializeArray(f, ind, fmt.Sprintf("%d", fld.ID), acc, fld.Elem, fld.ElemRef, fld.ElemItems, fld.Count, 0, keepAlways)
 		return
 	}
 	// The field-level wrapper frame is dropped when no element is written, and
@@ -1226,7 +1301,7 @@ func (g *gen) emitSerializeArray(f *hfile, fld *ir.Field, acc string) {
 	// needs a guard -- `if (value != default) { ... sequenceEndKeep(); }` -- so that
 	// a value differing from a non-empty default still reaches the wire as the empty
 	// wrapper, the only encoding of "explicitly empty" (MESSAGE_SPEC S2, S3).
-	g.serializeArray(f, "        ", fmt.Sprintf("%d", fld.ID), acc, fld.Elem, fld.ElemRef, fld.ElemItems, fld.Count, 0, "")
+	g.serializeArray(f, ind, fmt.Sprintf("%d", fld.ID), acc, fld.Elem, fld.ElemRef, fld.ElemItems, fld.Count, 0, "")
 }
 
 // lastElemExpr is the "this element is the array's last" test, at loop position
@@ -1251,6 +1326,9 @@ func lastElemExpr(iv, nv string) string {
 	return fmt.Sprintf("%s + 1 == %s", iv, nv)
 }
 
+// keepAlways is emitSeqEnd's "the frame always survives" condition.
+const keepAlways = "true"
+
 // emitSeqEnd closes the wrapper sequence opened at ind, choosing between the two
 // closers the corelib offers. Every sequence is opened LAZILY (the corelib holds
 // the header back until a child is written), so the closer alone decides whether
@@ -1260,6 +1338,8 @@ func lastElemExpr(iv, nv string) string {
 // keepIf is the condition under which an empty frame must survive:
 //   - "" -- never. A sequence-typed FIELD (an array wrapper): an all-default one
 //     is omitted and absence reconstructs it (§2).
+//   - keepAlways -- always. A union's held option other than its default_id:
+//     its frame is what selects it, so an empty one is still written (§2).
 //   - a lastElemExpr -- a sequence-form array ELEMENT, kept only at the array's
 //     last index. In the interior it is dropped and leaves an id GAP, which is
 //     what makes an all-default element sparse like any other default value.
@@ -1268,6 +1348,10 @@ func lastElemExpr(iv, nv string) string {
 func emitSeqEnd(f *hfile, ind, keepIf string) {
 	if keepIf == "" {
 		f.line("%s(void)os.sequenceEnd();", ind)
+		return
+	}
+	if keepIf == keepAlways {
+		f.line("%s(void)os.sequenceEndKeep();", ind)
 		return
 	}
 	f.line("%sif (%s) { (void)os.sequenceEndKeep(); } else { (void)os.sequenceEnd(); }", ind, keepIf)
@@ -1365,7 +1449,13 @@ func (g *gen) serializeArray(f *hfile, ind, idExpr, val string, elem ir.Kind, re
 }
 
 func (g *gen) emitDeserialize(f *hfile, fld *ir.Field) {
-	acc := cppIdent(fld.Name)
+	g.emitDeserializeAt(f, fld, cppIdent(fld.Name))
+}
+
+// emitDeserializeAt is emitDeserialize binding the destination expression acc
+// (a union's mutable_<option>() rather than a struct member). acc may be
+// evaluated more than once, so it must be idempotent.
+func (g *gen) emitDeserializeAt(f *hfile, fld *ir.Field, acc string) {
 	switch fld.Kind {
 	case ir.KindString:
 		// corelib-c-cpp's read() fills the existing buffer, so pre-size from the

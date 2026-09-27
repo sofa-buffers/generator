@@ -105,7 +105,7 @@ static void fillMessage(MSG_TYPE &m)
     // sofab::InlineVector<T, N> alike; both start EMPTY here, so a loop over
     // size() would fill nothing.
     m.someunionarray.resize(1);                                          // count 2
-    m.someunionarray[0].asstring.assign(std::string_view{"union-row-str"});  // maxlen 16
+    m.someunionarray[0].mutable_asstring().assign(std::string_view{"union-row-str"});  // maxlen 16
     m.somestructwitharray.label.assign(std::string_view{"struct-label"});    // maxlen 16
     m.somemap.resize(2);                                                 // dynamic
     m.somemap[0].key.assign(std::string_view{"first-key-straddles"});    // maxlen 32

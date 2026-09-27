@@ -140,8 +140,11 @@ int main()
     canonArrays.rows[1][0] = 1; canonArrays.rows[1][1] = 0; canonArrays.rows[1][2] = 1;
     canonArrays.nested.inner.resize(3);
     canonArrays.nested.inner[0] = 0; canonArrays.nested.inner[1] = 1; canonArrays.nested.inner[2] = 1;
-    canonArrays.choice.bits.resize(3);
-    canonArrays.choice.bits[0] = 1; canonArrays.choice.bits[1] = 0; canonArrays.choice.bits[2] = 1;
+    {   // choice is a union: mutable_bits() selects the option (MESSAGE_SPEC §4.2)
+        auto &bits = canonArrays.choice.mutable_bits();
+        bits.resize(3);
+        bits[0] = 1; bits[1] = 0; bits[2] = 1;
+    }
     canonArrays.cube.resize(2);
     canonArrays.cube[0].resize(2);
     canonArrays.cube[0][0].resize(2);
@@ -196,7 +199,7 @@ int main()
             fail(surface, "rows [[2, 256], [max, 0, 5]] must be stored as [[1, 1], [1, 0, 1]]");
         if (!holds(a.nested.inner, {0, 1, 1}))
             fail(surface, "nested.inner [0, 256, 5] must be stored as [0, 1, 1]");
-        if (!holds(a.choice.bits, {1, 0, 1}))
+        if (!a.choice.has_bits() || !holds(a.choice.bits(), {1, 0, 1}))
             fail(surface, "choice.bits [256, 0, 2] must be stored as [1, 0, 1]");
         if (a.cube.size() != 2 || a.cube[0].size() != 2 || a.cube[1].size() != 1 ||
             !holds(a.cube[0][0], {1, 1}) || !holds(a.cube[0][1], {0}) || !holds(a.cube[1][0], {1}))
