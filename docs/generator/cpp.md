@@ -185,3 +185,10 @@ id, change nothing.
 **JSON (project harness).** A union is an object with exactly one member, the
 held option: `{"pt": {"x": 7, "y": 2}}`, also when that is the `default_id`
 option at its default.
+
+**`corelib: c-cpp` project build.** The C++ unions do not use the C object API,
+so `corelib-c-cpp`'s `SOFAB_DISABLE_UNION_SUPPORT` has no effect on them. The
+generated `Makefile` still sets it (variable `SOFAB_DEFINES`, on every C and
+C++ compile) when no message of the schema reaches a union, so a firmware that
+also uses the C object API pays no flash for its union walk. A schema with a
+union never gets it.

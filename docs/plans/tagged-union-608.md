@@ -777,7 +777,18 @@ Budget (the user's constraint: size and speed move only minimally): a maxspeed r
 may move by at most **±1 % Ir/op** (encode and decode separately), a footprint row
 by at most **+64 B `.text`** per target and **+0 B `.data`** for the generated
 code; anything beyond is reported with its cause and either fixed or argued in
-the milestone's result. The expected direction is ≤ 0 on encode (one option
+the milestone's result.
+
+**Footprint first (user decision, footprint rework).** On the footprint profile
+(`c`, `cpp` with `corelib: c-cpp`, `rust` with `corelib: rs-no-std`, and
+corelib-c-cpp itself) **flash wins over cycles**: among correct shapes the one
+with the least `.text`/`.data`/`.bss` is taken, and `Ir/op` is measured and
+reported but triggers nothing — it only decides between shapes of equal size,
+and a shape that costs cycles must buy flash. The Ir triggers of this plan
+(§5.2's +0.3 %, the ±1 % above) bind maxspeed rows only. The corelib's own
+`tools/footprint.sh` (full and minimal configurations, all four architectures)
+is the measure of a corelib-c-cpp change; the `c` / `cpp-c-cpp` rows size the
+generated code plus what it reaches. The expected direction is ≤ 0 on encode (one option
 compared and written instead of three) and ≈ 0 on decode (one tag store per
 option occurrence). Finish runs the **full** bench and commits `results.txt` from
 that full run only.
@@ -960,6 +971,35 @@ Work only in `/root/corelibs/wt-c-cpp-union` (branch `feat/tagged-union`,
      generator: +0.07 % encode, −0.21 % decode), the union row gets cheaper
      (−0.95 % / −0.49 %), and `SOFAB_DISABLE_UNION_SUPPORT` compiles to main's
      `object.c` byte for byte. The price is flash, see item 6.
+   * **Superseded (footprint rework, user decision — §4 *Footprint first*).** The
+     hoist bought Ir the footprint profile does not rank first and cost more
+     flash than the prototype's per-field tests. corelib-c-cpp `fe6663d` goes
+     back to the per-field shape and adds only what the spec forces, choosing
+     among measured variants the smallest on all four architectures:
+     * `_field_is_default` decides the union rule for **both** its callers, at
+       its top: `if (_IS_UNION(info)) { if (field->id != _TAG(src)) return 1;
+       if (field->id != _DEFAULT_TAG(info)) return 0; }` — an option not held
+       is absent (default), the held non-`D` option is never default (the
+       forced write; the union holding it is then not default one level up).
+       Neither encode nor the nested ≠-default loop tests the tag itself, so
+       encode compiles to main's code.
+     * `sofab_object_init`: `_TAG(obj) = _DEFAULT_TAG(info)` for a union, then
+       the prototype's per-field `_NOT_HELD` skip.
+     * decode: the prototype's re-init in the SEQUENCE branch
+       (`_IS_HOLDER(nested->info) || _NOT_HELD(...)` — past the §7.3 wire test,
+       where a sequence read always binds, so it is the "was bound" point), and
+       the tag switch at the end of `_seq_len_observe`, keyed on the width in
+       hand: a union's "width" is its bit (`0x40` after the shift), which
+       `_store_uint`/`_load_uint` ignore, so only the ≠-default test masks it
+       (`_seq_len_width_masked`).
+     A stray tag (naming no option) now holds nothing: the union is default and
+     omitted — which decodes as `D` at its default, as the frame the hoisted
+     walk wrote did (Unity `union_stray_tag_holds_nothing`). Variants measured
+     and rejected: the forced test in both loops (+24…+48 B), the prototype's
+     width mask in every `_seq_len_width` (+20…+38 B), the tag switch after the
+     observe call (+4…+24 B), the init tag inside the width branch or cached in
+     locals (+2…+12 B), the decode re-init compared against the callback id
+     (+4…+14 B for −450 decode Ir). Numbers in item 6.
    * `sofab_object_init`: the tag comes from `_DEFAULT_TAG(info)` — a **NULL image
      now means tag 0**, so a union whose image would carry nothing but zeros needs
      no image and costs no `.rodata` (the exact condition is in 5.2).
@@ -1018,6 +1058,15 @@ Work only in `/root/corelibs/wt-c-cpp-union` (branch `feat/tagged-union`,
    the expectation assumed the per-field tests, which item 1 had to hoist: a
    per-walk union branch costs more flash than a per-field compare, and it is
    the one that keeps a union-free schema's Ir at main's.*
+   *Measured (footprint rework, `fe6663d`), same table: 3960 / 3960 / 5080 /
+   8582 B — +92 / +62 / +104 / +216 B over main, −24 / −46 / −20 / −2 B under
+   the prototype, −146 / −92 / −196 / −152 B under the hoisted walk; strict-UTF-8
+   full 4206 / 4178 / 5342 / 9038 B; minimal and minimal-noobj identical to main
+   on all four; `SOFAB_DISABLE_UNION_SUPPORT` 3868 B (= main). Ir/op, C bench
+   recipe (x86-64 `-O3`), encode / decode: the bench schema without its unions
+   24202 / 49876 (main) → 24491 / 51254 (+1.2 % / +2.8 %); row `c` 25733 / 52790
+   (hoisted) → 26076 / 54510 (+1.3 % / +3.3 %). A union-free project takes both
+   back with the automatic `SOFAB_DISABLE_UNION_SUPPORT` (5.2).*
 7. The **C++ side** of c-cpp (`sofab.hpp`, `seq.hpp`) needs no change.
 
 ### 5.2 c (generator)
@@ -1084,7 +1133,24 @@ Work only in `/root/corelibs/wt-c-cpp-union` (branch `feat/tagged-union`,
   `<PREFIX>` built exactly like the bitfield prefix (`g.prefix` + sanitized
   `"named/" + key`), deduped per key, covered by `checkMacroNames`.
 * **Capability guard** in the header: `#if defined(SOFAB_DISABLE_UNION_SUPPORT)
-  #error "… uses unions …"` when the message reaches a union.
+  #error "… uses unions …"` when the message reaches a union. *Added (footprint
+  rework):* also `#if !defined(SOFAB_OBJECT_DESCR_UNION) #error "… which this
+  corelib-c-cpp predates …"` — a corelib without tagged unions otherwise fails on
+  an undeclared macro "call" in a static initializer. A feature macro, not a
+  `SOFAB_API_VERSION` bump: the corelib bumps the API version only on a break,
+  and every header generated so far checks `!= 1`, so a bump would refuse all of
+  them although unions are additive; the descriptor macro is exactly what the
+  generated code needs.
+* **Automatic `SOFAB_DISABLE_UNION_SUPPORT`** (footprint rework, user decision).
+  When no message of the schema reaches a union, the project build sets it: the
+  `Makefile` as `SOFAB_DEFINES ?= -DSOFAB_DISABLE_UNION_SUPPORT` on the one
+  command that compiles corelib and generated code (kept out of `CFLAGS`, which
+  the bench recipe and users override), `CMakeLists.txt` as
+  `target_compile_definitions(harness PRIVATE …)`. A union-free project then pays
+  neither the walk's flash nor its per-field cycles. A schema with a union never
+  gets it, and its header refuses it. The `emit: sources` user sets it in their
+  own build (`docs/generator/c.md`). The cpp `corelib: c-cpp` Makefile sets it
+  the same way (5.3).
 * **JSON harness** (`generators/c/project.go`, and
   `tests/conformance/c/example_roundtrip.c`): print/parse only the held option.
 * **Tests** (`generators/c/backend_test.go`): the type shape above, descriptor macro
@@ -1109,6 +1175,12 @@ Work only in `/root/corelibs/wt-c-cpp-union` (branch `feat/tagged-union`,
   product-type generator against the same corelib measures the same
   5762 / 5714 / 6342 B (and 25998 / 52937 Ir), so the generated code stays
   within §4's +64 B; the corelib's own cost is item 6 of 5.1.)*
+  *Footprint rework:* the +0.3 % trigger above is a maxspeed rule and does not
+  apply here (§4 *Footprint first*); the hoist is undone, see 5.1 item 1. Row
+  `c` against the committed `results.txt` (product-type generator, corelib
+  main): `.text` 5538 / 5552 / 6066 → 5616 / 5622 / 6170 B (+78 / +70 /
+  +104; the hoisted walk was 5762 / 5714 / 6342), Ir 25986 / 53254 → 26076 /
+  54510 (+0.3 % / +2.4 %). `.data`/`.bss` 0.
 
 ### 5.3 cpp — `corelib: cpp` and `corelib: c-cpp`
 
@@ -1245,6 +1317,18 @@ Work only in `/root/corelibs/wt-c-cpp-union` (branch `feat/tagged-union`,
   change, the C library is untouched). Ir/op (raw): `cpp-c-cpp` encode −0.01 %,
   decode +0.03 %; `cpp-c-cpp-dyn` +0.03 % / +0.01 %; `cpp-cpp` −1.07 % / +0.11 %,
   `cpp-cpp-static` −0.03 % / +0.18 %, `cpp-cpp-unbounded` identical.
+  *Re-checked footprint-first (footprint rework):* the +84 / +82 B over budget
+  was the first cut (a gate spelled per arm, 9202 / 8792 B); round 1 moved the
+  §7.3 test onto the read and the rows stand at +18 / +22 B (static) and
+  +16 / +22 B (`allow_dynamic`), re-measured unchanged against corelib
+  `fe6663d` (the C++ image never reaches `object.c`). What remains is the one
+  shared `bindMatch_` (26 B); the union arms are at or below the product
+  type's. Dropping `bindMatch_` means spelling the test per scalar arm again,
+  which is what cost the 22 B per arm, so there is nothing left to take without
+  giving the §7.3 test up. The project `Makefile` sets
+  `SOFAB_DISABLE_UNION_SUPPORT` for a union-free schema like the C target (5.2);
+  it only compiles `object.c`'s union walk out, which the C++ unions never use,
+  so a union-bearing c-cpp header does not refuse the switch.
 
 ### 5.4 rust — std and no_std
 

@@ -345,3 +345,128 @@ func TestUnionCompilesOnEveryProfile(t *testing.T) {
 		}
 	}
 }
+
+// plainYAML is a union-free schema (a nested struct keeps the object walk busy).
+const plainYAML = `
+version: 1
+messages:
+  m:
+    payload:
+      s: { id: 0, type: struct, fields: { a: { id: 0, type: u8, default: 3 } } }
+      w: { id: 1, type: u8 }
+`
+
+// TestUnionCorelibCapabilityGuard: a header that uses unions refuses a corelib
+// without SOFAB_OBJECT_DESCR_UNION by name; a union-free one does not ask. The
+// build half stands in for an old corelib by dropping the macro after object.h.
+func TestUnionCorelibCapabilityGuard(t *testing.T) {
+	guard := "#if !defined(SOFAB_OBJECT_DESCR_UNION)"
+	h := genCFromYAML(t, unionShapeYAML)["m.h"]
+	if !strings.Contains(h, guard) || !strings.Contains(h, "which this corelib-c-cpp predates") {
+		t.Errorf("a message with a union must refuse a corelib without SOFAB_OBJECT_DESCR_UNION:\n%s", h)
+	}
+	if plain := genCFromYAML(t, plainYAML)["m.h"]; strings.Contains(plain, guard) {
+		t.Errorf("a message without a union must not ask for SOFAB_OBJECT_DESCR_UNION:\n%s", plain)
+	}
+
+	corelib := os.Getenv("SOFAB_C_CORELIB")
+	if corelib == "" {
+		t.Skip("set SOFAB_C_CORELIB to a corelib-c-cpp checkout to run the build half")
+	}
+	gcc, err := exec.LookPath("gcc")
+	if err != nil {
+		t.Skip("gcc not found")
+	}
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "m.h"), []byte(h), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	tu := "#include \"sofab/object.h\"\n#undef SOFAB_OBJECT_DESCR_UNION\n#include \"m.h\"\n"
+	if err := os.WriteFile(filepath.Join(dir, "old.c"), []byte(tu), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	out, err := exec.Command(gcc, "-std=c99", "-I"+filepath.Join(corelib, "src", "include"), "-I"+dir,
+		"-c", filepath.Join(dir, "old.c"), "-o", filepath.Join(dir, "old.o")).CombinedOutput()
+	if err == nil || !strings.Contains(string(out), "which this corelib-c-cpp predates") {
+		t.Fatalf("a corelib without SOFAB_OBJECT_DESCR_UNION must fail with the guard's message, got err=%v:\n%s", err, out)
+	}
+}
+
+// TestUnionFreeProjectDisablesUnionSupport: a project whose schema has no union
+// builds the corelib with SOFAB_DISABLE_UNION_SUPPORT (Makefile and CMake), so
+// the tagged-union walk costs it no flash; a union-bearing project never does.
+// The build half makes both: the union-free one builds and round-trips with the
+// switch on, and the union one, handed the switch, stops at its header guard.
+func TestUnionFreeProjectDisablesUnionSupport(t *testing.T) {
+	plain := genCProject(t, plainYAML)
+	for path, want := range map[string][]string{
+		"Makefile": {
+			"SOFAB_DEFINES ?= -DSOFAB_DISABLE_UNION_SUPPORT\n",
+			"$(CC) $(CSTD) $(WARNFLAGS) $(SOFAB_DEFINES) $(CFLAGS) $(INCLUDES) $^ -o $@",
+		},
+		"CMakeLists.txt": {"target_compile_definitions(harness PRIVATE SOFAB_DISABLE_UNION_SUPPORT)"},
+	} {
+		for _, w := range want {
+			if !strings.Contains(plain[path], w) {
+				t.Errorf("union-free %s missing %q:\n%s", path, w, plain[path])
+			}
+		}
+	}
+	uni := genCProject(t, unionShapeYAML)
+	for _, path := range []string{"Makefile", "CMakeLists.txt"} {
+		if strings.Contains(uni[path], "SOFAB_DISABLE_UNION_SUPPORT") || strings.Contains(uni[path], "SOFAB_DEFINES") {
+			t.Errorf("a union-bearing %s must not set SOFAB_DISABLE_UNION_SUPPORT:\n%s", path, uni[path])
+		}
+	}
+
+	corelib := os.Getenv("SOFAB_C_CORELIB")
+	if corelib == "" {
+		t.Skip("set SOFAB_C_CORELIB to a corelib-c-cpp checkout to run the build half")
+	}
+	for _, tool := range []string{"make", "gcc"} {
+		if _, err := exec.LookPath(tool); err != nil {
+			t.Skipf("%s not found", tool)
+		}
+	}
+	write := func(files map[string]string) string {
+		dir := t.TempDir()
+		for path, content := range files {
+			full := filepath.Join(dir, path)
+			if err := os.MkdirAll(filepath.Dir(full), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(full, []byte(content), 0o644); err != nil {
+				t.Fatal(err)
+			}
+		}
+		return dir
+	}
+	dir := write(plain)
+	if out, err := exec.Command("make", "-C", dir, "SOFAB_C_CORELIB="+corelib, strictMakeVar).CombinedOutput(); err != nil {
+		t.Fatalf("union-free project build failed:\n%s", out)
+	} else if !strings.Contains(string(out), "-DSOFAB_DISABLE_UNION_SUPPORT") {
+		t.Errorf("union-free project did not compile with SOFAB_DISABLE_UNION_SUPPORT:\n%s", out)
+	}
+	harness := filepath.Join(dir, "harness", "harness")
+	enc := exec.Command(harness, "encode")
+	enc.Stdin = strings.NewReader(`{"s":{"a":9},"w":4}`)
+	encoded, err := enc.Output()
+	if err != nil {
+		t.Fatalf("encode failed: %v", err)
+	}
+	dec := exec.Command(harness, "decode")
+	dec.Stdin = strings.NewReader(string(encoded))
+	decoded, err := dec.Output()
+	if err != nil {
+		t.Fatalf("decode failed: %v", err)
+	}
+	if !strings.Contains(string(decoded), `"a":9`) || !strings.Contains(string(decoded), `"w":4`) {
+		t.Errorf("union-free round trip lost a value:\n%s", decoded)
+	}
+
+	dir = write(uni)
+	out, err := exec.Command("make", "-C", dir, "SOFAB_C_CORELIB="+corelib, "CFLAGS=-DSOFAB_DISABLE_UNION_SUPPORT").CombinedOutput()
+	if err == nil || !strings.Contains(string(out), "but the corelib was built with SOFAB_DISABLE_UNION_SUPPORT") {
+		t.Fatalf("a union-bearing project handed SOFAB_DISABLE_UNION_SUPPORT must stop at its guard, got err=%v:\n%s", err, out)
+	}
+}
