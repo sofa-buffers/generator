@@ -1669,9 +1669,9 @@ func TestCsEnumAndBitfieldWidthBoundAtEverySixPositions(t *testing.T) {
 		// 4. struct-array element member
 		`case (Root_sa_e, 0): ` + enRej + `"se: value outside declared enum width"); m.sa[_ixRoot_sa].se = (ClosedSaElemSe)value; break;`,
 		`case (Root_sa_e, 1): ` + bfRej + `"sbf: value outside declared bitfield width"); m.sa[_ixRoot_sa].sbf = (ClosedSaElemSbf)value; break;`,
-		// 5. union member
-		`case (Root_un, 0): ` + enRej + `"ue: value outside declared enum width"); m.un.ue = (ClosedUnUe)value; break;`,
-		`case (Root_un, 1): ` + bfRej + `"ubf: value outside declared bitfield width"); m.un.ubf = (ClosedUnUbf)value; break;`,
+		// 5. union member -- stored through the option's setter, which selects it
+		`case (Root_un, 0): ` + enRej + `"ue: value outside declared enum width"); m.un.Ue = (ClosedUnUe)value; break;`,
+		`case (Root_un, 1): ` + bfRej + `"ubf: value outside declared bitfield width"); m.un.Ubf = (ClosedUnUbf)value; break;`,
 		// 6. matrix row element
 		`case (Root_mat, _): ` + fill + enRej,
 		`case (Root_mbf, _): ` + fill + bfRej,
@@ -1705,7 +1705,7 @@ func TestCsEnumAndBitfieldWidthBoundAtEverySixPositions(t *testing.T) {
 		`case (Root, 0): m.en = (ClosedEn)value;`,
 		`case (Root, 1): m.bf = (ClosedBf)value;`,
 		`case (Root_st, 0): m.st.se = (ClosedStSe)value;`,
-		`case (Root_un, 1): m.un.ubf = (ClosedUnUbf)value;`,
+		`case (Root_un, 1): m.un.Ubf = (ClosedUnUbf)value;`,
 	} {
 		if strings.Contains(m, bad) {
 			t.Errorf("Message.cs still stores an enum/bitfield through a bare cast (%q):\n%s", bad, m)

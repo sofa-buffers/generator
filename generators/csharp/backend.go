@@ -22,6 +22,9 @@ func (*Backend) Lang() string { return "csharp" }
 
 func (*Backend) Generate(s *ir.Schema, cfg map[string]any) ([]generator.File, error) {
 	g := &gen{schema: s, ns: cfgString(cfg, "namespace", "Message"), banner: cfgString(cfg, "tool_banner", "sofabgen"), license: generator.LicenseID(cfg), limits: resolveLimits(cfg), size: generator.NewSizePolicy(cfg)}
+	if err := g.checkUnions(); err != nil {
+		return nil, err
+	}
 	files := []generator.File{{Path: "Message.cs", Content: g.module(s)}}
 	if cfgString(cfg, "emit", "sources") == "project" {
 		files = append(files, g.projectFiles(s, cfg)...)
@@ -118,8 +121,11 @@ func (g *gen) module(s *ir.Schema) []byte {
 	}
 	for _, key := range s.NamedOrder {
 		nt := s.Named[key]
-		if nt.Category == ir.CatStruct || nt.Category == ir.CatUnion {
+		switch nt.Category {
+		case ir.CatStruct:
 			g.emitClass(f, g.typeName(key), nt.Summary, nt.Fields, false)
+		case ir.CatUnion:
+			g.emitUnionClass(f, key, nt)
 		}
 	}
 	for _, m := range s.Messages {
@@ -384,7 +390,7 @@ func (g *gen) emitIsDefault(f *cfile, fields []*ir.Field, dep bool) {
 		f.line("#pragma warning disable 612 // internal access to a member marked [Obsolete] (CS0612)")
 	}
 	for _, fld := range fields {
-		f.line("        if (!(%s)) return false;", g.fieldIsDefaultExpr(fld))
+		f.line("        if (!(%s)) return false;", g.fieldIsDefaultExpr(fld, "this."+csIdent(fld.Name)))
 	}
 	if dep {
 		f.line("#pragma warning restore 612")
@@ -394,9 +400,9 @@ func (g *gen) emitIsDefault(f *cfile, fields []*ir.Field, dep bool) {
 }
 
 // fieldIsDefaultExpr is the boolean expression "this field equals its default",
-// i.e. the negation of emitMarshal's write guard for the same field.
-func (g *gen) fieldIsDefaultExpr(fld *ir.Field) string {
-	acc := "this." + csIdent(fld.Name)
+// i.e. the negation of emitMarshal's write guard for the same field. acc is the
+// expression holding the value: the field itself, or a union's option slot.
+func (g *gen) fieldIsDefaultExpr(fld *ir.Field, acc string) string {
 	switch fld.Kind {
 	case ir.KindBlob:
 		if g.csDefaultValue(fld) == "Array.Empty<byte>()" {
@@ -465,7 +471,19 @@ func framesHaveDeprecated(fs []frame) bool {
 }
 
 func (g *gen) emitMarshal(f *cfile, fld *ir.Field) {
-	acc := "this." + csIdent(fld.Name)
+	g.emitMarshalAt(f, "        ", fld, "this."+csIdent(fld.Name), false)
+}
+
+// emitMarshalAt writes the field fld whose value is acc, at indent ind.
+//
+// forced is a union's held option other than default_id (MESSAGE_SPEC §4.2): it
+// is written EVEN AT ITS OWN DEFAULT, because the receiver's fresh union holds
+// default_id and absence would read back as that. So there is no ≠-default guard
+// -- a scalar is written as its value, a string/blob/compact array in its
+// explicit empty form -- and a struct, union or wrapper-array option is closed
+// with the KEEPING end, so an option at its default still leaves a present,
+// empty frame. Inside the option the ordinary per-field omission applies.
+func (g *gen) emitMarshalAt(f *cfile, ind string, fld *ir.Field, acc string, forced bool) {
 	var write string
 	switch fld.Kind {
 	case ir.KindU8, ir.KindU16, ir.KindU32, ir.KindU64, ir.KindBitfield:
@@ -485,11 +503,15 @@ func (g *gen) emitMarshal(f *cfile, fld *ir.Field) {
 		// decoder reconstructs the omitted field from its materialized default.
 		// With an empty default the content compare degenerates to a length
 		// check, sparing the LINQ SequenceEqual enumeration per call.
-		if g.csDefaultValue(fld) == "Array.Empty<byte>()" {
-			f.line("        if (%s != null && %s.Length != 0) { os.WriteBlob(%d, %s); }", acc, acc, fld.ID, acc)
+		if forced {
+			f.line("%sos.WriteBlob(%d, %s ?? Array.Empty<byte>());", ind, fld.ID, acc)
 			return
 		}
-		f.line("        if (!System.Linq.Enumerable.SequenceEqual(%s ?? Array.Empty<byte>(), %s)) { os.WriteBlob(%d, %s ?? Array.Empty<byte>()); }", acc, g.csDefaultValue(fld), fld.ID, acc)
+		if g.csDefaultValue(fld) == "Array.Empty<byte>()" {
+			f.line("%sif (%s != null && %s.Length != 0) { os.WriteBlob(%d, %s); }", ind, acc, acc, fld.ID, acc)
+			return
+		}
+		f.line("%sif (!System.Linq.Enumerable.SequenceEqual(%s ?? Array.Empty<byte>(), %s)) { os.WriteBlob(%d, %s ?? Array.Empty<byte>()); }", ind, acc, g.csDefaultValue(fld), fld.ID, acc)
 		return
 	case ir.KindStruct, ir.KindUnion:
 		// MESSAGE_SPEC S2: the != default test is per field and a sequence-typed
@@ -499,16 +521,24 @@ func (g *gen) emitMarshal(f *cfile, fld *ir.Field) {
 		// equals its declared default", evaluated per field and recursively. The
 		// dropping closer therefore makes an all-default nested object vanish instead
 		// of reaching the wire as an empty wrapper frame.
-		f.line("        os.WriteSequenceBeginLazy(%d); (%s ?? new %s()).Serialize(os); os.WriteSequenceEnd();", fld.ID, acc, g.typeName(fld.Ref.Key))
+		end := "os.WriteSequenceEnd();"
+		if forced {
+			end = "os.WriteSequenceEndKeep();"
+		}
+		f.line("%sos.WriteSequenceBeginLazy(%d); (%s ?? new %s()).Serialize(os); %s", ind, fld.ID, acc, g.typeName(fld.Ref.Key), end)
 		return
 	case ir.KindArray:
-		g.emitMarshalArray(f, fld, acc)
+		g.emitMarshalArray(f, ind, fld, acc, forced)
+		return
+	}
+	if forced {
+		f.line("%s%s", ind, write)
 		return
 	}
 	// Scalar/string/enum/bitfield leaf: always omit when equal to the default;
 	// sparse encoding is canonical (MESSAGE_SPEC S2) and the decoder reconstructs
 	// the omitted field from its default.
-	f.line("        if (%s != %s) { %s }", acc, g.csDefaultValue(fld), write)
+	f.line("%sif (%s != %s) { %s }", ind, acc, g.csDefaultValue(fld), write)
 }
 
 // arrDefName is the static holding a native array field's omit-compare default.
@@ -530,7 +560,29 @@ func (g *gen) csArrayCompareDefault(fld *ir.Field) (string, bool) {
 	return g.csNativeArrayLiteral(fld)
 }
 
-func (g *gen) emitMarshalArray(f *cfile, fld *ir.Field, acc string) {
+func (g *gen) emitMarshalArray(f *cfile, ind string, fld *ir.Field, acc string, forced bool) {
+	if forced {
+		// A union's held non-default option: no guard. A compact array is written
+		// as its count even when that is 0 (an fp array keeps its fixlen_word), and
+		// a wrapper array's frame survives empty through the keeping end. A null
+		// slot (a setter handed null) is written as the empty value.
+		id := fmt.Sprintf("%d", fld.ID)
+		switch {
+		case primArrayElem(fld.Elem):
+			v := fmt.Sprintf("(%s ?? Array.Empty<%s>())", acc, primArrayBase(fld.Elem, fld.ElemRef))
+			g.marshalArray(f, ind, id, v, fld.Elem, fld.ElemRef, fld.ElemItems, 0, true, "")
+		default:
+			// A List: the boolean array, or a wrapper array. Read once into a
+			// local, since the element loop reads it per element.
+			f.line("%svar _o = %s ?? new %s();", ind, acc, g.csType(fld))
+			keep := keepAlways
+			if nativeArrayElem(fld.Elem) {
+				keep = "" // a compact array opens no frame
+			}
+			g.marshalArray(f, ind, id, "_o", fld.Elem, fld.ElemRef, fld.ElemItems, 0, false, keep)
+		}
+		return
+	}
 	// A native scalar array is a leaf field: omit it when equal to its default
 	// (materialized in the field initializer), else when empty. A composite/
 	// dynamic-element array is a wrapper sequence, opened lazily and closed by the
@@ -544,22 +596,22 @@ func (g *gen) emitMarshalArray(f *cfile, fld *ir.Field, acc string) {
 		// Primitive array (T[]): written straight to the OStream overload with
 		// no List.ToArray temporary.
 		if _, ok := g.csArrayCompareDefault(fld); ok {
-			f.line("        if (!System.Linq.Enumerable.SequenceEqual(%s, %s)) {", acc, arrDefName(fld))
+			f.line("%sif (!System.Linq.Enumerable.SequenceEqual(%s, %s)) {", ind, acc, arrDefName(fld))
 		} else {
-			f.line("        if (%s != null && %s.Length != 0) {", acc, acc)
+			f.line("%sif (%s != null && %s.Length != 0) {", ind, acc, acc)
 		}
-		g.marshalArray(f, "            ", fmt.Sprintf("%d", fld.ID), acc, fld.Elem, fld.ElemRef, fld.ElemItems, 0, true, "")
-		f.line("        }")
+		g.marshalArray(f, ind+"    ", fmt.Sprintf("%d", fld.ID), acc, fld.Elem, fld.ElemRef, fld.ElemItems, 0, true, "")
+		f.line("%s}", ind)
 		return
 	}
 	if nativeArrayElem(fld.Elem) {
 		if _, ok := g.csArrayCompareDefault(fld); ok {
-			f.line("        if (!System.Linq.Enumerable.SequenceEqual(%s, %s)) {", acc, arrDefName(fld))
+			f.line("%sif (!System.Linq.Enumerable.SequenceEqual(%s, %s)) {", ind, acc, arrDefName(fld))
 		} else {
-			f.line("        if (%s.Count != 0) {", acc)
+			f.line("%sif (%s.Count != 0) {", ind, acc)
 		}
-		g.marshalArray(f, "            ", fmt.Sprintf("%d", fld.ID), acc, fld.Elem, fld.ElemRef, fld.ElemItems, 0, false, "")
-		f.line("        }")
+		g.marshalArray(f, ind+"    ", fmt.Sprintf("%d", fld.ID), acc, fld.Elem, fld.ElemRef, fld.ElemItems, 0, false, "")
+		f.line("%s}", ind)
 		return
 	}
 	// The field-level wrapper frame is dropped when no element is written, and
@@ -570,7 +622,7 @@ func (g *gen) emitMarshalArray(f *cfile, fld *ir.Field, acc string) {
 	// `if (value != default) { ... WriteSequenceEndKeep(); }` -- so that a value
 	// differing from a non-empty default still reaches the wire as the empty
 	// wrapper, the only encoding of "explicitly empty" (MESSAGE_SPEC §2, §3).
-	g.marshalArray(f, "        ", fmt.Sprintf("%d", fld.ID), acc, fld.Elem, fld.ElemRef, fld.ElemItems, 0, false, "")
+	g.marshalArray(f, ind, fmt.Sprintf("%d", fld.ID), acc, fld.Elem, fld.ElemRef, fld.ElemItems, 0, false, "")
 }
 
 // lastElemExpr is the "this element is the array's last" test, at loop position
@@ -591,6 +643,10 @@ func lastElemExpr(iv, nv string) string {
 	return fmt.Sprintf("%s == %s - 1", iv, nv)
 }
 
+// keepAlways is the emitSeqEnd condition of a frame that survives empty
+// unconditionally.
+const keepAlways = "always"
+
 // emitSeqEnd closes the wrapper sequence opened at ind, choosing between the two
 // closers the corelib offers. Every sequence is opened LAZILY (the corelib holds
 // the header back until a child is written), so the closer alone decides whether a
@@ -605,9 +661,15 @@ func lastElemExpr(iv, nv string) string {
 //     makes an all-default element sparse like any other default value. Note this
 //     is decided from the position in the VALUE, at run time; the schema cannot
 //     answer it.
+//   - keepAlways -- always. A union's held wrapper-array option other than
+//     default_id (MESSAGE_SPEC §4.2): its presence is what selects it.
 func emitSeqEnd(f *cfile, ind, keepIf string) {
-	if keepIf == "" {
+	switch keepIf {
+	case "":
 		f.line("%sos.WriteSequenceEnd();", ind)
+		return
+	case keepAlways:
+		f.line("%sos.WriteSequenceEndKeep();", ind)
 		return
 	}
 	f.line("%sif (%s) os.WriteSequenceEndKeep(); else os.WriteSequenceEnd();", ind, keepIf)

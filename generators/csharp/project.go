@@ -62,8 +62,16 @@ func (g *gen) harness(s *ir.Schema) []byte {
 	f.line("    }")
 	f.line("}")
 	f.blank()
+	// A union holds one option behind private slots, so System.Text.Json's own
+	// member walk would print every accessor instead; each union type gets a
+	// converter writing and reading `{"<option>": value}` (the library itself
+	// stays JSON-free).
+	convs := []string{"new ByteArrayConverter()"}
+	for _, cn := range g.emitUnionConverters(f, s) {
+		convs = append(convs, "new "+cn+"()")
+	}
 	f.line("static class Program {")
-	f.line("    static readonly JsonSerializerOptions Opts = new() { IncludeFields = true, Converters = { new ByteArrayConverter() } };")
+	f.line("    static readonly JsonSerializerOptions Opts = new() { IncludeFields = true, Converters = { %s } };", strings.Join(convs, ", "))
 	g.emitBenchBody(f, s)
 	f.line("    static int Main(string[] args) {")
 	f.line("        if (args.Length < 1) { Console.Error.WriteLine(\"usage: harness <encode|decode|streamdecode|trydecode|bench> [Message|workload]\"); return 2; }")
