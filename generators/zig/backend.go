@@ -30,6 +30,9 @@ func (*Backend) Lang() string { return "zig" }
 // Generate emits src/message.zig; project mode adds build.zig + build.zig.zon
 // and a JSON encode/decode harness (src/main.zig).
 func (*Backend) Generate(s *ir.Schema, cfg map[string]any) ([]generator.File, error) {
+	if err := checkUnionNames(s); err != nil {
+		return nil, err
+	}
 	g := &gen{
 		schema:  s,
 		banner:  cfgString(cfg, "tool_banner", "sofabgen"),
@@ -227,8 +230,11 @@ func (g *gen) module(s *ir.Schema) []byte {
 	}
 	for _, key := range s.NamedOrder {
 		nt := s.Named[key]
-		if nt.Category == ir.CatStruct || nt.Category == ir.CatUnion {
+		switch nt.Category {
+		case ir.CatStruct:
 			g.emitStruct(f, g.typeName(key), nt.Fields, false, "")
+		case ir.CatUnion:
+			g.emitUnion(f, g.typeName(key), nt)
 		}
 	}
 	for _, m := range s.Messages {
@@ -442,7 +448,19 @@ func (g *gen) arrayValExpr(fld *ir.Field, acc string) string {
 }
 
 func (g *gen) emitMarshal(f *zfile, fld *ir.Field) {
-	acc := "self." + zigIdent(fld.Name)
+	g.emitMarshalAt(f, "        ", fld, "self."+zigIdent(fld.Name), false)
+}
+
+// emitMarshalAt writes the field fld held at acc, one statement per line at ind.
+//
+// forced is the union rule for an option other than default_id (MESSAGE_SPEC
+// §4.2): the value is written even when it equals its own default -- a leaf
+// without its ≠-default guard, a native array as its (possibly zero) count, and a
+// sequence-framed option (struct, union, wrapper array) closed with the keeping
+// end, so that an option at its default still reaches the wire as a present
+// frame. Everything else (a struct/message field, default_id) is written exactly
+// as an ordinary field of its kind.
+func (g *gen) emitMarshalAt(f *zfile, ind string, fld *ir.Field, acc string, forced bool) {
 	var write string
 	switch fld.Kind {
 	case ir.KindU8, ir.KindU16, ir.KindU32, ir.KindU64, ir.KindBitfield:
@@ -466,22 +484,31 @@ func (g *gen) emitMarshal(f *zfile, fld *ir.Field) {
 		// marshal omits every child that equals its default, so "no child was
 		// written" IS "the object equals its declared default", evaluated per
 		// field and recursively. writeSequenceEnd therefore drops an all-default
-		// nested object entirely instead of emitting an empty wrapper.
-		f.line("        try os.writeSequenceBeginLazy(%d);", fld.ID)
-		f.line("        try %s.serialize(os);", acc)
-		f.line("        try os.writeSequenceEnd();")
+		// nested object entirely instead of emitting an empty wrapper. A forced
+		// union option keeps it instead: present, empty.
+		f.line("%stry os.writeSequenceBeginLazy(%d);", ind, fld.ID)
+		f.line("%stry %s.serialize(os);", ind, acc)
+		if forced {
+			f.line("%stry os.writeSequenceEndKeep();", ind)
+		} else {
+			f.line("%stry os.writeSequenceEnd();", ind)
+		}
 		return
 	case ir.KindArray:
-		g.emitMarshalArray(f, fld, acc)
+		g.emitMarshalArray(f, ind, fld, acc, forced)
+		return
+	}
+	if forced {
+		f.line("%s%s", ind, write)
 		return
 	}
 	// Scalar/string/blob/enum/bitfield leaf: omit when equal to the default;
 	// sparse encoding is canonical (MESSAGE_SPEC S2) and the decoder
 	// reconstructs the omitted field from its default.
-	f.line("        if (%s) %s", g.zigLeafNe(acc, fld), write)
+	f.line("%sif (%s) %s", ind, g.zigLeafNe(acc, fld), write)
 }
 
-func (g *gen) emitMarshalArray(f *zfile, fld *ir.Field, acc string) {
+func (g *gen) emitMarshalArray(f *zfile, ind string, fld *ir.Field, acc string, forced bool) {
 	// A native scalar array is a leaf field: omit it when equal to its default
 	// (materialized in the field initializer), else when empty. A composite/
 	// dynamic-element array is a wrapper sequence, opened lazily: writing no
@@ -490,11 +517,18 @@ func (g *gen) emitMarshalArray(f *zfile, fld *ir.Field, acc string) {
 	// A declared `count: N` takes no part in either test, and nothing is elided
 	// from either form: `count` is a capacity, never a length (§3), so the wire
 	// count IS the array's length.
+	//
+	// A forced union option (see emitMarshalAt) drops the guard of the native
+	// form -- an empty one is written as count 0 -- and keeps the wrapper frame.
 	if isNativeArrayElem(fld.Elem) {
+		if forced {
+			g.marshalArray(f, ind, fmt.Sprintf("%d", fld.ID), g.arrayValExpr(fld, acc), fld.Elem, fld.ElemRef, fld.ElemItems, 0, "")
+			return
+		}
 		// One expression, shared with isDefault (see arrayNeExpr).
-		f.line("        if (%s) {", g.arrayNeExpr(fld, acc))
-		g.marshalArray(f, "            ", fmt.Sprintf("%d", fld.ID), g.arrayValExpr(fld, acc), fld.Elem, fld.ElemRef, fld.ElemItems, 0, "")
-		f.line("        }")
+		f.line("%sif (%s) {", ind, g.arrayNeExpr(fld, acc))
+		g.marshalArray(f, ind+"    ", fmt.Sprintf("%d", fld.ID), g.arrayValExpr(fld, acc), fld.Elem, fld.ElemRef, fld.ElemItems, 0, "")
+		f.line("%s}", ind)
 		return
 	}
 	// The field-level wrapper frame is dropped when no element is written, and
@@ -505,9 +539,18 @@ func (g *gen) emitMarshalArray(f *zfile, fld *ir.Field, acc string) {
 	// is ever closed, this call needs a guard -- `if (value != default) { ...
 	// writeSequenceEndKeep(); }` -- so that a value differing from a non-empty
 	// default still reaches the wire as the empty wrapper, the only encoding of
-	// "explicitly empty" (MESSAGE_SPEC §2, §3).
-	g.marshalArray(f, "        ", fmt.Sprintf("%d", fld.ID), acc, fld.Elem, fld.ElemRef, fld.ElemItems, 0, "")
+	// "explicitly empty" (MESSAGE_SPEC §2, §3). A forced union option is exactly
+	// that case, and keeps its frame.
+	keep := ""
+	if forced {
+		keep = keepAlways
+	}
+	g.marshalArray(f, ind, fmt.Sprintf("%d", fld.ID), acc, fld.Elem, fld.ElemRef, fld.ElemItems, 0, keep)
 }
+
+// keepAlways is emitSeqEnd's keepIf for a frame that must always survive: a
+// wrapper-array union option other than default_id, written even when empty.
+const keepAlways = "true"
 
 // lastElemExpr is the "this element is the array's last" test, at loop position
 // iv over the value val.
@@ -545,9 +588,15 @@ func lastElemExpr(iv, val string) string {
 //     what makes an all-default element sparse like any other default value.
 //     Note this is decided from the position in the VALUE, at run time; the
 //     schema cannot answer it.
+//   - keepAlways -- always. A wrapper-array union option other than default_id,
+//     written even when empty (MESSAGE_SPEC §4.2).
 func emitSeqEnd(f *zfile, ind, keepIf string) {
 	if keepIf == "" {
 		f.line("%stry os.writeSequenceEnd();", ind)
+		return
+	}
+	if keepIf == keepAlways {
+		f.line("%stry os.writeSequenceEndKeep();", ind)
 		return
 	}
 	f.line("%sif (%s) {", ind, keepIf)

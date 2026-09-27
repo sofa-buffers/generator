@@ -78,7 +78,7 @@ fn sample() M {
     m.someuintarray = .init(&.{ 9, 8, 7, 6 });
     m.somefloatarray = .init(&.{ 1.5, -2.5, 3.5 });
     m.somestruct.nestedstring = "nested payload";
-    m.someunion.option2 = "union payload";
+    m.someunion = .{ .option2 = "union payload" };
     m.somestructwitharray.label = "struct label";
     m.someunionarray = &.{.{ .asstring = "union row" }};
     m.somemap = &.{

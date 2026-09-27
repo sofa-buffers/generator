@@ -301,7 +301,11 @@ func (g *gen) zigFieldDefault(f *ir.Field) string {
 			return "&.{}"
 		}
 		return "&.{}"
-	default: // struct/union: all children default, so .{} is right
+	case ir.KindUnion:
+		// A tagged union has no field defaults to fall back on: its `init` is
+		// default_id at that option's own default.
+		return ".init"
+	default: // struct: all children default, so .{} is right
 		return ".{}"
 	}
 }
