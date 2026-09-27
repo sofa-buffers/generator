@@ -1502,7 +1502,8 @@ func TestKotlinEnumAndBitfieldWidthBoundAtEverySixPositions(t *testing.T) {
 		// 4. struct-array element member
 		`0 -> { ` + enRej + `"se: value outside declared enum width"); m.sa[_ex_Root_sa].se = value.toInt() }`,
 		`1 -> { ` + bfRej + `"sbf: value outside declared bitfield width"); m.sa[_ex_Root_sa].sbf = value.toULong() }`,
-		// 5. union member
+		// 5. union member -- stored through the option property, whose setter
+		// selects the option after the guard
 		`0 -> { ` + enRej + `"ue: value outside declared enum width"); m.un.ue = value.toInt() }`,
 		`1 -> { ` + bfRej + `"ubf: value outside declared bitfield width"); m.un.ubf = value.toULong() }`,
 		// 6. matrix row element — the row cursor, not a field.

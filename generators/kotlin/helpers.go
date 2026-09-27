@@ -688,9 +688,9 @@ func ktStringLit(s string) string {
 // wire" -- literally the write guard emitMarshal emits for the same field.
 // isDefault() is built from it rather than from a hand-written "equals its
 // default" twin so the two cannot state different truth tables: the object is
-// default exactly when no arm fires.
-func (g *gen) ktWritesExpr(f *ir.Field) string {
-	acc := "this." + ktIdent(f.Name)
+// default exactly when no arm fires. acc is the expression holding the value:
+// the member itself, or a union's option slot.
+func (g *gen) ktWritesExpr(f *ir.Field, acc string) string {
 	switch f.Kind {
 	case ir.KindStruct, ir.KindUnion:
 		// Lazily framed, so the frame survives iff the nested serialize wrote a

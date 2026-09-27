@@ -1456,6 +1456,16 @@ held; setter selects), `val which: Int`, `fun has<Opt>()`, `fun mutable<Opt>()`,
 (`UByte` …) in the typed slots. `ktReservedMembers` gains `which` and the union
 API names for union types. Hand-written JSON harness renders one member.
 `Seq.reserveElem(out, id, cap, rcap) { T() }`. `kotlin` row ±1 %.
+*(Corrected in the Kotlin milestone: `ktReservedMembers` itself is NOT extended —
+it is package-wide, and a plain struct field named `which` has nothing to clash
+with. A union option named `which` takes the trailing underscore on its own, and
+the properties, slots (`_<option>`), id constants and `has`/`mutable` functions
+are checked as one namespace with the union's own members (`checkUnionNames`).
+`mutable<Opt>()` exists for struct, union and `MutableList` options only — every
+native array, `boolean` included, is a primitive array here and is replaced
+through its property, as in Java. And `OwnershipCheck.kt` needs no rewrite: its
+`m.someunion.option2 = …` and `it.asstring = …` are property assignments, which
+now select the option.)*
 
 ### 5.9 csharp
 

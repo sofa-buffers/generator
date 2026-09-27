@@ -24,6 +24,10 @@ type frame struct {
 	loc    string
 	path   string      // fkNormal: object path
 	fields []*ir.Field // fkNormal
+	// uni marks an fkNormal frame whose object is a UNION: its fields are the
+	// options, and every store into one goes through the option's property or
+	// mutable accessor, which is what selects the option (MESSAGE_SPEC §7.4.1).
+	uni bool
 	// array (fkSeqLeaf/fkSeqObj/fkNativeMat/fkSeqMat):
 	listExpr  string      // the MutableList this frame collects into
 	elemKind  ir.Kind     // fkSeqLeaf: KindString / KindBlob
@@ -68,16 +72,16 @@ func boundOf(hasMax bool, max int64) int64 {
 
 func (g *gen) frames(m *ir.Message) []frame {
 	var out []frame
-	var walk func(loc, path string, fields []*ir.Field)
+	var walk func(loc, path string, fields []*ir.Field, uni bool)
 	var addArray func(loc, listExpr string, elem ir.Kind, ref *ir.TypeRef, items *ir.ArrayElem, elemMaxHas bool, elemMax, cap int64)
-	walk = func(loc, path string, fields []*ir.Field) {
-		out = append(out, frame{kind: fkNormal, loc: loc, path: path, fields: fields})
+	walk = func(loc, path string, fields []*ir.Field, uni bool) {
+		out = append(out, frame{kind: fkNormal, loc: loc, path: path, fields: fields, uni: uni})
 		for _, fld := range fields {
 			switch {
 			case fld.Kind == ir.KindStruct || fld.Kind == ir.KindUnion:
-				walk(loc+"_"+fld.Name, path+"."+ktIdent(fld.Name), fld.Ref.Target.Fields)
+				walk(loc+"_"+fld.Name, memberPath(path, fld, uni), fld.Ref.Target.Fields, fld.Kind == ir.KindUnion)
 			case fld.Kind == ir.KindArray && seqArrayElem(fld.Elem):
-				addArray(loc+"_"+fld.Name, path+"."+ktIdent(fld.Name), fld.Elem, fld.ElemRef, fld.ElemItems, fld.ElemMaxHas, fld.ElemMax, capOf(fld.HasCount, fld.Count))
+				addArray(loc+"_"+fld.Name, memberPath(path, fld, uni), fld.Elem, fld.ElemRef, fld.ElemItems, fld.ElemMaxHas, fld.ElemMax, capOf(fld.HasCount, fld.Count))
 			}
 		}
 	}
@@ -98,7 +102,7 @@ func (g *gen) frames(m *ir.Message) []frame {
 			// at that index -- NOT the last one appended. A flat visitor has no
 			// per-element child visitor to carry the position, so the index is
 			// parked in a visitor field and the child accessor path reads it back.
-			walk(elemLoc, row, ref.Target.Fields)
+			walk(elemLoc, row, ref.Target.Fields, elem == ir.KindUnion)
 		case ir.KindArray:
 			// A row of a matrix is placed at the index its element id names,
 			// exactly like every other element kind. Appending would shift every
@@ -113,7 +117,7 @@ func (g *gen) frames(m *ir.Message) []frame {
 			}
 		}
 	}
-	walk("Root", "m", m.Fields)
+	walk("Root", "m", m.Fields, false)
 	for i := range out {
 		out[i].idx = i
 	}
@@ -879,7 +883,9 @@ func (g *gen) emitStringCb(f *kfile, fs []frame) {
 		var arms []string
 		for _, fld := range fr.fields {
 			if fld.Kind == ir.KindString {
-				arms = append(arms, fmt.Sprintf("%d -> %s.%s = s", fld.ID, fr.path, ktIdent(fld.Name)))
+				// In a union the property setter is the §7.4.1 switch: reached only
+				// here, at the completed payload -- never in fixlenBegin.
+				arms = append(arms, fmt.Sprintf("%d -> %s.%s = s", fld.ID, fr.path, memberName(fld, fr.uni)))
 			}
 		}
 		if len(arms) > 0 {
@@ -920,7 +926,7 @@ func (g *gen) emitBlobCb(f *kfile, fs []frame) {
 		var arms []string
 		for _, fld := range fr.fields {
 			if fld.Kind == ir.KindBlob {
-				arms = append(arms, fmt.Sprintf("%d -> %s.%s = b", fld.ID, fr.path, ktIdent(fld.Name)))
+				arms = append(arms, fmt.Sprintf("%d -> %s.%s = b", fld.ID, fr.path, memberName(fld, fr.uni)))
 			}
 		}
 		if len(arms) > 0 {
@@ -1037,7 +1043,10 @@ func (g *gen) emitArrayBegin(f *kfile, fs []frame, limArr, hasArray bool) {
 			// grown as they come and ends exactly M long. A declared `count: N`
 			// is a CAPACITY and bounds M (the guard above); it never adds
 			// elements, so there is nothing to materialize at [M, N).
-			target := fr.path + "." + ktIdent(fld.Name)
+			// In a union the property setter below selects the option -- behind the
+			// kind gate and the count bound -- and every later read of `target`
+			// (the bulk offer, the element fill) is the getter of the held slot.
+			target := fr.path + "." + memberName(fld, fr.uni)
 			body := guard + armFill(fs, fr, fld)
 			arrType := primArrayType(fld.Elem, fld.ElemRef)
 			// Allocated at exactly the wire count, once (ARCHITECTURE §9.5, shape
@@ -1222,6 +1231,15 @@ func (g *gen) emitSequenceCbs(f *kfile, fs []frame) {
 			for _, fld := range fr.fields {
 				switch {
 				case fld.Kind == ir.KindStruct || fld.Kind == ir.KindUnion:
+					if fr.uni {
+						// A union's struct/union option is SELECTED here (MESSAGE_SPEC
+						// §7.4.1): past the §7.3 gate, since only a sequence reaches
+						// this callback. Select if not held -- a held option continues
+						// its scope (§7.4 merge), another one is discarded and this one
+						// starts from its default.
+						arms = append(arms, fmt.Sprintf("%d -> { %s; cur = %d }", fld.ID, memberPath(fr.path, fld, true), locIndex(fs, fr.loc+"_"+fld.Name)))
+						continue
+					}
 					arms = append(arms, fmt.Sprintf("%d -> cur = %d", fld.ID, locIndex(fs, fr.loc+"_"+fld.Name)))
 				case fld.Kind == ir.KindArray && seqArrayElem(fld.Elem):
 					// §7.4: an array wrapper IS the array's value, so a later
@@ -1229,9 +1247,9 @@ func (g *gen) emitSequenceCbs(f *kfile, fs []frame) {
 					// callback, which the corelib invokes only for an actual
 					// sequence header -- so the wire-type dispatch shields it and
 					// a §7.3-skipped later occurrence cannot wipe a valid earlier
-					// array.
-					arms = append(arms, fmt.Sprintf("%d -> { %s.%s.clear(); cur = %d }",
-						fld.ID, fr.path, ktIdent(fld.Name), locIndex(fs, fr.loc+"_"+fld.Name)))
+					// array. In a union the mutable accessor selects the option first.
+					arms = append(arms, fmt.Sprintf("%d -> { %s.clear(); cur = %d }",
+						fld.ID, memberPath(fr.path, fld, fr.uni), locIndex(fs, fr.loc+"_"+fld.Name)))
 				}
 			}
 			// A skipping default even when this scope declares no sequence at
@@ -1290,7 +1308,9 @@ func (g *gen) emitScalarCb(f *kfile, fs []frame, cb, vtype string, want func(*ir
 			if fld.Kind == ir.KindArray || !want(fld) {
 				continue
 			}
-			target := fr.path + "." + ktIdent(fld.Name)
+			// In a union the store is the option's property setter: the §7.4.1
+			// switch and the store in one, after the width guard.
+			target := fr.path + "." + memberName(fld, fr.uni)
 			guard := ""
 			if cb == "unsigned" || cb == "signed" {
 				guard = widthThrow(fld.Kind, fld.Ref, fld.Name)
@@ -1412,7 +1432,7 @@ func (g *gen) emitArrayFillArm(f *kfile, fs []frame, cb string) {
 			if !ok {
 				continue
 			}
-			target := fr.path + "." + ktIdent(fld.Name)
+			target := fr.path + "." + memberName(fld, fr.uni)
 			guard := ""
 			if cb == "unsigned" || cb == "signed" {
 				guard = widthThrow(fld.Elem, fld.ElemRef, fld.Name+" element")
