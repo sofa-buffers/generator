@@ -26,6 +26,10 @@ type frame struct {
 	loc    string
 	path   string      // fkNormal: object path
 	fields []*ir.Field // fkNormal
+	// uni marks an fkNormal frame whose object is a UNION: its fields are the
+	// options, and every store into one goes through the union's setter or
+	// mutable accessor, which is what selects the option (MESSAGE_SPEC §7.4.1).
+	uni bool
 	// array (fkSeqLeaf/fkSeqObj/fkNativeMat/fkSeqMat):
 	listExpr  string      // the List<...> accessor this frame collects into
 	elemKind  ir.Kind     // fkSeqLeaf: KindString / KindBlob
@@ -76,16 +80,16 @@ func boundOf(hasMax bool, max int64) int64 {
 
 func (g *gen) frames(m *ir.Message) []frame {
 	var out []frame
-	var walk func(loc, path string, fields []*ir.Field)
+	var walk func(loc, path string, fields []*ir.Field, uni bool)
 	var addArray func(loc, listExpr string, elem ir.Kind, ref *ir.TypeRef, items *ir.ArrayElem, elemMaxHas bool, elemMax, cap int64)
-	walk = func(loc, path string, fields []*ir.Field) {
-		out = append(out, frame{kind: fkNormal, loc: loc, path: path, fields: fields})
+	walk = func(loc, path string, fields []*ir.Field, uni bool) {
+		out = append(out, frame{kind: fkNormal, loc: loc, path: path, fields: fields, uni: uni})
 		for _, fld := range fields {
 			switch {
 			case fld.Kind == ir.KindStruct || fld.Kind == ir.KindUnion:
-				walk(loc+"_"+fld.Name, path+"."+javaIdent(fld.Name), fld.Ref.Target.Fields)
+				walk(loc+"_"+fld.Name, memberPath(path, fld, uni), fld.Ref.Target.Fields, fld.Kind == ir.KindUnion)
 			case fld.Kind == ir.KindArray && seqArrayElem(fld.Elem):
-				addArray(loc+"_"+fld.Name, path+"."+javaIdent(fld.Name), fld.Elem, fld.ElemRef, fld.ElemItems, fld.ElemMaxHas, fld.ElemMax, capOf(fld.HasCount, fld.Count))
+				addArray(loc+"_"+fld.Name, memberPath(path, fld, uni), fld.Elem, fld.ElemRef, fld.ElemItems, fld.ElemMaxHas, fld.ElemMax, capOf(fld.HasCount, fld.Count))
 			}
 		}
 	}
@@ -108,7 +112,7 @@ func (g *gen) frames(m *ir.Message) []frame {
 			// per-element child visitor to carry the position (a nested-visitor
 			// backend just returns a pointer to dest[id]), so the index is parked in
 			// a visitor field and the child accessor path reads it back.
-			walk(elemLoc, listExpr+".get("+elemIdxVar(loc)+")", ref.Target.Fields)
+			walk(elemLoc, listExpr+".get("+elemIdxVar(loc)+")", ref.Target.Fields, elem == ir.KindUnion)
 		case ir.KindArray:
 			// A row of a matrix / an array-of-wrapper-arrays is placed at the index
 			// its element id names, exactly like every other element kind, so the
@@ -125,7 +129,7 @@ func (g *gen) frames(m *ir.Message) []frame {
 			}
 		}
 	}
-	walk("Root", "m", m.Fields)
+	walk("Root", "m", m.Fields, false)
 	for i := range out {
 		out[i].idx = i
 	}
@@ -523,7 +527,7 @@ func (g *gen) emitStringCb(f *jfile, fs []frame, limStr bool) {
 		var arms []string
 		for _, fld := range fr.fields {
 			if fld.Kind == ir.KindString {
-				arms = append(arms, jcase(fld.ID, fr.path+"."+javaIdent(fld.Name)+" = _s"))
+				arms = append(arms, jcase(fld.ID, memberStore(&fr, fld, "_s")))
 			}
 		}
 		if len(arms) > 0 {
@@ -598,7 +602,7 @@ func (g *gen) emitBlobCb(f *jfile, fs []frame, limBlob bool) {
 		var arms []string
 		for _, fld := range fr.fields {
 			if fld.Kind == ir.KindBlob {
-				arms = append(arms, jcase(fld.ID, fr.path+"."+javaIdent(fld.Name)+" = _b"))
+				arms = append(arms, jcase(fld.ID, memberStore(&fr, fld, "_b")))
 			}
 		}
 		if len(arms) > 0 {
@@ -1371,7 +1375,6 @@ func (g *gen) emitVisitor(f *jfile, name string, fields []*ir.Field) {
 			// CAPACITY and bounds M (the guard above); it never adds elements, so
 			// there is nothing to materialize at [M, N) and a count:N array is
 			// filled exactly like a count-less one.
-			target := fr.path + "." + javaIdent(fld.Name)
 			arm := kindGuard + guard + armFill(fs, fr, fld)
 			// Allocated at exactly the wire count, once (ARCHITECTURE §9.5, shape
 			// A): the guard above has already bounded that count against the
@@ -1383,18 +1386,25 @@ func (g *gen) emitVisitor(f *jfile, name string, fields []*ir.Field) {
 				if guard == "" {
 					panic("java: native array with neither a schema count nor a cap -- every target has a finite default (§9.5)")
 				}
-				alloc := target + " = new " + primArrayBase(fld.Elem, fld.ElemRef) + "[count]"
+				alloc := memberStore(fr, fld, "new "+primArrayBase(fld.Elem, fld.ElemRef)+"[count]")
 				if bulkCapable(fld) {
 					// The field's own array IS the bulk destination, at whatever width
 					// it was declared: the corelib writes the elements into it and
 					// bounds them by that width. It is allocated here either way, so
 					// the per-element arm stays the fallback for a decoder that
 					// declines the offer.
-					alloc = "abulk = " + alloc
+					if fr.uni {
+						// A union option is selected by its setter -- here, behind the
+						// kind gate and the count bound -- and offered through the slot
+						// the setter just filled.
+						alloc += "; abulk = " + memberArray(fr, fld)
+					} else {
+						alloc = "abulk = " + alloc
+					}
 				}
 				arms = append(arms, jcase(fld.ID, arm+alloc))
 			} else { // boolean List
-				arms = append(arms, jcase(fld.ID, arm+target+".clear()"))
+				arms = append(arms, jcase(fld.ID, arm+memberPath(fr.path, fld, fr.uni)+".clear()"))
 			}
 		}
 		if len(arms) > 0 {
@@ -1447,9 +1457,21 @@ func (g *gen) emitVisitor(f *jfile, name string, fields []*ir.Field) {
 			for _, fld := range fr.fields {
 				switch {
 				case fld.Kind == ir.KindStruct || fld.Kind == ir.KindUnion:
-					arms = append(arms, jcase(fld.ID, "cur = "+itoa(locIndex(fs, fr.loc+"_"+fld.Name))))
+					// A union's struct/union option is SELECTED here (MESSAGE_SPEC
+					// §7.4.1): past the §7.3 gate, since only a sequence reaches this
+					// callback. Select if not held -- a held option continues its scope
+					// (§7.4 merge), another one is discarded and this one starts from
+					// its default.
+					sel := ""
+					if fr.uni {
+						sel = memberPath(fr.path, fld, true) + "; "
+					}
+					arms = append(arms, jcase(fld.ID, sel+"cur = "+itoa(locIndex(fs, fr.loc+"_"+fld.Name))))
 				case fld.Kind == ir.KindArray && seqArrayElem(fld.Elem):
-					arms = append(arms, jcase(fld.ID, fr.path+"."+javaIdent(fld.Name)+".clear(); cur = "+itoa(locIndex(fs, fr.loc+"_"+fld.Name))))
+					// A wrapper array IS its field's value, so a later occurrence
+					// replaces it (§7.4); in a union the mutable accessor selects the
+					// option first.
+					arms = append(arms, jcase(fld.ID, memberPath(fr.path, fld, fr.uni)+".clear(); cur = "+itoa(locIndex(fs, fr.loc+"_"+fld.Name))))
 				}
 			}
 			// A skipping default even when this scope declares no sequence at all:
@@ -1747,8 +1769,7 @@ func (g *gen) emitScalarCb(f *jfile, fs []frame, cb, vtype string, action func(*
 			if fld.Kind == ir.KindArray {
 				continue
 			}
-			target := fr.path + "." + javaIdent(fld.Name)
-			arms = append(arms, jcase(fld.ID, widthThrow(fld.Kind, fld.Ref, fld.Name)+target+" "+act))
+			arms = append(arms, jcase(fld.ID, widthThrow(fld.Kind, fld.Ref, fld.Name)+memberStore(&fr, fld, strings.TrimPrefix(act, "= "))))
 		}
 		if len(arms) > 0 {
 			g.frameSwitch(f, fr.idx, arms)
@@ -1806,8 +1827,8 @@ func (g *gen) emitArrayFillArm(f *jfile, fs []frame, cb string) {
 			if !ok {
 				continue
 			}
-			target := fr.path + "." + javaIdent(fld.Name)
 			if fld.Elem == ir.KindBool {
+				target := memberPath(fr.path, fld, fr.uni)
 				// A boolean array stays a List<Boolean>, cleared at arrayBegin and
 				// grown by the M elements the wire carries -- M IS the length, with
 				// or without a declared count (MESSAGE_SPEC §3).
@@ -1820,7 +1841,7 @@ func (g *gen) emitArrayFillArm(f *jfile, fs []frame, cb string) {
 			// run past the end and nothing has to grow: no doubling, no copies, and
 			// no reference store into the message object per element.
 			arms = append(arms, arm{code, widthThrow(fld.Elem, fld.ElemRef, fld.Name+" element") +
-				target + "[ai++] = " + primArrayCast(fld.Elem, fld.ElemRef) + "value"})
+				memberArray(fr, fld) + "[ai++] = " + primArrayCast(fld.Elem, fld.ElemRef) + "value"})
 		}
 	}
 	f.line("        // An element of the array arrayBegin armed: its destination is already")

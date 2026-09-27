@@ -99,10 +99,10 @@ public final class OwnershipCheck {
         blobs.add(new byte[]{8});
         m.someblobarray = blobs;
         m.somestruct.nestedstring = "nested payload";
-        m.someunion.option2 = "union payload";
+        m.someunion.setOption2("union payload");
         m.somestructwitharray.label = "struct label";
         MyfirstmessageSomeunionarrayElem row = new MyfirstmessageSomeunionarrayElem();
-        row.asstring = "union row";
+        row.setAsstring("union row");
         m.someunionarray = new ArrayList<>(List.of(row));
         MyfirstmessageSomemapElem first = new MyfirstmessageSomemapElem();
         first.key = "first key";

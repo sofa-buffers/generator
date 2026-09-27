@@ -2468,9 +2468,9 @@ func TestJavaEnumAndBitfieldWidthBoundAtEverySixPositions(t *testing.T) {
 		// 4. struct-array element member
 		`case 0: ` + enRej + `"se: value outside declared enum width"); m.sa.get(_ex_Root_sa).se = value; break;`,
 		`case 1: ` + bfRej + `"sbf: value outside declared bitfield width"); m.sa.get(_ex_Root_sa).sbf = value; break;`,
-		// 5. union member
-		`case 0: ` + enRej + `"ue: value outside declared enum width"); m.un.ue = value; break;`,
-		`case 1: ` + bfRej + `"ubf: value outside declared bitfield width"); m.un.ubf = value; break;`,
+		// 5. union member -- stored through the option setter, which selects it
+		`case 0: ` + enRej + `"ue: value outside declared enum width"); m.un.setUe(value); break;`,
+		`case 1: ` + bfRej + `"ubf: value outside declared bitfield width"); m.un.setUbf(value); break;`,
 		// 6. matrix row element — the row cursor, not a field.
 		enRej + `"Root_mat element: value outside declared enum width"); _arowByte[ai++] = (byte) value;`,
 		bfRej + `"Root_mbf element: value outside declared bitfield width"); _arowByte[ai++] = (byte) value;`,
@@ -2500,7 +2500,7 @@ func TestJavaEnumAndBitfieldWidthBoundAtEverySixPositions(t *testing.T) {
 		"case 0: m.en = value; break;",
 		"case 1: m.bf = value; break;",
 		"case 0: m.st.se = value; break;",
-		"case 1: m.un.ubf = value; break;",
+		"case 1: m.un.setUbf(value); break;",
 	} {
 		if strings.Contains(m, bad) {
 			t.Errorf("Closed.java still stores an enum/bitfield unguarded (%q):\n%s", bad, m)
