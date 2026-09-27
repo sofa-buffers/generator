@@ -1146,7 +1146,16 @@ Work only in `/root/corelibs/wt-c-cpp-union` (branch `feat/tagged-union`,
   layout — has one too (`Which _which = Which::<D>;`), and the
   class keeps the implicit default constructor — `= default` beside a
   user-declared copy constructor, which starts `_u` with no option alive through
-  `explicit _Opts(std::nullptr_t)` before `_copy` places the held one.
+  `explicit _Opts(std::nullptr_t) noexcept : _none() {}` before `_copy` places the
+  held one. *Corrected after the cpp milestone:* the round-2 form
+  `explicit _Opts(std::nullptr_t) noexcept {}` names no variant member, so under
+  [class.base.init]/9 it constructs `D` from its default member initializer, and
+  `_copy` then placement-news the held option over a live `D` (a leaked heap
+  default under `allow_dynamic`). The constructor now names `_none`, a variant
+  member of type `struct _None { _None() noexcept {} }` (emitted only beside the
+  copy operations) whose constructor does nothing, so no option is alive and no
+  code is spent; `TestCppUnionCopyStartsNoOption` copies a union holding a
+  non-`D` option whose `D` allocates under ASan/LSan.
   Value-initializing the base (`: sofab::Message()`) also silences it but
   zero-fills every union on every construction: measured +114 B `.text` on
   `cpp-c-cpp` over this form.

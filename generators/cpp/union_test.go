@@ -172,9 +172,9 @@ func TestCppUnionTaggedShapeCCpp(t *testing.T) {
 			"case Which::s: ::new (&_u.s) " + str + "(o._u.s); break;",
 			"Which which() const noexcept { return _which; }",
 			"bool has_arr() const noexcept { return _which == Which::arr; }",
-			"    Which _which = Which::pt;\n    union _Opts {\n        _Opts() noexcept = default;\n        explicit _Opts(std::nullptr_t) noexcept {}",
+			"    Which _which = Which::pt;\n    union _Opts {\n        _Opts() noexcept = default;\n        struct _None { _None() noexcept {} };\n        explicit _Opts(std::nullptr_t) noexcept : _none() {}",
 			"        " + vec + " arr;",
-			"    } _u;\n};",
+			"        _None _none;\n    } _u;\n};",
 			"std::uint16_t num() const noexcept { return has_num() ? _u.num : 5; }",
 			"::new (&_u.num) std::uint16_t(5);",
 			"bool _isDefault() const noexcept { return _which == Which::pt && _u.pt._isDefault(); }",
@@ -631,9 +631,25 @@ int main() {
 // read, a mistyped child that must not switch, and last-option-wins in both
 // directions -- none of which check_union's schema pairs up by bind type.
 func TestCppUnionSameBindArmsDecode(t *testing.T) {
+	r := newCCppRunner(t)
+	for _, dyn := range []bool{false, true} {
+		r.run(t, sameBindYAML, "g.hpp", sameBindMain, map[string]any{"corelib": "c-cpp", "allow_dynamic": dyn})
+	}
+}
+
+// cCppRunner compiles corelib-c-cpp's C sources once (SOFAB_C_DIR) for tests
+// that build and run a generated c-cpp header against it; it skips when the
+// checkout or a compiler is missing.
+type cCppRunner struct {
+	gxx, inc string
+	objs     []string
+}
+
+func newCCppRunner(t *testing.T, cflags ...string) *cCppRunner {
+	t.Helper()
 	cc := os.Getenv("SOFAB_C_DIR")
 	if cc == "" {
-		t.Skip("set SOFAB_C_DIR to a corelib-c-cpp checkout to run the decode gate")
+		t.Skip("set SOFAB_C_DIR to a corelib-c-cpp checkout to run the run-time gate")
 	}
 	gxx, err := exec.LookPath("g++")
 	if err != nil {
@@ -643,32 +659,100 @@ func TestCppUnionSameBindArmsDecode(t *testing.T) {
 	if err != nil {
 		t.Skip("gcc not found")
 	}
-	inc := "-I" + filepath.Join(cc, "src", "include")
+	r := &cCppRunner{gxx: gxx, inc: "-I" + filepath.Join(cc, "src", "include")}
 	obj := t.TempDir()
-	var objs []string
 	for _, src := range []string{"istream", "ostream", "object", "utf8"} {
 		o := filepath.Join(obj, src+".o")
-		if out, err := exec.Command(gcc, "-std=c99", "-O2", inc, "-c", filepath.Join(cc, "src", src+".c"), "-o", o).CombinedOutput(); err != nil {
+		args := append([]string{"-std=c99", "-O2", r.inc}, cflags...)
+		args = append(args, "-c", filepath.Join(cc, "src", src+".c"), "-o", o)
+		if out, err := exec.Command(gcc, args...).CombinedOutput(); err != nil {
 			t.Fatalf("corelib %s.c: %s", src, out)
 		}
-		objs = append(objs, o)
+		r.objs = append(r.objs, o)
 	}
+	return r
+}
+
+// run generates schema under cfg, builds main against the generated header hdr
+// and runs it; cxxflags are added to the C++ compile and link.
+func (r *cCppRunner) run(t *testing.T, schema, hdr, main string, cfg map[string]any, cxxflags ...string) {
+	t.Helper()
+	dir := t.TempDir()
+	files := unionFiles(t, schema, cfg)
+	if err := os.WriteFile(filepath.Join(dir, hdr), []byte(files[hdr]), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "main.cpp"), []byte(main), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	exe := filepath.Join(dir, "run")
+	args := append([]string{"-std=c++20", "-O2", "-Wall", "-Wextra", "-Werror", r.inc, "-I" + dir}, cxxflags...)
+	args = append(args, filepath.Join(dir, "main.cpp"), "-o", exe)
+	args = append(args, r.objs...)
+	if out, err := exec.Command(r.gxx, args...).CombinedOutput(); err != nil {
+		t.Fatalf("%v: compile:\n%s", cfg, out)
+	}
+	if out, err := exec.Command(exe).CombinedOutput(); err != nil {
+		t.Fatalf("%v: %v\n%s", cfg, err, out)
+	}
+}
+
+// copyYAML: default_id is a struct option whose string member defaults to a
+// value too long for std::string's inline buffer, so constructing that option
+// allocates under allow_dynamic; the other option is a string.
+const copyYAML = `
+version: 1
+messages:
+  c:
+    payload:
+      k: { id: 0, type: union, oneof: { d: { id: 0, type: struct, fields: { n: { id: 0, type: string, maxlen: 80, default: "a default long enough to live on the heap, not inline" } } }, s: { id: 1, type: string, maxlen: 80 } } }
+`
+
+// copyMain copies unions holding each option, by construction and by
+// assignment, and checks what the copy holds.
+const copyMain = `#include "c.hpp"
+#include <cstdio>
+#include <string>
+
+using namespace sofabuffers;
+static int fails = 0;
+#define CHECK(c) do { if (!(c)) { std::printf("FAIL line %d: %s\n", __LINE__, #c); fails++; } } while (0)
+
+static std::string str(const auto &v) { return std::string(v.data(), v.size()); }
+
+int main() {
+    const std::string x(60, 'x');
+    C a;
+    a.k.set_s(x);
+    { C b(a); CHECK(b.k.has_s() && str(b.k.s()) == x); }
+    { auto k(a.k); CHECK(k.has_s() && str(k.s()) == x); }
+    { C b; b = a; CHECK(b.k.has_s() && str(b.k.s()) == x); }
+    { C d; C b(d); CHECK(b.k.has_d() && str(b.k.d().n) == str(d.k.d().n)); }
+    { C d; C b; b.k.set_s(x); b = d; CHECK(b.k.has_d() && str(b.k.d().n) == str(d.k.d().n)); }
+    return fails ? 1 : 0;
+}
+`
+
+// TestCppUnionCopyStartsNoOption: the copy constructor of a c-cpp union whose
+// options are not trivially copyable must start its storage with no option
+// alive before it places the held one. A union constructor naming no variant
+// member constructs default_id from its default member initializer, and
+// placing another option over that leaks default_id's heap storage under
+// allow_dynamic, which LeakSanitizer reports here.
+func TestCppUnionCopyStartsNoOption(t *testing.T) {
 	for _, dyn := range []bool{false, true} {
-		dir := t.TempDir()
-		files := unionFiles(t, sameBindYAML, map[string]any{"corelib": "c-cpp", "allow_dynamic": dyn})
-		if err := os.WriteFile(filepath.Join(dir, "g.hpp"), []byte(files["g.hpp"]), 0o644); err != nil {
-			t.Fatal(err)
+		h := unionFiles(t, copyYAML, map[string]any{"corelib": "c-cpp", "allow_dynamic": dyn})["c.hpp"]
+		s := section(t, h, "CK")
+		for _, want := range []string{"explicit _Opts(std::nullptr_t) noexcept : _none() {}", "_None _none;"} {
+			if !strings.Contains(s, want) {
+				t.Errorf("dyn=%v: _Opts(nullptr) must start the do-nothing _none member (%q):\n%s", dyn, want, s)
+			}
 		}
-		if err := os.WriteFile(filepath.Join(dir, "main.cpp"), []byte(sameBindMain), 0o644); err != nil {
-			t.Fatal(err)
-		}
-		exe := filepath.Join(dir, "run")
-		args := append([]string{"-std=c++20", "-O2", "-Wall", "-Wextra", "-Werror", inc, "-I" + dir, filepath.Join(dir, "main.cpp"), "-o", exe}, objs...)
-		if out, err := exec.Command(gxx, args...).CombinedOutput(); err != nil {
-			t.Fatalf("allow_dynamic=%v: compile:\n%s", dyn, out)
-		}
-		if out, err := exec.Command(exe).CombinedOutput(); err != nil {
-			t.Fatalf("allow_dynamic=%v: %v\n%s", dyn, err, out)
-		}
+	}
+	san := []string{"-fsanitize=address,undefined", "-fno-sanitize-recover=all", "-fno-omit-frame-pointer"}
+	r := newCCppRunner(t, san...)
+	t.Setenv("ASAN_OPTIONS", "detect_leaks=1")
+	for _, dyn := range []bool{false, true} {
+		r.run(t, copyYAML, "c.hpp", copyMain, map[string]any{"corelib": "c-cpp", "allow_dynamic": dyn}, san...)
 	}
 }
