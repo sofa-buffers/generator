@@ -284,7 +284,14 @@ func (g *gen) emitUnion(f *hfile, name string, nt *ir.NamedType) {
 		f.line("    union _Opts {")
 		f.line("        _Opts() noexcept = default;")
 		if dopt.copy {
-			f.line("        explicit _Opts(std::nullptr_t) noexcept {}")
+			// The copy constructor's start: no option alive. A union
+			// constructor that names no variant member would initialize
+			// default_id from its default member initializer
+			// ([class.base.init]/9), and _copy would then place the held
+			// option over a live one. Naming _none, whose constructor does
+			// nothing, starts no option and costs no code.
+			f.line("        struct _None { _None() noexcept {} };")
+			f.line("        explicit _Opts(std::nullptr_t) noexcept : _none() {}")
 		}
 		if dopt.clear {
 			f.line("        ~_Opts() noexcept {}")
@@ -295,6 +302,9 @@ func (g *gen) emitUnion(f *hfile, name string, nt *ir.NamedType) {
 				continue
 			}
 			f.line("        %s %s;", o.typ, o.base)
+		}
+		if dopt.copy {
+			f.line("        _None _none;")
 		}
 		f.line("    } _u;")
 	} else {
@@ -414,8 +424,10 @@ func (g *gen) emitUnionSpecials(f *hfile, name string, opts []*unionOpt, dopt *u
 		f.line("    %s() noexcept = default;", name)
 		// noexcept in both storage modes, like every other generated member: an
 		// allocation failing inside a copy terminates rather than leaving the
-		// tag naming an option whose lifetime already ended. _u starts with no
-		// option alive (_Opts(nullptr)); _copy places the one o holds.
+		// tag naming an option whose lifetime already ended. _u(nullptr)
+		// starts the union's do-nothing _none member, so no option is alive
+		// (default_id's default member initializer does not run); _copy then
+		// places the one o holds.
 		f.line("    %s(const %s &o) noexcept : sofab::Message(o), _which(o._which), _u(nullptr) { _copy(o); }", name, name)
 		f.line("    %s &operator=(const %s &o) noexcept {", name, name)
 		f.line("        if (this != &o) {")
