@@ -25,7 +25,9 @@ int main(void) {
     m.somestruct.nestedint = 200;
     strcpy(m.somestruct.nestedstring, "nested!");
     m.somestruct.nestedstruct.deepint = -123456;
-    m.someunion.option1 = 4242;   /* one option set */
+    /* a union holds ONE option: the tag names it, u.<option> holds its value */
+    m.someunion.which = MESSAGE_MYFIRSTMESSAGE_SOMEUNION_OPTION1_ID;
+    m.someunion.u.option1 = 4242;
     m.somefp32 = 3.5f;
     memcpy(m.someblob, (uint8_t[]){1,2,3,4,5}, 5);
     m.someblob_len = 5;   /* sized blob: set the used length (issue #128) */
@@ -66,7 +68,8 @@ int main(void) {
     assert(d.somestruct.nestedint == 200);
     assert(strcmp(d.somestruct.nestedstring, "nested!") == 0);
     assert(d.somestruct.nestedstruct.deepint == -123456);
-    assert(d.someunion.option1 == 4242);
+    assert(d.someunion.which == MESSAGE_MYFIRSTMESSAGE_SOMEUNION_OPTION1_ID);
+    assert(d.someunion.u.option1 == 4242);
     assert(d.somefp32 == 3.5f);
     assert(d.someblob_len == 5);   /* sub-maxlen blob length preserved (issue #128) */
     assert(memcmp(d.someblob, m.someblob, d.someblob_len) == 0);
@@ -121,6 +124,43 @@ int main(void) {
     printf("short arrays round-trip at their own length (%u / %u / %u)\n",
            (unsigned)sd.someintarray_len, (unsigned)sd.somestringarray.len,
            (unsigned)sd.someblobarray.len);
+
+    /* A union option other than default_id is written even at its own default
+     * (MESSAGE_SPEC §4.2), or it would read back as default_id. Selecting a
+     * STRUCT option at its default is the tag plus sofab_object_init on that
+     * option's descriptor, which the header declares for exactly this. */
+    message_myfirstmessage_t u;
+    message_myfirstmessage_init(&u);
+    size_t base = 0, uused = 0;
+    r = message_myfirstmessage_encode(&u, buf, sizeof(buf), &base);
+    assert(r == SOFAB_RET_OK);
+    u.someunion.which = MESSAGE_MYFIRSTMESSAGE_SOMEUNION_OPTION3_ID;
+    sofab_object_init(&_message_descr_named_myfirstmessage_someunion_option3, &u.someunion.u.option3);
+    r = message_myfirstmessage_encode(&u, buf, sizeof(buf), &uused);
+    assert(r == SOFAB_RET_OK);
+    /* exactly the union frame around an EMPTY option3 frame -- AE 01 16 07 07 --
+     * on top of what the fresh message already writes */
+    {
+        static const uint8_t frame[] = { 0xAE, 0x01, 0x16, 0x07, 0x07 };
+        int found = 0;
+        assert(uused == base + sizeof(frame));
+        for (size_t i = 0; i + sizeof(frame) <= uused; i++) found |= memcmp(buf + i, frame, sizeof(frame)) == 0;
+        assert(found);
+    }
+    message_myfirstmessage_t ud;
+    message_myfirstmessage_init(&ud);
+    r = message_myfirstmessage_decode(&ud, buf, uused);
+    assert(r == SOFAB_RET_OK);
+    assert(ud.someunion.which == MESSAGE_MYFIRSTMESSAGE_SOMEUNION_OPTION3_ID);
+    assert(ud.someunion.u.option3.unionstructint == 0 && ud.someunion.u.option3.unionstructbool == 0);
+
+    /* an option at its default leaves the union at its default only when it is
+     * default_id: option1 = 0 is omitted, back to the fresh message's bytes */
+    u.someunion.which = MESSAGE_MYFIRSTMESSAGE_SOMEUNION_OPTION1_ID;
+    u.someunion.u.option1 = 0;
+    r = message_myfirstmessage_encode(&u, buf, sizeof(buf), &uused);
+    assert(r == SOFAB_RET_OK && uused == base);
+    printf("union: a non-default option at its default is framed, default_id at its default is not\n");
 
     printf("ALL ROUND-TRIP CHECKS OK\n");
     return 0;

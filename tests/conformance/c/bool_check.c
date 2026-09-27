@@ -132,8 +132,9 @@ int main(void)
     memcpy(want_wide.rows.items[1].vals, row1, 3);
     want_wide.nested.inner_len = 3;
     memcpy(want_wide.nested.inner, inner, 3);
-    want_wide.choice.bits_len = 3;
-    memcpy(want_wide.choice.bits, bits, 3);
+    want_wide.choice.which = MESSAGE_BOOLCHK_CHOICE_BITS_ID;  /* the default option, held */
+    want_wide.choice.u.bits.len = 3;
+    memcpy(want_wide.choice.u.bits.items, bits, 3);
     want_wide.cube.len = 2;
     want_wide.cube.items[0].len = 2;
     want_wide.cube.items[0].items[0].len = 2;
@@ -171,7 +172,8 @@ int main(void)
             fail(surface, "rows [[2, 256], [max, 0, 5]] must be stored as [[1, 1], [1, 0, 1]]");
         if (!holds(m.nested.inner, m.nested.inner_len, inner, 3))
             fail(surface, "nested.inner [0, 256, 5] must be stored as [0, 1, 1]");
-        if (!holds(m.choice.bits, m.choice.bits_len, bits, 3))
+        if (m.choice.which != MESSAGE_BOOLCHK_CHOICE_BITS_ID
+            || !holds(m.choice.u.bits.items, m.choice.u.bits.len, bits, 3))
             fail(surface, "choice.bits [256, 0, 2] must be stored as [1, 0, 1]");
         if (m.cube.len != 2 || m.cube.items[0].len != 2 || m.cube.items[1].len != 1 ||
             !holds(m.cube.items[0].items[0].vals, m.cube.items[0].items[0].len, cube00, 2) ||

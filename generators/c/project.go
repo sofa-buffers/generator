@@ -162,9 +162,13 @@ func (g *gen) harness(s *ir.Schema) []byte {
 	// Emit to_json/from_json for every struct/union named type, then messages.
 	for _, key := range s.NamedOrder {
 		nt := s.Named[key]
-		if nt.Category == ir.CatStruct || nt.Category == ir.CatUnion {
+		switch nt.Category {
+		case ir.CatStruct:
 			g.emitToJSON(h, g.cType("named/"+key, nt.Name), g.jsonFn(key), nt.Fields)
 			g.emitFromJSON(h, g.cType("named/"+key, nt.Name), g.jsonFn(key), nt.Fields)
+		case ir.CatUnion:
+			g.emitUnionToJSON(h, "named/"+key, g.cType("named/"+key, nt.Name), g.jsonFn(key), nt)
+			g.emitUnionFromJSON(h, "named/"+key, g.cType("named/"+key, nt.Name), g.jsonFn(key), nt)
 		}
 	}
 	for _, m := range s.Messages {
@@ -214,27 +218,41 @@ func (g *gen) fieldToJSON(h *cfile, f *ir.Field) {
 	}
 	// The member carries the escaped identifier (cIdent); the JSON key keeps the
 	// schema name, so a field named after a C keyword reads and writes the same JSON.
-	acc := "o->" + cIdent(f.Name)
+	g.valueToJSON(h, f, "o->"+cIdent(f.Name), false, "    ")
+}
+
+// valueToJSON prints the value of f stored at acc. inUnion selects the union
+// option forms of a sized blob / compact array ({ len; data/items[]; }).
+func (g *gen) valueToJSON(h *cfile, f *ir.Field, acc string, inUnion bool, ind string) {
 	switch f.Kind {
 	case ir.KindU8, ir.KindU16, ir.KindU32, ir.KindU64, ir.KindBitfield:
-		h.line(`    fprintf(out, "%%llu", (unsigned long long)%s);`, acc)
+		h.line(`%sfprintf(out, "%%llu", (unsigned long long)%s);`, ind, acc)
 	case ir.KindI8, ir.KindI16, ir.KindI32, ir.KindI64, ir.KindEnum:
-		h.line(`    fprintf(out, "%%lld", (long long)%s);`, acc)
+		h.line(`%sfprintf(out, "%%lld", (long long)%s);`, ind, acc)
 	case ir.KindBool:
-		h.line(`    fputs(%s ? "true" : "false", out);`, acc)
+		h.line(`%sfputs(%s ? "true" : "false", out);`, ind, acc)
 	case ir.KindFP32, ir.KindFP64:
-		h.line(`    fprintf(out, "%%.17g", (double)%s);`, acc)
+		h.line(`%sfprintf(out, "%%.17g", (double)%s);`, ind, acc)
 	case ir.KindString:
-		h.line(`    json_str(out, %s);`, acc)
+		h.line(`%sjson_str(out, %s);`, ind, acc)
 	case ir.KindBlob:
 		// A scalar/struct-field blob is a sized blob (companion _len member): print
 		// only the used bytes, not the full fixed capacity, else a sub-maxlen blob
 		// shows trailing zero padding (issue #128).
-		h.line(`    json_bytes(out, %s, %s_len);`, acc, acc)
+		if inUnion {
+			h.line(`%sjson_bytes(out, %s.data, %s.len);`, ind, acc, acc)
+		} else {
+			h.line(`%sjson_bytes(out, %s, %s_len);`, ind, acc, acc)
+		}
 	case ir.KindStruct, ir.KindUnion:
-		h.line(`    %s_to_json(&%s, out);`, g.jsonFn(f.Ref.Key), acc)
+		h.line(`%s%s_to_json(&%s, out);`, ind, g.jsonFn(f.Ref.Key), acc)
 	case ir.KindArray:
-		g.arrayToJSON(h, f, acc)
+		spec := specOfField(f)
+		ref := g.arrayRef(spec, acc)
+		if inUnion && !isHolderElem(spec.elem) {
+			ref = arrRef{store: acc + ".items", length: acc + ".len", lenType: lenC(g.cAlignArray(spec))}
+		}
+		g.arrayValueToJSON(h, spec, ref, ind, 0)
 	}
 }
 
@@ -263,11 +281,6 @@ func (g *gen) arrayRefSlot(spec arraySpec, slot string) arrRef {
 		return arrRef{store: slot + ".vals", length: slot + ".len", lenType: lenC(g.cAlignArray(spec))}
 	}
 	return g.arrayRef(spec, slot)
-}
-
-func (g *gen) arrayToJSON(h *cfile, f *ir.Field, acc string) {
-	spec := specOfField(f)
-	g.arrayValueToJSON(h, spec, g.arrayRef(spec, acc), "    ", 0)
 }
 
 // arrayValueToJSON emits the JSON for one array value. Native numeric/enum/
@@ -331,9 +344,15 @@ func (g *gen) fieldFromJSON(h *cfile, f *ir.Field) {
 	}
 	// The member carries the escaped identifier (cIdent); the JSON key keeps the
 	// schema name, so a field named after a C keyword reads and writes the same JSON.
-	acc := "o->" + cIdent(f.Name)
 	h.line(`    c = sofab_json_get(j, "%s");`, f.Name)
 	h.line("    if (c) {")
+	g.valueFromJSON(h, f, "o->"+cIdent(f.Name), false)
+	h.line("    }")
+}
+
+// valueFromJSON parses the JSON node c into the value of f stored at acc.
+// inUnion selects the union option forms of a sized blob / compact array.
+func (g *gen) valueFromJSON(h *cfile, f *ir.Field, acc string, inUnion bool) {
 	switch f.Kind {
 	case ir.KindU8, ir.KindU16, ir.KindU32, ir.KindU64, ir.KindBitfield:
 		h.line("        %s = (%s)sofab_json_u64(c);", acc, scalarCType(f))
@@ -348,20 +367,79 @@ func (g *gen) fieldFromJSON(h *cfile, f *ir.Field) {
 	case ir.KindString:
 		h.line("        json_to_str(c, %s, sizeof(%s));", acc, acc)
 	case ir.KindBlob:
-		// Sized blob: record the parsed used-length into the companion _len member
-		// so encode emits exactly those bytes (issue #128).
-		h.line("        %s_len = (%s)json_to_bytes(c, %s, sizeof(%s));", acc, blobLenC(f.Maxlen), acc, acc)
+		// Sized blob: record the parsed used-length into the companion length
+		// member so encode emits exactly those bytes (issue #128).
+		if inUnion {
+			h.line("        %s.len = (%s)json_to_bytes(c, %s.data, sizeof(%s.data));", acc, blobLenC(f.Maxlen), acc, acc)
+		} else {
+			h.line("        %s_len = (%s)json_to_bytes(c, %s, sizeof(%s));", acc, blobLenC(f.Maxlen), acc, acc)
+		}
 	case ir.KindStruct, ir.KindUnion:
 		h.line("        %s_from_json(c, &%s);", g.jsonFn(f.Ref.Key), acc)
 	case ir.KindArray:
-		g.arrayFromJSON(h, f, acc)
+		spec := specOfField(f)
+		ref := g.arrayRef(spec, acc)
+		if inUnion && !isHolderElem(spec.elem) {
+			ref = arrRef{store: acc + ".items", length: acc + ".len", lenType: lenC(g.cAlignArray(spec))}
+		}
+		g.arrayValueFromJSON(h, spec, ref, "c", "        ", 0)
 	}
-	h.line("    }")
 }
 
-func (g *gen) arrayFromJSON(h *cfile, f *ir.Field, acc string) {
-	spec := specOfField(f)
-	g.arrayValueFromJSON(h, spec, g.arrayRef(spec, acc), "c", "        ", 0)
+// emitUnionToJSON prints a union as an object with exactly ONE member, the held
+// option: {"<option>": value} — also when that is the default option at its
+// default.
+func (g *gen) emitUnionToJSON(h *cfile, key, cType, fn string, nt *ir.NamedType) {
+	h.line("static void %s_to_json(const %s *o, FILE *out) {", fn, cType)
+	h.line(`    fputc('{', out);`)
+	h.line("    switch (o->which) {")
+	for _, f := range nt.Fields {
+		h.line("    case %s:", g.optionMacro(key, f))
+		if f.Deprecated {
+			h.line("#pragma GCC diagnostic push")
+			h.line(`#pragma GCC diagnostic ignored "-Wdeprecated-declarations"`)
+		}
+		h.line(`        fprintf(out, "\"%s\":");`, f.Name)
+		g.valueToJSON(h, f, "o->u."+cIdent(f.Name), true, "        ")
+		if f.Deprecated {
+			h.line("#pragma GCC diagnostic pop")
+		}
+		h.line("        break;")
+	}
+	h.line("    default:")
+	h.line("        break;")
+	h.line("    }")
+	h.line(`    fputc('}', out);`)
+	h.line("}")
+	h.blank()
+}
+
+// emitUnionFromJSON reads {"<option>": value}: the member present selects that
+// option — the tag, then its value; a sequence option is first put at its own
+// default through its descriptor, exactly as a caller selects one.
+func (g *gen) emitUnionFromJSON(h *cfile, key, cType, fn string, nt *ir.NamedType) {
+	h.line("static void %s_from_json(const sofab_json_t *j, %s *o) {", fn, cType)
+	h.line("    const sofab_json_t *c;")
+	for _, f := range nt.Fields {
+		if f.Deprecated {
+			h.line("#pragma GCC diagnostic push")
+			h.line(`#pragma GCC diagnostic ignored "-Wdeprecated-declarations"`)
+		}
+		acc := "o->u." + cIdent(f.Name)
+		h.line(`    c = sofab_json_get(j, "%s");`, f.Name)
+		h.line("    if (c) {")
+		h.line("        o->which = %s;", g.optionMacro(key, f))
+		if isSeqOption(f) {
+			h.line("        sofab_object_init(&%s, &%s);", g.optionDescr(key, f), acc)
+		}
+		g.valueFromJSON(h, f, acc, true)
+		h.line("    }")
+		if f.Deprecated {
+			h.line("#pragma GCC diagnostic pop")
+		}
+	}
+	h.line("}")
+	h.blank()
 }
 
 // arrayValueFromJSON parses one array value from the JSON node jnode. Mirrors
