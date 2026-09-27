@@ -890,7 +890,7 @@ extra option; the win is zero casts and zero per-decode allocations.
 **Ownership and aliasing (stated in every GC target's Unions chapter).** A setter
 stores the **reference** it is given (no copy), exactly as assigning a plain
 field of that type does today; a getter of the held reference option returns the
-slot itself. On Java/Kotlin/C#/Dart a kept reference slot is **reset in place**
+slot itself. On Java/Kotlin/Dart a kept reference slot is **reset in place**
 when its option is selected again (by the user through the setter/mutable
 accessor, or by decode), so a struct, list or destination obtained earlier from
 `get<Opt>()`/`mutable<Opt>()` — or passed to `set<Opt>(v)` — is reset and then
@@ -900,7 +900,7 @@ of Java/Kotlin/Dart already has for nested messages (it resets them in place,
 and reuse decodes allocation-free; a caller that needs an independent value copies
 it. Go stores options **by value** (5.6): `Set<Opt>(v)` copies, `<Opt>()` returns a
 copy, and only a pointer from `Mut<Opt>()` aliases the slot (and sees the reset on
-re-selection). TypeScript and Python allocate fresh on a real switch, so a
+re-selection). C# (§5.9), TypeScript and Python allocate fresh on a real switch, so a
 reference obtained earlier is never reset behind the caller's back (it is merely
 no longer held).
 
@@ -1475,6 +1475,23 @@ Has<Opt>`, `Mutable<Opt>()`, `Clear()`, `public const int <Opt>Id`). No
 per-union `JsonConverter<T>` emitted in the **harness** project and registered in
 its `JsonSerializerOptions` (STJ would otherwise serialize every property).
 `Seq.ReserveElem<T>(list, id, () => new T(), cap, rcap)`. `csharp` row ±1 %.
+*(Corrected in the C# milestone: "as Java" cannot hold for the in-place reset.
+A C# struct class has no reset method — Go, C#, TypeScript and Python have no
+message-level reset (§5) — and C# has no destination-reuse path either: `Decode`,
+`TryDecode` and `new Msg.Decoder()` all construct their message. So C# follows
+the TypeScript rule for reference options: a real switch to a struct, union or
+`List` option (`Mutable<Opt>()`, decode, `Clear()` for `D`) puts a **fresh**
+default instance in its slot; an option already held is never touched. The
+allocation is the one the first selection makes anyway, so nothing measurable
+moves, and an object obtained earlier is never reset behind the caller's back.
+The slot left behind is not released (the setters store only their own slot).
+`Mutable<Opt>()` exists for struct, union and `List`-backed array options
+(boolean and wrapper arrays); a primitive-array option (`ushort[]`, `float[]`,
+enum/bitfield arrays) is replaced through its property. Option names are
+PascalCase properties; one landing on a union member (`Which`, `Clear`,
+`Serialize`, `IsDefault`, an `object` member) or on the type name takes the
+trailing underscore, and the properties, `Has<Opt>`, `Mutable<Opt>`, `<Opt>Id`
+and the private slots are checked as one namespace (`checkUnionNames`).)*
 
 ### 5.10 dart
 

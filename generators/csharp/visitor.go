@@ -18,6 +18,11 @@ type frame struct {
 	loc    string
 	path   string
 	fields []*ir.Field // object scope
+	// utype is the C# type name of an object scope that is a UNION ("" for any
+	// other scope): its fields are the options, and every store into one goes
+	// through the union's property or mutable accessor, which is what selects the
+	// option (MESSAGE_SPEC §7.4.1).
+	utype string
 	// array scope (fields == nil, isArr == true):
 	isArr    bool
 	elem     ir.Kind       // element kind of this array
@@ -83,17 +88,17 @@ func seqCall(method, args string, fr frame) string {
 
 func (g *gen) frames(m *ir.Message) []frame {
 	var out []frame
-	var walkObj func(loc, path string, fields []*ir.Field)
+	var walkObj func(loc, path string, fields []*ir.Field, utype string)
 	var walkArr func(loc, list string, elem ir.Kind, ref *ir.TypeRef, items *ir.ArrayElem, cap, emax int64)
 
-	walkObj = func(loc, path string, fields []*ir.Field) {
-		out = append(out, frame{loc: loc, path: path, fields: fields})
+	walkObj = func(loc, path string, fields []*ir.Field, utype string) {
+		out = append(out, frame{loc: loc, path: path, fields: fields, utype: utype})
 		for _, fld := range fields {
 			switch {
 			case fld.Kind == ir.KindStruct || fld.Kind == ir.KindUnion:
-				walkObj(loc+"_"+fld.Name, path+"."+csIdent(fld.Name), fld.Ref.Target.Fields)
+				walkObj(loc+"_"+fld.Name, memberPath(path, fld, utype), fld.Ref.Target.Fields, g.unionTypeOf(fld.Kind, fld.Ref))
 			case fld.Kind == ir.KindArray && seqArrayElem(fld.Elem):
-				walkArr(loc+"_"+fld.Name, path+"."+csIdent(fld.Name), fld.Elem, fld.ElemRef, fld.ElemItems, capOf(fld.HasCount, fld.Count), boundOf(fld.ElemMaxHas, fld.ElemMax))
+				walkArr(loc+"_"+fld.Name, memberPath(path, fld, utype), fld.Elem, fld.ElemRef, fld.ElemItems, capOf(fld.HasCount, fld.Count), boundOf(fld.ElemMaxHas, fld.ElemMax))
 			}
 		}
 	}
@@ -114,7 +119,7 @@ func (g *gen) frames(m *ir.Message) []frame {
 			// scope decodes into the element that id names — never into "the one just
 			// appended" (generator#247). SequenceBegin records the id in this scope's
 			// own index variable, which the whole child sub-tree's paths hang off.
-			walkObj(fr.childLoc, elemAt(list, loc), ref.Target.Fields)
+			walkObj(fr.childLoc, elemAt(list, loc), ref.Target.Fields, g.unionTypeOf(elem, ref))
 		case ir.KindArray:
 			if seqArrayElem(items.Elem) {
 				fr.childLoc = loc + "_e"
@@ -133,8 +138,17 @@ func (g *gen) frames(m *ir.Message) []frame {
 		}
 	}
 
-	walkObj("Root", "m", m.Fields)
+	walkObj("Root", "m", m.Fields, "")
 	return out
+}
+
+// unionTypeOf is the frame utype of an object scope of kind k: the union's C#
+// type name, or "" for a struct.
+func (g *gen) unionTypeOf(k ir.Kind, ref *ir.TypeRef) string {
+	if k == ir.KindUnion {
+		return g.typeName(ref.Key)
+	}
+	return ""
 }
 
 // widthThrow renders the §7.1 rejection for a store into a destination the
@@ -469,7 +483,7 @@ func (g *gen) emitStringCb(f *cfile, fs []frame) {
 		}
 		for _, fld := range fr.fields {
 			if fld.Kind == ir.KindString {
-				f.line("            case (%s, %d): %s.%s = _s; break;", fr.loc, fld.ID, fr.path, csIdent(fld.Name))
+				f.line("            case (%s, %d): %s = _s; break;", fr.loc, fld.ID, memberRef(fr.path, fld, fr.utype))
 			}
 		}
 	}
@@ -531,7 +545,7 @@ func (g *gen) emitBlobCb(f *cfile, fs []frame) {
 		}
 		for _, fld := range fr.fields {
 			if fld.Kind == ir.KindBlob {
-				f.line("            case (%s, %d): %s.%s = _b; break;", fr.loc, fld.ID, fr.path, csIdent(fld.Name))
+				f.line("            case (%s, %d): %s = _b; break;", fr.loc, fld.ID, memberRef(fr.path, fld, fr.utype))
 			}
 		}
 	}
@@ -902,15 +916,15 @@ func (g *gen) emitVisitor(f *cfile, name string, fields []*ir.Field) {
 		for _, fld := range fr.fields {
 			switch {
 			case fld.Kind == ir.KindU8 || fld.Kind == ir.KindU16 || fld.Kind == ir.KindU32 || fld.Kind == ir.KindU64:
-				uArms = append(uArms, fmt.Sprintf("            case (%s, %d): %s%s.%s = (%s)value; break;", fr.loc, fld.ID, widthThrow(fld.Kind, fld.Ref, fld.Name), fr.path, csIdent(fld.Name), g.csType(fld)))
+				uArms = append(uArms, fmt.Sprintf("            case (%s, %d): %s%s = (%s)value; break;", fr.loc, fld.ID, widthThrow(fld.Kind, fld.Ref, fld.Name), memberRef(fr.path, fld, fr.utype), g.csType(fld)))
 			case fld.Kind == ir.KindBitfield:
-				uArms = append(uArms, fmt.Sprintf("            case (%s, %d): %s%s.%s = (%s)value; break;", fr.loc, fld.ID, widthThrow(fld.Kind, fld.Ref, fld.Name), fr.path, csIdent(fld.Name), g.typeName(fld.Ref.Key)))
+				uArms = append(uArms, fmt.Sprintf("            case (%s, %d): %s%s = (%s)value; break;", fr.loc, fld.ID, widthThrow(fld.Kind, fld.Ref, fld.Name), memberRef(fr.path, fld, fr.utype), g.typeName(fld.Ref.Key)))
 			case fld.Kind == ir.KindBool:
-				uArms = append(uArms, fmt.Sprintf("            case (%s, %d): %s.%s = value != 0; break;", fr.loc, fld.ID, fr.path, csIdent(fld.Name)))
+				uArms = append(uArms, fmt.Sprintf("            case (%s, %d): %s = value != 0; break;", fr.loc, fld.ID, memberRef(fr.path, fld, fr.utype)))
 			case fld.Kind == ir.KindArray && primArrayElem(fld.Elem) && unsignedArrayElem(fld.Elem):
-				uArms = append(uArms, fmt.Sprintf("            case (%s, %d): %s break;", fr.loc, fld.ID, primFill(fr.path+"."+csIdent(fld.Name), fld, widthThrow(fld.Elem, fld.ElemRef, fld.Name+" element"), primElemCast(fld.Elem, fld.ElemRef, "value"))))
+				uArms = append(uArms, fmt.Sprintf("            case (%s, %d): %s break;", fr.loc, fld.ID, primFill(memberRef(fr.path, fld, fr.utype), fld, widthThrow(fld.Elem, fld.ElemRef, fld.Name+" element"), primElemCast(fld.Elem, fld.ElemRef, "value"))))
 			case fld.Kind == ir.KindArray && unsignedArrayElem(fld.Elem):
-				uArms = append(uArms, fmt.Sprintf("            case (%s, %d): %s break;", fr.loc, fld.ID, nativeListFill(fr.path+"."+csIdent(fld.Name), widthThrow(fld.Elem, fld.ElemRef, fld.Name+" element"), g.arrayElemAddRHS(fld.Elem, fld.ElemRef, "value"))))
+				uArms = append(uArms, fmt.Sprintf("            case (%s, %d): %s break;", fr.loc, fld.ID, nativeListFill(memberRef(fr.path, fld, fr.utype), widthThrow(fld.Elem, fld.ElemRef, fld.Name+" element"), g.arrayElemAddRHS(fld.Elem, fld.ElemRef, "value"))))
 			}
 		}
 	}
@@ -932,13 +946,13 @@ func (g *gen) emitVisitor(f *cfile, name string, fields []*ir.Field) {
 		for _, fld := range fr.fields {
 			switch {
 			case fld.Kind == ir.KindI8 || fld.Kind == ir.KindI16 || fld.Kind == ir.KindI32 || fld.Kind == ir.KindI64:
-				sArms = append(sArms, fmt.Sprintf("            case (%s, %d): %s%s.%s = (%s)value; break;", fr.loc, fld.ID, widthThrow(fld.Kind, fld.Ref, fld.Name), fr.path, csIdent(fld.Name), g.csType(fld)))
+				sArms = append(sArms, fmt.Sprintf("            case (%s, %d): %s%s = (%s)value; break;", fr.loc, fld.ID, widthThrow(fld.Kind, fld.Ref, fld.Name), memberRef(fr.path, fld, fr.utype), g.csType(fld)))
 			case fld.Kind == ir.KindEnum:
-				sArms = append(sArms, fmt.Sprintf("            case (%s, %d): %s%s.%s = (%s)value; break;", fr.loc, fld.ID, widthThrow(fld.Kind, fld.Ref, fld.Name), fr.path, csIdent(fld.Name), g.typeName(fld.Ref.Key)))
+				sArms = append(sArms, fmt.Sprintf("            case (%s, %d): %s%s = (%s)value; break;", fr.loc, fld.ID, widthThrow(fld.Kind, fld.Ref, fld.Name), memberRef(fr.path, fld, fr.utype), g.typeName(fld.Ref.Key)))
 			case fld.Kind == ir.KindArray && primArrayElem(fld.Elem) && signedArrayElem(fld.Elem):
-				sArms = append(sArms, fmt.Sprintf("            case (%s, %d): %s break;", fr.loc, fld.ID, primFill(fr.path+"."+csIdent(fld.Name), fld, widthThrow(fld.Elem, fld.ElemRef, fld.Name+" element"), primElemCast(fld.Elem, fld.ElemRef, "value"))))
+				sArms = append(sArms, fmt.Sprintf("            case (%s, %d): %s break;", fr.loc, fld.ID, primFill(memberRef(fr.path, fld, fr.utype), fld, widthThrow(fld.Elem, fld.ElemRef, fld.Name+" element"), primElemCast(fld.Elem, fld.ElemRef, "value"))))
 			case fld.Kind == ir.KindArray && signedArrayElem(fld.Elem):
-				sArms = append(sArms, fmt.Sprintf("            case (%s, %d): %s break;", fr.loc, fld.ID, nativeListFill(fr.path+"."+csIdent(fld.Name), widthThrow(fld.Elem, fld.ElemRef, fld.Name+" element"), g.arrayElemAddRHS(fld.Elem, fld.ElemRef, "value"))))
+				sArms = append(sArms, fmt.Sprintf("            case (%s, %d): %s break;", fr.loc, fld.ID, nativeListFill(memberRef(fr.path, fld, fr.utype), widthThrow(fld.Elem, fld.ElemRef, fld.Name+" element"), g.arrayElemAddRHS(fld.Elem, fld.ElemRef, "value"))))
 			}
 		}
 	}
@@ -1033,11 +1047,14 @@ func (g *gen) emitVisitor(f *cfile, name string, fields []*ir.Field) {
 				if guard == "" {
 					panic("csharp: native array with neither a schema count nor a cap -- every target has a finite default (§9.5)")
 				}
-				aArms = append(aArms, fmt.Sprintf("            case (%s, %d): %s%s%s.%s = new %s[count]; break;", fr.loc, fld.ID, kindGuard, guard, fr.path, csIdent(fld.Name), primArrayBase(fld.Elem, fld.ElemRef)))
+				// In a union the store is the option's setter: the §7.4.1 switch, here
+				// behind the kind gate and the count bound, never ahead of them.
+				aArms = append(aArms, fmt.Sprintf("            case (%s, %d): %s%s%s = new %s[count]; break;", fr.loc, fld.ID, kindGuard, guard, memberRef(fr.path, fld, fr.utype), primArrayBase(fld.Elem, fld.ElemRef)))
 			} else if fld.Kind == ir.KindArray && nativeArrayElem(fld.Elem) {
 				// List<T> (the boolean array): cleared and appended to, with or
 				// without a count -- the M elements the wire carried are the whole value.
-				aArms = append(aArms, fmt.Sprintf("            case (%s, %d): %s%s%s.%s.Clear(); break;", fr.loc, fld.ID, kindGuard, guard, fr.path, csIdent(fld.Name)))
+				// In a union the mutable accessor selects the option first.
+				aArms = append(aArms, fmt.Sprintf("            case (%s, %d): %s%s%s.Clear(); break;", fr.loc, fld.ID, kindGuard, guard, memberPath(fr.path, fld, fr.utype)))
 			}
 		}
 	}
@@ -1087,9 +1104,20 @@ func (g *gen) emitVisitor(f *cfile, name string, fields []*ir.Field) {
 		for _, fld := range fr.fields {
 			switch {
 			case fld.Kind == ir.KindStruct || fld.Kind == ir.KindUnion:
-				f.line("            case (%s, %d): cur = %s; break;", fr.loc, fld.ID, fr.loc+"_"+fld.Name)
+				// A union's struct/union option is SELECTED here (MESSAGE_SPEC
+				// §7.4.1): past the §7.3 gate, since only a sequence reaches this
+				// callback. Select if not held -- a held option continues its scope
+				// (§7.4 merge), another one is discarded and this one starts from
+				// its default.
+				sel := ""
+				if fr.utype != "" {
+					sel = memberPath(fr.path, fld, fr.utype) + "; "
+				}
+				f.line("            case (%s, %d): %scur = %s; break;", fr.loc, fld.ID, sel, fr.loc+"_"+fld.Name)
 			case fld.Kind == ir.KindArray && seqArrayElem(fld.Elem):
-				f.line("            case (%s, %d): %s.%s.Clear(); cur = %s; break;", fr.loc, fld.ID, fr.path, csIdent(fld.Name), fr.loc+"_"+fld.Name)
+				// A wrapper array IS its field's value, so a later occurrence replaces
+				// it (§7.4); in a union the mutable accessor selects the option first.
+				f.line("            case (%s, %d): %s.Clear(); cur = %s; break;", fr.loc, fld.ID, memberPath(fr.path, fld, fr.utype), fr.loc+"_"+fld.Name)
 			}
 		}
 	}
@@ -1181,9 +1209,9 @@ func (g *gen) emitFloatVisit(f *cfile, fs []frame, kind ir.Kind, cb, ctype strin
 		for _, fld := range fr.fields {
 			switch {
 			case fld.Kind == kind:
-				arms = append(arms, fmt.Sprintf("            case (%s, %d): %s.%s = value; break;", fr.loc, fld.ID, fr.path, csIdent(fld.Name)))
+				arms = append(arms, fmt.Sprintf("            case (%s, %d): %s = value; break;", fr.loc, fld.ID, memberRef(fr.path, fld, fr.utype)))
 			case fld.Kind == ir.KindArray && fld.Elem == kind:
-				arms = append(arms, fmt.Sprintf("            case (%s, %d): %s break;", fr.loc, fld.ID, primFill(fr.path+"."+csIdent(fld.Name), fld, "", "value")))
+				arms = append(arms, fmt.Sprintf("            case (%s, %d): %s break;", fr.loc, fld.ID, primFill(memberRef(fr.path, fld, fr.utype), fld, "", "value")))
 			}
 		}
 	}

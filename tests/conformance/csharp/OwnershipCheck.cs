@@ -99,10 +99,10 @@ internal static class OwnershipCheck {
         m.somestringarray = new List<string>{"a", "bb", "ccc"};
         m.someblobarray = new List<byte[]>{ new byte[]{9, 9}, new byte[]{8} };
         m.somestruct.nestedstring = "nested payload";
-        m.someunion.option2 = "union payload";
+        m.someunion.Option2 = "union payload";
         m.somestructwitharray.label = "struct label";
         m.someunionarray = new List<MyfirstmessageSomeunionarrayElem>{
-            new MyfirstmessageSomeunionarrayElem{ asstring = "union row" },
+            new MyfirstmessageSomeunionarrayElem{ Asstring = "union row" },
         };
         m.somemap = new List<MyfirstmessageSomemapElem>{
             new MyfirstmessageSomemapElem{ key = "first key", value = 1 },
