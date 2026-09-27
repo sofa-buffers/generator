@@ -73,3 +73,115 @@ Two things worth knowing before switching it on under `corelib: cpp`:
 
 Wraps every generated type; the default is `message`. `generic.namespace` sets
 it for every target that has one, and this key overrides that for C++ alone.
+
+## Unions
+
+A `union` holds exactly one of its options. It is a class of its own (a
+`sofab::Message`, so it nests and encodes like a struct) whose options are
+reached through accessors, never as members:
+
+```yaml
+shape:
+  id: 3
+  type: union
+  default_id: 2
+  oneof:
+    num:  { id: 0, type: u16, default: 5 }
+    name: { id: 1, type: string, maxlen: 16 }
+    pt:   { id: 2, type: struct, fields: { x: { id: 0, type: i32, default: 7 }, y: { id: 1, type: i32 } } }
+```
+
+```cpp
+struct MShape : sofab::Message {
+    enum class Which : sofab::id { num = 0, name = 1, pt = 2 };
+    Which which() const noexcept;
+
+    bool has_num() const noexcept;
+    std::uint16_t num() const noexcept;
+    void set_num(std::uint16_t v) noexcept;
+    std::uint16_t &mutable_num() noexcept;
+
+    bool has_pt() const noexcept;
+    const MShapePt &pt() const noexcept;
+    void set_pt(const MShapePt &v);
+    MShapePt &mutable_pt() noexcept;
+    // ... likewise for name
+
+    void reset() noexcept;
+};
+```
+
+| operation | C++ |
+|---|---|
+| which option is held | `x.which()` → `MShape::Which` |
+| option ids | `MShape::Which::pt`; the enumerator's value is the option id |
+| test | `x.has_pt()` |
+| read | `x.num()` returns the value; `x.pt()` / `x.name()` return a `const` reference |
+| select with a value | `x.set_num(7)`, `x.set_pt(p)` |
+| select at the default and edit in place | `x.mutable_pt().y = 2` |
+| back to the default | `x.reset()` |
+
+```cpp
+MShape s;                      // holds pt at its default: {x = 7, y = 0}
+s.set_num(7);                  // now num = 7; pt is gone
+s.mutable_pt().y = 2;          // pt again, from its default: {x = 7, y = 2}
+if (s.has_pt()) { use(s.pt().x); }
+switch (s.which()) {
+case MShape::Which::num:  use(s.num()); break;
+case MShape::Which::name: use(s.name()); break;
+case MShape::Which::pt:   use(s.pt()); break;
+}
+s.reset();                     // pt at its default again
+```
+
+**Reading an option that is not held** returns that option's default — its
+declared `default` for a scalar, an empty string / blob / array, a
+default-constructed struct or union — and changes nothing. Only `set_` and
+`mutable_` select.
+
+**`mutable_<option>()`** selects the option at its default if it is not held,
+and returns a reference to it. If it is already held it is returned as it is,
+untouched.
+
+**Ownership.** `set_<option>(v)` copies `v` into the union. The references that
+`<option>()` and `mutable_<option>()` return point into the union's own storage:
+selecting another option ends the previous option's lifetime, so a reference
+taken to it earlier must not be used afterwards.
+
+**Storage.** With `corelib: cpp` the options live in a `std::variant`, one
+alternative per option in id order. With `corelib: c-cpp` — freestanding, no
+`<variant>` — they share a C++ `union` beside a `Which` tag; a switch places the
+new option with placement `new`. The options' own types follow `allow_dynamic`
+as any member does. The API is the same on both.
+
+**Accessor names** are the option names. An option named like a C++ keyword or
+like one of the union's own members (`which`, `Which`, `reset`, `serialize`,
+`deserialize`) gets a trailing underscore: option `reset` is `reset_()`,
+`set_reset_()`, `has_reset_()`, `mutable_reset_()`. Two options whose accessors
+would coincide — `foo` and `set_foo` — fail generation, naming both.
+
+**`$defs` unions** used with different `default_id`s are one class per
+`default_id`, named after `<Name>_default_<option>`: `UnionShapeDefaultPt` and
+`UnionShapeDefaultNum`.
+
+**Defaults.** A new union holds its `default_id` option at that option's own
+default; an omitted `default_id` means the option with the lowest id. Each
+element of an array of unions starts the same way — including an element a
+decoded array skips.
+
+**Encode.** Only the held option is written. If it is the `default_id` option
+at its default, the union is at its default and is left out. Any other held
+option is written **even at its own default** — `0`, an empty string, an empty
+blob or array, or an empty frame for a struct, union or array-of-string option
+— because the receiver's fresh union holds `default_id`, and leaving it out
+would read back as that.
+
+**Decode.** The option received last wins. A different option replaces the
+held one and starts from its own default; the held option received again
+continues where it was (a struct or union option merges, anything else is
+replaced). A field whose wire type does not match its option, and an unknown
+id, change nothing.
+
+**JSON (project harness).** A union is an object with exactly one member, the
+held option: `{"pt": {"x": 7, "y": 2}}`, also when that is the `default_id`
+option at its default.
