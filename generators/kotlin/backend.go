@@ -36,6 +36,9 @@ func (*Backend) Generate(s *ir.Schema, cfg map[string]any) ([]generator.File, er
 		size:    generator.NewSizePolicy(cfg),
 	}
 	dir := "src/main/kotlin/" + strings.ReplaceAll(g.pkg, ".", "/") + "/"
+	if err := g.checkUnions(); err != nil {
+		return nil, err
+	}
 	var files []generator.File
 	// Every named type gets its OWN file. Kotlin would allow several public
 	// declarations per file, but a type reached from two messages must be
@@ -248,6 +251,8 @@ func (g *gen) namedTypeFile(key string, nt *ir.NamedType) []byte {
 		g.emitEnumConsts(f, g.typeName(key), nt)
 	case ir.CatBitfield:
 		g.emitBitfieldConsts(f, g.typeName(key), nt)
+	case ir.CatUnion:
+		g.emitUnionClass(f, key, nt)
 	default:
 		g.emitClass(f, g.typeName(key), nt.Fields, nt.Summary, false)
 	}
@@ -617,7 +622,7 @@ func (g *gen) emitIsDefault(f *kfile, fields []*ir.Field) {
 	f.line("    /** True when every field still equals its declared default, compared per field and recursively -- i.e. serialize would write nothing at all. */")
 	f.line("    internal fun isDefault(): Boolean {")
 	for _, fld := range fields {
-		f.line("        if (%s) return false", g.ktWritesExpr(fld))
+		f.line("        if (%s) return false", g.ktWritesExpr(fld, "this."+ktIdent(fld.Name)))
 	}
 	f.line("        return true")
 	f.line("    }")
@@ -681,7 +686,19 @@ func (g *gen) emitResetField(f *kfile, fld *ir.Field) {
 // ---------------------------------------------------------------------------
 
 func (g *gen) emitMarshal(f *kfile, fld *ir.Field) {
-	acc := "this." + ktIdent(fld.Name)
+	g.emitMarshalAt(f, "        ", fld, "this."+ktIdent(fld.Name), false)
+}
+
+// emitMarshalAt writes the field fld whose value is acc, at indent ind.
+//
+// forced is a union's held option other than default_id (MESSAGE_SPEC §4.2): it
+// is written EVEN AT ITS OWN DEFAULT, because the receiver's fresh union holds
+// default_id and absence would read back as that. So there is no ≠-default guard
+// -- a scalar is written as its value, a string/blob/compact array in its
+// explicit empty form -- and a struct, union or wrapper-array option is closed
+// with the KEEPING end, so an option at its default still leaves a present,
+// empty frame. Inside the option the ordinary per-field omission applies.
+func (g *gen) emitMarshalAt(f *kfile, ind string, fld *ir.Field, acc string, forced bool) {
 	var write string
 	switch fld.Kind {
 	case ir.KindU8, ir.KindU16, ir.KindU32, ir.KindU64, ir.KindBitfield:
@@ -705,19 +722,38 @@ func (g *gen) emitMarshal(f *kfile, fld *ir.Field) {
 		// serialize omits every child that equals its default, so "no child was
 		// written" IS "the object equals its declared default", evaluated per
 		// field and recursively, with no byte image ever compared.
-		f.line("        os.writeSequenceBeginLazy(%d); %s.serialize(os); os.writeSequenceEnd()", fld.ID, acc)
+		end := "os.writeSequenceEnd()"
+		if forced {
+			end = "os.writeSequenceEndKeep()"
+		}
+		f.line("%sos.writeSequenceBeginLazy(%d); %s.serialize(os); %s", ind, fld.ID, acc, end)
 		return
 	case ir.KindArray:
-		g.emitMarshalArray(f, fld, acc)
+		g.emitMarshalArray(f, ind, fld, acc, forced)
+		return
+	}
+	if forced {
+		f.line("%s%s", ind, write)
 		return
 	}
 	// Leaf: always omit when equal to the default; sparse encoding is canonical
 	// (MESSAGE_SPEC §2) and the decoder reconstructs the omitted field from its
 	// declared default.
-	f.line("        if (%s) %s", g.ktWritesExpr(fld), write)
+	f.line("%sif (%s) %s", ind, g.ktWritesExpr(fld, acc), write)
 }
 
-func (g *gen) emitMarshalArray(f *kfile, fld *ir.Field, acc string) {
+func (g *gen) emitMarshalArray(f *kfile, ind string, fld *ir.Field, acc string, forced bool) {
+	if forced {
+		// A union's held non-default option: no guard. A compact array is written
+		// as its count even when that is 0 (an fp array keeps its fixlen_word), and
+		// a wrapper array's frame survives empty through the keeping end.
+		if nativeArrayElem(fld.Elem) {
+			f.line("%s%s", ind, arrayWriteCall(fld.Elem, fld.ElemRef, itoa64(fld.ID), acc))
+			return
+		}
+		g.marshalArray(f, ind, itoa64(fld.ID), acc, fld.Elem, fld.ElemRef, fld.ElemItems, 0, keepAlways)
+		return
+	}
 	// A native array is a leaf field: omit it when equal to its default. A
 	// composite/dynamic-element array is a wrapper sequence: opened lazily and
 	// closed with the dropping end at field level, so an empty one is omitted
@@ -728,9 +764,9 @@ func (g *gen) emitMarshalArray(f *kfile, fld *ir.Field, acc string) {
 	// against the declared default exactly as written -- neither side padded to
 	// N -- and against the empty array when no default is declared.
 	if nativeArrayElem(fld.Elem) {
-		f.line("        if (%s) {", g.ktWritesExpr(fld))
-		f.line("            %s", arrayWriteCall(fld.Elem, fld.ElemRef, itoa64(fld.ID), acc))
-		f.line("        }")
+		f.line("%sif (%s) {", ind, g.ktWritesExpr(fld, acc))
+		f.line("%s    %s", ind, arrayWriteCall(fld.Elem, fld.ElemRef, itoa64(fld.ID), acc))
+		f.line("%s}", ind)
 		return
 	}
 	// The field-level wrapper frame is dropped when no element is written, and
@@ -738,7 +774,7 @@ func (g *gen) emitMarshalArray(f *kfile, fld *ir.Field, acc string) {
 	// wrapper array's declared `default` is not materialised (the generated
 	// member is the empty list), so absent and explicitly-empty denote the same
 	// value.
-	g.marshalArray(f, "        ", itoa64(fld.ID), acc, fld.Elem, fld.ElemRef, fld.ElemItems, 0, "")
+	g.marshalArray(f, ind, itoa64(fld.ID), acc, fld.Elem, fld.ElemRef, fld.ElemItems, 0, "")
 }
 
 // lastElemExpr is the "this element is the array's last" test, at loop position
@@ -759,6 +795,10 @@ func lastElemExpr(iv, lv string) string {
 	return fmt.Sprintf("%s == %s.size - 1", iv, lv)
 }
 
+// keepAlways is the seqEndStmt condition of a frame that survives empty
+// unconditionally.
+const keepAlways = "always"
+
 // seqEndStmt closes a lazily-opened sequence, choosing between the two closers
 // the corelib offers. Every sequence is opened LAZILY (the corelib holds the
 // header back until a child is written), so the closer alone decides whether a
@@ -771,9 +811,14 @@ func lastElemExpr(iv, lv string) string {
 //   - a lastElemExpr -- a sequence-form array ELEMENT, kept only at the array's
 //     last index. In the interior it is dropped and leaves an id GAP, which is
 //     what makes an all-default element sparse like any other default value.
+//   - keepAlways -- always. A union's held wrapper-array option other than
+//     default_id (MESSAGE_SPEC §4.2): its presence is what selects it.
 func seqEndStmt(keepIf string) string {
-	if keepIf == "" {
+	switch keepIf {
+	case "":
 		return "os.writeSequenceEnd()"
+	case keepAlways:
+		return "os.writeSequenceEndKeep()"
 	}
 	return fmt.Sprintf("if (%s) os.writeSequenceEndKeep() else os.writeSequenceEnd()", keepIf)
 }

@@ -324,6 +324,10 @@ func (g *gen) jsonHelper(s *ir.Schema) []byte {
 			nt := s.Named[key]
 			if (nt.Category == ir.CatStruct || nt.Category == ir.CatUnion) && !emitted[key] {
 				emitted[key] = true
+				if nt.Category == ir.CatUnion {
+					g.emitUnionJSONFns(f, key, nt)
+					continue
+				}
 				g.emitJSONFns(f, g.typeName(key), nt.Fields)
 			}
 		}
@@ -393,18 +397,23 @@ func (g *gen) emitJSONFns(f *kfile, typeName string, fields []*ir.Field) {
 }
 
 func (g *gen) emitTo(f *kfile, fld *ir.Field) {
-	acc := "o." + ktIdent(fld.Name)
+	g.emitToAt(f, "        ", fld, "o."+ktIdent(fld.Name))
+}
+
+// emitToAt writes the JSON value of fld, read from acc -- a member, or a union
+// option's property -- at indent ind.
+func (g *gen) emitToAt(f *kfile, ind string, fld *ir.Field, acc string) {
 	switch fld.Kind {
 	case ir.KindString:
-		f.line("        Json.str(b, %s)", acc)
+		f.line("%sJson.str(b, %s)", ind, acc)
 	case ir.KindBlob:
-		f.line("        Json.bytes(b, %s)", acc)
+		f.line("%sJson.bytes(b, %s)", ind, acc)
 	case ir.KindStruct, ir.KindUnion:
-		f.line("        to(%s, b)", acc)
+		f.line("%sto(%s, b)", ind, acc)
 	case ir.KindArray:
-		g.jsonToArray(f, "        ", acc, fld.Elem, fld.ElemRef, fld.ElemItems, 0)
+		g.jsonToArray(f, ind, acc, fld.Elem, fld.ElemRef, fld.ElemItems, 0)
 	default:
-		f.line("        b.append(%s)", acc)
+		f.line("%sb.append(%s)", ind, acc)
 	}
 }
 
@@ -435,24 +444,29 @@ func (g *gen) jsonToArray(f *kfile, ind, val string, elem ir.Kind, ref *ir.TypeR
 }
 
 func (g *gen) emitFrom(f *kfile, fld *ir.Field) {
-	acc := "o." + ktIdent(fld.Name)
+	g.emitFromAt(f, "            ", fld, "o."+ktIdent(fld.Name))
+}
+
+// emitFromAt reads fld from the JsonValue `e` into acc -- a member, or a union
+// option's property, whose setter selects it -- at indent ind.
+func (g *gen) emitFromAt(f *kfile, ind string, fld *ir.Field, acc string) {
 	switch fld.Kind {
 	case ir.KindString:
-		f.line("            %s = e.str()", acc)
+		f.line("%s%s = e.str()", ind, acc)
 	case ir.KindBlob:
-		f.line("            %s = Json.toBytes(e.arr())", acc)
+		f.line("%s%s = Json.toBytes(e.arr())", ind, acc)
 	case ir.KindBool:
-		f.line("            %s = e.bool()", acc)
+		f.line("%s%s = e.bool()", ind, acc)
 	case ir.KindFP32:
-		f.line("            %s = e.num().toFloat()", acc)
+		f.line("%s%s = e.num().toFloat()", ind, acc)
 	case ir.KindFP64:
-		f.line("            %s = e.num()", acc)
+		f.line("%s%s = e.num()", ind, acc)
 	case ir.KindStruct, ir.KindUnion:
-		f.line("            from(e.obj(), %s)", acc)
+		f.line("%sfrom(e.obj(), %s)", ind, acc)
 	case ir.KindArray:
-		g.jsonFromArray(f, "            ", acc, "e.arr()", fld.Elem, fld.ElemRef, fld.ElemItems, 0)
+		g.jsonFromArray(f, ind, acc, "e.arr()", fld.Elem, fld.ElemRef, fld.ElemItems, 0)
 	default:
-		f.line("            %s = %s", acc, jsonIntRead(fld.Kind, "e"))
+		f.line("%s%s = %s", ind, acc, jsonIntRead(fld.Kind, "e"))
 	}
 }
 
