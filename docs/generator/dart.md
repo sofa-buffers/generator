@@ -31,7 +31,8 @@ decode makes no copy and, into a reused object, allocates nothing.
 | array of `fp32` / `fp64` | `final sofab.InlineFloat32Array` / `InlineFloat64Array` |
 | array of `string` / `blob` | `List<sofab.InlineString>` / `List<sofab.InlineBytes>` |
 | array of numeric arrays (matrix) | `List<sofab.InlineInt64Array>` (or the float kinds) |
-| struct, union | the generated class |
+| struct | the generated class |
+| union | the generated class, holding one option (see [Unions](#unions)) |
 | array of struct / union / other arrays | a `List` of the element type |
 
 Reading and writing a destination:
@@ -73,6 +74,155 @@ Things worth knowing:
   is read through `storage`, not widened into a `double`.
 - **A destination is complete when the decode reports `complete`.** After
   `incomplete` or a refusal its contents are unspecified.
+
+## Unions
+
+A `union` holds exactly one of its options. It is a class of its own whose
+option slots are private, so an option is only reached through the members
+below and two options cannot be set side by side:
+
+```yaml
+shape:
+  id: 3
+  type: union
+  default_id: 2
+  oneof:
+    num:  { id: 0, type: u16, default: 5 }
+    name: { id: 1, type: string, maxlen: 16 }
+    pt:   { id: 2, type: struct, fields: { x: { id: 0, type: i32, default: 7 }, y: { id: 1, type: i32 } } }
+    tags: { id: 3, type: array, items: { type: string, count: 4, maxlen: 8 } }
+```
+
+```dart
+class MShape {
+  static const int numId = 0;
+  static const int nameId = 1;
+  static const int ptId = 2;
+  static const int tagsId = 3;
+
+  int get which;
+
+  int get num_;                          // `num` is a Dart type: num_
+  set num_(int v);
+  bool get hasNum;
+
+  sofab.InlineString get name;
+  bool get hasName;
+  sofab.InlineString mutableName();
+
+  MShapePt get pt;
+  set pt(MShapePt v);
+  bool get hasPt;
+  MShapePt mutablePt();
+
+  List<sofab.InlineString> get tags;
+  set tags(List<sofab.InlineString> v);
+  bool get hasTags;
+  List<sofab.InlineString> mutableTags();
+
+  void reset();
+}
+```
+
+| operation | Dart |
+|---|---|
+| which option is held | `x.which` → the option's id |
+| option ids | `MShape.ptId` (`<option>Id` constants) |
+| test | `x.hasPt` |
+| read | `x.pt` |
+| select with a value | `x.num_ = 7`, `x.pt = p` |
+| select at the default and edit in place | `x.mutablePt().y = 2`, `x.mutableName().assignString('Ada')` |
+| back to the default | `x.reset()` |
+
+```dart
+final m = M();                   // m.shape holds pt at its default: {x: 7, y: 0}
+m.shape.num_ = 7;                // now num = 7; pt is no longer held
+m.shape.mutablePt().y = 2;       // pt again, from its default: {x: 7, y: 2}
+if (m.shape.hasPt) {
+  use(m.shape.pt.x);
+}
+switch (m.shape.which) {
+  case MShape.numId:
+    use(m.shape.num_);
+  case MShape.ptId:
+    use(m.shape.pt.y);
+}
+m.shape.mutableName().assignString('Ada'); // name, from empty
+m.shape.reset();                 // pt at its default again
+```
+
+Each option is held in a field of its own type — `num` is an `int`, `name` an
+`InlineString` — so reading or selecting an option never boxes or casts.
+
+**Reading** an option that is not held returns that option's default — a new
+struct or union at its default, an empty list, an empty destination — and
+changes nothing; it does not select the option, and writing into what it
+returned does not reach the union.
+
+**Selecting.** Assigning a scalar, struct, union or wrapper-array option selects
+it with the value assigned; the option held before is no longer held.
+**`mutable<Option>()`** (every option but the scalars) selects the option at its
+own default if another one is held, and returns it; if the option is already
+held it is returned as it is, untouched. A string, blob or numeric-array option
+has no setter — it is filled in place through `mutable<Option>()`, exactly as a
+struct's destination member is `final` and filled through `assign` /
+`assignString`.
+
+**Storage and ownership.** An option's storage is created the first time the
+option is selected, and kept when another option is selected: selecting it
+again — through `mutable<Option>()`, by decoding into the union, or by `reset()`
+for the `default_id` option — resets that same object in place (a struct or
+union to its defaults, a list cleared, a destination back to length 0). That is
+what lets `tryDecode` into a reused message decode without allocating. It also
+means an object obtained earlier from the getter or `mutable<Option>()`, or
+passed to a setter, is reset and then overwritten when its option is selected
+again after another one; copy it if you need to keep it. Assigning an option
+keeps the object it is given, as assigning a field does. A new union creates the
+storage of its `default_id` option only.
+
+**fp32 options** keep the raw wire bits of a NaN in `<option>Fp32Bits`, like an
+fp32 member: assigning the value clears them; to write a signaling NaN, assign
+`double.nan` and then the bits.
+
+**Names.** The getter and setter are the option name, `has<Option>` and
+`mutable<Option>()` use it in PascalCase, and the constant is `<option>Id`. An
+option whose name is a Dart keyword or core type gets a trailing underscore, as
+a field does (`num` → `num_`); so does one landing on the union's own members
+(`which`, `reset`, `serialize`, `hashCode`, `runtimeType`, `toString`,
+`noSuchMethod`) or on the union's class name: an option `which` is `which_`,
+with `hasWhich` and `whichId`. Two options that would produce the same member
+(`foo_bar` and `fooBar` both give `hasFooBar`; `a`'s `aId` and an option named
+`aId`; `x`'s `hasX` and an option named `hasX`) fail generation, naming both.
+
+**`$defs` unions** used with different `default_id`s are one class per
+`default_id`, named after `<Name>_default_<option>`: `UnionShapeDefaultPt` and
+`UnionShapeDefaultNum`.
+
+**Defaults.** A new union holds the `default_id` option at that option's own
+default; an omitted `default_id` means the option with the lowest id. Each
+element of an array of unions starts the same way — including an element a
+decoded array skips.
+
+**Encode.** Only the held option is written. If it is the `default_id` option
+at its default, the union is at its default and is left out. Any other held
+option is written **even at its own default** — `0`, an empty string, an empty
+blob or array, or an empty frame for a struct option, a union option, or an
+array whose elements are strings, blobs, structs, unions or arrays — because
+the receiver's new union holds `default_id`, and leaving it out would read
+back as that.
+
+**Decode.** The option received last wins. A different option replaces the
+held one and starts from its own default; the held option received again
+continues where it was (a struct or union option merges, anything else is
+replaced). A field whose wire type does not match its option, and an unknown
+id, change nothing.
+
+**JSON** (the project harness). A union is an object with exactly one member,
+the held option — `{"pt":{"x":7,"y":2}}`, also when that is the `default_id`
+option at its default. The generated `message.dart` itself has no JSON code. A
+union member left out of a message's JSON reads as the union's default. A
+64-bit option (like any 64-bit field) reads a decimal string as well as a JSON
+number; spell a value outside ±2^53 as a string.
 
 ## Formatting
 

@@ -153,10 +153,18 @@ func TestLazySequenceFraming(t *testing.T) {
 	if strings.Contains(out, "e.beginSequence(") {
 		t.Error("eager e.beginSequence( emitted; every sequence must open with beginSequenceLazy")
 	}
-	// The keeping closer must never appear unconditionally: it is only ever reached
-	// through the last-element test.
-	if got, want := strings.Count(out, "e.endSequenceKeep();"), strings.Count(out, ".length - 1) { e.endSequenceKeep(); } else { e.endSequence(); }"); got != want {
-		t.Errorf("endSequenceKeep emitted unconditionally: %d keeping closers, %d positional choices", got, want)
+	// The keeping closer appears unconditionally in exactly one place: the arm of
+	// a union option other than default_id, which is written even at its default
+	// (MESSAGE_SPEC §4.2) -- example.yaml's someunion.option3, a struct. Anywhere
+	// else it is only ever reached through the last-element test.
+	const forcedArm = "e.beginSequenceLazy(2); v.serialize(e); e.endSequenceKeep();"
+	if !strings.Contains(out, forcedArm) {
+		t.Errorf("the forced struct option someunion.option3 must close with the keeping closer, missing %q", forcedArm)
+	}
+	positional := strings.Count(out, ".length - 1) { e.endSequenceKeep(); } else { e.endSequence(); }")
+	forced := strings.Count(out, "v.serialize(e); e.endSequenceKeep();")
+	if got := strings.Count(out, "e.endSequenceKeep();"); got != positional+forced {
+		t.Errorf("endSequenceKeep emitted unconditionally outside a union option arm: %d keeping closers, %d positional choices, %d forced union options", got, positional, forced)
 	}
 }
 
