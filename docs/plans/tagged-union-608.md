@@ -1398,8 +1398,17 @@ Work only in `/root/corelibs/wt-c-cpp-union` (branch `feat/tagged-union`,
   the factory the issue asked for).
 * **API** per the table; `<Opt>()` of a struct option returns a copy (the held
   value or a fresh default), `Mut<Opt>()` returns a pointer into the slot.
-  `reservedGoMethod` gains `Which`, `Clear`, and the union type's `Has*`/`Set*`/
-  `Mut*` names are checked for collisions. The package-level option-id constants
+  The union type's own method set (the visitor callbacks, what the embedded
+  `sofab.StringCheck` promotes, `Which`, `Clear`, `Serialize`, the JSON methods)
+  is a **union-scoped** reserved set (`unionFixed`): a getter landing on one takes
+  the trailing underscore, and a `Has*`/`Set*`/`Mut*` name landing on one, or two
+  options deriving the same method, are located errors. *(Corrected in the Go
+  milestone: the first draft put `Which`/`Clear` into the package-wide
+  `reservedGoMethod`, which would have renamed a plain struct's `which`/`clear`
+  field to `Which_`/`Clear_` — a struct has no such method, so nothing there
+  collides; and `SetStringCheck` has to be reserved on a union, since an option
+  `string_check` would shadow the promoted setter and silently take the decode's
+  UTF-8 policy off the union.)* The package-level option-id constants
   `<Type><Opt>ID` are checked against every other package-level identifier the
   backend emits (types, constants), a located error with a unit test (§1.1).
 * **JSON**: generated `MarshalJSON` (value receiver) / `UnmarshalJSON` (pointer
