@@ -69,6 +69,9 @@ func (*Backend) Generate(s *ir.Schema, cfg map[string]any) ([]generator.File, er
 	if err := g.checkReservedNames(s); err != nil {
 		return nil, err
 	}
+	if err := checkUnionNames(s); err != nil {
+		return nil, err
+	}
 	files := []generator.File{{Path: "src/message.rs", Content: g.module(s)}}
 	if cfgString(cfg, "emit", "sources") == "project" {
 		files = append(files, g.projectFiles(s, cfg)...)
@@ -380,8 +383,11 @@ func (g *gen) moduleBody(f *rfile, s *ir.Schema) {
 	}
 	for _, key := range s.NamedOrder {
 		nt := s.Named[key]
-		if nt.Category == ir.CatStruct || nt.Category == ir.CatUnion {
+		switch nt.Category {
+		case ir.CatStruct:
 			g.emitStruct(f, g.typeName(key), nt.Fields, false, "")
+		case ir.CatUnion:
+			g.emitUnion(f, g.typeName(key), nt)
 		}
 	}
 	for _, m := range s.Messages {
@@ -915,9 +921,16 @@ func lastElemExpr(iv, val string) string {
 //     what makes an all-default element sparse like any other default value.
 //     Note this is decided from the position in the VALUE, at run time; the
 //     schema cannot answer it.
+//   - keepAlways -- always. A wrapper-array union option other than default_id
+//     is written even when empty (MESSAGE_SPEC §4.2): an omitted option would
+//     read back as default_id.
 func emitSeqEnd(f *rfile, ind, keepIf string) {
-	if keepIf == "" {
+	switch keepIf {
+	case "":
 		f.line("%slet _ = os.write_sequence_end();", ind)
+		return
+	case keepAlways:
+		f.line("%slet _ = os.write_sequence_end_keep();", ind)
 		return
 	}
 	f.line("%sif %s { let _ = os.write_sequence_end_keep(); } else { let _ = os.write_sequence_end(); }", ind, keepIf)

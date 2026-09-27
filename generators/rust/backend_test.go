@@ -3424,6 +3424,7 @@ func TestRustNoBlanketAllow(t *testing.T) {
 		approxConstantAllow: true,
 		derivableImplsAllow: true,
 		visitorClippyAllow:  true,
+		unionEnumAllow:      true,
 	}
 	for _, cfg := range []map[string]any{
 		{"corelib": "rs"},

@@ -1357,7 +1357,12 @@ Work only in `/root/corelibs/wt-c-cpp-union` (branch `feat/tagged-union`,
   goes through `<opt>_mut()`.
 * **Tests**: enum shape + serde renames, `Default` = `D`, arms, `_mut` paths,
   split variants.
-* **Conformance**: both corelibs. **Cost**: no_std `.text` ≤ +64 B, std Ir/op ±1 %.
+* **Conformance**: both corelibs. **Cost**: no_std `.text` ≤ +64 B, std Ir/op ±1 %
+  on the bench rows (whose unions are scalar-only). Unions with struct, string,
+  array and union options cost the select the product type never had; there the
+  footprint-first rule picks the shape (`#[inline(never)]` on the no_std
+  `<opt>_mut()`, a member below an option bound once per arm), and ARCHITECTURE
+  §11's rust row records what it measured.
 
 ### 5.5 zig
 

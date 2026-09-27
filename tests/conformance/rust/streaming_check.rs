@@ -124,7 +124,8 @@ fn main() {
     m.somestruct.nestedint = 7;
     m.somestruct.nestedstring = "nested-string-straddles".into();
     m.somestruct.nestedstruct.deepint = -99;
-    m.someunion.option1 = 4242;
+    // A union is an enum: the option is selected through its accessor.
+    *m.someunion.option1_mut() = 4242;
 
     // ---- 1. streaming encode is byte-identical -------------------------
 

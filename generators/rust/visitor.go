@@ -64,6 +64,68 @@ type frame struct {
 	// A native row opens no sequence (array_begin), so it adds no frame and no
 	// depth. The std decode stack is sized from the maximum (stdStackCap).
 	depth int
+	// union is set on the fkStruct frame of a UNION value (a field, an option or
+	// an element): its fields are the options, held as enum variants. A leaf
+	// option is stored by assigning its variant to `place` (setLeaf) -- the
+	// switch and the store are one statement -- and every other access goes
+	// through the option's select-if-not-held `<opt>_mut()` (member). utype is
+	// the enum's Rust name.
+	union *ir.NamedType
+	utype string
+	// place is the assignable spelling of a union frame's value: path itself, or
+	// `*path` where path is a `<opt>_mut()` call (a union option of a union).
+	place string
+}
+
+// member is the expression naming field fld of frame fr, for a method call on
+// it (clear, push, reserve_exact) or a field access below it. A union option is
+// reached through its `<opt>_mut()`, which selects it at its default unless it
+// is held (MESSAGE_SPEC §7.4.1) and never resets a held one -- so a repeated or
+// resumed call keeps what was decoded, and a store is correct even where no
+// begin hook selected the option first.
+func member(fr frame, fld *ir.Field) string {
+	if fr.union != nil {
+		return fmt.Sprintf("%s.%s()", fr.path, optMut(fld.Name))
+	}
+	return fr.path + "." + rustIdent(fld.Name)
+}
+
+// viaOption reports whether reaching field fld of frame fr calls a union
+// option's `<opt>_mut()`: fld is an option itself, or the frame lies below one.
+// A path is built from identifiers, `[self._ixN]` and those calls only, so a
+// call in it is always an accessor.
+func viaOption(fr frame, fld *ir.Field) bool {
+	return fr.union != nil || strings.Contains(fr.path, "()")
+}
+
+// memberRef is member(fr, fld) as a `&mut` place, for binding it once
+// (`let _d = …;`). An arm that touches a member more than once binds it when
+// reaching it calls an accessor: each spelled-out access is a call, which the
+// no_std build keeps out of line, and a repeated call cannot be merged.
+func memberRef(fr frame, fld *ir.Field) string {
+	if fr.union != nil {
+		return member(fr, fld)
+	}
+	return "&mut " + member(fr, fld)
+}
+
+// setLeaf is the store of a whole leaf value into field fld of frame fr. In a
+// union it assigns the option's variant: selecting the option and storing its
+// value are one statement, reached only past the §7.3 gate of that callback.
+func setLeaf(fr frame, fld *ir.Field, rhs string) string {
+	if fr.union != nil {
+		return fmt.Sprintf("%s = %s::%s(%s)", fr.place, fr.utype, optVariant(fld.Name), rhs)
+	}
+	return fmt.Sprintf("%s.%s = %s", fr.path, rustIdent(fld.Name), rhs)
+}
+
+// unionOf returns the union named type a struct/union reference points at, or
+// nil for a struct.
+func unionOf(ref *ir.TypeRef) *ir.NamedType {
+	if ref != nil && ref.Target != nil && ref.Target.Category == ir.CatUnion {
+		return ref.Target
+	}
+	return nil
 }
 
 // capOf maps a schema fixed-count bound to a frame's cap: N when the array
@@ -418,18 +480,35 @@ func isNativeArrayElem(k ir.Kind) bool {
 func (g *gen) frames(m *ir.Message) []frame {
 	var out []frame
 	nix := 0 // running number of element-index slots handed out (see frame.ixVar)
-	var walkFields func(depth int, loc, path string, fields []*ir.Field)
+	var walkFields func(depth int, loc, path, place string, fields []*ir.Field, un *ir.NamedType)
 	var addArray func(depth int, loc, path string, elem ir.Kind, ref *ir.TypeRef, items *ir.ArrayElem, elemMaxHas bool, elemMax int64, cap int64)
 
-	walkFields = func(depth int, loc, path string, fields []*ir.Field) {
-		out = append(out, frame{loc: loc, path: path, kind: fkStruct, fields: fields, depth: depth})
+	walkFields = func(depth int, loc, path, place string, fields []*ir.Field, un *ir.NamedType) {
+		fr := frame{loc: loc, path: path, kind: fkStruct, fields: fields, depth: depth}
+		if un != nil {
+			fr.union, fr.utype, fr.place = un, g.typeName(un.Key), place
+		}
+		out = append(out, fr)
 		for _, fld := range fields {
 			switch {
 			case fld.Kind == ir.KindStruct || fld.Kind == ir.KindUnion:
 				cl := loc + "_" + fld.Name
-				walkFields(depth+1, cl, path+"."+rustIdent(fld.Name), fld.Ref.Target.Fields)
+				// Below a union option every path goes through <opt>_mut(); a
+				// union reached that way is assigned through the reference it
+				// returns.
+				cp, cplace := member(fr, fld), member(fr, fld)
+				if un != nil {
+					cplace = "*" + cp
+				}
+				walkFields(depth+1, cl, cp, cplace, fld.Ref.Target.Fields, unionOf(fld.Ref))
 			case fld.Kind == ir.KindArray && isWrapperElem(fld.Elem):
-				addArray(depth+1, loc+"_"+fld.Name, path+"."+rustIdent(fld.Name), fld.Elem, fld.ElemRef, fld.ElemItems, fld.ElemMaxHas, fld.ElemMax, capOf(fld.HasCount, fld.Count))
+				// An array frame's path is taken by reference (`&mut path`) and
+				// indexed, so a union option's is the dereferenced accessor.
+				ap := member(fr, fld)
+				if un != nil {
+					ap = "(*" + ap + ")"
+				}
+				addArray(depth+1, loc+"_"+fld.Name, ap, fld.Elem, fld.ElemRef, fld.ElemItems, fld.ElemMaxHas, fld.ElemMax, capOf(fld.HasCount, fld.Count))
 			}
 		}
 	}
@@ -452,7 +531,8 @@ func (g *gen) frames(m *ir.Message) []frame {
 			ix := fmt.Sprintf("_ix%d", nix)
 			nix++
 			out = append(out, frame{loc: loc, path: path, kind: fkStructArr, elemLoc: el, cap: cap, ixVar: ix, depth: depth})
-			walkFields(depth+1, el, fmt.Sprintf("%s[self.%s]", path, ix), ref.Target.Fields)
+			ep := fmt.Sprintf("%s[self.%s]", path, ix)
+			walkFields(depth+1, el, ep, ep, ref.Target.Fields, unionOf(ref))
 		case ir.KindArray:
 			// The element is an inner array (items). A native inner row is handled by
 			// a single wrapper frame (array_begin opens the row the id names, elements
@@ -474,7 +554,7 @@ func (g *gen) frames(m *ir.Message) []frame {
 		}
 	}
 
-	walkFields(0, "Root", "self.m", m.Fields)
+	walkFields(0, "Root", "self.m", "self.m", m.Fields, nil)
 	return out
 }
 
@@ -1236,9 +1316,9 @@ func (g *gen) emitVisitor(f *rfile, name string, fields []*ir.Field) {
 			for _, fld := range fr.fields {
 				switch {
 				case fld.Kind == ir.KindU8 || fld.Kind == ir.KindU16 || fld.Kind == ir.KindU32 || fld.Kind == ir.KindU64 || fld.Kind == ir.KindBitfield:
-					arms.line("            (_Loc::%s, %d) => { %s%s.%s = value as %s },", fr.loc, fld.ID, widthGuard(fld.Kind, fld.Ref), fr.path, rustIdent(fld.Name), g.rustType(fld))
+					arms.line("            (_Loc::%s, %d) => { %s%s },", fr.loc, fld.ID, widthGuard(fld.Kind, fld.Ref), setLeaf(fr, fld, "value as "+g.rustType(fld)))
 				case fld.Kind == ir.KindBool:
-					arms.line("            (_Loc::%s, %d) => %s.%s = value != 0,", fr.loc, fld.ID, fr.path, rustIdent(fld.Name))
+					arms.line("            (_Loc::%s, %d) => %s,", fr.loc, fld.ID, setLeaf(fr, fld, "value != 0"))
 				case fld.Kind == ir.KindArray && isUnsignedElem(fld.Elem):
 					g.emitNativeArrayStore(arms, fr, fld, fmt.Sprintf("value as %s", numRustType(fld.Elem)))
 				case fld.Kind == ir.KindArray && fld.Elem == ir.KindBool:
@@ -1275,9 +1355,9 @@ func (g *gen) emitVisitor(f *rfile, name string, fields []*ir.Field) {
 			for _, fld := range fr.fields {
 				switch {
 				case fld.Kind == ir.KindI8 || fld.Kind == ir.KindI16 || fld.Kind == ir.KindI32 || fld.Kind == ir.KindI64:
-					arms.line("            (_Loc::%s, %d) => { %s%s.%s = value as %s },", fr.loc, fld.ID, widthGuard(fld.Kind, fld.Ref), fr.path, rustIdent(fld.Name), g.rustType(fld))
+					arms.line("            (_Loc::%s, %d) => { %s%s },", fr.loc, fld.ID, widthGuard(fld.Kind, fld.Ref), setLeaf(fr, fld, "value as "+g.rustType(fld)))
 				case fld.Kind == ir.KindEnum:
-					arms.line("            (_Loc::%s, %d) => { %s%s.%s = value as %s },", fr.loc, fld.ID, widthGuard(fld.Kind, fld.Ref), fr.path, rustIdent(fld.Name), enumBacking(fld.Ref.Target))
+					arms.line("            (_Loc::%s, %d) => { %s%s },", fr.loc, fld.ID, widthGuard(fld.Kind, fld.Ref), setLeaf(fr, fld, "value as "+enumBacking(fld.Ref.Target)))
 				case fld.Kind == ir.KindArray && isSignedElem(fld.Elem):
 					g.emitNativeArrayStore(arms, fr, fld, fmt.Sprintf("value as %s", numRustType(fld.Elem)))
 				case fld.Kind == ir.KindArray && fld.Elem == ir.KindEnum:
@@ -1342,9 +1422,16 @@ func (g *gen) emitVisitor(f *rfile, name string, fields []*ir.Field) {
 					f.line("            (_Loc::%s, _) => { %smatch sofab::seq::reserve_elem(&mut %s, id, %s) { Ok(_e) => { _e.clear(); let _ = _e.push_str(_s); if _e.len() != _s.len() { self.err = true; } } Err(_e) => { %s } } }", fr.loc, g.limGate(fr.cap), fr.path, g.seqBound(fr.cap), seqRefuse)
 				}
 				for _, fld := range fr.fields {
-					if fld.Kind == ir.KindString {
-						f.line("            (_Loc::%s, %d) => { %s.%s.clear(); let _ = %s.%s.push_str(_s); if %s.%s.len() != _s.len() { self.err = true; } }", fr.loc, fld.ID, fr.path, rustIdent(fld.Name), fr.path, rustIdent(fld.Name), fr.path, rustIdent(fld.Name))
+					if fld.Kind != ir.KindString {
+						continue
 					}
+					if viaOption(fr, fld) {
+						// A union option is selected here, at the completion store,
+						// once the whole payload is assembled -- never per chunk.
+						f.line("            (_Loc::%s, %d) => { let _d = %s; _d.clear(); let _ = _d.push_str(_s); if _d.len() != _s.len() { self.err = true; } }", fr.loc, fld.ID, memberRef(fr, fld))
+						continue
+					}
+					f.line("            (_Loc::%s, %d) => { %s.%s.clear(); let _ = %s.%s.push_str(_s); if %s.%s.len() != _s.len() { self.err = true; } }", fr.loc, fld.ID, fr.path, rustIdent(fld.Name), fr.path, rustIdent(fld.Name), fr.path, rustIdent(fld.Name))
 				}
 			}
 			f.line("            _ => {}")
@@ -1365,7 +1452,7 @@ func (g *gen) emitVisitor(f *rfile, name string, fields []*ir.Field) {
 				}
 				for _, fld := range fr.fields {
 					if fld.Kind == ir.KindString {
-						f.line("            (_Loc::%s, %d) => %s.%s = _s,", fr.loc, fld.ID, fr.path, rustIdent(fld.Name))
+						f.line("            (_Loc::%s, %d) => %s,", fr.loc, fld.ID, setLeaf(fr, fld, "_s"))
 					}
 				}
 			}
@@ -1411,9 +1498,14 @@ func (g *gen) emitVisitor(f *rfile, name string, fields []*ir.Field) {
 					f.line("            (_Loc::%s, _) => { %smatch sofab::seq::reserve_elem(&mut %s, id, %s) { Ok(_e) => { _e.clear(); let _ = _e.extend_from_slice(_b); if _e.len() != total { self.err = true; } } Err(_e) => { %s } } }", fr.loc, g.limGate(fr.cap), fr.path, g.seqBound(fr.cap), seqRefuse)
 				}
 				for _, fld := range fr.fields {
-					if fld.Kind == ir.KindBlob {
-						f.line("            (_Loc::%s, %d) => { %s.%s.clear(); let _ = %s.%s.extend_from_slice(_b); if %s.%s.len() != total { self.err = true; } }", fr.loc, fld.ID, fr.path, rustIdent(fld.Name), fr.path, rustIdent(fld.Name), fr.path, rustIdent(fld.Name))
+					if fld.Kind != ir.KindBlob {
+						continue
 					}
+					if viaOption(fr, fld) {
+						f.line("            (_Loc::%s, %d) => { let _d = %s; _d.clear(); let _ = _d.extend_from_slice(_b); if _d.len() != total { self.err = true; } }", fr.loc, fld.ID, memberRef(fr, fld))
+						continue
+					}
+					f.line("            (_Loc::%s, %d) => { %s.%s.clear(); let _ = %s.%s.extend_from_slice(_b); if %s.%s.len() != total { self.err = true; } }", fr.loc, fld.ID, fr.path, rustIdent(fld.Name), fr.path, rustIdent(fld.Name), fr.path, rustIdent(fld.Name))
 				}
 			}
 			f.line("            _ => {}")
@@ -1429,7 +1521,7 @@ func (g *gen) emitVisitor(f *rfile, name string, fields []*ir.Field) {
 				}
 				for _, fld := range fr.fields {
 					if fld.Kind == ir.KindBlob {
-						f.line("            (_Loc::%s, %d) => %s.%s = _b,", fr.loc, fld.ID, fr.path, rustIdent(fld.Name))
+						f.line("            (_Loc::%s, %d) => %s,", fr.loc, fld.ID, setLeaf(fr, fld, "_b"))
 					}
 				}
 			}
@@ -1491,7 +1583,9 @@ func (g *gen) emitVisitor(f *rfile, name string, fields []*ir.Field) {
 				for _, fld := range fr.fields {
 					if fld.Kind == ir.KindArray && isNativeArrayElem(fld.Elem) {
 						kp := arrayKindPat(fld.Elem)
-						clear := fmt.Sprintf("%s.%s.clear()", fr.path, rustIdent(fld.Name))
+						// In a union this is also the switch: member() selects the
+						// option, reached only past the kind-keyed pattern (§7.3).
+						clear := member(fr, fld) + ".clear()"
 						if fld.HasCount {
 							// Over-count reject at the count header (generator#216 / F-0032):
 							// a wire element count above the schema `count` N is INVALID
@@ -1513,7 +1607,12 @@ func (g *gen) emitVisitor(f *rfile, name string, fields []*ir.Field) {
 							// Without the disarm they were pushed into a container the schema
 							// bounds at N -- 8 MB for a forged count of a million, on a field
 							// whose declared storage is 32 bytes.
-							f.line("            (%s, _Loc::%s, %d) => { %s%s%s },", kp, fr.loc, fld.ID, fillReject(fmt.Sprintf("count > %d", fld.Count), "inv"), clear, g.reserveCount(fmt.Sprintf("%s.%s", fr.path, rustIdent(fld.Name)), fld.Count))
+							reserve := g.reserveCount(member(fr, fld), fld.Count)
+							if reserve != "" && viaOption(fr, fld) {
+								// clear + pre-size: bind the accessor's result once.
+								clear, reserve = fmt.Sprintf("let _d = %s; _d.clear()", memberRef(fr, fld)), g.reserveCount("_d", fld.Count)
+							}
+							f.line("            (%s, _Loc::%s, %d) => { %s%s%s },", kp, fr.loc, fld.ID, fillReject(fmt.Sprintf("count > %d", fld.Count), "inv"), clear, reserve)
 							continue
 						}
 						// Unbounded array under an active receiver cap (generator#102):
@@ -1588,10 +1687,15 @@ func (g *gen) emitVisitor(f *rfile, name string, fields []*ir.Field) {
 			case fkStruct:
 				for _, fld := range fr.fields {
 					switch {
+					case (fld.Kind == ir.KindStruct || fld.Kind == ir.KindUnion) && fr.union != nil:
+						// A struct/union option is selected where its frame opens,
+						// so an empty frame still switches (MESSAGE_SPEC §7.4.1); a
+						// held one is kept and its scope continues (§7.4 merge).
+						add("            (_Loc::%s, %d) => { %s; _Loc::%s },", fr.loc, fld.ID, member(fr, fld), fr.loc+"_"+fld.Name)
 					case fld.Kind == ir.KindStruct || fld.Kind == ir.KindUnion:
 						add("            (_Loc::%s, %d) => _Loc::%s,", fr.loc, fld.ID, fr.loc+"_"+fld.Name)
 					case fld.Kind == ir.KindArray && isWrapperElem(fld.Elem):
-						add("            (_Loc::%s, %d) => { %s.%s.clear(); _Loc::%s },", fr.loc, fld.ID, fr.path, rustIdent(fld.Name), fr.loc+"_"+fld.Name)
+						add("            (_Loc::%s, %d) => { %s.clear(); _Loc::%s },", fr.loc, fld.ID, member(fr, fld), fr.loc+"_"+fld.Name)
 					}
 				}
 			case fkStructArr:
@@ -1925,7 +2029,7 @@ func (g *gen) fixlenBeginArms(fs []frame, kind ir.Kind, capName string) []string
 // a heapless Vec<_, N> only -- its push drops what does not fit -- and false of
 // the std Vec<T> this same arm serves, which grew to the whole announced count.
 func (g *gen) emitNativeArrayStore(f *rfile, fr frame, fld *ir.Field, rhs string) {
-	store := g.pushExpr(fr.path+"."+rustIdent(fld.Name), rhs)
+	store := g.pushExpr(member(fr, fld), rhs)
 	if g.limits.arrayHas && !fld.HasCount {
 		store = g.limArrayStore(store)
 	}
@@ -2164,7 +2268,7 @@ func (g *gen) emitFloatVisit(f *rfile, fs []frame, kind ir.Kind, cb, rtype strin
 		for _, fld := range fr.fields {
 			switch {
 			case fld.Kind == kind:
-				f.line("            (_Loc::%s, %d) => %s.%s = value,", fr.loc, fld.ID, fr.path, rustIdent(fld.Name))
+				f.line("            (_Loc::%s, %d) => %s,", fr.loc, fld.ID, setLeaf(fr, fld, "value"))
 			case fld.Kind == ir.KindArray && fld.Elem == kind:
 				g.emitNativeArrayStore(f, fr, fld, "value")
 			}
