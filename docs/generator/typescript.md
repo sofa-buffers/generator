@@ -113,6 +113,152 @@ In JSON, a `bigint`-carried bitfield is a decimal **string**, as `u64` is under
 `int64: bigint` — `fromJSON` accepts both the string and a plain number. A
 `number`-carried one is a plain JSON number.
 
+## Unions
+
+A `union` holds exactly one of its options. It is a class of its own whose
+option slots are private, so an option is only reached through the members
+below and two options cannot be set side by side:
+
+```yaml
+shape:
+  id: 3
+  type: union
+  default_id: 2
+  oneof:
+    num:  { id: 0, type: u16, default: 5 }
+    name: { id: 1, type: string, maxlen: 16 }
+    pt:   { id: 2, type: struct, fields: { x: { id: 0, type: i32, default: 7 }, y: { id: 1, type: i32 } } }
+    tags: { id: 3, type: array, items: { type: string, count: 4, maxlen: 8 } }
+```
+
+```ts
+export class MShape {
+  static readonly NUM_ID = 0;
+  static readonly NAME_ID = 1;
+  static readonly PT_ID = 2;
+  static readonly TAGS_ID = 3;
+
+  get which(): number;
+
+  get num(): number;
+  set num(v: number);
+  hasNum(): boolean;
+
+  get name(): string;
+  set name(v: string);
+  hasName(): boolean;
+
+  get pt(): MShapePt;
+  set pt(v: MShapePt);
+  hasPt(): boolean;
+  mutablePt(): MShapePt;
+
+  get tags(): string[];
+  set tags(v: string[]);
+  hasTags(): boolean;
+  mutableTags(): string[];
+
+  clear(): void;
+}
+```
+
+| operation | TypeScript |
+|---|---|
+| which option is held | `x.which` → the option's id |
+| option ids | `MShape.PT_ID` (`<OPTION>_ID` constants) |
+| test | `x.hasPt()` |
+| read | `x.pt` |
+| select with a value | `x.num = 7` |
+| select at the default and edit in place | `x.mutablePt().y = 2` |
+| back to the default | `x.clear()` |
+
+```ts
+const m = new M();          // m.shape holds pt at its default: {x: 7, y: 0}
+m.shape.num = 7;            // now num = 7; pt is no longer held
+m.shape.mutablePt().y = 2;  // pt again, from its default: {x: 7, y: 2}
+if (m.shape.hasPt()) {
+  use(m.shape.pt.x);
+}
+switch (m.shape.which) {
+  case MShape.NUM_ID: use(m.shape.num); break;
+  case MShape.PT_ID:  use(m.shape.pt.y); break;
+}
+m.shape.clear();            // pt at its default again
+```
+
+Each option has a property of its own, typed as a field of that kind would be —
+`num` is a `number`, `pt` an `MShapePt` — so a numeric option is never held in a
+property that also holds strings or objects.
+
+**Reading** an option that is not held returns that option's default — a new
+struct or union at its default, an empty array, an empty `Uint8Array` for a
+blob, the option's declared default for a number — and changes nothing; it does
+not select the option.
+
+**Assigning** an option selects that option with the value assigned; the option
+held before is no longer held, and whatever it held is let go.
+**`mutable<Option>()`** (struct and union options, and arrays whose elements are
+strings, blobs, structs, unions or arrays) selects the option at its own
+default if another one is held, and returns it. If the option is already held it
+is returned as it is, untouched. A numeric array option (a typed array, or a
+`Long[]`) has no `mutable<Option>()`: select it by assigning an array, and change
+its elements through the array the getter returns while it is held.
+
+**64-bit options** follow the [`int64`](#int64) mode like any field: a `bigint`,
+a `Long` or a `number`. Under `long` and `number` a 64-bit option accepts
+`Long | bigint | number` (and a 64-bit array option any mix of those) and
+converts once, on assignment, as a message's own 64-bit field does.
+
+**fp32 options** keep the wire bytes of a decoded NaN beside the value, as an
+fp32 field does: `x.<option>Fp32Raw` (`null` while another option is held).
+Assigning the value drops them; assigning the bytes selects the option.
+
+**Ownership.** Assigning an option keeps the object it is given, as assigning a
+field does: after `x.pt = p`, `x.pt` returns that same `p` while `pt` is held.
+Selecting a struct, union or array option that is not held — through
+`mutable<Option>()`, by decoding into the union, or by `clear()` for the
+`default_id` option — always starts from a new object at the option's default;
+an object obtained earlier is never reset behind your back, it is merely no
+longer held.
+
+**Names.** The members are the option name: the getter/setter `<option>`,
+`has<Option>()`, `mutable<Option>()` and the constant `<OPTION>_ID` (the name
+upper-cased). An option whose name would land on one of the union's own members
+(`which`, `clear`, `serialize`, `isDefault`, `toJSON`, `constructor`, or a
+member every object inherits, such as `toString`) gets a trailing underscore: an
+option `which` is `which_`, with `hasWhich()` and `WHICH_ID`. Two options that
+would produce the same member (`foo_bar` and `fooBar` both give `hasFooBar()`;
+`f`'s `fFp32Raw` and an option named `fFp32Raw`; `a_b` and `A_B` both give
+`A_B_ID`) fail generation, naming both.
+
+**`$defs` unions** used with different `default_id`s are one class per
+`default_id`, named after `<Name>_default_<option>`: `UnionShapeDefaultPt` and
+`UnionShapeDefaultNum`.
+
+**Defaults.** A new union holds the `default_id` option at that option's own
+default; an omitted `default_id` means the option with the lowest id. Each
+element of an array of unions starts the same way — including an element a
+decoded array skips.
+
+**Encode.** Only the held option is written. If it is the `default_id` option
+at its default, the union is at its default and is left out. Any other held
+option is written **even at its own default** — `0`, an empty string, an empty
+blob or array, or an empty frame for a struct option, a union option, or an
+array whose elements are strings, blobs, structs, unions or arrays — because
+the receiver's new union holds `default_id`, and leaving it out would read
+back as that.
+
+**Decode.** The option received last wins. A different option replaces the
+held one and starts from its own default; the held option received again
+continues where it was (a struct or union option merges, anything else is
+replaced). A field whose wire type does not match its option, and an unknown
+id, change nothing.
+
+**JSON.** `toJSON()` returns an object with exactly one member, the held
+option — `{"pt":{"x":7,"y":2}}`, also when that is the `default_id` option at
+its default — and `fromJSON()` selects the option it finds. A union member left
+out of a message's JSON reads as the union's default.
+
 ## Formatting
 
 `sofabgen` can run `prettier` over what it generated, and does so only when you

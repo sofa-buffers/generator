@@ -173,8 +173,8 @@ echo "==> round-trip OK"
 # back is a full-coverage pass that grows with the schema by itself.
 #
 # A string comparison cannot do this job: member order is the backend's choice
-# (cpp orders by schema id, go alphabetically), a union renders every arm, and a
-# blob is base64 here and a byte array there -- all rendering, no wire fact.
+# (cpp orders by schema id, go alphabetically), and a blob is base64 here and a
+# byte array there -- all rendering, no wire fact.
 FULL="$OUT"
 OUT2=$(cd "$WORK/ex" && printf '%s' "$FULL" | npx tsx harness.ts encode myfirstmessage | npx tsx harness.ts decode myfirstmessage)
 python3 "$ROOT/tests/conformance/lib/json_equal.py" "$FULL" "$OUT2" \
@@ -182,11 +182,9 @@ python3 "$ROOT/tests/conformance/lib/json_equal.py" "$FULL" "$OUT2" \
 echo "==> full-message round-trip OK ($(python3 -c "import json,sys;print(len(json.loads(sys.argv[1])))" "$FULL") fields compared as data)"
 # Every field must sit OFF its schema default, or the round trip above compares
 # a default with itself and cannot tell a working decode from a broken one.
-# The union arms beside the selected one are excepted: a union carries exactly
-# one, so the others reading as their default is the rule, not a hole.
 BASE=$(cd "$WORK/ex" && printf '%s' '{}' | npx tsx harness.ts encode myfirstmessage | npx tsx harness.ts decode myfirstmessage)
 python3 "$ROOT/tests/conformance/lib/check_nondefault.py" "$BASE" "$FULL" \
-    --except '$.someunion.option2,$.someunion.option3,$.someunion.option3.unionstructint,$.someunion.option3.unionstructbool' --label "typescript: round-trip fixture" || exit 1
+    --label "typescript: round-trip fixture" || exit 1
 echo "==> round-trip fixture OK (no field sits on its schema default)"
 
 # The two encode-buffer arms (CORELIB_PLAN §5.1). The caller owns the output
@@ -1216,8 +1214,48 @@ printf 'version: 1\nmessages:\n' > "$WORK/repeated.yaml"
 python3 "$ROOT/tests/conformance/lib/check_repeated_id.py" --emit-schema >> "$WORK/repeated.yaml"
 gen "$WORK/repeated.yaml" "$WORK/repeated"
 ln -s "$WORK/ex/node_modules" "$WORK/repeated/node_modules"
-python3 "$ROOT/tests/conformance/lib/check_repeated_id.py" "TypeScript" \
+python3 "$ROOT/tests/conformance/lib/check_repeated_id.py" "TypeScript" --union \
     --cwd "$WORK/repeated" -- npx tsx harness.ts
+
+# MESSAGE_SPEC §4.2 / §7.4.1 (generator#608): a union holds exactly ONE option.
+# A fresh one holds default_id at that option's default; a held option other
+# than default_id is written even at its own default (a struct/union/wrapper
+# option as a present frame); on decode the last correctly-typed option wins, a
+# §7.3-skipped or unknown id never switches, and several children or re-opened
+# frames are legal. The driver forges the frames no encoder emits and prints its
+# own schema.
+#
+# Per int64 mode, each generated on its own: the `q` union holds a u64 and an
+# i64 option, so the three runs execute different code (a bigint, a Long with
+# its (low, high) omission test, a number). The 64-bit values go in as decimal
+# STRINGS (--int64-json string): JSON.parse rounds a bare integer above 2^53
+# before fromJSON sees it, and fromJSON reads a string through BigInt() in every
+# mode. `number` holds a 64-bit scalar in a double, documented as lossy above
+# 2^53, so it runs with --int64-safe.
+#
+# --sizes 1: this harness's streamdecode ignores the chunk size and feeds ONE
+# byte per call, so every byte offset is already a resume point; the driver's
+# other sizes would repeat the identical run.
+#
+# union_api_check.ts then drives the generated union API itself (accessors,
+# select-if-not-held, what a real switch builds and releases, clear()), which
+# no wire comparison reaches.
+echo "==> §4.2/§7.4.1 tagged unions: one option held, last option wins (generator#608)"
+python3 "$ROOT/tests/conformance/lib/check_union.py" --emit-schema > "$WORK/union.yaml"
+for mode in bigint long number; do
+    gen "$WORK/union.yaml" "$WORK/union-$mode" "$WORK/cfg_$mode.yaml"
+    ln -s "$WORK/ex/node_modules" "$WORK/union-$mode/node_modules"
+    # Dropped in before the typecheck, so tsc checks it against this mode's API.
+    cp "$ROOT/tests/conformance/typescript/union_api_check.ts" "$WORK/union-$mode/"
+    tsc_strict "$WORK/union-$mode"
+    safe=""
+    [ "$mode" = number ] && safe="--int64-safe"
+    python3 "$ROOT/tests/conformance/lib/check_union.py" "TypeScript int64: $mode" \
+        --int64-json string $safe --sizes 1 \
+        --cwd "$WORK/union-$mode" -- npx tsx harness.ts
+    ( cd "$WORK/union-$mode" && npx tsx union_api_check.ts ) \
+        || { echo "FAIL: union API (int64: $mode)"; exit 1; }
+done
 
 # Nested defaults (generator#609): absence reads as the schema's defaults at every
 # depth and inside a struct array's element -- asserted against the driver's own
@@ -1285,6 +1323,7 @@ format_gen typescript "$WORK/fmt/closed" --config "$WORK/cfg.yaml" --in "$WORK/c
 format_gen typescript "$WORK/fmt/arrlen" --config "$WORK/cfg.yaml" --in "$WORK/arrlen.yaml"
 format_gen typescript "$WORK/fmt/repeated" --config "$WORK/cfg.yaml" --in "$WORK/repeated.yaml"
 for mode in bigint long number; do
+    format_gen typescript "$WORK/fmt/union-$mode" --config "$WORK/cfg_$mode.yaml" --in "$WORK/union.yaml"
     format_gen typescript "$WORK/fmt/i64-$mode" --config "$WORK/cfg_$mode.yaml" --in "$WORK/i64.yaml"
     format_gen typescript "$WORK/fmt/arrlen-$mode" --config "$WORK/cfg_$mode.yaml" --in "$WORK/arrlen.yaml"
 done

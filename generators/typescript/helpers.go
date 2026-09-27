@@ -652,7 +652,11 @@ func (g *gen) emitJSON(f *tsfile, name string, fields []*ir.Field) {
 }
 
 func (g *gen) toJSONExpr(f *ir.Field) string {
-	acc := g.storage("this", f)
+	return g.toJSONExprAt(f, g.storage("this", f))
+}
+
+// toJSONExprAt is toJSONExpr over the value at acc.
+func (g *gen) toJSONExprAt(f *ir.Field, acc string) string {
 	switch f.Kind {
 	case ir.KindU64, ir.KindI64:
 		if g.longScalars() {
@@ -725,7 +729,12 @@ func (g *gen) tsArrayToJSON(val string, elem ir.Kind, ref *ir.TypeRef, items *ir
 }
 
 func (g *gen) fromJSONStmt(f *ir.Field) string {
-	acc := "o." + f.Name
+	return g.fromJSONStmtAt(f, "o."+f.Name)
+}
+
+// fromJSONStmtAt is fromJSONStmt assigning to acc, a public property (a setter
+// for a Long-backed field, which converts).
+func (g *gen) fromJSONStmtAt(f *ir.Field, acc string) string {
 	src := fmt.Sprintf("d[%q]", f.Name)
 	switch f.Kind {
 	case ir.KindU64, ir.KindI64:

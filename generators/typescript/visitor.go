@@ -39,6 +39,9 @@ type tsScope struct {
 	fields   []*ir.Field
 	path     string
 	seqChild map[int64]int // field id -> scope entered by its SEQUENCE_START
+	// union is set when the object is a union: its fields are OPTIONS, reached
+	// through the union's accessors (memberAcc), each store selecting its option.
+	union *unionShape
 
 	// Array scope: elements dispatch by index.
 	isArr      bool
@@ -61,23 +64,28 @@ type tsScopeSet struct{ scopes []*tsScope }
 
 // buildScopes walks a class's tree and assigns one scope per sequence-framed
 // location reachable from it, rooted at the class itself.
-func (g *gen) buildScopes(typeName string, fields []*ir.Field) []*tsScope {
+func (g *gen) buildScopes(typeName string, nt *ir.NamedType) []*tsScope {
 	ss := &tsScopeSet{}
-	ss.object(g, typeName, "this.o", fields)
+	ss.object(g, typeName, "this.o", nt)
 	return ss.scopes
 }
 
-func (ss *tsScopeSet) object(g *gen, locName, path string, fields []*ir.Field) int {
+// object adds the scope of one message, struct or union (nt) and, below it, the
+// scopes its sequence-framed fields open.
+func (ss *tsScopeSet) object(g *gen, locName, path string, nt *ir.NamedType) int {
 	sc := &tsScope{
 		id: len(ss.scopes), name: "_L_" + locName,
-		fields: fields, path: path, seqChild: map[int64]int{}, child: -1, parent: -1,
+		fields: nt.Fields, path: path, seqChild: map[int64]int{}, child: -1, parent: -1,
+	}
+	if nt.Category == ir.CatUnion {
+		sc.union = g.unionShapeOf(nt.Key, nt)
 	}
 	ss.scopes = append(ss.scopes, sc)
-	for _, fld := range fields {
+	for _, fld := range nt.Fields {
 		switch fld.Kind {
 		case ir.KindStruct, ir.KindUnion:
 			sc.seqChild[fld.ID] = ss.object(g, locName+"_"+fld.Name,
-				g.visStorage(path, fld), fld.Ref.Target.Fields)
+				g.memberPath(sc, fld), fld.Ref.Target)
 			ss.scopes[sc.seqChild[fld.ID]].parent = sc.id
 		case ir.KindArray:
 			// A native scalar array arrives element-wise through arrayBegin /
@@ -85,7 +93,7 @@ func (ss *tsScopeSet) object(g *gen, locName, path string, fields []*ir.Field) i
 			// scope of its own.
 			if !nativeArrayElem(fld.Elem) {
 				sc.seqChild[fld.ID] = ss.array(g, locName+"_"+fld.Name,
-					g.visStorage(path, fld), fld.Name,
+					g.memberAcc(sc, fld), fld.Name,
 					fld.Elem, fld.ElemRef, fld.ElemItems,
 					capOf(fld.HasCount, fld.Count), fld.ElemMaxHas, fld.ElemMax)
 				ss.scopes[sc.seqChild[fld.ID]].parent = sc.id
@@ -118,7 +126,7 @@ func (ss *tsScopeSet) array(g *gen, locName, arrPath, loc string, elem ir.Kind, 
 		// UTF-8 decode. Generated code only routes the two events to it.
 	case ir.KindStruct, ir.KindUnion:
 		sc.ix = fmt.Sprintf("_ix%d", sc.id)
-		sc.child = ss.object(g, locName+"_e", fmt.Sprintf("%s[this.%s]!", arrPath, sc.ix), ref.Target.Fields)
+		sc.child = ss.object(g, locName+"_e", fmt.Sprintf("%s[this.%s]!", arrPath, sc.ix), ref.Target)
 		ss.scopes[sc.child].parent = sc.id
 	case ir.KindArray:
 		// A native row arrives whole through arrayBegin/array<kind> at THIS scope,
@@ -151,6 +159,39 @@ func (g *gen) visStorage(recv string, f *ir.Field) string {
 	return recv + "." + f.Name
 }
 
+// memberAcc is the expression a scope's field f is read and stored through: the
+// field itself on a message or struct (visStorage), and on a union the option's
+// public property -- its setter SELECTS the option, which is the whole of
+// MESSAGE_SPEC §7.4.1's switch for every kind that is stored whole (a scalar, a
+// string, a blob, a native array, a wrapper array's fresh destination). Every
+// hook that stores through it has already passed the §7.3 gate for the option's
+// kind: the typed callbacks by construction, arrayBegin behind its kind test.
+func (g *gen) memberAcc(sc *tsScope, f *ir.Field) string {
+	if sc.union != nil {
+		return sc.path + "." + sc.union.byField[f].prop
+	}
+	return g.visStorage(sc.path, f)
+}
+
+// memberPath is the object a struct/union field's own scope stores into. On a
+// union it is the option's mutable<Opt>(), which selects the option at its
+// default unless it is held and never touches a held one, so every store below it
+// lands on the held object whether or not the begin arm ran in this feed.
+func (g *gen) memberPath(sc *tsScope, f *ir.Field) string {
+	if sc.union != nil {
+		return fmt.Sprintf("%s.mutable%s()", sc.path, sc.union.byField[f].base)
+	}
+	return g.visStorage(sc.path, f)
+}
+
+// unionLongBacked reports whether f is a union option whose setter CONVERTS
+// (a Long-backed option: it accepts Long | bigint | number and builds its Long
+// storage from that), so the decoder cannot hand it a destination and keep
+// filling that one: it assigns an empty value and reads the stored one back.
+func unionLongBacked(g *gen, sc *tsScope, f *ir.Field) bool {
+	return sc.union != nil && g.longBacked(f)
+}
+
 // visitorName is the flat visitor class emitted for one generated type.
 func visitorName(typeName string) string { return "_" + typeName + "Vis" }
 
@@ -176,8 +217,8 @@ func (g *gen) emitDecode(f *tsfile, name string) {
 
 // emitVisitor writes the flat visitor class for one generated type, preceded by
 // its location constants.
-func (g *gen) emitVisitor(f *tsfile, name string, fields []*ir.Field) {
-	scopes := g.buildScopes(name, fields)
+func (g *gen) emitVisitor(f *tsfile, name string, nt *ir.NamedType) {
+	scopes := g.buildScopes(name, nt)
 
 	f.line("// Dispatch locations for %s: one per sequence-framed scope in its tree.", name)
 	f.line("// A field id is only unique WITHIN a scope -- a nested sequence opens a fresh")
@@ -461,13 +502,22 @@ func (g *gen) objSeqArm(sc *tsScope, scopes []*tsScope) []string {
 			// empty rather than merging into whatever the defaults put there. The
 			// destination is the field on THIS scope's object (sc.path), not on the
 			// message: a wrapper array inside a nested struct/union lands there.
-			acc := g.visStorage(sc.path, fld)
-			b = fmt.Sprintf("    case %d: { const _t: %s = []; %s = _t; ", fld.ID, g.arrElemType(ch), acc)
+			acc := g.memberAcc(sc, fld)
+			if unionLongBacked(g, sc, fld) {
+				b = fmt.Sprintf("    case %d: { %s = []; const _t = %s; ", fld.ID, acc, acc)
+			} else {
+				b = fmt.Sprintf("    case %d: { const _t: %s = []; %s = _t; ", fld.ID, g.arrElemType(ch), acc)
+			}
 			// The collector is bound HERE, over the destination this arm just
 			// built, so the element arm below always finds one bound to the current
 			// array -- which is also what §7.4's replacement needs: a re-opened
 			// array field must not keep collecting into the destination it dropped.
 			b += fmt.Sprintf("this.%s = %s; ", ch.seq, g.seqCtor(ch, "_t"))
+		} else if sc.union != nil {
+			// A struct/union option: select it (at its default unless it is held,
+			// which is left alone, so a re-opened or repeated option merges, §7.4)
+			// even when its frame turns out empty.
+			b = fmt.Sprintf("    case %d: { %s; ", fld.ID, g.memberPath(sc, fld))
 		} else {
 			b = fmt.Sprintf("    case %d: { ", fld.ID)
 		}
@@ -662,7 +712,7 @@ func (g *gen) emitScalarCb(f *tsfile, scopes []*tsScope, cb string, in kindSet) 
 
 // scalarArm renders one field's store inside an integer callback.
 func (g *gen) scalarArm(sc *tsScope, x *ir.Field, cb string) string {
-	acc := g.visStorage(sc.path, x)
+	acc := g.memberAcc(sc, x)
 	switch x.Kind {
 	case ir.KindBool:
 		return fmt.Sprintf("case %d: %s = Boolean(v); break;", x.ID, acc)
@@ -751,10 +801,16 @@ func (g *gen) emitFpCb(f *tsfile, scopes []*tsScope) {
 		}
 		var i32, i64 []string
 		for _, x := range sc.fields {
-			acc := g.visStorage(sc.path, x)
+			acc := g.memberAcc(sc, x)
 			switch x.Kind {
 			case ir.KindFP32:
-				if fp32RawCompanion(x) {
+				if sc.union != nil {
+					// The value's setter selects the option and drops any bits an
+					// earlier value left; the bits of a NaN go in after it.
+					o := sc.union.byField[x]
+					i32 = append(i32, fmt.Sprintf("    case %d: { const _u = %s; _u.%s = v; if (Number.isNaN(v)) _u.%s = fp32RawBytes(bits); break; }",
+						x.ID, sc.path, o.prop, o.raw))
+				} else if fp32RawCompanion(x) {
 					i32 = append(i32, fmt.Sprintf("    case %d: { %s = v; %s = Number.isNaN(v) ? fp32RawBytes(bits) : null; break; }",
 						x.ID, acc, g.fp32RawStorage(sc.path, x)))
 				} else {
@@ -863,7 +919,12 @@ func (g *gen) emitPayloadCb(f *tsfile, scopes []*tsScope, cb string) {
 			if x.Kind != want {
 				continue
 			}
-			acc := g.visStorage(sc.path, x)
+			// On a union this is the option's setter: the option is selected at the
+			// completion store, the one point past the subtype gate (a blob at a
+			// string option never reaches this callback) that fires exactly once per
+			// occurrence -- a zero-length payload included, which corelib-ts
+			// delivers as one empty range.
+			acc := g.memberAcc(sc, x)
 			var store string
 			if want == ir.KindString {
 				// A payload that arrived whole is transcoded straight out of the
@@ -1187,7 +1248,7 @@ func (g *gen) emitArrayCbs(f *tsfile, scopes []*tsScope) {
 			if x.Kind != ir.KindArray || !nativeArrayElem(x.Elem) {
 				continue
 			}
-			acc := g.visStorage(sc.path, x)
+			acc := g.memberAcc(sc, x)
 			cap := capOf(x.HasCount, x.Count)
 			// The kind test comes FIRST, and both of the things after it depend on
 			// that. The corelib routes an array header by id alone, so this arm also
@@ -1203,10 +1264,18 @@ func (g *gen) emitArrayCbs(f *tsfile, scopes []*tsScope) {
 			// Built once, assigned to the field AND kept in the register the offer
 			// and the arrayEnd pass read. A re-opened array id replaces (§7.4), so
 			// both are rebuilt.
-			b += fmt.Sprintf("const _d%s = %s; %s = _d; this.%s = _d; ",
-				g.newArrayDecl(x.Elem, x.ElemRef, g.tsArrayType(x.Elem, x.ElemRef, x.ElemItems)),
-				g.newArrayExpr(x.Elem, x.ElemRef, g.tsArrayType(x.Elem, x.ElemRef, x.ElemItems)),
-				acc, arrayDst(sc, x))
+			//
+			// On a union the store is the option's setter, and it comes only here,
+			// behind the kind test and the count bound: the switch of §7.4.1 happens
+			// for a header that passed §7.3, and never for one that did not.
+			if unionLongBacked(g, sc, x) {
+				b += fmt.Sprintf("%s = []; const _d = %s; this.%s = _d; ", acc, acc, arrayDst(sc, x))
+			} else {
+				b += fmt.Sprintf("const _d%s = %s; %s = _d; this.%s = _d; ",
+					g.newArrayDecl(x.Elem, x.ElemRef, g.tsArrayType(x.Elem, x.ElemRef, x.ElemItems)),
+					g.newArrayExpr(x.Elem, x.ElemRef, g.tsArrayType(x.Elem, x.ElemRef, x.ElemItems)),
+					acc, arrayDst(sc, x))
+			}
 			b += "break; }"
 			ib = append(ib, b)
 

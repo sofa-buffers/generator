@@ -28,6 +28,9 @@ const corelibPkg = "@sofa-buffers/corelib"
 // package.json + tsconfig.
 func (*Backend) Generate(s *ir.Schema, cfg map[string]any) ([]generator.File, error) {
 	g := &gen{schema: s, banner: cfgString(cfg, "tool_banner", "sofabgen"), license: generator.LicenseID(cfg), i64rep: cfgInt64Mode(cfg), limits: resolveLimits(s, cfg), size: generator.NewSizePolicy(cfg)}
+	if err := g.checkUnions(s); err != nil {
+		return nil, err
+	}
 	files := []generator.File{{Path: "message.ts", Content: g.module(s)}}
 	if cfgString(cfg, "emit", "sources") == "project" {
 		files = append(files, g.projectFiles(s, cfg)...)
@@ -373,11 +376,14 @@ func (g *gen) moduleBody(f *tsfile, s *ir.Schema) {
 	}
 	for _, key := range s.NamedOrder {
 		nt := s.Named[key]
-		if nt.Category == ir.CatStruct || nt.Category == ir.CatUnion {
-			// A struct/union serializes a headerless field RUN, not a message, so it
-			// gets no MAX_SIZE and no encode(): bytes handed back from one would not
-			// be a message any decoder could read on its own.
+		// A struct/union serializes a headerless field RUN, not a message, so it
+		// gets no MAX_SIZE and no encode(): bytes handed back from one would not
+		// be a message any decoder could read on its own.
+		switch nt.Category {
+		case ir.CatStruct:
 			g.emitClass(f, g.typeName(key), nt.Summary, nt.Fields, false)
+		case ir.CatUnion:
+			g.emitUnionClass(f, key, nt)
 		}
 	}
 	for _, m := range s.Messages {
@@ -396,11 +402,11 @@ func (g *gen) moduleBody(f *tsfile, s *ir.Schema) {
 		for _, key := range s.NamedOrder {
 			nt := s.Named[key]
 			if nt.Category == ir.CatStruct || nt.Category == ir.CatUnion {
-				g.emitVisitor(vis, g.typeName(key), nt.Fields)
+				g.emitVisitor(vis, g.typeName(key), nt)
 			}
 		}
 		for _, m := range s.Messages {
-			g.emitVisitor(vis, exported(m.Name), m.Fields)
+			g.emitVisitor(vis, exported(m.Name), &ir.NamedType{Category: ir.CatStruct, Fields: m.Fields})
 			g.emitDecoderClass(vis, exported(m.Name))
 		}
 		if len(g.mkName) > 0 {
@@ -731,7 +737,11 @@ func (g *gen) emitIsDefault(f *tsfile, fields []*ir.Field) {
 // fieldIsDefaultExpr is the boolean expression "this field equals its default",
 // i.e. the negation of emitMarshal's write guard for the same field.
 func (g *gen) fieldIsDefaultExpr(fld *ir.Field) string {
-	acc := g.storage("this", fld)
+	return g.fieldIsDefaultExprAt(fld, g.storage("this", fld))
+}
+
+// fieldIsDefaultExprAt is fieldIsDefaultExpr over the value at acc.
+func (g *gen) fieldIsDefaultExprAt(fld *ir.Field, acc string) string {
 	switch fld.Kind {
 	case ir.KindU64, ir.KindI64:
 		// A Long is an object: `===` would compare identity, so the test is the
@@ -779,11 +789,23 @@ func (g *gen) arrayIsDefaultExpr(fld *ir.Field, acc string) string {
 }
 
 func (g *gen) emitMarshal(f *tsfile, fld *ir.Field) {
-	acc := g.storage("this", fld)
 	rawAcc := ""
 	if fp32RawCompanion(fld) {
 		rawAcc = g.fp32RawStorage("this", fld)
 	}
+	g.emitMarshalAt(f, "    ", fld, g.storage("this", fld), rawAcc, false)
+}
+
+// emitMarshalAt writes one field at indent ind, reading its value from acc (and,
+// for an fp32 scalar, its raw-bits companion from rawAcc).
+//
+// forced drops the ≠-default guard: the write happens whatever the value, and a
+// sequence-framed kind (struct, union, wrapper array) closes with the KEEPING
+// end, so an all-default one still reaches the wire as a present, empty frame.
+// Only a union option other than default_id is written that way (MESSAGE_SPEC
+// §4.2): which option is held is information the wire has to carry even at the
+// option's own default. Every ordinary field, and default_id itself, is guarded.
+func (g *gen) emitMarshalAt(f *tsfile, ind string, fld *ir.Field, acc, rawAcc string, forced bool) {
 	var write string
 	switch fld.Kind {
 	case ir.KindU8, ir.KindU16, ir.KindU32, ir.KindBitfield:
@@ -822,13 +844,19 @@ func (g *gen) emitMarshal(f *tsfile, fld *ir.Field) {
 		// writeFp32Raw in corelib-ts by design: writeFixlen with subtype fp32 emits
 		// the identical fixlenHead(id, 4, Fp32) + 4 raw bytes (corelib-ts's own doc
 		// comment on readFp32Raw prescribes this route).
-		f.line("    if (%s !== %s) {", acc, g.tsDefault(fld))
-		f.line("      if (Number.isNaN(%s) && %s !== null && %s.length === 4) {", acc, rawAcc, rawAcc)
-		f.line("        os.writeFixlen(%d, %s, FixlenSubtype.Fp32);", fld.ID, rawAcc)
-		f.line("      } else {")
-		f.line("        os.writeFp32(%d, %s);", fld.ID, acc)
-		f.line("      }")
-		f.line("    }")
+		in := ind
+		if !forced {
+			f.line("%sif (%s !== %s) {", ind, acc, g.tsDefault(fld))
+			in = ind + "  "
+		}
+		f.line("%sif (Number.isNaN(%s) && %s !== null && %s.length === 4) {", in, acc, rawAcc, rawAcc)
+		f.line("%s  os.writeFixlen(%d, %s, FixlenSubtype.Fp32);", in, fld.ID, rawAcc)
+		f.line("%s} else {", in)
+		f.line("%s  os.writeFp32(%d, %s);", in, fld.ID, acc)
+		f.line("%s}", in)
+		if !forced {
+			f.line("%s}", ind)
+		}
 		return
 	case ir.KindFP64:
 		write = fmt.Sprintf("os.writeFp64(%d, %s);", fld.ID, acc)
@@ -838,13 +866,18 @@ func (g *gen) emitMarshal(f *tsfile, fld *ir.Field) {
 		// blob is a leaf: omit when equal to its default (empty if none). An empty
 		// default tests emptiness directly (no per-encode `new Uint8Array()` to
 		// compare against); a non-empty default needs an element-wise elementsEqual.
-		if blobHasNonEmptyDefault(fld) {
-			f.line("    if (!elementsEqual(%s, %s)) {", acc, g.tsDefault(fld))
-		} else {
-			f.line("    if (%s.length !== 0) {", acc)
+		// Forced, the empty value is written as the zero-length payload.
+		if forced {
+			f.line("%sos.writeBlob(%d, %s);", ind, fld.ID, acc)
+			return
 		}
-		f.line("      os.writeBlob(%d, %s);", fld.ID, acc)
-		f.line("    }")
+		if blobHasNonEmptyDefault(fld) {
+			f.line("%sif (!elementsEqual(%s, %s)) {", ind, acc, g.tsDefault(fld))
+		} else {
+			f.line("%sif (%s.length !== 0) {", ind, acc)
+		}
+		f.line("%s  os.writeBlob(%d, %s);", ind, fld.ID, acc)
+		f.line("%s}", ind)
 		return
 	case ir.KindStruct, ir.KindUnion:
 		// MESSAGE_SPEC S2: the != default test is per field and a sequence is no
@@ -854,12 +887,20 @@ func (g *gen) emitMarshal(f *tsfile, fld *ir.Field) {
 		// declared default", evaluated per field and recursively. Closing with the
 		// dropping end therefore omits an all-default nested object instead of
 		// emitting it as an empty wrapper.
-		f.line("    os.writeSequenceBeginLazy(%d);", fld.ID)
-		f.line("    %s.serialize(os);", acc)
-		f.line("    os.writeSequenceEnd();")
+		f.line("%sos.writeSequenceBeginLazy(%d);", ind, fld.ID)
+		f.line("%s%s.serialize(os);", ind, acc)
+		if forced {
+			f.line("%sos.writeSequenceEndKeep();", ind)
+		} else {
+			f.line("%sos.writeSequenceEnd();", ind)
+		}
 		return
 	case ir.KindArray:
-		g.emitMarshalArray(f, fld, acc)
+		g.emitMarshalArray(f, ind, fld, acc, forced)
+		return
+	}
+	if forced {
+		f.line("%s%s", ind, write)
 		return
 	}
 	// Scalar/string/enum/bitfield leaf: always omit when equal to the default;
@@ -869,17 +910,17 @@ func (g *gen) emitMarshal(f *tsfile, fld *ir.Field) {
 		// A Long-backed scalar compares by its halves, not by `!==` (object
 		// identity). Same predicate as isDefault's — one helper, so the writer and
 		// the predicate cannot drift apart.
-		f.line("    if (!(%s)) {", g.longScalarIsDefault(acc, fld))
-		f.line("      %s", write)
-		f.line("    }")
+		f.line("%sif (!(%s)) {", ind, g.longScalarIsDefault(acc, fld))
+		f.line("%s  %s", ind, write)
+		f.line("%s}", ind)
 		return
 	}
-	f.line("    if (%s !== %s) {", acc, g.tsDefault(fld))
-	f.line("      %s", write)
-	f.line("    }")
+	f.line("%sif (%s !== %s) {", ind, acc, g.tsDefault(fld))
+	f.line("%s  %s", ind, write)
+	f.line("%s}", ind)
 }
 
-func (g *gen) emitMarshalArray(f *tsfile, fld *ir.Field, acc string) {
+func (g *gen) emitMarshalArray(f *tsfile, ind string, fld *ir.Field, acc string, forced bool) {
 	// A native scalar array is a leaf field: omit it when equal to its default
 	// (materialized at construction), else when empty. A composite/dynamic-element
 	// array is a wrapper sequence, opened lazily and closed with the dropping end
@@ -890,6 +931,12 @@ func (g *gen) emitMarshalArray(f *tsfile, fld *ir.Field, acc string) {
 	// against the declared default exactly as written — neither side padded to N —
 	// and against the empty collection when no default is declared.
 	if nativeArrayElem(fld.Elem) {
+		if forced {
+			// A held union option: the empty array is written too, as count 0 (an
+			// fp array keeps its fixlen_word, which the corelib writer does).
+			g.marshalArray(f, ind, fmt.Sprintf("%d", fld.ID), acc, fld.Elem, fld.ElemRef, fld.ElemItems, 0, "")
+			return
+		}
 		if def, ok := g.nativeArrayDefault(fld); ok {
 			// Long elements are object identities: compare with the (low, high)
 			// word-pair helper instead of elementsEqual's element !==.
@@ -897,9 +944,9 @@ func (g *gen) emitMarshalArray(f *tsfile, fld *ir.Field, acc string) {
 			if g.longBacked(fld) {
 				eq = "longElementsEqual"
 			}
-			f.line("    if (!%s(%s, %s)) {", eq, acc, def)
+			f.line("%sif (!%s(%s, %s)) {", ind, eq, acc, def)
 		} else {
-			f.line("    if (%s.length !== 0) {", acc)
+			f.line("%sif (%s.length !== 0) {", ind, acc)
 		}
 		// No raw-bits branch for an fp32 array any more: the member is a
 		// `Float32Array` and HOLDS the wire words, so `writeFp32Array` copies them
@@ -907,8 +954,13 @@ func (g *gen) emitMarshalArray(f *tsfile, fld *ir.Field, acc string) {
 		// signaling NaN (§4.6/§6.5). Bit-exact for every value, with nothing
 		// captured beside the numbers and nothing to re-attach. The SCALAR half
 		// stays: a JS number has nowhere to keep the bits.
-		g.marshalArray(f, "      ", fmt.Sprintf("%d", fld.ID), acc, fld.Elem, fld.ElemRef, fld.ElemItems, 0, "")
-		f.line("    }")
+		g.marshalArray(f, ind+"  ", fmt.Sprintf("%d", fld.ID), acc, fld.Elem, fld.ElemRef, fld.ElemItems, 0, "")
+		f.line("%s}", ind)
+		return
+	}
+	if forced {
+		// A held union option: an empty wrapper survives as a present, empty frame.
+		g.marshalArray(f, ind, fmt.Sprintf("%d", fld.ID), acc, fld.Elem, fld.ElemRef, fld.ElemItems, 0, keepAlways)
 		return
 	}
 	// The field-level wrapper frame is dropped when no element is written, and
@@ -919,7 +971,7 @@ func (g *gen) emitMarshalArray(f *tsfile, fld *ir.Field, acc string) {
 	// `if (!eq(value, default)) { ... os.writeSequenceEndKeep(); }` -- so that a
 	// value differing from a non-empty default still reaches the wire as the empty
 	// wrapper, the only encoding of "explicitly empty" (MESSAGE_SPEC S2, S3).
-	g.marshalArray(f, "    ", fmt.Sprintf("%d", fld.ID), acc, fld.Elem, fld.ElemRef, fld.ElemItems, 0, "")
+	g.marshalArray(f, ind, fmt.Sprintf("%d", fld.ID), acc, fld.Elem, fld.ElemRef, fld.ElemItems, 0, "")
 }
 
 // lastElemExpr is the "this element is the array's last" test, at loop position
@@ -936,6 +988,9 @@ func (g *gen) emitMarshalArray(f *tsfile, fld *ir.Field, acc string) {
 // A declared `count: N` changes nothing here. N is a capacity, not a length (§3),
 // so it can never restore an elided tail — the same test applies with or without
 // one.
+// keepAlways is emitSeqEnd's "keep the frame, unconditionally" closer choice.
+const keepAlways = "true"
+
 func lastElemExpr(iv, av string) string {
 	return fmt.Sprintf("%s === %s.length - 1", iv, av)
 }
@@ -954,9 +1009,15 @@ func lastElemExpr(iv, av string) string {
 //     what makes an all-default element sparse like any other default value.
 //     Note this is decided from the position in the VALUE, at run time; the schema
 //     cannot answer it.
+//   - keepAlways — the frame of a held union option other than default_id,
+//     which is written even when empty (MESSAGE_SPEC §4.2).
 func emitSeqEnd(f *tsfile, ind, keepIf string) {
 	if keepIf == "" {
 		f.line("%sos.writeSequenceEnd();", ind)
+		return
+	}
+	if keepIf == keepAlways {
+		f.line("%sos.writeSequenceEndKeep();", ind)
 		return
 	}
 	f.line("%sif (%s) {", ind, keepIf)
