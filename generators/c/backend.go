@@ -1200,6 +1200,17 @@ func (g *gen) emitGuards(h *cfile, m *ir.Message, caps capset, maxField int64, m
 		h.line(`# error "SofaBuffers: message %s %s."`, m.Name, c.msg)
 		h.line("#endif")
 	}
+	if caps.union {
+		// A corelib that predates tagged unions has no SOFAB_OBJECT_DESCR_UNION
+		// at all: without this the .c fails on an undeclared macro "call" in a
+		// static initializer, which names neither the cause nor the fix. The
+		// corelib signals features by what its headers define (it bumps
+		// SOFAB_API_VERSION only on a break), and the macro is exactly what the
+		// generated descriptors use.
+		h.line("#if !defined(SOFAB_OBJECT_DESCR_UNION)")
+		h.line(`# error "SofaBuffers: message %s uses unions (SOFAB_OBJECT_DESCR_UNION), which this corelib-c-cpp predates. Update the corelib."`, m.Name)
+		h.line("#endif")
+	}
 	h.blank()
 	h.line("/* --- descriptor width guard: field ids must fit the configured profile --- */")
 	h.line("#if %d > SOFAB_OBJECT_DESCR_ID_MAX", maxField)

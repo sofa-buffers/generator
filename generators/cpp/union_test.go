@@ -756,3 +756,72 @@ func TestCppUnionCopyStartsNoOption(t *testing.T) {
 		r.run(t, copyYAML, "c.hpp", copyMain, map[string]any{"corelib": "c-cpp", "allow_dynamic": dyn}, san...)
 	}
 }
+
+// TestCppUnionFreeProjectDisablesUnionSupport: a corelib: c-cpp project whose
+// schema has no union compiles corelib-c-cpp with SOFAB_DISABLE_UNION_SUPPORT on
+// every compile line; a union-bearing one, and every corelib: cpp project, never
+// set it. The build half makes the union-free project and checks the flag reached
+// the compiles.
+func TestCppUnionFreeProjectDisablesUnionSupport(t *testing.T) {
+	const plain = `
+version: 1
+messages:
+  p:
+    payload:
+      s: { id: 0, type: struct, fields: { a: { id: 0, type: u8, default: 3 } } }
+      w: { id: 1, type: u8 }
+`
+	mk := unionFiles(t, plain, map[string]any{"corelib": "c-cpp"})["Makefile"]
+	for _, want := range []string{
+		"SOFAB_DEFINES ?= -DSOFAB_DISABLE_UNION_SUPPORT\n",
+		"\t$(CC) $(CSTD) $(SOFAB_DEFINES) $(CFLAGS) -I$(SOFAB_C_DIR)/src/include -c $< -o $@",
+		"\t$(CXX) $(CXXSTD) $(WARNFLAGS) $(SOFAB_DEFINES) $(CXXFLAGS) $(INCLUDES)",
+	} {
+		if !strings.Contains(mk, want) {
+			t.Errorf("union-free c-cpp Makefile missing %q:\n%s", want, mk)
+		}
+	}
+	if strings.Contains(mk, "{{") {
+		t.Errorf("c-cpp Makefile has an unfilled placeholder:\n%s", mk)
+	}
+	for name, cfg := range map[string]map[string]any{
+		"c-cpp with a union": {"corelib": "c-cpp"},
+		"corelib: cpp":       {},
+	} {
+		src := unionShapeYAML
+		if name == "corelib: cpp" {
+			src = plain
+		}
+		got := unionFiles(t, src, cfg)["Makefile"]
+		if strings.Contains(got, "SOFAB_DISABLE_UNION_SUPPORT") || strings.Contains(got, "SOFAB_DEFINES") || strings.Contains(got, "{{") {
+			t.Errorf("%s: Makefile must not set SOFAB_DISABLE_UNION_SUPPORT:\n%s", name, got)
+		}
+	}
+
+	cc := os.Getenv("SOFAB_C_DIR")
+	if cc == "" {
+		t.Skip("set SOFAB_C_DIR to a corelib-c-cpp checkout to run the build half")
+	}
+	for _, tool := range []string{"make", "gcc", "g++"} {
+		if _, err := exec.LookPath(tool); err != nil {
+			t.Skipf("%s not found", tool)
+		}
+	}
+	dir := t.TempDir()
+	for path, content := range unionFiles(t, plain, map[string]any{"corelib": "c-cpp"}) {
+		full := filepath.Join(dir, path)
+		if err := os.MkdirAll(filepath.Dir(full), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(full, []byte(content), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	out, err := exec.Command("make", "-C", dir, "SOFAB_C_DIR="+cc).CombinedOutput()
+	if err != nil {
+		t.Fatalf("union-free c-cpp project build failed:\n%s", out)
+	}
+	if n := strings.Count(string(out), "-DSOFAB_DISABLE_UNION_SUPPORT"); n < 6 {
+		t.Errorf("SOFAB_DISABLE_UNION_SUPPORT reached %d of the 6 compiles:\n%s", n, out)
+	}
+}
