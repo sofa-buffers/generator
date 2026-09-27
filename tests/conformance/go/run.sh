@@ -53,8 +53,8 @@ echo "==> round-trip OK"
 # back is a full-coverage pass that grows with the schema by itself.
 #
 # A string comparison cannot do this job: member order is the backend's choice
-# (cpp orders by schema id, go alphabetically), a union renders every arm, and a
-# blob is base64 here and a byte array there -- all rendering, no wire fact.
+# (cpp orders by schema id, go alphabetically), and a blob is base64 here and a
+# byte array there -- all rendering, no wire fact.
 FULL="$OUT"
 OUT2=$(cd "$WORK/proj" && printf '%s' "$FULL" | GOFLAGS=-mod=mod go run ./harness encode myfirstmessage | GOFLAGS=-mod=mod go run ./harness decode myfirstmessage)
 python3 "$ROOT/tests/conformance/lib/json_equal.py" "$FULL" "$OUT2" \
@@ -62,11 +62,9 @@ python3 "$ROOT/tests/conformance/lib/json_equal.py" "$FULL" "$OUT2" \
 echo "==> full-message round-trip OK ($(python3 -c "import json,sys;print(len(json.loads(sys.argv[1])))" "$FULL") fields compared as data)"
 # Every field must sit OFF its schema default, or the round trip above compares
 # a default with itself and cannot tell a working decode from a broken one.
-# The union arms beside the selected one are excepted: a union carries exactly
-# one, so the others reading as their default is the rule, not a hole.
 BASE=$(cd "$WORK/proj" && printf '%s' '{}' | GOFLAGS=-mod=mod go run ./harness encode myfirstmessage | GOFLAGS=-mod=mod go run ./harness decode myfirstmessage)
 python3 "$ROOT/tests/conformance/lib/check_nondefault.py" "$BASE" "$FULL" \
-    --except '$.someunion.option2,$.someunion.option3,$.someunion.option3.unionstructint,$.someunion.option3.unionstructbool' --label "go: round-trip fixture" || exit 1
+    --label "go: round-trip fixture" || exit 1
 echo "==> round-trip fixture OK (no field sits on its schema default)"
 
 # Streaming decode: the same bytes through the io.Reader-driven entry point
@@ -1043,9 +1041,11 @@ func sample() *message.Myfirstmessage {
 	m.Somestringarray = []string{"a", "bb", "ccc"}
 	m.Someblobarray = [][]byte{{9, 9}, {8}}
 	m.Somestruct.Nestedstring = "nested payload"
-	m.Someunion.Option2 = "union payload"
+	m.Someunion.SetOption2("union payload")
 	m.Somestructwitharray.Label = "struct label"
-	m.Someunionarray = []message.MyfirstmessageSomeunionarrayElem{{Asstring: "union row"}}
+	var row message.MyfirstmessageSomeunionarrayElem
+	row.SetAsstring("union row")
+	m.Someunionarray = []message.MyfirstmessageSomeunionarrayElem{row}
 	m.Somemap = []message.MyfirstmessageSomemapElem{
 		{Key: "first key", Value: 1},
 		{Key: "second key", Value: 2},
@@ -1251,8 +1251,25 @@ python3 "$ROOT/tests/conformance/lib/check_repeated_id.py" --emit-schema >> "$WO
 ( cd "$ROOT" && go run ./cmd/sofabgen --config "$WORK/cfg.yaml" --lang go --in "$WORK/repeated.yaml" --out "$WORK/repeated" )
 sed -i "s#\${SOFAB_GO_CORELIB}#$CORELIB#" "$WORK/repeated/go.mod"
 ( cd "$WORK/repeated" && GOFLAGS=-mod=mod go build -o "$WORK/repeated-harness" ./harness )
-python3 "$ROOT/tests/conformance/lib/check_repeated_id.py" "Go" \
+python3 "$ROOT/tests/conformance/lib/check_repeated_id.py" "Go" --union \
     -- "$WORK/repeated-harness"
+
+# MESSAGE_SPEC §4.2 / §7.4.1 (generator#608): a union holds exactly ONE option.
+# A fresh one holds default_id at that option's default; a held option other
+# than default_id is written even at its own default (a struct/union/wrapper
+# option as a present frame); on decode the last correctly-typed option wins, a
+# §7.3-skipped or unknown id never switches, and several children or re-opened
+# frames are legal. The driver forges the frames no encoder emits and prints its
+# own schema. `--sizes 1`: this harness's streamdecode feeds ONE byte per call
+# (dripReader) whatever split it is handed, so larger splits would repeat the
+# same run under a label that claims otherwise.
+echo "==> §4.2/§7.4.1 tagged unions: one option held, last option wins (generator#608)"
+python3 "$ROOT/tests/conformance/lib/check_union.py" --emit-schema > "$WORK/union.yaml"
+( cd "$ROOT" && go run ./cmd/sofabgen --config "$WORK/cfg.yaml" --lang go --in "$WORK/union.yaml" --out "$WORK/union" )
+sed -i "s#\${SOFAB_GO_CORELIB}#$CORELIB#" "$WORK/union/go.mod"
+( cd "$WORK/union" && GOFLAGS=-mod=mod go build -o "$WORK/union-harness" ./harness )
+python3 "$ROOT/tests/conformance/lib/check_union.py" "Go" --sizes 1 \
+    -- "$WORK/union-harness"
 
 # Nested defaults (generator#609): a default declared inside a struct, at any
 # depth and inside a struct array's element, is what absence means. This backend
@@ -1311,6 +1328,7 @@ format_gen go "$WORK/fmt/closed" --config "$WORK/cfg.yaml" --in "$WORK/closed.ya
 format_gen go "$WORK/fmt/vecskip" --config "$WORK/cfg.yaml" --in "$WORK/vecskip.yaml"
 format_gen go "$WORK/fmt/growth" --config "$WORK/cfg-limits.yaml" --in "$WORK/growth.yaml"
 format_gen go "$WORK/fmt/repeated" --config "$WORK/cfg.yaml" --in "$WORK/repeated.yaml"
+format_gen go "$WORK/fmt/union" --config "$WORK/cfg.yaml" --in "$WORK/union.yaml"
 format_gen_corpus go "$WORK/fmt" --config "$WORK/cfg.yaml"
 check_format go "$WORK/fmt"
 

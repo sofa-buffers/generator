@@ -31,6 +31,9 @@ func (*Backend) Generate(s *ir.Schema, cfg map[string]any) ([]generator.File, er
 		size:     generator.NewSizePolicy(cfg),
 		needsDef: map[string]bool{},
 	}
+	if err := g.checkPackageNames(); err != nil {
+		return nil, err
+	}
 	project := cfgString(cfg, "emit", "sources") == "project"
 	// In a project the package gets its own directory so the harness can import
 	// it; in sources mode the files are emitted flat for the caller to place.
@@ -324,9 +327,11 @@ func (g *gen) typesFile() []byte {
 			g.emitEnum(f, nt)
 		case ir.CatBitfield:
 			g.emitBitfield(f, nt)
-		case ir.CatStruct, ir.CatUnion:
+		case ir.CatStruct:
 			g.emitObject(f, g.typeName(key), nt.Fields)
 			g.emitSetDefaults(f, key, g.typeName(key), nt.Fields)
+		case ir.CatUnion:
+			g.emitUnion(f, nt)
 		}
 	}
 	return g.render(f, "types.go")
@@ -460,7 +465,7 @@ func (g *gen) emitObject(f *gofile, typeName string, fields []*ir.Field) {
 
 	g.emitIsDefault(f, typeName, fields)
 
-	g.emitVisitorMethods(f, typeName, fields)
+	g.emitVisitorMethods(f, typeName, fields, nil)
 }
 
 // emitIsDefault emits the object's all-default predicate. It is the exact
@@ -491,7 +496,11 @@ func (g *gen) emitIsDefault(f *gofile, typeName string, fields []*ir.Field) {
 // fieldIsDefaultExpr is the boolean expression "this field equals its default",
 // i.e. the negation of emitMarshalField's write guard for the same field.
 func (g *gen) fieldIsDefaultExpr(f *gofile, fld *ir.Field) string {
-	acc := "m." + goFieldName(fld.Name)
+	return g.fieldIsDefaultExprAt(f, fld, "m."+goFieldName(fld.Name))
+}
+
+// fieldIsDefaultExprAt is fieldIsDefaultExpr for the value acc.
+func (g *gen) fieldIsDefaultExprAt(f *gofile, fld *ir.Field, acc string) string {
 	switch fld.Kind {
 	case ir.KindBlob:
 		if def, ok := g.defaultLiteral(fld); ok {
@@ -533,7 +542,19 @@ func (g *gen) arrayIsDefaultExpr(f *gofile, fld *ir.Field, acc string) string {
 // ---- per-field marshal/unmarshal ----------------------------------------
 
 func (g *gen) emitMarshalField(f *gofile, fld *ir.Field) {
-	acc := "m." + goFieldName(fld.Name)
+	g.emitMarshalFieldAt(f, fld, "m."+goFieldName(fld.Name), "\t", false)
+}
+
+// emitMarshalFieldAt writes the field whose value is acc, at indent ind.
+//
+// forced drops the ≠-default guard: the value is written whatever it is, a
+// string/blob/compact array as its (possibly empty) payload and a sequence-framed
+// kind (struct, union, wrapper array) closed with WriteSequenceEndKeep, so even an
+// all-default one reaches the wire as a present, empty frame. A union writes its
+// held option that way when that option is not its default_id (MESSAGE_SPEC §4.2):
+// the receiver's fresh union holds default_id, so omitting the option would read
+// back as a different option, not as this one at its default.
+func (g *gen) emitMarshalFieldAt(f *gofile, fld *ir.Field, acc, ind string, forced bool) {
 	var write string
 	switch fld.Kind {
 	case ir.KindU8, ir.KindU16, ir.KindU32, ir.KindU64:
@@ -553,6 +574,10 @@ func (g *gen) emitMarshalField(f *gofile, fld *ir.Field) {
 	case ir.KindBitfield:
 		write = fmt.Sprintf("e.WriteUnsigned(%d, uint64(%s))", fld.ID, acc)
 	case ir.KindBlob:
+		write = fmt.Sprintf("e.WriteBytes(%d, %s)", fld.ID, acc)
+		if forced {
+			break
+		}
 		// blob is a leaf: omit when equal to its default. With a schema default,
 		// compare against its literal via bytes.Equal (importing "bytes" into
 		// whatever file holds this marshal, per-message or the shared types.go).
@@ -562,12 +587,12 @@ func (g *gen) emitMarshalField(f *gofile, fld *ir.Field) {
 		// the bytes dependency in the common case (#113).
 		if def, ok := g.defaultLiteral(fld); ok {
 			f.imp("bytes")
-			f.line("\tif !bytes.Equal(%s, %s) {", acc, def)
+			f.line("%sif !bytes.Equal(%s, %s) {", ind, acc, def)
 		} else {
-			f.line("\tif len(%s) != 0 {", acc)
+			f.line("%sif len(%s) != 0 {", ind, acc)
 		}
-		f.line("\t\te.WriteBytes(%d, %s)", fld.ID, acc)
-		f.line("\t}")
+		f.line("%s\t%s", ind, write)
+		f.line("%s}", ind)
 		return
 	case ir.KindStruct, ir.KindUnion:
 		// MESSAGE_SPEC S2: the != default test is per field and a sequence is no
@@ -577,20 +602,30 @@ func (g *gen) emitMarshalField(f *gofile, fld *ir.Field) {
 		// "the object equals its declared default", evaluated per field and
 		// recursively. WriteSequenceEnd then drops the contentless frame: an
 		// all-default nested object is omitted, not emitted as an empty wrapper.
-		f.line("\te.WriteSequenceBeginLazy(%d)", fld.ID)
-		f.line("\t%s.Serialize(e)", acc)
-		f.line("\te.WriteSequenceEnd()")
+		// A forced one closes with WriteSequenceEndKeep instead, so it survives as
+		// a present, empty frame.
+		f.line("%se.WriteSequenceBeginLazy(%d)", ind, fld.ID)
+		f.line("%s%s.Serialize(e)", ind, acc)
+		if forced {
+			f.line("%se.WriteSequenceEndKeep()", ind)
+		} else {
+			f.line("%se.WriteSequenceEnd()", ind)
+		}
 		return
 	case ir.KindArray:
-		g.emitMarshalArray(f, fld, acc)
+		g.emitMarshalArray(f, fld, acc, ind, forced)
+		return
+	}
+	if forced {
+		f.line("%s%s", ind, write)
 		return
 	}
 	// Scalar/string/enum/bitfield leaf: always omit when equal to the default;
 	// sparse encoding is canonical (MESSAGE_SPEC S2) and the decoder reconstructs
 	// the omitted field from its default.
-	f.line("\tif %s != %s {", acc, g.defaultCompare(fld))
-	f.line("\t\t%s", write)
-	f.line("\t}")
+	f.line("%sif %s != %s {", ind, acc, g.defaultCompare(fld))
+	f.line("%s\t%s", ind, write)
+	f.line("%s}", ind)
 }
 
 // defaultCompare is the RHS to compare a field against for omission: its schema
@@ -611,7 +646,7 @@ func (g *gen) defaultCompare(fld *ir.Field) string {
 	}
 }
 
-func (g *gen) emitMarshalArray(f *gofile, fld *ir.Field, acc string) {
+func (g *gen) emitMarshalArray(f *gofile, fld *ir.Field, acc, ind string, forced bool) {
 	// A native scalar array is a leaf field: omit it when equal to its default
 	// (materialized in New<Msg>), else when empty. A composite/dynamic-element
 	// array is a wrapper sequence, opened lazily and closed with the dropping end
@@ -622,14 +657,20 @@ func (g *gen) emitMarshalArray(f *gofile, fld *ir.Field, acc string) {
 	// against the declared default exactly as written -- neither side padded to N
 	// -- and against the empty collection when no default is declared.
 	if isNativeArrayElem(fld.Elem) {
+		if forced {
+			// Count + elements with no guard: an empty one is count 0 (an fp array
+			// keeps its fixlen_word), which is how a union option says "held, empty".
+			g.marshalArray(f, ind, fmt.Sprintf("%d", fld.ID), acc, fld.Elem, fld.ElemRef, fld.ElemItems, 0, "")
+			return
+		}
 		if def, ok := g.defaultLiteral(fld); ok {
 			f.imp("slices")
-			f.line("\tif !slices.Equal(%s, %s) {", acc, def)
+			f.line("%sif !slices.Equal(%s, %s) {", ind, acc, def)
 		} else {
-			f.line("\tif len(%s) != 0 {", acc)
+			f.line("%sif len(%s) != 0 {", ind, acc)
 		}
-		g.marshalArray(f, "\t\t", fmt.Sprintf("%d", fld.ID), acc, fld.Elem, fld.ElemRef, fld.ElemItems, 0, "")
-		f.line("\t}")
+		g.marshalArray(f, ind+"\t", fmt.Sprintf("%d", fld.ID), acc, fld.Elem, fld.ElemRef, fld.ElemItems, 0, "")
+		f.line("%s}", ind)
 		return
 	}
 	// The field-level wrapper frame is dropped when no element is written, and
@@ -640,8 +681,17 @@ func (g *gen) emitMarshalArray(f *gofile, fld *ir.Field, acc string) {
 	// `if !equal(value, default) { ... WriteSequenceEndKeep() }` -- so that a value
 	// differing from a non-empty default still reaches the wire as the empty
 	// wrapper, the only encoding of "explicitly empty" (MESSAGE_SPEC §2, §3).
-	g.marshalArray(f, "\t", fmt.Sprintf("%d", fld.ID), acc, fld.Elem, fld.ElemRef, fld.ElemItems, 0, "")
+	keep := ""
+	if forced {
+		// A held wrapper-array union option other than default_id: present even
+		// when empty (MESSAGE_SPEC §4.2).
+		keep = keepAlways
+	}
+	g.marshalArray(f, ind, fmt.Sprintf("%d", fld.ID), acc, fld.Elem, fld.ElemRef, fld.ElemItems, 0, keep)
 }
+
+// keepAlways is the emitSeqEnd condition that keeps the frame unconditionally.
+const keepAlways = "true"
 
 // lastElemExpr is the "this element is the array's last" test, at loop position
 // iv over the value val.
@@ -675,9 +725,15 @@ func lastElemExpr(iv, val string) string {
 //     what makes an all-default element sparse like any other default value.
 //     Note this is decided from the position in the VALUE, at run time; the
 //     schema cannot answer it.
+//   - keepAlways -- always. A wrapper-array union option that is not the
+//     union's default_id: held, it is written even when empty (MESSAGE_SPEC §4.2).
 func emitSeqEnd(f *gofile, ind, keepIf string) {
-	if keepIf == "" {
+	switch keepIf {
+	case "":
 		f.line("%se.WriteSequenceEnd()", ind)
+		return
+	case keepAlways:
+		f.line("%se.WriteSequenceEndKeep()", ind)
 		return
 	}
 	f.line("%sif %s {", ind, keepIf)
@@ -888,7 +944,17 @@ func declaredWidthCond(k ir.Kind, ref *ir.TypeRef) string {
 // wrapper-sequence array descend via BeginSequence into a child visitor (a
 // nested object, or a collector from arrayCollector). Unused callbacks fall back
 // to the embedded sofab.VisitorBase no-ops.
-func (g *gen) emitVisitorMethods(f *gofile, typeName string, fields []*ir.Field) {
+//
+// u is non-nil for a union type, whose fields are its options. The arms are the
+// same ones -- the same §7.3 gates, bounds and assembly -- and differ only in
+// where a value lands: a whole-value store goes through the option's setter,
+// which selects it; a compact array selects in ArrayBegin, behind the kind gate
+// and the count bound, where its destination is opened; a wrapper-array option
+// selects in BeginSequence where its §7.4 replace truncates it; and a struct or
+// union option descends through Mut<Opt>(), which selects it at its default only
+// when another option is held. None of those re-selects an option that is held,
+// so an occurrence is never wiped half-way through (MESSAGE_SPEC §7.4.1).
+func (g *gen) emitVisitorMethods(f *gofile, typeName string, fields []*ir.Field, u *unionShape) {
 	recv := "func (m *" + typeName + ") "
 
 	// scalar callbacks
@@ -928,25 +994,37 @@ func (g *gen) emitVisitorMethods(f *gofile, typeName string, fields []*ir.Field)
 	utf8Guard := "if !m.UTF8Valid(_b) {\n\t\t\treturn sofab.ErrInvalidMsg\n\t\t}\n\t\t"
 	for _, fld := range fields {
 		acc := "m." + goFieldName(fld.Name)
+		store := func(expr string) string { return acc + " = " + expr }
+		sel := ""
+		descend := fmt.Sprintf("return &%s, nil", acc)
+		if u != nil {
+			o := u.byField[fld]
+			acc = "m." + o.slot
+			store = func(expr string) string { return fmt.Sprintf("m.%s(%s)", o.setter, expr) }
+			sel = fmt.Sprintf("m.which = %s\n\t\t", u.tag(o))
+			descend = fmt.Sprintf("return m.%s(), nil", o.mut)
+		}
 		switch fld.Kind {
 		case ir.KindU8, ir.KindU16, ir.KindU32, ir.KindU64:
-			uns = append(uns, arm(fld.ID, widthGuard(fld.Kind, fld.Ref)+fmt.Sprintf("%s = %s(v)", acc, goNumType(fld.Kind))))
+			uns = append(uns, arm(fld.ID, widthGuard(fld.Kind, fld.Ref)+store(goNumType(fld.Kind)+"(v)")))
 		case ir.KindBitfield:
-			uns = append(uns, arm(fld.ID, widthGuard(fld.Kind, fld.Ref)+fmt.Sprintf("%s = %s(v)", acc, g.typeName(fld.Ref.Key))))
+			uns = append(uns, arm(fld.ID, widthGuard(fld.Kind, fld.Ref)+store(g.typeName(fld.Ref.Key)+"(v)")))
 		case ir.KindBool:
-			uns = append(uns, arm(fld.ID, acc+" = v != 0"))
+			uns = append(uns, arm(fld.ID, store("v != 0")))
 		case ir.KindI8, ir.KindI16, ir.KindI32, ir.KindI64:
-			sig = append(sig, arm(fld.ID, widthGuard(fld.Kind, fld.Ref)+fmt.Sprintf("%s = %s(v)", acc, goNumType(fld.Kind))))
+			sig = append(sig, arm(fld.ID, widthGuard(fld.Kind, fld.Ref)+store(goNumType(fld.Kind)+"(v)")))
 		case ir.KindEnum:
-			sig = append(sig, arm(fld.ID, widthGuard(fld.Kind, fld.Ref)+fmt.Sprintf("%s = %s(v)", acc, g.typeName(fld.Ref.Key))))
+			sig = append(sig, arm(fld.ID, widthGuard(fld.Kind, fld.Ref)+store(g.typeName(fld.Ref.Key)+"(v)")))
 		case ir.KindFP32:
-			f32 = append(f32, arm(fld.ID, acc+" = v"))
+			f32 = append(f32, arm(fld.ID, store("v")))
 		case ir.KindFP64:
-			f64 = append(f64, arm(fld.ID, acc+" = v"))
+			f64 = append(f64, arm(fld.ID, store("v")))
 		case ir.KindString:
 			// A string is a byte container in Go (§6.4): the wire bytes pass
-			// through verbatim and are validated here, at the destination.
-			str = append(str, arm(fld.ID, takePayload+utf8Guard+acc+" = string(_b)"))
+			// through verbatim and are validated here, at the destination. A union
+			// option is selected here too, at completion -- never in FixlenBegin,
+			// which also fires for a subtype this option does not declare.
+			str = append(str, arm(fld.ID, takePayload+utf8Guard+store("string(_b)")))
 			if body := g.fixlenBeginBody("sofab.FixlenStr", fld); body != "" {
 				fixBegin = append(fixBegin, arm(fld.ID, body))
 			}
@@ -956,12 +1034,12 @@ func (g *gen) emitVisitorMethods(f *gofile, typeName string, fields []*ir.Field)
 			// is a copy. A split payload arrives in storage the accumulator hands
 			// over, which needs no copy, but the arm cannot tell the two apart and
 			// the copy is what makes the message outlive the input either way.
-			blob = append(blob, arm(fld.ID, takePayload+acc+" = append([]byte(nil), _b...)"))
+			blob = append(blob, arm(fld.ID, takePayload+store("append([]byte(nil), _b...)")))
 			if body := g.fixlenBeginBody("sofab.FixlenBlob", fld); body != "" {
 				fixBegin = append(fixBegin, arm(fld.ID, body))
 			}
 		case ir.KindStruct, ir.KindUnion:
-			seq = append(seq, arm(fld.ID, fmt.Sprintf("return &%s, nil", acc)))
+			seq = append(seq, arm(fld.ID, descend))
 		case ir.KindArray:
 			// The wire count M IS the array's length (MESSAGE_SPEC §3): the M
 			// elements that arrived are the whole value. A declared `count: N` is a
@@ -969,7 +1047,7 @@ func (g *gen) emitVisitorMethods(f *gofile, typeName string, fields []*ir.Field)
 			// elements, so there is nothing to fill in at [M, N).
 			switch {
 			case isNativeArrayElem(fld.Elem):
-				arrBegin = append(arrBegin, arm(fld.ID, g.arrayBeginBody(fld, acc, g.goArrayElem(fld.Elem, fld.ElemRef, fld.ElemItems))))
+				arrBegin = append(arrBegin, arm(fld.ID, g.arrayBeginBody(fld, acc, sel, g.goArrayElem(fld.Elem, fld.ElemRef, fld.ElemItems))))
 				elemArm := arm(fld.ID, widthGuard(fld.Elem, fld.ElemRef)+g.elemAppendStmt(acc, fld.Elem, fld.ElemRef))
 				switch {
 				case isUnsignedNativeArray(fld.Elem):
@@ -982,7 +1060,7 @@ func (g *gen) emitVisitorMethods(f *gofile, typeName string, fields []*ir.Field)
 					f64Arr = append(f64Arr, elemArm)
 				}
 			default: // wrapper-sequence array (string/blob/struct/union/nested)
-				seq = append(seq, arm(fld.ID, fmt.Sprintf("%s = %s[:0]\n\t\treturn %s, nil", acc, acc, g.arrayCollector("&"+acc, fld.Elem, fld.ElemRef, fld.ElemItems, fieldBounds(fld)))))
+				seq = append(seq, arm(fld.ID, fmt.Sprintf("%s%s = %s[:0]\n\t\treturn %s, nil", sel, acc, acc, g.arrayCollector("&"+acc, fld.Elem, fld.ElemRef, fld.ElemItems, fieldBounds(fld)))))
 			}
 		}
 	}
@@ -1095,7 +1173,11 @@ func (g *gen) fixlenBeginBody(sub string, fld *ir.Field) string {
 // gate: a skipped field is never capped. §6.6.1 puts the allocation on this side
 // of the callback either way: "the generated layer allocates; the codec does
 // not".
-func (g *gen) arrayBeginBody(fld *ir.Field, acc, elemType string) string {
+//
+// sel is "" for a struct member; for a union option it is the statement that
+// selects the option, placed after both checks so that a header this option does
+// not accept never switches the union (MESSAGE_SPEC §7.4.1).
+func (g *gen) arrayBeginBody(fld *ir.Field, acc, sel, elemType string) string {
 	body := fmt.Sprintf("if kind != sofab.%s {\n\t\t\treturn nil\n\t\t}\n\t\t", goArrayWireKind(fld.Elem))
 	switch {
 	case fld.HasCount:
@@ -1103,7 +1185,7 @@ func (g *gen) arrayBeginBody(fld *ir.Field, acc, elemType string) string {
 	case g.limits.arrayHas:
 		body += fmt.Sprintf("if count > %s {\n\t\t\treturn sofab.ErrLimitExceeded\n\t\t}\n\t\t", g.arrayCapExpr())
 	}
-	return body + fmt.Sprintf("%s = make([]%s, 0, count)", acc, elemType)
+	return body + sel + fmt.Sprintf("%s = make([]%s, 0, count)", acc, elemType)
 }
 
 // elemAppendStmt appends one native array element, narrowed to the declared
@@ -1649,7 +1731,16 @@ func (g *gen) needsDefaults(key string) bool {
 	nt := g.schema.Named[key]
 	need := false
 	if nt != nil {
-		for _, fld := range nt.Fields {
+		fields := nt.Fields
+		if nt.Category == ir.CatUnion {
+			// A union's zero value holds its default_id option (the tag is stored
+			// relative to it), so only that option's own default can need seeding.
+			fields = nil
+			if d := nt.DefaultOption(); d != nil {
+				fields = []*ir.Field{d}
+			}
+		}
+		for _, fld := range fields {
 			if lit, ok := g.defaultLiteral(fld); ok && !isZeroLiteral(lit) {
 				need = true
 				break

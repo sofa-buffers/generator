@@ -1351,8 +1351,10 @@ func TestGoEnumAndBitfieldWidthBoundAtEverySixPositions(t *testing.T) {
 		"case 1:\n\t\t" + widthBitRej + "m.Sbf = ClosedStSbf(v)",
 		"case 0:\n\t\t" + widthEnumRej + "m.Se = ClosedSaElemSe(v)",
 		"case 1:\n\t\t" + widthBitRej + "m.Sbf = ClosedSaElemSbf(v)",
-		"case 0:\n\t\t" + widthEnumRej + "m.Ue = ClosedUnUe(v)",
-		"case 1:\n\t\t" + widthBitRej + "m.Ubf = ClosedUnUbf(v)",
+		// A union member is stored through its setter, which selects the option
+		// -- after the bound, so an over-width value never switches the union.
+		"case 0:\n\t\t" + widthEnumRej + "m.SetUe(ClosedUnUe(v))",
+		"case 1:\n\t\t" + widthBitRej + "m.SetUbf(ClosedUnUbf(v))",
 	} {
 		if !strings.Contains(types, want) {
 			t.Errorf("types.go: a position stores without its §1 width bound, missing %q:\n%s", want, types)

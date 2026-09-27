@@ -161,7 +161,7 @@ func deep() *msg.Deep {
 	m := msg.NewDeep()
 	m.Mid = mid()
 	m.Rows = [][]msg.StructMid{{mid()}, {mid(), mid()}}
-	m.U.M = mid()
+	m.U.SetM(mid())
 	return m
 }
 
