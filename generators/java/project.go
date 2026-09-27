@@ -274,6 +274,10 @@ func (g *gen) jsonHelper(s *ir.Schema) []byte {
 			nt := s.Named[key]
 			if (nt.Category == ir.CatStruct || nt.Category == ir.CatUnion) && !emitted[key] {
 				emitted[key] = true
+				if nt.Category == ir.CatUnion {
+					g.emitUnionJSONFns(f, key, nt)
+					continue
+				}
 				g.emitJSONFns(f, g.typeName(key), nt.Fields)
 			}
 		}
@@ -336,7 +340,12 @@ func (g *gen) emitJSONFns(f *jfile, typeName string, fields []*ir.Field) {
 }
 
 func (g *gen) emitTo(f *jfile, fld *ir.Field) {
-	acc := "o." + javaIdent(fld.Name)
+	g.emitToAt(f, fld, "o."+javaIdent(fld.Name))
+}
+
+// emitToAt writes the JSON value of fld, read from acc: a field, or a union
+// option's getter.
+func (g *gen) emitToAt(f *jfile, fld *ir.Field, acc string) {
 	switch fld.Kind {
 	// A bitfield is an unsigned 64-bit mask, so it prints the way a u64 does.
 	// Java's carrier for both is the SIGNED `long`: a mask with bit 63 set is a
@@ -360,6 +369,77 @@ func (g *gen) emitTo(f *jfile, fld *ir.Field) {
 		f.line("        to(%s, b);", acc)
 	case ir.KindArray:
 		g.emitToArray(f, fld, acc)
+	}
+}
+
+// emitUnionJSONFns emits to/from for a union type: exactly ONE member, the held
+// option, `{"<option>": value}` -- printed even when that is the default option
+// at its default. `from` selects each member it reads through the option's
+// setter or mutable accessor, so the last member read wins, as the last option
+// on the wire does.
+func (g *gen) emitUnionJSONFns(f *jfile, key string, nt *ir.NamedType) {
+	u := g.unionShapeOf(key, nt)
+	suppress := ""
+	for _, o := range u.opts {
+		if o.f.Deprecated {
+			suppress = "    @SuppressWarnings(\"deprecation\") // the harness round-trips deprecated options too"
+			break
+		}
+	}
+	if suppress != "" {
+		f.line("%s", suppress)
+	}
+	f.line("    static void to(%s o, StringBuilder b) {", u.typeName)
+	f.line("        b.append('{');")
+	f.line("        switch (o.which()) {")
+	for _, o := range u.opts {
+		f.line("        case %s.%s: {", u.typeName, o.idConst)
+		f.line("        b.append(\"\\\"%s\\\":\");", o.f.Name)
+		g.emitToAt(f, o.f, "o.get"+o.base+"()")
+		f.line("        break;")
+		f.line("        }")
+	}
+	f.line("        default: break;")
+	f.line("        }")
+	f.line("        b.append('}');")
+	f.line("    }")
+	if suppress != "" {
+		f.line("%s", suppress)
+	}
+	f.line("    static void from(JsonObject j, %s o) {", u.typeName)
+	f.line("        for (Map.Entry<String, JsonElement> me : j.entrySet()) {")
+	f.line("            JsonElement e = me.getValue();")
+	f.line("            if (e == null || e.isJsonNull()) continue;")
+	f.line("            switch (me.getKey()) {")
+	for _, o := range u.opts {
+		f.line("            case %q: {", o.f.Name)
+		g.emitUnionFrom(f, o)
+		f.line("            break;")
+		f.line("            }")
+	}
+	f.line("            default: break;")
+	f.line("            }")
+	f.line("        }")
+	f.line("    }")
+}
+
+// emitUnionFrom reads option o from the JsonElement e and selects it.
+func (g *gen) emitUnionFrom(f *jfile, o *unionOpt) {
+	fld := o.f
+	switch fld.Kind {
+	case ir.KindStruct, ir.KindUnion:
+		f.line("            from(e.getAsJsonObject(), o.mutable%s());", o.base)
+	case ir.KindArray:
+		if primitiveArrayElem(fld.Elem) {
+			f.line("            %s _u;", g.javaType(fld))
+			g.jsonFromArray(f, "            ", "_u", "e.getAsJsonArray()", fld.Elem, fld.ElemRef, fld.ElemItems, 0, true)
+			f.line("            o.set%s(_u);", o.base)
+			return
+		}
+		f.line("            %s _u = o.mutable%s();", g.javaType(fld), o.base)
+		g.jsonFromArray(f, "            ", "_u", "e.getAsJsonArray()", fld.Elem, fld.ElemRef, fld.ElemItems, 0, false)
+	default:
+		f.line("            o.set%s(%s);", o.base, jsonLeafExpr(fld.Kind))
 	}
 }
 
@@ -402,6 +482,26 @@ func (g *gen) jsonToArray(f *jfile, ind, val string, elem ir.Kind, ref *ir.TypeR
 		f.line("%s    b.append(%s);", ind, el)
 	}
 	f.line("%s} b.append(']'); }", ind)
+}
+
+// jsonLeafExpr reads a scalar, string or blob JsonElement `e` as the Java value
+// of kind k -- what a union option's setter is handed.
+func jsonLeafExpr(k ir.Kind) string {
+	switch k {
+	case ir.KindU64, ir.KindBitfield:
+		return "Long.parseUnsignedLong(e.getAsString())"
+	case ir.KindBool:
+		return "e.getAsBoolean()"
+	case ir.KindFP32:
+		return "e.getAsFloat()"
+	case ir.KindFP64:
+		return "e.getAsDouble()"
+	case ir.KindString:
+		return "e.getAsString()"
+	case ir.KindBlob:
+		return "Json.toBytes(e.getAsJsonArray())"
+	}
+	return "e.getAsLong()"
 }
 
 func (g *gen) emitFrom(f *jfile, fld *ir.Field) {

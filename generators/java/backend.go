@@ -24,6 +24,9 @@ func (*Backend) Lang() string { return "java" }
 func (*Backend) Generate(s *ir.Schema, cfg map[string]any) ([]generator.File, error) {
 	g := &gen{schema: s, pkg: cfgString(cfg, "package", "message"), banner: cfgString(cfg, "tool_banner", "sofabgen"), license: generator.LicenseID(cfg), limits: resolveLimits(s, cfg), size: generator.NewSizePolicy(cfg)}
 	dir := "src/main/java/" + strings.ReplaceAll(g.pkg, ".", "/") + "/"
+	if err := g.checkUnions(); err != nil {
+		return nil, err
+	}
 	var files []generator.File
 	// Every named struct/union gets its OWN file, so it can be public: Java
 	// allows one public top-level class per file, and the message owns that slot
@@ -226,6 +229,10 @@ func (g *gen) namedTypeFile(key string, nt *ir.NamedType) []byte {
 	f.line("import java.io.IOException;")
 	f.line("import java.util.*;")
 	f.blank()
+	if nt.Category == ir.CatUnion {
+		g.emitUnionClass(f, key, nt)
+		return f.bytes()
+	}
 	g.emitClass(f, g.typeName(key), nt.Fields, nt.Summary, false, true)
 	return f.bytes()
 }
@@ -474,7 +481,7 @@ func (g *gen) emitIsDefault(f *jfile, fields []*ir.Field) {
 	f.line("    /** True when every field still equals its declared default, compared per field and recursively -- i.e. serialize would write nothing at all. */")
 	f.line("    boolean isDefault() {")
 	for _, fld := range fields {
-		f.line("        if (%s) return false;", g.fieldWritesExpr(fld))
+		f.line("        if (%s) return false;", g.fieldWritesExpr(fld, "this."+javaIdent(fld.Name)))
 	}
 	f.line("        return true;")
 	f.line("    }")
@@ -484,9 +491,9 @@ func (g *gen) emitIsDefault(f *jfile, fields []*ir.Field) {
 // wire", i.e. literally emitMarshal's write guard for the same field. isDefault is
 // built from it rather than from a hand-written "equals its default" twin so that
 // the two cannot state different truth tables: the object is default exactly when
-// no arm below fires.
-func (g *gen) fieldWritesExpr(fld *ir.Field) string {
-	acc := "this." + javaIdent(fld.Name)
+// no arm below fires. acc is the expression holding the value: the field itself,
+// or a union's option slot.
+func (g *gen) fieldWritesExpr(fld *ir.Field, acc string) string {
 	switch fld.Kind {
 	case ir.KindBlob:
 		// emitMarshal's two blob guards, verbatim.
@@ -504,7 +511,7 @@ func (g *gen) fieldWritesExpr(fld *ir.Field) string {
 		return g.arrayWritesExpr(fld, acc)
 	}
 	// Scalar/string/enum/bitfield leaf: the writer's own omit condition.
-	return g.javaOmitCond(fld)
+	return g.javaOmitCond(fld, acc)
 }
 
 // arrayWritesExpr mirrors emitMarshalArray arm for arm: a native array is a leaf
@@ -606,7 +613,19 @@ func emptyPrimConst(elem ir.Kind, ref *ir.TypeRef) string {
 }
 
 func (g *gen) emitMarshal(f *jfile, fld *ir.Field) {
-	acc := "this." + javaIdent(fld.Name)
+	g.emitMarshalAt(f, "        ", fld, "this."+javaIdent(fld.Name), false)
+}
+
+// emitMarshalAt writes the field fld whose value is acc, at indent ind.
+//
+// forced is a union's held option other than default_id (MESSAGE_SPEC §4.2): it
+// is written EVEN AT ITS OWN DEFAULT, because the receiver's fresh union holds
+// default_id and absence would read back as that. So there is no ≠-default guard
+// -- a scalar is written as its value, a string/blob/compact array in its
+// explicit empty form -- and a struct, union or wrapper-array option is closed
+// with the KEEPING end, so an option at its default still leaves a present,
+// empty frame. Inside the option the ordinary per-field omission applies.
+func (g *gen) emitMarshalAt(f *jfile, ind string, fld *ir.Field, acc string, forced bool) {
 	var write string
 	switch fld.Kind {
 	case ir.KindU8, ir.KindU16, ir.KindU32, ir.KindU64, ir.KindBitfield:
@@ -625,11 +644,15 @@ func (g *gen) emitMarshal(f *jfile, fld *ir.Field) {
 		// A blob is a leaf: omit when equal to its default (empty when none).
 		// With an empty default the content compare degenerates to a length
 		// check, sparing an Arrays.equals against a fresh byte[0] per call.
-		if def := g.javaDefaultValue(fld); def == "new byte[0]" || def == "Seq.EMPTY_BYTES" {
-			f.line("        if (%s == null || %s.length != 0) { os.writeBlob(%d, %s == null ? new byte[0] : %s); }", acc, acc, fld.ID, acc, acc)
+		if forced {
+			f.line("%sos.writeBlob(%d, %s == null ? Seq.EMPTY_BYTES : %s);", ind, fld.ID, acc, acc)
 			return
 		}
-		f.line("        if (!Arrays.equals(%s, %s)) { os.writeBlob(%d, %s == null ? new byte[0] : %s); }", acc, javaArrDefName(fld), fld.ID, acc, acc)
+		if def := g.javaDefaultValue(fld); def == "new byte[0]" || def == "Seq.EMPTY_BYTES" {
+			f.line("%sif (%s == null || %s.length != 0) { os.writeBlob(%d, %s == null ? new byte[0] : %s); }", ind, acc, acc, fld.ID, acc, acc)
+			return
+		}
+		f.line("%sif (!Arrays.equals(%s, %s)) { os.writeBlob(%d, %s == null ? new byte[0] : %s); }", ind, acc, javaArrDefName(fld), fld.ID, acc, acc)
 		return
 	case ir.KindStruct, ir.KindUnion:
 		// MESSAGE_SPEC S2: the != default test is per field and a sequence-typed
@@ -639,19 +662,42 @@ func (g *gen) emitMarshal(f *jfile, fld *ir.Field) {
 		// "the object equals its declared default", evaluated per field and
 		// recursively, with no byte image ever compared. An all-default nested
 		// object is therefore dropped, not emitted as an empty wrapper.
-		f.line("        os.writeSequenceBeginLazy(%d); (%s == null ? new %s() : %s).serialize(os); os.writeSequenceEnd();", fld.ID, acc, g.typeName(fld.Ref.Key), acc)
+		end := "os.writeSequenceEnd();"
+		if forced {
+			end = "os.writeSequenceEndKeep();"
+		}
+		f.line("%sos.writeSequenceBeginLazy(%d); (%s == null ? new %s() : %s).serialize(os); %s", ind, fld.ID, acc, g.typeName(fld.Ref.Key), acc, end)
 		return
 	case ir.KindArray:
-		g.emitMarshalArray(f, fld, acc)
+		g.emitMarshalArray(f, ind, fld, acc, forced)
+		return
+	}
+	if forced {
+		f.line("%s%s", ind, write)
 		return
 	}
 	// Scalar/string/enum/bitfield leaf: always omit when equal to the default;
 	// sparse encoding is canonical (MESSAGE_SPEC S2) and the decoder reconstructs
 	// the omitted field from its default.
-	f.line("        if (%s) { %s }", g.javaOmitCond(fld), write)
+	f.line("%sif (%s) { %s }", ind, g.javaOmitCond(fld, acc), write)
 }
 
-func (g *gen) emitMarshalArray(f *jfile, fld *ir.Field, acc string) {
+func (g *gen) emitMarshalArray(f *jfile, ind string, fld *ir.Field, acc string, forced bool) {
+	if forced {
+		// A union's held non-default option: no guard. A compact array is written
+		// as its count even when that is 0 (an fp array keeps its fixlen_word), and
+		// a wrapper array's frame survives empty through the keeping end.
+		switch {
+		case primitiveArrayElem(fld.Elem):
+			v := fmt.Sprintf("(%s == null ? %s : %s)", acc, emptyPrimConst(fld.Elem, fld.ElemRef), acc)
+			g.marshalArray(f, ind, fmt.Sprintf("%d", fld.ID), v, fld.Elem, fld.ElemRef, fld.ElemItems, 0, "")
+		case nativeArrayElem(fld.Elem): // boolean array (boxed List<Boolean>)
+			g.marshalArray(f, ind, fmt.Sprintf("%d", fld.ID), elemListExpr(acc), fld.Elem, fld.ElemRef, fld.ElemItems, 0, "")
+		default:
+			g.marshalArray(f, ind, fmt.Sprintf("%d", fld.ID), acc, fld.Elem, fld.ElemRef, fld.ElemItems, 0, keepAlways)
+		}
+		return
+	}
 	// A native scalar array is a leaf field: omit it when equal to its default,
 	// else when empty. A composite/dynamic-element array is a wrapper sequence:
 	// opened lazily, closed with the dropping end at field level, so an empty one
@@ -666,22 +712,22 @@ func (g *gen) emitMarshalArray(f *jfile, fld *ir.Field, acc string) {
 		// (Arrays.equals), else when empty; write straight to the OStream primitive
 		// overload with no box/unbox temporary.
 		if _, ok := g.javaPrimArrayLiteral(fld); ok {
-			f.line("        if (!java.util.Arrays.equals(%s, %s)) {", acc, javaArrDefName(fld))
+			f.line("%sif (!java.util.Arrays.equals(%s, %s)) {", ind, acc, javaArrDefName(fld))
 		} else {
-			f.line("        if (%s != null && %s.length != 0) {", acc, acc)
+			f.line("%sif (%s != null && %s.length != 0) {", ind, acc, acc)
 		}
-		g.marshalArray(f, "            ", fmt.Sprintf("%d", fld.ID), acc, fld.Elem, fld.ElemRef, fld.ElemItems, 0, "")
-		f.line("        }")
+		g.marshalArray(f, ind+"    ", fmt.Sprintf("%d", fld.ID), acc, fld.Elem, fld.ElemRef, fld.ElemItems, 0, "")
+		f.line("%s}", ind)
 		return
 	}
 	if nativeArrayElem(fld.Elem) { // boolean array (boxed List<Boolean>)
 		if _, ok := g.javaNativeArrayLiteral(fld); ok {
-			f.line("        if (!%s.equals(%s)) {", javaArrDefName(fld), acc)
+			f.line("%sif (!%s.equals(%s)) {", ind, javaArrDefName(fld), acc)
 		} else {
-			f.line("        if (%s != null && !%s.isEmpty()) {", acc, acc)
+			f.line("%sif (%s != null && !%s.isEmpty()) {", ind, acc, acc)
 		}
-		g.marshalArray(f, "            ", fmt.Sprintf("%d", fld.ID), acc, fld.Elem, fld.ElemRef, fld.ElemItems, 0, "")
-		f.line("        }")
+		g.marshalArray(f, ind+"    ", fmt.Sprintf("%d", fld.ID), acc, fld.Elem, fld.ElemRef, fld.ElemItems, 0, "")
+		f.line("%s}", ind)
 		return
 	}
 	// The field-level wrapper frame is dropped when no element is written, and
@@ -692,7 +738,7 @@ func (g *gen) emitMarshalArray(f *jfile, fld *ir.Field, acc string) {
 	// `if (value != default) { ... os.writeSequenceEndKeep(); }` -- so that a value
 	// differing from a non-empty default still reaches the wire as the empty
 	// wrapper, the only encoding of "explicitly empty" (MESSAGE_SPEC S2, S3).
-	g.marshalArray(f, "        ", fmt.Sprintf("%d", fld.ID), acc, fld.Elem, fld.ElemRef, fld.ElemItems, 0, "")
+	g.marshalArray(f, ind, fmt.Sprintf("%d", fld.ID), acc, fld.Elem, fld.ElemRef, fld.ElemItems, 0, "")
 }
 
 // javaArrDefName is the static field holding a native array field's omit-compare
@@ -762,6 +808,10 @@ func lastElemExpr(iv, lv string) string {
 	return fmt.Sprintf("%s == %s.size() - 1", iv, lv)
 }
 
+// keepAlways is the seqEndStmt condition of a frame that survives empty
+// unconditionally.
+const keepAlways = "always"
+
 // seqEndStmt closes a lazily-opened wrapper sequence, choosing between the two
 // closers the corelib offers. Every sequence is opened LAZILY (the corelib holds
 // the header back until a child is written), so the closer alone decides whether a
@@ -774,9 +824,14 @@ func lastElemExpr(iv, lv string) string {
 //   - a lastElemExpr -- a sequence-form array ELEMENT, kept only at the array's
 //     last index. In the interior it is dropped and leaves an id GAP, which is what
 //     makes an all-default element sparse like any other default value.
+//   - keepAlways -- always. A union's held wrapper-array option other than
+//     default_id (MESSAGE_SPEC §4.2): its presence is what selects it.
 func seqEndStmt(keepIf string) string {
-	if keepIf == "" {
+	switch keepIf {
+	case "":
 		return "os.writeSequenceEnd();"
+	case keepAlways:
+		return "os.writeSequenceEndKeep();"
 	}
 	return fmt.Sprintf("if (%s) os.writeSequenceEndKeep(); else os.writeSequenceEnd();", keepIf)
 }

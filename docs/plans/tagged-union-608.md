@@ -1438,6 +1438,14 @@ Work only in `/root/corelibs/wt-c-cpp-union` (branch `feat/tagged-union`,
   constructor (per type).
 * **JSON harness** (`project.go`, Gson): a per-union `TypeAdapter` in the
   **harness** project (the library stays JSON-free) writing/reading one member.
+  *(Corrected in the Java milestone: the harness has no `TypeAdapter` anywhere —
+  Gson only parses the input tree, and every type's JSON is a hand-written static
+  `Json.to`/`Json.from` pair — so a union gets the same pair, switching on
+  `which()` / selecting through the setters. Still harness-only; the library stays
+  JSON-free. And `mutable<Opt>()` exists for struct, union and `List`-backed array
+  options only: a primitive-array option (`short[]`, `float[]`, …) cannot grow in
+  place, so it is replaced through `set<Opt>(v)` and its elements are edited
+  through the array `get<Opt>()` returns.)*
 * **Tests / conformance / cost** as the common pattern; `java` row ±1 %.
 
 ### 5.8 kotlin

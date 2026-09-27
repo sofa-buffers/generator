@@ -19,9 +19,9 @@ func cfgString(cfg map[string]any, key, dflt string) string {
 
 // javaOmitCond is the condition under which to write a field (value differs from
 // its default): sparse encoding is canonical (MESSAGE_SPEC S2). Strings use
-// Objects.equals (content compare).
-func (g *gen) javaOmitCond(f *ir.Field) string {
-	acc := "this." + javaIdent(f.Name)
+// Objects.equals (content compare). acc is the expression holding the value:
+// the field itself, or a union's option slot.
+func (g *gen) javaOmitCond(f *ir.Field, acc string) string {
 	def := g.javaDefaultValue(f)
 	if f.Kind == ir.KindString {
 		// Same truth table as !Objects.equals(acc, def) for a non-null literal
