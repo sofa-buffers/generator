@@ -100,6 +100,17 @@ type objectPlan struct {
 	// present id + 1) instead of only 0 and N. A message / struct / union object
 	// leaves this false.
 	fixedSeq bool
+	// union is set for a union named type (MESSAGE_SPEC §4.2): the object is a
+	// tag `which` (the held option's id) followed by a C union `u` that overlays
+	// the options, described by SOFAB_OBJECT_DESCR_UNION. members then lists the
+	// options in schema order, one declaration each, and optDecl keeps each
+	// option's declaration by id for the default image (see emitUnionImage).
+	union   *ir.NamedType
+	optDecl map[int64]string
+	// seqOptDescrs are the descriptors of this union's sequence options
+	// (struct/union/wrapper array): selecting one at its default is
+	// `sofab_object_init(&<descr>, &x.u.<option>)`, so the header declares them.
+	seqOptDescrs []string
 }
 
 // defaultInit is one designated-initializer entry (".field = expr") in an
@@ -234,7 +245,7 @@ func (g *gen) messagePlans(m *ir.Message) (plans map[string]*objectPlan, order [
 	plans = map[string]*objectPlan{}
 	bitfields = map[string]*bitfieldPlan{}
 	msgKey := "message/" + m.Name
-	err = g.collect(msgKey, g.cType(msgKey, m.Name), m.Fields, plans, &order, bitfields, &bitfieldOrder)
+	err = g.collect(msgKey, g.cType(msgKey, m.Name), m.Fields, nil, plans, &order, bitfields, &bitfieldOrder)
 	return plans, order, bitfields, bitfieldOrder, err
 }
 
@@ -283,6 +294,24 @@ func (g *gen) checkMacroNames(s *ir.Schema) error {
 			bp := bitfields[k]
 			for _, fl := range bp.flags {
 				if err := claim(bp.macro(fl), fmt.Sprintf("flag %q of bitfield %s", fl.Name, strings.TrimPrefix(bp.key, "named/"))); err != nil {
+					return err
+				}
+			}
+		}
+		// A union's option ids share the flat macro namespace as well: option
+		// "fl_id"'s MESSAGE_U_FL_ID_ID is safe, but a bitfield option "fl" with a
+		// flag "id" (MESSAGE_U_FL_ID) meets the id of an option "fl".
+		plans, order, _, _, err := g.messagePlans(m)
+		if err != nil {
+			return err
+		}
+		for _, k := range order {
+			p := plans[k]
+			if p.union == nil {
+				continue
+			}
+			for _, f := range p.union.Fields {
+				if err := claim(g.optionMacro(k, f), fmt.Sprintf("option %q of union %s", f.Name, strings.TrimPrefix(k, "named/"))); err != nil {
 					return err
 				}
 			}
@@ -345,6 +374,30 @@ func (g *gen) message(m *ir.Message) (hdr, src []byte, err error) {
 	for _, k := range bitfieldOrder {
 		g.emitBitfieldConsts(h, bitfields[k])
 	}
+	// union option ids, and the descriptors of the sequence options: selecting
+	// such an option at its default is `sofab_object_init(&<descr>, &x.u.<opt>)`.
+	var seqDescrs []string
+	seenDescr := map[string]bool{}
+	for _, k := range order {
+		if p := plans[k]; p.union != nil {
+			g.emitUnionConsts(h, p)
+			for _, d := range p.seqOptDescrs {
+				if !seenDescr[d] {
+					seenDescr[d] = true
+					seqDescrs = append(seqDescrs, d)
+				}
+			}
+		}
+	}
+	if len(seqDescrs) > 0 {
+		h.doc("Descriptors of the union options that are sequences (struct, union, wrapper\n" +
+			"array). Select one at its default with the tag and sofab_object_init:\n" +
+			"x.which = <..._ID>; sofab_object_init(&<descriptor>, &x.u.<option>);")
+		for _, d := range seqDescrs {
+			h.line("extern const sofab_object_descr_t %s;", d)
+		}
+		h.blank()
+	}
 	// max serialized size (ir.MaxWireSize — one walk shared by every backend)
 	ms, err := g.size.Resolve(m.Name, m.Fields)
 	if err != nil {
@@ -381,12 +434,31 @@ func (g *gen) message(m *ir.Message) (hdr, src []byte, err error) {
 	return h.bytes(), c.bytes(), nil
 }
 
-// collect walks an id scope, appending object plans in post-order.
-func (g *gen) collect(key, cType string, fields []*ir.Field, plans map[string]*objectPlan, order *[]string, bitfields map[string]*bitfieldPlan, bitfieldOrder *[]string) error {
+// unionOf returns ref's target when it is a union named type, else nil.
+func unionOf(ref *ir.TypeRef) *ir.NamedType {
+	if ref != nil && ref.Target != nil && ref.Target.Category == ir.CatUnion {
+		return ref.Target
+	}
+	return nil
+}
+
+// collect walks an id scope, appending object plans in post-order. un is the
+// union named type when the scope is a union's options, nil otherwise.
+func (g *gen) collect(key, cType string, fields []*ir.Field, un *ir.NamedType, plans map[string]*objectPlan, order *[]string, bitfields map[string]*bitfieldPlan, bitfieldOrder *[]string) error {
 	if _, done := plans[key]; done {
 		return nil
 	}
-	p := &objectPlan{key: key, cType: cType, descr: g.descrSym(key)}
+	p := &objectPlan{key: key, cType: cType, descr: g.descrSym(key), union: un}
+	if un != nil {
+		p.optDecl = map[int64]string{}
+	}
+	// A union option is addressed through the overlay: u.<option>.
+	path := func(f *ir.Field) string {
+		if un != nil {
+			return "u." + cIdent(f.Name)
+		}
+		return cIdent(f.Name)
+	}
 	// First, recurse into children so nested plans are emitted before this one.
 	nestedIdx := map[string]int{}
 	for _, f := range fields {
@@ -407,20 +479,29 @@ func (g *gen) collect(key, cType string, fields []*ir.Field, plans map[string]*o
 		if f.Kind == ir.KindArray && f.Elem == ir.KindBitfield {
 			g.registerBitfield(f.ElemRef, bitfields, bitfieldOrder)
 		}
+		note := memberNote(f)
+		if un != nil {
+			note = unionMemberNote(f)
+		}
 		switch {
 		case f.Kind == ir.KindStruct || f.Kind == ir.KindUnion:
 			ck := "named/" + f.Ref.Key
-			if err := g.collect(ck, g.cType(ck, f.Ref.Target.Name), f.Ref.Target.Fields, plans, order, bitfields, bitfieldOrder); err != nil {
+			if err := g.collect(ck, g.cType(ck, f.Ref.Target.Name), f.Ref.Target.Fields, unionOf(f.Ref), plans, order, bitfields, bitfieldOrder); err != nil {
 				return err
 			}
 			if _, ok := nestedIdx[ck]; !ok {
 				nestedIdx[ck] = len(p.nested)
 				p.nested = append(p.nested, ck)
 			}
-			p.members = append(p.members, member{decl: fmt.Sprintf("%s %s;", plans[ck].cType, cIdent(f.Name)), align: ir.AlignRank(f), doc: memberDoc(f), note: memberNote(f), deprecated: f.Deprecated})
+			decl := fmt.Sprintf("%s %s;", plans[ck].cType, cIdent(f.Name))
+			p.members = append(p.members, member{decl: decl, align: ir.AlignRank(f), doc: memberDoc(f), note: note, deprecated: f.Deprecated})
 			p.fields = append(p.fields, fieldEntry{macro: fmt.Sprintf(
 				"    SOFAB_OBJECT_FIELD_SEQUENCE(%d, %s, %s, SOFAB_OBJECT_FIELDTYPE_SEQUENCE, %d),",
-				f.ID, p.cType, cIdent(f.Name), nestedIdx[ck])})
+				f.ID, p.cType, path(f), nestedIdx[ck])})
+			if un != nil {
+				p.optDecl[f.ID] = decl
+				p.seqOptDescrs = append(p.seqOptDescrs, g.descrSym(ck))
+			}
 		case f.Kind == ir.KindArray && isHolderElem(f.Elem):
 			// string/blob/struct/union/nested-array elements lower to a wrapper
 			// sequence: a synthetic holder object with one field per element.
@@ -430,16 +511,32 @@ func (g *gen) collect(key, cType string, fields []*ir.Field, plans map[string]*o
 				nestedIdx[ck] = len(p.nested)
 				p.nested = append(p.nested, ck)
 			}
-			p.members = append(p.members, member{decl: fmt.Sprintf("%s %s;", ep.cType, cIdent(f.Name)), align: ir.AlignRank(f), doc: memberDoc(f), note: memberNote(f), deprecated: f.Deprecated})
+			decl := fmt.Sprintf("%s %s;", ep.cType, cIdent(f.Name))
+			p.members = append(p.members, member{decl: decl, align: ir.AlignRank(f), doc: memberDoc(f), note: note, deprecated: f.Deprecated})
 			p.fields = append(p.fields, fieldEntry{macro: fmt.Sprintf(
 				"    SOFAB_OBJECT_FIELD_SEQUENCE(%d, %s, %s, SOFAB_OBJECT_FIELDTYPE_SEQUENCE, %d),",
-				f.ID, p.cType, cIdent(f.Name), nestedIdx[ck])})
-		default:
-			decl, entry, err := g.scalarMember(p.cType, f)
+				f.ID, p.cType, path(f), nestedIdx[ck])})
+			if un != nil {
+				p.optDecl[f.ID] = decl
+				p.seqOptDescrs = append(p.seqOptDescrs, g.descrSym(ck))
+			}
+		case un != nil:
+			// A leaf union option. Its own default is never stored anywhere: only
+			// the default option's default is ever read, and that one lives in the
+			// union's prefix image (emitUnionImage).
+			decl, entry, err := g.unionLeafMember(p.cType, f)
 			if err != nil {
 				return err
 			}
-			p.members = append(p.members, member{decl: decl, align: ir.AlignRank(f), doc: memberDoc(f), note: memberNote(f), deprecated: f.Deprecated})
+			p.members = append(p.members, member{decl: decl, align: ir.AlignRank(f), doc: memberDoc(f), note: note, deprecated: f.Deprecated})
+			p.fields = append(p.fields, fieldEntry{macro: entry})
+			p.optDecl[f.ID] = decl
+		default:
+			decl, entry, err := g.scalarMember(p.cType, f, path(f))
+			if err != nil {
+				return err
+			}
+			p.members = append(p.members, member{decl: decl, align: ir.AlignRank(f), doc: memberDoc(f), note: note, deprecated: f.Deprecated})
 			p.fields = append(p.fields, fieldEntry{macro: entry})
 			// A compact array's declared default is an array of its OWN length, not
 			// one padded out to the capacity (§2/§3/§6): `default: [1,2,3]` on a
@@ -463,8 +560,11 @@ func (g *gen) collect(key, cType string, fields []*ir.Field, plans map[string]*o
 	// Order the struct members widest-first to minimise padding. The descriptor
 	// (p.fields) and the wire format are unaffected — encode walks the descriptor
 	// in id order and decode keys off the field id, both independent of the C
-	// member layout (offsets are resolved with offsetof at compile time).
-	sort.SliceStable(p.members, func(i, j int) bool { return p.members[i].align > p.members[j].align })
+	// member layout (offsets are resolved with offsetof at compile time). A
+	// union's options overlay each other, so they keep schema order.
+	if un == nil {
+		sort.SliceStable(p.members, func(i, j int) bool { return p.members[i].align > p.members[j].align })
+	}
 	plans[key] = p
 	*order = append(*order, key)
 	return nil
@@ -558,7 +658,7 @@ func (g *gen) buildHolder(key string, spec arraySpec, plans map[string]*objectPl
 		// is emitted as a normal named object, and every holder slot is a sequence
 		// referencing that one descriptor (nested_idx 0).
 		ek := "named/" + spec.ref.Key
-		if err := g.collect(ek, g.cType(ek, spec.ref.Target.Name), spec.ref.Target.Fields, plans, order, bitfields, bitfieldOrder); err == nil {
+		if err := g.collect(ek, g.cType(ek, spec.ref.Target.Name), spec.ref.Target.Fields, unionOf(spec.ref), plans, order, bitfields, bitfieldOrder); err == nil {
 			p.nested = append(p.nested, ek)
 		}
 		p.members = append(p.members, member{decl: fmt.Sprintf("%s%s items[%d];", lead, plans[ek].cType, cap)})
@@ -610,29 +710,31 @@ func (g *gen) buildHolder(key string, spec arraySpec, plans map[string]*objectPl
 }
 
 // scalarMember produces the struct member decl + descriptor entry for a
-// non-composite field.
-func (g *gen) scalarMember(cType string, f *ir.Field) (decl, entry string, err error) {
+// non-composite field. at is the member's path in the descriptor (the member
+// name, or u.<option> inside a union); the sized blob/array forms below are
+// struct-only — a union wraps them (unionLeafMember).
+func (g *gen) scalarMember(cType string, f *ir.Field, at string) (decl, entry string, err error) {
 	mn := cIdent(f.Name)
 	switch f.Kind {
 	case ir.KindU8, ir.KindU16, ir.KindU32, ir.KindU64:
 		decl = fmt.Sprintf("%s %s;", uintC(f.Kind), mn)
-		entry = field(f.ID, cType, mn, "UNSIGNED")
+		entry = field(f.ID, cType, at, "UNSIGNED")
 	case ir.KindI8, ir.KindI16, ir.KindI32, ir.KindI64:
 		decl = fmt.Sprintf("%s %s;", intC(f.Kind), mn)
-		entry = field(f.ID, cType, mn, "SIGNED")
+		entry = field(f.ID, cType, at, "SIGNED")
 	case ir.KindBool:
 		// BOOLEAN, not UNSIGNED: the wire form is the same unsigned varint, but
 		// CORELIB_PLAN §4.4 reads every non-zero value as true and normalizes it,
 		// with no width bound. Described as UNSIGNED, 2 was stored raw and 256 was
 		// rejected as INVALID by the one-byte width check.
 		decl = fmt.Sprintf("uint8_t %s;", mn)
-		entry = field(f.ID, cType, mn, "BOOLEAN")
+		entry = field(f.ID, cType, at, "BOOLEAN")
 	case ir.KindFP32:
 		decl = fmt.Sprintf("float %s;", mn)
-		entry = field(f.ID, cType, mn, "FP32")
+		entry = field(f.ID, cType, at, "FP32")
 	case ir.KindFP64:
 		decl = fmt.Sprintf("double %s;", mn)
-		entry = field(f.ID, cType, mn, "FP64")
+		entry = field(f.ID, cType, at, "FP64")
 	case ir.KindString:
 		// checkBounded guarantees a maxlen on every string, so the storage is the
 		// schema bound directly (no zero-usable-capacity fallback). +1 for the NUL:
@@ -640,7 +742,7 @@ func (g *gen) scalarMember(cType string, f *ir.Field) (decl, entry string, err e
 		// rejects length > capacity-1), so a maxlen-byte wire string needs maxlen+1
 		// of storage to be accepted at its schema bound (#103).
 		decl = fmt.Sprintf("char %s[%d];", mn, f.Maxlen+1)
-		entry = field(f.ID, cType, mn, "STRING")
+		entry = field(f.ID, cType, at, "STRING")
 	case ir.KindBlob:
 		// A blob is opaque bytes and may be shorter than its maxlen, so it needs a
 		// companion used-length: a bare uint8_t[N] cannot represent "3 of a possible
@@ -656,10 +758,10 @@ func (g *gen) scalarMember(cType string, f *ir.Field) (decl, entry string, err e
 		entry = fmt.Sprintf("    SOFAB_OBJECT_FIELD_BLOB_SIZED(%d, %s, %s, %s_len),", f.ID, cType, mn, mn)
 	case ir.KindEnum:
 		decl = fmt.Sprintf("%s %s;", enumC(f.Ref), mn)
-		entry = field(f.ID, cType, mn, "SIGNED")
+		entry = field(f.ID, cType, at, "SIGNED")
 	case ir.KindBitfield:
 		decl = fmt.Sprintf("%s %s;", bitfieldC(f.Ref), mn)
-		entry = field(f.ID, cType, mn, "UNSIGNED")
+		entry = field(f.ID, cType, at, "UNSIGNED")
 	case ir.KindArray:
 		// Native array element (numeric/enum/boolean/bitfield): enum -> signed,
 		// bitfield -> unsigned, boolean -> the §4.4 boolean array (arrayFieldType),
@@ -688,39 +790,48 @@ func (g *gen) scalarMember(cType string, f *ir.Field) (decl, entry string, err e
 
 func (g *gen) emitStruct(h *cfile, p *objectPlan) {
 	h.line("typedef struct {")
-	for _, m := range p.members {
-		decl, doc := m.decl, m.doc
-		if m.deprecated {
-			// Emit the native marker so callers touching the field warn, and add a
-			// Doxygen @deprecated note so the doc tool renders a deprecation section.
-			decl = deprecatedDecl(decl)
-			if doc != "" {
-				doc += " @deprecated"
-			} else {
-				doc = "@deprecated"
-			}
-		}
-		// A field with a schema bound takes the leading block form: the note does
-		// not fit a trailing /**< ... */, and it documents the length member the
-		// declaration line declares alongside the storage.
-		switch {
-		case m.note != "":
-			h.line("    /**")
-			if doc != "" {
-				h.line("     * %s", doc)
-				h.line("     *")
-			}
-			h.line("     * %s", m.note)
-			h.line("     */")
-			h.line("    %s", decl)
-		case doc != "":
-			h.line("    %s  /**< %s */", decl, doc)
-		default:
-			h.line("    %s", decl)
+	if p.union != nil {
+		g.emitUnionMembers(h, p)
+	} else {
+		for _, m := range p.members {
+			g.emitMember(h, m, "    ")
 		}
 	}
 	h.line("} %s;", p.cType)
 	h.blank()
+}
+
+// emitMember writes one member declaration with its documentation at indent.
+func (g *gen) emitMember(h *cfile, m member, ind string) {
+	decl, doc := m.decl, m.doc
+	if m.deprecated {
+		// Emit the native marker so callers touching the field warn, and add a
+		// Doxygen @deprecated note so the doc tool renders a deprecation section.
+		decl = deprecatedDecl(decl)
+		if doc != "" {
+			doc += " @deprecated"
+		} else {
+			doc = "@deprecated"
+		}
+	}
+	// A field with a schema bound takes the leading block form: the note does
+	// not fit a trailing /**< ... */, and it documents the length member the
+	// declaration line declares alongside the storage.
+	switch {
+	case m.note != "":
+		h.line("%s/**", ind)
+		if doc != "" {
+			h.line("%s * %s", ind, doc)
+			h.line("%s *", ind)
+		}
+		h.line("%s * %s", ind, m.note)
+		h.line("%s */", ind)
+		h.line("%s%s", ind, decl)
+	case doc != "":
+		h.line("%s%s  /**< %s */", ind, decl, doc)
+	default:
+		h.line("%s%s", ind, decl)
+	}
 }
 
 // emitBitfieldConsts emits one #define per declared bit position: the FIELD
@@ -935,7 +1046,10 @@ func (g *gen) emitDescriptor(c *cfile, p *objectPlan) {
 	// leaf field carries a non-zero default; otherwise the plain descriptor
 	// compares against zero and costs no .rodata. Designated initializers are
 	// order-independent, so the widest-first member reordering is irrelevant.
-	if len(p.defaults) > 0 {
+	if p.union != nil {
+		c.line("const sofab_object_descr_t %s = SOFAB_OBJECT_DESCR_UNION(%s, %d, %s, %d, %s, %s, which);",
+			p.descr, g.fieldsSym(p.key), len(p.fields), nested, nestedCount, g.unionImage(c, p), p.cType)
+	} else if len(p.defaults) > 0 {
 		// A holder (fixedSeq) never carries a defaults image (its elements default to
 		// empty/zero), so WITH_DEFAULTS and SEQ are mutually exclusive in practice.
 		c.line("static const %s %s = {", p.cType, g.defaultsSym(p.key))
@@ -1077,6 +1191,7 @@ func (g *gen) emitGuards(h *cfile, m *ir.Message, caps capset, maxField int64, m
 		{caps.array, "SOFAB_DISABLE_ARRAY_SUPPORT", "uses numeric arrays, but the corelib was built with SOFAB_DISABLE_ARRAY_SUPPORT"},
 		{caps.sequence, "SOFAB_DISABLE_SEQUENCE_SUPPORT", "uses nested framing (struct/union/array-of-string), but the corelib was built with SOFAB_DISABLE_SEQUENCE_SUPPORT"},
 		{caps.value64, "SOFAB_DISABLE_INT64_SUPPORT", "uses 64-bit integers, but the corelib was built with SOFAB_DISABLE_INT64_SUPPORT"},
+		{caps.union, "SOFAB_DISABLE_UNION_SUPPORT", "uses unions (one option held, SOFAB_OBJECT_DESCR_UNION), but the corelib was built with SOFAB_DISABLE_UNION_SUPPORT"},
 	} {
 		if !c.on {
 			continue
@@ -1110,7 +1225,7 @@ func (g *gen) emitGuards(h *cfile, m *ir.Message, caps capset, maxField int64, m
 // ---- capability derivation ---------------------------------------------
 
 type capset struct {
-	fixlen, fp64, array, sequence, value64 bool
+	fixlen, fp64, array, sequence, value64, union bool
 }
 
 func (g *gen) capabilities(m *ir.Message) capset {
@@ -1137,6 +1252,7 @@ func (g *gen) capabilities(m *ir.Message) capset {
 			caps.fixlen = true
 		case ir.KindStruct, ir.KindUnion:
 			caps.sequence = true
+			caps.union = caps.union || spec.elem == ir.KindUnion
 			if !seen[spec.ref.Key] {
 				seen[spec.ref.Key] = true
 				walk(spec.ref.Target.Fields)
@@ -1176,6 +1292,7 @@ func (g *gen) capabilities(m *ir.Message) capset {
 				}
 			case ir.KindStruct, ir.KindUnion:
 				caps.sequence = true
+				caps.union = caps.union || f.Kind == ir.KindUnion
 				if !seen[f.Ref.Key] {
 					seen[f.Ref.Key] = true
 					walk(f.Ref.Target.Fields)

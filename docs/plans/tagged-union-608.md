@@ -461,10 +461,16 @@ D.isDefault` treats differently: a struct (`u`, `v2`, `pf`), a leaf (`v`, `q`,
 `pe`/`po`), a **union** (`r`: `nu`, whose own `D` is its non-first option `b` = 4),
 a **compact array** (`r2`) and a **wrapper array** (`r3`). `r` is the one that
 executes the recursion: `r` holding `nu` which holds its non-`D` option `a` = 0
-is **not** default (E36) — a backend that tests only the held option's value, or
-C without the `_UNION_FORCED` line in `_field_is_default` (§5.1 item 1), omits
-`r` and decodes `nu = {"b":4}`: silent data loss that no other field shows (E10
-does not, because `inner` is a non-`D` option of `u` and is forced anyway). `g`
+is **not** default (E36) — a backend that tests only the held option's value
+omits `r` and decodes `nu = {"b":4}`: silent data loss that no other field shows
+(E10 does not, because `inner` is a non-`D` option of `u` and is forced anyway).
+(Corrected in the C milestone: C *without* the `_UNION_FORCED` line in
+`_field_is_default` (§5.1 item 1) still passes E36 by coincidence — it compares
+the held `a` = 0 against the image bytes at the same overlay offset, which are
+`b`'s default 4, and calls `r` non-default. It fails only when the held non-`D`
+option's bytes equal `D`'s default, e.g. `a` = 4; the corelib's Unity test
+`union_nested_union_not_default_when_forced` pins exactly that case, and the
+mutation that drops the line fails it.) `g`
 runs the gap fill of an **inner** array of unions (Rust `reserve_elem`, Go
 `NewMessageSeqInit`, the GC factories, the C holder) with a non-first `D` at a
 non-zero default, through the nested `ArrayElem.ElemRef` that §1.1 fixes — the
@@ -518,7 +524,7 @@ also a streamed decode case.
 | E33 `$defs` element holding the field's `D` | `{"pe":[{"t":{"k":2}}]}` | `seq(6, seq(0, seq(1)))` | option `end_keep`, last element `end_keep` |
 | E34 `$defs` element gap = the element site's `D` | `{"pe":[{"n":6},{"s":"x"}]}` | `seq(6, seq(1, string(2,"x")))` | gap fill is `n` = 6, not `t` |
 | E35 union `D` holding its own `D` at default | `{"r":{"nu":{"b":4}}}` | `b""` | recursive `isDefault` true |
-| E36 union `D` holding its non-`D` at 0 | `{"r":{"nu":{"a":0}}}` | `seq(8, seq(0, unsigned(0,0)))` | recursive `isDefault` **false**: `r` is written although `nu`'s held value is 0 (C: `_UNION_FORCED` in `_field_is_default`) |
+| E36 union `D` holding its non-`D` at 0 | `{"r":{"nu":{"a":0}}}` | `seq(8, seq(0, unsigned(0,0)))` | recursive `isDefault` **false**: `r` is written although `nu`'s held value is 0 (C: `_UNION_FORCED` in `_field_is_default`, isolated by the corelib Unity test, see §2.1) |
 | E37 union `D`, its `D` set | `{"r":{"nu":{"b":5}}}` | `seq(8, seq(0, unsigned(1,5)))` | `D` framed normally |
 | E38 non-`D` compact array empty beside a union `D` | `{"r":{"ar":[]}}` | `seq(8, uarray(1,[]))` | forced write, count 0 |
 | E39 compact-array `D` empty | `{"r2":{"ca":[]}}` | `b""` | array `D` at its (empty) default is omitted |
@@ -925,15 +931,35 @@ Work only in `/root/corelibs/wt-c-cpp-union` (branch `feat/tagged-union`,
        ? *(const sofab_object_descr_id_t *)(info)->default_values : 0u)
    #define _UNION_FORCED(info, obj) (_IS_UNION(info) && _TAG(obj) != _DEFAULT_TAG(info))
    ```
-   * `sofab_object_encode`: the skip becomes
-     `if (!_SOFAB_ELEMENT_HELD(i) && !_UNION_FORCED(info, src) && _field_is_default(info, field, src))`
-     — the held option (the only one that survives `_NOT_HELD`) is written even at
-     its default: a scalar as its value, a string/sized blob as the empty value, a
-     sized array as count 0, a sequence option (struct/union/wrapper holder) as a
-     present (eager) frame.
-   * `_field_is_default`, SEQUENCE branch: before the loop,
-     `if (_UNION_FORCED(ninfo, nsrc)) return 0;` — a union holding a non-default
-     option is never default.
+   * **As landed (C milestone): no union test in any per-field loop.** The first
+     draft of this item put `_UNION_FORCED` into the per-field encode skip and
+     kept the prototype's per-field `_NOT_HELD` tests in init, encode and the
+     ≠-default test. Measured on the bench row `c`, those per-field tests cost
+     every schema +2.9 % encode / +3.6 % decode Ir on its plain structs, over
+     the +0.3 % trigger of 5.2, so the hoist 5.2 prescribes is what landed.
+     Every union test sits inside the branch each walk already takes on a
+     non-zero `fixed_seq` (a plain struct never reaches it), and a union's walk
+     runs its unchanged plain-struct loop over one index, the held option's
+     (`_union_held`, `SIZE_MAX` for a stray tag, i.e. an empty range):
+     * `sofab_object_encode`: `first = held; count = held + 1`, and
+       `if (_UNION_FORCED(info, src)) last = first;` — the held non-`D` option
+       takes the holder's "last element is always written" exemption, so it is
+       written even at its default: a scalar as its value, a string/sized blob as
+       the empty value, a sized array as count 0, a sequence option
+       (struct/union/wrapper holder) as a present (eager) frame.
+     * `_field_is_default`, SEQUENCE branch, union: `if (_UNION_FORCED(ninfo,
+       nsrc)) return 0;` — a union holding a non-default option is never default
+       — then the held option only.
+     * decode: the tag moves in `_seq_len_observe`, the holder's "was bound"
+       point (tested on the `fixed_seq` byte, so a plain struct leaves as early as
+       before); a switch to a sequence option `sofab_object_init`s it there,
+       before its children arrive. The SEQUENCE branch's re-open reset and the
+       over-index reject test the holder bit (`_IS_HOLDER`) instead of the whole
+       byte.
+     Result: a union-free schema pays no Ir (bench `c` against the product-type
+     generator: +0.07 % encode, −0.21 % decode), the union row gets cheaper
+     (−0.95 % / −0.49 %), and `SOFAB_DISABLE_UNION_SUPPORT` compiles to main's
+     `object.c` byte for byte. The price is flash, see item 6.
    * `sofab_object_init`: the tag comes from `_DEFAULT_TAG(info)` — a **NULL image
      now means tag 0**, so a union whose image would carry nothing but zeros needs
      no image and costs no `.rodata` (the exact condition is in 5.2).
@@ -984,6 +1010,14 @@ Work only in `/root/corelibs/wt-c-cpp-union` (branch `feat/tagged-union`,
    `657d6ca`'s numbers; expected ≤ +32 B on top of #182's +108…+218 B full-config
    cost, ±0 minimal. Update the PR #182 body (still draft) with the final numbers
    and remove "prototype" from it once the C milestone is green.
+   *Measured (C milestone), full config ARMv6-m / ARMv7-m / RV32IMC / atmega8:
+   main 3868 / 3898 / 4976 / 8366 B, `657d6ca` 3984 / 4006 / 5100 / 8584 B,
+   landed 4106 / 4052 / 5276 / 8734 B — +238 / +154 / +300 / +368 B over main,
+   +122 / +46 / +176 / +150 B over the prototype; minimal ±0;
+   `SOFAB_DISABLE_UNION_SUPPORT` = main. Over the +32 B expectation because
+   the expectation assumed the per-field tests, which item 1 had to hoist: a
+   per-walk union branch costs more flash than a per-field compare, and it is
+   the one that keeps a union-free schema's Ir at main's.*
 7. The **C++ side** of c-cpp (`sofab.hpp`, `seq.hpp`) needs no change.
 
 ### 5.2 c (generator)
@@ -1069,6 +1103,12 @@ Work only in `/root/corelibs/wt-c-cpp-union` (branch `feat/tagged-union`,
   (§4) — expected 2–4 B per union with a struct `D` and tag + `D` for a leaf `D`.
   Ir/op: `_NOT_HELD`/`_IS_UNION` bit tests on every object walk; if the `c` row
   moves by more than +0.3 % hoist `_IS_UNION(info)` out of the three loops.
+  *(It moved +2.9 % / +3.6 %; hoisted, see 5.1 item 1. Landed row `c`:
+  25733 / 52790 Ir, .text 5762 / 5714 / 6342 B against main's 25979 / 53048,
+  5524 / 5560 / 6066 B. The whole .text delta is the corelib's: the
+  product-type generator against the same corelib measures the same
+  5762 / 5714 / 6342 B (and 25998 / 52937 Ir), so the generated code stays
+  within §4's +64 B; the corelib's own cost is item 6 of 5.1.)*
 
 ### 5.3 cpp — `corelib: cpp` and `corelib: c-cpp`
 

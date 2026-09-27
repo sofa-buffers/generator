@@ -273,8 +273,8 @@ echo "==> project harness round-trip OK"
 # back is a full-coverage pass that grows with the schema by itself.
 #
 # A string comparison cannot do this job: member order is the backend's choice
-# (cpp orders by schema id, go alphabetically), a union renders every arm, and a
-# blob is base64 here and a byte array there -- all rendering, no wire fact.
+# (cpp orders by schema id, go alphabetically), and a blob is base64 here and a
+# byte array there -- all rendering, no wire fact.
 FULL="$OUT"
 OUT2=$(printf '%s' "$FULL" | "$WORK/proj/harness/harness" encode | "$WORK/proj/harness/harness" decode)
 python3 "$ROOT/tests/conformance/lib/json_equal.py" "$FULL" "$OUT2" \
@@ -282,11 +282,9 @@ python3 "$ROOT/tests/conformance/lib/json_equal.py" "$FULL" "$OUT2" \
 echo "==> full-message round-trip OK ($(python3 -c "import json,sys;print(len(json.loads(sys.argv[1])))" "$FULL") fields compared as data)"
 # Every field must sit OFF its schema default, or the round trip above compares
 # a default with itself and cannot tell a working decode from a broken one.
-# The union arms beside the selected one are excepted: a union carries exactly
-# one, so the others reading as their default is the rule, not a hole.
 BASE=$(printf '%s' '{}' | "$WORK/proj/harness/harness" encode | "$WORK/proj/harness/harness" decode)
 python3 "$ROOT/tests/conformance/lib/check_nondefault.py" "$BASE" "$FULL" \
-    --except '$.someunion.option2,$.someunion.option3,$.someunion.option3.unionstructint,$.someunion.option3.unionstructbool' --label "c: round-trip fixture" || exit 1
+    --label "c: round-trip fixture" || exit 1
 echo "==> round-trip fixture OK (no field sits on its schema default)"
 
 # Over-index wrapper array (generator#149 / F-0013): somestringarray (id 18)
@@ -700,7 +698,7 @@ messages: { m: { payload: { a: {id: 0, type: u32}, b: {id: 1, type: i32}, f: {id
 
 echo "==> negative: a guard fires when a used feature is disabled in the corelib"
 # (the full example uses every feature; each disable macro must trip its #error)
-for flag in FIXLEN_SUPPORT ARRAY_SUPPORT SEQUENCE_SUPPORT FP64_SUPPORT INT64_SUPPORT; do
+for flag in FIXLEN_SUPPORT ARRAY_SUPPORT SEQUENCE_SUPPORT FP64_SUPPORT INT64_SUPPORT UNION_SUPPORT; do
     if gcc -std=c99 -DSOFAB_OBJECT_DESCR_PROFILE=3 -DSOFAB_DISABLE_$flag -I"$INC" -I"$WORK/gen" \
             -c "$WORK"/gen/myfirstmessage.c -o /dev/null 2>/dev/null; then
         echo "FAIL: expected a capability-guard #error with $flag disabled"
@@ -866,8 +864,25 @@ python3 "$ROOT/tests/conformance/lib/check_repeated_id.py" --emit-schema >> "$WO
 ( cd "$ROOT" && go run ./cmd/sofabgen --config "$WORK/proj.yaml" --lang c \
     --in "$WORK/repeated.yaml" --out "$WORK/repeated" )
 make -C "$WORK/repeated" SOFAB_C_CORELIB="$CORELIB" >/dev/null
-python3 "$ROOT/tests/conformance/lib/check_repeated_id.py" "C" \
+python3 "$ROOT/tests/conformance/lib/check_repeated_id.py" "C" --union \
     -- "$WORK/repeated/harness/harness"
+
+# MESSAGE_SPEC §4.2 / §7.4.1 (generator#608): a union holds exactly ONE option.
+# A fresh one holds default_id at that option's default; a held option other
+# than default_id is written even at its own default (a struct option as an
+# empty frame); on decode the last correctly-typed option wins, a §7.3-skipped
+# or unknown id never switches, and several children or re-opened frames are
+# legal. On this target all of it is corelib-c-cpp's object walk over the
+# SOFAB_OBJECT_DESCR_UNION descriptor the generator emits, so this drives the
+# generated type, its default image and the corelib together. The driver forges
+# the multi-child / mistyped frames no encoder emits, and prints its own schema.
+echo "==> §4.2/§7.4.1 tagged unions: one option held, last option wins (generator#608)"
+python3 "$ROOT/tests/conformance/lib/check_union.py" --emit-schema > "$WORK/union.yaml"
+( cd "$ROOT" && go run ./cmd/sofabgen --config "$WORK/proj.yaml" --lang c \
+    --in "$WORK/union.yaml" --out "$WORK/union" )
+make -C "$WORK/union" SOFAB_C_CORELIB="$CORELIB" >/dev/null
+python3 "$ROOT/tests/conformance/lib/check_union.py" "C" \
+    -- "$WORK/union/harness/harness"
 
 # Nested defaults (generator#609): a default declared inside a struct, at any
 # depth and inside a struct array's element, is what absence means -- asserted

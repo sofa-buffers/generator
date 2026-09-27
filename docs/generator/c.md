@@ -72,3 +72,93 @@ C has one macro namespace across all included headers. If a flag macro would
 match another generated macro anywhere in the schema, generation fails and
 names both owners. The other macro can be a message's include guard
 (`..._H`), its `..._MAX_SIZE`/`..._MAX_SIZE_LIMIT`, or another flag.
+
+## Unions
+
+A `union` holds exactly one of its options. It is a tag, `which`, followed by a
+C `union` of the options:
+
+```c
+typedef struct {
+    sofab_object_descr_id_t which;  /* the held option: one of the *_ID macros */
+    union {
+        uint16_t num;
+        char name[17];
+        message_m_shape_pt_t pt;                             /* struct option: its own type */
+        struct { uint8_t len; uint8_t data[8]; } raw;        /* blob option */
+        struct { uint16_t len; uint16_t items[4]; } vals;    /* array option */
+        message_m_shape_names_elems_t names;                 /* array of strings: a holder */
+    } u;
+} message_m_shape_t;
+```
+
+A `blob` or `array` option keeps its length inside the option
+(`x.u.raw.len`, `x.u.vals.len`), because the options share their storage.
+
+Each option id has a `#define`, named like a bitfield flag: `symbol_prefix`,
+the path of the union's definition, the option, then `_ID`, all upper-cased —
+`MESSAGE_M_SHAPE_PT_ID` for option `pt` of the union field `shape` of message
+`m`, `MESSAGE_UNION_SHAPE_PT_ID` for a union from `$defs/union/Shape`. A
+`$defs` union used with different `default_id`s is one type per `default_id`,
+named `<Name>_default_<option>`: `message_union_Shape_default_pt_t` with the
+macros `MESSAGE_UNION_SHAPE_DEFAULT_PT_*_ID`. If an option macro would match
+another generated macro anywhere in the schema, generation fails and names both
+owners, as it does for bitfield flags.
+
+| operation | C |
+|---|---|
+| which option is held | `x.which` |
+| test | `x.which == MESSAGE_M_SHAPE_PT_ID` |
+| read the held option | `x.u.pt`, `x.u.num`, … |
+| select a scalar / string / blob / array option | set `which`, then the value (for a blob or array: the bytes and `len`) |
+| select a struct, union or array-of-string/blob/struct option at its default | set `which`, then `sofab_object_init(&<option descriptor>, &x.u.<option>)` |
+| edit the held option in place | write through `x.u.<option>` |
+| back to the default | `<prefix><message>_init` (the whole message) |
+
+```c
+message_m_t msg;
+message_m_init(&msg);                      /* shape holds its default option */
+
+msg.shape.which = MESSAGE_M_SHAPE_NUM_ID;  /* select num = 7 */
+msg.shape.u.num = 7;
+
+msg.shape.which = MESSAGE_M_SHAPE_PT_ID;   /* select pt at its declared default */
+sofab_object_init(&_message_descr_named_m_shape_pt, &msg.shape.u.pt);
+msg.shape.u.pt.y = 2;                      /* ... and edit it in place */
+
+if (msg.shape.which == MESSAGE_M_SHAPE_PT_ID) { use(msg.shape.u.pt.x); }
+```
+
+The header declares the descriptor of every option that is a struct, a union
+or an array of string/blob/struct/array, for exactly that
+`sofab_object_init` call. A scalar, string, blob or compact-array option needs
+none: writing its value is all there is to select it.
+
+Selecting an option overwrites the storage of the one held before — there is
+nothing else to clear, and nothing to free. A pointer into `x.u.<option>` taken
+earlier points into the same bytes afterwards, now holding the other option.
+
+**Defaults.** `_init` puts every union at its `default_id` option, at that
+option's own default (an omitted `default_id` means the option with the lowest
+id). Each element of an array of unions starts the same way, and so does an
+element a decoded array skips.
+
+**Encode.** The held option is the only one written. If it is the
+`default_id` option at its default, the union is at its default and is left
+out. Any other held option is written **even at its own default** — `0`, an
+empty string, an empty blob or array, or an empty frame for a struct option —
+because the receiver's fresh union holds `default_id`, and leaving it out
+would read back as that.
+
+**Decode.** The option received last wins. A different option replaces the
+held one and starts from its own default; the same struct option received again
+continues where it was; a field whose wire type does not match its option, and
+an unknown id, change nothing.
+
+**JSON (project harness).** A union is an object with exactly one member, the
+held option: `{"pt": {"x": 7, "y": 2}}`, also when that is the `default_id`
+option at its default.
+
+**Corelib build switch.** The union walk lives in `corelib-c-cpp`'s object API.
+A header whose message uses a union refuses to compile against a corelib built
+with `SOFAB_DISABLE_UNION_SUPPORT`.
