@@ -163,8 +163,11 @@ func (g *gen) harness(s *ir.Schema) []byte {
 	// Per-type JSON converters (shared named types first, then messages).
 	for _, key := range s.NamedOrder {
 		nt := s.Named[key]
-		if nt.Category == ir.CatStruct || nt.Category == ir.CatUnion {
+		switch nt.Category {
+		case ir.CatStruct:
 			g.emitJSON(f, g.typeName(key), nt.Fields)
+		case ir.CatUnion:
+			g.emitUnionJSON(f, g.typeName(key), nt)
 		}
 	}
 	for _, m := range s.Messages {
@@ -372,7 +375,50 @@ func (g *gen) emitJSON(f *zfile, name string, fields []*ir.Field) {
 		f.line("    _ = obj;")
 	}
 	for _, fld := range fields {
-		g.emitFromJSONField(f, fld)
+		g.emitFromJSONField(f, fld, "o."+zigIdent(fld.Name))
+	}
+	f.line("    return o;")
+	f.line("}")
+	f.blank()
+}
+
+// emitUnionJSON writes toJson_<T> / fromJson_<T> for one union type. A union is
+// an object with exactly ONE member, the option held -- `{"<option>": value}`,
+// printed even when that is default_id at its default. fromJson starts from
+// `init` and selects each member present through <opt>Mut(), so an object
+// naming no option reads as the union's default.
+func (g *gen) emitUnionJSON(f *zfile, name string, nt *ir.NamedType) {
+	opts := unionOptions(nt)
+	f.line("fn toJson_%s(o: *const message.%s, w: *std.Io.Writer) std.Io.Writer.Error!void {", name, name)
+	f.line("    switch (o.*) {")
+	for _, o := range opts {
+		acc := "o." + o.ident
+		f.line("        .%s => {", o.ident)
+		f.line("            try w.writeAll(\"{\\\"%s\\\":\");", o.f.Name)
+		if o.f.Kind == ir.KindArray {
+			ed := arrayElemOf(o.f)
+			g.emitToJSONValue(f, "            ", g.arrayValExpr(o.f, acc), ir.ArrayElem{Elem: ir.KindArray, ElemItems: &ed}, 0)
+		} else {
+			g.emitToJSONValue(f, "            ", acc, fieldElem(o.f), 0)
+		}
+		f.line("            try w.writeByte('}');")
+		f.line("        },")
+	}
+	f.line("    }")
+	f.line("}")
+	f.blank()
+
+	f.line("fn fromJson_%s(alloc: std.mem.Allocator, v: std.json.Value) message.%s {", name, name)
+	f.line("    var o: message.%s = .init;", name)
+	f.line("    const obj = switch (v) {")
+	f.line("        .object => |ob| ob,")
+	f.line("        else => return o,")
+	f.line("    };")
+	if !fieldsUseAlloc(nt.Fields) {
+		f.line("    _ = alloc;")
+	}
+	for _, o := range opts {
+		g.emitFromJSONField(f, o.f, "o."+o.mut+"().*")
 	}
 	f.line("    return o;")
 	f.line("}")
@@ -415,9 +461,9 @@ func (g *gen) emitToJSONValue(f *zfile, ind, acc string, e ir.ArrayElem, depth i
 	}
 }
 
-func (g *gen) emitFromJSONField(f *zfile, fld *ir.Field) {
+// emitFromJSONField loads JSON member fld.Name into the lvalue acc.
+func (g *gen) emitFromJSONField(f *zfile, fld *ir.Field, acc string) {
 	get := fmt.Sprintf("obj.get(%q)", fld.Name)
-	acc := "o." + zigIdent(fld.Name)
 	switch fld.Kind {
 	case ir.KindU8, ir.KindU16, ir.KindU32, ir.KindU64, ir.KindBitfield:
 		dest := numZigType(fld.Kind)

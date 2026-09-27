@@ -22,10 +22,15 @@ const (
 // variant; path is the Zig lvalue expression (e.g. "self.m.somestruct.deep" or
 // "sofab.arrays.at(self.m.points, self.ei_root_points).tags").
 type frame struct {
-	loc      string
-	path     string
-	kind     frameKind
-	fields   []*ir.Field // fkStruct
+	loc    string
+	path   string
+	kind   frameKind
+	fields []*ir.Field // fkStruct
+	// union marks an fkStruct frame whose fields are the OPTIONS of the tagged
+	// union at path (an lvalue of the union type): a leaf option is stored by
+	// assigning the whole union, and every path into an option goes through its
+	// select-if-not-held accessor (memberAcc).
+	union    bool
 	elemLoc  string      // fkStructArr, fkArrArr: location to descend to on a per-element sequenceBegin
 	elemKind ir.Kind     // fkSeqArr: string/blob element; fkNestedNative: inner native element kind
 	elemRef  *ir.TypeRef // fkNestedNative: enum/bitfield backing type
@@ -66,6 +71,28 @@ type frame struct {
 	emax int64
 }
 
+// memberAcc is the lvalue of field fld in frame fr. In a union frame it is the
+// option reached through <opt>Mut(), which selects the option at its own default
+// unless it is the one held (MESSAGE_SPEC §7.4.1, "select if not held") -- so a
+// store below an option is right even without a begin arm in front of it, and a
+// repeated or resumed call keeps what was decoded.
+func memberAcc(fr frame, fld *ir.Field) string {
+	if fr.union {
+		return fr.path + "." + optMut(fld.Name) + "().*"
+	}
+	return fr.path + "." + zigIdent(fld.Name)
+}
+
+// leafStore renders the store of a whole value into field fld of frame fr. In a
+// union frame it assigns the tagged union: selecting the option and storing its
+// value are one statement, which discards the option held before.
+func leafStore(fr frame, fld *ir.Field, val string) string {
+	if fr.union {
+		return fmt.Sprintf("%s = .{ .%s = %s }", fr.path, optIdent(fld.Name), val)
+	}
+	return fr.path + "." + zigIdent(fld.Name) + " = " + val
+}
+
 // capOf maps a schema count bound to a frame's cap: N when the array declares a
 // count, -1 (unbounded) otherwise. N is a CAPACITY: a frame uses it only to
 // reject an out-of-range element id, never to size the result.
@@ -88,18 +115,19 @@ func boundOf(has bool, v int64) int64 {
 // frames walks a message and returns every sequence container, root first.
 func (g *gen) frames(m *ir.Message) []frame {
 	var out []frame
-	var walkFields func(loc, path string, fields []*ir.Field)
+	var walkFields func(loc, path string, fields []*ir.Field, union bool)
 	var addArray func(loc, path string, elem ir.Kind, ref *ir.TypeRef, items *ir.ArrayElem, elemMaxHas bool, elemMax int64, cap int64)
 
-	walkFields = func(loc, path string, fields []*ir.Field) {
-		out = append(out, frame{loc: loc, path: path, kind: fkStruct, fields: fields})
+	walkFields = func(loc, path string, fields []*ir.Field, union bool) {
+		fr := frame{loc: loc, path: path, kind: fkStruct, fields: fields, union: union}
+		out = append(out, fr)
 		for _, fld := range fields {
 			switch {
 			case fld.Kind == ir.KindStruct || fld.Kind == ir.KindUnion:
 				cl := loc + "_" + fld.Name
-				walkFields(cl, path+"."+zigIdent(fld.Name), fld.Ref.Target.Fields)
+				walkFields(cl, memberAcc(fr, fld), fld.Ref.Target.Fields, fld.Kind == ir.KindUnion)
 			case fld.Kind == ir.KindArray && isWrapperElem(fld.Elem):
-				addArray(loc+"_"+fld.Name, path+"."+zigIdent(fld.Name), fld.Elem, fld.ElemRef, fld.ElemItems, fld.ElemMaxHas, fld.ElemMax, capOf(fld.HasCount, fld.Count))
+				addArray(loc+"_"+fld.Name, memberAcc(fr, fld), fld.Elem, fld.ElemRef, fld.ElemItems, fld.ElemMaxHas, fld.ElemMax, capOf(fld.HasCount, fld.Count))
 			}
 		}
 	}
@@ -115,11 +143,19 @@ func (g *gen) frames(m *ir.Message) []frame {
 		case ir.KindStruct, ir.KindUnion:
 			el := loc + "_e"
 			idx := "ei_" + loc
+			// A union element's gap fill is the type's `init` -- default_id at its
+			// own default, per (union, default_id) type -- and its path is the
+			// element itself (`.*`), since a leaf option is stored by assigning the
+			// whole tagged union.
+			fill, elPath := ".{}", "sofab.arrays.at("+path+", self."+idx+")"
+			if elem == ir.KindUnion {
+				fill, elPath = ".init", elPath+".*"
+			}
 			out = append(out, frame{
 				loc: loc, path: path, kind: fkStructArr, elemLoc: el, idx: idx,
-				elemType: g.typeName(ref.Key), elemFill: ".{}", cap: cap,
+				elemType: g.typeName(ref.Key), elemFill: fill, cap: cap,
 			})
-			walkFields(el, "sofab.arrays.at("+path+", self."+idx+")", ref.Target.Fields)
+			walkFields(el, elPath, ref.Target.Fields, elem == ir.KindUnion)
 		case ir.KindArray:
 			// The element is an inner array (items). A native inner array is
 			// handled by a single wrapper frame (arrayBegin places a fresh inner
@@ -145,7 +181,7 @@ func (g *gen) frames(m *ir.Message) []frame {
 		}
 	}
 
-	walkFields("root", "self.m", m.Fields)
+	walkFields("root", "self.m", m.Fields, false)
 	return out
 }
 
@@ -297,7 +333,7 @@ func (g *gen) msgLimitGuards(fields []*ir.Field) bool {
 // INSIDE the fill guard: an over-width scalar arriving at this id with no
 // arrayBegin in front of it (afill == 0) is a §7.3 skip and must not be rejected.
 func (g *gen) putCall(fr frame, fld *ir.Field, guard, val string) string {
-	acc := fr.path + "." + zigIdent(fld.Name)
+	acc := memberAcc(fr, fld)
 	var inner string
 	if _, _, ok := g.fixedNativeArray(fld); ok {
 		inner = fmt.Sprintf("%s.push(%s, &self.inv)", acc, val)
@@ -544,13 +580,12 @@ func (g *gen) emitDecoder(f *zfile, name string, fields []*ir.Field) {
 // intArm renders one match arm body for an unsigned/signed store, or "" when
 // the field does not belong to this callback.
 func (g *gen) intArm(fr frame, fld *ir.Field, signed bool) string {
-	acc := fr.path + "." + zigIdent(fld.Name)
 	if signed {
 		switch {
 		case isSignedElem(fld.Kind):
-			return guardedStore(widthGuard(fld.Kind, fld.Ref), fmt.Sprintf("%s = %s", acc, storeCast(numZigType(fld.Kind), "value")))
+			return guardedStore(widthGuard(fld.Kind, fld.Ref), leafStore(fr, fld, storeCast(numZigType(fld.Kind), "value")))
 		case fld.Kind == ir.KindEnum:
-			return guardedStore(widthGuard(fld.Kind, fld.Ref), fmt.Sprintf("%s = %s", acc, storeCast(enumBacking(fld.Ref.Target), "value")))
+			return guardedStore(widthGuard(fld.Kind, fld.Ref), leafStore(fr, fld, storeCast(enumBacking(fld.Ref.Target), "value")))
 		case fld.Kind == ir.KindArray && isSignedElem(fld.Elem):
 			return g.putCall(fr, fld, widthGuard(fld.Elem, fld.ElemRef), storeCast(numZigType(fld.Elem), "value"))
 		case fld.Kind == ir.KindArray && fld.Elem == ir.KindEnum:
@@ -560,11 +595,11 @@ func (g *gen) intArm(fr frame, fld *ir.Field, signed bool) string {
 	}
 	switch {
 	case isUnsignedElem(fld.Kind):
-		return guardedStore(widthGuard(fld.Kind, fld.Ref), fmt.Sprintf("%s = %s", acc, storeCast(numZigType(fld.Kind), "value")))
+		return guardedStore(widthGuard(fld.Kind, fld.Ref), leafStore(fr, fld, storeCast(numZigType(fld.Kind), "value")))
 	case fld.Kind == ir.KindBool:
-		return fmt.Sprintf("%s = value != 0", acc)
+		return leafStore(fr, fld, "value != 0")
 	case fld.Kind == ir.KindBitfield:
-		return guardedStore(widthGuard(fld.Kind, fld.Ref), fmt.Sprintf("%s = %s", acc, storeCast(bitfieldBacking(fld.Ref.Target), "value")))
+		return guardedStore(widthGuard(fld.Kind, fld.Ref), leafStore(fr, fld, storeCast(bitfieldBacking(fld.Ref.Target), "value")))
 	case fld.Kind == ir.KindArray && isUnsignedElem(fld.Elem):
 		return g.putCall(fr, fld, widthGuard(fld.Elem, fld.ElemRef), storeCast(numZigType(fld.Elem), "value"))
 	case fld.Kind == ir.KindArray && fld.Elem == ir.KindBool:
@@ -862,10 +897,9 @@ func (g *gen) emitFloatVisit(f *zfile, fs []frame, name string, kind ir.Kind, cb
 		}
 		fa := frameArms{fr: fr}
 		for _, fld := range fr.fields {
-			acc := fr.path + "." + zigIdent(fld.Name)
 			switch {
 			case fld.Kind == kind:
-				fa.arms = append(fa.arms, fmt.Sprintf("%d => %s = value,", fld.ID, acc))
+				fa.arms = append(fa.arms, fmt.Sprintf("%d => %s,", fld.ID, leafStore(fr, fld, "value")))
 			case fld.Kind == ir.KindArray && fld.Elem == kind:
 				fa.arms = append(fa.arms, fmt.Sprintf("%d => %s,", fld.ID, g.putCall(fr, fld, "", "value")))
 			}
@@ -1253,7 +1287,9 @@ func (g *gen) emitPayloadVisit(f *zfile, fs []frame, name string, kind ir.Kind, 
 			if fld.Kind != kind {
 				continue
 			}
-			store := fr.path + "." + zigIdent(fld.Name) + " = chunk;"
+			// The completion store: the bind returns the payload only once it is
+			// whole, so a union option is selected here and never per chunk.
+			store := leafStore(fr, fld, "chunk") + ";"
 			switch {
 			case fld.HasMaxlen:
 				// Bounded scalar string/blob: no length test here either. The schema
@@ -1418,8 +1454,12 @@ func (g *gen) emitArrayBegin(f *zfile, fs []frame, name string, arrSkip bool) {
 					// contradiction into INVALID -- §7.3 decides the subtype BEFORE
 					// any schema bound, and only a field that survives that test is
 					// bounded at all.
-					arm := fmt.Sprintf("if (kind == .%s) { %s %s.%s.clear(); }",
-						wireArrayKind(fld.Elem), guard, fr.path, zigIdent(fld.Name))
+					//
+					// A union option is selected here, behind the kind gate and the
+					// over-count reject: <opt>Mut() (memberAcc) keeps a held option and
+					// selects one that is not, and the clear then replaces its value.
+					arm := fmt.Sprintf("if (kind == .%s) { %s %s.clear(); }",
+						wireArrayKind(fld.Elem), guard, memberAcc(fr, fld))
 					fa.arms = append(fa.arms, fmt.Sprintf("%d => %s,", fld.ID, arm))
 					// The guard reads the wire count; the switch reads id.
 					idUsed, countUsed = true, true
@@ -1452,8 +1492,8 @@ func (g *gen) emitArrayBegin(f *zfile, fs []frame, name string, arrSkip bool) {
 					// yet; the cap bounds it, so the reservation only added doubling
 					// and copies.
 					bound, isCap := g.arrayBound(-1)
-					body := fmt.Sprintf("%s.%s = sofab.arrays.allocCounted(%s, %s, self.alloc, count) catch { %s = true; self.an = 0; return; };",
-						fr.path, zigIdent(fld.Name), elem, bound, boundFlag(isCap))
+					body := fmt.Sprintf("%s = sofab.arrays.allocCounted(%s, %s, self.alloc, count) catch { %s = true; self.an = 0; return; };",
+						memberAcc(fr, fld), elem, bound, boundFlag(isCap))
 					// A count-less array has no schema bound to misapply, but it
 					// still must not ALLOCATE from a header that is being skipped
 					// (CORELIB_PLAN §4.8 / MESSAGE_SPEC §7.3, generator#259). The
@@ -1613,10 +1653,18 @@ func (g *gen) emitSequence(f *zfile, fs []frame, name string) {
 			fa := frameArms{fr: fr}
 			for _, fld := range fr.fields {
 				switch {
+				case (fld.Kind == ir.KindStruct || fld.Kind == ir.KindUnion) && fr.union:
+					// A struct/union OPTION is selected at its sequence begin, so an
+					// empty frame still holds it at its own default (§7.4.1). The
+					// select is <opt>Mut(): it keeps an option already held, so a
+					// re-opened frame continues its scope (§7.4) instead of restarting.
+					fa.arms = append(fa.arms, fmt.Sprintf("%d => blk: { _ = %s.%s(); break :blk .%s; },", fld.ID, fr.path, optMut(fld.Name), fr.loc+"_"+fld.Name))
 				case fld.Kind == ir.KindStruct || fld.Kind == ir.KindUnion:
 					fa.arms = append(fa.arms, fmt.Sprintf("%d => .%s,", fld.ID, fr.loc+"_"+fld.Name))
 				case fld.Kind == ir.KindArray && isWrapperElem(fld.Elem):
-					acc := fr.path + "." + zigIdent(fld.Name)
+					// A wrapper-array option is selected by the same accessor, then
+					// reset: the wrapper IS the value and a repeated one replaces it.
+					acc := memberAcc(fr, fld)
 					fa.arms = append(fa.arms, fmt.Sprintf("%d => blk: { %s = &.{}; break :blk .%s; },", fld.ID, acc, fr.loc+"_"+fld.Name))
 				}
 			}

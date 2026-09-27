@@ -1553,8 +1553,8 @@ func TestZigEnumAndBitfieldWidthBoundAtEverySixPositions(t *testing.T) {
 		"0 => { " + enRej + "sofab.arrays.at(self.m.sa, self.ei_root_sa).se = @intCast(value); },",
 		"1 => { " + bfRej + "sofab.arrays.at(self.m.sa, self.ei_root_sa).sbf = @intCast(value); },",
 		// 5. union member
-		"0 => { " + enRej + "self.m.un.ue = @intCast(value); },",
-		"1 => { " + bfRej + "self.m.un.ubf = @intCast(value); },",
+		"0 => { " + enRej + "self.m.un = .{ .ue = @intCast(value) }; },",
+		"1 => { " + bfRej + "self.m.un = .{ .ubf = @intCast(value) }; },",
 		// 6. matrix row element
 		".root_mat => { " + fill + enRej,
 		".root_mbf => { " + fill + bfRej,
@@ -1580,6 +1580,7 @@ func TestZigEnumAndBitfieldWidthBoundAtEverySixPositions(t *testing.T) {
 		"1 => self.m.bf = @intCast(value),",
 		"0 => self.m.st.se = @intCast(value),",
 		"1 => self.m.un.ubf = @intCast(value),",
+		"1 => self.m.un = .{ .ubf = @intCast(value) },",
 	} {
 		if containsCode(m, bad) {
 			t.Errorf("message.zig still stores an enum/bitfield through a bare @intCast (%q):\n%s", bad, m)
