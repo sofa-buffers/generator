@@ -1552,6 +1552,27 @@ and the private slots are checked as one namespace (`checkUnionNames`).)*
   rows and reports both before choosing. Rebuild `corelib-ts` `dist/` before the
   suite. Conformance runs the driver in all three modes (`number` with
   `--int64-safe`).
+* *(Corrected in the TypeScript milestone: "reference → `null`" is refined per
+  kind. A typed native-array slot starts at the module's shared empty instance
+  (`_E_<Type>`, what a field of that kind defaults to — it holds nothing and
+  costs nothing), so only struct, union, wrapper-array, `Long[]` and blob slots
+  are nullable. "Nulls the reference slot left behind" is one emitted
+  `_leave()` switch (per-schema arms, emitted only when some option holds
+  anything), called by every select on a real switch; it also puts a string
+  slot back to `""` and a typed array back to its shared empty instance, so a
+  discarded payload is never kept alive. `mutable<Opt>()` exists for struct,
+  union and wrapper-array options only — a typed array cannot grow and a
+  `Long[]` option is replaced through its converting setter, as a struct's
+  `Long[]` member is. That setter copies (`v.map(Long.fromValue)`), so decode
+  cannot hand it a destination and keep filling that one: a Long-backed option
+  (a `Long[]`, or a wrapper of `Long[]` rows) is decoded by assigning `[]` and
+  reading the held value back through the getter. The decode switch needs no
+  code of its own: every store in a union scope goes through the option's
+  setter, and each store already sits behind the §7.3 gate of its kind; the
+  fp32 arm assigns the value (which drops stale NaN bytes) and then the NaN
+  bytes through the public `<opt>Fp32Raw` setter. The driver runs with
+  `--sizes 1`: the TS harness's `streamdecode` ignores the chunk size and always
+  feeds one byte per call.)*
 
 ### 5.12 python — native and pure engines
 

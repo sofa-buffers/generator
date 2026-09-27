@@ -2565,20 +2565,35 @@ func TestTSClosedNameSet(t *testing.T) {
 	// `decode` is the only decode-side name the CLASS carries. Any other static
 	// on a generated class must come from the language-mandated-extra escape
 	// hatch, not from a second spelling of a wire operation.
-	statics := regexp.MustCompile(`(?m)^  static (?:readonly )?(\w+)`).FindAllStringSubmatch(mod, -1)
-	if len(statics) == 0 {
-		t.Fatal("no statics found — the scan is not seeing the class bodies")
-	}
 	allowed := map[string]bool{
 		"decode":         true, // §6.1.1
 		"fromJSON":       true, // JSON bridge, not a wire entry point
 		"MAX_SIZE":       true, // the schema's worst-case size constant, not an entry point
 		"MAX_SIZE_LIMIT": true, // its unbounded-schema companion, likewise a constant
 	}
-	for _, m := range statics {
-		if !allowed[m[1]] {
-			t.Errorf("generated class carries static %q; §6.1.1 closes the set (add it to the allowlist only if it is a language-mandated extra, never a second wire entry point)", m[1])
+	// A union class additionally carries one option-id constant per option
+	// (`<OPT>_ID`), a constant like MAX_SIZE -- and only a union class does.
+	optID := regexp.MustCompile(`^[A-Z0-9_]+_ID$`)
+	statics, ids := 0, 0
+	for _, cls := range strings.Split(mod, "\nexport class ")[1:] {
+		isUnion := strings.Contains(cls, "\n  private _which: number = ")
+		for _, m := range regexp.MustCompile(`(?m)^  static (?:readonly )?(\w+)`).FindAllStringSubmatch(cls, -1) {
+			statics++
+			switch {
+			case allowed[m[1]]:
+			case isUnion && optID.MatchString(m[1]):
+				ids++
+			default:
+				t.Errorf("generated class carries static %q; §6.1.1 closes the set (add it to the allowlist only if it is a language-mandated extra, never a second wire entry point)", m[1])
+			}
 		}
+	}
+	if statics == 0 {
+		t.Fatal("no statics found — the scan is not seeing the class bodies")
+	}
+	// example.yaml's unions: someunion (3 options) and the someunionarray element (2).
+	if ids != 5 {
+		t.Errorf("option-id constants on union classes = %d, want 5", ids)
 	}
 }
 
