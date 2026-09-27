@@ -39,7 +39,21 @@ import (
 // onSequenceStart into a child visitor. A struct/union descent returns the
 // EXISTING member's visitor, so a re-opened scope merges (§7.4); an array
 // wrapper clears its list first, so a re-opened wrapper is replaced.
-func (g *gen) emitVisitor(f *dfile, typeName string, fields []*ir.Field) {
+//
+// u is the union shape when the scope is a union (nil for a struct or message).
+// Every store into a union then goes through the option's own API, which IS the
+// §7.4.1 switch, and every hook it runs in is reached only past the §7.3 gate --
+// which is structural here: the call is chosen by the wire kind (and fixlen
+// subtype), so a mistyped option id lands in a call with no arm for it and
+// switches nothing. A scalar selects through its setter, after the width guard.
+// A string, blob or native array selects at its ONE header call, after the bound
+// check and before the destination is handed over, through mutable<Opt>() --
+// select if not held, so a held option is never cleared, and a zero-length
+// payload (whose header still calls) switches like any other. A struct or union
+// option descends into mutable<Opt>()'s object, which a held option continues
+// (§7.4 merge) and a newly selected one enters at its default; a wrapper-array
+// option clears the list mutable<Opt>() returns (§7.4 replace).
+func (g *gen) emitVisitor(f *dfile, typeName string, fields []*ir.Field, u *unionShape) {
 	var uns, sig, f32, f32bits, f64 []string
 	var str, blob, uArr, sArr, f32Arr, f64Arr []string
 	var seq []string
@@ -53,6 +67,17 @@ func (g *gen) emitVisitor(f *dfile, typeName string, fields []*ir.Field) {
 
 	for _, fld := range fields {
 		acc := "o." + dartIdent(fld.Name)
+		// dest is what an aggregate header arm hands over, seqObj what a struct/
+		// union descent enters: the member itself, or in a union the option's
+		// select-if-not-held accessor.
+		dest, seqObj := acc, acc
+		var opt *unionOpt
+		if u != nil {
+			opt = u.byField[fld]
+			acc = "o." + opt.prop
+			dest = "o.mutable" + opt.base + "()"
+			seqObj = dest
+		}
 		switch fld.Kind {
 		case ir.KindU8, ir.KindU16, ir.KindU32, ir.KindU64, ir.KindBitfield:
 			uns = append(uns, arm(fld.ID, widthGuard(fld.Kind, fld.Ref)+acc+" = value;"))
@@ -64,6 +89,13 @@ func (g *gen) emitVisitor(f *dfile, typeName string, fields []*ir.Field) {
 			// onFp32 fires for a non-NaN value: bind it and drop any bits a prior
 			// (re-opened, §7.4) NaN occurrence captured. onFp32Bits fires for a NaN:
 			// capture the exact wire bits and widen a display double for element access.
+			if opt != nil {
+				// The option's setter selects it and drops the bits of an earlier NaN;
+				// the bits are stored after the value, which selected the option.
+				f32 = append(f32, arm(fld.ID, acc+" = value;"))
+				f32bits = append(f32bits, arm(fld.ID, acc+" = _f32FromBits(bits);\n        o."+opt.bits+" = bits;"))
+				continue
+			}
 			bitsAcc := "o." + fp32BitsField(fld.Name)
 			f32 = append(f32, arm(fld.ID, acc+" = value;\n        "+bitsAcc+" = null;"))
 			f32bits = append(f32bits, arm(fld.ID, bitsAcc+" = bits;\n        "+acc+" = _f32FromBits(bits);"))
@@ -73,21 +105,29 @@ func (g *gen) emitVisitor(f *dfile, typeName string, fields []*ir.Field) {
 			// The codec validates the bytes as UTF-8 once they are whole, and only
 			// for a destination it was handed: a skipped string is never inspected
 			// (CORELIB_PLAN §6.4, generator#257).
-			str = append(str, retArm(fld.ID, g.destReturn(fld, acc, "length", g.limits.stringHas, g.elemMaxExpr(ir.KindString))))
+			str = append(str, retArm(fld.ID, g.destReturn(fld, dest, "length", g.limits.stringHas, g.elemMaxExpr(ir.KindString))))
 		case ir.KindBlob:
-			blob = append(blob, retArm(fld.ID, g.destReturn(fld, acc, "length", g.limits.blobHas, g.elemMaxExpr(ir.KindBlob))))
+			blob = append(blob, retArm(fld.ID, g.destReturn(fld, dest, "length", g.limits.blobHas, g.elemMaxExpr(ir.KindBlob))))
 		case ir.KindStruct, ir.KindUnion:
-			seq = append(seq, retArm(fld.ID, fmt.Sprintf("return %s(%s);", visitorName(g.typeName(fld.Ref.Key)), acc)))
+			seq = append(seq, retArm(fld.ID, fmt.Sprintf("return %s(%s);", visitorName(g.typeName(fld.Ref.Key)), seqObj)))
 		case ir.KindArray:
 			if !nativeArrayElem(fld.Elem) {
 				// Wrapper-sequence array: clear, then descend into a collector. The
 				// clear is §7.4 -- a later occurrence of the field replaces it whole --
 				// and keeps the list's backing store, where a fresh list would not.
-				coll := g.collector(acc, fld.Elem, fld.ElemRef, fld.ElemItems, capOf(fld.HasCount, fld.Count), emaxOf(fld.ElemMaxHas, fld.ElemMax))
-				seq = append(seq, retArm(fld.ID, fmt.Sprintf("%s.clear();\n        return %s;", acc, coll)))
+				list := acc
+				pre := ""
+				if opt != nil {
+					// The option is selected (at its default: an empty list) unless it is
+					// held; the clear below is §7.4's replace of a held one.
+					list = "l"
+					pre = fmt.Sprintf("final l = %s;\n        ", dest)
+				}
+				coll := g.collector(list, fld.Elem, fld.ElemRef, fld.ElemItems, capOf(fld.HasCount, fld.Count), emaxOf(fld.ElemMaxHas, fld.ElemMax))
+				seq = append(seq, retArm(fld.ID, fmt.Sprintf("%s%s.clear();\n        return %s;", pre, list, coll)))
 				continue
 			}
-			a := retArm(fld.ID, g.destReturn(fld, acc, "count", g.limits.arrayHas, g.arrayCapExpr()))
+			a := retArm(fld.ID, g.destReturn(fld, dest, "count", g.limits.arrayHas, g.arrayCapExpr()))
 			switch {
 			case unsignedArrayElem(fld.Elem):
 				uArr = append(uArr, a)
@@ -142,19 +182,28 @@ func (g *gen) emitVisitor(f *dfile, typeName string, fields []*ir.Field) {
 // short -- allocated once, from a count that has just been checked, and never
 // grown element by element (ARCHITECTURE §9.5). The old contents are not kept:
 // the codec overwrites all `n` elements, so copying them over would be waste.
+//
+// acc may be a union option's mutable<Opt>() call: the option is then selected
+// only once the bound has passed, and a destination that still has to be sized
+// is bound to a local first, so the accessor runs once.
 func (g *gen) destReturn(fld *ir.Field, acc, n string, capLive bool, capExpr string) string {
-	size := fmt.Sprintf("if (%s.capacity < %s) %s.storage = %s(%s);\n        ", acc, n, acc, storageType(fld), n)
+	check := ""
+	eager := false
 	if bound, ok := destBound(fld); ok {
-		if eagerDest(fld) {
-			size = ""
-		}
-		return fmt.Sprintf("if (%s > %d) invalidate();\n        %sreturn %s;", n, bound, size, acc)
+		check = fmt.Sprintf("if (%s > %d) invalidate();\n        ", n, bound)
+		eager = eagerDest(fld)
+	} else if capLive {
+		check = fmt.Sprintf("if (%s > %s) limitExceeded();\n        ", n, capExpr)
 	}
-	guard := ""
-	if capLive {
-		guard = fmt.Sprintf("if (%s > %s) limitExceeded();\n        ", n, capExpr)
+	if eager {
+		return fmt.Sprintf("%sreturn %s;", check, acc)
 	}
-	return fmt.Sprintf("%s%sreturn %s;", guard, size, acc)
+	bind := ""
+	if strings.HasSuffix(acc, ")") {
+		bind = fmt.Sprintf("final d = %s;\n        ", acc)
+		acc = "d"
+	}
+	return fmt.Sprintf("%s%sif (%s.capacity < %s) %s.storage = %s(%s);\n        return %s;", check, bind, acc, n, acc, storageType(fld), n, acc)
 }
 
 // storageType is the typed list a destination field's storage is.

@@ -64,6 +64,9 @@ func (*Backend) Generate(s *ir.Schema, cfg map[string]any) ([]generator.File, er
 		limits:  resolveLimits(s, cfg),
 		size:    generator.NewSizePolicy(cfg),
 	}
+	if err := g.checkUnions(s); err != nil {
+		return nil, err
+	}
 	project := cfgString(cfg, "emit", "sources") == "project"
 	prefix := ""
 	if project {
@@ -215,8 +218,11 @@ func (g *gen) module(s *ir.Schema) []byte {
 	decoded := reachableNamed(s)
 	for _, key := range s.NamedOrder {
 		nt := s.Named[key]
-		if nt.Category == ir.CatStruct || nt.Category == ir.CatUnion {
+		switch nt.Category {
+		case ir.CatStruct:
 			g.emitClass(body, g.typeName(key), nt.Summary, nt.Fields, false, decoded[key])
+		case ir.CatUnion:
+			g.emitUnionClass(body, key, nt, decoded[key])
 		}
 	}
 	for _, m := range s.Messages {
@@ -616,7 +622,7 @@ func (g *gen) emitClass(f *dfile, name, summary string, fields []*ir.Field, isMe
 	}
 
 	if withVisitor {
-		g.emitVisitor(f, name, fields)
+		g.emitVisitor(f, name, fields, nil)
 	}
 }
 
@@ -724,7 +730,27 @@ func (g *gen) destDefaultTest(fld *ir.Field, acc string, differs bool) string {
 // ---- serialize --------------------------------------------------------------
 
 func (g *gen) emitMarshal(f *dfile, fld *ir.Field) {
-	acc := dartIdent(fld.Name)
+	g.emitMarshalAt(f, "    ", fld, dartIdent(fld.Name), fp32BitsField(fld.Name), false)
+}
+
+// emitMarshalAt writes field fld, held in acc (its fp32 raw-bits companion in
+// bits), at indent ind.
+//
+// forced drops the != default guard: a union option that is NOT the union's
+// default_id is written whenever it is held, even at its own default
+// (MESSAGE_SPEC §4.2) -- a scalar as its value, a string/blob/native array as
+// its (possibly empty) payload, and a struct/union/wrapper-array option as a
+// frame closed with the KEEPING closer, so an option at its default still
+// travels as a present, empty frame. Inside that frame the normal per-field
+// omission applies. Unforced, this is the ordinary field writer.
+func (g *gen) emitMarshalAt(f *dfile, ind string, fld *ir.Field, acc, bits string, forced bool) {
+	guarded := func(cond, write string) {
+		if forced {
+			f.line("%s%s", ind, write)
+			return
+		}
+		f.line("%sif (%s) { %s }", ind, cond, write)
+	}
 	var write string
 	switch fld.Kind {
 	case ir.KindU8, ir.KindU16, ir.KindU32, ir.KindU64, ir.KindBitfield:
@@ -737,10 +763,14 @@ func (g *gen) emitMarshal(f *dfile, fld *ir.Field) {
 		// A NaN with captured bits re-emits bit-for-bit (writeFp32Bits); any other
 		// value (incl. a user-set NaN with no captured bits) goes through writeFp32.
 		// `acc != default` still gates omission: a NaN never equals the default.
-		bits := fp32BitsField(fld.Name)
-		f.line("    if (%s != %s) {", acc, g.dartDefaultValue(fld))
-		f.line("      if (%s.isNaN && %s != null) { e.writeFp32Bits(%d, %s!); } else { e.writeFp32(%d, %s); }", acc, bits, fld.ID, bits, fld.ID, acc)
-		f.line("    }")
+		w := fmt.Sprintf("if (%s.isNaN && %s != null) { e.writeFp32Bits(%d, %s!); } else { e.writeFp32(%d, %s); }", acc, bits, fld.ID, bits, fld.ID, acc)
+		if forced {
+			f.line("%s%s", ind, w)
+			return
+		}
+		f.line("%sif (%s != %s) {", ind, acc, g.dartDefaultValue(fld))
+		f.line("%s  %s", ind, w)
+		f.line("%s}", ind)
 		return
 	case ir.KindFP64:
 		write = fmt.Sprintf("e.writeFp64(%d, %s);", fld.ID, acc)
@@ -748,7 +778,7 @@ func (g *gen) emitMarshal(f *dfile, fld *ir.Field) {
 		// A leaf: omit when equal to its default (empty if none). The storage and
 		// its length go out as they are -- a string as the UTF-8 bytes it is held
 		// in, which the corelib validates, never transcoded through a String.
-		f.line("    if (%s) { %s }", g.destDefaultTest(fld, acc, true), g.writeDestStmt(fld.Kind, fld.Elem, fmt.Sprintf("%d", fld.ID), acc))
+		guarded(g.destDefaultTest(fld, acc, true), g.writeDestStmt(fld.Kind, fld.Elem, fmt.Sprintf("%d", fld.ID), acc))
 		return
 	case ir.KindStruct, ir.KindUnion:
 		// MESSAGE_SPEC S2: the != default test is per field and a sequence is no
@@ -757,18 +787,22 @@ func (g *gen) emitMarshal(f *dfile, fld *ir.Field) {
 		// equals its default, so "no child was written" IS "the object equals its
 		// declared default", evaluated per field and recursively. endSequence then
 		// drops the frame, so an all-default nested object is omitted rather than
-		// emitted as an empty wrapper.
-		f.line("    e.beginSequenceLazy(%d); %s.serialize(e); e.endSequence();", fld.ID, acc)
+		// emitted as an empty wrapper. A forced union option keeps it instead.
+		end := "e.endSequence();"
+		if forced {
+			end = "e.endSequenceKeep();"
+		}
+		f.line("%se.beginSequenceLazy(%d); %s.serialize(e); %s", ind, fld.ID, acc, end)
 		return
 	case ir.KindArray:
-		g.emitMarshalArray(f, fld, acc)
+		g.emitMarshalArray(f, ind, fld, acc, forced)
 		return
 	}
 	// Scalar/string/enum/bitfield/bool leaf: omit when equal to the default.
-	f.line("    if (%s != %s) { %s }", acc, g.dartDefaultValue(fld), write)
+	guarded(fmt.Sprintf("%s != %s", acc, g.dartDefaultValue(fld)), write)
 }
 
-func (g *gen) emitMarshalArray(f *dfile, fld *ir.Field, acc string) {
+func (g *gen) emitMarshalArray(f *dfile, ind string, fld *ir.Field, acc string, forced bool) {
 	// A native scalar array is a leaf field: omit when equal to its default, else
 	// when empty. A composite/dynamic-element array is a wrapper sequence: opened
 	// lazily and closed with the dropping end at field level, so an EMPTY one is
@@ -780,8 +814,17 @@ func (g *gen) emitMarshalArray(f *dfile, fld *ir.Field, acc string) {
 	// -- and against the empty collection when no default is declared. Every
 	// element the list holds is then written; nothing is elided from the tail,
 	// because the wire count IS the array's length.
+	//
+	// A forced union option has neither test: a native array goes out as its
+	// count (0 when empty; an fp array keeps its fixlen_word), a wrapper array as
+	// a frame closed with the keeping closer.
 	if nativeArrayElem(fld.Elem) {
-		f.line("    if (%s) { %s }", g.destDefaultTest(fld, acc, true), g.writeDestStmt(fld.Kind, fld.Elem, fmt.Sprintf("%d", fld.ID), acc))
+		write := g.writeDestStmt(fld.Kind, fld.Elem, fmt.Sprintf("%d", fld.ID), acc)
+		if forced {
+			f.line("%s%s", ind, write)
+			return
+		}
+		f.line("%sif (%s) { %s }", ind, g.destDefaultTest(fld, acc, true), write)
 		return
 	}
 	// Wrapper sequence (string/blob/struct/union/nested array). The field-level
@@ -793,7 +836,11 @@ func (g *gen) emitMarshalArray(f *dfile, fld *ir.Field, acc string) {
 	// `if (value != default) { ...; e.endSequenceKeep(); }` -- so that a value
 	// differing from a non-empty default still reaches the wire as the empty
 	// wrapper, the only encoding of "explicitly empty" (MESSAGE_SPEC S2, S3).
-	g.marshalWrapperArray(f, "    ", fmt.Sprintf("%d", fld.ID), acc, fld.Elem, fld.ElemRef, fld.ElemItems, 0, "")
+	keep := ""
+	if forced {
+		keep = keepAlways
+	}
+	g.marshalWrapperArray(f, ind, fmt.Sprintf("%d", fld.ID), acc, fld.Elem, fld.ElemRef, fld.ElemItems, 0, keep)
 }
 
 // wireMaxDepth is the format's MAX_DEPTH (corelib-dart `maxDepth`, §4.9): the
@@ -914,6 +961,9 @@ func lastElemExpr(iv, val string) string {
 	return fmt.Sprintf("%s == %s.length - 1", iv, val)
 }
 
+// keepAlways is the emitSeqEnd condition of a frame that must always survive.
+const keepAlways = "true"
+
 // emitSeqEnd closes the wrapper sequence opened at ind, choosing between the two
 // closers corelib-dart offers. Every sequence is opened LAZILY (the corelib
 // holds the header back until a child is written), so the closer alone decides
@@ -928,9 +978,15 @@ func lastElemExpr(iv, val string) string {
 //     what makes an all-default element sparse like any other default value.
 //     Note this is decided from the position in the VALUE, at run time; the
 //     schema cannot answer it.
+//   - keepAlways -- always. A union option other than default_id, written even
+//     at its default (MESSAGE_SPEC §4.2): its presence IS the selection.
 func emitSeqEnd(f *dfile, ind, keepIf string) {
-	if keepIf == "" {
+	switch keepIf {
+	case "":
 		f.line("%se.endSequence();", ind)
+		return
+	case keepAlways:
+		f.line("%se.endSequenceKeep();", ind)
 		return
 	}
 	f.line("%sif (%s) { e.endSequenceKeep(); } else { e.endSequence(); }", ind, keepIf)

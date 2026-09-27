@@ -72,7 +72,8 @@ Myfirstmessage _sample() {
       sofab.InlineBytes.of([8]),
     ]
     ..someunionarray = [
-      MyfirstmessageSomeunionarrayElem()..asstring.assignString('row payload'),
+      MyfirstmessageSomeunionarrayElem()
+        ..mutableAsstring().assignString('row payload'),
     ]
     ..somemap = [
       MyfirstmessageSomemapElem()
@@ -85,7 +86,7 @@ Myfirstmessage _sample() {
   m.somestring.assignString('héllo wörld payload');
   m.someblob.assign([1, 2, 3, 4, 5]);
   m.somestruct.nestedstring.assignString('nested payload');
-  m.someunion.option2.assignString('union payload');
+  m.someunion.mutableOption2().assignString('union payload');
   m.somestructwitharray.label.assignString('labelled');
   return m;
 }

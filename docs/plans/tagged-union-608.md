@@ -321,7 +321,10 @@ printed, and the summary names what was covered.
   **spelled in the encode input**. `number` (the default) writes it as a bare JSON
   integer — `json.dumps` of a Python `int`, exactly the dialect of
   `maxsize_fill.json` (`"f_u64":18446744073709551615`, `"f_i64":-9223372036854775808`),
-  which every harness already encodes byte-exactly in all 11 `run.sh`. `string`
+  which nine of the eleven `run.sh` feed their harness verbatim and encode
+  byte-exactly; `dart/run.sh` and `typescript/run.sh` pre-quote every integer
+  above 2^53 first (`quote_big_ints`), because their harness cannot read the bare
+  u64 maximum exactly. `string`
   writes the decimal string (`"18446744073709551615"`). The flag exists because the
   two dialects are **not** interchangeable: C and C++ read a 64-bit value through
   `sofab_json_u64`/`sofab_json_i64` (corelib `test/shared/sofab_test_json.c`,
@@ -332,8 +335,9 @@ printed, and the summary names what was covered.
   integer above 2^53 is rounded before `fromJSON` sees it, while its `fromJSON`
   takes `string | number` through `BigInt()`/`Number()` in every int64 mode. A
   harness is therefore driven in the one dialect it reads exactly (§2.4), and a
-  wrong-dialect run fails loudly (E23 would still pass by accident on a quoted 0,
-  E25–E28 would not) instead of being "fixed" inside the harness. The summary
+  wrong-dialect run fails loudly (E23 and E24 would still pass by accident on a
+  quoted 0 — E24's `sig` 0 is `D` at its default, omitted either way — E25–E28
+  would not) instead of being "fixed" inside the harness. The summary
   prints the dialect used. Nothing else in the driver's input is 64-bit.
 * `--int64-safe` is for a harness whose 64-bit scalar is a JS `number` (TS
   `int64: number`, documented as lossy above 2^53). It replaces exactly three
@@ -628,14 +632,16 @@ bigint vs number option slot and setter).
 
 64-bit input dialect per language (§2 `--int64-json`), each backed by the
 harness's own 64-bit reader and, for `number`, by the byte-exact
-`maxsize_fill.json` check the same `run.sh` already passes:
+`maxsize_fill.json` check the same `run.sh` already passes (fed verbatim; dart
+and typescript pre-quote it, see §2):
 
 | language | `--int64-json` | why |
 |---|---|---|
 | c, cpp (both corelibs) | `number` (default) | `sofab_json_u64`/`_i64` read `SOFAB_JSON_NUMBER` only; a string reads 0 |
 | zig | `number` (default) | `jsonU64`/`jsonI64` read `.integer`/`.number_string`; `.string` reads 0 |
 | rust (std, no_std) | `number` (default) | serde `u64`/`i64` from a JSON integer |
-| go, java, kotlin, csharp, dart | `number` (default) | the dialect of `maxsize_fill.json`, encoded byte-exactly by every one of them |
+| go, java, kotlin, csharp | `number` (default) | the dialect of `maxsize_fill.json`, encoded byte-exactly by every one of them |
+| dart | **`string`** | `jsonDecode` hands a bare integer above 2^63−1 back as a double, which the harness's `_exact64` refuses (E28 fails under `number`); the u64 reader takes a `String` or an exact `int`, and the i64 reader was `(x as num).toInt()`, which threw on a quoted value — so no single dialect fitted. *Resolved in the Dart milestone:* the i64 reader now takes a `String` too (the u64 reader's expression, `BigInt.parse(…).toSigned(64)`, pinned by `TestDartI64JSONReadsAString`), and `dart/run.sh` passes `--int64-json string` |
 | python (both engines) | `number` (default) | `json.loads` yields an exact `int` |
 | typescript (`bigint`, `long`, `number`) | **`string`**, all three modes | `JSON.parse` rounds a bare integer above 2^53; `fromJSON` reads `string \| number` through `BigInt()` / `Number()`; `number` mode adds `--int64-safe` |
 
@@ -1508,6 +1514,18 @@ and the private slots are checked as one namespace (`checkUnionNames`).)*
   T(), …)` per type.
 * **Encode**: `switch (_which)`; forced arms write `storage`/`length` even when
   `length == 0`. JSON (`project.go`): one member. `dart` row ±1 %.
+* *(Corrected in the Dart milestone: a string, blob or native-array option has
+  **no setter** — the API table's `<opt> = v` holds for scalar, struct, union and
+  wrapper-list options only. A struct's destination member is `final` for the
+  same reason: a caller-supplied `InlineInt64Array` would carry no (or the wrong)
+  `range:`, and decode into the held destination would then skip the §7.1
+  element-width check. `mutable<Opt>()` therefore exists for every non-scalar
+  option and is the only place a destination is created. The slot is `_` + the
+  option's getter name, so an option `which` (getter `which_`, slot `_which_`)
+  never lands on the tag `_which`. No `isDefault` is emitted: the union field's
+  lazy frame vanishes exactly when `serialize` wrote nothing. §7.3 needed no gate
+  code: onString/onBlob and the four array calls are chosen by the wire kind and
+  fixlen subtype, so D20–D27 land in a call with no arm.)*
 
 ### 5.11 typescript — int64 `bigint` / `long` / `number`
 

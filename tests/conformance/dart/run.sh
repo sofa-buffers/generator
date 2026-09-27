@@ -124,8 +124,8 @@ echo "==> round-trip OK"
 # back is a full-coverage pass that grows with the schema by itself.
 #
 # A string comparison cannot do this job: member order is the backend's choice
-# (cpp orders by schema id, go alphabetically), a union renders every arm, and a
-# blob is base64 here and a byte array there -- all rendering, no wire fact.
+# (cpp orders by schema id, go alphabetically), and a blob is base64 here and a
+# byte array there -- all rendering, no wire fact.
 FULL="$OUT"
 OUT2=$(printf '%s' "$FULL" | "$H" encode myfirstmessage | "$H" decode myfirstmessage)
 python3 "$ROOT/tests/conformance/lib/json_equal.py" "$FULL" "$OUT2" \
@@ -133,11 +133,9 @@ python3 "$ROOT/tests/conformance/lib/json_equal.py" "$FULL" "$OUT2" \
 echo "==> full-message round-trip OK ($(python3 -c "import json,sys;print(len(json.loads(sys.argv[1])))" "$FULL") fields compared as data)"
 # Every field must sit OFF its schema default, or the round trip above compares
 # a default with itself and cannot tell a working decode from a broken one.
-# The union arms beside the selected one are excepted: a union carries exactly
-# one, so the others reading as their default is the rule, not a hole.
 BASE=$(printf '%s' '{}' | "$H" encode myfirstmessage | "$H" decode myfirstmessage)
 python3 "$ROOT/tests/conformance/lib/check_nondefault.py" "$BASE" "$FULL" \
-    --except '$.someunion.option2,$.someunion.option3,$.someunion.option3.unionstructint,$.someunion.option3.unionstructbool' --label "dart: round-trip fixture" || exit 1
+    --label "dart: round-trip fixture" || exit 1
 echo "==> round-trip fixture OK (no field sits on its schema default)"
 
 # The two encode-buffer arms (CORELIB_PLAN §5.1). The caller owns the output
@@ -158,10 +156,10 @@ check_maxsize_constant dart "$WORK/fill/lib/message.dart" \
 # reads 18446744073709551615 as a double, which the u64 arm then clamps to
 # 2^63-1 -- four bytes short of the filled message. Quote those so the arm takes
 # its BigInt.parse path, the spelling the u64 round-trip leg above already uses.
-# Only POSITIVE integers above 2^53: the i64 arm is `(x as num).toInt()` and
-# would throw on a quoted value, and i64 min survives the double round-trip
-# exactly. Nothing else about the input changes, so every field is still filled
-# to its declared bound.
+# Only POSITIVE integers above 2^53: i64 min is a bare int jsonDecode reads
+# exactly (the i64 arm takes the quoted spelling too, but needs none here).
+# Nothing else about the input changes, so every field is still filled to its
+# declared bound.
 quote_big_ints() {
     python3 -c 'import re,sys; sys.stdout.write(re.sub(r"(?<![-\d.])\d+(?![\d.eE\"])", lambda m: "\"%s\"" % m.group(0) if int(m.group(0)) > 2**53 else m.group(0), sys.stdin.read()))'
 }
@@ -1007,8 +1005,28 @@ python3 "$ROOT/tests/conformance/lib/check_repeated_id.py" --emit-schema >> "$WO
 ( cd "$ROOT" && go run ./cmd/sofabgen --format=off --config "$WORK/cfg.yaml" --lang dart --in "$WORK/repeated.yaml" --out "$WORK/repeated" )
 sed -i "s#\${SOFAB_DART_CORELIB}#$CORELIB#" "$WORK/repeated/pubspec.yaml"
 compile_project "$WORK/repeated"
-python3 "$ROOT/tests/conformance/lib/check_repeated_id.py" "Dart" \
+python3 "$ROOT/tests/conformance/lib/check_repeated_id.py" "Dart" --union \
     -- "$WORK/repeated/harness"
+
+# MESSAGE_SPEC §4.2 / §7.4.1 (generator#608): a union holds exactly ONE option.
+# A fresh one holds default_id at that option's default; a held option other
+# than default_id is written even at its own default (a struct/union/wrapper
+# option as a present frame); on decode the last correctly-typed option wins, a
+# §7.3-skipped or unknown id never switches, and several children or re-opened
+# frames are legal. The driver forges the frames no encoder emits and prints its
+# own schema; the harness's streamdecode takes the chunk size, so every split
+# the driver sweeps is a real one.
+#
+# The 64-bit options go in as decimal STRINGS (--int64-json string): jsonDecode
+# turns a bare integer above 2^63-1 into a double, which the harness refuses
+# rather than rounds, so the u64 maximum has no exact bare spelling here -- the
+# reason the maxsize fill above is quoted too. Both 64-bit readers take the
+# string, the i64 one included.
+echo "==> §4.2/§7.4.1 tagged unions: one option held, last option wins (generator#608)"
+python3 "$ROOT/tests/conformance/lib/check_union.py" --emit-schema > "$WORK/union.yaml"
+build "$WORK/union.yaml" "$WORK/union"
+python3 "$ROOT/tests/conformance/lib/check_union.py" "Dart" --int64-json string \
+    -- "$WORK/union/harness"
 
 # Nested defaults (generator#609): absence reads as the schema's defaults at every
 # depth and inside a struct array's element -- asserted against the driver's own
@@ -1050,6 +1068,7 @@ format_gen dart "$WORK/fmt/refusal" --config "$WORK/cfg-refusal.yaml" --in "$WOR
 format_gen dart "$WORK/fmt/strlim" --config "$WORK/cfg-strlim.yaml" --in "$WORK/dynstr.yaml"
 format_gen dart "$WORK/fmt/growth" --config "$WORK/cfg-limit.yaml" --in "$WORK/growth.yaml"
 format_gen dart "$WORK/fmt/repeated" --config "$WORK/cfg.yaml" --in "$WORK/repeated.yaml"
+format_gen dart "$WORK/fmt/union" --config "$WORK/cfg.yaml" --in "$WORK/union.yaml"
 check_format dart "$WORK/fmt"
 
 # ... and it still builds. A formatter is supposed to move whitespace only, but

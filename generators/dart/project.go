@@ -54,8 +54,14 @@ func (g *gen) harness(s *ir.Schema) []byte {
 	decoded := reachableNamed(s)
 	for _, key := range s.NamedOrder {
 		nt := s.Named[key]
-		if (nt.Category == ir.CatStruct || nt.Category == ir.CatUnion) && decoded[key] {
+		if !decoded[key] {
+			continue
+		}
+		switch nt.Category {
+		case ir.CatStruct:
 			g.emitJSONCodec(codecs, g.typeName(key), nt.Fields)
+		case ir.CatUnion:
+			g.emitUnionJSONCodec(codecs, key, nt)
 		}
 	}
 	for _, m := range s.Messages {
@@ -347,7 +353,9 @@ func (g *gen) jsonFrom(fld *ir.Field, jx string) string {
 	// throwing — a mask with bit 63 set came back four bytes short, silently.
 	case ir.KindU64, ir.KindBitfield:
 		return u64FromJSON(jx, false)
-	case ir.KindU8, ir.KindU16, ir.KindU32, ir.KindI8, ir.KindI16, ir.KindI32, ir.KindI64, ir.KindEnum:
+	case ir.KindI64:
+		return i64FromJSON(jx)
+	case ir.KindU8, ir.KindU16, ir.KindU32, ir.KindI8, ir.KindI16, ir.KindI32, ir.KindEnum:
 		return fmt.Sprintf("(%s as num).toInt()", jx)
 	case ir.KindFP32, ir.KindFP64:
 		return fmt.Sprintf("(%s as num).toDouble()", jx)
@@ -415,6 +423,17 @@ func u64FromJSON(jx string, promotable bool) string {
 	}
 	return fmt.Sprintf("(%s is String ? %s : BigInt.from(_exact64(%s))).toSigned(64).toInt()", jx, parse, jx)
 }
+
+// i64FromJSON reads a 64-bit SIGNED scalar from JSON accessor `jx` (a map
+// index, which does not promote): the decimal string as well as a bare number,
+// mirroring u64FromJSON. A bare number is exact only while jsonDecode can hand
+// it back as an int, so a value outside +-2^53 that arrived as a double is
+// refused by _exact64 rather than rounded; the string spelling carries every
+// i64 whole, which is the dialect a driver uses for a value the JSON number
+// cannot hold exactly (tests/conformance/lib/check_union.py --int64-json
+// string). The expression is u64FromJSON's: BigInt.parse(...).toSigned(64) is
+// exact for the whole i64 range as much as for the u64 one.
+func i64FromJSON(jx string) string { return u64FromJSON(jx, false) }
 
 // emitBench emits the `bench <workload> <reps>` entry point (tests/bench,
 // ARCHITECTURE §15), measured by the `subtract` method: the Dart VM JITs the hot
