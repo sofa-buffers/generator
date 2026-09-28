@@ -15,9 +15,10 @@ format's. The same message decoded by two backends:
     cpp : {"zz":7,"aa":"hi","mm":{"a":5,"b":""}}
     go  : {"aa":"hi","mm":{"b":"","a":5},"zz":7}
 
-Three differences, none of them semantic: cpp orders members by schema id and go
-alphabetically, the union arms come in either order, and both print every arm
-rather than the selected one. A string comparison therefore pins the rendering
+The difference is not semantic: cpp orders members by schema id and go
+alphabetically, at every level (here the message and its struct `mm`). A union
+prints one member, the option it holds, so it has nothing to reorder -- but the
+object around it does. A string comparison therefore pins the rendering
 convention, not the values -- it cannot be shared across suites, and it turns a
 cosmetic change into a red build.
 

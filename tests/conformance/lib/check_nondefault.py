@@ -5,9 +5,13 @@ Usage:
   check_nondefault.py <baseline> <decoded-fixture> [--label TEXT]
                       [--except PATH[,PATH...]] [--warn-only]
 
-`--except` names paths that are legitimately at their default: a union carries ONE
-selected arm, so the arms beside it must read as their defaults and saying so is
-part of the test rather than a hole in it.
+`--except` names paths that are legitimately at their default, where saying so
+is part of the test rather than a hole in it. No suite needs it today.
+
+A union prints one member, its held option. The baseline holds the union's
+`default_id` option at its default, so a fixture must hold that SAME option (at
+a non-default value) for the two to be compared member by member; a fixture
+holding another option is reported as not setting the baseline's one.
 
 `baseline` is what the harness decodes from an EMPTY message -- every field at
 its schema default, spelled the way this backend spells it. `fixture` is the
