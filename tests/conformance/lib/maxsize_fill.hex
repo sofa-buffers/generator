@@ -1,5 +1,5 @@
 # The exact encoding of tests/conformance/lib/maxsize_fill.json against
-# tests/conformance/lib/maxsize_fill.yaml — 269 bytes, the schema's MAX_SIZE.
+# tests/conformance/lib/maxsize_fill.yaml — 310 bytes, the schema's MAX_SIZE.
 # Read by check_maxsize_fill (maxsize_fill.sh); every target must produce this
 # byte for byte, because the wire format is a property of the schema and not of
 # the language. Comments and whitespace are stripped before comparing.
@@ -72,5 +72,25 @@
    0e                                #   elem 1: id 1
       00 ff 01
       0a 1a 64 65 66                 #     "def"
+      07
+   07
+
+# A union is one sequence frame holding ONE option, the largest when filled:
+# here the struct, itself a frame inside the union's frame.
+a6 01                                # f_union    id 20  (20<<3)|6 = 166
+   16                                #   u_pt option id 2, hdr|6
+      00 ff ff ff ff 0f              #     p_u32 id 0, 2^32-1
+      09 ff ff ff ff ff ff ff ff ff 01  # p_i64 id 1, hdr|1, ZigZag(-2^63)
+      07
+   07
+
+# A wrapper array of UNION elements: each element frame holds the one option
+# its element holds, here the string.
+ae 01                                # f_arr_union id 21  (21<<3)|6 = 174
+   06                                #   elem 0: id 0, hdr|6
+      0a 22 67 68 69 6a              #     a_str option id 1, word 0x22 (4, string) "ghij"
+      07
+   0e                                #   elem 1: id 1
+      0a 22 6b 6c 6d 6e              #     "klmn"
       07
    07

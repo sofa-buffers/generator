@@ -98,6 +98,21 @@ int main(void)
     m.f_arr_struct.items[1].s_u8 = UINT8_MAX;
     memcpy(m.f_arr_struct.items[1].s_str, "def", 3);
 
+    /* A union writes the one option it holds, so a full union holds its LARGEST
+     * option at its bound: here the struct, selected at its default (tag, then
+     * the option's descriptor) and then filled. */
+    m.f_union.which = MESSAGE_FILL_F_UNION_U_PT_ID;
+    sofab_object_init(&_message_descr_named_fill_f_union_u_pt, &m.f_union.u.u_pt);
+    m.f_union.u.u_pt.p_u32 = UINT32_MAX;
+    m.f_union.u.u_pt.p_i64 = INT64_MIN;
+
+    /* ...and each element of an array of unions the same way, here the string. */
+    m.f_arr_union.len = 2;
+    m.f_arr_union.items[0].which = MESSAGE_FILL_F_ARR_UNION_ELEM_A_STR_ID;
+    memcpy(m.f_arr_union.items[0].u.a_str, "ghij", 5); /* with the NUL: the option shares storage */
+    m.f_arr_union.items[1].which = MESSAGE_FILL_F_ARR_UNION_ELEM_A_STR_ID;
+    memcpy(m.f_arr_union.items[1].u.a_str, "klmn", 5);
+
     /* Deliberately oversized so an encode that overruns MAX_SIZE still succeeds
      * and can be measured, instead of failing with BUFFER_FULL and hiding by how
      * much the bound was wrong. */

@@ -132,8 +132,14 @@ func (g *gen) resolveReassembly(s *ir.Schema) {
 // (ir.MaxWireSize), falling back to the configured max_message_size ceiling when
 // a field is unbounded. The emit path has no error channel, so a violation of an
 // explicitly configured ceiling is recorded here and surfaced by Generate.
-func (g *gen) messageSize(name string, fields []*ir.Field) generator.MessageSize {
-	ms, err := g.size.Resolve(name, fields)
+//
+// A union class encodes one option, so it is sized by its largest option.
+func (g *gen) messageSize(name string, fields []*ir.Field, union bool) generator.MessageSize {
+	resolve := g.size.Resolve
+	if union {
+		resolve = g.size.ResolveUnion
+	}
+	ms, err := resolve(name, fields)
 	if err != nil && g.sizeErr == nil {
 		g.sizeErr = err
 	}
@@ -716,7 +722,7 @@ func (g *gen) emitDataclass(f *pyfile, name, summary string, fields []*ir.Field,
 	//
 	// Deliberately unannotated: an annotated class attribute in a @dataclass
 	// becomes a FIELD, which would put MAX_SIZE on the wire and in __init__.
-	ms := g.messageSize(name, fields)
+	ms := g.messageSize(name, fields, u != nil)
 	if ms.Bounded {
 		f.line("    # Worst-case encoded size, derived from the schema: no value of this")
 		f.line("    # class can encode to more, which is why encode() can size one exact")
