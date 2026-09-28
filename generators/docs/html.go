@@ -27,7 +27,7 @@ type section struct {
 	Anchor  string
 	Badge   string // "message" | "struct" | "union" | "enum" | "bitfield"
 	Summary string
-	Note    string // extra line under the summary (e.g. the union default option)
+	Note    template.HTML // pre-escaped extra line under the summary (a union's "one of" rule)
 	// HasUnit is PAGE-wide (any field anywhere carries a unit), not per
 	// section, so every field table shares the same column grid — mixed
 	// layouts would make the reader's eye re-find the columns per table.
@@ -55,6 +55,8 @@ type fieldRow struct {
 	Unit        string
 	Description string
 	Deprecated  bool
+	// DefaultOption marks the option a fresh union holds (union sections only).
+	DefaultOption bool
 }
 
 type constRow struct {
@@ -115,7 +117,10 @@ func (g *gen) typeSection(nt *ir.NamedType) *section {
 	case ir.CatUnion:
 		s.Badge = "union"
 		g.fillFields(s, nt.Fields)
-		s.Note = "Exactly one option is set at a time."
+		s.Note = g.unionNote(nt)
+		for i, f := range nt.Fields {
+			s.Fields[i].DefaultOption = nt.IsDefaultOption(f)
+		}
 	case ir.CatEnum:
 		s.Badge = "enum"
 		for _, c := range nt.Consts {
@@ -132,6 +137,61 @@ func (g *gen) typeSection(nt *ir.NamedType) *section {
 		}
 	}
 	return s
+}
+
+// unionNote states the "one of" rule of a union section: exactly one option is
+// held, which option a fresh value holds (the type's DefaultID — a $defs union
+// used with several default_ids is split into one section per default), and
+// the two wire rules a reader of the page needs: a held option other than the
+// default is always written, and the last option received wins. The default is
+// marked implicit when no site that uses the type writes a default_id, i.e.
+// it is the lowest option id.
+func (g *gen) unionNote(nt *ir.NamedType) template.HTML {
+	d := nt.DefaultOption()
+	if d == nil { // unreachable after analysis; keep the page renderable
+		return "One of the options below: exactly one option is held at a time."
+	}
+	how := "default_id"
+	if !g.explicitDefault()[nt.Key] {
+		how = "implicit: no default_id, so the lowest option id"
+	}
+	return template.HTML(fmt.Sprintf(
+		"One of the options below: exactly one option is held at a time. "+
+			"A fresh value holds the default option <code>%s</code> (id %d; %s) at its own default. "+
+			"A held option other than the default is always written, even at its own default; "+
+			"when a message carries several options, the last one received wins.",
+		html.EscapeString(d.Name), d.ID, html.EscapeString(how)))
+}
+
+// explicitDefault reports, per union type key, whether any site referencing
+// that type (a field, or an array element at any depth) writes a default_id.
+// Computed once per page.
+func (g *gen) explicitDefault() map[string]bool {
+	if g.explicit != nil {
+		return g.explicit
+	}
+	g.explicit = map[string]bool{}
+	mark := func(r *ir.TypeRef) {
+		if r != nil && r.DefaultID != nil {
+			g.explicit[r.Key] = true
+		}
+	}
+	walk := func(fields []*ir.Field) {
+		for _, f := range fields {
+			mark(f.Ref)
+			mark(f.ElemRef)
+			for e := f.ElemItems; e != nil; e = e.ElemItems {
+				mark(e.ElemRef)
+			}
+		}
+	}
+	for _, m := range g.schema.Messages {
+		walk(m.Fields)
+	}
+	for _, key := range g.schema.NamedOrder {
+		walk(g.schema.Named[key].Fields)
+	}
+	return g.explicit
 }
 
 func (g *gen) fillFields(s *section, fields []*ir.Field) {
@@ -231,25 +291,26 @@ func refHTML(k ir.Kind, ref *ir.TypeRef) template.HTML {
 
 // defaultText renders a field's default for the Default column. Values pass
 // through as authored in the definition (strings quoted, blob defaults stay
-// base64); an enum default is resolved to its constant name when possible.
+// base64); an enum default is resolved to its constant name when possible. A
+// union field always shows the option a fresh value holds — its site's
+// default_id, or the lowest option id marked "implicit" when the site omits it.
 func (g *gen) defaultText(f *ir.Field) string {
+	if f.Kind == ir.KindUnion && f.Ref != nil {
+		if d := f.Ref.Target.DefaultOption(); d != nil {
+			if f.Ref.DefaultID == nil {
+				return fmt.Sprintf("%s (id %d, implicit)", d.Name, d.ID)
+			}
+			return fmt.Sprintf("%s (id %d)", d.Name, d.ID)
+		}
+	}
 	if f.Default == nil {
 		return ""
 	}
-	if f.Ref != nil && f.Ref.Target != nil {
+	if f.Kind == ir.KindEnum && f.Ref != nil && f.Ref.Target != nil {
 		if v, ok := asInt64(f.Default); ok {
-			switch f.Kind {
-			case ir.KindEnum:
-				for _, c := range f.Ref.Target.Consts {
-					if c.Value == v {
-						return fmt.Sprintf("%s (%d)", c.Name, v)
-					}
-				}
-			case ir.KindUnion: // Default carries the default_id -> name the option
-				for _, o := range f.Ref.Target.Fields {
-					if o.ID == v {
-						return fmt.Sprintf("%s (id %d)", o.Name, v)
-					}
+			for _, c := range f.Ref.Target.Consts {
+				if c.Value == v {
+					return fmt.Sprintf("%s (%d)", c.Name, v)
 				}
 			}
 		}
@@ -447,7 +508,7 @@ footer { margin-top: 3rem; padding-top: 1rem; border-top: 1px solid var(--line);
 {{else}}<colgroup><col style="width:6%"><col style="width:17%"><col style="width:20%"><col style="width:14%"><col></colgroup>
 {{end}}<thead><tr><th class="num">ID</th><th>Field</th><th>Type</th><th>Default</th>{{if .HasUnit}}<th>Unit</th>{{end}}<th>Description</th></tr></thead>
 <tbody>
-{{$hasUnit := .HasUnit}}{{range .Fields}}<tr><td class="num">{{.ID}}</td><td><code>{{.Name}}</code>{{if .Deprecated}}<span class="badge dep">deprecated</span>{{end}}</td><td class="type">{{.Type}}</td><td>{{if .Default}}<code>{{.Default}}</code>{{else}}<span class="none">&ndash;</span>{{end}}</td>{{if $hasUnit}}<td>{{if .Unit}}{{.Unit}}{{else}}<span class="none">&ndash;</span>{{end}}</td>{{end}}<td class="desc">{{if .Description}}{{.Description}}{{else}}<span class="none">&ndash;</span>{{end}}</td></tr>
+{{$hasUnit := .HasUnit}}{{range .Fields}}<tr><td class="num">{{.ID}}</td><td><code>{{.Name}}</code>{{if .DefaultOption}}<span class="badge">default</span>{{end}}{{if .Deprecated}}<span class="badge dep">deprecated</span>{{end}}</td><td class="type">{{.Type}}</td><td>{{if .Default}}<code>{{.Default}}</code>{{else}}<span class="none">&ndash;</span>{{end}}</td>{{if $hasUnit}}<td>{{if .Unit}}{{.Unit}}{{else}}<span class="none">&ndash;</span>{{end}}</td>{{end}}<td class="desc">{{if .Description}}{{.Description}}{{else}}<span class="none">&ndash;</span>{{end}}</td></tr>
 {{end}}</tbody>
 </table></div>
 {{if .HasBound}}<p class="note">In the Type column, <code>[N]</code> is a <strong>capacity</strong>, not a length: the array holds at most N elements and starts at its declared default (empty when it has none), and the wire carries the length actually set. <code>maxlen N</code> bounds a string or blob in bytes. Exceeding either is rejected as INVALID &mdash; never truncated.</p>
