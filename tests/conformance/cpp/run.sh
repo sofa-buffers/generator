@@ -970,7 +970,7 @@ YAML
     ( cd "$ROOT" && go run ./cmd/sofabgen --config "$WORK/cfg-$label.yaml" --lang cpp \
         --in "$WORK/repeated.yaml" --out "$WORK/repeated-$label" )
     make -C "$WORK/repeated-$label" "$@" >/dev/null
-    python3 "$ROOT/tests/conformance/lib/check_repeated_id.py" "C++ [$label]" --union \
+    python3 "$ROOT/tests/conformance/lib/check_repeated_id.py" "C++ [$label]" \
         -- "$WORK/repeated-$label/harness/harness"
 
     # MESSAGE_SPEC §4.2 / §7.4.1 (generator#608): a union holds exactly ONE option.

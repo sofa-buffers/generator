@@ -1214,7 +1214,7 @@ printf 'version: 1\nmessages:\n' > "$WORK/repeated.yaml"
 python3 "$ROOT/tests/conformance/lib/check_repeated_id.py" --emit-schema >> "$WORK/repeated.yaml"
 gen "$WORK/repeated.yaml" "$WORK/repeated"
 ln -s "$WORK/ex/node_modules" "$WORK/repeated/node_modules"
-python3 "$ROOT/tests/conformance/lib/check_repeated_id.py" "TypeScript" --union \
+python3 "$ROOT/tests/conformance/lib/check_repeated_id.py" "TypeScript" \
     --cwd "$WORK/repeated" -- npx tsx harness.ts
 
 # MESSAGE_SPEC §4.2 / §7.4.1 (generator#608): a union holds exactly ONE option.

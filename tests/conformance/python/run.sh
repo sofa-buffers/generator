@@ -1154,7 +1154,7 @@ python3 "$ROOT/tests/conformance/lib/check_repeated_id.py" --emit-schema >> "$WO
 for ENGINE in $ENGINES; do
     if [ "$ENGINE" = python ]; then export SOFAB_PUREPYTHON=1; else unset SOFAB_PUREPYTHON || true; fi
     require_engine "$ENGINE"
-    python3 "$ROOT/tests/conformance/lib/check_repeated_id.py" "python/$ENGINE" --union \
+    python3 "$ROOT/tests/conformance/lib/check_repeated_id.py" "python/$ENGINE" \
         --cwd "$WORK/repeated" -- python3 harness.py
 done
 unset SOFAB_PUREPYTHON || true
