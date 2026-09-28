@@ -138,3 +138,53 @@ func TestMaxWireSizeRecursiveStructIsUnbounded(t *testing.T) {
 		t.Fatal("recursive struct reported as bounded")
 	}
 }
+
+// A union holds exactly one option and an encoder writes at most that one, so
+// its worst case is its frame plus its LARGEST option, as a field and as an
+// array element alike. The decode span keeps the sum: a receiver must take a
+// frame carrying several options (MESSAGE_SPEC §7.4.1).
+func TestMaxWireSizeUnionIsItsLargestOption(t *testing.T) {
+	def := int64(0)
+	shape := &NamedType{Category: CatUnion, Name: "Shape", Key: "union/Shape", DefaultID: &def,
+		Fields: []*Field{
+			{Name: "n", ID: 0, Kind: KindU8},                                  // 1 + 2
+			{Name: "s", ID: 1, Kind: KindString, HasMaxlen: true, Maxlen: 10}, // 1 + 1 + 10
+			{Name: "v", ID: 2, Kind: KindU64},                                 // 1 + 10
+		}}
+	ref := &TypeRef{Key: shape.Key, Target: shape}
+	const largest = 1 + 1 + 10
+
+	// A two-byte header ((20<<3)|7 = 167), the largest option, the terminator.
+	field := &Field{Name: "u", ID: 20, Kind: KindUnion, Ref: ref}
+	if got, ok := MaxFieldWireSize(field, nil); !ok || got != 2+largest+1 {
+		t.Errorf("union field: size = %d (bounded %v), want %d", got, ok, 2+largest+1)
+	}
+
+	// Two elements, each its own frame (index header, largest option,
+	// terminator), then the array frame's terminator.
+	arr := &Field{Name: "us", ID: 1, Kind: KindArray, Elem: KindUnion, ElemRef: ref,
+		HasCount: true, Count: 2}
+	if got, ok := MaxFieldWireSize(arr, nil); !ok || got != 1+2*(1+largest+1)+1 {
+		t.Errorf("union array: size = %d (bounded %v), want %d", got, ok, 1+2*(1+largest+1)+1)
+	}
+
+	// The decode span charges every varint 10 bytes and keeps the sum.
+	const decodeSum = (1 + 10) + (1 + 1 + 10) + (1 + 10)
+	if got, ok := MaxFieldDecodeSpan(field, nil, nil); !ok || got != 2+decodeSum+1 {
+		t.Errorf("union decode span: size = %d (bounded %v), want %d", got, ok, 2+decodeSum+1)
+	}
+
+	// A struct over the same fields is still their sum.
+	sum := &NamedType{Category: CatStruct, Name: "S", Key: "struct/S", Fields: shape.Fields}
+	sf := &Field{Name: "s", ID: 20, Kind: KindStruct, Ref: &TypeRef{Key: sum.Key, Target: sum}}
+	if got, ok := MaxFieldWireSize(sf, nil); !ok || got != 2+(1+2)+(1+1+10)+(1+10)+1 {
+		t.Errorf("struct field: size = %d (bounded %v)", got, ok)
+	}
+
+	// One unbounded option leaves the union without a worst case, however small
+	// the option a sender happens to hold.
+	shape.Fields = append(shape.Fields, &Field{Name: "b", ID: 3, Kind: KindBlob})
+	if _, ok := MaxFieldWireSize(field, nil); ok {
+		t.Error("a union with an unbounded option reported as bounded")
+	}
+}

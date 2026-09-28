@@ -263,6 +263,14 @@ claiming "a safe over-estimate, since only one is ever written" is rewritten to
 say why max is exact. Note that a held non-`D` option at its default is never
 larger than that option's maximum, so max stays safe under the forced write.
 
+*Refined in Finish:* max applies to the ENCODE walk only. `ir.MaxFieldDecodeSpan`
+(corelib-cpp's `max_buffered_field`) keeps the sum, because a receiver must take a
+frame carrying several options (§7.4.1), which is exactly what a product-type
+peer sends; sizing that refusal ceiling by one option would reject valid traffic.
+And Python gives every union class its own `MAX_SIZE`/`encode()`: that constant is
+the largest option too (`ir.MaxUnionWireSize`, `SizePolicy.ResolveUnion`), which
+`TestMaxSizeUnionIsItsLargestOption` pins beside the message's number.
+
 ### 1.4 Core tests
 
 * `internal/parser/validate_test.go` — rule 2 for string/blob/array × field /

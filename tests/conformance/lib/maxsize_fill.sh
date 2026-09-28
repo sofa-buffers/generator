@@ -32,7 +32,7 @@
 # The expected byte count. Language-independent by construction: the wire format
 # is the same everywhere, so this is a property of maxsize_fill.yaml alone. If
 # the schema changes, this number changes with it — in exactly one place.
-SOFAB_MAXSIZE_FILL_BYTES=269
+SOFAB_MAXSIZE_FILL_BYTES=310
 
 # check_maxsize_fill <label> <encode-command...>
 #   Runs the encode command with maxsize_fill.json on stdin and requires it to
@@ -46,7 +46,8 @@ SOFAB_MAXSIZE_FILL_BYTES=269
 #   count alone, and this schema is the only place several of those shapes (an
 #   fp64 fixlen array, a blob wrapper array, a struct behind a two-byte header,
 #   a wrapper array whose elements are themselves sequences, an all-flags-set
-#   bitfield) meet an encoder at all: the shared byte-exact vectors use a
+#   bitfield, a union holding its largest option, a wrapper array of unions)
+#   meet an encoder at all: the shared byte-exact vectors use a
 #   different schema and reach none of them.
 check_maxsize_fill() {
     _label=$1
@@ -88,8 +89,8 @@ check_maxsize_fill() {
 # check_maxsize_constant <label> <generated-file> <grep-pattern>
 #   Requires the source generated for maxsize_fill.yaml to carry the DERIVED
 #   constant — leg (2) above. The pattern is a basic regex and every caller
-#   anchors it at end of line, so a wider constant sharing the prefix (2690 for
-#   269) cannot match. Only the file path and the spelling of the constant are
+#   anchors it at end of line, so a wider constant sharing the prefix (3100 for
+#   310) cannot match. Only the file path and the spelling of the constant are
 #   per-language; the reason is stated once, in the header above.
 check_maxsize_constant() {
     grep -q "$3" "$2" || {

@@ -5040,6 +5040,14 @@ ZigZag-mapped onto their unsigned peer's width, so they cost the same); `fp32`
 `(id<<3)|wiretype` header, an array's element-count varint, a sequence's
 one-byte terminator, and one `fixlen_word` per `fp32`/`fp64` array.
 
+A `struct` is charged the **sum** of its fields, a `union` its **largest option**
+— as a field, as an array element, and (`ir.MaxUnionWireSize`, Python's
+per-class `MAX_SIZE`) as a union type encoded by itself. That is exact too: a
+union holds one option and an encoder writes at most that one (§11 *Tagged
+unions*); a held option other than `default_id` is written even at its own
+default, but an option at its default is never larger than the same option at
+its bound, so the forced write cannot pass the maximum.
+
 **Encode size and decode span are different questions.** A second entry point,
 `ir.MaxFieldDecodeSpan`, sizes a *reassembly window* and differs in two ways
 forced by what a decoder must tolerate:
@@ -5048,7 +5056,11 @@ forced by what a decoder must tolerate:
   type, because CORELIB_PLAN §4.1 obliges a decoder to accept a non-minimal
   encoding — a conformant peer may legally pad a `u32` to ten bytes;
 - it substitutes the receiver-side `max_dyn_*` caps (§9.5) for missing schema
-  bounds, because those caps are exactly what this peer will accept.
+  bounds, because those caps are exactly what this peer will accept;
+- it charges a union the **sum** of its options, not the largest: a receiver
+  must take a union frame carrying several options (MESSAGE_SPEC §7.4.1 — the
+  last correctly-typed one wins, the others are not INVALID), and a peer still
+  generating unions as product types sends exactly that, every option once.
 
 Those caps must **never** reach the encode walk: a limit on what I accept says
 nothing about what I may legitimately send, and sizing an encode buffer by it
@@ -5148,9 +5160,13 @@ and not just a count; the fill schema is the only place several of those shapes
 meet an encoder at all. `tests/conformance/c/maxsize_fill.c` and the shared
 `tests/conformance/lib/maxsize_fill.{yaml,json,hex,sh}` carry all of it, and
 since generator#415 **all eleven** suites run both legs. The fill schema's own
-coverage limits are recorded in the fixture's header: an enum and a union are
-deliberately over-charged and can never join it, and a wrapper array whose
-elements are themselves ARRAYS is the last exactly-priced shape still missing.
+coverage limits are recorded in the fixture's header: an enum is deliberately
+over-charged and can never join it, and a wrapper array whose elements are
+themselves ARRAYS is the last exactly-priced shape still missing. A union and an
+array of unions joined once every backend wrote one option and the walk charged
+the largest (269 → 310 bytes): each filled union holds its largest option at its
+bound, so a target writing more than the held option, or a walk still charging
+the sum, misses by a whole option.
 The bitfield and the array-of-struct joined in generator#470, which moved the
 count from 234 to 269 bytes and cost three backends a fix. Two were carriers:
 TypeScript could not hold an all-flags-set mask in a `number` at all, and Dart's
@@ -5422,8 +5438,11 @@ target renders the same metadata as HTML page content
     when re-selected. Python keeps one `_value` slot (every attribute is an
     object reference there). No generic union helper is emitted per schema — only
     option arms, id routing and option types.
-  - **`MAX_SIZE`** charges the **sum** of all options until every backend writes
-    one option, then header + the **largest** option + terminator (§9.6).
+  - **`MAX_SIZE`** charges a union header + its **largest** option + terminator
+    (§9.6), exact because every backend writes one option. Until the last
+    backend did, it charged the sum of all options. The decode span
+    (`ir.MaxFieldDecodeSpan`) keeps the sum: a received frame may carry several
+    options (§7.4.1).
   - **Footprint first.** On a footprint target (`c`, `cpp` over `c-cpp`,
     `rust` over `rs-no-std`, and corelib-c-cpp itself) the union code takes the
     shape with the least `.text`/`.data`/`.bss`, even where another shape costs
@@ -5434,8 +5453,8 @@ target renders the same metadata as HTML page content
     union-free schema at main's `Ir/op` but cost +238…+368 B of flash, so the
     per-field test is what ships (C row below), and a union-free project
     compiles the walk out altogether.
-  - **Per target** (one row per landed backend; a target not listed still emits a
-    record holding every option side by side):
+  - **Per target** (every backend holds one option; none emits a record holding
+    every option side by side any more):
     | target | representation | status |
     |---|---|---|
     | c | `which` (`sofab_object_descr_id_t`, offset 0) + C `union u`; a sized blob/array option is `struct { len; data/items[]; }` inside the overlay; descriptor `SOFAB_OBJECT_DESCR_UNION` (corelib-c-cpp#182), so init, the forced write of a non-`D` option and the switch at the "was bound" point past §7.3 are the corelib's walk, not generated code. That walk is shaped **footprint-first** (see *Footprint first* below): a per-field held test instead of narrowing each walk to the held option. `_field_is_default` decides the union rule for both of its callers — an option not held is absent (default), the held non-`D` option is never default (the forced write, and non-default one level up) — so encode is main's code; init seeds the image's tag (`NULL` = tag 0) and skips the options not held; decode re-initialises a switched-to sequence option where its frame opens and switches the tag at the end of `_seq_len_observe`. Measured (`tools/footprint.sh`, `libsofabuffers.a`, full config, ARMv6-m / ARMv7-m / RV32IMC / atmega8): +92 / +62 / +104 / +216 B over corelib main, 24 / 46 / 20 / 2 B **below** the product-type prototype (657d6ca) and 146 / 92 / 196 / 152 B below the hoisted walk the C milestone first landed (0127836); minimal configs and `SOFAB_DISABLE_UNION_SUPPORT` = main. The cycles are the price: a union-free schema pays the per-field flag tests (C bench recipe on the bench schema without its unions, x86-64 `-O3`: +1.2 % encode / +2.8 % decode `Ir/op`), which is why a **union-free generated project sets `SOFAB_DISABLE_UNION_SUPPORT` itself** (`Makefile` `SOFAB_DEFINES`, CMake `target_compile_definitions`; `docs/generator/c.md`) and pays neither; `#define <PREFIX>_<OPTION>_ID`, collision-checked by `checkMacroNames`; the header declares the descriptors of the sequence options, so a caller selects one at its default with `sofab_object_init`. **Default image = a prefix**: `NULL` iff `default_id` is 0 and `D` is a sequence or an all-zero leaf; the tag alone for a sequence `D`; else the tag + `D` in a union aligned like `u` (`offsetof` asserted in the `.c`). Only `D`'s bytes are ever read from it — the §4.2 empty-default rule for string/blob/array options is what makes one image enough. A header whose message reaches a union `#error`s on `SOFAB_DISABLE_UNION_SUPPORT` and on a corelib without `SOFAB_OBJECT_DESCR_UNION` (one that predates unions: the corelib signals an additive feature by what its headers define and bumps `SOFAB_API_VERSION` only on a break) | landed; CI `lang-c` red until corelib-c-cpp#182 merges (it pins corelib main) |

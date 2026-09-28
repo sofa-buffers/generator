@@ -44,9 +44,56 @@ func TestMaxSizeAgreesAcrossTargets(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	assertMaxSizeAgrees(t, s)
+}
+
+// TestMaxSizeUnionIsItsLargestOption: a union holds exactly one option and every
+// target writes at most that one, so every target charges a union its LARGEST
+// option — as a field and as an array element — and not the sum of them all.
+func TestMaxSizeUnionIsItsLargestOption(t *testing.T) {
+	s, err := buildIRFromSource(t, "version: 1\nmessages:\n  m:\n    payload:\n"+
+		"      u:\n        id: 0\n        type: union\n        oneof:\n"+
+		"          n: { id: 0, type: u8 }\n"+ // 1 + 2
+		"          s: { id: 1, type: string, maxlen: 10 }\n"+ // 1 + 1 + 10
+		"          v: { id: 2, type: u64 }\n"+ // 1 + 10
+		"      l:\n        id: 1\n        type: array\n        items:\n"+
+		"          type: union\n          count: 2\n          oneof:\n"+
+		"            a: { id: 0, type: u32 }\n"+ // 1 + 5
+		"            b: { id: 1, type: string, maxlen: 3 }\n") // 1 + 1 + 3
+	if err != nil {
+		t.Fatal(err)
+	}
+	// u: header, largest option (s), terminator. l: header, two element frames
+	// of index header + largest option (a) + terminator, the array terminator.
+	const want = (1 + 12 + 1) + (1 + 2*(1+6+1) + 1)
+	if got, ok := ir.MaxWireSize(s.Messages[0].Fields); !ok || got != want {
+		t.Fatalf("ir.MaxWireSize = %d (bounded %v), want %d", got, ok, want)
+	}
+	// Python gives each union class its own encode(), sized by its largest
+	// option: u's s (12) and l's element a (6).
+	assertMaxSizeAgrees(t, s, 12, 6)
+}
+
+// assertMaxSizeAgrees generates s for every registered target and requires every
+// MAX_SIZE constant found to be ir.MaxWireSize's number for s's first message.
+// A target that also gives a named type its own encode() — Python does, for
+// every class — emits that type's size beside it; typeSizes lists the numbers
+// those may carry, so a per-type constant is checked too instead of skipped.
+func assertMaxSizeAgrees(t *testing.T, s *ir.Schema, typeSizes ...int64) {
+	t.Helper()
 	empty := config.Empty()
 
-	sizes := map[string]int64{}
+	// The schema is the authority: every target must match the shared walk.
+	want, bounded := ir.MaxWireSize(s.Messages[0].Fields)
+	if !bounded {
+		t.Fatal("corpus message unexpectedly unbounded")
+	}
+	allowed := map[int64]bool{want: true}
+	for _, v := range typeSizes {
+		allowed[v] = true
+	}
+
+	found := map[string]bool{}
 	for _, lang := range generator.Registered() {
 		b, _ := generator.Lookup(lang)
 		files, err := b.Generate(s, empty.Effective(lang))
@@ -63,27 +110,21 @@ func TestMaxSizeAgreesAcrossTargets(t *testing.T) {
 					if err != nil {
 						t.Fatalf("[%s] %s: unparsable size %q", lang, f.Path, g)
 					}
-					if prev, seen := sizes[lang]; seen && prev != v {
-						t.Errorf("[%s] emits two different sizes: %d and %d", lang, prev, v)
+					if !allowed[v] {
+						t.Errorf("[%s] MAX_SIZE = %d, but ir.MaxWireSize says %d — a backend is "+
+							"computing the wire size itself instead of using the shared walk", lang, v, want)
 					}
-					sizes[lang] = v
+					found[lang] = found[lang] || v == want
 				}
 			}
 		}
 	}
-	if len(sizes) < 2 {
-		t.Fatalf("expected several targets to emit a size constant, got %v", sizes)
+	if len(found) < 2 {
+		t.Fatalf("expected several targets to emit a size constant, got %v", found)
 	}
-
-	// The schema is the authority: every target must match the shared walk.
-	want, bounded := ir.MaxWireSize(s.Messages[0].Fields)
-	if !bounded {
-		t.Fatal("corpus message unexpectedly unbounded")
-	}
-	for lang, got := range sizes {
-		if got != want {
-			t.Errorf("[%s] MAX_SIZE = %d, but ir.MaxWireSize says %d — a backend is "+
-				"computing the wire size itself instead of using the shared walk", lang, got, want)
+	for lang, ok := range found {
+		if !ok {
+			t.Errorf("[%s] emits no MAX_SIZE of %d for the message", lang, want)
 		}
 	}
 }

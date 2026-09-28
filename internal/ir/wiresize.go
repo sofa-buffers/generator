@@ -17,7 +17,8 @@ package ir
 //	string / blob        fixlen word + maxlen
 //
 // Each field additionally pays its (id<<3)|wiretype header varint, an array its
-// element-count varint, and a sequence its one-byte terminator.
+// element-count varint, and a sequence its one-byte terminator. A struct's
+// children are summed, a union is charged its largest option (structWireMax).
 //
 // A field with no schema bound — a string/blob without `maxlen`, an array
 // without `count` — has NO worst case, and this walk says so by returning
@@ -65,6 +66,22 @@ func MaxWireSize(fields []*Field) (size int64, bounded bool) {
 			return 0, false
 		}
 		size += c
+	}
+	return size, true
+}
+
+// MaxUnionWireSize is MaxWireSize for a union's options encoded as a payload of
+// their own, with no frame around them — the shape a target that can encode a
+// union type by itself writes. One option is written, so the worst case is the
+// largest option (structWireMax says why that is exact).
+func MaxUnionWireSize(options []*Field) (size int64, bounded bool) {
+	seen := map[string]bool{}
+	for _, f := range options {
+		c, ok := fieldSize(f, seen, mode{})
+		if !ok {
+			return 0, false
+		}
+		size = max(size, c)
 	}
 	return size, true
 }
@@ -145,9 +162,9 @@ func fieldSize(f *Field, seen map[string]bool, m mode) (int64, bool) {
 		return hdr + body, true
 
 	case KindStruct, KindUnion:
-		// sequence: header opens it, children, one-byte terminator. A union is
-		// charged the sum of all its options — a safe over-estimate, since only
-		// one is ever written.
+		// sequence: header opens it, children, one-byte terminator. What the
+		// children cost is structWireMax's question: a struct's sum, a union's
+		// largest option.
 		inner, ok := structWireMax(f.Ref, seen, m)
 		if !ok {
 			return 0, false
@@ -157,8 +174,27 @@ func fieldSize(f *Field, seen map[string]bool, m mode) (int64, bool) {
 	return hdr, true
 }
 
-// structWireMax sums a struct/union's fields. A type reached recursively has no
-// static worst case, so a cycle reports unbounded.
+// structWireMax returns what a struct's or union's children cost inside their
+// sequence frame. A type reached recursively has no static worst case, so a
+// cycle reports unbounded, and one unbounded child — a union option included —
+// makes the whole type unbounded.
+//
+// A struct is charged the SUM of its fields: every one can be on the wire at
+// once.
+//
+// On ENCODE a union is charged its LARGEST option, and that is exact, not an
+// estimate. A union holds exactly one option and an encoder writes at most that
+// one (MESSAGE_SPEC §4.2): the default_id option only when it is off its
+// default, any other held option always — even at its own default, as its value
+// or the explicit empty form (§2). An option at its default is never larger than
+// the same option filled to its bound, so the forced write cannot exceed the
+// maximum, and holding the largest option filled to its bound reaches it.
+//
+// On DECODE (m.decode) a union keeps the sum of its options. A receiver must take
+// a union frame carrying several options — the last correctly-typed one wins and
+// the others are not INVALID (§7.4.1) — and a peer that still generates unions as
+// product types sends exactly that: every option, once. A decode span sized to the
+// largest option would refuse such a message.
 func structWireMax(ref *TypeRef, seen map[string]bool, m mode) (int64, bool) {
 	if ref == nil || ref.Target == nil || seen[ref.Key] {
 		return 0, false
@@ -166,13 +202,18 @@ func structWireMax(ref *TypeRef, seen map[string]bool, m mode) (int64, bool) {
 	seen[ref.Key] = true
 	defer delete(seen, ref.Key)
 
+	largest := ref.Target.Category == CatUnion && !m.decode
 	var inner int64
 	for _, c := range ref.Target.Fields {
 		cc, ok := fieldSize(c, seen, m)
 		if !ok {
 			return 0, false
 		}
-		inner += cc
+		if largest {
+			inner = max(inner, cc)
+		} else {
+			inner += cc
+		}
 	}
 	return inner, true
 }
@@ -219,6 +260,8 @@ func arrayWireMax(elem Kind, ref *TypeRef, items *ArrayElem, count int64,
 		return count*per + 1, true
 
 	case KindStruct, KindUnion:
+		// The element's own frame holds a struct's fields or one union option,
+		// charged exactly as for a field of that type (structWireMax).
 		inner, ok := structWireMax(ref, seen, m)
 		if !ok {
 			return 0, false

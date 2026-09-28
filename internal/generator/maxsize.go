@@ -69,6 +69,18 @@ func (p SizePolicy) Limit() int64 { return p.limit }
 // user has actually declared a smaller budget.
 func (p SizePolicy) Resolve(msg string, fields []*ir.Field) (MessageSize, error) {
 	size, bounded := ir.MaxWireSize(fields)
+	return p.resolve(msg, size, bounded)
+}
+
+// ResolveUnion is Resolve for a union type encoded as a payload of its own (a
+// target that gives a union type its own encode()): it holds one option, so it
+// is sized by its largest option (ir.MaxUnionWireSize), not by their sum.
+func (p SizePolicy) ResolveUnion(name string, options []*ir.Field) (MessageSize, error) {
+	size, bounded := ir.MaxUnionWireSize(options)
+	return p.resolve(name, size, bounded)
+}
+
+func (p SizePolicy) resolve(msg string, size int64, bounded bool) (MessageSize, error) {
 	if !bounded {
 		return MessageSize{Size: p.limit, Bounded: false}, nil
 	}
