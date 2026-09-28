@@ -977,7 +977,7 @@ echo "==> §7.4 repeated id: wrappers replace, scopes merge (generator#523)"
 printf 'version: 1\nmessages:\n' > "$WORK/repeated.yaml"
 python3 "$ROOT/tests/conformance/lib/check_repeated_id.py" --emit-schema >> "$WORK/repeated.yaml"
 build "$WORK/repeated.yaml" "$WORK/repeated"
-python3 "$ROOT/tests/conformance/lib/check_repeated_id.py" "Java" --union \
+python3 "$ROOT/tests/conformance/lib/check_repeated_id.py" "Java" \
     -- java -jar "$WORK/repeated/target/harness.jar"
 
 # MESSAGE_SPEC §4.2 / §7.4.1 (generator#608): a union holds exactly ONE option.

@@ -4,13 +4,15 @@
 Usage:
   check_repeated_id.py --emit-schema
   check_repeated_id.py <label> [--cwd DIR] [--sizes 1,2,3,5,0]
-                       [--no-stream] [--union] [--message NAME] -- <harness argv...>
+                       [--no-stream] [--message NAME] -- <harness argv...>
 
 §7.4 says the **last occurrence wins, per field id**, and then splits on what
 the field *is*:
 
-  a re-opened SEQUENCE continues its scope  -> struct/union members MERGE, and
+  a re-opened SEQUENCE continues its scope  -> struct members MERGE, and
     children set by an earlier opening whose ids do not recur are RETAINED;
+    a union continues only its HELD option, and a re-opening that carries
+    ANOTHER option replaces it (§7.4.1) -- nothing of the old option survives;
   an ARRAY WRAPPER is the exception         -> it *is* the value of its array
     field (§5), so a later occurrence REPLACES it whole.
 
@@ -50,7 +52,7 @@ backend can get one right and the next wrong:
     matstr array<array<string>>        a WRAPPER ROW (generator#523)
     deep   array<array<array<u32>>>    a wrapper row one level further down
     objs   array<struct>               the MERGING half
-    uni    union                       one option held (§7.4.1), `--union` only
+    uni    union                       one option held (§7.4.1)
 
 Every array is schema-bounded (`count`, and `maxlen` on the payload elements) so
 the statically bounded profiles — C, C++ `corelib: c-cpp`, Rust `no_std` — can
@@ -75,15 +77,14 @@ can carry a repeated id. So each case is also fed through `streamdecode` at
 several splits and compared against the one-shot answer. `--no-stream` exists
 for a harness that has no streaming verb; it is reported, never silent.
 
-## The union half (`--union`)
+## The union half
 
 A union field `uni` repeated with the SAME struct option continues that
 option's scope (§7.4 merge), and repeated with ANOTHER option replaces the held
-one (§7.4.1). Both cases need a backend that holds exactly one option, so they
-run only under `--union`, which each backend's run.sh passes once its tagged
-union lands (generator#608); the field itself is harmless to a backend that
-still renders every option. The union level is compared STRICTLY: the decoded
-union must be an object with exactly the one expected member.
+one (§7.4.1). Both cases run on every backend, because every backend holds
+exactly one option. The union level is compared STRICTLY: the decoded union must
+be an object with exactly the one expected member, so a backend that kept the
+replaced option beside the new one fails.
 
 ## Loud, never quiet
 
@@ -235,7 +236,8 @@ CASES = [
     ),
 ]
 
-# The union half, run only under `--union` (a backend that holds one option).
+# The union half (§7.4.1): a union holds one option, so a re-opening continues
+# the held option or replaces it.
 UNION_CASES = [
     (
         "union_same_option_merges", "uni",
@@ -325,8 +327,7 @@ def main() -> int:
     msg = opt(head, "--message", MSG)
     stream = "--no-stream" not in head
     sizes = [int(s) for s in opt(head, "--sizes", "1,2,3,5,0").split(",")]
-    union = "--union" in head
-    cases = CASES + (UNION_CASES if union else [])
+    cases = CASES + UNION_CASES
 
     def matches(field, want, got):
         # A union level is strict: exactly the one expected member.
@@ -371,15 +372,13 @@ def main() -> int:
     if ran != len(cases):
         print(f"FAIL: ran {ran} of {len(cases)} repeated-id cases")
         return 1
-    unions = ("union: same option merges, other option replaces; " if union
-              else "union cases NOT run (no --union); ")
     chunks = (f"one-shot and streamed at splits {','.join(str(s) for s in sizes)}"
               if stream else "one-shot ONLY (--no-stream: this harness has no "
                              "streaming verb, so the destructive resets are "
                              "unchecked on resume)")
     print(f"{label} §7.4 repeated id: {ran} cases -- wrappers replace (leaf array, "
           f"value element, native row, wrapper row, depth-3 row) and scopes merge; "
-          f"{unions}{chunks}")
+          f"union: same option merges, other option replaces; {chunks}")
     return 0
 
 

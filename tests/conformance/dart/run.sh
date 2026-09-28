@@ -1005,7 +1005,7 @@ python3 "$ROOT/tests/conformance/lib/check_repeated_id.py" --emit-schema >> "$WO
 ( cd "$ROOT" && go run ./cmd/sofabgen --format=off --config "$WORK/cfg.yaml" --lang dart --in "$WORK/repeated.yaml" --out "$WORK/repeated" )
 sed -i "s#\${SOFAB_DART_CORELIB}#$CORELIB#" "$WORK/repeated/pubspec.yaml"
 compile_project "$WORK/repeated"
-python3 "$ROOT/tests/conformance/lib/check_repeated_id.py" "Dart" --union \
+python3 "$ROOT/tests/conformance/lib/check_repeated_id.py" "Dart" \
     -- "$WORK/repeated/harness"
 
 # MESSAGE_SPEC §4.2 / §7.4.1 (generator#608): a union holds exactly ONE option.

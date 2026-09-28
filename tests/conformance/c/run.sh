@@ -864,7 +864,7 @@ python3 "$ROOT/tests/conformance/lib/check_repeated_id.py" --emit-schema >> "$WO
 ( cd "$ROOT" && go run ./cmd/sofabgen --config "$WORK/proj.yaml" --lang c \
     --in "$WORK/repeated.yaml" --out "$WORK/repeated" )
 make -C "$WORK/repeated" SOFAB_C_CORELIB="$CORELIB" >/dev/null
-python3 "$ROOT/tests/conformance/lib/check_repeated_id.py" "C" --union \
+python3 "$ROOT/tests/conformance/lib/check_repeated_id.py" "C" \
     -- "$WORK/repeated/harness/harness"
 
 # MESSAGE_SPEC §4.2 / §7.4.1 (generator#608): a union holds exactly ONE option.
