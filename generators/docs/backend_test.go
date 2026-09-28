@@ -1,6 +1,7 @@
 package docs
 
 import (
+	"fmt"
 	"os"
 	"regexp"
 	"strings"
@@ -148,5 +149,105 @@ func TestDocsUnsupportedFormat(t *testing.T) {
 	s := schema(t, "version: 1\nmessages:\n  m:\n    payload:\n      a: {id: 0, type: u8}\n")
 	if _, err := (&Backend{}).Generate(s, map[string]any{"format": "markdown"}); err == nil {
 		t.Fatal("format markdown should be rejected")
+	}
+}
+
+// unionSection returns the HTML of one named-type section (from its heading to
+// the next heading), so a test can pin what that one union renders.
+func unionSection(t *testing.T, page, anchor string) string {
+	t.Helper()
+	i := strings.Index(page, `<h3 id="`+anchor+`">`)
+	if i < 0 {
+		t.Fatalf("no section #%s", anchor)
+	}
+	rest := page[i+1:]
+	if j := strings.Index(rest, "<h3 "); j >= 0 {
+		rest = rest[:j]
+	} else if j := strings.Index(rest, "<footer>"); j >= 0 {
+		rest = rest[:j]
+	}
+	return rest
+}
+
+// defaultBadges returns the option names of a section that carry the
+// "default" badge.
+func defaultBadges(sec string) []string {
+	var out []string
+	re := regexp.MustCompile(`<td><code>([^<]+)</code><span class="badge">default</span>`)
+	for _, m := range re.FindAllStringSubmatch(sec, -1) {
+		out = append(out, m[1])
+	}
+	return out
+}
+
+// TestDocsUnionOneOf: a union renders as "one of" with the option a fresh
+// value holds (the type's DefaultID, not the first option listed and not the
+// lowest id when a default_id is written), exactly one row badged "default",
+// and the two wire rules (a held non-default option is always written; the
+// last option received wins). A $defs union used with two default_ids is two
+// sections, one per default; a union field's Default column names the option,
+// marked implicit when the site omits default_id.
+func TestDocsUnionOneOf(t *testing.T) {
+	page := genDocs(t, schemaFile(t, "../../tests/matrix/corpus/defs/unions.yaml"), map[string]any{})
+	for _, c := range []struct {
+		anchor, opt string
+		id          int
+	}{
+		{"type-union-Shape_default_pt", "pt", 2},
+		{"type-union-Shape_default_num", "num", 0}, // one explicit site (second) is enough
+		{"type-UnRef_sparse", "b", 7},              // non-contiguous ids: not the lowest (3)
+		{"type-Un_u", "y", 1},                      // not the first option listed
+		{"type-UnRef_list_elem", "p", 2},           // element union
+		{"type-UnRef_grid_elem_elem", "hi", 1},     // element two array levels down
+		{"type-UnRef_nested_inner", "b", 1},        // union option of a union
+	} {
+		sec := unionSection(t, page, c.anchor)
+		for _, want := range []string{
+			"One of the options below: exactly one option is held at a time.",
+			fmt.Sprintf("A fresh value holds the default option <code>%s</code> (id %d; default_id) at its own default.", c.opt, c.id),
+			"A held option other than the default is always written, even at its own default;",
+			"the last one received wins.",
+		} {
+			if !strings.Contains(sec, want) {
+				t.Errorf("#%s: missing %q", c.anchor, want)
+			}
+		}
+		if got := defaultBadges(sec); len(got) != 1 || got[0] != c.opt {
+			t.Errorf("#%s: default badge on %v, want exactly [%s]", c.anchor, got, c.opt)
+		}
+	}
+	if strings.Contains(page, `id="type-union-Shape"`) {
+		t.Error("split $defs union: the unsplit original must not render")
+	}
+	for _, want := range []string{
+		"<code>pt (id 2)</code>",            // first: default_id 2
+		"<code>num (id 0)</code>",           // second: default_id 0
+		"<code>num (id 0, implicit)</code>", // third: omitted -> lowest id, marked
+	} {
+		if !strings.Contains(page, want) {
+			t.Errorf("union field Default column: missing %q", want)
+		}
+	}
+	if strings.Contains(page, "Exactly one option is set at a time.") {
+		t.Error("the old product-type note is still rendered")
+	}
+}
+
+// TestDocsUnionImplicitDefault: a union no site gives a default_id holds its
+// lowest option id — not the first option listed — and the section says the
+// default is implicit.
+func TestDocsUnionImplicitDefault(t *testing.T) {
+	src := "version: 1\nmessages:\n  m:\n    payload:\n      u: {id: 0, type: union, oneof: {hi: {id: 9, type: u8}, lo: {id: 4, type: string, maxlen: 4}}}\n"
+	page := genDocs(t, schema(t, src), map[string]any{})
+	sec := unionSection(t, page, "type-m_u")
+	want := "A fresh value holds the default option <code>lo</code> (id 4; implicit: no default_id, so the lowest option id) at its own default."
+	if !strings.Contains(sec, want) {
+		t.Errorf("missing %q in\n%s", want, sec)
+	}
+	if got := defaultBadges(sec); len(got) != 1 || got[0] != "lo" {
+		t.Errorf("default badge on %v, want exactly [lo]", got)
+	}
+	if !strings.Contains(page, "<code>lo (id 4, implicit)</code>") {
+		t.Error("union field Default column: implicit default not rendered")
 	}
 }

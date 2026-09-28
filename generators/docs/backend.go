@@ -43,6 +43,8 @@ type gen struct {
 	schema  *ir.Schema
 	banner  string
 	license string // SPDX id, "" to omit the header comment
+
+	explicit map[string]bool // union type key -> some site writes default_id (lazy)
 }
 
 func cfgString(cfg map[string]any, key, dflt string) string {
