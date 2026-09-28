@@ -2801,16 +2801,19 @@ MESSAGE_SPEC **§7.4** defines what a decoder does when a field id repeats withi
 one scope: the **last occurrence wins, per field id**. The consequence differs by
 what the field *is*:
 
-- A re-opened **sequence continues its scope** — `struct` and `union` members
-  therefore **merge**, and children set by an earlier opening whose ids do not
-  recur are **retained**.
+- A re-opened **sequence continues its scope** — `struct` members therefore
+  **merge**, and children set by an earlier opening whose ids do not recur are
+  **retained**. A `union` continues only its **held** option: a re-opening that
+  carries **another** option replaces it, and nothing of the old option is
+  retained (§7.4.1, see *Decode verdict: a union holds one option*).
 - An **array wrapper is the exception**: it *is* the array's value (§5), so a
   later occurrence **replaces it whole**.
 
 Both halves are decode-side only; encode never emits a repeated id. Who enforces
 them (generator#175, Crucible F-0019):
 
-- **Nested `struct`/`union` must decode *into* the existing member.** Most
+- **Nested `struct`/`union` must decode *into* the existing member** (for a
+  union: into its held option, when the child continues that option). Most
   backends already did (C++ `is.read(nested)`, Go `return &m.Nested, nil`).
   **TypeScript** did not: its case arm assigned a *fresh* object built by the
   per-type from-decoder, so the earlier opening's children were discarded. The
@@ -2830,7 +2833,8 @@ them (generator#175, Crucible F-0019):
 - **C** distinguishes the two kinds by the `fixed_seq` flag the generator already
   emits for every wrapper array (`SOFAB_OBJECT_DESCR_SEQ`, required since
   corelib-c-cpp#96). That flag is what lets `object.c` reset a wrapper's slots on
-  open while structs and unions keep merging (corelib-c-cpp#101) — so this target
+  open while structs keep merging and a union continues its held option
+  (corelib-c-cpp#101; the option switch is §7.4.1) — so this target
   needed **no generator change**, only the descriptor kind it already emits. This
   supersedes the "C needs a new descriptor kind" reading in generator#175.
 - **A MATRIX ROW is an array too, and rust was replacing everywhere but there**
@@ -5568,7 +5572,8 @@ A reimplementation is **conformant** when it reproduces these gates:
    *Repeated field id* (`tests/conformance/lib/check_repeated_id.py`):
    MESSAGE_SPEC §7.4 — the last occurrence wins per field id, and what that means
    depends on what the field is: a re-opened **sequence** continues its scope, so
-   struct/union members merge and unrecurring children are retained, while an
+   struct members merge and unrecurring children are retained (a union continues
+   only its held option, and another option replaces it — §7.4.1), while an
    **array wrapper** *is* the value of its field and a later occurrence replaces it
    whole (generator#523). Like `check_growth.py` this builds its own message, and
    for a stronger reason than "no vector carries it": §7.4 opens by saying such an
@@ -5590,10 +5595,11 @@ A reimplementation is **conformant** when it reproduces these gates:
    python engines for exactly that reason. Before it existed the family's only
    §7.4 guard was rust's own, and the family had drifted behind it: five of eleven
    backends merged a wrapper row, four of them found by this driver's first run.
-   The schema also carries a union field `uni`; under `--union` two more cases
-   check that a re-opened union continuing the same struct option merges and one
-   carrying another option replaces it (§7.4.1), compared strictly at the union
-   level. A backend's run.sh passes `--union` once its tagged union lands.
+   The schema also carries a union field `uni`, and two more cases check that a
+   re-opened union continuing the same struct option merges and one carrying
+   another option replaces it (§7.4.1), compared strictly at the union level: the
+   decoded union must hold exactly the one expected option. They run in every
+   suite.
 
    *Tagged unions* (`tests/conformance/lib/check_union.py`, generator#608): a
    union holds exactly one option (MESSAGE_SPEC §4.2, §7.4.1; §11 *Tagged
@@ -7092,8 +7098,7 @@ few cross-language inconsistencies to reconcile for *true* JSON interop (blob is
 `number[]` in C/Python/C++/Rust/C#/Java but base64 in Go; `u64` is a JSON number
 everywhere except a string in TS); schema defaults are applied per-backend except
 Rust (derive `Default` = zeros). These do not affect the **binary** wire interop
-(which is vector-verified). Further known drift: `NamedType.DefaultID` is
-declared but never populated (§6). (The planning-era `cpp-embedded` target was
+(which is vector-verified). (The planning-era `cpp-embedded` target was
 removed from the config schema — embedded C++ shipped as the `cpp` target's
 `corelib: c-cpp` profile instead.)
 
