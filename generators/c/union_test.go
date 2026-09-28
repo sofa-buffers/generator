@@ -262,10 +262,15 @@ messages:
 	}
 }
 
+// TestUnionCapabilityGuard: a union is a sequence on the wire, so a message
+// that reaches one -- directly or only through an array element -- refuses a
+// corelib built without sequence support. The corelib has no union switch of
+// its own, so there is none to refuse.
 func TestUnionCapabilityGuard(t *testing.T) {
-	guard := "#if defined(SOFAB_DISABLE_UNION_SUPPORT)"
-	if h := genCFromYAML(t, unionShapeYAML)["m.h"]; !strings.Contains(h, guard) {
-		t.Errorf("a message with a union must refuse SOFAB_DISABLE_UNION_SUPPORT:\n%s", h)
+	guard := "#if defined(SOFAB_DISABLE_SEQUENCE_SUPPORT)"
+	h := genCFromYAML(t, unionShapeYAML)["m.h"]
+	if !strings.Contains(h, guard) {
+		t.Errorf("a message with a union must refuse SOFAB_DISABLE_SEQUENCE_SUPPORT:\n%s", h)
 	}
 	// reached only through an array element
 	elem := genCFromYAML(t, `
@@ -276,17 +281,12 @@ messages:
       v: { id: 0, type: array, items: { type: union, count: 2, oneof: { a: { id: 0, type: u8 } } } }
 `)["m.h"]
 	if !strings.Contains(elem, guard) {
-		t.Errorf("an array of unions must refuse SOFAB_DISABLE_UNION_SUPPORT:\n%s", elem)
+		t.Errorf("an array of unions must refuse SOFAB_DISABLE_SEQUENCE_SUPPORT:\n%s", elem)
 	}
-	plain := genCFromYAML(t, `
-version: 1
-messages:
-  m:
-    payload:
-      s: { id: 0, type: struct, fields: { a: { id: 0, type: u8 } } }
-`)["m.h"]
-	if strings.Contains(plain, guard) {
-		t.Errorf("a message without a union must not refuse SOFAB_DISABLE_UNION_SUPPORT:\n%s", plain)
+	for name, src := range map[string]string{"union": h, "array of unions": elem} {
+		if strings.Contains(src, "_UNION_SUPPORT") {
+			t.Errorf("%s: the corelib has no union switch to refuse:\n%s", name, src)
+		}
 	}
 }
 
@@ -392,30 +392,18 @@ func TestUnionCorelibCapabilityGuard(t *testing.T) {
 	}
 }
 
-// TestUnionFreeProjectDisablesUnionSupport: a project whose schema has no union
-// builds the corelib with SOFAB_DISABLE_UNION_SUPPORT (Makefile and CMake), so
-// the tagged-union walk costs it no flash; a union-bearing project never does.
-// The build half makes both: the union-free one builds and round-trips with the
-// switch on, and the union one, handed the switch, stops at its header guard.
-func TestUnionFreeProjectDisablesUnionSupport(t *testing.T) {
-	plain := genCProject(t, plainYAML)
-	for path, want := range map[string][]string{
-		"Makefile": {
-			"SOFAB_DEFINES ?= -DSOFAB_DISABLE_UNION_SUPPORT\n",
-			"$(CC) $(CSTD) $(WARNFLAGS) $(SOFAB_DEFINES) $(CFLAGS) $(INCLUDES) $^ -o $@",
-		},
-		"CMakeLists.txt": {"target_compile_definitions(harness PRIVATE SOFAB_DISABLE_UNION_SUPPORT)"},
-	} {
-		for _, w := range want {
-			if !strings.Contains(plain[path], w) {
-				t.Errorf("union-free %s missing %q:\n%s", path, w, plain[path])
-			}
-		}
-	}
+// TestProjectSetsNoUnionSwitch: corelib-c-cpp has no union switch, so no
+// generated project -- with a union or without -- passes one. The build half
+// hands a union-bearing project a sequence-free corelib and expects it to stop
+// at a guard naming SOFAB_DISABLE_SEQUENCE_SUPPORT: the generated header's,
+// which the .c includes before its descriptors reach the corelib's own.
+func TestProjectSetsNoUnionSwitch(t *testing.T) {
 	uni := genCProject(t, unionShapeYAML)
-	for _, path := range []string{"Makefile", "CMakeLists.txt"} {
-		if strings.Contains(uni[path], "SOFAB_DISABLE_UNION_SUPPORT") || strings.Contains(uni[path], "SOFAB_DEFINES") {
-			t.Errorf("a union-bearing %s must not set SOFAB_DISABLE_UNION_SUPPORT:\n%s", path, uni[path])
+	for name, files := range map[string]map[string]string{"union-free": genCProject(t, plainYAML), "union": uni} {
+		for _, path := range []string{"Makefile", "CMakeLists.txt"} {
+			if strings.Contains(files[path], "_UNION_SUPPORT") || strings.Contains(files[path], "SOFAB_DEFINES") {
+				t.Errorf("%s %s must not set a union switch:\n%s", name, path, files[path])
+			}
 		}
 	}
 
@@ -423,50 +411,104 @@ func TestUnionFreeProjectDisablesUnionSupport(t *testing.T) {
 	if corelib == "" {
 		t.Skip("set SOFAB_C_CORELIB to a corelib-c-cpp checkout to run the build half")
 	}
-	for _, tool := range []string{"make", "gcc"} {
-		if _, err := exec.LookPath(tool); err != nil {
-			t.Skipf("%s not found", tool)
+	if _, err := exec.LookPath("make"); err != nil {
+		t.Skip("make not found")
+	}
+	dir := writeProject(t, uni)
+	out, err := exec.Command("make", "-C", dir, "SOFAB_C_CORELIB="+corelib, "CFLAGS=-DSOFAB_DISABLE_SEQUENCE_SUPPORT").CombinedOutput()
+	if err == nil || !strings.Contains(string(out), "but the corelib was built with SOFAB_DISABLE_SEQUENCE_SUPPORT") {
+		t.Fatalf("a union-bearing project on a sequence-free corelib must stop at the sequence guard, got err=%v:\n%s", err, out)
+	}
+}
+
+// writeProject writes a generated project into a fresh temp dir.
+func writeProject(t *testing.T, files map[string]string) string {
+	t.Helper()
+	dir := t.TempDir()
+	for path, content := range files {
+		full := filepath.Join(dir, path)
+		if err := os.MkdirAll(filepath.Dir(full), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(full, []byte(content), 0o644); err != nil {
+			t.Fatal(err)
 		}
 	}
-	write := func(files map[string]string) string {
-		dir := t.TempDir()
-		for path, content := range files {
-			full := filepath.Join(dir, path)
-			if err := os.MkdirAll(filepath.Dir(full), 0o755); err != nil {
-				t.Fatal(err)
-			}
-			if err := os.WriteFile(full, []byte(content), 0o644); err != nil {
-				t.Fatal(err)
-			}
+	return dir
+}
+
+// unionBlobYAML puts a blob option directly in a union, one level down in a
+// struct option, and in a union reached only through an array element.
+const unionBlobYAML = `
+version: 1
+messages:
+  m:
+    payload:
+      u:
+        id: 0
+        type: union
+        oneof:
+          s:  { id: 0, type: string, maxlen: 8 }
+          bl: { id: 1, type: blob, maxlen: 6 }
+          pt: { id: 2, type: struct, fields: { n: { id: 0, type: u8 }, raw: { id: 1, type: blob, maxlen: 3 } } }
+      v: { id: 1, type: array, items: { type: union, count: 2, oneof: { i: { id: 0, type: u8 }, b: { id: 1, type: blob, maxlen: 2 } } } }
+`
+
+// TestUnionBlobOptionIsSized: corelib-c-cpp forbids a capacity-only BLOB option
+// in a union and asserts it in sofab_object_init -- such a blob has nowhere to
+// record the length it received, so a shorter payload would keep the previously
+// held option's bytes and re-encode them. Every blob a generated descriptor
+// carries must be SOFAB_OBJECT_FIELD_BLOB_SIZED. The build half compiles with
+// the corelib's asserts ON and decodes one union frame that holds a long string
+// and then switches to a one-byte blob: the assert, or the residue, would show.
+func TestUnionBlobOptionIsSized(t *testing.T) {
+	c := genCFromYAML(t, unionBlobYAML)["m.c"]
+	for _, want := range []string{
+		"SOFAB_OBJECT_FIELD_BLOB_SIZED(1, message_m_u_t, u.bl.data, u.bl.len),",
+		"SOFAB_OBJECT_FIELD_BLOB_SIZED(1, message_m_u_pt_t, raw, raw_len),",
+		", u.b.data, u.b.len),",
+	} {
+		if !strings.Contains(c, want) {
+			t.Errorf("source missing %q:\n%s", want, c)
 		}
-		return dir
 	}
-	dir := write(plain)
-	if out, err := exec.Command("make", "-C", dir, "SOFAB_C_CORELIB="+corelib, strictMakeVar).CombinedOutput(); err != nil {
-		t.Fatalf("union-free project build failed:\n%s", out)
-	} else if !strings.Contains(string(out), "-DSOFAB_DISABLE_UNION_SUPPORT") {
-		t.Errorf("union-free project did not compile with SOFAB_DISABLE_UNION_SUPPORT:\n%s", out)
-	}
-	harness := filepath.Join(dir, "harness", "harness")
-	enc := exec.Command(harness, "encode")
-	enc.Stdin = strings.NewReader(`{"s":{"a":9},"w":4}`)
-	encoded, err := enc.Output()
-	if err != nil {
-		t.Fatalf("encode failed: %v", err)
-	}
-	dec := exec.Command(harness, "decode")
-	dec.Stdin = strings.NewReader(string(encoded))
-	decoded, err := dec.Output()
-	if err != nil {
-		t.Fatalf("decode failed: %v", err)
-	}
-	if !strings.Contains(string(decoded), `"a":9`) || !strings.Contains(string(decoded), `"w":4`) {
-		t.Errorf("union-free round trip lost a value:\n%s", decoded)
+	if strings.Contains(c, "SOFAB_OBJECT_FIELDTYPE_BLOB)") {
+		t.Errorf("no descriptor may carry a capacity-only blob, SOFAB_OBJECT_FIELD(..., SOFAB_OBJECT_FIELDTYPE_BLOB):\n%s", c)
 	}
 
-	dir = write(uni)
-	out, err := exec.Command("make", "-C", dir, "SOFAB_C_CORELIB="+corelib, "CFLAGS=-DSOFAB_DISABLE_UNION_SUPPORT").CombinedOutput()
-	if err == nil || !strings.Contains(string(out), "but the corelib was built with SOFAB_DISABLE_UNION_SUPPORT") {
-		t.Fatalf("a union-bearing project handed SOFAB_DISABLE_UNION_SUPPORT must stop at its guard, got err=%v:\n%s", err, out)
+	corelib := os.Getenv("SOFAB_C_CORELIB")
+	if corelib == "" {
+		t.Skip("set SOFAB_C_CORELIB to a corelib-c-cpp checkout to run the build half")
+	}
+	if _, err := exec.LookPath("make"); err != nil {
+		t.Skip("make not found")
+	}
+	dir := writeProject(t, genCProject(t, unionBlobYAML))
+	// No -DNDEBUG: the corelib's asserts are live.
+	if out, err := exec.Command("make", "-C", dir, "SOFAB_C_CORELIB="+corelib, strictMakeVar, "CFLAGS=-O0 -g").CombinedOutput(); err != nil {
+		t.Fatalf("union-with-blob project build failed:\n%s", out)
+	}
+	harness := filepath.Join(dir, "harness", "harness")
+	run := func(mode string, in []byte) []byte {
+		t.Helper()
+		cmd := exec.Command(harness, mode)
+		cmd.Stdin = strings.NewReader(string(in))
+		out, err := cmd.CombinedOutput()
+		if err != nil {
+			t.Fatalf("%s failed (a corelib assert aborts here): %v\n%s", mode, err, out)
+		}
+		return out
+	}
+	// Two frames of u, back to back: {s:"SECRET"}, then {bl:[255]}. The option
+	// received last wins, and it is exactly the one byte it carried.
+	frames := append(run("encode", []byte(`{"u":{"s":"SECRET"}}`)), run("encode", []byte(`{"u":{"bl":[255]}}`))...)
+	if got := string(run("decode", frames)); !strings.Contains(got, `"u":{"bl":[255]}`) {
+		t.Errorf("a blob option after a string option must hold only its own byte:\n%s", got)
+	}
+	got := string(run("decode", run("encode", []byte(`{"u":{"pt":{"n":1,"raw":[9]}},"v":[{"b":[7,8]},{"i":4}]}`))))
+	for _, want := range []string{`"raw":[9]`, `"b":[7,8]`, `"i":4`} {
+		if !strings.Contains(got, want) {
+			t.Errorf("round trip lost %s:\n%s", want, got)
+		}
 	}
 }

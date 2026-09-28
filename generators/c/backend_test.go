@@ -898,10 +898,12 @@ func TestCBitfieldArrayDefaultAtBit63IsUnsignedConstant(t *testing.T) {
 // TestValueWidthIdGuard: CORELIB_PLAN §6.2 lets a profile build the value type
 // 32 bits wide (SOFAB_DISABLE_INT64_SUPPORT), and the field header (id<<3)|type
 // is accumulated in it — so SOFAB_ID_MAX drops to UINT32_MAX>>3 and a larger id
-// is refused at run time, per field, with InvalidArgument. The descriptor guard
-// beside it does not catch that: on the BIG profile SOFAB_OBJECT_DESCR_ID_MAX is
-// UINT32_MAX, four times the narrowed ceiling, so the build stays silent
-// (generator#529). The guard is width-aware for free, because SOFAB_ID_MAX is.
+// is refused at run time, per field, with InvalidArgument. The corelib's
+// descriptor-profile check does not catch that: on the BIG profile the
+// descriptor id is 32 bits, four times the narrowed ceiling, so the build stays
+// silent (generator#529). The guard is width-aware for free, because
+// SOFAB_ID_MAX is. The descriptor width itself has no header guard: every
+// SOFAB_OBJECT_FIELD* entry checks its id, offset and size against the profile.
 func TestValueWidthIdGuard(t *testing.T) {
 	files := genCFromYAML(t, `
 version: 1
@@ -915,8 +917,71 @@ messages:
 	if !strings.Contains(h, "#if 536870912 > SOFAB_ID_MAX") {
 		t.Errorf("m.h missing the value-width id guard:\n%s", h)
 	}
-	if !strings.Contains(h, "#if 536870912 > SOFAB_OBJECT_DESCR_ID_MAX") {
-		t.Errorf("m.h lost the descriptor width guard:\n%s", h)
+	if strings.Contains(h, "SOFAB_OBJECT_DESCR_ID_MAX") {
+		t.Errorf("the descriptor width is the corelib's per-field check (SOFAB_OBJECT_FIELD*), not a header guard:\n%s", h)
+	}
+}
+
+// TestDescriptorProfileRefusedByCorelib: the generated header carries no
+// descriptor-width guard because every SOFAB_OBJECT_FIELD* entry checks its id,
+// offset and size against SOFAB_OBJECT_DESCR_PROFILE itself. This pins that the
+// corelib really refuses, under SMALL, an id past 255 in a nested struct and in
+// a union option, and an offset past 255 -- the one the old max-id guard never
+// saw -- while MEDIUM builds all three.
+func TestDescriptorProfileRefusedByCorelib(t *testing.T) {
+	corelib := os.Getenv("SOFAB_C_CORELIB")
+	if corelib == "" {
+		t.Skip("set SOFAB_C_CORELIB to a corelib-c-cpp checkout to run the compile gate")
+	}
+	gcc, err := exec.LookPath("gcc")
+	if err != nil {
+		t.Skip("gcc not found")
+	}
+	for name, src := range map[string]string{
+		"nested id": `
+version: 1
+messages:
+  m:
+    payload:
+      s: { id: 0, type: struct, fields: { a: { id: 300, type: u8 } } }
+`,
+		"union option id": `
+version: 1
+messages:
+  m:
+    payload:
+      u: { id: 0, type: union, oneof: { a: { id: 0, type: u8 }, b: { id: 300, type: u8 } } }
+`,
+		"offset": `
+version: 1
+messages:
+  m:
+    payload:
+      s: { id: 0, type: string, maxlen: 300 }
+      w: { id: 1, type: u8 }
+`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			dir := t.TempDir()
+			for path, content := range genCFromYAML(t, src) {
+				if err := os.WriteFile(filepath.Join(dir, path), []byte(content), 0o644); err != nil {
+					t.Fatal(err)
+				}
+			}
+			compile := func(profile string) (string, error) {
+				out, err := exec.Command(gcc, "-std=c99", "-DSOFAB_OBJECT_DESCR_PROFILE="+profile,
+					"-I"+filepath.Join(corelib, "src", "include"), "-I"+dir,
+					"-c", filepath.Join(dir, "m.c"), "-o", filepath.Join(dir, "m.o")).CombinedOutput()
+				return string(out), err
+			}
+			if out, err := compile("SOFAB_OBJECT_DESCR_MEDIUM"); err != nil {
+				t.Fatalf("MEDIUM must build:\n%s", out)
+			}
+			out, err := compile("SOFAB_OBJECT_DESCR_SMALL")
+			if err == nil || !strings.Contains(out, "field_exceeds_the_SOFAB_OBJECT_DESCR_PROFILE_id_offset_or_size_ceiling") {
+				t.Fatalf("SMALL must fail at the corelib's profile check, got err=%v:\n%s", err, out)
+			}
+		})
 	}
 }
 
