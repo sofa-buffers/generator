@@ -191,8 +191,8 @@ echo "==> round-trip OK"
 # back is a full-coverage pass that grows with the schema by itself.
 #
 # A string comparison cannot do this job: member order is the backend's choice
-# (cpp orders by schema id, go alphabetically), a union renders every arm, and a
-# blob is base64 here and a byte array there -- all rendering, no wire fact.
+# (cpp orders by schema id, go alphabetically), and a blob is base64 here and a
+# byte array there -- all rendering, no wire fact.
 FULL="$OUT"
 OUT2=$(cd "$WORK/proj" && printf '%s' "$FULL" | python3 harness.py encode myfirstmessage | python3 harness.py decode myfirstmessage)
 python3 "$ROOT/tests/conformance/lib/json_equal.py" "$FULL" "$OUT2" \
@@ -200,11 +200,9 @@ python3 "$ROOT/tests/conformance/lib/json_equal.py" "$FULL" "$OUT2" \
 echo "==> full-message round-trip OK ($(python3 -c "import json,sys;print(len(json.loads(sys.argv[1])))" "$FULL") fields compared as data)"
 # Every field must sit OFF its schema default, or the round trip above compares
 # a default with itself and cannot tell a working decode from a broken one.
-# The union arms beside the selected one are excepted: a union carries exactly
-# one, so the others reading as their default is the rule, not a hole.
 BASE=$(cd "$WORK/proj" && printf '%s' '{}' | python3 harness.py encode myfirstmessage | python3 harness.py decode myfirstmessage)
 python3 "$ROOT/tests/conformance/lib/check_nondefault.py" "$BASE" "$FULL" \
-    --except '$.someunion.option2,$.someunion.option3,$.someunion.option3.unionstructint,$.someunion.option3.unionstructbool' --label "python: round-trip fixture" || exit 1
+    --label "python: round-trip fixture" || exit 1
 echo "==> round-trip fixture OK (no field sits on its schema default)"
 
 # The two encode-buffer arms (CORELIB_PLAN §5.1). The caller owns the output
@@ -1156,8 +1154,39 @@ python3 "$ROOT/tests/conformance/lib/check_repeated_id.py" --emit-schema >> "$WO
 for ENGINE in $ENGINES; do
     if [ "$ENGINE" = python ]; then export SOFAB_PUREPYTHON=1; else unset SOFAB_PUREPYTHON || true; fi
     require_engine "$ENGINE"
-    python3 "$ROOT/tests/conformance/lib/check_repeated_id.py" "python/$ENGINE" \
+    python3 "$ROOT/tests/conformance/lib/check_repeated_id.py" "python/$ENGINE" --union \
         --cwd "$WORK/repeated" -- python3 harness.py
+done
+unset SOFAB_PUREPYTHON || true
+if [ "$NATIVE" = yes ]; then require_engine native; else require_engine python; fi
+
+# MESSAGE_SPEC §4.2 / §7.4.1 (generator#608): a union holds exactly ONE option.
+# A fresh one holds default_id at that option's default; a held option other
+# than default_id is written even at its own default (a struct/union/wrapper
+# option as a present frame); on decode the last correctly-typed option wins, a
+# §7.3-skipped or unknown id never switches, and several children or re-opened
+# frames are legal. The driver forges the frames no encoder emits and prints its
+# own schema.
+#
+# BOTH engines: a union is never on the destination table (a slot per id cannot
+# say "the last of several ids wins"), so the native engine decodes it through
+# the visitor dispatch the accelerator reimplements -- and a union element two
+# array levels down, a struct option inside a union element and a $defs union
+# split per default_id all ride that same dispatch.
+#
+# union_api_check.py then drives the generated union API itself (the property
+# getters and setters, has_/mutable_, select-if-not-held, clear(), what an array
+# of unions fills a gap with), which no wire comparison reaches.
+echo "==> §4.2/§7.4.1 tagged unions: one option held, last option wins (generator#608)"
+python3 "$ROOT/tests/conformance/lib/check_union.py" --emit-schema > "$WORK/union.yaml"
+( cd "$ROOT" && go run ./cmd/sofabgen --format=off --config "$WORK/cfg.yaml" --lang python --in "$WORK/union.yaml" --out "$WORK/union" >/dev/null )
+for ENGINE in $ENGINES; do
+    if [ "$ENGINE" = python ]; then export SOFAB_PUREPYTHON=1; else unset SOFAB_PUREPYTHON || true; fi
+    require_engine "$ENGINE"
+    python3 "$ROOT/tests/conformance/lib/check_union.py" "python/$ENGINE" \
+        --cwd "$WORK/union" -- python3 harness.py
+    python3 "$ROOT/tests/conformance/python/union_api_check.py" "$WORK/union" "$ENGINE" \
+        || { echo "FAIL: [$ENGINE] the generated union API"; exit 1; }
 done
 unset SOFAB_PUREPYTHON || true
 if [ "$NATIVE" = yes ]; then require_engine native; else require_engine python; fi
@@ -1275,6 +1304,7 @@ format_gen python "$WORK/fmt/elem" --config "$WORK/elem-cfg.yaml" --in "$WORK/el
 format_gen python "$WORK/fmt/growth" --config "$WORK/limit-cfg.yaml" --in "$WORK/growth.yaml"
 format_gen python "$WORK/fmt/closed" --config "$WORK/cfg.yaml" --in "$WORK/closed.yaml"
 format_gen python "$WORK/fmt/repeated" --config "$WORK/cfg.yaml" --in "$WORK/repeated.yaml"
+format_gen python "$WORK/fmt/union" --config "$WORK/cfg.yaml" --in "$WORK/union.yaml"
 format_gen python "$WORK/fmt/table" --config "$WORK/cfg.yaml" --in "$WORK/table.yaml"
 format_gen python "$WORK/fmt/bools" --config "$WORK/cfg.yaml" --in "$ROOT/tests/conformance/python/bool_tolerant.yaml"
 format_gen_corpus python "$WORK/fmt" --config "$WORK/cfg.yaml"

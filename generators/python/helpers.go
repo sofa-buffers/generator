@@ -248,10 +248,15 @@ func (g *gen) emitJSON(f *pyfile, name string, fields []*ir.Field, ms generator.
 	f.line("        o = cls()")
 	for _, fld := range fields {
 		f.line("        if %q in d:", fld.Name)
-		g.fromJSONStmt(f, fld)
+		g.fromJSONStmt(f, fld, "o."+pyIdent(fld.Name))
 	}
 	f.line("        return o")
 	f.blank()
+	g.emitCodec(f, name, ms)
+}
+
+// emitCodec writes a class's encode(), decoder() and decode().
+func (g *gen) emitCodec(f *pyfile, name string, ms generator.MessageSize) {
 	// encode / decode
 	//
 	// The encode buffer belongs to the CALLER (CORELIB_PLAN §5.1): the corelib
@@ -378,7 +383,11 @@ func (g *gen) emitJSON(f *pyfile, name string, fields []*ir.Field, ms generator.
 }
 
 func (g *gen) toJSONExpr(f *ir.Field) string {
-	acc := "self." + pyIdent(f.Name)
+	return g.toJSONExprAt(f, "self."+pyIdent(f.Name))
+}
+
+// toJSONExprAt is toJSONExpr over the value `acc` names.
+func (g *gen) toJSONExprAt(f *ir.Field, acc string) string {
 	switch f.Kind {
 	case ir.KindBlob:
 		return fmt.Sprintf("list(%s)", acc)
@@ -411,8 +420,9 @@ func (g *gen) pyArrayToJSON(val string, elem ir.Kind, ref *ir.TypeRef, items *ir
 	}
 }
 
-func (g *gen) fromJSONStmt(f *pyfile, fld *ir.Field) {
-	acc := "o." + pyIdent(fld.Name)
+// fromJSONStmt assigns the JSON member of `fld` to `acc` -- a field, or a union
+// option's setter, which selects it.
+func (g *gen) fromJSONStmt(f *pyfile, fld *ir.Field, acc string) {
 	src := fmt.Sprintf("d[%q]", fld.Name)
 	switch fld.Kind {
 	case ir.KindBlob:

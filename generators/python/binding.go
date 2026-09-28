@@ -34,7 +34,7 @@ import (
 //
 // --- WHAT THE TABLE MAY CARRY -----------------------------------------------
 //
-// Two rules decide, and both are about a verdict the table cannot reach:
+// Three rules decide, and each is about a verdict the table cannot reach:
 //
 //  1. A SHAPE the table has no entry for: a wrapper-sequence array (its elements
 //     are per-index scopes), and an array the schema leaves unbounded (its
@@ -51,6 +51,14 @@ import (
 //     skipped by the codec, sequence and all, exactly as a decoder with no
 //     visitor skips it. A scope that still has an unbindable field cannot be
 //     closed, so the table does not descend into it at all.
+//
+//  3. A UNION is never on a table, at any depth (MESSAGE_SPEC §7.4.1). A table
+//     maps each id to a FIXED slot once, at decoder construction, so it cannot
+//     say "the last of several option ids wins, and a new one discards the held
+//     one": two options arriving in one frame would both land, each in its own
+//     slot. A union field is therefore left to the visitor -- its scope open, so
+//     the decoder offers the union's on_sequence_begin -- and so is any scope
+//     that contains one, which keeps that scope's table (if any) open too.
 //
 // Everything else is on the table, including every narrow width: an entry states
 // it (`max_value` / `min_value`, corelib-py#149) and the decoder checks it at the
@@ -185,6 +193,12 @@ func (a *slotAlloc) object() int64      { at := a.objects; a.objects++; return a
 // buildBindPlan decides what one class's table carries, or returns nil when it
 // would carry too little to pay for itself.
 func (g *gen) buildBindPlan(name string, scopes []*pyScope) *bindPlan {
+	if scopes[0].union != nil {
+		// A union class's own fields are its options: a table would give each
+		// one a slot of its own, and the last of several options cannot be told
+		// from a slot per id (rule 3 at the top of this file).
+		return nil
+	}
 	p := &bindPlan{name: name, boundSc: map[int]bool{}, boundFd: map[int]idSet{}}
 	// A table is CLOSED when its scope needs nothing from the visitor, which is
 	// the same question that decides whether a parent may descend into it.
@@ -213,13 +227,18 @@ func (g *gen) bindableSubtree(scopes []*pyScope, sc *pyScope, seen map[int]bool)
 	if sc.isArr {
 		return false // a wrapper array's elements are per-index scopes
 	}
+	if sc.union != nil {
+		return false // one option held: see the union rule at the top of this file
+	}
 	if seen[sc.id] {
 		return true
 	}
 	seen[sc.id] = true
 	for _, fld := range sc.fields {
 		switch fld.Kind {
-		case ir.KindStruct, ir.KindUnion:
+		case ir.KindUnion:
+			return false
+		case ir.KindStruct:
 			child, ok := sc.seqChild[fld.ID]
 			if !ok || !g.bindableSubtree(scopes, scopes[child], seen) {
 				return false
@@ -255,7 +274,13 @@ func (g *gen) bindScope(p *bindPlan, alloc *slotAlloc, scopes []*pyScope,
 
 	for _, fld := range sc.fields {
 		dest := path + "." + pyIdent(fld.Name)
-		if fld.Kind == ir.KindStruct || fld.Kind == ir.KindUnion {
+		if fld.Kind == ir.KindUnion {
+			// Never on a table (see the union rule at the top of this file): the
+			// scope stays open, so the visitor receives the union's
+			// on_sequence_begin and switches there.
+			continue
+		}
+		if fld.Kind == ir.KindStruct {
 			child, ok := sc.seqChild[fld.ID]
 			// Only into a subtree that needs nothing from the visitor: its table
 			// is then closed, so an id it does not name is skipped by the codec

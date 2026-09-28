@@ -33,6 +33,9 @@ func (*Backend) Generate(s *ir.Schema, cfg map[string]any) ([]generator.File, er
 		size:    generator.NewSizePolicy(cfg),
 	}
 	g.resolveReassembly(s)
+	if err := g.checkUnions(s); err != nil {
+		return nil, err
+	}
 	module := g.module(s)
 	files := []generator.File{{Path: "message.py", Content: module}}
 	if cfgString(cfg, "emit", "sources") == "project" {
@@ -68,19 +71,21 @@ type gen struct {
 	scopes map[string][]*pyScope
 	// bind is the plan of the class being emitted, nil while none is.
 	bind *bindPlan
+	// unions caches each union type's options and derived names (union.go).
+	unions map[*ir.NamedType]*unionShape
 }
 
 // scopesFor returns a class's scope tree, built once and reused: buildBindPlan
 // walks it before emission and emitVisitor walks it again.
-func (g *gen) scopesFor(name string, fields []*ir.Field) []*pyScope {
-	if sc, ok := g.scopes[name]; ok {
+func (g *gen) scopesFor(c decodeClass) []*pyScope {
+	if sc, ok := g.scopes[c.name]; ok {
 		return sc
 	}
-	sc := g.buildScopes(name, fields)
+	sc := g.buildScopes(c)
 	if g.scopes == nil {
 		g.scopes = map[string][]*pyScope{}
 	}
-	g.scopes[name] = sc
+	g.scopes[c.name] = sc
 	return sc
 }
 
@@ -224,6 +229,9 @@ func (g *gen) module(s *ir.Schema) []byte {
 	if imp := stdlibImport("enum", typeSection, enumNames); imp != "" {
 		f.line("%s", imp)
 	}
+	if imp := stdlibImport("typing", typeSection, typingNames); imp != "" {
+		f.line("%s", imp)
+	}
 	// SofaDecodeError and SofaIncompleteError are unconditional: every class's
 	// decode() surfaces the three-valued outcome through them (MESSAGE_SPEC §7).
 	names := []string{
@@ -348,12 +356,15 @@ func (g *gen) typeSection(s *ir.Schema) string {
 	// struct/union dataclasses, then messages
 	for _, key := range s.NamedOrder {
 		nt := s.Named[key]
-		if nt.Category == ir.CatStruct || nt.Category == ir.CatUnion {
-			g.emitDataclass(f, g.typeName(key), nt.Summary, nt.Fields)
+		switch nt.Category {
+		case ir.CatStruct:
+			g.emitDataclass(f, g.typeName(key), nt.Summary, nt.Fields, nil)
+		case ir.CatUnion:
+			g.emitDataclass(f, g.typeName(key), nt.Summary, nt.Fields, g.unionShapeOf(nt))
 		}
 	}
 	for _, m := range s.Messages {
-		g.emitDataclass(f, exported(m.Name), m.Summary, m.Fields)
+		g.emitDataclass(f, exported(m.Name), m.Summary, m.Fields, nil)
 	}
 	return f.b.String()
 }
@@ -370,6 +381,9 @@ type stdlibName struct{ name, use string }
 var (
 	dataclassNames = []stdlibName{{"dataclass", "@dataclass\n"}, {"field", "field(default_factory="}}
 	enumNames      = []stdlibName{{"IntEnum", "(IntEnum):\n"}, {"IntFlag", "(IntFlag):\n"}}
+	// ClassVar keeps a union's option-id constants out of the dataclass fields;
+	// dataclasses recognises the string annotation only through this import.
+	typingNames = []stdlibName{{"ClassVar", ": ClassVar[int] = "}}
 )
 
 // stdlibImport returns `from <mod> import <names>` for the names the text uses,
@@ -397,14 +411,14 @@ func (g *gen) decodeSection(s *ir.Schema) string {
 	// whether any visitor in the module carries one.
 	g.plans = map[string]*bindPlan{}
 	for _, c := range g.decodeClasses(s) {
-		if p := g.buildBindPlan(c.name, g.scopesFor(c.name, c.fields)); p != nil {
+		if p := g.buildBindPlan(c.name, g.scopesFor(c)); p != nil {
 			g.plans[c.name] = p
 		}
 	}
 
 	body := &pyfile{}
 	for _, c := range g.decodeClasses(s) {
-		g.emitVisitor(body, c.name, c.fields)
+		g.emitVisitor(body, c)
 	}
 
 	f := &pyfile{}
@@ -428,18 +442,22 @@ func (g *gen) decodeSection(s *ir.Schema) string {
 type decodeClass struct {
 	name   string
 	fields []*ir.Field
+	union  *unionShape // non-nil for a union type
 }
 
 func (g *gen) decodeClasses(s *ir.Schema) []decodeClass {
 	var out []decodeClass
 	for _, key := range s.NamedOrder {
 		nt := s.Named[key]
-		if nt.Category == ir.CatStruct || nt.Category == ir.CatUnion {
-			out = append(out, decodeClass{g.typeName(key), nt.Fields})
+		switch nt.Category {
+		case ir.CatStruct:
+			out = append(out, decodeClass{g.typeName(key), nt.Fields, nil})
+		case ir.CatUnion:
+			out = append(out, decodeClass{g.typeName(key), nt.Fields, g.unionShapeOf(nt)})
 		}
 	}
 	for _, m := range s.Messages {
-		out = append(out, decodeClass{exported(m.Name), m.Fields})
+		out = append(out, decodeClass{exported(m.Name), m.Fields, nil})
 	}
 	return out
 }
@@ -667,16 +685,23 @@ func pyFieldDocLines(fld *ir.Field) []string {
 	return lines
 }
 
-func (g *gen) emitDataclass(f *pyfile, name, summary string, fields []*ir.Field) {
+// emitDataclass writes one generated class. `u` is non-nil for a union type,
+// whose fields are its options and which holds exactly one of them (union.go).
+func (g *gen) emitDataclass(f *pyfile, name, summary string, fields []*ir.Field, u *unionShape) {
 	f.line("@dataclass")
 	f.line("class %s:", name)
 	// Class docstring (pydoc/Sphinx) as the first statement in the body, when the
 	// summary is non-empty. It also satisfies the body for a field-less class.
 	emitClassDoc(f, summary)
-	if len(fields) == 0 && summary == "" {
+	if u != nil {
+		g.emitUnionFields(f, u)
+	} else if len(fields) == 0 && summary == "" {
 		f.line("    pass")
 	}
 	for _, fld := range fields {
+		if u != nil {
+			break
+		}
 		// Sphinx attribute comment(s) immediately before the declaration.
 		for _, dl := range pyFieldDocLines(fld) {
 			f.line("    #: %s", dl)
@@ -705,6 +730,15 @@ func (g *gen) emitDataclass(f *pyfile, name, summary string, fields []*ir.Field)
 		f.line("    MAX_SIZE = MAX_SIZE_LIMIT")
 	}
 	f.blank()
+
+	if u != nil {
+		g.emitUnionAccessors(f, u)
+		g.emitUnionIsDefault(f, u)
+		g.emitUnionSerialize(f, u)
+		g.emitUnionJSON(f, u)
+		g.emitCodec(f, name, ms)
+		return
+	}
 
 	g.emitIsDefault(f, fields)
 
@@ -752,7 +786,13 @@ func (g *gen) emitIsDefault(f *pyfile, fields []*ir.Field) {
 // fieldIsDefaultExpr is the boolean expression "this field equals its default",
 // i.e. the negation of emitMarshal's write guard for the same field.
 func (g *gen) fieldIsDefaultExpr(fld *ir.Field) string {
-	acc := "self." + pyIdent(fld.Name)
+	return g.fieldIsDefaultExprAt(fld, "self."+pyIdent(fld.Name))
+}
+
+// fieldIsDefaultExprAt is fieldIsDefaultExpr over the value `acc` names -- a
+// union's default option tests its held `_value` with the same predicate a field
+// of that kind uses.
+func (g *gen) fieldIsDefaultExprAt(fld *ir.Field, acc string) string {
 	switch fld.Kind {
 	case ir.KindBlob:
 		// emitMarshal compares bytes(acc) so a bytearray/memoryview value still
@@ -789,7 +829,19 @@ func (g *gen) arrayIsDefaultExpr(fld *ir.Field, acc string) string {
 }
 
 func (g *gen) emitMarshal(f *pyfile, fld *ir.Field) {
-	acc := "self." + pyIdent(fld.Name)
+	g.emitMarshalAt(f, fld, "self."+pyIdent(fld.Name), "        ", false)
+}
+
+// emitMarshalAt writes the value `acc` names as field `fld`, at indent `ind`.
+//
+// `forced` is the write of a held union option other than default_id
+// (MESSAGE_SPEC §2, §4.2): the option's presence is what says which one is held,
+// so it is written whatever its value -- a scalar, string or blob with no
+// ≠-default guard (the empty value is a zero-length payload), a native array as
+// its count even when empty, and a struct, union or wrapper array as a present
+// frame, closed with write_sequence_end_keep. Inside the option the ordinary
+// per-field omission still applies.
+func (g *gen) emitMarshalAt(f *pyfile, fld *ir.Field, acc, ind string, forced bool) {
 	var write string
 	switch fld.Kind {
 	case ir.KindU8, ir.KindU16, ir.KindU32, ir.KindU64, ir.KindBitfield:
@@ -805,9 +857,13 @@ func (g *gen) emitMarshal(f *pyfile, fld *ir.Field) {
 	case ir.KindString:
 		write = fmt.Sprintf("e.write_string(%d, %s)", fld.ID, acc)
 	case ir.KindBlob:
+		write = fmt.Sprintf("e.write_bytes(%d, bytes(%s))", fld.ID, acc)
+		if forced {
+			break
+		}
 		// blob is a leaf: omit when equal to its default (empty if none).
-		f.line("        if bytes(%s) != %s:", acc, g.pyDefault(fld))
-		f.line("            e.write_bytes(%d, bytes(%s))", fld.ID, acc)
+		f.line("%sif bytes(%s) != %s:", ind, acc, g.pyDefault(fld))
+		f.line("%s    %s", ind, write)
 		return
 	case ir.KindStruct, ir.KindUnion:
 		// MESSAGE_SPEC S2: the != default test is per field and a sequence is no
@@ -816,22 +872,33 @@ func (g *gen) emitMarshal(f *pyfile, fld *ir.Field) {
 		// equals its default, so "no child was written" IS "the object equals its
 		// declared default", evaluated per field and recursively. An all-default
 		// nested object is therefore dropped, not emitted as an empty wrapper.
-		f.line("        e.write_sequence_begin_lazy(%d)", fld.ID)
-		f.line("        %s.serialize(e)", acc)
-		f.line("        e.write_sequence_end()")
+		//
+		// A forced option keeps its frame even when it wrote nothing: an empty
+		// frame is what selects the option at its own default.
+		f.line("%se.write_sequence_begin_lazy(%d)", ind, fld.ID)
+		f.line("%s%s.serialize(e)", ind, acc)
+		if forced {
+			f.line("%se.write_sequence_end_keep()", ind)
+		} else {
+			f.line("%se.write_sequence_end()", ind)
+		}
 		return
 	case ir.KindArray:
-		g.emitMarshalArray(f, fld, acc)
+		g.emitMarshalArray(f, fld, acc, ind, forced)
+		return
+	}
+	if forced {
+		f.line("%s%s", ind, write)
 		return
 	}
 	// Scalar/string/enum/bitfield leaf: always omit when equal to the default;
 	// sparse encoding is canonical (MESSAGE_SPEC S2) and the decoder reconstructs
 	// the omitted field from its default.
-	f.line("        if %s != %s:", acc, g.pyDefault(fld))
-	f.line("            %s", write)
+	f.line("%sif %s != %s:", ind, acc, g.pyDefault(fld))
+	f.line("%s    %s", ind, write)
 }
 
-func (g *gen) emitMarshalArray(f *pyfile, fld *ir.Field, acc string) {
+func (g *gen) emitMarshalArray(f *pyfile, fld *ir.Field, acc, ind string, forced bool) {
 	// A native scalar array is a leaf field: omit it when equal to its default
 	// (materialized in the dataclass), else when empty. A composite/dynamic-element
 	// array is a wrapper sequence, opened lazily and closed by the dropping end
@@ -841,13 +908,26 @@ func (g *gen) emitMarshalArray(f *pyfile, fld *ir.Field, acc string) {
 	// never a length (§3): it never reaches the wire, so the value is compared
 	// against the declared default exactly as written -- neither side padded to N
 	// -- and against the empty collection when no default is declared.
+	//
+	// A forced union option drops both guards: a native array is written as its
+	// count even when empty (an fp array keeps its fixlen_word), and a wrapper
+	// closes with the keeping end, so the empty frame survives.
+	id := fmt.Sprintf("%d", fld.ID)
 	if isNativeArrayElem(fld.Elem) {
-		if lit, ok := g.pyNativeArrayDefault(fld); ok {
-			f.line("        if %s != %s:", acc, lit)
-		} else {
-			f.line("        if len(%s) != 0:", acc)
+		if forced {
+			g.marshalArray(f, ind, id, acc, fld.Elem, fld.ElemRef, fld.ElemItems, 0, "")
+			return
 		}
-		g.marshalArray(f, "            ", fmt.Sprintf("%d", fld.ID), acc, fld.Elem, fld.ElemRef, fld.ElemItems, 0, "")
+		if lit, ok := g.pyNativeArrayDefault(fld); ok {
+			f.line("%sif %s != %s:", ind, acc, lit)
+		} else {
+			f.line("%sif len(%s) != 0:", ind, acc)
+		}
+		g.marshalArray(f, ind+"    ", id, acc, fld.Elem, fld.ElemRef, fld.ElemItems, 0, "")
+		return
+	}
+	if forced {
+		g.marshalArray(f, ind, id, acc, fld.Elem, fld.ElemRef, fld.ElemItems, 0, keepAlways)
 		return
 	}
 	// The field-level wrapper frame is dropped when no element is written, and
@@ -858,7 +938,7 @@ func (g *gen) emitMarshalArray(f *pyfile, fld *ir.Field, acc string) {
 	// `if value != default: ... e.write_sequence_end_keep()` -- so that a value
 	// differing from a non-empty default still reaches the wire as the empty
 	// wrapper, the only encoding of "explicitly empty" (MESSAGE_SPEC §2, §3).
-	g.marshalArray(f, "        ", fmt.Sprintf("%d", fld.ID), acc, fld.Elem, fld.ElemRef, fld.ElemItems, 0, "")
+	g.marshalArray(f, ind, id, acc, fld.Elem, fld.ElemRef, fld.ElemItems, 0, "")
 }
 
 // lastElemExpr is the "this element is the array's last" test, at loop position
@@ -879,6 +959,9 @@ func lastElemExpr(iv, val string) string {
 	return fmt.Sprintf("%s == len(%s) - 1", iv, val)
 }
 
+// keepAlways is the emitSeqEnd condition that keeps the frame unconditionally.
+const keepAlways = "True"
+
 // emitSeqEnd closes the wrapper sequence opened at ind, choosing between the two
 // closers the corelib offers. Every sequence is opened LAZILY (the corelib holds
 // the header back until a child is written), so the closer alone decides whether
@@ -893,9 +976,15 @@ func lastElemExpr(iv, val string) string {
 //     what makes an all-default element sparse like any other default value.
 //     Note this is decided from the position in the VALUE, at run time; the
 //     schema cannot answer it.
+//   - keepAlways -- always: a held union option other than default_id, whose
+//     frame is what selects it (MESSAGE_SPEC §2).
 func emitSeqEnd(f *pyfile, ind, keepIf string) {
-	if keepIf == "" {
+	switch keepIf {
+	case "":
 		f.line("%se.write_sequence_end()", ind)
+		return
+	case keepAlways:
+		f.line("%se.write_sequence_end_keep()", ind)
 		return
 	}
 	f.line("%sif %s:", ind, keepIf)
