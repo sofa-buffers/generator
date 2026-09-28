@@ -791,7 +791,10 @@ Budget (the user's constraint: size and speed move only minimally): a maxspeed r
 may move by at most **±1 % Ir/op** (encode and decode separately), a footprint row
 by at most **+64 B `.text`** per target and **+0 B `.data`** for the generated
 code; anything beyond is reported with its cause and either fixed or argued in
-the milestone's result.
+the milestone's result. The expected direction is ≤ 0 on encode (one option
+compared and written instead of three) and ≈ 0 on decode (one tag store per
+option occurrence). Finish runs the **full** bench and commits `results.txt` from
+that full run only.
 
 **Footprint first (user decision, footprint rework).** On the footprint profile
 (`c`, `cpp` with `corelib: c-cpp`, `rust` with `corelib: rs-no-std`, and
@@ -802,10 +805,7 @@ and a shape that costs cycles must buy flash. The Ir triggers of this plan
 (§5.2's +0.3 %, the ±1 % above) bind maxspeed rows only. The corelib's own
 `tools/footprint.sh` (full and minimal configurations, all four architectures)
 is the measure of a corelib-c-cpp change; the `c` / `cpp-c-cpp` rows size the
-generated code plus what it reaches. The expected direction is ≤ 0 on encode (one option
-compared and written instead of three) and ≈ 0 on decode (one tag store per
-option occurrence). Finish runs the **full** bench and commits `results.txt` from
-that full run only.
+generated code plus what it reaches.
 
 **What the bench cannot see, measured separately.** Both bench unions use
 `default_id: 0` with all-zero option defaults, so the C default image (§5.2) never
@@ -1081,6 +1081,12 @@ Work only in `/root/corelibs/wt-c-cpp-union` (branch `feat/tagged-union`,
    24202 / 49876 (main) → 24491 / 51254 (+1.2 % / +2.8 %); row `c` 25733 / 52790
    (hoisted) → 26076 / 54510 (+1.3 % / +3.3 %). A union-free project takes both
    back with the automatic `SOFAB_DISABLE_UNION_SUPPORT` (5.2).*
+   *Measured (default tag out of line, `95842b4`): the `default_id` lookup is one
+   static function instead of a macro expanded in init and the ≠-default test —
+   atmega8 full 8572 B (+206 B over main, −12 B under the prototype, −162 B under
+   the hoisted walk; `object.o` 3418 → 3408 B), strict-UTF-8 full 9028 B;
+   ARMv6-m / ARMv7-m / RV32IMC, both minimal configurations and
+   `SOFAB_DISABLE_UNION_SUPPORT` (byte-identical to main on all four) unchanged.*
 7. The **C++ side** of c-cpp (`sofab.hpp`, `seq.hpp`) needs no change.
 
 ### 5.2 c (generator)
@@ -1195,6 +1201,19 @@ Work only in `/root/corelibs/wt-c-cpp-union` (branch `feat/tagged-union`,
   main): `.text` 5538 / 5552 / 6066 → 5616 / 5622 / 6170 B (+78 / +70 /
   +104; the hoisted walk was 5762 / 5714 / 6342), Ir 25986 / 53254 → 26076 /
   54510 (+0.3 % / +2.4 %). `.data`/`.bss` 0.
+  *What that delta is.* Row `c` links the generated sources **with**
+  corelib-c-cpp's `object.c`/`ostream.c`/`istream.c`/`utf8.c` and sums the
+  SofaBuffers symbols left after `--gc-sections` (`tests/bench/lang/c.sh`,
+  generator#589) — generated code plus corelib, not generated code alone. Split
+  by defining object (ARMv6-m / ARMv7-m / RV32IMC, `run.sh --rows c`): the
+  committed main row was measured at corelib `35f2df7`; against `cdb7a0b` the
+  product-type generator measures 5524 / 5560 / 6066 B, so −14 / +8 / 0 B of
+  the +78 / +70 / +104 B is corelib-main drift, and the union share +92 / +62 /
+  +104 B is **all corelib** (`sofab_object_init`, `_field_is_default`,
+  `sofab_object_field_cb`, RV32 also `sofab_object_encode`). The generated code
+  is 1778 / 1778 / 1800 B under both generators: the product-type generator
+  against `fe6663d` measures 5616 / 5622 / 6170 B, byte for byte the tagged-union
+  generator's — ±0 B, within §4's +64 B.
 
 ### 5.3 cpp — `corelib: cpp` and `corelib: c-cpp`
 
@@ -1294,6 +1313,14 @@ Work only in `/root/corelibs/wt-c-cpp-union` (branch `feat/tagged-union`,
   `IStreamImpl::delivered(Wire[, Fix])`, the wire type and subtype as ONE compare.
 * Arrays of unions: `MessageSeq` / `FixedMessageSeq` default-construct elements →
   the element type's `D` (per-type default via the split).
+* **Capability guard** (`corelib: c-cpp`, added after the footprint rework): a
+  header whose message reaches a union includes `sofab/object.h` (which
+  `sofab.hpp` does not) and emits the C header's `#if
+  !defined(SOFAB_OBJECT_DESCR_UNION) #error "… which this corelib-c-cpp predates
+  …"` — the macro and `readMatch` land in the same corelib PR (#182), and against
+  an older corelib the header otherwise fails on "'class sofab::IStreamImpl' has
+  no member named 'readMatch'". `corelib: cpp` needs none: `std::variant` and the
+  wire/fixType gate use nothing corelib-cpp lacks.
 * **JSON harness** (`generators/cpp/project.go`): only the held option.
 * **Tests** (`generators/cpp/backend_test.go`): variant/tagged-union shapes for
   both corelibs, `D` vs non-`D` arms (`writeLazy` vs `write`), gate-then-switch

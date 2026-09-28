@@ -192,3 +192,7 @@ generated `Makefile` still sets it (variable `SOFAB_DEFINES`, on every C and
 C++ compile) when no message of the schema reaches a union, so a firmware that
 also uses the C object API pays no flash for its union walk. A schema with a
 union never gets it.
+
+With `corelib: c-cpp`, a header whose message uses a union refuses to compile
+against a corelib that predates unions (one without `SOFAB_OBJECT_DESCR_UNION`),
+with an `#error` naming the cause.
