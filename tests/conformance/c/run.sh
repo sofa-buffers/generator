@@ -209,7 +209,7 @@ echo "==> bitfield INT64 guard fired as expected (control built)"
 # drops to UINT32_MAX>>3 = 536,870,911 and a larger id is refused at RUN time,
 # per field, with InvalidArgument. All three builds below use the BIG descriptor
 # profile, where SOFAB_OBJECT_DESCR_ID_MAX is UINT32_MAX -- four times the
-# narrowed ceiling -- so the descriptor guard beside it stays silent and only
+# narrowed ceiling -- so the corelib's descriptor-profile check stays silent and only
 # the value-width guard can reject anything.
 echo "==> verifying the value-width id guard fires on a 32-bit value build"
 cat > "$WORK/wideid.yaml" <<'YAML'
@@ -698,7 +698,7 @@ messages: { m: { payload: { a: {id: 0, type: u32}, b: {id: 1, type: i32}, f: {id
 
 echo "==> negative: a guard fires when a used feature is disabled in the corelib"
 # (the full example uses every feature; each disable macro must trip its #error)
-for flag in FIXLEN_SUPPORT ARRAY_SUPPORT SEQUENCE_SUPPORT FP64_SUPPORT INT64_SUPPORT UNION_SUPPORT; do
+for flag in FIXLEN_SUPPORT ARRAY_SUPPORT SEQUENCE_SUPPORT FP64_SUPPORT INT64_SUPPORT; do
     if gcc -std=c99 -DSOFAB_OBJECT_DESCR_PROFILE=3 -DSOFAB_DISABLE_$flag -I"$INC" -I"$WORK/gen" \
             -c "$WORK"/gen/myfirstmessage.c -o /dev/null 2>/dev/null; then
         echo "FAIL: expected a capability-guard #error with $flag disabled"

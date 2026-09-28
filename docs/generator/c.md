@@ -159,22 +159,14 @@ an unknown id, change nothing.
 held option: `{"pt": {"x": 7, "y": 2}}`, also when that is the `default_id`
 option at its default.
 
-**Corelib build switch.** The union walk lives in `corelib-c-cpp`'s object API
-and costs flash in every build that keeps it (about 100&nbsp;B on Cortex-M and
-RV32, about 220&nbsp;B on AVR), union or not. `SOFAB_DISABLE_UNION_SUPPORT`
-compiles it out; it must be set for the corelib and for every file that
-includes `object.h` alike.
-
-- **Generated project** (`emit: project`). When no message of the schema
-  reaches a union, the `Makefile` passes `-DSOFAB_DISABLE_UNION_SUPPORT` to the
-  compile (variable `SOFAB_DEFINES`, kept apart from `CFLAGS` so overriding
-  those keeps it) and `CMakeLists.txt` adds it with
-  `target_compile_definitions`. A schema with a union never gets it.
-- **Your own build** (`emit: sources`). Set `SOFAB_DISABLE_UNION_SUPPORT` in the
-  corelib's CMake options (it is applied `PUBLIC`) or as a define on every
-  compile, when your schema has no union.
+**Corelib cost.** The union walk lives in `corelib-c-cpp`'s object API and is
+part of every build of it that keeps sequence support, whether or not the
+schema has a union: about 100&nbsp;B of flash on Cortex-M and RV32, about
+220&nbsp;B on AVR, and a small per-field cost at run time. It has no switch of
+its own; a corelib built with `SOFAB_DISABLE_SEQUENCE_SUPPORT` leaves it out,
+and a schema with a union (or any struct) cannot use such a corelib.
 
 A header whose message uses a union refuses to compile against a corelib built
-with `SOFAB_DISABLE_UNION_SUPPORT`, and against a corelib that predates unions
-(one without `SOFAB_OBJECT_DESCR_UNION`), each with an `#error` naming the
-cause.
+with `SOFAB_DISABLE_SEQUENCE_SUPPORT`, and against a corelib that predates
+unions (one without `SOFAB_OBJECT_DESCR_UNION`), each with an `#error` naming
+the cause.

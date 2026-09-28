@@ -1049,6 +1049,8 @@ Work only in `/root/corelibs/wt-c-cpp-union` (branch `feat/tagged-union`,
    (with the §6.2.2 profile-variation statement: without it a union descriptor
    behaves as a plain struct, so the switch must be configured identically for the
    library and every includer); the generated header refuses it (5.2).
+   *Removed after review (corelib-c-cpp `8660e7f`, see item 8): the switch no
+   longer exists; the union walk rides sequence support.*
 4. **Tests** (`test/c/test_object.c`): update
    `union_encodes_only_the_held_option` (the degenerate case is now **written**);
    add `union_held_option_at_own_default_is_written` (scalar, string, sized blob,
@@ -1080,7 +1082,8 @@ Work only in `/root/corelibs/wt-c-cpp-union` (branch `feat/tagged-union`,
    recipe (x86-64 `-O3`), encode / decode: the bench schema without its unions
    24202 / 49876 (main) → 24491 / 51254 (+1.2 % / +2.8 %); row `c` 25733 / 52790
    (hoisted) → 26076 / 54510 (+1.3 % / +3.3 %). A union-free project takes both
-   back with the automatic `SOFAB_DISABLE_UNION_SUPPORT` (5.2).*
+   back with the automatic `SOFAB_DISABLE_UNION_SUPPORT` (5.2) — no longer:
+   the switch was removed, item 8.*
    *Measured (default tag out of line, `95842b4`): the `default_id` lookup is one
    static function instead of a macro expanded in init and the ≠-default test —
    atmega8 full 8572 B (+206 B over main, −12 B under the prototype, −162 B under
@@ -1088,6 +1091,35 @@ Work only in `/root/corelibs/wt-c-cpp-union` (branch `feat/tagged-union`,
    ARMv6-m / ARMv7-m / RV32IMC, both minimal configurations and
    `SOFAB_DISABLE_UNION_SUPPORT` (byte-identical to main on all four) unchanged.*
 7. The **C++ side** of c-cpp (`sofab.hpp`, `seq.hpp`) needs no change.
+8. **Review follow-up (corelib-c-cpp `8660e7f` and `e379da1`/#183, both on
+   corelib main with #182).** Recorded decisions:
+   * **The union switch is removed.** `SOFAB_DISABLE_UNION_SUPPORT` is gone from
+     the corelib: a union frame *is* a sequence, so the walk now rides
+     `SOFAB_DISABLE_SEQUENCE_SUPPORT` (under which `SOFAB_OBJECT_DESCR_UNION`
+     fails to compile, naming that switch), and a second `PUBLIC` switch whose
+     library and includer sides could silently disagree was the review's
+     finding 3. The generator no longer sets it (5.2, 5.3) and its header no
+     longer refuses it; the `SOFAB_OBJECT_DESCR_UNION` "predates" guard stays.
+   * **The per-field walk is kept under footprint-first, although union-free
+     schemas can no longer opt out.** The walk costs +92 / +66 / +102 / +218 B
+     of `.text` (ARMv6-m / ARMv7-m / RV32IMC / atmega8, corelib's measurement
+     at the switch removal) and +1.2 % encode / +2.8 % decode `Ir/op` for
+     **every** schema, union or not. The hoisted walk (`0127836`, ±0 Ir for a
+     union-free schema) is +238 / +154 / +300 / +368 B; on a footprint target
+     flash decides, so the per-field shape stands on the new terms.
+   * **A capacity-only BLOB option is forbidden** (`@warning` in `object.h`,
+     `assert` in `sofab_object_init` over every option, 0 B under `NDEBUG`):
+     it cannot record a shorter payload's length, so the previously held
+     option's bytes stayed and were re-encoded. The C target already emits
+     every blob as `SOFAB_OBJECT_FIELD_BLOB_SIZED`; a unit test now pins it
+     and builds a union-with-blob project with asserts on (5.2).
+   * **Descriptor profile ceilings are the corelib's check** (#183): every
+     `SOFAB_OBJECT_FIELD*` entry tests its id, offset and size against
+     `SOFAB_OBJECT_DESCR_PROFILE` at compile time. That covers the generated
+     header's `#if <max id> > SOFAB_OBJECT_DESCR_ID_MAX` guard completely (every
+     id the guard maxed over is a descriptor entry) and more (offsets and
+     sizes), so the guard is removed; the value-width guard (`SOFAB_ID_MAX`,
+     generator#529) stays, the profile check does not cover it.
 
 ### 5.2 c (generator)
 
@@ -1153,7 +1185,9 @@ Work only in `/root/corelibs/wt-c-cpp-union` (branch `feat/tagged-union`,
   `<PREFIX>` built exactly like the bitfield prefix (`g.prefix` + sanitized
   `"named/" + key`), deduped per key, covered by `checkMacroNames`.
 * **Capability guard** in the header: `#if defined(SOFAB_DISABLE_UNION_SUPPORT)
-  #error "… uses unions …"` when the message reaches a union. *Added (footprint
+  #error "… uses unions …"` when the message reaches a union. *That half was
+  removed with the switch (5.1 item 8); a union still requires the
+  `SOFAB_DISABLE_SEQUENCE_SUPPORT` guard every framed message carries.* *Added (footprint
   rework):* also `#if !defined(SOFAB_OBJECT_DESCR_UNION) #error "… which this
   corelib-c-cpp predates …"` — a corelib without tagged unions otherwise fails on
   an undeclared macro "call" in a static initializer. A feature macro, not a
@@ -1170,7 +1204,9 @@ Work only in `/root/corelibs/wt-c-cpp-union` (branch `feat/tagged-union`,
   neither the walk's flash nor its per-field cycles. A schema with a union never
   gets it, and its header refuses it. The `emit: sources` user sets it in their
   own build (`docs/generator/c.md`). The cpp `corelib: c-cpp` Makefile sets it
-  the same way (5.3).
+  the same way (5.3). *Removed with the switch itself (5.1 item 8): no
+  generated project passes it any more, and the `SOFAB_DEFINES` plumbing is
+  gone.*
 * **JSON harness** (`generators/c/project.go`, and
   `tests/conformance/c/example_roundtrip.c`): print/parse only the held option.
 * **Tests** (`generators/c/backend_test.go`): the type shape above, descriptor macro
@@ -1366,10 +1402,10 @@ Work only in `/root/corelibs/wt-c-cpp-union` (branch `feat/tagged-union`,
   shared `bindMatch_` (26 B); the union arms are at or below the product
   type's. Dropping `bindMatch_` means spelling the test per scalar arm again,
   which is what cost the 22 B per arm, so there is nothing left to take without
-  giving the §7.3 test up. The project `Makefile` sets
+  giving the §7.3 test up. The project `Makefile` set
   `SOFAB_DISABLE_UNION_SUPPORT` for a union-free schema like the C target (5.2);
-  it only compiles `object.c`'s union walk out, which the C++ unions never use,
-  so a union-bearing c-cpp header does not refuse the switch.
+  it only compiled `object.c`'s union walk out, which the C++ unions never use.
+  *Removed with the switch itself (5.1 item 8).*
 
 ### 5.4 rust — std and no_std
 
