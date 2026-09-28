@@ -275,6 +275,20 @@ func (g *gen) header(m *ir.Message) []byte {
 	}
 	f.line("#include %q", "sofab/sofab.hpp")
 	f.blank()
+	// A corelib-c-cpp that predates tagged unions has no readMatch, and the
+	// union arms below fail on it with "'class sofab::IStreamImpl' has no
+	// member named 'readMatch'", which names neither the cause nor the fix. The
+	// corelib signals the feature by what its headers define (it bumps
+	// SOFAB_API_VERSION only on a break): SOFAB_OBJECT_DESCR_UNION lands with
+	// readMatch, in object.h, which sofab.hpp does not include -- so this header
+	// includes it for the guard, the same test and wording as the C header's.
+	if g.clib && g.unionHas(m) {
+		f.line("#include %q", "sofab/object.h")
+		f.line("#if !defined(SOFAB_OBJECT_DESCR_UNION)")
+		f.line(`# error "SofaBuffers: message %s uses unions (SOFAB_OBJECT_DESCR_UNION), which this corelib-c-cpp predates. Update the corelib."`, m.Name)
+		f.line("#endif")
+		f.blank()
+	}
 	f.line("static_assert(sofab::API_VERSION == 1,")
 	f.line("    \"SofaBuffers: generated against C++ API v1, but the linked corelib differs.\");")
 	f.blank()

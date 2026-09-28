@@ -825,3 +825,55 @@ messages:
 		t.Errorf("SOFAB_DISABLE_UNION_SUPPORT reached %d of the 6 compiles:\n%s", n, out)
 	}
 }
+
+// TestCppUnionCorelibCapabilityGuard: a corelib: c-cpp header whose message
+// reaches a union refuses a corelib-c-cpp without SOFAB_OBJECT_DESCR_UNION (one
+// that predates tagged unions, so has no readMatch) by name, the C header's
+// test and wording; a union-free one, and every corelib: cpp header, does not
+// ask. The build half hides the macro and checks the guard's message is what
+// the compiler reports.
+func TestCppUnionCorelibCapabilityGuard(t *testing.T) {
+	const plain = `
+version: 1
+messages:
+  p:
+    payload:
+      w: { id: 0, type: u8 }
+`
+	guard := "#if !defined(SOFAB_OBJECT_DESCR_UNION)"
+	msg := "which this corelib-c-cpp predates"
+	h := unionFiles(t, unionShapeYAML, map[string]any{"corelib": "c-cpp"})["m.hpp"]
+	if !strings.Contains(h, "#include \"sofab/object.h\"\n"+guard) || !strings.Contains(h, msg) {
+		t.Errorf("a c-cpp message with a union must refuse a corelib without SOFAB_OBJECT_DESCR_UNION:\n%s", h)
+	}
+	for name, got := range map[string]string{
+		"c-cpp without a union": unionFiles(t, plain, map[string]any{"corelib": "c-cpp"})["p.hpp"],
+		"corelib: cpp union":    unionFiles(t, unionShapeYAML, nil)["m.hpp"],
+	} {
+		if got == "" || strings.Contains(got, guard) || strings.Contains(got, "sofab/object.h") {
+			t.Errorf("%s: must not ask for SOFAB_OBJECT_DESCR_UNION:\n%s", name, got)
+		}
+	}
+
+	cc := os.Getenv("SOFAB_C_DIR")
+	if cc == "" {
+		t.Skip("set SOFAB_C_DIR to a corelib-c-cpp checkout to run the build half")
+	}
+	gxx, err := exec.LookPath("g++")
+	if err != nil {
+		t.Skip("g++ not found")
+	}
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "m.hpp"), []byte(h), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	tu := "#include \"sofab/object.h\"\n#undef SOFAB_OBJECT_DESCR_UNION\n#include \"m.hpp\"\n"
+	if err := os.WriteFile(filepath.Join(dir, "old.cpp"), []byte(tu), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	out, err := exec.Command(gxx, "-std=c++20", "-fsyntax-only", "-I"+filepath.Join(cc, "src", "include"), "-I"+dir,
+		filepath.Join(dir, "old.cpp")).CombinedOutput()
+	if err == nil || !strings.Contains(string(out), msg) {
+		t.Fatalf("a corelib without SOFAB_OBJECT_DESCR_UNION must fail with the guard's message, got err=%v:\n%s", err, out)
+	}
+}
