@@ -2144,9 +2144,12 @@ func TestPythonBitfieldIsIntFlagAndEnumIsIntEnum(t *testing.T) {
 // member, struct-array element member, union member, matrix row element -- for
 // both kinds, and each is pinned WHERE IT NOW LIVES rather than by shape:
 //
-//   - a scalar, a struct member and a union member are on the destination table,
-//     where the entry states the width and the decoder checks it at the value
+//   - a scalar and a struct member are on the destination table, where the
+//     entry states the width and the decoder checks it at the value
 //     (`min_value`/`max_value`, corelib-py#149);
+//   - a union member is never on the table (MESSAGE_SPEC §7.4.1: a slot per id
+//     cannot hold "the last of several options"), so it is the typed hook's
+//     guard, ahead of the option switch;
 //   - a native array's elements are stated at on_array_begin or on the array's
 //     entry, as the interval the decoder applies AT each element;
 //   - a struct-ARRAY element member and a matrix row stay in the typed hook: a
@@ -2188,9 +2191,16 @@ func TestPythonEnumAndBitfieldWidthBoundAtEverySixPositions(t *testing.T) {
 		// 4. struct-array element member.
 		fmt.Sprintf(enRej, "se: value outside declared enum width", "self._o.sa[self._ix2].se"),
 		fmt.Sprintf(bfRej, "sbf: value outside declared bitfield width", "self._o.sa[self._ix2].sbf"),
-		// 5. union member -- same shape as the struct's.
-		"_BIND_Closed_un = (Binding(closed=True)\n    .signed(0, at=18, count_at=19, min_value=-128, max_value=127)\n    .unsigned(1, at=20, count_at=21, max_value=255)\n",
-		"    .sequence(6, child=_BIND_Closed_un)",
+		// 5. union member -- never on a table (a slot per id cannot say "the
+		// last of several options wins", MESSAGE_SPEC §7.4.1), so it is the
+		// visitor's typed hook: the width check first, then the option switch
+		// and the store.
+		"        elif c == _L_Closed_un:\n            if fid == 0:\n" +
+			"                if value < -128 or value > 127:\n                    raise SofaDecodeError(\"ue: value outside declared enum width\")\n" +
+			"                _u = self._o.un\n                _u._which = 0\n                _u._value = value\n",
+		"        elif c == _L_Closed_un:\n            if fid == 1:\n" +
+			"                if (value & ~0xff) != 0:\n                    raise SofaDecodeError(\"ubf: value outside declared bitfield width\")\n" +
+			"                _u = self._o.un\n                _u._which = 1\n                _u._value = value\n",
 		// 6. matrix row element -- a row scope keyed by row index, so its interval
 		// is the scope's whole arm rather than one keyed by a field id.
 		"        if c == _L_Closed_mat:\n            return (None, -128, 127)\n",

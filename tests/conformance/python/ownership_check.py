@@ -100,9 +100,12 @@ def sample(message):
     m.somestringarray = ["a", "bb", "ccc"]
     m.someblobarray = [b"\x09\x09", b"\x08"]
     m.somestruct.nestedstring = "nested payload"
+    # A union holds one option; the property setter selects it.
     m.someunion.option2 = "union payload"
     m.somestructwitharray.label = "struct label"
-    m.someunionarray = [message.MyfirstmessageSomeunionarrayElem(asstring="union row")]
+    row = message.MyfirstmessageSomeunionarrayElem()
+    row.asstring = "union row"
+    m.someunionarray = [row]
     m.somemap = [
         message.MyfirstmessageSomemapElem(key="first key", value=1),
         message.MyfirstmessageSomemapElem(key="second key", value=2),

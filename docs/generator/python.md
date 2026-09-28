@@ -73,9 +73,11 @@ Which fields go which way follows from the schema, not from a setting. Every
 scalar rides the table — the narrow integers, `enum` and `bitfield` included,
 whose declared width the table states and the decoder checks — as do `string`,
 `blob`, native arrays with a declared `count` of at most 32, and whole nested
-structs and unions. What stays on the visitor is an array the schema leaves
-unbounded or declares longer than 32, an array of strings, blobs, structs, unions
-or arrays, and any struct or union that contains one. A class with fewer than
+structs. What stays on the visitor is an array the schema leaves unbounded or
+declares longer than 32, an array of strings, blobs, structs, unions or arrays,
+every union (a table gives each field id a slot of its own, and a union keeps
+only the option received last — see [Unions](#unions)), and any struct that
+contains one of these. A class with fewer than
 three table-carried fields uses none at all; a class the table covers completely
 needs no visitor behaviour at all.
 
@@ -119,3 +121,133 @@ Under `auto` and under `require` alike, a formatter that RUNS and rejects a
 generated file fails the generation with that file named — that is a generator
 bug, and writing the file would only move it into your build.
 
+
+## Unions
+
+A `union` holds exactly one of its options. It is a `@dataclass` of its own with
+two fields — the id of the option held and that option's value — so an option
+is only reached through the members below, and two options cannot be set side by
+side:
+
+```yaml
+shape:
+  id: 3
+  type: union
+  default_id: 2
+  oneof:
+    num:  { id: 0, type: u16, default: 5 }
+    name: { id: 1, type: string, maxlen: 16 }
+    pt:   { id: 2, type: struct, fields: { x: { id: 0, type: i32, default: 7 }, y: { id: 1, type: i32 } } }
+    tags: { id: 3, type: array, items: { type: string, count: 4, maxlen: 8 } }
+```
+
+```python
+@dataclass
+class MShape:
+    NUM_ID: ClassVar[int] = 0
+    NAME_ID: ClassVar[int] = 1
+    PT_ID: ClassVar[int] = 2
+    TAGS_ID: ClassVar[int] = 3
+
+    which: int                 # read-only property
+
+    num: int                   # property with a setter
+    def has_num(self) -> bool: ...
+
+    name: str
+    def has_name(self) -> bool: ...
+
+    pt: MShapePt
+    def has_pt(self) -> bool: ...
+    def mutable_pt(self) -> MShapePt: ...
+
+    tags: list[str]
+    def has_tags(self) -> bool: ...
+    def mutable_tags(self) -> list[str]: ...
+
+    def clear(self) -> None: ...
+```
+
+| operation | Python |
+|---|---|
+| which option is held | `x.which` → the option's id |
+| option ids | `MShape.PT_ID` (`<OPTION>_ID` constants) |
+| test | `x.has_pt()` |
+| read | `x.pt` |
+| select with a value | `x.num = 7` |
+| select at the default and edit in place | `x.mutable_pt().y = 2` |
+| back to the default | `x.clear()` |
+
+```python
+m = M()                      # m.shape holds pt at its default: x=7, y=0
+m.shape.num = 7              # now num = 7; pt is no longer held
+m.shape.mutable_pt().y = 2   # pt again, from its default: x=7, y=2
+if m.shape.has_pt():
+    use(m.shape.pt.x)
+if m.shape.which == MShape.NUM_ID:
+    use(m.shape.num)
+m.shape.clear()              # pt at its default again
+```
+
+Two unions compare equal (`==`) when they hold the same option with equal values.
+
+**Reading** an option that is not held returns that option's default — a new
+struct or union at its default, a new empty list for an array, `b""` for a blob,
+the option's declared default for a number — and changes nothing; it does not
+select the option, so changing what it returned is lost.
+
+**Assigning** an option selects that option with the value assigned; the option
+held before is no longer held. **`mutable_<option>()`** (struct, union and array
+options) selects the option at its own default if another one is held, and
+returns it. If the option is already held it is returned as it is, untouched. A
+number, string or blob option is replaced by assigning it.
+
+**Ownership.** Assigning an option keeps the object it is given, as assigning a
+field does: after `x.pt = p`, `x.pt` returns that same `p` while `pt` is held.
+Selecting a struct, union or array option that is not held — through
+`mutable_<option>()`, by decoding into the union, or by `clear()` for the
+`default_id` option — always starts from a new object at the option's default;
+an object obtained earlier is never reset behind your back, it is merely no
+longer held.
+
+**Names.** The members are the option name: the property `<option>` (a Python
+keyword takes a trailing underscore, as a field does), `has_<option>()`,
+`mutable_<option>()` and the constant `<OPTION>_ID` (the name upper-cased). An
+option whose name would land on one of the union's own members (`which`,
+`clear`, `serialize`, `encode`, `decode`, `decoder`, `to_jsonable`,
+`from_jsonable`, `MAX_SIZE`) or on a builtin the class body uses (`property`,
+`classmethod`) gets a trailing underscore: an option `which` is the property
+`which_`, with `has_which()` and `WHICH_ID`. A class has one
+namespace, so two options that would produce the same member (`a` and `A_ID`
+both give `A_ID`; `x` and `has_x` both give `has_x`) fail generation, naming
+both.
+
+**`$defs` unions** used with different `default_id`s are one class per
+`default_id`, named after `<Name>_default_<option>`: `UnionShapeDefaultPt` and
+`UnionShapeDefaultNum`.
+
+**Defaults.** A new union holds the `default_id` option at that option's own
+default; an omitted `default_id` means the option with the lowest id. Each
+element of an array of unions starts the same way — including an element a
+decoded array skips.
+
+**Encode.** Only the held option is written. If it is the `default_id` option
+at its default, the union is at its default and is left out. Any other held
+option is written **even at its own default** — `0`, an empty string, an empty
+blob or array, or an empty frame for a struct option, a union option, or an
+array whose elements are strings, blobs, structs, unions or arrays — because
+the receiver's new union holds `default_id`, and leaving it out would read
+back as that.
+
+**Decode.** The option received last wins. A different option replaces the
+held one and starts from its own default; the held option received again
+continues where it was (a struct or union option merges, anything else is
+replaced). A field whose wire type does not match its option, and an unknown
+id, change nothing. A union is always decoded field by field, never through the
+destination table (see [When a streamed message fills in](#when-a-streamed-message-fills-in)):
+a streamed union shows its option as soon as it arrives.
+
+**JSON.** `to_jsonable()` returns a dict with exactly one member, the held
+option — `{"pt": {"x": 7, "y": 2}}`, also when that is the `default_id` option at
+its default — and `from_jsonable()` selects the option it finds. A union member
+left out of a message's JSON reads as the union's default.

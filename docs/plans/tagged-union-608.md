@@ -1591,6 +1591,32 @@ and the private slots are checked as one namespace (`checkUnionNames`).)*
 * **Conformance**: rebuild the native `.so`, run the driver on **both** engines.
   **Cost**: `python` ±1 %; `python-native` decode may rise because `aux_sensor`
   leaves the Binding — budget +2 % decode, reported with the measured number.
+* *(Refined in the Python milestone: `mutable_<opt>()` exists for struct, union
+  and **every** array option — a Python list is edited in place, native or
+  wrapper alike; a scalar, string or blob is replaced through its property. The
+  decode stores are the two attribute stores themselves (`_u = <path>;
+  _u._which = N; _u._value = value`, behind the width check) rather than a
+  property-setter call per value, and a path below a struct/union/wrapper option
+  names the union's one slot (`<path>._value.x`), which the option's
+  `on_sequence_begin` arm has made the option's — `mutable_<opt>()` for a
+  struct/union, `<path>.<opt> = []` for a wrapper. Beside `binding.go`'s two
+  exclusions a union CLASS builds no table of its own (its fields are its
+  options). The option-id constants share the class's one namespace with the
+  properties and methods, so `checkUnionNames` checks them as one set. Measured:
+  `python-native` decode **+2.77 %** (433,017 → 445,026 Ir/op), over the +2 %
+  budget above; the cause is the four Python-level calls `aux_sensor` now costs
+  per decode (`on_sequence_begin`, `on_field`, `on_float32`, `on_sequence_end`)
+  in place of a closed child table's slot, which no fixed-slot entry can
+  replace — only a corelib-py table entry recording the last-arrived option id
+  could. That entry is filed as corelib-py#164 and is the milestone's **known
+  gap**: out of scope here, listed in the final PR, and a python-backend-only
+  follow-up (`bindableSubtree`/`bindScope`) once it lands. A review re-run read
+  +2.93 % (432,410 → 445,069). `python` decode +0.75 %, both encodes
+  −0.03 %/−0.05 %. Names: besides the class's own members, an option property
+  must not take a builtin the class body evaluates while the class is defined —
+  `property` and `classmethod` (the decorators) — so those two are in
+  `unionFixed` and take the trailing underscore; a struct FIELD named
+  `classmethod` or `field` has the same defect on main, filed as generator#612.)*
 
 ### 5.13 docs target
 

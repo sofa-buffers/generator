@@ -53,9 +53,15 @@ type pyScope struct {
 	loc        string // schema location named in a rejection message
 	ix         string // index register, "" when no element scope needs one
 	child      int    // element scope id, -1 when the element is a value
+
+	// union is set on a union's object scope: its fields are the options, the
+	// object at `path` holds exactly one of them, and every store selects the
+	// option it lands in (unionStore, the union arm of objSeqArm).
+	union *unionShape
 }
 
 type scopeSet struct {
+	g      *gen
 	scopes []*pyScope
 	// Every location name ever handed out. A scope is named after the PATH that
 	// reaches it, and two different paths can spell the same name: a field `a`
@@ -88,32 +94,48 @@ func (ss *scopeSet) uniq(base string) string {
 
 // buildScopes walks a class's tree and assigns one scope per sequence-framed
 // location reachable from it, rooted at the class itself.
-func (g *gen) buildScopes(typeName string, fields []*ir.Field) []*pyScope {
-	ss := &scopeSet{}
-	ss.object(typeName, "self._o", fields)
+func (g *gen) buildScopes(c decodeClass) []*pyScope {
+	ss := &scopeSet{g: g}
+	ss.object(c.name, "self._o", c.fields, c.union)
 	return ss.scopes
 }
 
-func (ss *scopeSet) object(locName, path string, fields []*ir.Field) int {
+// unionOf returns the union shape a struct/union reference names, nil for a
+// struct.
+func (ss *scopeSet) unionOf(ref *ir.TypeRef) *unionShape {
+	if ref.Target.Category != ir.CatUnion {
+		return nil
+	}
+	return ss.g.unionShapeOf(ref.Target)
+}
+
+func (ss *scopeSet) object(locName, path string, fields []*ir.Field, u *unionShape) int {
 	sc := &pyScope{
 		id: len(ss.scopes), name: ss.uniq("_L_" + locName),
-		fields: fields, path: path, seqChild: map[int64]int{}, child: -1,
+		fields: fields, path: path, seqChild: map[int64]int{}, child: -1, union: u,
 	}
 	ss.scopes = append(ss.scopes, sc)
 	for _, fld := range fields {
+		// A member's value is the object's attribute; a union option's is the
+		// union's one `_value` slot, which the sequence arm has made the option's
+		// (objSeqArm) before anything inside it is delivered.
+		dest := path + "." + pyIdent(fld.Name)
+		if u != nil {
+			dest = path + "._value"
+		}
 		switch fld.Kind {
 		case ir.KindStruct, ir.KindUnion:
 			sc.seqChild[fld.ID] = ss.object(
 				locName+"_"+fld.Name,
-				path+"."+pyIdent(fld.Name),
-				fld.Ref.Target.Fields)
+				dest,
+				fld.Ref.Target.Fields, ss.unionOf(fld.Ref))
 		case ir.KindArray:
 			// A native scalar array arrives whole through on_*_array; only a
 			// wrapper-sequence array opens a scope of its own.
 			if !isNativeArrayElem(fld.Elem) {
 				sc.seqChild[fld.ID] = ss.array(
 					locName+"_"+fld.Name,
-					path+"."+pyIdent(fld.Name),
+					dest,
 					fld.Name,
 					fld.Elem, fld.ElemRef, fld.ElemItems,
 					capOf(fld.HasCount, fld.Count), fld.ElemMaxHas, fld.ElemMax)
@@ -134,7 +156,7 @@ func (ss *scopeSet) array(locName, arrPath, loc string, elem ir.Kind, ref *ir.Ty
 	switch elem {
 	case ir.KindStruct, ir.KindUnion:
 		sc.ix = fmt.Sprintf("_ix%d", sc.id)
-		sc.child = ss.object(locName+"_e", fmt.Sprintf("%s[self.%s]", arrPath, sc.ix), ref.Target.Fields)
+		sc.child = ss.object(locName+"_e", fmt.Sprintf("%s[self.%s]", arrPath, sc.ix), ref.Target.Fields, ss.unionOf(ref))
 	case ir.KindArray:
 		// A native row arrives whole through on_*_array at THIS scope, keyed by
 		// its row index; only a wrapper row opens a scope of its own.
@@ -196,8 +218,9 @@ var pyValueHooks = []string{
 // emitVisitor writes the flat visitor class for one generated dataclass, and --
 // where corelib-py's destination table can carry part of it -- the Binding that
 // takes those fields off the visitor entirely (binding.go).
-func (g *gen) emitVisitor(f *pyfile, name string, fields []*ir.Field) {
-	scopes := g.scopesFor(name, fields)
+func (g *gen) emitVisitor(f *pyfile, c decodeClass) {
+	name := c.name
+	scopes := g.scopesFor(c)
 	g.bind = g.plans[name]
 	defer func() { g.bind = nil }()
 
@@ -352,7 +375,20 @@ func (g *gen) objSeqArm(sc *pyScope, scopes []*pyScope) []string {
 			continue
 		}
 		out = append(out, fmt.Sprintf("%s fid == %d:", kw(&inner), fld.ID))
-		if fld.Kind == ir.KindArray {
+		switch {
+		case sc.union != nil && fld.Kind == ir.KindArray:
+			// A union's wrapper option: the setter selects it, and the fresh list
+			// is the §7.4 replacement a repeated wrapper gets anyway -- a held
+			// wrapper option is replaced exactly like a wrapper field.
+			out = append(out, fmt.Sprintf("    %s.%s = []", sc.path, sc.union.byField[fld].prop))
+		case sc.union != nil:
+			// A union's struct/union option (§7.4.1): select it at its own default
+			// unless it is held -- a held one continues its scope (§7.4). This is
+			// the one place the switch happens for it, reached once per occurrence
+			// and only past the §7.3 gate: a header of any other wire type at this
+			// id is declined in on_field and never gets here.
+			out = append(out, fmt.Sprintf("    %s.%s()", sc.path, sc.union.byField[fld].mut))
+		case fld.Kind == ir.KindArray:
 			// §7.4: an array wrapper REPLACES the value, so the list starts empty
 			// rather than merging into whatever the defaults put there.
 			out = append(out, fmt.Sprintf("    %s.%s = []", sc.path, pyIdent(fld.Name)))
@@ -526,11 +562,30 @@ func (g *gen) objValueArm(sc *pyScope, hook string) []string {
 		if want != hook {
 			continue
 		}
-		acc := sc.path + "." + pyIdent(fld.Name)
 		out = append(out, fmt.Sprintf("%s fid == %d:", kw(&inner), fld.ID))
+		if sc.union != nil {
+			out = append(out, indent(g.unionStore(sc, fld))...)
+			continue
+		}
+		acc := sc.path + "." + pyIdent(fld.Name)
 		out = append(out, indent(g.storeValue(acc, fld.Name, fld))...)
 	}
 	return out
+}
+
+// unionStore is a union option's store (MESSAGE_SPEC §7.4.1): the option becomes
+// the held one and the value its value, in the typed hook of its kind -- which
+// fires once per occurrence, with the whole value, and only for a header that
+// passed the §7.3 gate in on_field -- after the declared-width check. Assigning
+// both is the whole switch: a scalar, string, blob or native array replaces the
+// held value whole whichever option held it.
+func (g *gen) unionStore(sc *pyScope, fld *ir.Field) []string {
+	lines := g.storeValue("_u._value", fld.Name, fld)
+	store := lines[len(lines)-1]
+	return append(lines[:len(lines)-1],
+		"_u = "+sc.path,
+		fmt.Sprintf("_u._which = %d", fld.ID),
+		store)
 }
 
 // storeValue renders the assignment, and the §7.1 rejection of a value the
