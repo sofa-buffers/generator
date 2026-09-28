@@ -918,7 +918,7 @@ re-selection). C# (§5.9), TypeScript and Python allocate fresh on a real switch
 reference obtained earlier is never reset behind the caller's back (it is merely
 no longer held).
 
-**`reset()` vs `clear()`.** Java, Kotlin and Dart already emit a message-level
+**`reset()` vs `clear()`.** C++, Java, Kotlin and Dart already emit a message-level
 `reset()` on every generated class — the destination-reuse API — and a union type
 is such a class, so its "back to default" **is** that `reset()`; adding a
 `clear()` beside it would give one class two names for the same operation. Go,
@@ -1711,7 +1711,7 @@ against the branch is the proof for C.
 > * **API.** Code that reads or writes union options as plain fields must move to
 >   the new accessors: C `u.which` + `u.u.<option>` and `<PREFIX>_<OPTION>_ID`;
 >   C++ `which()`, `<option>()`, `set_<option>()`, `has_<option>()`,
->   `mutable_<option>()`; Rust and Zig a native `enum` / `union(enum)`; Go
+>   `mutable_<option>()`, `reset()`; Rust and Zig a native `enum` / `union(enum)`; Go
 >   `Which()`, `<Option>()`, `Set<Option>()`, `Has<Option>()`, `Mut<Option>()`,
 >   `Clear()`; Java/Kotlin/C#/Dart/TypeScript/Python getters and setters (or
 >   properties), `has…`, `mutable…` and `which`. See the "Unions" chapter of each
@@ -1749,8 +1749,11 @@ against the branch is the proof for C.
    §5.11 — V8 field representations); Go stores struct/union options **by value**,
    decided by argument, not by the measurement issue §9 asked for (§5.6); the
    "back to default" operation is the existing message-level `reset()` on
-   Java/Kotlin/Dart and `clear()`/`Clear()` elsewhere, not a uniform `clear()`
+   C++/Java/Kotlin/Dart and `clear()`/`Clear()` elsewhere, not a uniform `clear()`
    (§5); no corelib-go change (§5.6); no corelib-c-cpp shared vector (§5.1
    item 5); no bench schema change (§4); the default-image fix is the spec-backed
    validator rule, not (a)/(c) (§5.1 item 2), and the C image is a prefix of the
-   tag and `D` only (§5.2).
+   tag and `D` only (§5.2); the chunked decode splits 1,2,3,5,0 run where the
+   harness honours the chunk size — the go/zig/rust/ts harnesses feed one byte
+   per call whatever size they are given, so they run `check_union.py` with
+   `--sizes 1`, which already makes every byte offset a resume point.
