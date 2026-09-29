@@ -599,6 +599,52 @@ arbitrary — see the header comment in each file. In particular:
   corelib out of the number entirely and go blind to code that moves between
   generated code and the corelib; sizing the whole linked image would instead
   count the freestanding glue as if it were SofaBuffers cost.
+* **The sum counts bytes, not names.** `nm` lists one line per symbol *name*, and one
+  body can have several: GCC emits a C++ constructor or destructor as one function
+  under its C1/C2 (D1/D2) aliases, `-fipa-icf` folds identical functions into
+  aliases, and libgcc exports several entry names for one routine. `sum_syms.py`
+  groups symbols by `(address, size)` and counts each group once; a group is left out
+  only when *every* name in it is excluded glue, so a body reachable under a
+  SofaBuffers name is always counted. Symbols that share an address but not a size
+  are not aliases and are all counted. Summing per name used to count an aliased body
+  once per alias — 690–800 B per `cpp-c-cpp*` cell — and whether GCC emits the
+  aliases or a single local `.isra` clone is decided by inlining elsewhere in the
+  image, so an unrelated change could move a row by the size of a whole function
+  (#611). The `c` rows have no aliases and were unaffected. The rule has unit tests
+  (`lib/test_sum_syms.py`).
+* **The C++ driver's root is counted, net of a skeleton.** The driver calls
+  SofaBuffers from one root, `reset()`, and GCC inlines the message constructor,
+  `encodeTo` and `try_decode` into it — about 4 KB on `cpp-c-cpp-dyn` and 0.4–0.5 KB
+  on `cpp-c-cpp`. Excluding the root as harness code (the recipe before #611) left
+  that code out of the row, and made code moving between `reset()` and a named symbol
+  look like a size change. `cpp.sh` now compiles the same driver a second time with
+  `-DSOFAB_BENCH_SKELETON` — the same volatile in/out, no SofaBuffers call — and
+  counts `reset()` as its size minus the skeleton's (32–36 B). Measured the other way
+  round, a `-g` rebuild attributes 38–44 B of the full `reset()` to `driver.cpp` and
+  the rest to the generated header, `sofab.hpp` and the libstdc++ containers they
+  instantiate. `noinline` wrappers around the calls were the other option; they were
+  measured and rejected, because the barrier changes the program being measured (the
+  `-dyn` ARMv6-m cell moved −414 B from the wrappers alone). The `c` driver needs
+  neither: it is its own TU with no LTO and calls only extern functions, so nothing
+  can be inlined into its `reset()`.
+
+  What this buys is that a compiler decision alone no longer moves the row. Measured
+  by changing only GCC's choices (two flags on the driver TU) or the order of two
+  statements in the harness, on an unchanged generator and corelib, against the whole
+  linked image's `.text` (which includes the constant glue):
+
+  | cell | change | image `.text` | row, old recipe | row, new recipe |
+  |---|---|---|---|---|
+  | `cpp-c-cpp` ARMv6-m | `-fno-ipa-sra` | +812 | +338 | +814 |
+  | `cpp-c-cpp-dyn` ARMv6-m | `-fno-ipa-sra` | +188 | +632 | +180 |
+  | `cpp-c-cpp-dyn` ARMv7-m | `-fno-ipa-sra` | +236 | +642 | +236 |
+  | `cpp-c-cpp` ARMv7-m | `-fno-inline-functions-called-once` | −20 | +90 | −22 |
+  | `cpp-c-cpp-dyn` ARMv7-m | `-fno-inline-functions-called-once` | +48 | +468 | +48 |
+  | `cpp-c-cpp-dyn` ARMv6-m | decode target declared first | −156 | 0 | −156 |
+
+  So a `cpp-c-cpp*` delta no longer needs reading next to a per-symbol `nm` diff to
+  be trusted. The rows are not comparable across #611: every `cpp-c-cpp*` cell
+  changed recipe there, and the `c` cells did not move.
 * **Rust needs the link step for a different reason.** Quoting
   `corelib-rs-no-std/tools/footprint.sh`: *"A bare staticlib archive is NOT
   dead-stripped, so measuring it directly massively over-counts; the link step
@@ -644,11 +690,13 @@ The pair is the measurement; neither number alone is a verdict. Turning it on tr
 static bytes for an allocator, and on the two targets that goes in opposite
 directions:
 
-* **cpp-c-cpp** `.text` 9118 → 12296, `.bss` 180 → 300 on ARMv6-m. The inline
+* **cpp-c-cpp** `.text` 8824 → 15732, `.bss` 180 → 300 on ARMv6-m. The inline
   build's containers (`InlineVector<T,N>`) never touch an allocator. Switching
   to `allow_dynamic` moves the fields to real `std::vector`s, and the delta is
   their own template-instantiated methods (`_M_default_append`,
-  `_M_realloc_append`, `operator=`, …) — real SofaBuffers cost in the sense
+  `_M_realloc_append`, `operator=`, …), plus the vector construction and
+  resizing GCC inlines into the driver's `reset()` (4126 B there against 488 B
+  on the inline build, see the previous section) — real SofaBuffers cost in the sense
   that the corelib's `allow_dynamic` choice is exactly what pulls them in, even
   though the code itself lives in libstdc++'s headers. The allocator that
   backs them (`operator new`/`delete`, the driver's own bump allocator) is
