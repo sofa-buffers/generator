@@ -30,6 +30,12 @@
 # c.sh and rust.sh -- the linked image also carries libc/libgcc/driver glue
 # that is not SofaBuffers code. Both cpp-c-cpp rows' numbers are not
 # comparable with what was committed before generator#589.
+#
+# generator#611: the same two rows changed recipe again. sum_syms.py now counts
+# an aliased body (C1/C2 constructors, D1/D2 destructors) once instead of once
+# per name, and reset() -- which GCC fills with inlined generated code -- is
+# counted net of the harness skeleton instead of excluded. Their numbers are
+# not comparable with what was committed before generator#611 either.
 
 # ---- Ir/op (method: toggle) -------------------------------------------------
 #
@@ -179,8 +185,18 @@ namespace std {
 // The single --gc-sections root, hardcoded to the default bench schema/message
 // (tests/bench/rows.json). Volatile in/out so the optimizer cannot const-fold
 // or elide the encode/decode work; everything reachable from here is what a
-// real firmware consumer pays for.
+// real firmware consumer pays for -- INCLUDING what GCC inlines into this
+// function, which is why it is counted net of the skeleton below rather than
+// excluded (see bench_size).
 extern "C" void reset() {
+#ifdef SOFAB_BENCH_SKELETON
+    // The same volatile in/out with no SofaBuffers call in between: the
+    // harness's own share of reset(), subtracted from the full one.
+    std::uint64_t in = *(volatile std::uint64_t *)0x20001000;
+    std::size_t n = *(volatile std::size_t *)0x20001008;
+    *(volatile std::uint64_t *)0x20000000 = in ^ (std::uint64_t)n;
+    for (;;) {}
+#else
     static std::uint8_t buf[message::VehicleTelemetry::_maxSize];
     message::VehicleTelemetry v;
     v.odometer_m = *(volatile std::uint64_t *)0x20001000;
@@ -191,6 +207,7 @@ extern "C" void reset() {
 
     *(volatile std::uint64_t *)0x20000000 = out.odometer_m ^ (std::uint64_t)n;
     for (;;) {}
+#endif
 }
 EOF
 
@@ -207,13 +224,22 @@ EOF
 
     local objs=() src obj
     # -Os -fno-exceptions -fno-rtti mirror the flags the cpp backend itself emits
-    # for the c-cpp profile (generators/cpp/project.go).
-    # shellcheck disable=SC2086
-    "$cxx" $flags -std=c++20 -Os -ffunction-sections -fdata-sections \
-        -fno-exceptions -fno-rtti -DNDEBUG \
-        -ffile-prefix-map="$build=/bench" -ffile-prefix-map="$gen=/bench" \
-        -I"$corelib/src/include" -I"$gen" \
-        -c "$build/driver.cpp" -o "$build/driver.o" 2>"$work/cpp.err" || return 1
+    # for the c-cpp profile (generators/cpp/project.go). The same TU is compiled
+    # twice: once as the measured driver, once as its skeleton (reset() with no
+    # SofaBuffers call), which is linked alone and serves only as the size of
+    # the harness's own reset() -- see the sum below.
+    local variant
+    : > "$work/cpp.err"
+    for variant in driver skeleton; do
+        local def=""
+        [ "$variant" = skeleton ] && def="-DSOFAB_BENCH_SKELETON"
+        # shellcheck disable=SC2086
+        "$cxx" $flags -std=c++20 -Os -ffunction-sections -fdata-sections \
+            -fno-exceptions -fno-rtti -DNDEBUG $def \
+            -ffile-prefix-map="$build=/bench" -ffile-prefix-map="$gen=/bench" \
+            -I"$corelib/src/include" -I"$gen" \
+            -c "$build/driver.cpp" -o "$build/$variant.o" 2>>"$work/cpp.err" || return 1
+    done
     objs+=("$build/driver.o")
 
     for src in "$corelib"/src/object.c "$corelib"/src/ostream.c \
@@ -231,6 +257,10 @@ EOF
     "$cxx" $flags -nostdlib -nostartfiles -fno-exceptions -fno-rtti \
         -Wl,--gc-sections -Wl,-T,"$build/footprint.ld" "${objs[@]}" -lgcc \
         -o "$build/out.elf" 2>>"$work/cpp.err" || return 1
+    # shellcheck disable=SC2086
+    "$cxx" $flags -nostdlib -nostartfiles -fno-exceptions -fno-rtti \
+        -Wl,--gc-sections -Wl,-T,"$build/footprint.ld" "$build/skeleton.o" -lgcc \
+        -o "$build/skeleton.elf" 2>>"$work/cpp.err" || return 1
 
     # Sum only the SofaBuffers symbols in the linked, gc-sectioned image (see
     # c.sh's matching comment): exclude the driver's own freestanding glue --
@@ -239,12 +269,25 @@ EOF
     # this; only operator new and the libc loops usually survive as their own
     # symbols, since each has more than one call site) -- and whatever -lgcc
     # pulled in. Names not present in a given build simply match nothing.
+    #
+    # generator#611: reset() itself is NOT excluded. GCC inlines generated code
+    # into it -- the VehicleTelemetry constructor, encodeTo and try_decode; ~3-4
+    # KB on the -dyn row, ~0.4-0.5 KB on the inline one -- and whether a given
+    # piece of SofaBuffers code sits in reset or in its own symbol is an
+    # inlining decision an unrelated change can flip. --root/--skeleton count it
+    # as size(reset) - size(skeleton's reset): every byte GCC put there on
+    # SofaBuffers' behalf, minus the harness's own volatile I/O (32-36 B). The
+    # alternative -- noinline wrappers around the calls, with reset still
+    # excluded -- was measured and rejected: the boundary itself changes what
+    # GCC compiles (the -dyn ARMv6-m cell moved by -414 B from the wrappers
+    # alone), so it would price a different program than the one it replaces.
+    # See tests/bench/README.md, "Per-row recipes".
     local nm_tool="${size_tool%size}nm" libgcc
     # shellcheck disable=SC2086
     libgcc="$("$cxx" $flags -print-libgcc-file-name)"
     local exclude=(
         memset memcpy memmove memcmp strncmp strlen
-        reset "reset::buf"
+        "reset::buf"
         "operator new(unsigned int)" "operator new[](unsigned int)"
         "operator delete(void*)" "operator delete(void*, unsigned int)"
         "operator delete[](void*)" "operator delete[](void*, unsigned int)"
@@ -257,5 +300,6 @@ EOF
         "(anonymous namespace)::arena" "(anonymous namespace)::arena_used"
     )
     python3 "$(dirname "${BASH_SOURCE[0]}")/../lib/sum_syms.py" \
+        --root reset --skeleton "$build/skeleton.elf" \
         "$nm_tool" "$build/out.elf" "$libgcc" 0x20000000 "${exclude[@]}"
 }

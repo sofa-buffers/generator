@@ -82,6 +82,14 @@ bench_cmd_ir() {
 # drivers; its own symbol, and the static `buf` it declares, are excluded the
 # same way as the libc stubs.
 #
+# Excluding reset() is safe HERE and was not in cpp.sh (generator#611, where
+# GCC inlined ~3 KB of generated code into it): footprint_root.c is its own
+# TU, there is no LTO, and every function it calls -- the generated
+# _init/_encode/_decode -- is an extern definition in another TU, so nothing
+# SofaBuffers can be inlined into it. Its body is argument setup and three
+# calls (92 B on ARMv7-m). Add -flto or a `static inline` API to this recipe
+# and that stops being true: count reset() net of a skeleton, as cpp.sh does.
+#
 # --specs=picolibc.specs (RV32IMC's `flags`, needed at compile time so the
 # compiler can find <assert.h>/<string.h>/... -- see
 # utils/riscv32/toolchain-riscv32.cmake in corelib-c-cpp) carries its own
