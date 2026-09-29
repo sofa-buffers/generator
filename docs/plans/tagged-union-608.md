@@ -1656,7 +1656,9 @@ and the private slots are checked as one namespace (`checkUnionNames`).)*
   `bindableSubtree` returns false for `ir.KindUnion`, and `bindScope` skips a
   union field (`continue`), so the enclosing table is open and the visitor
   receives the union's `on_sequence_begin` (issue §5: a fixed slot per id cannot
-  express "last of several ids wins").
+  express "last of several ids wins"). *(Superseded by generator#614 for a
+  union whose options are all leaves — it binds as a one-of table; see the
+  refined note below.)*
 * **Decode**: switch only in the typed value hooks and `on_sequence_begin` (§0).
   `reserve_elem(out, id, T, …)` per type.
 * **Conformance**: rebuild the native `.so`, run the driver on **both** engines.
@@ -1679,10 +1681,18 @@ and the private slots are checked as one namespace (`checkUnionNames`).)*
   per decode (`on_sequence_begin`, `on_field`, `on_float32`, `on_sequence_end`)
   in place of a closed child table's slot, which no fixed-slot entry can
   replace — only a corelib-py table entry recording the last-arrived option id
-  could. That entry is filed as corelib-py#164 and is the milestone's **known
-  gap**: out of scope here, listed in the final PR, and a python-backend-only
-  follow-up (`bindableSubtree`/`bindScope`) once it lands. A review re-run read
-  +2.93 % (432,410 → 445,069). `python` decode +0.75 %, both encodes
+  could. That entry was filed as corelib-py#164, landed as corelib-py#165 (the
+  one-of table, `Binding(which_at=N)`), and **generator#614 closed the gap** in
+  this PR for every union whose options are all leaves: `bindableSubtree` /
+  `bindScope` bind it as a closed one-of table, the prefill seeds the which slot
+  with `default_id`, and the scatter reads the which slot first and then only
+  the held option's slots. Re-measured with one corelib-py build (f37d1b3, `.so`
+  rebuilt) for all three generator states — product type aa3609f / visitor
+  25ce2be / one-of table: `python-native` decode 432,801 → 444,959 → **432,933**
+  (+0.03 % vs the product type), `python` decode 1,969,322 → 1,981,108 →
+  1,967,531 (−0.09 %), encodes within 0.15 %. A union with a struct/union option
+  keeps the visitor until corelib-py#167 gives the one-of table §7.4.1's option
+  reset. (The review re-run before #614 read +2.93 %, 432,410 → 445,069.) `python` decode +0.75 %, both encodes
   −0.03 %/−0.05 %. Names: besides the class's own members, an option property
   must not take a builtin the class body evaluates while the class is defined —
   `property` and `classmethod` (the decorators) — so those two are in
@@ -1820,3 +1830,10 @@ against the branch is the proof for C.
    harness honours the chunk size — the go/zig/rust/ts harnesses feed one byte
    per call whatever size they are given, so they run `check_union.py` with
    `--sizes 1`, which already makes every byte offset a resume point.
+4. **Known gaps.** `python-native`'s +2.77 % decode is **closed by generator#614**
+   for leaf-option unions (the bench's `aux_sensor`): measured back to +0.03 %
+   against the product-type generator. A Python union with a **struct/union
+   option** still decodes through the visitor; binding it waits for
+   corelib-py#167 (the one-of table's §7.4.1 option reset). `check_union.py`
+   D38–D47 pin the §7.4.1 rules on the leaf-option unions `r2` and `q`, which a
+   backend may store differently from `u`.

@@ -11,8 +11,9 @@ import (
 // A schema union is a dataclass holding exactly ONE option (MESSAGE_SPEC §4.2,
 // §7.4.1; union.go). The tests below pin the emitted shape of every half -- the
 // storage and accessors, the forced vs guarded encode arms, where the decode
-// switch sits, that no union reaches a destination table, the gap fill and the
-// JSON form -- and the name errors. check_union.py proves the behaviour on both
+// switch sits, which unions reach a destination table (a one-of table, only with
+// leaf options) and which stay on the visitor, the gap fill and the JSON form --
+// and the name errors. check_union.py proves the behaviour on both
 // engines; these make a regression loud at `go test` time.
 
 const unionSrc = `
@@ -246,11 +247,111 @@ func TestPythonUnionDecodeSwitch(t *testing.T) {
 	}
 }
 
-// TestPythonUnionNeverBound: a union is not bindable at any depth. A destination
-// table maps each id to a fixed slot, so two options in one frame would both
-// land; the union's scope stays on the visitor, its on_sequence_begin arm is
-// emitted, and a union class carries no table of its own.
-func TestPythonUnionNeverBound(t *testing.T) {
+// TestPythonLeafUnionBindsAsOneOfTable: a union whose options are all leaves --
+// scalar, string, blob, bounded native array -- is a ONE-OF table
+// (corelib-py#165): closed, `which_at` naming its own words slot, one row per
+// option, reached from the parent by a `sequence` row. The which slot is seeded
+// with default_id in the prefill, and the union's scope leaves the visitor
+// entirely -- no location, no on_sequence_begin arm, no typed-hook arm.
+func TestPythonLeafUnionBindsAsOneOfTable(t *testing.T) {
+	const src = `
+version: 1
+messages:
+  M:
+    payload:
+      a: { id: 0, type: u64 }
+      b: { id: 1, type: u64 }
+      u:
+        id: 2
+        type: union
+        default_id: 3
+        oneof:
+          n:  { id: 0, type: u16, default: 5 }
+          s:  { id: 1, type: string, maxlen: 8 }
+          bl: { id: 2, type: blob, maxlen: 4 }
+          ar: { id: 3, type: array, items: { type: i8, count: 2 } }
+          f:  { id: 4, type: fp64 }
+`
+	mod := string(genPy(t, schema(t, src), map[string]any{})["message.py"])
+	for _, want := range []string{
+		"_BIND_M_u = (Binding(closed=True, which_at=4)\n" +
+			"    .unsigned(0, at=5, count_at=6, max_value=65535)\n" +
+			"    .string(1, at=0, maxlen=8, count_at=7)\n" +
+			"    .bytes(2, at=1, maxlen=4, count_at=8)\n" +
+			"    .signed_array(3, at=9, cap=2, count_at=11, elem_min=-128, elem_max=127)\n" +
+			"    .float64(4, at=12, count_at=13)\n)\n",
+		"    .sequence(2, child=_BIND_M_u)\n",
+		// The which slot starts at default_id -- not at the all-ones every other
+		// slot starts at, which is no option id at all.
+		"_FILL_M = bytearray(b\"\\xff\" * (_W_M * 8))\n",
+		"memoryview(_FILL_M).cast(\"Q\")[4] = 3  # m.u\n_FILL_M = bytes(_FILL_M)\n",
+	} {
+		if !strings.Contains(mod, want) {
+			t.Errorf("leaf union one-of table missing %q\n%s", want, mod)
+		}
+	}
+	// Every id of M is now on a closed table, so M is table-only: no hook at all,
+	// which is also what lets the decoder skip on_sequence_begin for the whole
+	// message type (corelib-py's _wants_seq_begin is false for it).
+	vis := mod[strings.Index(mod, "class _MVisitor(Visitor):"):]
+	if !strings.Contains(vis, "a destination table and nothing else") {
+		t.Errorf("M should be table-only once its union is bound:\n%s", vis)
+	}
+	for _, bad := range []string{"_L_M_u", "def on_sequence_begin", "def on_unsigned", "def on_field"} {
+		if strings.Contains(vis, bad) {
+			t.Errorf("the bound union's scope still reaches the visitor (%q)", bad)
+		}
+	}
+}
+
+// TestPythonOneOfScatterReadsWhichFirst: the scatter consults the which slot and
+// then only the held option's slots. Every arm is gated on `_x == <id>`, and the
+// which slot is read before any option slot -- a reader that went straight to an
+// option's slot would return a discarded option's stale value.
+func TestPythonOneOfScatterReadsWhichFirst(t *testing.T) {
+	const src = `
+version: 1
+messages:
+  M:
+    payload:
+      a: { id: 0, type: u64 }
+      u: { id: 1, type: union, default_id: 1, oneof: { x: { id: 0, type: u32 }, y: { id: 1, type: i32, default: -3 }, z: { id: 2, type: boolean } } }
+`
+	mod := string(genPy(t, schema(t, src), map[string]any{})["message.py"])
+	const want = "        _u = m.u\n" +
+		"        _x = U[2]\n" +
+		"        if _x == 0 and U[4] != _ABSENT:\n" +
+		"            _u._which = 0\n" +
+		"            _u._value = U[3]\n" +
+		"        elif _x == 1 and U[6] != _ABSENT:\n" +
+		"            _u._which = 1\n" +
+		"            _u._value = S[5]\n" +
+		"        elif _x == 2 and U[8] != _ABSENT:\n" +
+		"            _u._which = 2\n" +
+		"            _u._value = U[7] != 0\n"
+	if !strings.Contains(mod, want) {
+		t.Fatalf("one-of scatter missing:\n%s\n---\n%s", want, mod)
+	}
+	if !strings.Contains(mod, "memoryview(_FILL_M).cast(\"Q\")[2] = 1  # m.u\n") {
+		t.Error("the which slot does not start at default_id")
+	}
+	// No option slot is read outside its arm.
+	sc := mod[strings.Index(mod, "    def scatter(self) -> None:"):]
+	sc = sc[:strings.Index(sc, "        _u = m.u\n")]
+	for _, slot := range []string{"U[3]", "S[5]", "U[7]"} {
+		if strings.Contains(sc, slot) {
+			t.Errorf("an option slot (%s) is read before the which slot", slot)
+		}
+	}
+}
+
+// TestPythonUnionWithSequenceOptionStaysOnVisitor: a union with a struct or union
+// option keeps the visitor path -- §7.4.1 has a newly selected struct/union
+// option start from its own default, and the table has no reset for it yet
+// (corelib-py#167). A union with a wrapper-array or unbounded array option is not
+// bindable either: the table has no entry for that shape. Each such union's scope
+// stays open, and so does every scope holding it.
+func TestPythonUnionWithSequenceOptionStaysOnVisitor(t *testing.T) {
 	const src = `
 version: 1
 messages:
@@ -259,30 +360,107 @@ messages:
       a: { id: 0, type: u64 }
       b: { id: 1, type: u64 }
       c: { id: 2, type: u64 }
-      u: { id: 3, type: union, oneof: { x: { id: 0, type: u64 }, y: { id: 1, type: u64 }, z: { id: 2, type: u64 } } }
-      st: { id: 4, type: struct, fields: { k: { id: 0, type: u64 }, w: { id: 1, type: union, oneof: { p: { id: 0, type: u8 } } } } }
+      us: { id: 3, type: union, oneof: { x: { id: 0, type: u64 }, p: { id: 1, type: struct, fields: { k: { id: 0, type: u8 } } } } }
+      uu: { id: 4, type: union, oneof: { x: { id: 0, type: u64 }, i: { id: 1, type: union, oneof: { q: { id: 0, type: u8 } } } } }
+      uw: { id: 5, type: union, oneof: { x: { id: 0, type: u64 }, w: { id: 1, type: array, items: { type: string, count: 2, maxlen: 4 } } } }
+      st: { id: 6, type: struct, fields: { k: { id: 0, type: u64 }, w: { id: 1, type: union, oneof: { p: { id: 0, type: struct, fields: { z: { id: 0, type: u8 } } } } } } }
 `
 	mod := string(genPy(t, schema(t, src), map[string]any{})["message.py"])
-	if !strings.Contains(mod, "    .unsigned(0, at=0, count_at=1)") {
-		t.Fatalf("the message's scalars should still be on its table:\n%s", mod)
+	if !strings.Contains(mod, "_BIND_M = (Binding()\n    .unsigned(0, at=0, count_at=1)") {
+		t.Fatalf("the message's scalars should still be on its (open) table:\n%s", mod)
 	}
-	for _, bad := range []string{".sequence(3,", ".sequence(4,", "_BIND_MU", "_BIND_M_u ", "_BIND_M_st"} {
+	for _, bad := range []string{"which_at=", ".sequence(3,", ".sequence(4,", ".sequence(5,", ".sequence(6,", "_BIND_M_us", "_BIND_M_st"} {
 		if strings.Contains(mod, bad) {
-			t.Errorf("a union (or a scope holding one) is on a destination table (%q)", bad)
+			t.Errorf("a union with a sequence option (or a scope holding one) is on a destination table (%q)", bad)
 		}
 	}
 	for _, want := range []string{
-		"            if fid == 3:\n                self._s.append(c)\n                self._c = _L_M_u\n",
-		"            elif fid == 4:\n                self._s.append(c)\n                self._c = _L_M_st\n",
-		"                _u = self._o.u\n                _u._which = 2\n",
+		"            if fid == 3:\n                self._s.append(c)\n                self._c = _L_M_us\n",
+		"            elif fid == 4:\n                self._s.append(c)\n                self._c = _L_M_uu\n",
+		"            elif fid == 5:\n                self._s.append(c)\n                self._c = _L_M_uw\n",
+		"            elif fid == 6:\n                self._s.append(c)\n                self._c = _L_M_st\n",
+		"                _u = self._o.us\n                _u._which = 0\n",
+		"                self._o.us.mutable_p()\n",
 	} {
 		if !strings.Contains(mod, want) {
-			t.Errorf("union decode missing %q", want)
+			t.Errorf("union visitor decode missing %q", want)
 		}
 	}
 	// The union class's own visitor is a visitor, never a table-only class.
-	if strings.Contains(mod, "class _MUVisitor(Visitor):\n    \"\"\"Decode handler for :class:`MU`: a destination table") {
-		t.Error("the union class decodes through a destination table")
+	if strings.Contains(mod, "a destination table and nothing else") {
+		t.Error("a class decodes through a table alone although a union in it needs the visitor")
+	}
+}
+
+// TestPythonMixedUnionsOneBoundOneNot: one message, one leaf union (bound, a
+// one-of table) and one with a struct option (the visitor). Each takes its own
+// path and neither leaks into the other: the bound one has no location and no
+// hook arm, the other no table; the root table stays open, because one scope in
+// it still needs the visitor.
+func TestPythonMixedUnionsOneBoundOneNot(t *testing.T) {
+	const src = `
+version: 1
+messages:
+  M:
+    payload:
+      a: { id: 0, type: u64 }
+      lf: { id: 1, type: union, default_id: 1, oneof: { x: { id: 0, type: u32 }, y: { id: 1, type: string, maxlen: 4 } } }
+      sq: { id: 2, type: union, oneof: { x: { id: 0, type: u32 }, p: { id: 1, type: struct, fields: { k: { id: 0, type: u8 } } } } }
+`
+	mod := string(genPy(t, schema(t, src), map[string]any{})["message.py"])
+	for _, want := range []string{
+		"_BIND_M_lf = (Binding(closed=True, which_at=",
+		"    .sequence(1, child=_BIND_M_lf)\n",
+		"_BIND_M = (Binding()\n",
+		"        _u = m.lf\n",
+		"            if fid == 2:\n                self._s.append(c)\n                self._c = _L_M_sq\n",
+		"                _u = self._o.sq\n                _u._which = 0\n",
+	} {
+		if !strings.Contains(mod, want) {
+			t.Errorf("mixed unions missing %q", want)
+		}
+	}
+	for _, bad := range []string{"_L_M_lf", "_u = self._o.lf", "_BIND_M_sq", ".sequence(2,"} {
+		if strings.Contains(mod, bad) {
+			t.Errorf("mixed unions: one union took the other's path (%q)", bad)
+		}
+	}
+}
+
+// TestPythonScopeHoldingBoundUnionCloses: a struct whose only non-scalar member
+// is a leaf union is now bindable whole, so its table is CLOSED and the parent
+// descends into it -- an unknown id inside it is skipped by the codec instead of
+// reaching on_field (corelib-py#132).
+func TestPythonScopeHoldingBoundUnionCloses(t *testing.T) {
+	const src = `
+version: 1
+messages:
+  M:
+    payload:
+      a: { id: 0, type: u64 }
+      b: { id: 1, type: u64 }
+      st: { id: 2, type: struct, fields: { k: { id: 0, type: u64 }, w: { id: 1, type: union, oneof: { p: { id: 0, type: u8 }, q: { id: 1, type: fp32 } } } } }
+      ws: { id: 3, type: array, items: { type: string, count: 2, maxlen: 4 } }
+`
+	mod := string(genPy(t, schema(t, src), map[string]any{})["message.py"])
+	for _, want := range []string{
+		"_BIND_M_st_w = (Binding(closed=True, which_at=",
+		"_BIND_M_st = (Binding(closed=True)\n",
+		"    .sequence(1, child=_BIND_M_st_w)\n",
+		"    .sequence(2, child=_BIND_M_st)\n",
+		// The wrapper array keeps the root open, so the visitor still exists and
+		// declines what it does not enter.
+		"_BIND_M = (Binding()\n",
+		"    def on_sequence_begin(self, fid: int) -> bool:\n",
+	} {
+		if !strings.Contains(mod, want) {
+			t.Errorf("scope holding a bound union missing %q\n%s", want, mod)
+		}
+	}
+	for _, bad := range []string{"_L_M_st ", "_L_M_st_w", "c == _L_M_st"} {
+		if strings.Contains(mod, bad) {
+			t.Errorf("the scope holding a bound union still reaches the visitor (%q)", bad)
+		}
 	}
 }
 

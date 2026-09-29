@@ -72,12 +72,13 @@ both refusals still surface as `SofaDecodeError` / `SofaIncompleteError`.
 Which fields go which way follows from the schema, not from a setting. Every
 scalar rides the table — the narrow integers, `enum` and `bitfield` included,
 whose declared width the table states and the decoder checks — as do `string`,
-`blob`, native arrays with a declared `count` of at most 32, and whole nested
-structs. What stays on the visitor is an array the schema leaves unbounded or
-declares longer than 32, an array of strings, blobs, structs, unions or arrays,
-every union (a table gives each field id a slot of its own, and a union keeps
-only the option received last — see [Unions](#unions)), and any struct that
-contains one of these. A class with fewer than
+`blob`, native arrays with a declared `count` of at most 32, whole nested
+structs, and unions whose options are all of those kinds (scalars, strings,
+blobs, such arrays): the table records which option arrived last, and only that
+option is read back. What stays on the visitor is an array the schema leaves
+unbounded or declares longer than 32, an array of strings, blobs, structs, unions
+or arrays, a union with a struct or union option or with an option the table
+cannot carry, and any struct that contains one of these. A class with fewer than
 three table-carried fields uses none at all; a class the table covers completely
 needs no visitor behaviour at all.
 
@@ -243,9 +244,12 @@ back as that.
 held one and starts from its own default; the held option received again
 continues where it was (a struct or union option merges, anything else is
 replaced). A field whose wire type does not match its option, and an unknown
-id, change nothing. A union is always decoded field by field, never through the
-destination table (see [When a streamed message fills in](#when-a-streamed-message-fills-in)):
-a streamed union shows its option as soon as it arrives.
+id, change nothing. A union member whose options are all scalars, strings, blobs
+or native arrays of at most 32 elements is decoded through the destination table
+(see [When a streamed message fills in](#when-a-streamed-message-fills-in)), so a
+streamed one shows its option when the message completes; a union with a struct
+or union option is decoded field by field and shows its option as soon as it
+arrives.
 
 **JSON.** `to_jsonable()` returns a dict with exactly one member, the held
 option — `{"pt": {"x": 7, "y": 2}}`, also when that is the `default_id` option at

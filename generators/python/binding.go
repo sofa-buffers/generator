@@ -52,13 +52,23 @@ import (
 //     visitor skips it. A scope that still has an unbindable field cannot be
 //     closed, so the table does not descend into it at all.
 //
-//  3. A UNION is never on a table, at any depth (MESSAGE_SPEC §7.4.1). A table
-//     maps each id to a FIXED slot once, at decoder construction, so it cannot
-//     say "the last of several option ids wins, and a new one discards the held
-//     one": two options arriving in one frame would both land, each in its own
-//     slot. A union field is therefore left to the visitor -- its scope open, so
-//     the decoder offers the union's on_sequence_begin -- and so is any scope
-//     that contains one, which keeps that scope's table (if any) open too.
+//  3. A UNION is on a table only as a ONE-OF table (corelib-py#165), and only
+//     when every option is a kind a later arrival replaces WHOLE -- a scalar, a
+//     string/blob, a native array the rules above admit. `Binding(which_at=N)`
+//     makes the union's rows alternatives: the decoder writes the arriving
+//     option's id into words[N] behind the §7.3 tag test it already runs, so the
+//     last correctly-typed option wins (MESSAGE_SPEC §7.4.1) and a mistyped or
+//     unknown option neither switches nor discards the held one. The slot starts
+//     at the union's default_id (the prefill), which is also what an absent union
+//     and an empty union frame decode to (§4.2). The scatter reads the which slot
+//     FIRST and then only the held option's slots: whatever a discarded option
+//     left behind is stale by design and never read.
+//
+//     A union with a struct/union option stays on the visitor, its scope open,
+//     and so does every scope holding it: §7.4.1 has a newly selected
+//     struct/union option start again from its own default, and the table has
+//     no such reset yet (corelib-py#167). A union CLASS decoded on its own keeps
+//     the visitor too -- its options are the class's own fields (buildBindPlan).
 //
 // Everything else is on the table, including every narrow width: an entry states
 // it (`max_value` / `min_value`, corelib-py#149) and the decoder checks it at the
@@ -127,6 +137,7 @@ type bindRow struct {
 	dest   string // scatter destination, e.g. "m.captured_at.seconds"
 	expr   string // scatter source, e.g. "U[3]"
 	cnt    int64  // count_at slot; the arrival test reads it
+	id     int64  // the field id; a one-of table's scatter arm tests it
 }
 
 // bindTable is one Binding object: a class's own, or a nested scope's.
@@ -135,6 +146,14 @@ type bindTable struct {
 	closed  bool   // an id this table does not name is skipped by the codec
 	rows    []bindRow
 	seqRows []string // `.sequence(id, child=...)`, rendered after the child exists
+
+	// A ONE-OF table (a union, rule 3): the `words` slot the decoder writes the
+	// arriving option's id into, the union's default_id that slot starts at, and
+	// the union object the scatter selects the held option on. which < 0 on
+	// every other table.
+	which    int64
+	whichDef int64
+	path     string
 }
 
 // bindPlan is everything one class's table tree needs.
@@ -147,6 +166,7 @@ type bindPlan struct {
 	needS   bool // ... an int64 view
 	needF   bool // ... a double view
 	needObj bool // the table names a string/blob slot
+	oneOf   bool // a one-of table is in the tree: the prefill seeds its which slot
 	rows    int  // rows over the whole tree, against pyBindMin
 	// closed says the ROOT table carries every id its scope declares, so the
 	// visitor is never called at all -- not even to decline an unknown id.
@@ -228,7 +248,15 @@ func (g *gen) bindableSubtree(scopes []*pyScope, sc *pyScope, seen map[int]bool)
 		return false // a wrapper array's elements are per-index scopes
 	}
 	if sc.union != nil {
-		return false // one option held: see the union rule at the top of this file
+		// A one-of table carries only options a later arrival replaces whole:
+		// `bindable` answers false for a struct/union option and for every
+		// array shape the table has no entry for (rule 3).
+		for _, fld := range sc.fields {
+			if !bindable(fld) {
+				return false
+			}
+		}
+		return true
 	}
 	if seen[sc.id] {
 		return true
@@ -236,9 +264,7 @@ func (g *gen) bindableSubtree(scopes []*pyScope, sc *pyScope, seen map[int]bool)
 	seen[sc.id] = true
 	for _, fld := range sc.fields {
 		switch fld.Kind {
-		case ir.KindUnion:
-			return false
-		case ir.KindStruct:
+		case ir.KindStruct, ir.KindUnion:
 			child, ok := sc.seqChild[fld.ID]
 			if !ok || !g.bindableSubtree(scopes, scopes[child], seen) {
 				return false
@@ -253,7 +279,9 @@ func (g *gen) bindableSubtree(scopes []*pyScope, sc *pyScope, seen map[int]bool)
 }
 
 // bindScope renders one table: a row per bindable field, plus a `sequence` row
-// per struct/union child whose OWN subtree is bindable.
+// per struct/union child whose OWN subtree is bindable. A union's own scope
+// renders as a one-of table (rule 3): its rows are the options, plus the which
+// slot.
 //
 // `path` is the scatter's name for the object this scope's values land on -- "m"
 // for the message itself, "m.captured_at" for a nested struct.
@@ -266,7 +294,16 @@ func (g *gen) bindScope(p *bindPlan, alloc *slotAlloc, scopes []*pyScope,
 	// Deriving it here rather than rebuilding it is what keeps the two in step: a
 	// duplicate table name would hand both scopes the SAME Binding, so one would
 	// decode into the other's slots and the other into none.
-	t := &bindTable{name: bindTableName(sc), closed: g.bindableSubtree(scopes, sc, map[int]bool{})}
+	t := &bindTable{name: bindTableName(sc), closed: g.bindableSubtree(scopes, sc, map[int]bool{}), which: -1}
+	if sc.union != nil {
+		// Only ever reached for a union bindableSubtree admitted, so the table
+		// is closed too: an option id a newer sender added is skipped by the
+		// codec, not handed to the visitor under the parent's location.
+		t.which = alloc.word(1)
+		t.whichDef = sc.union.d.f.ID
+		t.path = path
+		p.oneOf = true
+	}
 	p.tables = append(p.tables, t)
 	p.boundSc[sc.id] = true
 	ids := idSet{}
@@ -274,24 +311,21 @@ func (g *gen) bindScope(p *bindPlan, alloc *slotAlloc, scopes []*pyScope,
 
 	for _, fld := range sc.fields {
 		dest := path + "." + pyIdent(fld.Name)
-		if fld.Kind == ir.KindUnion {
-			// Never on a table (see the union rule at the top of this file): the
-			// scope stays open, so the visitor receives the union's
-			// on_sequence_begin and switches there.
-			continue
-		}
-		if fld.Kind == ir.KindStruct {
+		if fld.Kind == ir.KindStruct || fld.Kind == ir.KindUnion {
 			child, ok := sc.seqChild[fld.ID]
 			// Only into a subtree that needs nothing from the visitor: its table
 			// is then closed, so an id it does not name is skipped by the codec
-			// rather than offered to the visitor under THIS scope's location.
+			// rather than offered to the visitor under THIS scope's location. A
+			// union with a struct/union option is not such a subtree (rule 3):
+			// its scope stays open, and the visitor receives the union's
+			// on_sequence_begin and switches there.
 			if !ok || !g.bindableSubtree(scopes, scopes[child], map[int]bool{}) {
 				continue
 			}
 			g.bindScope(p, alloc, scopes, scopes[child], dest)
-			// No count slot: every member carries its own arrival, and the
-			// dataclass already holds a default-constructed sub-object for a
-			// struct that never arrives at all.
+			// No count slot: every member carries its own arrival, a union its
+			// which slot, and the dataclass already holds a default-constructed
+			// sub-object for a struct or union that never arrives at all.
 			t.seqRows = append(t.seqRows,
 				fmt.Sprintf(".sequence(%d, child=%s)", fld.ID, bindTableName(scopes[child])))
 			ids[fld.ID] = true
@@ -300,7 +334,9 @@ func (g *gen) bindScope(p *bindPlan, alloc *slotAlloc, scopes []*pyScope,
 		if !bindable(fld) {
 			continue
 		}
-		t.rows = append(t.rows, bindRowFor(fld, alloc, dest))
+		r := bindRowFor(fld, alloc, dest)
+		r.id = fld.ID
+		t.rows = append(t.rows, r)
 		ids[fld.ID] = true
 		p.rows++
 		p.needU = true // every arrival test reads the uint64 view
@@ -547,7 +583,9 @@ func (g *gen) emitBindTables(f *pyfile, p *bindPlan) {
 	f.line("#")
 	f.line("# What is not here is on the visitor below: a value whose declared width an")
 	f.line("# entry cannot carry (u8..u32, i8..i32, a narrow enum/bitfield), an array the")
-	f.line("# schema leaves unbounded, and every wrapper-sequence array.")
+	f.line("# schema leaves unbounded, every wrapper-sequence array, and a union with a")
+	f.line("# struct/union option. A union whose options are all leaves is a one-of")
+	f.line("# table: the decoder writes the held option's id into its `which_at` slot.")
 	// Children first: a sequence row names its child table by name.
 	for i := len(p.tables) - 1; i >= 0; i-- {
 		emitOneTable(f, p.tables[i])
@@ -558,7 +596,20 @@ func (g *gen) emitBindTables(f *pyfile, p *bindPlan) {
 	f.line("# slot holds its element count and every other kind's holds 1. That is what")
 	f.line("# tells a field that never arrived from one that arrived EMPTY -- an empty")
 	f.line("# array replaces the default, and a zero count slot could not say so.")
-	f.line("_FILL_%s = b\"\\xff\" * (_W_%s * 8)", p.name, p.name)
+	if !p.oneOf {
+		f.line("_FILL_%s = b\"\\xff\" * (_W_%s * 8)", p.name, p.name)
+		f.blank()
+		return
+	}
+	f.line("_FILL_%s = bytearray(b\"\\xff\" * (_W_%s * 8))", p.name, p.name)
+	f.line("# A union's which slot starts at its default_id instead: an absent union and")
+	f.line("# an empty union frame both leave it alone, and both hold default_id.")
+	for _, t := range p.tables {
+		if t.which >= 0 {
+			f.line("memoryview(_FILL_%s).cast(\"Q\")[%d] = %d  # %s", p.name, t.which, t.whichDef, t.path)
+		}
+	}
+	f.line("_FILL_%s = bytes(_FILL_%s)", p.name, p.name)
 	f.blank()
 }
 
@@ -568,7 +619,13 @@ func emitOneTable(f *pyfile, t *bindTable) {
 		// on it is one the schema does not name: the codec skips it -- sequence
 		// and all -- instead of offering it to a visitor that is not tracking
 		// this scope (corelib-py#150).
-		f.line("%s = (Binding(closed=True)", t.name)
+		if t.which >= 0 {
+			// A one-of table: its rows are alternatives, and the decoder writes
+			// the arriving option's id into words[which] (corelib-py#165).
+			f.line("%s = (Binding(closed=True, which_at=%d)", t.name, t.which)
+		} else {
+			f.line("%s = (Binding(closed=True)", t.name)
+		}
 	} else {
 		f.line("%s = (Binding()", t.name)
 	}
@@ -656,9 +713,32 @@ func (g *gen) emitScatter(f *pyfile, p *bindPlan) {
 		f.line("        OB = self._ob")
 	}
 	for _, t := range p.tables {
+		if t.which >= 0 {
+			emitOneOfScatter(f, t)
+			continue
+		}
 		for _, r := range t.rows {
 			f.line("        if U[%d] != _ABSENT: %s = %s", r.cnt, r.dest, r.expr)
 		}
 	}
 	f.blank()
+}
+
+// emitOneOfScatter selects a bound union's held option: the which slot FIRST,
+// then that option's slots and no other's -- a discarded option's slots are
+// stale by design (rule 3). The option's own arrival test stays: the which slot
+// starts at default_id, so default_id held says nothing about whether its value
+// arrived, and one that did not leaves the union's own default standing.
+//
+// The two stores are the ones the visitor's unionStore makes; the scatter runs
+// once, on the fully decoded message, so it selects with the last arrival.
+func emitOneOfScatter(f *pyfile, t *bindTable) {
+	f.line("        _u = %s", t.path)
+	f.line("        _x = U[%d]", t.which)
+	first := true
+	for _, r := range t.rows {
+		f.line("        %s _x == %d and U[%d] != _ABSENT:", kw(&first), r.id, r.cnt)
+		f.line("            _u._which = %d", r.id)
+		f.line("            _u._value = %s", r.expr)
+	}
 }

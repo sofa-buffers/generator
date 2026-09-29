@@ -484,6 +484,30 @@ def decode_cases():
          "an empty union-D frame is nu at ITS default (b = 4), not its first option"),
         ("D37", seq(G, seq(0, seq(1, unsigned(0, 1)))), {"g": [[{"hi": 4}, {"lo": 1}]]}, None,
          "an inner-row gap is the element type's D (hi = 4), two array levels down"),
+        # The same rules on unions whose options are ALL leaves (r2, q): a
+        # backend may store those differently from `u` -- one slot per option
+        # plus the held id, read back after the decode -- and there a reader
+        # that goes to an option's slot without the held id returns a
+        # discarded option's stale value.
+        ("D38", seq(R2, uarray(0, [1, 2]), unsigned(1, 5)), {"r2": {"x": 5}}, None,
+         "leaf-option union: the last option wins over an earlier D"),
+        ("D39", seq(R2, unsigned(1, 5), uarray(0, [3])), {"r2": {"ca": [3]}}, None,
+         "leaf-option union: back to D, the discarded x is not read"),
+        ("D40", seq(R2, unsigned(1, 5), sarray(0, [1])), {"r2": {"x": 5}}, None,
+         "leaf-option union: a §7.3-mistyped option does not switch"),
+        ("D41", seq(R2, unsigned(1, 5), unsigned(7, 1)), {"r2": {"x": 5}}, None,
+         "leaf-option union: an unknown id does not switch"),
+        ("D42", seq(R2), {}, b"", "leaf-option union: an empty frame means the default"),
+        ("D43", seq(R2, unsigned(1, 5)) + seq(R2), {"r2": {"x": 5}}, None,
+         "leaf-option union: an empty re-opened frame keeps the held option"),
+        ("D44", seq(R2, unsigned(1, 5)) + seq(R2, uarray(0, [4])), {"r2": {"ca": [4]}}, None,
+         "leaf-option union: switch across re-opened frames"),
+        ("D45", seq(Q, unsigned(0, 7), signed(1, 3)), {"q": {"sig": 3}}, None,
+         "leaf-option union: the last option wins when it is D"),
+        ("D46", seq(Q, signed(1, 3), unsigned(0, 7)), {"q": {"big": 7}}, None,
+         "leaf-option union: the last option wins over D"),
+        ("D47", seq(Q, unsigned(0, 7), signed(0, 1)), {"q": {"big": 7}}, None,
+         "leaf-option union: a signed value at the unsigned option does not switch"),
     ]
 
 
