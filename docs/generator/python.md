@@ -73,14 +73,15 @@ Which fields go which way follows from the schema, not from a setting. Every
 scalar rides the table — the narrow integers, `enum` and `bitfield` included,
 whose declared width the table states and the decoder checks — as do `string`,
 `blob`, native arrays with a declared `count` of at most 32, whole nested
-structs, and unions whose options are all of those kinds (scalars, strings,
-blobs, such arrays): the table records which option arrived last, and only that
-option is read back. What stays on the visitor is an array the schema leaves
-unbounded or declares longer than 32, an array of strings, blobs, structs, unions
-or arrays, a union with a struct or union option or with an option the table
-cannot carry, and any struct that contains one of these. A class with fewer than
-three table-carried fields uses none at all; a class the table covers completely
-needs no visitor behaviour at all.
+structs, and unions whose options are all of those kinds, including struct and
+union options made of them: the table records which option arrived last, and
+only that option is read back. What stays on the visitor is an array the schema
+leaves unbounded or declares longer than 32, an array of strings, blobs, structs,
+unions or arrays, a union with an option of those kinds, a union with a struct
+option whose string, blob or array member declares a non-empty default, and any
+struct or union that contains one of these. A class with fewer than three
+table-carried fields uses none at all; a class the table covers completely needs
+no visitor behaviour at all.
 
 The array limit is a cost, not a rule: an array on the table is written element by
 element into slots and then built into the list your dataclass holds, so past a
@@ -244,12 +245,14 @@ back as that.
 held one and starts from its own default; the held option received again
 continues where it was (a struct or union option merges, anything else is
 replaced). A field whose wire type does not match its option, and an unknown
-id, change nothing. A union member whose options are all scalars, strings, blobs
-or native arrays of at most 32 elements is decoded through the destination table
-(see [When a streamed message fills in](#when-a-streamed-message-fills-in)), so a
-streamed one shows its option when the message completes; a union with a struct
-or union option is decoded field by field and shows its option as soon as it
-arrives.
+id, change nothing. A union member is decoded through the destination table (see
+[When a streamed message fills in](#when-a-streamed-message-fills-in)) when the
+union and every struct between it and the message hold only fields the table
+carries — for the union, every option and everything inside a struct or union
+option — so a streamed one shows its option when the message completes. A union
+the table cannot carry, a union that is an array element, and a union type
+decoded on its own (`MyUnion.decode(...)`) are decoded field by field and show
+their option as soon as it arrives. Both give the same result.
 
 **JSON.** `to_jsonable()` returns a dict with exactly one member, the held
 option — `{"pt": {"x": 7, "y": 2}}`, also when that is the `default_id` option at

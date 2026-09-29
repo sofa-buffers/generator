@@ -247,7 +247,7 @@ func TestPythonScatterRunsOnlyOnAComplete(t *testing.T) {
 		"        st = self._d.feed(chunk)\n        if st is Status.COMPLETE:",
 		// the arrival test, and the prefill that makes it mean something
 		"_ABSENT = 0xFFFFFFFFFFFFFFFF",
-		`_FILL_Myfirstmessage = b"\xff" * (_W_Myfirstmessage * 8)`,
+		`_FILL_Myfirstmessage = bytearray(b"\xff" * (_W_Myfirstmessage * 8))`,
 		"        self._w = bytearray(_FILL_Myfirstmessage)",
 		"        if U[22] != _ABSENT: m.somestring = OB[0]",
 	} {

@@ -11,8 +11,9 @@ import (
 // A schema union is a dataclass holding exactly ONE option (MESSAGE_SPEC §4.2,
 // §7.4.1; union.go). The tests below pin the emitted shape of every half -- the
 // storage and accessors, the forced vs guarded encode arms, where the decode
-// switch sits, which unions reach a destination table (a one-of table, only with
-// leaf options) and which stay on the visitor, the gap fill and the JSON form --
+// switch sits, which unions reach a destination table (a one-of table, struct and
+// union options included) and which stay on the visitor, the gap fill and the
+// JSON form --
 // and the name errors. check_union.py proves the behaviour on both
 // engines; these make a regression loud at `go test` time.
 
@@ -345,12 +346,14 @@ messages:
 	}
 }
 
-// TestPythonUnionWithSequenceOptionStaysOnVisitor: a union with a struct or union
-// option keeps the visitor path -- §7.4.1 has a newly selected struct/union
-// option start from its own default, and the table has no reset for it yet
-// (corelib-py#167). A union with a wrapper-array or unbounded array option is not
-// bindable either: the table has no entry for that shape. Each such union's scope
-// stays open, and so does every scope holding it.
+// TestPythonUnionWithSequenceOptionStaysOnVisitor: what still keeps a union off
+// the table now that a struct/union option binds (corelib-py#167). An option
+// whose SHAPE the table has no entry for -- a wrapper array, an unbounded array,
+// a struct option holding a wrapper array, a nested union with a wrapper option
+// -- and a struct option MEMBER with a non-empty string/blob/array default,
+// which the corelib's option reset would restart empty instead of at that
+// default (rule 4). Each such union's scope stays open, and so does every scope
+// holding it.
 func TestPythonUnionWithSequenceOptionStaysOnVisitor(t *testing.T) {
 	const src = `
 version: 1
@@ -360,43 +363,208 @@ messages:
       a: { id: 0, type: u64 }
       b: { id: 1, type: u64 }
       c: { id: 2, type: u64 }
-      us: { id: 3, type: union, oneof: { x: { id: 0, type: u64 }, p: { id: 1, type: struct, fields: { k: { id: 0, type: u8 } } } } }
-      uu: { id: 4, type: union, oneof: { x: { id: 0, type: u64 }, i: { id: 1, type: union, oneof: { q: { id: 0, type: u8 } } } } }
-      uw: { id: 5, type: union, oneof: { x: { id: 0, type: u64 }, w: { id: 1, type: array, items: { type: string, count: 2, maxlen: 4 } } } }
-      st: { id: 6, type: struct, fields: { k: { id: 0, type: u64 }, w: { id: 1, type: union, oneof: { p: { id: 0, type: struct, fields: { z: { id: 0, type: u8 } } } } } } }
+      uw: { id: 3, type: union, oneof: { x: { id: 0, type: u64 }, w: { id: 1, type: array, items: { type: string, count: 2, maxlen: 4 } } } }
+      ud: { id: 4, type: union, oneof: { x: { id: 0, type: u64 }, d: { id: 1, type: array, items: { type: u8 } } } }
+      ui: { id: 5, type: union, oneof: { x: { id: 0, type: u64 }, i: { id: 1, type: union, oneof: { q: { id: 0, type: u8 }, w: { id: 1, type: array, items: { type: string, count: 2, maxlen: 4 } } } } } }
+      st: { id: 6, type: struct, fields: { k: { id: 0, type: u64 }, w: { id: 1, type: union, oneof: { p: { id: 0, type: struct, fields: { z: { id: 0, type: array, items: { type: string, count: 2, maxlen: 4 } } } } } } } }
+      us: { id: 7, type: union, oneof: { x: { id: 0, type: u64 }, p: { id: 1, type: struct, fields: { s: { id: 0, type: string, maxlen: 4, default: "ab" } } } } }
+      ua: { id: 8, type: union, oneof: { x: { id: 0, type: u64 }, p: { id: 1, type: struct, fields: { r: { id: 0, type: array, items: { type: u8, count: 2 }, default: [1] } } } } }
 `
 	mod := string(genPy(t, schema(t, src), map[string]any{})["message.py"])
 	if !strings.Contains(mod, "_BIND_M = (Binding()\n    .unsigned(0, at=0, count_at=1)") {
 		t.Fatalf("the message's scalars should still be on its (open) table:\n%s", mod)
 	}
-	for _, bad := range []string{"which_at=", ".sequence(3,", ".sequence(4,", ".sequence(5,", ".sequence(6,", "_BIND_M_us", "_BIND_M_st"} {
+	for _, bad := range []string{"which_at=", ".sequence(", "_BIND_M_u", "_BIND_M_st"} {
 		if strings.Contains(mod, bad) {
-			t.Errorf("a union with a sequence option (or a scope holding one) is on a destination table (%q)", bad)
+			t.Errorf("a union the table cannot carry (or a scope holding one) is on a destination table (%q)", bad)
 		}
 	}
 	for _, want := range []string{
-		"            if fid == 3:\n                self._s.append(c)\n                self._c = _L_M_us\n",
-		"            elif fid == 4:\n                self._s.append(c)\n                self._c = _L_M_uu\n",
-		"            elif fid == 5:\n                self._s.append(c)\n                self._c = _L_M_uw\n",
+		"            if fid == 3:\n                self._s.append(c)\n                self._c = _L_M_uw\n",
+		"            elif fid == 4:\n                self._s.append(c)\n                self._c = _L_M_ud\n",
+		"            elif fid == 5:\n                self._s.append(c)\n                self._c = _L_M_ui\n",
 		"            elif fid == 6:\n                self._s.append(c)\n                self._c = _L_M_st\n",
-		"                _u = self._o.us\n                _u._which = 0\n",
+		"            elif fid == 7:\n                self._s.append(c)\n                self._c = _L_M_us\n",
+		"            elif fid == 8:\n                self._s.append(c)\n                self._c = _L_M_ua\n",
 		"                self._o.us.mutable_p()\n",
+		"                self._o.ua.mutable_p()\n",
+		"                self._o.ui.mutable_i()\n",
 	} {
 		if !strings.Contains(mod, want) {
 			t.Errorf("union visitor decode missing %q", want)
 		}
 	}
-	// The union class's own visitor is a visitor, never a table-only class.
 	if strings.Contains(mod, "a destination table and nothing else") {
 		t.Error("a class decodes through a table alone although a union in it needs the visitor")
 	}
+	// The same struct option with EMPTY defaults binds: it is the default, not
+	// the kind, that keeps `us`/`ua` off.
+	const ok = `
+version: 1
+messages:
+  M:
+    payload:
+      a: { id: 0, type: u64 }
+      us: { id: 1, type: union, oneof: { x: { id: 0, type: u64 }, p: { id: 1, type: struct, fields: { s: { id: 0, type: string, maxlen: 4, default: "" }, r: { id: 1, type: array, items: { type: u8, count: 2 }, default: [] } } } } }
+`
+	okMod := string(genPy(t, schema(t, ok), map[string]any{})["message.py"])
+	if !strings.Contains(okMod, "    .sequence(1, child=_BIND_M_us)\n") {
+		t.Errorf("a struct option whose string/array members default to empty should bind:\n%s", okMod)
+	}
 }
 
-// TestPythonMixedUnionsOneBoundOneNot: one message, one leaf union (bound, a
-// one-of table) and one with a struct option (the visitor). Each takes its own
-// path and neither leaks into the other: the bound one has no location and no
-// hook arm, the other no table; the root table stays open, because one scope in
-// it still needs the visitor.
+// TestPythonUnionWithStructOptionBinds: a union with a struct option and a
+// nested union option is a one-of table (corelib-py#167). The struct option's
+// table is a `sequence` row of the one-of table; every scalar row inside an
+// option's subtree states its non-zero schema default (a boolean as 1, an enum
+// or a bitfield as its integer, an fp32 as written), a union nested in an option
+// states its default_id; and nothing outside an option -- neither a top-level
+// member nor the top-level union's own leaf options -- carries a `default=`.
+func TestPythonUnionWithStructOptionBinds(t *testing.T) {
+	const src = `
+version: 1
+messages:
+  M:
+    payload:
+      a: { id: 0, type: u64, default: 3 }
+      b: { id: 1, type: u64 }
+      u:
+        id: 2
+        type: union
+        default_id: 1
+        oneof:
+          n:  { id: 0, type: u16, default: 5 }
+          pt:
+            id: 1
+            type: struct
+            fields:
+              x:  { id: 0, type: i32, default: -7 }
+              y:  { id: 1, type: i32 }
+              bo: { id: 2, type: boolean, default: true }
+              f:  { id: 3, type: fp32, default: 0.1 }
+              e:  { id: 4, type: enum, enum: { A: 0, B: 1, C: 2 }, default: 2 }
+              fl: { id: 5, type: bitfield, bits: { r: { pos: 0 }, w: { pos: 1, default: true } } }
+              nz: { id: 6, type: fp64, default: -0.0 }
+              in: { id: 7, type: struct, fields: { k: { id: 0, type: u8, default: 9 } } }
+          nu: { id: 2, type: union, default_id: 1, oneof: { p: { id: 0, type: u8 }, q: { id: 1, type: u8, default: 4 } } }
+`
+	mod := string(genPy(t, schema(t, src), map[string]any{})["message.py"])
+	for _, want := range []string{
+		"_BIND_M_u_pt_in = (Binding(closed=True)\n    .unsigned(0, at=21, count_at=22, max_value=255, default=9)\n)\n",
+		"_BIND_M_u_pt = (Binding(closed=True)\n" +
+			"    .signed(0, at=7, count_at=8, min_value=-2147483648, max_value=2147483647, default=-7)\n" +
+			"    .signed(1, at=9, count_at=10, min_value=-2147483648, max_value=2147483647)\n" +
+			"    .boolean(2, at=11, count_at=12, default=1)\n" +
+			"    .float32(3, at=13, count_at=14, default=0.1)\n" +
+			"    .signed(4, at=15, count_at=16, min_value=-128, max_value=127, default=2)\n" +
+			"    .unsigned(5, at=17, count_at=18, max_value=255, default=2)\n" +
+			"    .float64(6, at=19, count_at=20, default=-0.0)\n" +
+			"    .sequence(7, child=_BIND_M_u_pt_in)\n)\n",
+		// A nested union states its default_id, and its own options their
+		// defaults: the corelib resets it to that option at that default.
+		"_BIND_M_u_nu = (Binding(closed=True, which_at=23, default_id=1)\n" +
+			"    .unsigned(0, at=24, count_at=25, max_value=255)\n" +
+			"    .unsigned(1, at=26, count_at=27, max_value=255, default=4)\n)\n",
+		// The top-level union: its leaf option has no default= (its own arrival
+		// writes it whole), and no default_id= (the prefill seeds it).
+		"_BIND_M_u = (Binding(closed=True, which_at=4)\n" +
+			"    .unsigned(0, at=5, count_at=6, max_value=65535)\n" +
+			"    .sequence(1, child=_BIND_M_u_pt)\n" +
+			"    .sequence(2, child=_BIND_M_u_nu)\n)\n",
+		"_BIND_M = (Binding(closed=True)\n    .unsigned(0, at=0, count_at=1)\n",
+		"memoryview(_FILL_M).cast(\"Q\")[4] = 1  # m.u\n",
+		"memoryview(_FILL_M).cast(\"Q\")[23] = 1  # m.u.nu\n",
+	} {
+		if !strings.Contains(mod, want) {
+			t.Errorf("struct-option one-of table missing %q\n%s", want, mod)
+		}
+	}
+	// Outside an option a default is never stated: the corelib would ignore it,
+	// and the dataclass default is what an absent member reads as.
+	if strings.Contains(mod, ".unsigned(0, at=0, count_at=1, default=") {
+		t.Error("a top-level member states default=: only a union option's subtree reads it")
+	}
+	// Everything is on the table, so M is table-only.
+	vis := mod[strings.Index(mod, "class _MVisitor(Visitor):"):]
+	if !strings.Contains(vis, "a destination table and nothing else") {
+		t.Errorf("M should be table-only once its union is bound:\n%s", vis)
+	}
+	for _, bad := range []string{"_L_M_u", "def on_sequence_begin", "mutable_pt()\n                self._s"} {
+		if strings.Contains(vis, bad) {
+			t.Errorf("the bound union still reaches the visitor (%q)", bad)
+		}
+	}
+}
+
+// TestPythonOneOfScatterStructOption: the scatter reads the which slot first
+// and reaches a struct option's slots -- and a nested union's which slot -- only
+// inside that option's arm. A struct/union arm has no arrival test of its own:
+// mutable_<opt>() selects it (the held object on a fresh message), and its
+// members follow with theirs, onto that object. A nested union's locals are
+// suffixed so they never clobber the enclosing option's.
+func TestPythonOneOfScatterStructOption(t *testing.T) {
+	const src = `
+version: 1
+messages:
+  M:
+    payload:
+      a: { id: 0, type: u64 }
+      u:
+        id: 1
+        type: union
+        default_id: 0
+        oneof:
+          n:  { id: 0, type: u16 }
+          pt: { id: 1, type: struct, fields: { x: { id: 0, type: i32 }, w: { id: 1, type: union, oneof: { p: { id: 0, type: u8 }, s: { id: 1, type: struct, fields: { z: { id: 0, type: u8 } } } } }, k: { id: 2, type: u8 } } }
+          nu: { id: 2, type: union, default_id: 1, oneof: { p: { id: 0, type: u8 }, q: { id: 1, type: u8, default: 4 } } }
+`
+	mod := string(genPy(t, schema(t, src), map[string]any{})["message.py"])
+	sc := mod[strings.Index(mod, "class _MVisitor(Visitor):"):]
+	sc = sc[strings.Index(sc, "        m = self._o\n"):]
+	sc = sc[:strings.Index(sc, "\n\n")]
+	const want = "        _u = m.u\n" +
+		"        _x = U[2]\n" +
+		"        if _x == 0 and U[4] != _ABSENT:\n" +
+		"            _u._which = 0\n" +
+		"            _u._value = U[3]\n" +
+		"        elif _x == 1:\n" +
+		"            _v = _u.mutable_pt()\n" +
+		"            if U[6] != _ABSENT: _v.x = S[5]\n" +
+		"            if U[13] != _ABSENT: _v.k = U[12]\n" +
+		"            _u1 = _v.w\n" +
+		"            _x1 = U[7]\n" +
+		"            if _x1 == 0 and U[9] != _ABSENT:\n" +
+		"                _u1._which = 0\n" +
+		"                _u1._value = U[8]\n" +
+		"            elif _x1 == 1:\n" +
+		"                _v1 = _u1.mutable_s()\n" +
+		"                if U[11] != _ABSENT: _v1.z = U[10]\n" +
+		"        elif _x == 2:\n" +
+		"            _u1 = _u.mutable_nu()\n" +
+		"            _x1 = U[14]\n" +
+		"            if _x1 == 0 and U[16] != _ABSENT:\n" +
+		"                _u1._which = 0\n" +
+		"                _u1._value = U[15]\n" +
+		"            elif _x1 == 1 and U[18] != _ABSENT:\n" +
+		"                _u1._which = 1\n" +
+		"                _u1._value = U[17]"
+	if !strings.HasSuffix(sc, want) {
+		t.Fatalf("struct-option scatter:\nwant suffix\n%s\n---\ngot\n%s", want, sc)
+	}
+	// No option slot is read before the which slot.
+	pre := sc[:strings.Index(sc, "        _x = U[2]\n")]
+	for _, slot := range []string{"U[3]", "S[5]", "U[7]", "U[14]"} {
+		if strings.Contains(pre, slot) {
+			t.Errorf("an option slot (%s) is read before the which slot", slot)
+		}
+	}
+}
+
+// TestPythonMixedUnionsOneBoundOneNot: one message, one union that binds (a
+// struct option, a one-of table) and one the table cannot carry (a wrapper
+// option: the visitor). Each takes its own path and neither leaks into the
+// other: the bound one has no location and no hook arm, the other no table; the
+// root table stays open, because one scope in it still needs the visitor.
 func TestPythonMixedUnionsOneBoundOneNot(t *testing.T) {
 	const src = `
 version: 1
@@ -404,8 +572,8 @@ messages:
   M:
     payload:
       a: { id: 0, type: u64 }
-      lf: { id: 1, type: union, default_id: 1, oneof: { x: { id: 0, type: u32 }, y: { id: 1, type: string, maxlen: 4 } } }
-      sq: { id: 2, type: union, oneof: { x: { id: 0, type: u32 }, p: { id: 1, type: struct, fields: { k: { id: 0, type: u8 } } } } }
+      lf: { id: 1, type: union, default_id: 1, oneof: { x: { id: 0, type: u32 }, p: { id: 1, type: struct, fields: { k: { id: 0, type: u8 } } } } }
+      sq: { id: 2, type: union, oneof: { x: { id: 0, type: u32 }, w: { id: 1, type: array, items: { type: string, count: 2, maxlen: 4 } } } }
 `
 	mod := string(genPy(t, schema(t, src), map[string]any{})["message.py"])
 	for _, want := range []string{
@@ -413,6 +581,7 @@ messages:
 		"    .sequence(1, child=_BIND_M_lf)\n",
 		"_BIND_M = (Binding()\n",
 		"        _u = m.lf\n",
+		"            _v = _u.mutable_p()\n",
 		"            if fid == 2:\n                self._s.append(c)\n                self._c = _L_M_sq\n",
 		"                _u = self._o.sq\n                _u._which = 0\n",
 	} {
@@ -420,7 +589,7 @@ messages:
 			t.Errorf("mixed unions missing %q", want)
 		}
 	}
-	for _, bad := range []string{"_L_M_lf", "_u = self._o.lf", "_BIND_M_sq", ".sequence(2,"} {
+	for _, bad := range []string{"_L_M_lf", "_u = self._o.lf", "self._o.lf.mutable_p()", "_BIND_M_sq", ".sequence(2,"} {
 		if strings.Contains(mod, bad) {
 			t.Errorf("mixed unions: one union took the other's path (%q)", bad)
 		}
