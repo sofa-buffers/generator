@@ -1658,7 +1658,8 @@ and the private slots are checked as one namespace (`checkUnionNames`).)*
   receives the union's `on_sequence_begin` (issue §5: a fixed slot per id cannot
   express "last of several ids wins"). *(Superseded by generator#614 for a
   union whose options are all leaves — it binds as a one-of table; see the
-  refined note below.)*
+  refined note below; since corelib-py#167 that covers struct/union options
+  too.)*
 * **Decode**: switch only in the typed value hooks and `on_sequence_begin` (§0).
   `reserve_elem(out, id, T, …)` per type.
 * **Conformance**: rebuild the native `.so`, run the driver on **both** engines.
@@ -1690,10 +1691,12 @@ and the private slots are checked as one namespace (`checkUnionNames`).)*
   rebuilt) for all three generator states — product type aa3609f / visitor
   25ce2be / one-of table: `python-native` decode 432,801 → 444,959 → **432,933**
   (+0.03 % vs the product type), `python` decode 1,969,322 → 1,981,108 →
-  1,967,531 (−0.09 %), encodes within 0.15 %. A union with a struct/union option
-  keeps the visitor until corelib-py#167 gives the one-of table §7.4.1's option
-  reset. (The review re-run before #614 read +2.93 %, 432,410 → 445,069.) `python` decode +0.75 %, both encodes
-  −0.03 %/−0.05 %. Names: besides the class's own members, an option property
+  1,967,531 (−0.09 %), encodes within 0.15 %. Before #614, the review re-run
+  read `python-native` decode +2.93 % (432,410 → 445,069), `python` decode
+  +0.75 % and both encodes −0.03 %/−0.05 %. corelib-py#167 then gave the one-of
+  table §7.4.1's option reset, and #614 extended the table to every union whose
+  subtree it can carry — struct and union options at any depth, with
+  `default=`/`default_id=` stated where the reset reads them (see §8). Names: besides the class's own members, an option property
   must not take a builtin the class body evaluates while the class is defined —
   `property` and `classmethod` (the decorators) — so those two are in
   `unionFixed` and take the trailing underscore; a struct FIELD named
@@ -1832,8 +1835,18 @@ against the branch is the proof for C.
    `--sizes 1`, which already makes every byte offset a resume point.
 4. **Known gaps.** `python-native`'s +2.77 % decode is **closed by generator#614**
    for leaf-option unions (the bench's `aux_sensor`): measured back to +0.03 %
-   against the product-type generator. A Python union with a **struct/union
-   option** still decodes through the visitor; binding it waits for
-   corelib-py#167 (the one-of table's §7.4.1 option reset). `check_union.py`
-   D38–D47 pin the §7.4.1 rules on the leaf-option unions `r2` and `q`, which a
-   backend may store differently from `u`.
+   against the product-type generator. Since corelib-py#167 (the one-of table's
+   §7.4.1 option reset) #614 binds **every** Python union whose subtree the
+   table can carry, struct/union options and nested unions included, with
+   `default=` on the scalar rows inside an option and `default_id=` on a nested
+   union. What stays on the visitor: a union with a wrapper-array or
+   unbounded/>32 array option (anywhere in an option's subtree), a union as a
+   wrapper-array element, a union class decoded on its own, and a union with a
+   struct-option member that declares a non-empty string/blob/array default —
+   the corelib's reset restarts those rows empty, which is right for an option
+   (§4.2) but not for such a member; that last one is a corelib-py limitation
+   worth an issue. `check_union.py` D38–D49 pin the §7.4.1 rules on the
+   leaf-option unions `r2` and `q`, and D50–D54 on the struct-option unions
+   `pf`/`po` and the nested union `r` (non-zero option defaults), which a
+   backend may store differently from `u`; `u` itself stays on the visitor in
+   Python (its `strs` option is a wrapper array).

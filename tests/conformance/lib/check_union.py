@@ -508,6 +508,27 @@ def decode_cases():
          "leaf-option union: the last option wins over D"),
         ("D47", seq(Q, unsigned(0, 7), signed(0, 1)), {"q": {"big": 7}}, None,
          "leaf-option union: a signed value at the unsigned option does not switch"),
+        ("D48", seq(R2, uarray(0, [1, 2]), uarray(0, [3])), {"r2": {"ca": [3]}}, None,
+         "leaf-option union: a repeated array D is replaced, not appended (§7.4)"),
+        ("D49", seq(Q, unsigned(0, 7), unsigned(0, 9)), {"q": {"big": 9}}, None,
+         "leaf-option union: a repeated scalar option, the last value wins (§7.4)"),
+        # The struct/union-option rules again, on the unions whose option
+        # defaults are NOT zero (pf/po: t.k = 2; r: nu holds b = 4): a backend
+        # that stores a union in slots resets a re-selected option from
+        # defaults it states itself, and a missing one reads back as 0.
+        ("D50", seq(PF, seq(1, unsigned(0, 5))) + seq(PF, unsigned(0, 3)) + seq(PF, seq(1)),
+         {"pf": {"t": {"k": 2}}}, None,
+         "struct D away and back: restarts at its NON-ZERO default (§7.4.1)"),
+        ("D51", seq(PO, unsigned(0, 3), seq(1)), {"po": {"t": {"k": 2}}}, None,
+         "an empty struct-option frame after another option switches, at its default"),
+        ("D52", seq(PO, seq(1, unsigned(0, 5)), seq(1)), {"po": {"t": {"k": 5}}}, None,
+         "an empty frame of the HELD struct option continues it"),
+        ("D53", seq(R, seq(0, unsigned(0, 3))) + seq(R, uarray(1, [1])) + seq(R, seq(0)),
+         {"r": {"nu": {"b": 4}}}, None,
+         "a re-selected union option restarts at ITS default_id, at that option's default"),
+        ("D54", seq(R, seq(0, unsigned(0, 3))) + seq(R, seq(0, unsigned(1, 7))),
+         {"r": {"nu": {"b": 7}}}, None,
+         "the held union option continues: its own last option wins"),
     ]
 
 

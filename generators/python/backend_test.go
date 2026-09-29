@@ -2147,7 +2147,7 @@ func TestPythonBitfieldIsIntFlagAndEnumIsIntEnum(t *testing.T) {
 //   - a scalar and a struct member are on the destination table, where the
 //     entry states the width and the decoder checks it at the value
 //     (`min_value`/`max_value`, corelib-py#149);
-//   - a union member of a union whose options are all leaves is on the union's
+//   - a union member of a union the table can carry is on the union's
 //     ONE-OF table (corelib-py#165), stated there like a scalar's; the union
 //     class decoded on its own keeps the visitor, where it is the typed hook's
 //     guard, ahead of the option switch;
