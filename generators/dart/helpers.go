@@ -350,12 +350,22 @@ func initialCap(f *ir.Field) int64 {
 	return 0
 }
 
-// rangeArg is the `range:` argument of an integer array destination: the
-// declared element width (or the one an enum/bitfield implies, MESSAGE_SPEC §1),
-// which the codec applies to every element as it is decoded -- on both decode
-// surfaces, and ahead of a truncated tail (§5.2, generator#267). "" where no
-// interval narrows the 64-bit element.
+// rangeArg is the `range:` argument of an integer array destination: the rule
+// its elements follow, which the codec applies to every element as it is
+// decoded -- on both decode surfaces, and ahead of a truncated tail (§5.2,
+// generator#267):
+//
+//   - `sofab.ElemRange.boolean` for a bool array: any non-zero element is
+//     `true` and is held as 1 (CORELIB_PLAN §4.4), so element access never sees
+//     the raw 2 or 48 the wire may carry. A bool has no width to bound.
+//   - the declared element width (or the one an enum/bitfield implies,
+//     MESSAGE_SPEC §1).
+//
+// "" where neither applies: nothing narrows the 64-bit element.
 func (g *gen) rangeArg(elem ir.Kind, ref *ir.TypeRef) string {
+	if elem == ir.KindBool {
+		return ", range: sofab.ElemRange.boolean"
+	}
 	lo, hi, ok := elemRange(elem, ref)
 	if !ok {
 		return ""

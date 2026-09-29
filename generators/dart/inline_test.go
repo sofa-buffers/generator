@@ -28,6 +28,10 @@ messages:
 func TestDartInlineDestinationShapes(t *testing.T) {
 	out := genFor(t, writeDef(t, inlineSchema), map[string]any{})
 	for _, want := range []string{
+		// A bool array's destination and a bool matrix's rows are boolean ones:
+		// the codec holds any non-zero element as 1 (CORELIB_PLAN §4.4).
+		"final sofab.InlineInt64Array flags = sofab.InlineInt64Array(4, range: sofab.ElemRange.boolean)..assign(_flagsDefault);",
+		"sofab.IntMatrixSeq(o.brows, 3, false, 0, 0, rcap: maxDynArrayCount, rowCount: 2, rowCap: maxDynArrayCount, boolean: true)",
 		// A bool array is compared as booleans and written as canonical 0/1.
 		"if (!_boolsEq(flags.storage, flags.length, _flagsDefault)) { e.writeUnsignedArray(0, _bools01(flags), flags.length); }",
 		"static final Int64List _flagsDefault = Int64List.fromList(const <int>[1, 0]);",
@@ -51,7 +55,8 @@ func TestDartInlineDestinationShapes(t *testing.T) {
 }
 
 // TestDartInlineDestinationsRoundTrip runs those shapes against the real corelib:
-// the all-default object encodes to nothing, a decoded bool 5 re-encodes as 1
+// the all-default object encodes to nothing, a decoded bool 5 reads and
+// re-encodes as 1 (in an array and in a matrix row)
 // and a [5, 0] equals the default [true, false], the lazily sized and unbounded
 // destinations round-trip, a reused object keeps its storage and loses every
 // stale field, and an over-count on a lazily sized array is still INVALID at the
@@ -79,10 +84,20 @@ Uint8List wire(void Function(sofab.Encoder) f) =>
 void main() {
   if (Edge().encode().isNotEmpty) fail('all-default Edge encoded ${hex(Edge().encode())}');
 
+  // The decoded value itself is canonical, before any re-encode touches it:
+  // element access reads 1 where the wire carried 5 or 7 (§4.4).
   final m = Edge.decode(wire((e) => e.writeUnsignedArray(0, [5, 0, 7])));
-  if (m.flags.length != 3 || m.flags[0] == 0 || m.flags[2] == 0) {
-    fail('bool array not decoded: ${m.flags.toList()}');
+  if (m.flags.toList().join(',') != '1,0,1') {
+    fail('bool array not normalized on decode: ${m.flags.toList()}');
   }
+  final mr = Edge.decode(wire((e) {
+    e.beginSequenceLazy(6);
+    e.writeUnsignedArray(0, [0, 48]);
+    e.writeUnsignedArray(1, [2]);
+    e.endSequence();
+  }));
+  final rows = mr.brows.map((r) => r.toList().join(',')).join('|');
+  if (rows != '0,1|1') fail('bool matrix rows not normalized on decode: $rows');
   final canon = wire((e) => e.writeUnsignedArray(0, [1, 0, 1]));
   if (hex(m.encode()) != hex(canon)) fail('bool re-encode ${hex(m.encode())}, want ${hex(canon)}');
   if (Edge.decode(wire((e) => e.writeUnsignedArray(0, [5, 0]))).encode().isNotEmpty) {

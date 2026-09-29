@@ -412,9 +412,13 @@ func (g *gen) collector(out string, elem ir.Kind, ref *ir.TypeRef, items *ir.Arr
 			// position has: a row's values never reach the generated visitor, so
 			// there is no store here to guard. Under the width rule it carries the
 			// whole bound for an `enum` and a `bitfield` too (MESSAGE_SPEC §1). A
-			// bool row has none -- any non-zero element is `true` (§4.4) -- and
-			// neither does a 64-bit one: equal lo/hi mean "nothing to check".
+			// 64-bit row has none: equal lo/hi mean "nothing to check". Neither
+			// does a bool row; its rows are boolean destinations instead, which
+			// hold any non-zero element as 1 (§4.4).
 			lo, hi, _ := elemRange(items.Elem, items.ElemRef)
+			if items.Elem == ir.KindBool {
+				rows += ", boolean: true"
+			}
 			return fmt.Sprintf("sofab.IntMatrixSeq(%s, %d, %v, %d, %d%s)", out, cap, signedArrayElem(items.Elem), lo, hi, rows)
 		}
 		// Array of wrapper arrays: each element opens a sequence collected into the
