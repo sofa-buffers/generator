@@ -230,7 +230,9 @@ class _StreamDecoder:
 #
 # What is not here is on the visitor below: a value whose declared width an
 # entry cannot carry (u8..u32, i8..i32, a narrow enum/bitfield), an array the
-# schema leaves unbounded, and every wrapper-sequence array.
+# schema leaves unbounded, every wrapper-sequence array, and a union with a
+# struct/union option. A union whose options are all leaves is a one-of
+# table: the decoder writes the held option's id into its `which_at` slot.
 _BIND_Scalars = (Binding(closed=True)
     .unsigned(0, at=0, count_at=1, max_value=255)
     .unsigned(1, at=2, count_at=3, max_value=255)

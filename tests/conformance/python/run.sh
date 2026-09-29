@@ -1168,11 +1168,12 @@ if [ "$NATIVE" = yes ]; then require_engine native; else require_engine python; 
 # frames are legal. The driver forges the frames no encoder emits and prints its
 # own schema.
 #
-# BOTH engines: a union is never on the destination table (a slot per id cannot
-# say "the last of several ids wins"), so the native engine decodes it through
-# the visitor dispatch the accelerator reimplements -- and a union element two
-# array levels down, a struct option inside a union element and a $defs union
-# split per default_id all ride that same dispatch.
+# BOTH engines, and both decode paths in one message: a union whose options are
+# all leaves (q, r2) is a one-of destination table (corelib-py's `which_at`
+# records the held option's id, read back first by the scatter), while a union
+# with a struct/union option (u, pf, po, r), a union element two array levels
+# down and a $defs union split per default_id ride the visitor dispatch the
+# accelerator reimplements.
 #
 # union_api_check.py then drives the generated union API itself (the property
 # getters and setters, has_/mutable_, select-if-not-held, clear(), what an array
