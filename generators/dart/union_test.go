@@ -145,6 +145,10 @@ func TestDartUnionAccessors(t *testing.T) {
 		// The destination is created WITH the declared element width the codec
 		// checks every decoded element against.
 		"      s = sofab.InlineInt64Array(4, range: const sofab.ElemRange(0, 65535));",
+		// A bool array option is a boolean destination, held and detached alike:
+		// the codec stores any non-zero element as 1 (CORELIB_PLAN §4.4).
+		"      s = sofab.InlineInt64Array(2, range: sofab.ElemRange.boolean);",
+		"  sofab.InlineInt64Array get flags => _which == flagsId ? _flags! : sofab.InlineInt64Array(0, range: sofab.ElemRange.boolean);",
 		"    } else if (_which != strsId) {\n      s.clear();\n    }",
 		// A destination too large to size eagerly starts empty; the header sizes it.
 		"      s = sofab.InlineString(0);\n      _big = s;",
