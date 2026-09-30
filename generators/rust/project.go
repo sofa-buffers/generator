@@ -22,7 +22,7 @@ import (
 // inlining is the cost being measured.
 func (g *gen) emitBench(f *rfile, s *ir.Schema) {
 	for _, m := range s.Messages {
-		mt := exported(m.Name)
+		mt := "message::" + msgIdent(m)
 		low := strings.ToLower(m.Name)
 		// Returns the byte count, not the buffer: encode()'s type differs by profile
 		// (Vec<u8> with corelib rs, heapless::Vec<u8, MAX_SIZE> with rs-no-std), and
@@ -55,7 +55,7 @@ func (g *gen) emitBench(f *rfile, s *ir.Schema) {
 	}
 	f.line("fn bench_main(w: &str, %s: &[u8]) -> i32 {", input)
 	for _, m := range s.Messages {
-		mt := exported(m.Name)
+		mt := "message::" + msgIdent(m)
 		low := strings.ToLower(m.Name)
 		f.line("    if w == \"encode_%s\" || w == \"decode_%s\" {", low, low)
 		f.line("        let obj: %s = serde_json::from_slice(input).expect(\"json\");", mt)
@@ -229,7 +229,7 @@ func (g *gen) harness(s *ir.Schema) []byte {
 		// The message module is the crate's lib (src/lib.rs); this std harness bin
 		// (built only with the `std` feature) consumes it as a dependency.
 		if hasMsg {
-			f.line("use sofabuffers_generated::*;")
+			f.line("use sofabuffers_generated as message;")
 		}
 	} else {
 		// pub: the module is the generated API, which the harness exercises only
@@ -237,10 +237,11 @@ func (g *gen) harness(s *ir.Schema) []byte {
 		// be dead code to rustc; declared pub, it is checked like a library's
 		// public surface, and only genuinely unreachable code still warns.
 		f.line("pub mod message;")
-		if hasMsg {
-			f.line("use message::*;")
-		}
 	}
+	// The generated types are reached as message::<Type>, never glob-imported:
+	// a message is free to be named like anything the harness itself uses
+	// (Read, Write, black_box, Vec), and a path cannot be shadowed.
+	//
 	// Only a message gives the harness something to encode (Write) and a
 	// run_* body to keep opaque (black_box); a message-less schema imports
 	// neither, so no import goes unused.
@@ -274,7 +275,7 @@ func (g *gen) harness(s *ir.Schema) []byte {
 	}
 	f.line("    match name {")
 	for _, m := range s.Messages {
-		mt := exported(m.Name)
+		mt := "message::" + msgIdent(m)
 		f.line("        %q => {", m.Name)
 		f.line("            if mode == \"encode\" {")
 		f.line("                let obj: %s = serde_json::from_slice(&input).expect(\"json\");", mt)

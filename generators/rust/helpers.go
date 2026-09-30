@@ -316,35 +316,6 @@ func rustFloat(v any) string {
 	return s
 }
 
-func exported(name string) string {
-	parts := strings.FieldsFunc(name, func(r rune) bool { return r == '_' })
-	var b strings.Builder
-	for _, p := range parts {
-		if p == "" {
-			continue
-		}
-		b.WriteString(strings.ToUpper(p[:1]))
-		b.WriteString(p[1:])
-	}
-	if b.Len() == 0 {
-		return "X"
-	}
-	return b.String()
-}
-
-func (g *gen) typeName(key string) string {
-	parts := strings.FieldsFunc(key, func(r rune) bool { return r == '/' || r == '_' })
-	var b strings.Builder
-	for _, p := range parts {
-		if p == "" {
-			continue
-		}
-		b.WriteString(strings.ToUpper(p[:1]))
-		b.WriteString(p[1:])
-	}
-	return b.String()
-}
-
 // Native `count: N` arrays deliberately have NO inline `[T; N]` storage. `count`
 // is a capacity, not a length (MESSAGE_SPEC §3): a field holds 0..N elements and
 // the wire count M IS its length, which a Rust array of exactly N cannot express
@@ -439,7 +410,7 @@ func (g *gen) rustType(f *ir.Field) string {
 	case ir.KindBitfield:
 		return bitfieldBacking(f.Ref.Target)
 	case ir.KindStruct, ir.KindUnion:
-		return g.typeName(f.Ref.Key)
+		return namedIdent(f.Ref.Target)
 	case ir.KindArray:
 		return g.rustSeq(g.rustArrayElem(f.Elem, f.ElemRef, f.ElemItems, f.ElemMaxHas, f.ElemMax), f.HasCount, f.Count)
 	}
@@ -464,7 +435,7 @@ func (g *gen) rustArrayElem(elem ir.Kind, ref *ir.TypeRef, items *ir.ArrayElem, 
 	case ir.KindBitfield:
 		return bitfieldBacking(ref.Target)
 	case ir.KindStruct, ir.KindUnion:
-		return g.typeName(ref.Key)
+		return namedIdent(ref.Target)
 	case ir.KindArray:
 		return g.rustSeq(g.rustArrayElem(items.Elem, items.ElemRef, items.ElemItems, items.ElemMaxHas, items.ElemMax), items.HasCount, items.Count)
 	default: // numeric

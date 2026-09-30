@@ -486,7 +486,7 @@ func (g *gen) frames(m *ir.Message) []frame {
 	walkFields = func(depth int, loc, path, place string, fields []*ir.Field, un *ir.NamedType) {
 		fr := frame{loc: loc, path: path, kind: fkStruct, fields: fields, depth: depth}
 		if un != nil {
-			fr.union, fr.utype, fr.place = un, g.typeName(un.Key), place
+			fr.union, fr.utype, fr.place = un, namedIdent(un), place
 		}
 		out = append(out, fr)
 		for _, fld := range fields {
@@ -643,13 +643,13 @@ func (g *gen) emitArraySkipGuard(f *rfile, arrSkip bool) {
 func (g *gen) emitScalarVisit(f *rfile, name, typ string, arms *rfile, arrSkip bool) {
 	if arms.b.Len() == 0 {
 		if arrSkip {
-			f.line("    fn %s(&mut self, _id: Id, _value: %s) {", name, typ)
+			f.line("    fn %s(&mut self, _id: sofab::Id, _value: %s) {", name, typ)
 			f.line("        if self.askip > 0 { self.askip -= 1; } // array delivered at a scalar id")
 			f.line("    }")
 		}
 		return
 	}
-	f.line("    fn %s(&mut self, id: Id, value: %s) {", name, typ)
+	f.line("    fn %s(&mut self, id: sofab::Id, value: %s) {", name, typ)
 	g.emitArraySkipGuard(f, arrSkip)
 	f.line("        match (self.cur, id) {")
 	f.b.WriteString(arms.b.String())
@@ -705,13 +705,13 @@ func anyArrayElem(fs []frame, want func(ir.Kind) bool) bool {
 func arrayKindPat(k ir.Kind) string {
 	switch {
 	case k == ir.KindFP32:
-		return "ArrayKind::Fp32"
+		return "sofab::ArrayKind::Fp32"
 	case k == ir.KindFP64:
-		return "ArrayKind::Fp64"
+		return "sofab::ArrayKind::Fp64"
 	case wantSignedArrayElem(k):
-		return "ArrayKind::Signed"
+		return "sofab::ArrayKind::Signed"
 	default:
-		return "ArrayKind::Unsigned"
+		return "sofab::ArrayKind::Unsigned"
 	}
 }
 
@@ -812,14 +812,14 @@ func (g *gen) emitArrayKindArms(f *rfile, fs []frame, emit func(pat string, want
 	// One arm per wire kind, never a collapsed integer family: a declared `i8[]`
 	// must disarm only for ArraySigned, so an ArrayUnsigned header at that id is
 	// skipped AND leaves the fill counter at 0 (generator#270 / F-0045).
-	emit("ArrayKind::Unsigned", wantUnsignedArrayElem)
-	emit("ArrayKind::Signed", wantSignedArrayElem)
+	emit("sofab::ArrayKind::Unsigned", wantUnsignedArrayElem)
+	emit("sofab::ArrayKind::Signed", wantSignedArrayElem)
 	fp32, fp64 := anyArrayElem(fs, wantFP32Elem), anyArrayElem(fs, wantFP64Elem)
 	if fp32 {
-		emit("ArrayKind::Fp32", wantFP32Elem)
+		emit("sofab::ArrayKind::Fp32", wantFP32Elem)
 	}
 	if fp64 {
-		emit("ArrayKind::Fp64", wantFP64Elem)
+		emit("sofab::ArrayKind::Fp64", wantFP64Elem)
 	}
 	switch {
 	case fp32 && fp64:
@@ -837,7 +837,7 @@ func (g *gen) emitArrayKindArms(f *rfile, fs []frame, emit func(pat string, want
 		// an fp scalar is a fixlen wire type — so `fixlen`, the one feature both
 		// ArrayKind fp variants sit behind under no_std, is provisioned and naming
 		// the variant compiles.
-		f.line("            ArrayKind::Fp32 => %s,", rest(ir.KindFP32))
+		f.line("            sofab::ArrayKind::Fp32 => %s,", rest(ir.KindFP32))
 		f.line("            _ => %s,", rest(ir.KindFP64))
 	}
 }
@@ -903,7 +903,11 @@ func (g *gen) emitPayloadFeed(f *rfile, name string) {
 	f.line("        let %s = match self.acc.feed(total, offset, chunk) { Some(_v) => _v, None => return };", name)
 }
 
-func (g *gen) emitVisitor(f *rfile, name string, fields []*ir.Field) {
+// decodeModAllow sits on a message's private decoder module, whose name is the
+// private channel `_<Message>__Decode` and so not snake_case.
+const decodeModAllow = "#[allow(non_snake_case)] // the private channel: _<Message>__Decode"
+
+func (g *gen) emitVisitor(f *rfile, msg *ir.Message, name string, fields []*ir.Field) {
 	fs := g.frames(&ir.Message{Name: name, Fields: fields})
 	use := visitorUseOf(fs)
 
@@ -944,30 +948,18 @@ func (g *gen) emitVisitor(f *rfile, name string, fields []*ir.Field) {
 		accType = fmt.Sprintf("sofab::PayloadAcc<%d>", g.messageSize(name, fields).Size)
 	}
 
-	// Wrap the decoder in a private module so _Loc / V don't clash across
-	// messages in a multi-message crate.
-	// The decoder module stays private -- _Loc and V are implementation detail --
-	// but the incremental Decoder is part of the public API, so it is re-exported
-	// under the message's own name.
-	f.line("pub use %s_dec::Decoder as %sDecoder;", strings.ToLower(name), name)
-	f.line("mod %s_dec {", strings.ToLower(name))
+	// Wrap the decoder in a private module so _Loc / _V don't clash across
+	// messages in a multi-message crate. The module is the private channel
+	// (_M__Decode) and everything it declares starts with `_`, so the
+	// `use super::*` that brings in the schema's types never loses one of them
+	// to a local of the same name (ARCHITECTURE §8, "Naming"); the corelib is
+	// spelled sofab:: throughout. The incremental decoder is part of the public
+	// API, so it is re-exported under the message's role name (M__Decoder).
+	mod := privateIdent(msg, "Decode")
+	f.line("pub use %s::_Decoder as %s;", mod, roleIdent(msg, "Decoder"))
+	f.line(decodeModAllow)
+	f.line("mod %s {", mod)
 	f.line("    use super::*;")
-	// ArrayKind is gated behind the no-std `array` feature; import it only when an
-	// array_begin override is emitted (i.e. the message has a native array).
-	// The other corelib names (IStream, Visitor, Id, ...) come from the crate
-	// module through `use super::*`, which imports exactly what the file uses.
-	var local []string
-	if emitArrayBegin {
-		local = append(local, "ArrayKind")
-	}
-	// FixlenType only for the fixlen_begin override, on the same on-demand rule --
-	// a message with no bounded string/blob names neither type.
-	if len(g.fixlenBeginArms(fs, ir.KindString, g.strCapConst())) > 0 || len(g.fixlenBeginArms(fs, ir.KindBlob, g.blobCapConst())) > 0 {
-		local = append(local, "FixlenType")
-	}
-	if len(local) > 0 {
-		f.line("    %s", useDecl("sofab", local))
-	}
 	f.blank()
 	// Bounded decode stack for the no_std profile. Only LIVE scopes are stacked --
 	// a sequence opened inside a skipped subtree is depth-counted in `dead` instead
@@ -1015,9 +1007,9 @@ func (g *gen) emitVisitor(f *rfile, name string, fields []*ir.Field) {
 	if needAcc {
 		accInit = ", acc: " + accNew
 	}
-	vInit := fmt.Sprintf("let mut v = V { m: &mut m, stack: [_Loc::Root; %d], sp: 0, cur: _Loc::Root, dead: 0%s, err: false, inv: false%s%s };", stackCap, accInit, limInit, askipInit)
+	vInit := fmt.Sprintf("let mut v = _V { m: &mut m, stack: [_Loc::Root; %d], sp: 0, cur: _Loc::Root, dead: 0%s, err: false, inv: false%s%s };", stackCap, accInit, limInit, askipInit)
 	if g.noStd {
-		vInit = fmt.Sprintf("let mut v = V { m: &mut m, stack: heapless::Vec::new(), cur: _Loc::Root, dead: 0%s, err: false, inv: false%s };", accInit, askipInit)
+		vInit = fmt.Sprintf("let mut v = _V { m: &mut m, stack: heapless::Vec::new(), cur: _Loc::Root, dead: 0%s, err: false, inv: false%s };", accInit, askipInit)
 	}
 	// Infallible, best-effort decode: kept for back-compat. It discards feed's
 	// Result and returns whatever was filled, so it can never reject malformed
@@ -1026,7 +1018,7 @@ func (g *gen) emitVisitor(f *rfile, name string, fields []*ir.Field) {
 	f.line("        let mut m = %s::default();", name)
 	f.line("        {")
 	f.line("            %s", vInit)
-	f.line("            let mut is = IStream::new();")
+	f.line("            let mut is = sofab::IStream::new();")
 	f.line("            let _ = is.feed(data, &mut v);")
 	f.line("        }")
 	f.line("        m")
@@ -1053,7 +1045,7 @@ func (g *gen) emitVisitor(f *rfile, name string, fields []*ir.Field) {
 	f.line("        let fed;")
 	f.line("        {")
 	f.line("            %s", vInit)
-	f.line("            let mut is = IStream::new();")
+	f.line("            let mut is = sofab::IStream::new();")
 	f.line("            fed = is.feed(data, &mut v);")
 	f.line("            overflow = v.err;")
 	f.line("            invalid = v.inv;")
@@ -1102,7 +1094,7 @@ func (g *gen) emitVisitor(f *rfile, name string, fields []*ir.Field) {
 	// the whole message.
 	//
 	// The decoder owns the message and the visitor's persistent state as plain
-	// fields; V borrows them for the duration of one feed and is destructured
+	// fields; _V borrows them for the duration of one feed and is destructured
 	// afterwards, so nothing here is self-referential.
 	stateFields := g.visitorState(stackCap, needAcc, accType, accNew, arrSkip, use.scalarArray, ixVars)
 	f.line("    /// Incremental decoder: hold one and feed the message as bytes arrive.")
@@ -1120,21 +1112,21 @@ func (g *gen) emitVisitor(f *rfile, name string, fields []*ir.Field) {
 	f.line("    /// becomes the rejection `DecodeError::Incomplete`.")
 	f.line("    ///")
 	f.line("    /// Every `Err` from `feed` is terminal: discard the decoder.")
-	f.line("    pub struct Decoder {")
+	f.line("    pub struct _Decoder {")
 	f.line("        m: %s,", name)
-	f.line("        is: IStream,")
+	f.line("        is: sofab::IStream,")
 	for _, sf := range stateFields {
 		f.line("        %s: %s,", sf.name, sf.typ)
 	}
 	f.line("    }")
 	f.blank()
-	f.line("    impl Decoder {")
+	f.line("    impl _Decoder {")
 	f.line("        pub fn new() -> Self {")
 	inits := make([]string, 0, len(stateFields))
 	for _, sf := range stateFields {
 		inits = append(inits, fmt.Sprintf("%s: %s", sf.name, sf.init))
 	}
-	f.line("            Self { m: %s::default(), is: IStream::new(), %s }", name, strings.Join(inits, ", "))
+	f.line("            Self { m: %s::default(), is: sofab::IStream::new(), %s }", name, strings.Join(inits, ", "))
 	f.line("        }")
 	f.blank()
 	f.line("        /// Feed the next chunk. `Ok(Status::Complete)` if it ended on a field")
@@ -1153,10 +1145,10 @@ func (g *gen) emitVisitor(f *rfile, name string, fields []*ir.Field) {
 			takes = append(takes, fmt.Sprintf("%s: core::mem::take(&mut self.%s)", sf.name, sf.name))
 		}
 	}
-	f.line("                let mut v = V { m: &mut self.m, %s };", strings.Join(takes, ", "))
+	f.line("                let mut v = _V { m: &mut self.m, %s };", strings.Join(takes, ", "))
 	f.line("                let r = self.is.feed(chunk, &mut v);")
 	f.line("                // `..` covers `m`, ending its borrow before the write-back.")
-	f.line("                let V { %s, .. } = v;", strings.Join(names, ", "))
+	f.line("                let _V { %s, .. } = v;", strings.Join(names, ", "))
 	for _, sf := range stateFields {
 		f.line("                self.%s = %s;", sf.name, sf.name)
 	}
@@ -1198,7 +1190,7 @@ func (g *gen) emitVisitor(f *rfile, name string, fields []*ir.Field) {
 	f.line("        }")
 	f.line("    }")
 	f.blank()
-	f.line("    impl Default for Decoder {")
+	f.line("    impl Default for _Decoder {")
 	f.line("        fn default() -> Self { Self::new() }")
 	f.line("    }")
 	f.blank()
@@ -1221,7 +1213,7 @@ func (g *gen) emitVisitor(f *rfile, name string, fields []*ir.Field) {
 	f.line("}")
 	f.blank()
 
-	f.line("struct V<'a> {")
+	f.line("struct _V<'a> {")
 	f.line("    m: &'a mut %s,", name)
 	if g.noStd {
 		// Heap-free: bounded location stack.
@@ -1283,7 +1275,7 @@ func (g *gen) emitVisitor(f *rfile, name string, fields []*ir.Field) {
 	// code only files it. Emitted only where a wrapper array exists, so a message
 	// without one carries no dead method.
 	if hasSeqFrame(fs) {
-		f.line("impl V<'_> {")
+		f.line("impl _V<'_> {")
 		f.line("    #[inline]")
 		f.line("    fn refuse(&mut self, e: sofab::Error) {")
 		f.line("        match e {")
@@ -1308,7 +1300,7 @@ func (g *gen) emitVisitor(f *rfile, name string, fields []*ir.Field) {
 			break
 		}
 	}
-	f.line("impl<'a> Visitor for V<'a> {")
+	f.line("impl<'a> sofab::Visitor for _V<'a> {")
 
 	// unsigned: u*/bitfield scalars, bool, and unsigned/bool/bitfield array elements
 	arms := &rfile{}
@@ -1347,7 +1339,7 @@ func (g *gen) emitVisitor(f *rfile, name string, fields []*ir.Field) {
 			arms.line("            (_Loc::%s, _) => { %s%s%s; },", fr.loc, fillGuard, arrayWidthGuard(fr.elemKind, fr.elemRef), store)
 		}
 	}
-	g.emitScalarVisit(f, "unsigned", "Unsigned", arms, arrSkip)
+	g.emitScalarVisit(f, "unsigned", "sofab::Unsigned", arms, arrSkip)
 
 	// signed: i*/enum scalars + signed/enum array elements
 	arms = &rfile{}
@@ -1382,7 +1374,7 @@ func (g *gen) emitVisitor(f *rfile, name string, fields []*ir.Field) {
 			arms.line("            (_Loc::%s, _) => { %s%s%s; },", fr.loc, fillGuard, arrayWidthGuard(fr.elemKind, fr.elemRef), store)
 		}
 	}
-	g.emitScalarVisit(f, "signed", "Signed", arms, arrSkip)
+	g.emitScalarVisit(f, "signed", "sofab::Signed", arms, arrSkip)
 
 	if use.fp32 {
 		g.emitFloatVisit(f, fs, ir.KindFP32, "fp32", "f32", arrSkip)
@@ -1395,7 +1387,7 @@ func (g *gen) emitVisitor(f *rfile, name string, fields []*ir.Field) {
 
 	if use.str {
 		// string: scalar strings + string-array elements
-		f.line("    fn string(&mut self, id: Id, total: usize, offset: usize, chunk: &[u8]) {")
+		f.line("    fn string(&mut self, id: sofab::Id, total: usize, offset: usize, chunk: &[u8]) {")
 		g.emitDestGuard(f, fs, ir.KindString)
 		if g.limits.stringHas {
 			g.emitLimitGuard(f, fs, ir.KindString, "MAX_DYN_STRING_LEN")
@@ -1485,7 +1477,7 @@ func (g *gen) emitVisitor(f *rfile, name string, fields []*ir.Field) {
 		// §9.5.2 exempts Rust std from moving the receiver CAP into the corelib.
 		// It exempts nothing from this: where the comparison lives is a separate
 		// question from whether a skipped field is materialized at all.
-		f.line("    fn blob(&mut self, id: Id, total: usize, offset: usize, chunk: &[u8]) {")
+		f.line("    fn blob(&mut self, id: sofab::Id, total: usize, offset: usize, chunk: &[u8]) {")
 		g.emitDestGuard(f, fs, ir.KindBlob)
 		if g.limits.blobHas {
 			g.emitLimitGuard(f, fs, ir.KindBlob, "MAX_DYN_BLOB_LEN")
@@ -1575,7 +1567,7 @@ func (g *gen) emitVisitor(f *rfile, name string, fields []*ir.Field) {
 		// rust, which is outside what the fixlen-subtype work decides. rust is the
 		// last of the six backends still carrying it: java, csharp, zig, go and
 		// dart all key their integer arms by kind.
-		f.line("    fn array_begin(&mut self, id: Id, kind: ArrayKind, count: usize) {")
+		f.line("    fn array_begin(&mut self, id: sofab::Id, kind: sofab::ArrayKind, count: usize) {")
 		g.emitArraySkipArm(f, fs, use, arrSkip)
 		g.emitArrayFillArm(f, fs, use.scalarArray)
 		f.line("        match (kind, self.cur, id) {")
@@ -1751,7 +1743,7 @@ func (g *gen) emitVisitor(f *rfile, name string, fields []*ir.Field) {
 		if len(arms) == 0 {
 			idParam = "_id"
 		}
-		f.line("    fn sequence_begin(&mut self, %s: Id) {", idParam)
+		f.line("    fn sequence_begin(&mut self, %s: sofab::Id) {", idParam)
 		f.line("        // Inside a skipped subtree: count the level and stay Dead.")
 		f.line("        if self.cur == _Loc::Dead { self.dead = self.dead.saturating_add(1); return; }")
 		if g.noStd {
@@ -1803,7 +1795,7 @@ func (g *gen) emitVisitor(f *rfile, name string, fields []*ir.Field) {
 	}
 
 	f.line("}") // impl Visitor
-	f.line("}") // mod <name>_dec
+	f.line("}") // mod _<Message>__Decode
 	f.blank()
 }
 
@@ -1923,7 +1915,7 @@ func (g *gen) emitFixlenBegin(f *rfile, fs []frame, use visitorUse) {
 	if len(str) == 0 && len(blob) == 0 {
 		return
 	}
-	f.line("    fn fixlen_begin(&mut self, id: Id, subtype: FixlenType, total: usize) {")
+	f.line("    fn fixlen_begin(&mut self, id: sofab::Id, subtype: sofab::FixlenType, total: usize) {")
 	f.line("        // Every bound below is fully established by the LENGTH WORD, so it is")
 	f.line("        // decided here rather than once payload bytes arrive: a message that ends")
 	f.line("        // right after this word reaches no payload callback at all, and both")
@@ -1941,7 +1933,7 @@ func (g *gen) emitFixlenBegin(f *rfile, fs []frame, use visitorUse) {
 		if len(a.arms) == 0 {
 			continue
 		}
-		f.line("            FixlenType::%s => match (self.cur, id) {", a.variant)
+		f.line("            sofab::FixlenType::%s => match (self.cur, id) {", a.variant)
 		for _, arm := range a.arms {
 			f.line("%s", arm)
 		}
@@ -2255,7 +2247,7 @@ func (g *gen) limArrayStore(expr string) string {
 }
 
 func (g *gen) emitFloatVisit(f *rfile, fs []frame, kind ir.Kind, cb, rtype string, arrSkip bool) {
-	f.line("    fn %s(&mut self, id: Id, value: %s) {", cb, rtype)
+	f.line("    fn %s(&mut self, id: sofab::Id, value: %s) {", cb, rtype)
 	g.emitArraySkipGuard(f, arrSkip)
 	f.line("        match (self.cur, id) {")
 	for _, fr := range fs {

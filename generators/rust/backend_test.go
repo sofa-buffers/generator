@@ -75,9 +75,9 @@ func TestRustStructural(t *testing.T) {
 	// Default corelib is the std corelib-rs: no feature flags, no require! guard.
 	m := exampleModule(t, map[string]any{})
 	for _, want := range []string{
-		"use sofab::{OStream, IStream, Visitor, Id, Unsigned, Signed};",
+		"impl<'a> sofab::Visitor for _V<'a> {", // the corelib is spelled as a path, never imported
 		"pub struct Myfirstmessage {",
-		"pub fn serialize<_F: sofab::Flush>(&self, os: &mut OStream<'_, _F>)",
+		"pub fn serialize<_F: sofab::Flush>(&self, os: &mut sofab::OStream<'_, _F>)",
 		"pub fn encode(&self) -> Vec<u8>",
 		"pub fn decode(data: &[u8]) -> Self",
 		"pub fn try_decode(data: &[u8]) -> Result<Self, DecodeError>",              // fallible entry point (generator#79)
@@ -96,11 +96,11 @@ func TestRustStructural(t *testing.T) {
 		"    Incomplete,",
 		"    Sofab(sofab::Error),",
 		"impl From<sofab::Error> for DecodeError {",
-		"err: bool,",                           // sticky overflow flag on the visitor (generator#82)
-		"inv: bool,",                           // sticky malformed-message flag (generator#100)
-		"mod myfirstmessage_dec {",             // isolated decode module
-		"fn sequence_begin(&mut self, id: Id)", // flat-visitor nesting
-		"ArrayKind",                            // example has arrays -> array_begin imports it
+		"err: bool,",                                  // sticky overflow flag on the visitor (generator#82)
+		"inv: bool,",                                  // sticky malformed-message flag (generator#100)
+		"mod _Myfirstmessage__Decode {",               // isolated decode module (the private channel)
+		"fn sequence_begin(&mut self, id: sofab::Id)", // flat-visitor nesting
+		"sofab::ArrayKind",                            // example has arrays -> array_begin imports it
 		"pub someu64: u64,",
 		"#[serde(default)]",
 		"pub someuintarray: Vec<u32>,",                                // bounded native array -> the profile's dynamic container
@@ -155,16 +155,15 @@ func TestRustStructural(t *testing.T) {
 	// The no_std profile lowers bounded fields to fixed-capacity heapless storage
 	// (serde gated behind a feature), and keeps an alloc fallback for unbounded ones.
 	for _, want := range []string{
-		"#[cfg(feature = \"serde\")]",                                      // serde import gated
-		"#[cfg_attr(feature = \"serde\", derive(Serialize, Deserialize))]", // serde derive gated
-		"pub somestring: heapless::String<50>,",                            // bounded string -> heapless
-		"pub someblob: heapless::Vec<u8, 16>,",                             // bounded blob -> heapless
-		"pub somestringarray: heapless::Vec<heapless::String<16>, 5>,",     // string array -> inline
-		"pub somemap: heapless::Vec<",                                      // bounded -> heapless (default no_std storage)
-		"pub fn encode(&self) -> heapless::Vec<u8,",                        // heap-free encode
-		"stack: heapless::Vec<_Loc,",                                       // bounded decode stack
-		"if !self.somestring.is_empty() {",                                 // string omit: empty default -> is_empty
-		"acc: sofab::PayloadAcc<",                                          // the corelib's accumulator, over storage this crate names (generator#345)
+		"#[cfg_attr(feature = \"serde\", derive(serde::Serialize, serde::Deserialize))]", // serde derive gated
+		"pub somestring: heapless::String<50>,",                                          // bounded string -> heapless
+		"pub someblob: heapless::Vec<u8, 16>,",                                           // bounded blob -> heapless
+		"pub somestringarray: heapless::Vec<heapless::String<16>, 5>,",                   // string array -> inline
+		"pub somemap: heapless::Vec<",                                                    // bounded -> heapless (default no_std storage)
+		"pub fn encode(&self) -> heapless::Vec<u8,",                                      // heap-free encode
+		"stack: heapless::Vec<_Loc,",                                                     // bounded decode stack
+		"if !self.somestring.is_empty() {",                                               // string omit: empty default -> is_empty
+		"acc: sofab::PayloadAcc<",                                                        // the corelib's accumulator, over storage this crate names (generator#345)
 		"match self.acc.feed(total, offset, chunk) { Ok(Some(_v)) => _v, Ok(None) => return, Err(_) => { self.err = true; return; } };", // ...whose finite storage adds the BufferFull arm
 		"match core::str::from_utf8(_p) { Ok(_v) => _v, Err(_) => { self.inv = true; \"\" } }",                                          // strict UTF-8 -> INVALID, agrees with std (issue #85)
 		"self.err = true;", // fixed-capacity overflow flagged in the fill (generator#82)
@@ -177,7 +176,7 @@ func TestRustStructural(t *testing.T) {
 	// visitor must no longer bail on a non-initial chunk (generator#81).
 	for _, notWant := range []string{
 		"pub somestring: String,",
-		"#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]",
+		"#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]",
 		"String::from_utf8_lossy",
 		"if offset != 0 || chunk.len() < total { return; }",
 		"self.acc.extend_from_slice(chunk)",
@@ -269,7 +268,7 @@ messages:
 		// later count-less array still arrives armed. See limArrayStore, and
 		// tests/conformance/rust/post_limit_fill.rs, which measures both halves
 		// of what it buys (generator#511).
-		"(ArrayKind::Unsigned, _Loc::Root, 1) => { if count > MAX_DYN_ARRAY_COUNT { self.lim = true; self.afill = 0; return; }; self.m.arr.clear() },",
+		"(sofab::ArrayKind::Unsigned, _Loc::Root, 1) => { if count > MAX_DYN_ARRAY_COUNT { self.lim = true; self.afill = 0; return; }; self.m.arr.clear() },",
 		"(_Loc::Root, 1) => { if self.afill == 0 { return; } self.afill -= 1; { if !self.lim { self.m.arr.push(value as u64); } }; },",
 		// Unbounded nested native inner array: same guard on its array_begin arm
 		// (the inner-Vec push is skipped, so the store must be lim-gated too).
@@ -279,7 +278,7 @@ messages:
 		// CLEARED on open even here: §7.4 replacement is a semantics rule, so it does
 		// not depend on the bound being a schema `count` (generator#509). What the
 		// missing bound suppresses is the pre-size, and only that.
-		"(ArrayKind::Unsigned, _Loc::Root_mat, _) => { if let Err(_e) = sofab::seq::check_index(id, sofab::seq::Bound::Cap(MAX_DYN_ARRAY_COUNT)) { self.refuse(_e); self.afill = 0; return; }; if count > MAX_DYN_ARRAY_COUNT { self.lim = true; self.afill = 0; return; }; if self.lim { return; }; if let Err(_e) = sofab::seq::reserve_row(&mut self.m.mat, id, sofab::seq::Bound::Cap(MAX_DYN_ARRAY_COUNT)) { self.refuse(_e); self.afill = 0; return; } self._ix0 = id as usize; },",
+		"(sofab::ArrayKind::Unsigned, _Loc::Root_mat, _) => { if let Err(_e) = sofab::seq::check_index(id, sofab::seq::Bound::Cap(MAX_DYN_ARRAY_COUNT)) { self.refuse(_e); self.afill = 0; return; }; if count > MAX_DYN_ARRAY_COUNT { self.lim = true; self.afill = 0; return; }; if self.lim { return; }; if let Err(_e) = sofab::seq::reserve_row(&mut self.m.mat, id, sofab::seq::Bound::Cap(MAX_DYN_ARRAY_COUNT)) { self.refuse(_e); self.afill = 0; return; } self._ix0 = id as usize; },",
 		"(_Loc::Root_mat, _) => { if self.afill == 0 { return; } self.afill -= 1; if value > 4294967295 { self.inv = true; self.afill = 0; return; }; { if !self.lim { if let Some(_r) = self.m.mat.get_mut(self._ix0) { _r.push(value as u32); }; } }; },",
 		// Unbounded string/blob: declared total checked at the top of the callback,
 		// scalar fields and wrapper-sequence string elements alike.
@@ -446,7 +445,7 @@ messages:
 			// Warning suppression over the impl blocks that read the field.
 			"#[allow(deprecated)]\nimpl Default for Telemetry {",
 			"#[allow(deprecated)]\nimpl Telemetry {",
-			"#[allow(deprecated)]\nimpl<'a> Visitor for V<'a> {",
+			"#[allow(deprecated)]\nimpl<'a> sofab::Visitor for _V<'a> {",
 		} {
 			if !strings.Contains(m, want) {
 				t.Errorf("message.rs (%v) missing %q", cfg, want)
@@ -503,64 +502,34 @@ func filesFromYAML(t *testing.T, src string, cfg map[string]any) []generator.Fil
 	return files
 }
 
-// TestRustReservedTypeNames: a schema element whose Rust name collides with a
-// module-scope name the crate already spends -- `DecodeError`, which generator#461
-// added, or one of the six corelib imports -- is refused by the generator, naming
-// the element. Left to rustc it is an E0428/E0255 on generated code with nothing
-// pointing back at the schema, and `decode_error` in particular compiled fine
-// until #461 introduced the enum.
+// TestRustReservedTypeNames: a schema type whose identifier lands on a name the
+// module spends itself -- `DecodeError`, a prelude name, the keyword `Self` --
+// takes the escape (a trailing `_`), and is never refused (ARCHITECTURE §8,
+// "Naming"). A corelib or serde name is not reserved at all: the module spells
+// those as paths. Roles are built from the unescaped identifier.
 func TestRustReservedTypeNames(t *testing.T) {
-	// A named struct or union cannot reach this set: it is emitted under its
-	// graph key, so `struct/Point` becomes `StructPoint`. Only a message can.
-	schemaFor := func(t *testing.T, src string) *ir.Schema {
-		t.Helper()
-		doc, err := parser.Parse([]byte(src), "inline.yaml")
-		if err != nil {
-			t.Fatal(err)
-		}
-		resolved, _ := doc.Resolve()
-		if errs := parser.Validate(resolved); errs != nil {
-			t.Fatalf("invalid: %v", errs)
-		}
-		s, err := model.Build(doc)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if err := analysis.Analyze(s); err != nil {
-			t.Fatal(err)
-		}
-		return s
-	}
-	for _, tc := range []struct{ name, src, want string }{
-		{"message", `
-version: 1
-messages:
-  decode_error: { payload: { a: { id: 0, type: u32 } } }
-`, "DecodeError"},
-		{"corelib-import", `
-version: 1
-messages:
-  i_stream: { payload: { a: { id: 0, type: u32 } } }
-`, "IStream"},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			_, err := (&Backend{}).Generate(schemaFor(t, tc.src), map[string]any{})
-			if err == nil {
-				t.Fatalf("a schema element named %q must be refused, not emitted", tc.want)
-			}
-			if !strings.Contains(err.Error(), tc.want) {
-				t.Errorf("the error must name the colliding type %q; got: %v", tc.want, err)
-			}
-		})
-	}
-	// ...and a name that merely resembles one still generates.
 	m := moduleFromYAML(t, `
 version: 1
 messages:
+  decode_error: { payload: { a: { id: 0, type: u32 } } }
+  vec: { payload: { a: { id: 0, type: u32 } } }
+  self: { payload: { a: { id: 0, type: u32 } } }
+  i_stream: { payload: { a: { id: 0, type: u32 } } }
   decode_errors: { payload: { a: { id: 0, type: u32 } } }
 `, map[string]any{})
-	if !strings.Contains(m, "pub struct DecodeErrors {") {
-		t.Error("only the exact collisions are reserved; DecodeErrors must still generate")
+	for _, want := range []string{
+		"pub struct DecodeError_ {",
+		"pub struct Vec_ {",
+		"pub struct Self_ {",
+		"pub struct IStream {",
+		"pub struct DecodeErrors {",
+		"pub use _DecodeError__Decode::_Decoder as DecodeError__Decoder;",
+		"pub use _Vec__Decode::_Decoder as Vec__Decoder;",
+		"pub enum DecodeError {",
+	} {
+		if !strings.Contains(m, want) {
+			t.Errorf("missing %q", want)
+		}
 	}
 }
 
@@ -703,7 +672,7 @@ messages:
 	// The count-less NATIVE leaf array is untouched: its elements have been dropped
 	// at the store since generator#102 and its array_begin arm allocates nothing,
 	// so there is no container there to refuse (generator#511 keeps that test).
-	if !strings.Contains(m, "(ArrayKind::Unsigned, _Loc::Root, 1) => { if count > MAX_DYN_ARRAY_COUNT { self.lim = true; self.afill = 0; return; }; self.m.nums.clear() },") {
+	if !strings.Contains(m, "(sofab::ArrayKind::Unsigned, _Loc::Root, 1) => { if count > MAX_DYN_ARRAY_COUNT { self.lim = true; self.afill = 0; return; }; self.m.nums.clear() },") {
 		t.Errorf("the count-less native leaf arm must be unchanged:\n%s", m)
 	}
 	if !strings.Contains(m, "{ if !self.lim { self.m.nums.push(value as u32); } }") {
@@ -1036,11 +1005,11 @@ messages:
 		cfg := tc.cfg
 		m := moduleFromYAML(t, src, cfg)
 		for _, want := range []string{
-			"(ArrayKind::Unsigned, _Loc::Root, 0) => { if count > 5 { self.inv = true; self.afill = 0; return; }; self.m.defd.clear()" + tc.size("defd") + " },",
-			"(ArrayKind::Unsigned, _Loc::Root, 2) => { if count > 3 { self.inv = true; self.afill = 0; return; }; self.m.nodef.clear()" + tc.size("nodef") + " },",
+			"(sofab::ArrayKind::Unsigned, _Loc::Root, 0) => { if count > 5 { self.inv = true; self.afill = 0; return; }; self.m.defd.clear()" + tc.size("defd") + " },",
+			"(sofab::ArrayKind::Unsigned, _Loc::Root, 2) => { if count > 3 { self.inv = true; self.afill = 0; return; }; self.m.nodef.clear()" + tc.size("nodef") + " },",
 			// The fp32 array's arm is keyed to its own subtype, so an fp64 header
 			// at id 3 never reaches this bound (generator#259).
-			"(ArrayKind::Fp32, _Loc::Root, 3) => { if count > 3 { self.inv = true; self.afill = 0; return; }; self.m.fdef.clear()" + tc.size("fdef") + " },",
+			"(sofab::ArrayKind::Fp32, _Loc::Root, 3) => { if count > 3 { self.inv = true; self.afill = 0; return; }; self.m.fdef.clear()" + tc.size("fdef") + " },",
 		} {
 			if !strings.Contains(m, want) {
 				t.Errorf("message.rs (%v) missing %q:\n%s", cfg, want, m)
@@ -1089,8 +1058,8 @@ messages:
 		for _, want := range []string{
 			// row id vs the OUTER count, then element count vs the INNER count,
 			// both before the row is opened or grown, both disarming the fill.
-			"(ArrayKind::Unsigned, _Loc::Root_mat, _) => { if let Err(_e) = sofab::seq::check_index(id, sofab::seq::Bound::Schema(2)) { self.refuse(_e); self.afill = 0; return; }; if count > 3 { self.inv = true; self.afill = 0; return; }; ",
-			"(ArrayKind::Fp32, _Loc::Root_fmat, _) => { if let Err(_e) = sofab::seq::check_index(id, sofab::seq::Bound::Schema(2)) { self.refuse(_e); self.afill = 0; return; }; if count > 4 { self.inv = true; self.afill = 0; return; }; ",
+			"(sofab::ArrayKind::Unsigned, _Loc::Root_mat, _) => { if let Err(_e) = sofab::seq::check_index(id, sofab::seq::Bound::Schema(2)) { self.refuse(_e); self.afill = 0; return; }; if count > 3 { self.inv = true; self.afill = 0; return; }; ",
+			"(sofab::ArrayKind::Fp32, _Loc::Root_fmat, _) => { if let Err(_e) = sofab::seq::check_index(id, sofab::seq::Bound::Schema(2)) { self.refuse(_e); self.afill = 0; return; }; if count > 4 { self.inv = true; self.afill = 0; return; }; ",
 		} {
 			if !strings.Contains(m, want) {
 				t.Errorf("message.rs (%v) missing %q:\n%s", cfg, want, m)
@@ -1133,12 +1102,12 @@ messages:
 			"askip: usize,", // the discard counter
 			"if self.askip > 0 { self.askip -= 1; return; }", // consumed by unsigned/signed/fp32/fp64
 			"self.askip = match kind {",
-			"ArrayKind::Unsigned => match (self.cur, id) {",
-			"(_Loc::Root, 2) => 0,",                     // declared u32 array: elements store normally
-			"(_Loc::Root, 3) => 0,",                     // declared i32 array: likewise
-			"ArrayKind::Fp32 => match (self.cur, id) {", // subtype-keyed fixlen arm (#259)
-			"(_Loc::Root, 4) => 0,",                     // declared fp32 array: disarms under Fp32 (#193)
-			"_ => count,",                               // every other id (scalar or unknown) discards
+			"sofab::ArrayKind::Unsigned => match (self.cur, id) {",
+			"(_Loc::Root, 2) => 0,",                            // declared u32 array: elements store normally
+			"(_Loc::Root, 3) => 0,",                            // declared i32 array: likewise
+			"sofab::ArrayKind::Fp32 => match (self.cur, id) {", // subtype-keyed fixlen arm (#259)
+			"(_Loc::Root, 4) => 0,",                            // declared fp32 array: disarms under Fp32 (#193)
+			"_ => count,",                                      // every other id (scalar or unknown) discards
 		} {
 			if !strings.Contains(m, want) {
 				t.Errorf("message.rs (%v) missing §7.3 array-at-scalar guard %q:\n%s", cfg, want, m)
@@ -1161,7 +1130,7 @@ messages:
   m: { payload: { u: { id: 0, type: u8 } } }
 `, map[string]any{})
 	for _, want := range []string{
-		"fn array_begin(&mut self, id: Id, kind: ArrayKind, count: usize) {",
+		"fn array_begin(&mut self, id: sofab::Id, kind: sofab::ArrayKind, count: usize) {",
 		"self.askip = match kind {",
 	} {
 		if !strings.Contains(scalarOnly, want) {
@@ -1180,7 +1149,7 @@ messages:
   m: { payload: { u: { id: 0, type: u8 } } }
 `, map[string]any{"corelib": "rs-no-std"})
 	for _, want := range []string{
-		"fn array_begin(&mut self, id: Id, kind: ArrayKind, count: usize) {",
+		"fn array_begin(&mut self, id: sofab::Id, kind: sofab::ArrayKind, count: usize) {",
 		"self.askip = match kind {",
 	} {
 		if !strings.Contains(nostdScalar, want) {
@@ -1241,19 +1210,19 @@ messages:
 		for _, want := range []string{
 			// Skip counter: each fp field disarms only under its own subtype's arm,
 			// so the other subtype falls through to `_ => count` and is discarded.
-			"ArrayKind::Fp32 => match (self.cur, id) {\n                (_Loc::Root, 1) => 0,\n                _ => count,\n            },",
-			"ArrayKind::Fp64 => match (self.cur, id) {\n                (_Loc::Root, 2) => 0,\n                _ => count,\n            },",
+			"sofab::ArrayKind::Fp32 => match (self.cur, id) {\n                (_Loc::Root, 1) => 0,\n                _ => count,\n            },",
+			"sofab::ArrayKind::Fp64 => match (self.cur, id) {\n                (_Loc::Root, 2) => 0,\n                _ => count,\n            },",
 			// Fill counter: same keying, so a contradicting header arms nothing.
-			"ArrayKind::Fp32 => match (self.cur, id) {\n                (_Loc::Root, 1) => count,\n                _ => 0,\n            },",
-			"ArrayKind::Fp64 => match (self.cur, id) {\n                (_Loc::Root, 2) => count,\n                _ => 0,\n            },",
+			"sofab::ArrayKind::Fp32 => match (self.cur, id) {\n                (_Loc::Root, 1) => count,\n                _ => 0,\n            },",
+			"sofab::ArrayKind::Fp64 => match (self.cur, id) {\n                (_Loc::Root, 2) => count,\n                _ => 0,\n            },",
 			// Target match: keyed by (kind, loc, id), with the schema `count` bound
 			// and the clear both INSIDE the kind-matched arm.
 			"match (kind, self.cur, id) {",
-			"(ArrayKind::Fp32, _Loc::Root, 1) => { if count > 4 { self.inv = true; self.afill = 0; return; }; self.m.f32s.clear()" + tc.size("f32s") + " },",
-			"(ArrayKind::Fp64, _Loc::Root, 2) => { if count > 6 { self.inv = true; self.afill = 0; return; }; self.m.f64s.clear()" + tc.size("f64s") + " },",
+			"(sofab::ArrayKind::Fp32, _Loc::Root, 1) => { if count > 4 { self.inv = true; self.afill = 0; return; }; self.m.f32s.clear()" + tc.size("f32s") + " },",
+			"(sofab::ArrayKind::Fp64, _Loc::Root, 2) => { if count > 6 { self.inv = true; self.afill = 0; return; }; self.m.f64s.clear()" + tc.size("f64s") + " },",
 			// Integer arrays are unaffected: no second header word, so no subtype to
 			// contradict.
-			"(ArrayKind::Unsigned, _Loc::Root, 3) => { if count > 8 { self.inv = true; self.afill = 0; return; }; self.m.ints.clear()" + tc.size("ints") + " },",
+			"(sofab::ArrayKind::Unsigned, _Loc::Root, 3) => { if count > 8 { self.inv = true; self.afill = 0; return; }; self.m.ints.clear()" + tc.size("ints") + " },",
 		} {
 			if !strings.Contains(m, want) {
 				t.Errorf("message.rs (%v) missing subtype-keyed fixlen arm %q:\n%s", cfg, want, m)
@@ -1262,11 +1231,11 @@ messages:
 		// The declared fp32 field must not be reachable from an Fp64 header, and
 		// vice versa — the whole point of the split.
 		for _, bad := range []string{
-			"(ArrayKind::Fp64, _Loc::Root, 1)",
-			"(ArrayKind::Fp32, _Loc::Root, 2)",
+			"(sofab::ArrayKind::Fp64, _Loc::Root, 1)",
+			"(sofab::ArrayKind::Fp32, _Loc::Root, 2)",
 			"(_, _Loc::Root, 1)",
 			"(_, _Loc::Root, 2)",
-			"ArrayKind::Fixlen",
+			"sofab::ArrayKind::Fixlen",
 		} {
 			if strings.Contains(m, bad) {
 				t.Errorf("message.rs (%v) must not contain %q -- a fixlen arm is keyed to one subtype:\n%s", cfg, bad, m)
@@ -1295,10 +1264,10 @@ version: 1
 messages:
   m: { payload: { f: { id: 1, type: array, items: { type: fp32, count: 4 } } } }
 `, map[string]any{"corelib": "rs-no-std"})
-	if !strings.Contains(only32, "ArrayKind::Fp32 => match (self.cur, id) {") {
+	if !strings.Contains(only32, "sofab::ArrayKind::Fp32 => match (self.cur, id) {") {
 		t.Errorf("fp32-only message.rs must name the Fp32 arm:\n%s", only32)
 	}
-	if strings.Contains(only32, "ArrayKind::Fp64") {
+	if strings.Contains(only32, "sofab::ArrayKind::Fp64") {
 		t.Errorf("fp32-only message.rs must not name Fp64 (feature-gated under no_std):\n%s", only32)
 	}
 	if !strings.Contains(only32, "            _ => 0,\n        };\n        self.afill") {
@@ -1314,7 +1283,7 @@ version: 1
 messages:
   m: { payload: { a: { id: 1, type: array, items: { type: u16, count: 4 } } } }
 `, map[string]any{"corelib": "rs-no-std"})
-	for _, bad := range []string{"ArrayKind::Fp32", "ArrayKind::Fp64"} {
+	for _, bad := range []string{"sofab::ArrayKind::Fp32", "sofab::ArrayKind::Fp64"} {
 		if strings.Contains(noFP, bad) {
 			t.Errorf("fp-free message.rs must not name %q:\n%s", bad, noFP)
 		}
@@ -1350,7 +1319,7 @@ messages:
 `
 	for _, cfg := range []map[string]any{{}, {"corelib": "rs-no-std"}} {
 		m := moduleFromYAML(t, asym, cfg)
-		if !strings.Contains(m, "fn fp32(&mut self, id: Id, value: f32) {") {
+		if !strings.Contains(m, "fn fp32(&mut self, id: sofab::Id, value: f32) {") {
 			t.Fatalf("message.rs (%v) should override fp32():\n%s", cfg, m)
 		}
 		if strings.Contains(m, "fn fp64(") {
@@ -1359,13 +1328,13 @@ messages:
 		// Fp32 elements arrive at the overridden fp32(), so they must be counted
 		// out; the fp64 header delivers nothing, so it arms nothing.
 		want := "        self.askip = match kind {\n" +
-			"            ArrayKind::Unsigned => match (self.cur, id) {\n" +
+			"            sofab::ArrayKind::Unsigned => match (self.cur, id) {\n" +
 			"                _ => count,\n" +
 			"            },\n" +
-			"            ArrayKind::Signed => match (self.cur, id) {\n" +
+			"            sofab::ArrayKind::Signed => match (self.cur, id) {\n" +
 			"                _ => count,\n" +
 			"            },\n" +
-			"            ArrayKind::Fp32 => count,\n" +
+			"            sofab::ArrayKind::Fp32 => count,\n" +
 			"            _ => 0,\n" +
 			"        };"
 		if !strings.Contains(m, want) {
@@ -1383,7 +1352,7 @@ messages:
       f:    { id: 2, type: fp64 }
       keep: { id: 4, type: u32 }
 `, nil)
-	if !strings.Contains(mirror, "            ArrayKind::Fp32 => 0,\n            _ => count,\n        };") {
+	if !strings.Contains(mirror, "            sofab::ArrayKind::Fp32 => 0,\n            _ => count,\n        };") {
 		t.Errorf("fp64-only message.rs must arm 0 for the undelivered Fp32 header:\n%s", mirror)
 	}
 
@@ -1397,7 +1366,7 @@ messages:
       f:    { id: 2, type: array, items: { type: fp64, count: 4 } }
       keep: { id: 4, type: u32 }
 `, nil)
-	if !strings.Contains(arr, "ArrayKind::Fp64 => match (self.cur, id) {\n                (_Loc::Root, 2) => 0,\n                _ => count,\n            },") {
+	if !strings.Contains(arr, "sofab::ArrayKind::Fp64 => match (self.cur, id) {\n                (_Loc::Root, 2) => 0,\n                _ => count,\n            },") {
 		t.Errorf("declared fp64[] must keep arming the discard counter at other ids:\n%s", arr)
 	}
 	if !strings.Contains(arr, "            _ => 0,\n        };\n        self.afill") {
@@ -1431,10 +1400,10 @@ messages:
 	} {
 		m := moduleFromYAML(t, src, cfg)
 		for _, want := range []string{
-			// Re-exported under the message's own name; the decoder module stays private.
-			"pub use m_dec::Decoder as MDecoder;",
-			"pub fn decoder() -> MDecoder {",
-			"pub struct Decoder {",
+			// Re-exported under the message's role name; the decoder module stays private.
+			"pub use _M__Decode::_Decoder as M__Decoder;",
+			"pub fn decoder() -> M__Decoder {",
+			"pub struct _Decoder {",
 			// feed mirrors the corelib since corelib-rs#101: Complete and Incomplete
 			// are BOTH ordinary outcomes and share the Ok arm, because only the
 			// caller's framing knows whether more bytes come (§5.2.1/§5.2.4). The
@@ -1451,9 +1420,9 @@ messages:
 			"return Err(DecodeError::Incomplete);",
 			// The state the visitor needs across chunks lives in the decoder, not
 			// in a borrow: a self-referential struct would need unsafe.
-			"let mut v = V { m: &mut self.m,",
+			"let mut v = _V { m: &mut self.m,",
 			"let r = self.is.feed(chunk, &mut v);",
-			"let V {",
+			"let _V {",
 			// INVALID dominates a truncated tail, so it is checked before feed's
 			// own Incomplete verdict is returned. In feed it stays a plain
 			// sofab::Error -- feed has no truncation verdict to give.
@@ -1503,8 +1472,8 @@ messages:
 	// all-default interior element into an id gap). The field's own wrapper still
 	// always takes the dropping closer.
 	for _, want := range []string{
-		"let _ = os.write_sequence_begin_lazy(_i0 as Id); _e0.serialize(os);\n            if _i0 + 1 == self.fixed.len() { let _ = os.write_sequence_end_keep(); } else { let _ = os.write_sequence_end(); }\n        }\n        let _ = os.write_sequence_end();",
-		"let _ = os.write_sequence_begin_lazy(_i0 as Id); _e0.serialize(os);\n            if _i0 + 1 == self.dynamic.len() { let _ = os.write_sequence_end_keep(); } else { let _ = os.write_sequence_end(); }\n        }\n        let _ = os.write_sequence_end();",
+		"let _ = os.write_sequence_begin_lazy(_i0 as sofab::Id); _e0.serialize(os);\n            if _i0 + 1 == self.fixed.len() { let _ = os.write_sequence_end_keep(); } else { let _ = os.write_sequence_end(); }\n        }\n        let _ = os.write_sequence_end();",
+		"let _ = os.write_sequence_begin_lazy(_i0 as sofab::Id); _e0.serialize(os);\n            if _i0 + 1 == self.dynamic.len() { let _ = os.write_sequence_end_keep(); } else { let _ = os.write_sequence_end(); }\n        }\n        let _ = os.write_sequence_end();",
 	} {
 		if !strings.Contains(got, want) {
 			t.Errorf("positional closer expected:\n%s", got)
@@ -1513,9 +1482,9 @@ messages:
 	// The leaf elements take the same rule through the same expression, count:N and
 	// count-less alike.
 	for _, want := range []string{
-		"for (_i0, _e0) in self.fstrs.iter().enumerate() { if !_e0.is_empty() || _i0 + 1 == self.fstrs.len() { let _ = os.write_str(_i0 as Id, _e0); } }",
-		"for (_i0, _e0) in self.dstrs.iter().enumerate() { if !_e0.is_empty() || _i0 + 1 == self.dstrs.len() { let _ = os.write_str(_i0 as Id, _e0); } }",
-		"for (_i0, _e0) in self.dblobs.iter().enumerate() { if !_e0.is_empty() || _i0 + 1 == self.dblobs.len() { let _ = os.write_blob(_i0 as Id, _e0); } }",
+		"for (_i0, _e0) in self.fstrs.iter().enumerate() { if !_e0.is_empty() || _i0 + 1 == self.fstrs.len() { let _ = os.write_str(_i0 as sofab::Id, _e0); } }",
+		"for (_i0, _e0) in self.dstrs.iter().enumerate() { if !_e0.is_empty() || _i0 + 1 == self.dstrs.len() { let _ = os.write_str(_i0 as sofab::Id, _e0); } }",
+		"for (_i0, _e0) in self.dblobs.iter().enumerate() { if !_e0.is_empty() || _i0 + 1 == self.dblobs.len() { let _ = os.write_blob(_i0 as sofab::Id, _e0); } }",
 	} {
 		if !strings.Contains(got, want) {
 			t.Errorf("message.rs missing %q:\n%s", want, got)
@@ -1735,7 +1704,7 @@ messages:
 		}
 		// Matrix rows: array_begin opens the row the id names, and elements push into
 		// THAT row rather than into the last one appended.
-		if !strings.Contains(got, "(ArrayKind::Unsigned, _Loc::Root_mat, _) => { if let Err(_e) = sofab::seq::check_index(id, sofab::seq::Bound::Schema(4)) { self.refuse(_e); self.afill = 0; return; }; if count > 3 { self.inv = true; self.afill = 0; return; }; ") ||
+		if !strings.Contains(got, "(sofab::ArrayKind::Unsigned, _Loc::Root_mat, _) => { if let Err(_e) = sofab::seq::check_index(id, sofab::seq::Bound::Schema(4)) { self.refuse(_e); self.afill = 0; return; }; if count > 3 { self.inv = true; self.afill = 0; return; }; ") ||
 			// Pinned to the closing brace: all three configs here have DYNAMIC rows,
 			// so all three CLEAR the row through reserve_row -- a repeated row id
 			// replaces rather than merges (§7.4, generator#509) -- and then size it
@@ -2276,7 +2245,7 @@ func TestRustWidthAdmitsUndeclaredValues(t *testing.T) {
 
 // generator#270 (Crucible F-0045) and generator#271 (F-0046) are one slip seen
 // from two sides: array_begin keyed its arms on the kind FAMILY
-// (`ArrayKind::Unsigned | ArrayKind::Signed` in a single arm) and applied the
+// (`sofab::ArrayKind::Unsigned | sofab::ArrayKind::Signed` in a single arm) and applied the
 // schema `count` through a wildcard-kind arm. Both let a header whose wire kind
 // §7.3 says to skip reach machinery that belongs to a field it is not.
 //
@@ -2313,21 +2282,21 @@ messages:
 		cfg := tc.cfg
 		got := moduleFromYAML(t, src, cfg)
 		for _, want := range []string{
-			// One arm per wire kind: never `Unsigned | Signed` collapsed together.
-			"ArrayKind::Unsigned => match (self.cur, id) {",
-			"ArrayKind::Signed => match (self.cur, id) {",
+			// One arm per wire kind: never `sofab::Unsigned | sofab::Signed` collapsed together.
+			"sofab::ArrayKind::Unsigned => match (self.cur, id) {",
+			"sofab::ArrayKind::Signed => match (self.cur, id) {",
 			// The u8 array disarms the discard counter ONLY under Unsigned, the i8
 			// array ONLY under Signed — that is the §7.3 kind check (#270).
-			"            ArrayKind::Unsigned => match (self.cur, id) {\n                (_Loc::Root_arrays, 0) => 0,\n                _ => count,\n            },",
-			"            ArrayKind::Signed => match (self.cur, id) {\n                (_Loc::Root_arrays, 1) => 0,\n                _ => count,\n            },",
+			"            sofab::ArrayKind::Unsigned => match (self.cur, id) {\n                (_Loc::Root_arrays, 0) => 0,\n                _ => count,\n            },",
+			"            sofab::ArrayKind::Signed => match (self.cur, id) {\n                (_Loc::Root_arrays, 1) => 0,\n                _ => count,\n            },",
 			// ... and the fill counter is armed under the same keying, so a
 			// kind-mismatched header leaves it at 0 and the next bare scalar is not
 			// absorbed (#270).
-			"            ArrayKind::Unsigned => match (self.cur, id) {\n                (_Loc::Root_arrays, 0) => count,\n                _ => 0,\n            },",
+			"            sofab::ArrayKind::Unsigned => match (self.cur, id) {\n                (_Loc::Root_arrays, 0) => count,\n                _ => 0,\n            },",
 			// The schema `count` bound names the declared kind, so a fixlen header
 			// at an integer id matches no arm and is never measured (#271).
-			"(ArrayKind::Unsigned, _Loc::Root_arrays, 0) => { if count > 5 { self.inv = true; self.afill = 0; return; }; self.m.arrays.u8s.clear()" + tc.size("u8s") + " },",
-			"(ArrayKind::Signed, _Loc::Root_arrays, 1) => { if count > 5 { self.inv = true; self.afill = 0; return; }; self.m.arrays.i8s.clear()" + tc.size("i8s") + " },",
+			"(sofab::ArrayKind::Unsigned, _Loc::Root_arrays, 0) => { if count > 5 { self.inv = true; self.afill = 0; return; }; self.m.arrays.u8s.clear()" + tc.size("u8s") + " },",
+			"(sofab::ArrayKind::Signed, _Loc::Root_arrays, 1) => { if count > 5 { self.inv = true; self.afill = 0; return; }; self.m.arrays.i8s.clear()" + tc.size("i8s") + " },",
 		} {
 			if !strings.Contains(got, want) {
 				t.Errorf("(%v) array_begin must key on the wire kind, missing %q:\n%s", cfg, want, got)
@@ -2335,7 +2304,7 @@ messages:
 		}
 		// The defects themselves: a collapsed integer family, and a bound reachable
 		// through a wildcard kind.
-		if strings.Contains(got, "ArrayKind::Unsigned | ArrayKind::Signed") {
+		if strings.Contains(got, "sofab::ArrayKind::Unsigned | sofab::ArrayKind::Signed") {
 			t.Errorf("(%v) the integer kinds must not share one arm (#270):\n%s", cfg, got)
 		}
 		if strings.Contains(got, "(_, _Loc::Root_arrays,") {
@@ -2445,7 +2414,7 @@ messages:
 		got := moduleFromYAML(t, src, cfg)
 		// Emitted even though nothing here is a sequence, and `id` is named _id so
 		// the generated crate stays warning-clean with no arms to read it.
-		want := "    fn sequence_begin(&mut self, _id: Id) {\n" +
+		want := "    fn sequence_begin(&mut self, _id: sofab::Id) {\n" +
 			"        // Inside a skipped subtree: count the level and stay Dead.\n" +
 			"        if self.cur == _Loc::Dead { self.dead = self.dead.saturating_add(1); return; }\n" +
 			"        if let Some(_slot) = self.stack.get_mut(self.sp) { *_slot = self.cur; self.sp += 1; } else { self.err = true; self.dead = self.dead.saturating_add(1); self.cur = _Loc::Dead; return; }\n" +
@@ -2546,7 +2515,7 @@ func TestRustStaticStorageOnStd(t *testing.T) {
 		// Still a std crate: serde derived unconditionally. staticStore governs
 		// message fields, not the environment; the decode stack is a fixed array
 		// on std whatever the storage (TestRustStdDecodeStackIsFixed).
-		"#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]",
+		"#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]",
 		"stack: [_Loc; ",
 		// A fixed-capacity destination is filled in place and its overflow is
 		// reported, rather than being moved into as an owned String.
@@ -2563,7 +2532,7 @@ func TestRustStaticStorageOnStd(t *testing.T) {
 	for _, notWant := range []string{
 		"#![no_std]",
 		"alloc::string::String",
-		"#[cfg_attr(feature = \"serde\", derive(Serialize, Deserialize))]",
+		"#[cfg_attr(feature = \"serde\", derive(serde::Serialize, serde::Deserialize))]",
 	} {
 		if strings.Contains(m, notWant) {
 			t.Errorf("static storage on std must not make the crate no_std; found %q", notWant)
@@ -2729,21 +2698,17 @@ messages:
       sa: { id: 2, type: array, items: { type: string, count: 3, maxlen: 6 } }
 `, map[string]any{})
 
-	if !strings.Contains(m, "fn fixlen_begin(&mut self, id: Id, subtype: FixlenType, total: usize)") {
+	if !strings.Contains(m, "fn fixlen_begin(&mut self, id: sofab::Id, subtype: sofab::FixlenType, total: usize)") {
 		t.Fatal("no fixlen_begin override")
 	}
-	// FixlenType is imported on demand -- naming it without the import does not compile.
-	if !strings.Contains(m, ", FixlenType};") {
-		t.Error("FixlenType must be imported where fixlen_begin names it")
-	}
 	// Scalar maxlen, keyed by (scope, field id), under the declared subtype.
-	if !strings.Contains(m, "FixlenType::Str => match (self.cur, id) {") ||
+	if !strings.Contains(m, "sofab::FixlenType::Str => match (self.cur, id) {") ||
 		!strings.Contains(m, "(_Loc::Root, 0) => if total > 8 { self.inv = true; return; },") {
-		t.Error("a scalar string maxlen must be latched under FixlenType::Str")
+		t.Error("a scalar string maxlen must be latched under sofab::FixlenType::Str")
 	}
-	if !strings.Contains(m, "FixlenType::Blob => match (self.cur, id) {") ||
+	if !strings.Contains(m, "sofab::FixlenType::Blob => match (self.cur, id) {") ||
 		!strings.Contains(m, "(_Loc::Root, 1) => if total > 4 { self.inv = true; return; },") {
-		t.Error("a scalar blob maxlen must be latched under FixlenType::Blob")
+		t.Error("a scalar blob maxlen must be latched under sofab::FixlenType::Blob")
 	}
 	// A wrapper element carries BOTH bounds, over-index first: an element that is
 	// not this array's element at all must not be measured against its bound.
@@ -2752,7 +2717,7 @@ messages:
 	}
 	// And each bound is compared exactly once, at that word (#594): the payload
 	// callbacks restate none of them.
-	if !strings.Contains(m, "fn string(&mut self, id: Id, total: usize, offset: usize, chunk: &[u8]) {") {
+	if !strings.Contains(m, "fn string(&mut self, id: sofab::Id, total: usize, offset: usize, chunk: &[u8]) {") {
 		t.Error("the string callback must still be emitted")
 	}
 	if n := strings.Count(m, "total > 8"); n != 1 {
@@ -2907,7 +2872,7 @@ messages:
 		// match arm whose pattern names the location (and, for arrays, the wire
 		// kind) this field decodes at. A guard that is not one caps whatever the
 		// callback was handed, skipped or not.
-		if !strings.HasPrefix(trimmed, "(_Loc::") && !strings.HasPrefix(trimmed, "(ArrayKind::") {
+		if !strings.HasPrefix(trimmed, "(_Loc::") && !strings.HasPrefix(trimmed, "(sofab::ArrayKind::") {
 			t.Errorf("a receiver cap outside a keyed match arm (§7.3-skipped fields would be capped):\n%s", trimmed)
 		}
 	}
@@ -2968,8 +2933,8 @@ messages:
 		// for a rule this test covers.)
 		"(_Loc::Root_sa, _) => { if total > MAX_DYN_STRING_LEN { self.lim = true; return; }; },",
 		// ...all of it behind the §7.3 declared-subtype gate.
-		"FixlenType::Str => match (self.cur, id) {",
-		"FixlenType::Blob => match (self.cur, id) {",
+		"sofab::FixlenType::Str => match (self.cur, id) {",
+		"sofab::FixlenType::Blob => match (self.cur, id) {",
 	} {
 		if !strings.Contains(fx, want) {
 			t.Errorf("fixlen_begin missing %q\ngot:\n%s", want, fx)
@@ -3059,18 +3024,18 @@ messages:
 			// Whole arms, so the ORDER is pinned too: the reserve can only ever
 			// follow the over-count reject. Reserving first would hand an
 			// attacker-controlled count straight to the allocator.
-			"(ArrayKind::Unsigned, _Loc::Root, 0) => { if count > 4 { self.inv = true; self.afill = 0; return; }; self.m.nums.clear(); self.m.nums.reserve_exact(count) },",
+			"(sofab::ArrayKind::Unsigned, _Loc::Root, 0) => { if count > 4 { self.inv = true; self.afill = 0; return; }; self.m.nums.clear(); self.m.nums.reserve_exact(count) },",
 			// A fixlen (fp) array is the same arm, reached through its own subtype.
-			"(ArrayKind::Fp32, _Loc::Root, 1) => { if count > 3 { self.inv = true; self.afill = 0; return; }; self.m.fps.clear(); self.m.fps.reserve_exact(count) },",
+			"(sofab::ArrayKind::Fp32, _Loc::Root, 1) => { if count > 3 { self.inv = true; self.afill = 0; return; }; self.m.fps.clear(); self.m.fps.reserve_exact(count) },",
 			// Under a struct, addressed through the frame's path -- the bound is not
 			// a property of being at Root.
-			"(ArrayKind::Unsigned, _Loc::Root_s, 0) => { if count > 5 { self.inv = true; self.afill = 0; return; }; self.m.s.vals.clear(); self.m.s.vals.reserve_exact(count) },",
+			"(sofab::ArrayKind::Unsigned, _Loc::Root_s, 0) => { if count > 5 { self.inv = true; self.afill = 0; return; }; self.m.s.vals.clear(); self.m.s.vals.reserve_exact(count) },",
 			// ...and inside a struct that is the ELEMENT of a wrapper sequence, where
 			// the arm is addressed through the element index and fires once per
 			// element rather than once per message. That is the fourth reach of the
 			// leaf arm, and the first cut of #505 left it out of its own surface
 			// claim; csharp emits `new ulong[count]` at the identical shape.
-			"(ArrayKind::Unsigned, _Loc::Root_rows_e, 0) => { if count > 7 { self.inv = true; self.afill = 0; return; }; self.m.rows[self._ix1].vs.clear(); self.m.rows[self._ix1].vs.reserve_exact(count) },",
+			"(sofab::ArrayKind::Unsigned, _Loc::Root_rows_e, 0) => { if count > 7 { self.inv = true; self.afill = 0; return; }; self.m.rows[self._ix1].vs.clear(); self.m.rows[self._ix1].vs.reserve_exact(count) },",
 			// A nested row is the same field one level down: its INNER count is
 			// checked by the row guards, so the row reserve_row just opened -- and
 			// CLEARED -- is sized from it, on the Ok arm only: a full fixed-capacity
@@ -3114,7 +3079,7 @@ messages:
             vs: { id: 0, type: array, items: { type: u64, count: 7 } }
 `
 	d := moduleFromYAML(t, unbounded, map[string]any{})
-	if !strings.Contains(d, "(ArrayKind::Unsigned, _Loc::Root, 1) => { if count > MAX_DYN_ARRAY_COUNT { self.lim = true; self.afill = 0; return; }; self.m.free.clear() },") {
+	if !strings.Contains(d, "(sofab::ArrayKind::Unsigned, _Loc::Root, 1) => { if count > MAX_DYN_ARRAY_COUNT { self.lim = true; self.afill = 0; return; }; self.m.free.clear() },") {
 		t.Errorf("the count-less arm must stay lazy -- clear and nothing else:\n%s", d)
 	}
 	if strings.Contains(d, "self.m.free.reserve") {
@@ -3150,7 +3115,7 @@ messages:
 	// The wrapper-sequence element arm is the one that fires up to
 	// MAX_DYN_ARRAY_COUNT times per message; it is bounded per firing by its own
 	// schema count, and now by the ceiling as well.
-	if !strings.Contains(d, "(ArrayKind::Unsigned, _Loc::Root_wrapped_e, 0) => { if count > 7 { self.inv = true; self.afill = 0; return; }; self.m.wrapped[self._ix1].vs.clear(); self.m.wrapped[self._ix1].vs.reserve_exact(count) },") {
+	if !strings.Contains(d, "(sofab::ArrayKind::Unsigned, _Loc::Root_wrapped_e, 0) => { if count > 7 { self.inv = true; self.afill = 0; return; }; self.m.wrapped[self._ix1].vs.clear(); self.m.wrapped[self._ix1].vs.reserve_exact(count) },") {
 		t.Errorf("a bounded array under an unbounded wrapper sequence must be sized:\n%s", d)
 	}
 
@@ -3183,7 +3148,7 @@ messages:
 		if strings.Contains(m, "reserve_exact") {
 			t.Errorf("message.rs (%v) must not reserve into fixed-capacity storage:\n%s", cfg, m)
 		}
-		if !strings.Contains(m, "(ArrayKind::Unsigned, _Loc::Root, 0) => { if count > 4 { self.inv = true; self.afill = 0; return; }; self.m.nums.clear() },") {
+		if !strings.Contains(m, "(sofab::ArrayKind::Unsigned, _Loc::Root, 0) => { if count > 4 { self.inv = true; self.afill = 0; return; }; self.m.nums.clear() },") {
 			t.Errorf("message.rs (%v) fixed-capacity arm must be clear-only:\n%s", cfg, m)
 		}
 	}
@@ -3232,14 +3197,14 @@ messages:
 			// The schema-bounded count header — the shape the issue measured. The
 			// disarm precedes #505's reserve, which is untouched and still only ever
 			// reached by a count the reject has already approved.
-			"(ArrayKind::Unsigned, _Loc::Root, 0) => { if count > 4 { self.inv = true; self.afill = 0; return; }; self.m.bigs.clear()",
+			"(sofab::ArrayKind::Unsigned, _Loc::Root, 0) => { if count > 4 { self.inv = true; self.afill = 0; return; }; self.m.bigs.clear()",
 			// The fixlen (fp) twin, reached through its own subtype: the issue never
 			// measured it and it was exposed identically.
-			"(ArrayKind::Fp64, _Loc::Root, 2) => { if count > 4 { self.inv = true; self.afill = 0; return; }; self.m.fx.clear()",
+			"(sofab::ArrayKind::Fp64, _Loc::Root, 2) => { if count > 4 { self.inv = true; self.afill = 0; return; }; self.m.fx.clear()",
 			// A native ROW's two bounds — the row id against the outer count, and the
 			// row's own element count against the inner one. These already disarmed;
 			// pinned so they stay that way.
-			"(ArrayKind::Unsigned, _Loc::Root_mat, _) => { if let Err(_e) = sofab::seq::check_index(id, sofab::seq::Bound::Schema(2)) { self.refuse(_e); self.afill = 0; return; }; if count > 4 { self.inv = true; self.afill = 0; return; }",
+			"(sofab::ArrayKind::Unsigned, _Loc::Root_mat, _) => { if let Err(_e) = sofab::seq::check_index(id, sofab::seq::Bound::Schema(2)) { self.refuse(_e); self.afill = 0; return; }; if count > 4 { self.inv = true; self.afill = 0; return; }",
 			// The MID-ARRAY width trip: an element that breaches its declared width
 			// invalidates the message, and every later element of that same array
 			// still arrives. Unsigned and signed forms both; the push that follows is
@@ -3279,7 +3244,7 @@ messages:
       objs:   { id: 5, type: array, items: { type: struct, count: 2, fields: { x: { id: 0, type: u32 } } } }
       mat:    { id: 6, type: array, items: { type: array, count: 2, items: { type: u32, count: 4 } } }
 `, map[string]any{"corelib": "rs", "max_dyn_array_count": 64})
-	if !strings.Contains(d, "(ArrayKind::Unsigned, _Loc::Root, 1) => { if count > MAX_DYN_ARRAY_COUNT { self.lim = true; self.afill = 0; return; }; self.m.free.clear() },") {
+	if !strings.Contains(d, "(sofab::ArrayKind::Unsigned, _Loc::Root, 1) => { if count > MAX_DYN_ARRAY_COUNT { self.lim = true; self.afill = 0; return; }; self.m.free.clear() },") {
 		t.Errorf("the over-cap count header must disarm the fill too:\n%s", d)
 	}
 	for _, m := range append(mods, d) {
@@ -3421,10 +3386,13 @@ func TestRustNoBlanketAllow(t *testing.T) {
 	narrow := map[string]bool{
 		"#[allow(deprecated)]": true,
 		"#[allow(non_camel_case_types)] // variants spell the schema path (Root_a_b), not a type name": true,
-		approxConstantAllow: true,
-		derivableImplsAllow: true,
-		visitorClippyAllow:  true,
-		unionEnumAllow:      true,
+		approxConstantAllow:  true,
+		derivableImplsAllow:  true,
+		visitorClippyAllow:   true,
+		unionEnumAllow:       true,
+		leafModAllow:         true,
+		decodeModAllow:       true,
+		typeNameAllow("M_A"): true,
 	}
 	for _, cfg := range []map[string]any{
 		{"corelib": "rs"},
@@ -3451,45 +3419,33 @@ func TestRustNoBlanketAllow(t *testing.T) {
 // an id and a value nothing reads.
 func TestRustUnarmedScalarVisitHasNoUnusedParams(t *testing.T) {
 	m := moduleFromYAML(t, "version: 1\nmessages:\n  u: { payload: { a: { id: 0, type: u32 } } }\n", map[string]any{"corelib": "rs"})
-	want := "    fn signed(&mut self, _id: Id, _value: Signed) {\n" +
+	want := "    fn signed(&mut self, _id: sofab::Id, _value: sofab::Signed) {\n" +
 		"        if self.askip > 0 { self.askip -= 1; } // array delivered at a scalar id\n" +
 		"    }\n"
 	if !strings.Contains(m, want) {
 		t.Errorf("unarmed signed() not in its drain-only form:\n%s", sliceFn(t, m, "    fn signed("))
 	}
-	if !strings.Contains(m, "    fn unsigned(&mut self, id: Id, value: Unsigned) {") {
+	if !strings.Contains(m, "    fn unsigned(&mut self, id: sofab::Id, value: sofab::Unsigned) {") {
 		t.Error("armed unsigned() lost its named parameters")
 	}
 }
 
-// TestRustImportsFollowTheBody: the crate-level imports are exactly the names
-// the module uses unqualified -- a doc comment or a sofab:: path does not count,
-// and the per-message decoder module imports only what `use super::*` cannot
-// give it.
-func TestRustImportsFollowTheBody(t *testing.T) {
-	got := usedNames("// Visitor in a comment\nlet x = sofab::Unsigned::MAX;\nimpl Visitor for V {}\nlet s: Signed = 0; // OStream\n",
-		"OStream", "IStream", "Visitor", "Unsigned", "Signed")
-	if strings.Join(got, ",") != "Visitor,Signed" {
-		t.Errorf("usedNames = %v, want [Visitor Signed]", got)
-	}
-	// A `//` inside a string literal is not a comment: the name after it counts.
-	got = usedNames(`if self.url != "http://h" { let _ = os.write_unsigned(0, self.n as Unsigned); }`, "Unsigned")
-	if strings.Join(got, ",") != "Unsigned" {
-		t.Errorf("usedNames with // in a string literal = %v, want [Unsigned]", got)
-	}
-	got = usedNames(`let s = "a\"b"; // Signed`, "Signed")
-	if len(got) != 0 {
-		t.Errorf("usedNames after an escaped quote = %v, want none", got)
-	}
-	if useDecl("sofab", []string{"ArrayKind"}) != "use sofab::ArrayKind;" {
-		t.Error("a single name is imported without braces")
-	}
-	m := exampleModule(t, map[string]any{"corelib": "rs"})
-	if strings.Contains(m, "    use sofab::{IStream") {
-		t.Error("the decoder module re-imports names use super::* already brings")
-	}
-	if !strings.Contains(m, "    use sofab::{ArrayKind, FixlenType};") {
-		t.Error("the decoder module lost its on-demand ArrayKind/FixlenType import")
+// TestRustModuleImportsNothing: src/message.rs spells the corelib, serde and
+// the standard crates as paths, so a schema type can never shadow an import --
+// neither at module level nor in a per-message decoder module, whose own items
+// all start with `_` (ARCHITECTURE §8, "Naming").
+func TestRustModuleImportsNothing(t *testing.T) {
+	for _, cfg := range []map[string]any{{"corelib": "rs"}, {"corelib": "rs-no-std", "no_std": true}} {
+		m := exampleModule(t, cfg)
+		for _, ln := range strings.Split(m, "\n") {
+			ln = strings.TrimSpace(ln)
+			if strings.HasPrefix(ln, "use ") && ln != "use super::*;" {
+				t.Errorf("%v: unexpected import %q", cfg, ln)
+			}
+		}
+		if !strings.Contains(m, "fn array_begin(&mut self, id: sofab::Id, kind: sofab::ArrayKind, count: usize)") {
+			t.Errorf("%v: array_begin does not spell the corelib as a path", cfg)
+		}
 	}
 }
 
@@ -3524,7 +3480,7 @@ func TestRustFloatDefaultsCarryTheApproxConstantAllow(t *testing.T) {
 			t.Errorf("%q is not preceded by the approx_constant allow", head)
 		}
 	}
-	if strings.Contains(m, approxConstantAllow+"\nimpl Default for MyfirstmessageSomemapElem {") {
+	if strings.Contains(m, approxConstantAllow+"\nimpl Default for Myfirstmessage_Somemap {") {
 		t.Error("a struct with no float default carries the approx_constant allow")
 	}
 	if n := strings.Count(m, approxConstantAllow); n != 2 {
@@ -3540,10 +3496,10 @@ func TestRustClippyAllowsSitOnTheirItem(t *testing.T) {
 	if n, d := strings.Count(m, derivableImplsAllow+"\n"), strings.Count(m, "\nimpl Default for "); n != d || n == 0 {
 		t.Errorf("derivable_impls allow on %d items, want one per impl Default (%d)", n, d)
 	}
-	if !strings.Contains(m, visitorClippyAllow+"\n#[allow(deprecated)]\nimpl<'a> Visitor for V<'a> {") {
+	if !strings.Contains(m, visitorClippyAllow+"\n#[allow(deprecated)]\nimpl<'a> sofab::Visitor for _V<'a> {") {
 		t.Error("the flat visitor impl is not preceded by its clippy allow")
 	}
-	if strings.Count(m, visitorClippyAllow) != strings.Count(m, "impl<'a> Visitor for V<'a> {") {
+	if strings.Count(m, visitorClippyAllow) != strings.Count(m, "impl<'a> sofab::Visitor for _V<'a> {") {
 		t.Error("the visitor clippy allow sits somewhere other than a visitor impl")
 	}
 }
@@ -3568,10 +3524,10 @@ func TestRustGuardsDoNotReadAsMissingElse(t *testing.T) {
 // again (clippy::needless_borrow). The top-level field is still borrowed.
 func TestRustNestedNativeRowIsNotReborrowed(t *testing.T) {
 	m := exampleModule(t, map[string]any{"corelib": "rs"})
-	if !strings.Contains(m, "os.write_array_unsigned(_i0 as Id, _e0);") {
+	if !strings.Contains(m, "os.write_array_unsigned(_i0 as sofab::Id, _e0);") {
 		t.Error("the matrix row is not passed as the reference it already is")
 	}
-	if strings.Contains(m, "as Id, &_e0);") {
+	if strings.Contains(m, "as sofab::Id, &_e0);") {
 		t.Error("a matrix row is borrowed again")
 	}
 	if !strings.Contains(m, "os.write_array_unsigned(15, &self.someuintarray);") {

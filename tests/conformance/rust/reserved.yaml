@@ -57,28 +57,27 @@ $defs:
       pub: { id: 47, type: u8 }
       ref: { id: 48, type: u8 }
       return: { id: 49, type: u8 }
-      self: { id: 50, type: u8 }
-      serialize: { id: 51, type: u8 }
-      static: { id: 52, type: u8 }
-      struct: { id: 53, type: u8 }
-      super: { id: 54, type: u8 }
-      to_owned: { id: 55, type: u8 }
-      trait: { id: 56, type: u8 }
-      true: { id: 57, type: u8 }
-      try: { id: 58, type: u8 }
-      try_into: { id: 59, type: u8 }
-      type: { id: 60, type: u8 }
-      type_id: { id: 61, type: u8 }
-      typeof: { id: 62, type: u8 }
-      unsafe: { id: 63, type: u8 }
-      unsized: { id: 64, type: u8 }
-      use: { id: 65, type: u8 }
-      virtual: { id: 66, type: u8 }
-      where: { id: 67, type: u8 }
-      which: { id: 68, type: u8 }
-      while: { id: 69, type: u8 }
-      yield: { id: 70, type: u8 }
-      inner2: { id: 71, type: struct, fields: { $ref: '#/$defs/struct/Inner2' } }
+      serialize: { id: 50, type: u8 }
+      static: { id: 51, type: u8 }
+      struct: { id: 52, type: u8 }
+      super: { id: 53, type: u8 }
+      to_owned: { id: 54, type: u8 }
+      trait: { id: 55, type: u8 }
+      true: { id: 56, type: u8 }
+      try: { id: 57, type: u8 }
+      try_into: { id: 58, type: u8 }
+      type: { id: 59, type: u8 }
+      type_id: { id: 60, type: u8 }
+      typeof: { id: 61, type: u8 }
+      unsafe: { id: 62, type: u8 }
+      unsized: { id: 63, type: u8 }
+      use: { id: 64, type: u8 }
+      virtual: { id: 65, type: u8 }
+      where: { id: 66, type: u8 }
+      which: { id: 67, type: u8 }
+      while: { id: 68, type: u8 }
+      yield: { id: 69, type: u8 }
+      inner2: { id: 70, type: struct, fields: { $ref: '#/$defs/struct/Inner2' } }
 messages:
   m:
     payload:
@@ -132,27 +131,67 @@ messages:
       pub: { id: 47, type: u8 }
       ref: { id: 48, type: u8 }
       return: { id: 49, type: u8 }
-      self: { id: 50, type: u8 }
-      serialize: { id: 51, type: u8 }
-      static: { id: 52, type: u8 }
-      struct: { id: 53, type: u8 }
-      super: { id: 54, type: u8 }
-      to_owned: { id: 55, type: u8 }
-      trait: { id: 56, type: u8 }
-      true: { id: 57, type: u8 }
-      try: { id: 58, type: u8 }
-      try_into: { id: 59, type: u8 }
-      type: { id: 60, type: u8 }
-      type_id: { id: 61, type: u8 }
-      typeof: { id: 62, type: u8 }
-      unsafe: { id: 63, type: u8 }
-      unsized: { id: 64, type: u8 }
-      use: { id: 65, type: u8 }
-      virtual: { id: 66, type: u8 }
-      where: { id: 67, type: u8 }
-      which: { id: 68, type: u8 }
-      while: { id: 69, type: u8 }
-      yield: { id: 70, type: u8 }
-      inner:        { id: 71, type: struct, fields: { $ref: '#/$defs/struct/Inner' } }
-      inner_inner2: { id: 72, type: struct, fields: { $ref: '#/$defs/struct/Inner2' } }
-      u:            { id: 73, type: union, oneof: { Self: { id: 0, type: u8 }, abstract: { id: 1, type: u8 }, as: { id: 2, type: u8 }, async: { id: 4, type: u8 }, await: { id: 5, type: u8 }, become: { id: 6, type: u8 }, borrow: { id: 7, type: u8 }, box: { id: 9, type: u8 }, break: { id: 10, type: u8 }, clone: { id: 11, type: u8 }, clone_from: { id: 12, type: u8 }, clone_into: { id: 13, type: u8 }, const: { id: 14, type: u8 }, continue: { id: 15, type: u8 }, crate: { id: 16, type: u8 }, default: { id: 17, type: u8 }, deserialize: { id: 19, type: u8 }, do: { id: 20, type: u8 }, dyn: { id: 21, type: u8 }, else: { id: 22, type: u8 }, enum: { id: 23, type: u8 }, eq: { id: 24, type: u8 }, extern: { id: 25, type: u8 }, false: { id: 26, type: u8 }, final: { id: 27, type: u8 }, fmt: { id: 28, type: u8 }, fn: { id: 29, type: u8 }, for: { id: 30, type: u8 }, gen: { id: 31, type: u8 }, if: { id: 32, type: u8 }, impl: { id: 33, type: u8 }, in: { id: 34, type: u8 }, into: { id: 35, type: u8 }, let: { id: 36, type: u8 }, loop: { id: 37, type: u8 }, macro: { id: 38, type: u8 }, match: { id: 39, type: u8 }, mod: { id: 40, type: u8 }, move: { id: 41, type: u8 }, mut: { id: 42, type: u8 }, ne: { id: 43, type: u8 }, new: { id: 44, type: u8 }, override: { id: 45, type: u8 }, priv: { id: 46, type: u8 }, pub: { id: 47, type: u8 }, ref: { id: 48, type: u8 }, return: { id: 49, type: u8 }, serialize: { id: 51, type: u8 }, static: { id: 52, type: u8 }, struct: { id: 53, type: u8 }, super: { id: 54, type: u8 }, to_owned: { id: 55, type: u8 }, trait: { id: 56, type: u8 }, true: { id: 57, type: u8 }, try: { id: 58, type: u8 }, try_into: { id: 59, type: u8 }, type: { id: 60, type: u8 }, type_id: { id: 61, type: u8 }, typeof: { id: 62, type: u8 }, unsafe: { id: 63, type: u8 }, unsized: { id: 64, type: u8 }, use: { id: 65, type: u8 }, virtual: { id: 66, type: u8 }, where: { id: 67, type: u8 }, which: { id: 68, type: u8 }, while: { id: 69, type: u8 }, yield: { id: 70, type: u8 }, deref: { id: 74, type: u8 } } }
+      serialize: { id: 50, type: u8 }
+      static: { id: 51, type: u8 }
+      struct: { id: 52, type: u8 }
+      super: { id: 53, type: u8 }
+      to_owned: { id: 54, type: u8 }
+      trait: { id: 55, type: u8 }
+      true: { id: 56, type: u8 }
+      try: { id: 57, type: u8 }
+      try_into: { id: 58, type: u8 }
+      type: { id: 59, type: u8 }
+      type_id: { id: 60, type: u8 }
+      typeof: { id: 61, type: u8 }
+      unsafe: { id: 62, type: u8 }
+      unsized: { id: 63, type: u8 }
+      use: { id: 64, type: u8 }
+      virtual: { id: 65, type: u8 }
+      where: { id: 66, type: u8 }
+      which: { id: 67, type: u8 }
+      while: { id: 68, type: u8 }
+      yield: { id: 69, type: u8 }
+      inner:        { id: 70, type: struct, fields: { $ref: '#/$defs/struct/Inner' } }
+      inner_inner2: { id: 71, type: struct, fields: { $ref: '#/$defs/struct/Inner2' } }
+      u:            { id: 72, type: union, oneof: { Self: { id: 0, type: u8 }, abstract: { id: 1, type: u8 }, as: { id: 2, type: u8 }, as_mut: { id: 3, type: u8 }, async: { id: 4, type: u8 }, await: { id: 5, type: u8 }, become: { id: 6, type: u8 }, borrow: { id: 7, type: u8 }, borrow_mut: { id: 8, type: u8 }, box: { id: 9, type: u8 }, break: { id: 10, type: u8 }, clone: { id: 11, type: u8 }, clone_from: { id: 12, type: u8 }, clone_into: { id: 13, type: u8 }, const: { id: 14, type: u8 }, continue: { id: 15, type: u8 }, crate: { id: 16, type: u8 }, default: { id: 17, type: u8 }, deref_mut: { id: 18, type: u8 }, deserialize: { id: 19, type: u8 }, do: { id: 20, type: u8 }, dyn: { id: 21, type: u8 }, else: { id: 22, type: u8 }, enum: { id: 23, type: u8 }, eq: { id: 24, type: u8 }, extern: { id: 25, type: u8 }, false: { id: 26, type: u8 }, final: { id: 27, type: u8 }, fmt: { id: 28, type: u8 }, fn: { id: 29, type: u8 }, for: { id: 30, type: u8 }, gen: { id: 31, type: u8 }, if: { id: 32, type: u8 }, impl: { id: 33, type: u8 }, in: { id: 34, type: u8 }, into: { id: 35, type: u8 }, let: { id: 36, type: u8 }, loop: { id: 37, type: u8 }, macro: { id: 38, type: u8 }, match: { id: 39, type: u8 }, mod: { id: 40, type: u8 }, move: { id: 41, type: u8 }, mut: { id: 42, type: u8 }, ne: { id: 43, type: u8 }, new: { id: 44, type: u8 }, override: { id: 45, type: u8 }, priv: { id: 46, type: u8 }, pub: { id: 47, type: u8 }, ref: { id: 48, type: u8 }, return: { id: 49, type: u8 }, serialize: { id: 50, type: u8 }, static: { id: 51, type: u8 }, struct: { id: 52, type: u8 }, super: { id: 53, type: u8 }, to_owned: { id: 54, type: u8 }, trait: { id: 55, type: u8 }, true: { id: 56, type: u8 }, try: { id: 57, type: u8 }, try_into: { id: 58, type: u8 }, type: { id: 59, type: u8 }, type_id: { id: 60, type: u8 }, typeof: { id: 61, type: u8 }, unsafe: { id: 62, type: u8 }, unsized: { id: 63, type: u8 }, use: { id: 64, type: u8 }, virtual: { id: 65, type: u8 }, where: { id: 66, type: u8 }, which: { id: 67, type: u8 }, while: { id: 68, type: u8 }, yield: { id: 69, type: u8 }, deref: { id: 74, type: u8 }, x: { id: 75, type: u8 }, x_mut: { id: 76, type: u8 }, a: { id: 77, type: u8 }, A_ID: { id: 78, type: u8 } } }
+      twins:
+        id: 73
+        type: struct
+        fields:
+          self: { id: 0, type: u8 }
+  as_mut: { payload: { x: { id: 0, type: u8 } } }
+  as_ref: { payload: { x: { id: 0, type: u8 } } }
+  box: { payload: { x: { id: 0, type: u8 } } }
+  clone: { payload: { x: { id: 0, type: u8 } } }
+  copy: { payload: { x: { id: 0, type: u8 } } }
+  decode_error: { payload: { x: { id: 0, type: u8 } } }
+  default: { payload: { x: { id: 0, type: u8 } } }
+  double_ended_iterator: { payload: { x: { id: 0, type: u8 } } }
+  drop: { payload: { x: { id: 0, type: u8 } } }
+  eq: { payload: { x: { id: 0, type: u8 } } }
+  exact_size_iterator: { payload: { x: { id: 0, type: u8 } } }
+  extend: { payload: { x: { id: 0, type: u8 } } }
+  fn: { payload: { x: { id: 0, type: u8 } } }
+  fn_mut: { payload: { x: { id: 0, type: u8 } } }
+  fn_once: { payload: { x: { id: 0, type: u8 } } }
+  from: { payload: { x: { id: 0, type: u8 } } }
+  from_iterator: { payload: { x: { id: 0, type: u8 } } }
+  into: { payload: { x: { id: 0, type: u8 } } }
+  into_iterator: { payload: { x: { id: 0, type: u8 } } }
+  iterator: { payload: { x: { id: 0, type: u8 } } }
+  option: { payload: { x: { id: 0, type: u8 } } }
+  ord: { payload: { x: { id: 0, type: u8 } } }
+  partial_eq: { payload: { x: { id: 0, type: u8 } } }
+  partial_ord: { payload: { x: { id: 0, type: u8 } } }
+  result: { payload: { x: { id: 0, type: u8 } } }
+  self: { payload: { x: { id: 0, type: u8 } } }
+  send: { payload: { x: { id: 0, type: u8 } } }
+  sized: { payload: { x: { id: 0, type: u8 } } }
+  string: { payload: { x: { id: 0, type: u8 } } }
+  sync: { payload: { x: { id: 0, type: u8 } } }
+  to_owned: { payload: { x: { id: 0, type: u8 } } }
+  to_string: { payload: { x: { id: 0, type: u8 } } }
+  try_from: { payload: { x: { id: 0, type: u8 } } }
+  try_into: { payload: { x: { id: 0, type: u8 } } }
+  unpin: { payload: { x: { id: 0, type: u8 } } }
+  vec: { payload: { x: { id: 0, type: u8 } } }

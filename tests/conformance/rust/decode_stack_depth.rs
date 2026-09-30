@@ -153,7 +153,7 @@ fn main() {
         Err(e) => fail(&format!("a well-formed message reaching the schema's full depth was refused: {e:?}")),
     };
     check_full(&one, "try_decode");
-    let mut d = DeepDecoder::new();
+    let mut d = Deep__Decoder::new();
     for b in &wire {
         if let Err(e) = d.feed(core::slice::from_ref(b)) {
             fail(&format!("byte-by-byte feed refused a well-formed message: {e:?}"));

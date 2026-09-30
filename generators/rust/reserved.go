@@ -1,13 +1,91 @@
 package rust
 
 import (
-	"fmt"
 	"strings"
 
 	"github.com/sofa-buffers/generator/internal/ir"
+	"github.com/sofa-buffers/generator/internal/naming"
 )
 
-// One reserved-name list for the Rust backend (generator#239). A struct field
+// Type level (ARCHITECTURE §8, "Naming: conflict-free identifiers"). Every
+// schema type is named naming.TypeIdent of its path, so two schema types never
+// meet; what is left is a type landing on a name src/message.rs spends itself
+// or reaches unqualified. The corelib (sofab::), serde, core/alloc/std and
+// heapless are only ever spelled as paths, and a type identifier starts with an
+// upper-case letter, so no crate path can be shadowed; the per-message decoder
+// module declares only `_`-prefixed items, so its `use super::*` never loses a
+// schema type to a local. What remains is this list: a type identifier equal
+// to one of these names takes a trailing `_` (a TypeIdent never ends in one).
+var rustTypeReserved = map[string]string{
+	"Self":        "the one type-namespace keyword",
+	"DecodeError": "the crate's own decode verdict enum",
+	// The Rust 2021 prelude's type-namespace names. The generated code spells
+	// several of them unqualified (Vec, String, Option, Result, Default, From),
+	// and a module-level type of the same name would shadow the prelude for all
+	// of it -- and for a user who glob-imports the module. The whole prelude is
+	// listed rather than the handful used today, so a later emitter change
+	// cannot reopen the hole.
+	"Copy": "prelude", "Send": "prelude", "Sized": "prelude", "Sync": "prelude",
+	"Unpin": "prelude", "Drop": "prelude", "Fn": "prelude", "FnMut": "prelude",
+	"FnOnce": "prelude", "Box": "prelude", "ToOwned": "prelude", "Clone": "prelude",
+	"PartialEq": "prelude", "PartialOrd": "prelude", "Eq": "prelude", "Ord": "prelude",
+	"AsRef": "prelude", "AsMut": "prelude", "Into": "prelude", "From": "prelude",
+	"Default": "prelude", "Iterator": "prelude", "Extend": "prelude",
+	"IntoIterator": "prelude", "DoubleEndedIterator": "prelude",
+	"ExactSizeIterator": "prelude", "Option": "prelude", "Result": "prelude",
+	"String": "prelude", "ToString": "prelude", "Vec": "prelude",
+	"TryFrom": "prelude", "TryInto": "prelude", "FromIterator": "prelude",
+}
+
+// typeIdent is the Rust type identifier of a schema path: naming.TypeIdent,
+// escaped with a trailing `_` when it lands on rustTypeReserved.
+func typeIdent(path []string) string {
+	t := naming.TypeIdent(path)
+	if _, ok := rustTypeReserved[t]; ok {
+		return t + "_"
+	}
+	return t
+}
+
+// msgIdent is a message's Rust type identifier.
+func msgIdent(m *ir.Message) string { return typeIdent([]string{m.Name}) }
+
+// namedIdent is a named type's Rust identifier. A $defs union split by
+// default_id is one type per default: the union's identifier plus the role
+// `__Default<Option>`, built from the unescaped identifier (a role is never
+// reserved: it contains `__`).
+func namedIdent(nt *ir.NamedType) string {
+	if nt.Variant != "" {
+		return naming.TypeIdent(nt.Path) + "__Default" + naming.Pascal(nt.Variant)
+	}
+	return typeIdent(nt.Path)
+}
+
+// roleIdent is a generated companion of a message at module level: the
+// unescaped type identifier, `__`, and a Pascal role word (M__Decoder).
+func roleIdent(m *ir.Message, role string) string {
+	return naming.TypeIdent([]string{m.Name}) + "__" + role
+}
+
+// privateIdent is a per-message name only generated code uses (the decoder's
+// private module): `_` + the type identifier + `__` + a role word.
+func privateIdent(m *ir.Message, role string) string {
+	return "_" + roleIdent(m, role)
+}
+
+// typeNameAllow is the attribute a type whose identifier is not UpperCamelCase
+// carries: an inline type's path (M_A), a split union's variant
+// (Shape__DefaultPt), an escape (Vec_ is fine, M_A_ is not). rustc's
+// non_camel_case_types lint refuses a `_` inside the name (leading and trailing
+// ones are fine); "" when there is none.
+func typeNameAllow(ident string) string {
+	if !strings.Contains(strings.Trim(ident, "_"), "_") {
+		return ""
+	}
+	return "#[allow(non_camel_case_types)] // spelled from the schema path"
+}
+
+// Member level: one reserved-name list for the Rust backend (generator#239). A struct field
 // and a method live in different namespaces in Rust -- `m.encode` and
 // `m.encode()` coexist -- so a struct field is bound by the keywords alone. A
 // union's option ACCESSORS are methods, so the union path adds the method names
@@ -97,60 +175,4 @@ func nonSnakeAllow(ident string) string {
 		return ""
 	}
 	return "#[allow(non_snake_case)] // spelled as the schema names it"
-}
-
-// checkFieldNames rejects what the list cannot prevent: two struct fields that
-// give one Rust member (`self` is mangled to `self_`, which a field `self_`
-// already is), and two constants of one enum or bitfield that give one Rust
-// constant (they are upper-cased, so `a` and `A` are both `A`). rustc would
-// report E0124/E0428 far from the schema. Union options are checkUnionNames'.
-// Located: the error names the type and both names.
-func checkFieldNames(s *ir.Schema) error {
-	dup := func(owner, what string, names []string, ident func(string) string) error {
-		seen := map[string]string{}
-		for _, n := range names {
-			id := strings.TrimPrefix(ident(n), "r#")
-			if prev, ok := seen[id]; ok {
-				return fmt.Errorf("rust: %s: %s %q and %q both generate %s; rename one", owner, what, prev, n, id)
-			}
-			seen[id] = n
-		}
-		return nil
-	}
-	fieldNames := func(fields []*ir.Field) []string {
-		out := make([]string, len(fields))
-		for i, f := range fields {
-			out[i] = f.Name
-		}
-		return out
-	}
-	for _, key := range s.NamedOrder {
-		nt := s.Named[key]
-		var err error
-		switch nt.Category {
-		case ir.CatStruct:
-			err = dup("struct "+key, "fields", fieldNames(nt.Fields), rustIdent)
-		case ir.CatEnum:
-			names := make([]string, len(nt.Consts))
-			for i, c := range nt.Consts {
-				names[i] = c.Name
-			}
-			err = dup("enum "+key, "constants", names, strings.ToUpper)
-		case ir.CatBitfield:
-			names := make([]string, len(nt.Flags))
-			for i, fl := range nt.Flags {
-				names[i] = fl.Name
-			}
-			err = dup("bitfield "+key, "flags", names, strings.ToUpper)
-		}
-		if err != nil {
-			return err
-		}
-	}
-	for _, m := range s.Messages {
-		if err := dup("message "+m.Name, "fields", fieldNames(m.Fields), rustIdent); err != nil {
-			return err
-		}
-	}
-	return nil
 }
