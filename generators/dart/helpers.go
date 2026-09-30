@@ -22,34 +22,6 @@ func cfgString(cfg map[string]any, key, dflt string) string {
 
 // ---- identifiers ----------------------------------------------------------
 
-// dartKeywords are Dart reserved words: used as a field/member name they are a
-// hard error. Dart has no verbatim-identifier escape (no C# `@`), so a collision
-// is mangled with a trailing `_` (the C/Java/Python convention). The wire is
-// keyed by id, and the JSON name stays the original (the harness maps the raw
-// name), so mangling is source-only.
-var dartKeywords = map[string]bool{
-	"assert": true, "break": true, "case": true, "catch": true, "class": true,
-	"const": true, "continue": true, "default": true, "do": true, "else": true,
-	"enum": true, "extends": true, "false": true, "final": true, "finally": true,
-	"for": true, "if": true, "in": true, "is": true, "new": true, "null": true,
-	"rethrow": true, "return": true, "super": true, "switch": true, "this": true,
-	"throw": true, "true": true, "try": true, "var": true, "void": true,
-	"while": true, "with": true,
-	// Contextual/built-in identifiers that are unsafe as a member name.
-	"await": true, "yield": true, "dynamic": true,
-	// Core type names: a field named `int` would shadow the `int` type the
-	// generated code references, so these are mangled too. (A field named after a
-	// generated class is not escaped; the schema identifier space makes that rare
-	// and the wire is id-keyed regardless.)
-	"int": true, "double": true, "bool": true, "num": true, "String": true,
-	"List": true, "Map": true, "Set": true, "Object": true, "Iterable": true,
-	"Null": true, "Never": true, "Function": true, "Uint8List": true,
-	"Symbol": true, "Type": true, "Enum": true, "Record": true,
-	// The encoder parameter of serialize/encodeTo: a field named `e` would shadow
-	// it inside those bodies (the field's own read then names the encoder).
-	"e": true,
-}
-
 // fp32BitsField is the companion `int?` holding the raw 32 wire bits of an fp32
 // SCALAR field whose decoded value is a NaN, so a signaling/payload NaN
 // re-encodes bit-for-bit — a Dart `double` cannot carry an fp32 NaN payload
@@ -70,16 +42,6 @@ var dartKeywords = map[string]bool{
 // that also keeps the ENCODE side reachable: a caller who wants to emit a
 // signaling NaN has no other way to say so, since the double cannot carry it.
 func fp32BitsField(name string) string { return dartIdent(name) + "Fp32Bits" }
-
-// dartIdent mangles a field name that is a Dart reserved word with a trailing
-// underscore. It also guards a leading digit / empty name defensively (the
-// schema identifier pattern already forbids those).
-func dartIdent(name string) string {
-	if dartKeywords[name] {
-		return name + "_"
-	}
-	return name
-}
 
 // typeName renders a graph key ("struct/Point", "enum/Colour", or an inline
 // synthetic like "msg_field") as a PascalCase Dart type name.
