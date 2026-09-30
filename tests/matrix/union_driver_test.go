@@ -35,7 +35,7 @@ func TestUnionDriverSchema(t *testing.T) {
 	if err != nil {
 		t.Fatalf("the driver's schema must validate: %v", err)
 	}
-	for key, want := range map[string]int64{"union/Pick_default_n": 0, "union/Pick_default_t": 1} {
+	for key, want := range map[string]int64{"union/Pick~n": 0, "union/Pick~t": 1} {
 		nt, ok := s.Named[key]
 		if !ok || nt.DefaultID == nil || *nt.DefaultID != want {
 			t.Errorf("want split type %s with default_id %d, got %+v", key, want, nt)
