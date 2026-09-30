@@ -825,7 +825,7 @@ done
 #
 # Metadata only: a JS or native compilation would prove the same thing and pull a
 # Node distribution or the whole Kotlin/Native toolchain to do it. The message
-# sources are copied WITHOUT the project scaffolding (Main.kt / Json.kt), which is
+# sources are copied WITHOUT the project scaffolding (_Main.kt / _Json.kt), which is
 # deliberately JVM-specific -- a harness needs a `main`, an exit code and a stdin
 # -- and without OwnershipCheck.kt, which is not generated output at all: it is
 # this suite's own JVM-only check (String.format, kotlin.system.exitProcess), and
@@ -833,8 +833,8 @@ done
 echo "==> generated sources type-check as commonMain (multiplatform)"
 mkdir -p "$WORK/mp/src/commonMain/kotlin"
 cp -r "$WORK/ex/src/main/kotlin/message" "$WORK/mp/src/commonMain/kotlin/message"
-rm -f "$WORK/mp/src/commonMain/kotlin/message/Main.kt" \
-      "$WORK/mp/src/commonMain/kotlin/message/Json.kt" \
+rm -f "$WORK/mp/src/commonMain/kotlin/message/_Main.kt" \
+      "$WORK/mp/src/commonMain/kotlin/message/_Json.kt" \
       "$WORK/mp/src/commonMain/kotlin/message/OwnershipCheck.kt"
 cat > "$WORK/mp/settings.gradle.kts" <<'YAML'
 rootProject.name = "mp"
@@ -886,10 +886,12 @@ done
 echo "==> corpus compiles ($ndefs definitions incl. every realworld file)"
 
 # The reserved-name collision test (ARCHITECTURE §8): reserved.yaml uses every
-# name on generators/kotlin/reserved.go's list as a message field, a nested
-# struct field and a union option, plus the one path clash a decoder frame name
-# can hit (TestReservedSchemaFile keeps it in step with the list;
-# TestKotlinNamesInScope keeps the list in step with the generated classes). The
+# member name on generators/kotlin/reserved.go's lists as a message field, a
+# nested struct field and a union option, plus the one path clash a decoder
+# frame name can hit and the member pairs that share a JVM setter; and every
+# type name on ktOuterNames as a message or a $defs type (TestReservedSchemaFile
+# keeps it in step with the lists; TestKotlinNamesInScope and
+# TestKotlinOuterNames keep the lists in step with the generated code). The
 # generator exits 0 on a class that does not compile, so the project must build
 # warning-free, and every value of reserved.json must come back under its
 # schema name.
@@ -909,6 +911,38 @@ if bad:
     sys.exit(f"mismatch on {bad}: got {[got.get(k) for k in bad]}")
 PY
 echo "==> reserved names OK"
+
+# The shared name-collision schema (ARCHITECTURE §8, "Naming"): path clashes
+# (`m_a` beside `m.a`), roles and fixed names as type names, corelib and Kotlin
+# default-import names as messages. Every one of its ~90 messages must compile
+# warning-free in one package, harness included, and message m must round-trip
+# names.json. Compared as data (json_equal.py): the harness renders members in
+# schema order, names.json does not have to.
+echo "==> names: the shared name-collision schema compiles and round-trips"
+build "$ROOT/tests/conformance/lib/names.yaml" "$WORK/names"
+NH="$WORK/names/build/install/harness/bin/harness"
+"$NH" encode m < "$ROOT/tests/conformance/lib/names.json" > "$WORK/names.bin" \
+    || { echo "FAIL: names.json did not encode"; exit 1; }
+NOUT=$("$NH" decode m < "$WORK/names.bin") \
+    || { echo "FAIL: names.bin did not decode"; exit 1; }
+python3 "$ROOT/tests/conformance/lib/json_equal.py" "$(cat "$ROOT/tests/conformance/lib/names.json")" "$NOUT" \
+    --label "kotlin names m" \
+    || { echo "FAIL: names.json did not round-trip"; exit 1; }
+echo "==> names OK"
+
+# The escapes the two collision schemas force -- the trailing `_` of a type or
+# member, and a renamed JVM setter (`@set:kotlin.jvm.JvmName`) -- must stay
+# commonMain Kotlin like everything else the generator emits.
+echo "==> collision schemas type-check as commonMain (multiplatform)"
+for n in reserved names; do
+    rm -rf "$WORK/mp/src/commonMain/kotlin/message"
+    cp -r "$WORK/$n/src/main/kotlin/message" "$WORK/mp/src/commonMain/kotlin/message"
+    rm -f "$WORK/mp/src/commonMain/kotlin/message/_Main.kt" \
+          "$WORK/mp/src/commonMain/kotlin/message/_Json.kt"
+    ( cd "$WORK/mp" && "$GRADLEW" --console=plain -q $KT_STRICT compileCommonMainKotlinMetadata ) \
+        || { echo "FAIL: the $n sources are not commonMain-clean"; exit 1; }
+done
+echo "==> collision schemas: commonMain type-check OK"
 
 # The message-less realworld files as emit:project, harness included, under
 # $KT_STRICT: the Kotlin target emits its types per message, so the corpus

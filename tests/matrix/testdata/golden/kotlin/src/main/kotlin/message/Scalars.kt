@@ -100,7 +100,7 @@ public class Scalars {
     public class Decoder {
         private val m = Scalars()
         private val ist = IStream()
-        private val v = ScalarsVisitor(m)
+        private val v = _Scalars__Visitor(m)
 
         /**
          * Feed the next chunk, of any size.
@@ -155,7 +155,7 @@ public class Scalars {
         public fun decode(data: ByteArray): Scalars {
             val m = Scalars()
             val ist = IStream()
-            val st = ist.feed(data, ScalarsVisitor(m))
+            val st = ist.feed(data, _Scalars__Visitor(m))
             check(st == DecodeStatus.COMPLETE) { "Scalars: stream ended mid-field (" + st + ")" }
             return m
         }
@@ -174,7 +174,7 @@ public class Scalars {
         public fun tryDecode(data: ByteArray, out: Scalars): DecodeStatus {
             out.reset()
             val ist = IStream()
-            return ist.feed(data, ScalarsVisitor(out))
+            return ist.feed(data, _Scalars__Visitor(out))
         }
 
         /**
@@ -194,7 +194,7 @@ public class Scalars {
  * streaming decode half of the message API, reached through [Scalars.decode],
  * [Scalars.tryDecode] and [Scalars.Decoder].
  */
-internal class ScalarsVisitor(private val m: Scalars) : Visitor {
+internal class _Scalars__Visitor(private val m: Scalars) : Visitor {
     private var cur = 0
     private var ai = 0                  // index into the primitive array currently being filled
     private var askip = 0               // elements left to discard from a wire-type-contradictory array (S7.3)

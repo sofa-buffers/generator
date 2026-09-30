@@ -25,6 +25,27 @@ This holds in both `emit` modes — `sources` emits the same tree without the
 Gradle build. Changing the package changes the paths, so point `output_dir` at
 the root of a source tree, not at the package directory itself.
 
+## Type names
+
+Every message and named type is a class (an `object` for an enum or a
+bitfield) in the configured package, in a file of the same name. The name is
+the schema name in upper camel case — the message `vehicle_telemetry` is
+`VehicleTelemetry`, the `$defs` struct `point` is `Point`. A type declared
+inline is named after where it is declared, each step in upper camel case and
+joined with `_`: the struct of field `a` in message `m` is `M_A`, and so is the
+element struct of an array field `a`. A `$defs` union used with different
+`default_id`s is one class per `default_id`, named `<Union>__Default<Option>`:
+`Shape__DefaultPt` and `Shape__DefaultNum`.
+
+A type whose name the generated code already uses — a Kotlin type such as
+`String` or `UByte`, a corelib type such as `Seq` or `Visitor`, or `Decoder`
+and `Companion`, which every message class declares inside itself — gets a
+trailing underscore: the message `string` is `String_`. The list lives in
+`generators/kotlin/reserved.go`.
+
+With `emit: project`, the harness declarations (`_Json`, `_JsonValue`, `main`
+in `_Main.kt`) start with an underscore, so no type can take their names.
+
 ## Field names
 
 A field's property is the field's schema name. A field named like a Kotlin hard
@@ -35,17 +56,20 @@ there — the field `encode` is `encode_`. Those names are:
 
 - the members every generated class or its companion object declares:
   `serialize`, `isDefault`, `reset`, `encode`, `encodeTo`, `decode`,
-  `tryDecode`, `decoder`, `Decoder`, `MAX_SIZE`, `MAX_SIZE_LIMIT`,
-  `ENC_SCRATCH`;
+  `tryDecode`, `decoder`, `Decoder`, `Companion`, `MAX_SIZE`,
+  `MAX_SIZE_LIMIT`, `ENC_SCRATCH`;
 - the names the class body uses in front of a dot — `DecodeStatus`, `Long`,
   `Seq`. Inside the class a property of such a name would take precedence, and
   a call like `Seq.boolsToBytes(...)` would no longer compile.
 
 Only the property changes: the wire is keyed by the field id, and the JSON key
-stays the schema name. Two fields that end up with the same property or the
-same JVM accessor — `encode` and `encode_`, `foo` and `Foo` (both `getFoo`),
-or `isOpen` and `open` (both `setOpen`) — fail generation, naming both. The list lives in
-`generators/kotlin/reserved.go`.
+stays the schema name. The list lives in `generators/kotlin/reserved.go`.
+
+**JVM setter names.** Kotlin names the setter of a property `isOpen` `setOpen`,
+the same as the setter of a property `open`. When a class has both, the setter
+of `isOpen` is named `setIsOpen__` on the JVM instead
+(`@set:kotlin.jvm.JvmName`). Kotlin code is not affected; only a Java caller
+sees the name.
 
 ## Unions
 
@@ -66,7 +90,7 @@ shape:
 ```
 
 ```kotlin
-public class MShape {
+public class M_Shape {
     public var which: Int
         private set
 
@@ -76,9 +100,9 @@ public class MShape {
     public var name: String
     public fun hasName(): Boolean
 
-    public var pt: MShapePt
+    public var pt: M_Shape_Pt
     public fun hasPt(): Boolean
-    public fun mutablePt(): MShapePt
+    public fun mutablePt(): M_Shape_Pt
 
     public var tags: MutableList<String>
     public fun hasTags(): Boolean
@@ -98,7 +122,7 @@ public class MShape {
 | operation | Kotlin |
 |---|---|
 | which option is held | `x.which` → the option's id |
-| option ids | `MShape.PT_ID` (`<OPTION>_ID` constants) |
+| option ids | `M_Shape.PT_ID` (`<OPTION>_ID` constants) |
 | test | `x.hasPt()` |
 | read | `x.pt` |
 | select with a value | `x.num = 7u` |
@@ -113,8 +137,8 @@ if (m.shape.hasPt()) {
     use(m.shape.pt.x)
 }
 when (m.shape.which) {
-    MShape.NUM_ID -> use(m.shape.num)
-    MShape.PT_ID -> use(m.shape.pt.y)
+    M_Shape.NUM_ID -> use(m.shape.num)
+    M_Shape.PT_ID -> use(m.shape.pt.y)
 }
 m.shape.reset()               // pt at its default again
 ```
@@ -156,13 +180,14 @@ a Kotlin keyword (`` `class` ``); `has<Option>` and `mutable<Option>` carry the
 option name in upper camel case; the id constant is the option name in upper
 case plus `_ID`. An option whose name is reserved for a field (see
 [Field names](#field-names)) or is the union's own `which` gets a trailing
-underscore: `x.which_`. Two options that would produce the same member
-(`foo_bar` and `fooBar` both give `hasFooBar`, `a`'s `A_ID` and an option named
-`A_ID`) fail generation, naming both.
+underscore: `x.which_`. So does an option spelled like an id constant (upper
+case, ending in `_ID`): the option `A_ID` is `x.A_ID_`, its constant `A_ID_ID`,
+next to the constant `A_ID` of an option `a`. The setter rule of
+[Field names](#field-names) applies to options too.
 
 **`$defs` unions** used with different `default_id`s are one class per
-`default_id`, named after `<Name>_default_<option>`: `UnionShapeDefaultPt` and
-`UnionShapeDefaultNum`.
+`default_id`, named `<Union>__Default<Option>`: `Shape__DefaultPt` and
+`Shape__DefaultNum` (see [Type names](#type-names)).
 
 **Defaults.** A new union holds the `default_id` option at that option's own
 default; an omitted `default_id` means the option with the lowest id. Each

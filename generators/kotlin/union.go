@@ -1,11 +1,11 @@
 package kotlin
 
 import (
-	"fmt"
 	"strings"
 
 	"github.com/sofa-buffers/generator/internal/generator"
 	"github.com/sofa-buffers/generator/internal/ir"
+	"github.com/sofa-buffers/generator/internal/naming"
 )
 
 // A schema union is a Kotlin class that holds exactly ONE option (MESSAGE_SPEC
@@ -49,6 +49,7 @@ type unionOpt struct {
 	slot    string    // the private slot
 	idConst string    // <OPT>_ID
 	isD     bool      // the union's default option (default_id)
+	jvmSet  string    // the @set:JvmName annotation, "" unless the setter needs one (jvmSetterRenames)
 }
 
 // unionShape is one union type with its options.
@@ -63,11 +64,30 @@ type unionShape struct {
 // members (`which`, `serialize`, `isDefault`, `reset`) and the generated
 // members every class avoids take the trailing underscore; a hard keyword is
 // backtick-escaped, exactly as a struct member's name is.
+//
+// So does a name spelled like an id constant (isIDConstSpelling): inside the
+// class a property outranks the companion's constant of the same name, and the
+// `when (which)` arms would compare against the property.
+//
+// Every other name the union derives from its options is distinct by the naming
+// rules (ARCHITECTURE §8): has<Opt>/mutable<Opt> carry naming.Pascal of the
+// option, the id constant its upper-cased name, the slot `_` + the name -- and
+// options differ in their fold. A property may share its name with a function
+// (an option `hasFoo` beside `foo`'s hasFoo()): Kotlin and the JVM keep a
+// property's accessors and a function apart.
 func unionOptProp(name string) string {
-	if unionReserved[name] {
+	if unionReserved[name] || isIDConstSpelling(name) {
 		return name + "_"
 	}
 	return ktIdent(name)
+}
+
+// isIDConstSpelling reports whether an option name is spelled like an id
+// constant -- upper case, digits and `_`, ending in `_ID` -- so it could be the
+// `<OPT>_ID` of a sibling. It is decided on the name alone, so every property
+// path (the class, the visitor's stores, the harness) spells it alike.
+func isIDConstSpelling(name string) bool {
+	return strings.HasSuffix(name, "_ID") && name == strings.ToUpper(name)
 }
 
 // unionMutable reports whether an option gets a mutable<Opt>() accessor: the
@@ -102,7 +122,7 @@ func (g *gen) unionShapeOf(key string, nt *ir.NamedType) *unionShape {
 			f:       &cp,
 			orig:    fld,
 			prop:    unionOptProp(fld.Name),
-			base:    exported(fld.Name),
+			base:    naming.Pascal(fld.Name),
 			slot:    "_" + fld.Name,
 			idConst: strings.ToUpper(fld.Name) + "_ID",
 			isD:     nt.IsDefaultOption(fld),
@@ -112,57 +132,15 @@ func (g *gen) unionShapeOf(key string, nt *ir.NamedType) *unionShape {
 			u.d = o
 		}
 	}
-	return u
-}
-
-// checkUnionNames rejects a union whose options derive the same Kotlin member.
-// A class and its companion share one visible scope, so the properties, the
-// slots, the id constants and the has/mutable functions are checked as ONE
-// namespace, together with the union's own members: `foo_bar` and `fooBar` both
-// give hasFooBar, `a`'s A_ID lands on an option named `A_ID`. The JVM accessors
-// are checked too (jvmAccessors): `foo` and `Foo` are both getFoo, `isOpen` and
-// `open` both setOpen. Located: the error names the union and both
-// options.
-func checkUnionNames(u *unionShape) error {
-	owner := map[string]string{}
-	for _, set := range []map[string]bool{ktReservedMembers, ktQualifiers, unionReserved} {
-		for n := range set {
-			owner[n] = ""
-		}
+	props := make([]string, len(u.opts))
+	for i, o := range u.opts {
+		props[i] = o.prop
 	}
+	renames := jvmSetterRenames(props)
 	for _, o := range u.opts {
-		getter, setter := jvmAccessors(strings.Trim(o.prop, "`"))
-		names := []string{strings.Trim(o.prop, "`"), o.slot, o.idConst, "has" + o.base, getter, setter}
-		if unionMutable(o.f) {
-			names = append(names, "mutable"+o.base)
-		}
-		for _, n := range names {
-			prev, ok := owner[n]
-			switch {
-			case ok && prev == "":
-				return fmt.Errorf("kotlin backend: union %s: option %q generates the member %s, which the union type already has; rename the option", u.nt.Key, o.f.Name, n)
-			case ok && prev != o.f.Name:
-				return fmt.Errorf("kotlin backend: union %s: options %q and %q both generate the member %s; rename one", u.nt.Key, prev, o.f.Name, n)
-			}
-			owner[n] = o.f.Name
-		}
+		o.jvmSet = renames[o.prop]
 	}
-	return nil
-}
-
-// checkUnions runs checkUnionNames over every union type the schema's messages
-// reach.
-func (g *gen) checkUnions() error {
-	for _, key := range g.namedTypes() {
-		nt := g.schema.Named[key]
-		if nt.Category != ir.CatUnion {
-			continue
-		}
-		if err := checkUnionNames(g.unionShapeOf(key, nt)); err != nil {
-			return err
-		}
-	}
-	return nil
+	return u
 }
 
 // unionSlotInit is the value a slot is declared with: default_id's option at its
@@ -289,6 +267,9 @@ func (g *gen) emitUnionAccessors(f *kfile, o *unionOpt) {
 	if unionSlotNullable(o.f) {
 		held += "!!"
 	}
+	if o.jvmSet != "" {
+		f.line("    %s", o.jvmSet)
+	}
 	f.line("    public var %s: %s", o.prop, t)
 	f.line("        get() = if (which == %s) %s else %s", o.idConst, held, g.ktDefaultValue(o.f))
 	f.line("        set(v) { which = %s; %s = v }", o.idConst, o.slot)
@@ -331,7 +312,7 @@ func memberName(fld *ir.Field, uni bool) string {
 // even where no begin arm ran first.
 func memberPath(path string, fld *ir.Field, uni bool) string {
 	if uni && unionMutable(fld) {
-		return path + ".mutable" + exported(fld.Name) + "()"
+		return path + ".mutable" + naming.Pascal(fld.Name) + "()"
 	}
 	return path + "." + memberName(fld, uni)
 }
@@ -347,7 +328,7 @@ func (g *gen) emitUnionJSONFns(f *kfile, key string, nt *ir.NamedType) {
 	if dep {
 		f.line("    %s", deprecationSuppress)
 	}
-	f.line("    internal fun to(o: %s, b: StringBuilder) {", u.typeName)
+	f.line("    internal fun to(o: %s, b: kotlin.text.StringBuilder) {", u.typeName)
 	f.line("        b.append('{')")
 	f.line("        when (o.which) {")
 	for _, o := range u.opts {
@@ -362,7 +343,7 @@ func (g *gen) emitUnionJSONFns(f *kfile, key string, nt *ir.NamedType) {
 	if dep {
 		f.line("    %s", deprecationSuppress)
 	}
-	f.line("    internal fun from(j: Map<String, JsonValue>, o: %s) {", u.typeName)
+	f.line("    internal fun from(j: kotlin.collections.Map<String, _JsonValue>, o: %s) {", u.typeName)
 	f.line("        for ((k, e) in j) {")
 	f.line("            if (e.isNull) continue")
 	f.line("            when (k) {")

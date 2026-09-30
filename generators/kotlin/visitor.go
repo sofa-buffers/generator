@@ -379,7 +379,7 @@ func nativeElemCb(k ir.Kind) string {
 // most log2(count) times.
 func rowCursor(arrType string) string { return "_arow" + baseSuffix(arrType) }
 
-func (g *gen) emitVisitor(f *kfile, name string, fields []*ir.Field) {
+func (g *gen) emitVisitor(f *kfile, name, vis string, fields []*ir.Field) {
 	fs := g.frames(&ir.Message{Name: name, Fields: fields})
 	primTypes := primArrayTypesUsed(fs)
 	rowTypes := primRowTypesUsed(fs)
@@ -407,7 +407,7 @@ func (g *gen) emitVisitor(f *kfile, name string, fields []*ir.Field) {
 			break
 		}
 	}
-	f.line("internal class %sVisitor(private val m: %s) : Visitor {", name, name)
+	f.line("internal class %s(private val m: %s) : Visitor {", vis, name)
 	f.line("    private var cur = 0")
 	// The SKIPPED-SUBTREE scope. sequenceBegin moves here for any (scope, id) the
 	// schema does not declare, and every callback dispatches on `cur` with an arm

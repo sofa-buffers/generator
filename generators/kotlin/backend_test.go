@@ -105,7 +105,7 @@ func TestKotlinStructural(t *testing.T) {
 		"public fun tryDecode(data: ByteArray, out: Myfirstmessage): DecodeStatus {",
 		"public fun decoder(): Decoder = Decoder()",
 		"public class Decoder {",
-		"internal class MyfirstmessageVisitor(private val m: Myfirstmessage) : Visitor {",
+		"internal class _Myfirstmessage__Visitor(private val m: Myfirstmessage) : Visitor {",
 		"override fun sequenceBegin(id: Int) {", // flat-visitor nesting
 	} {
 		if !strings.Contains(m, want) {
@@ -237,28 +237,28 @@ messages:
       status: { id: 1, type: bitfield, bits: { $ref: "#/$defs/bitfield/Flags" } }
 `
 	out := genFromYAML(t, src, map[string]any{})
-	mode := out["src/main/kotlin/message/EnumMode.kt"]
-	flags := out["src/main/kotlin/message/BitfieldFlags.kt"]
+	mode := out["src/main/kotlin/message/Mode.kt"]
+	flags := out["src/main/kotlin/message/Flags.kt"]
 	for _, want := range []string{
-		"public object EnumMode {",
+		"public object Mode {",
 		"/** Powered down. */",
 		"public const val Off: Int = 0",
 		"/** Running. */",
 		"public const val On: Int = 1",
 	} {
 		if !strings.Contains(mode, want) {
-			t.Errorf("EnumMode.kt missing %q", want)
+			t.Errorf("Mode.kt missing %q", want)
 		}
 	}
 	for _, want := range []string{
-		"public object BitfieldFlags {",
+		"public object Flags {",
 		"/** Initialized. (default: true) */",
 		"public const val ready: ULong = 1uL",
 		"/** Work in flight. */",
 		"public const val busy: ULong = 8uL",
 	} {
 		if !strings.Contains(flags, want) {
-			t.Errorf("BitfieldFlags.kt missing %q", want)
+			t.Errorf("Flags.kt missing %q", want)
 		}
 	}
 	// The field itself stays an integer, and the bitfield default is seeded from
@@ -314,7 +314,7 @@ func TestKotlinOverIndexWrapperArray(t *testing.T) {
 	for _, want := range []string{
 		`Seq.placeElem(m.bs, id, "", s, 4, MAX_DYN_ARRAY_COUNT)`,
 		`Seq.placeElem(m.bb, id, Seq.EMPTY_BYTES, b, 3, MAX_DYN_ARRAY_COUNT)`,
-		`Seq.reserveElem(m.bp, id, 2, MAX_DYN_ARRAY_COUNT) { MBpElem() }; _ex_Root_bp = id; cur = `,
+		`Seq.reserveElem(m.bp, id, 2, MAX_DYN_ARRAY_COUNT) { M_Bp() }; _ex_Root_bp = id; cur = `,
 	} {
 		if !strings.Contains(m, want) {
 			t.Errorf("M.kt missing over-index guard %q", want)
@@ -565,7 +565,7 @@ func TestKotlinLazySequenceFraming(t *testing.T) {
 	if !strings.Contains(m, "if (!this.n.isDefault()) return false") {
 		t.Error("the all-default predicate must delegate to the nested one")
 	}
-	nested := out["src/main/kotlin/message/MN.kt"]
+	nested := out["src/main/kotlin/message/M_N.kt"]
 	if !strings.Contains(nested, "if (this.x != 0) return false") ||
 		!strings.Contains(nested, "if (this.y != 0) return false") {
 		t.Error("the nested predicate must test every child against its own default")
@@ -892,11 +892,11 @@ messages:
       p: { id: 0, type: struct, fields: { $ref: "#/$defs/struct/Point" } }
 `
 	out := genFromYAML(t, src, map[string]any{})
-	if _, ok := out["src/main/kotlin/message/StructPoint.kt"]; !ok {
+	if _, ok := out["src/main/kotlin/message/Point.kt"]; !ok {
 		t.Fatal("the shared type must have its own file")
 	}
 	for _, p := range []string{"src/main/kotlin/message/A.kt", "src/main/kotlin/message/B.kt"} {
-		if strings.Contains(out[p], "public class StructPoint {") {
+		if strings.Contains(out[p], "public class Point {") {
 			t.Errorf("%s must reference the shared type, not re-declare it", p)
 		}
 	}
@@ -954,12 +954,12 @@ func TestKotlinProjectMode(t *testing.T) {
 	src := "version: 1\nmessages:\n  M:\n    payload:\n      a: { id: 0, type: u64 }\n"
 	out := genFromYAML(t, src, map[string]any{"emit": "project"})
 	for _, p := range []string{"settings.gradle.kts", "build.gradle.kts", "README.md",
-		"src/main/kotlin/message/Json.kt", "src/main/kotlin/message/Main.kt"} {
+		"src/main/kotlin/message/_Json.kt", "src/main/kotlin/message/_Main.kt"} {
 		if _, ok := out[p]; !ok {
 			t.Errorf("project mode must emit %s", p)
 		}
 	}
-	main := out["src/main/kotlin/message/Main.kt"]
+	main := out["src/main/kotlin/message/_Main.kt"]
 	for _, mode := range []string{`"encode" ->`, `"decode" ->`, `"trydecode" ->`, `"stream" ->`,
 		`"streamdecode" ->`, `if (mode == "bench")`} {
 		if !strings.Contains(main, mode) {
@@ -1026,12 +1026,12 @@ func TestKotlinProjectMode(t *testing.T) {
 	// A u64 must survive the JSON round trip exactly, which a double-based
 	// parser cannot do -- so the reader keeps the literal text and parses it at
 	// the field's declared width.
-	if !strings.Contains(out["src/main/kotlin/message/Json.kt"], "o.a = e.uint()") {
+	if !strings.Contains(out["src/main/kotlin/message/_Json.kt"], "o.a = e.uint()") {
 		t.Error("a u64 must be parsed at its declared width from the literal text")
 	}
 	// Sources mode emits none of it.
 	plain := genFromYAML(t, src, map[string]any{})
-	for _, p := range []string{"settings.gradle.kts", "build.gradle.kts", "src/main/kotlin/message/Main.kt"} {
+	for _, p := range []string{"settings.gradle.kts", "build.gradle.kts", "src/main/kotlin/message/_Main.kt"} {
 		if _, ok := plain[p]; ok {
 			t.Errorf("sources mode must not emit %s", p)
 		}
@@ -1226,7 +1226,7 @@ messages:
 	for _, want := range []string{
 		`Seq.placeElem(m.dstrs, id, "", s, -1, MAX_DYN_ARRAY_COUNT)`,
 		`Seq.placeElem(m.dblbs, id, Seq.EMPTY_BYTES, b, -1, MAX_DYN_ARRAY_COUNT)`,
-		`Seq.reserveElem(m.dobjs, id, -1, MAX_DYN_ARRAY_COUNT) { MDobjsElem() }`,
+		`Seq.reserveElem(m.dobjs, id, -1, MAX_DYN_ARRAY_COUNT) { M_Dobjs() }`,
 		// A native matrix ROW takes the index cap too: its id is the outer array's
 		// length. It rides the reservation, which is the call that grows the outer
 		// list, so the cap arrives as an argument and no guard precedes it. Its own
@@ -1385,9 +1385,9 @@ func TestKotlinDecoderAsksTheStreamForItsVerdict(t *testing.T) {
 	for _, want := range []string{
 		// The one-shots need no memory: feed's return IS the answer. `decode`
 		// checks the value it was handed, `tryDecode` hands it straight back.
-		"            val st = ist.feed(data, MyfirstmessageVisitor(m))",
+		"            val st = ist.feed(data, _Myfirstmessage__Visitor(m))",
 		"            check(st == DecodeStatus.COMPLETE) { \"Myfirstmessage: stream ended mid-field (\" + st + \")\" }",
-		"            return ist.feed(data, MyfirstmessageVisitor(out))",
+		"            return ist.feed(data, _Myfirstmessage__Visitor(out))",
 		// Feed forwards and nothing more: no assignment, no catch.
 		"        public fun feed(chunk: ByteArray): DecodeStatus = feed(chunk, 0, chunk.size)",
 		"        public fun feed(chunk: ByteArray, off: Int, len: Int): DecodeStatus =",
@@ -1758,9 +1758,9 @@ func TestKotlinNarrowEnumBitfieldArrayRoundTrip(t *testing.T) {
 			t.Errorf("W.kt missing %q:\n%s", want, m)
 		}
 	}
-	j := files["src/main/kotlin/message/Json.kt"]
+	j := files["src/main/kotlin/message/_Json.kt"]
 	if j == "" {
-		t.Fatal("no Json.kt generated")
+		t.Fatal("no _Json.kt generated")
 	}
 	for _, want := range []string{
 		// A UByte element already IS the value: it prints unsigned with no mask,
@@ -1776,7 +1776,7 @@ func TestKotlinNarrowEnumBitfieldArrayRoundTrip(t *testing.T) {
 		"o.u8[_k0] = _a0[_k0].uint().toUByte()",
 	} {
 		if !strings.Contains(j, want) {
-			t.Errorf("Json.kt missing %q:\n%s", want, j)
+			t.Errorf("_Json.kt missing %q:\n%s", want, j)
 		}
 	}
 	// No mask may appear on either side: masking is how a target WITHOUT unsigned
@@ -1821,10 +1821,10 @@ messages:
 		}
 	}
 	for _, c := range []struct{ file, decl string }{
-		{"StructInner.kt", "public class StructInner {"},
+		{"Inner.kt", "public class Inner {"},
 		{"Plain.kt", "public class Plain {"},
-		{"Plain.kt", "internal class PlainVisitor("},
-		{"Outer.kt", "internal class OuterVisitor("},
+		{"Plain.kt", "internal class _Plain__Visitor("},
+		{"Outer.kt", "internal class _Outer__Visitor("},
 	} {
 		if !strings.Contains(files["src/main/kotlin/p/"+c.file], ann+c.decl) {
 			t.Errorf("%s: %q is not preceded by the deprecation suppression", c.file, c.decl)
@@ -1833,26 +1833,26 @@ messages:
 	for _, c := range []struct{ file, decl string }{
 		{"Outer.kt", "public class Outer {"},
 		{"Clean.kt", "public class Clean {"},
-		{"Clean.kt", "internal class CleanVisitor("},
+		{"Clean.kt", "internal class _Clean__Visitor("},
 	} {
 		if strings.Contains(files["src/main/kotlin/p/"+c.file], ann+c.decl) {
 			t.Errorf("%s: %q touches no deprecated field and must not be suppressed", c.file, c.decl)
 		}
 	}
-	js := files["src/main/kotlin/p/Json.kt"]
-	for _, head := range []string{"internal fun to(o: StructInner,", "internal fun from(j: Map<String, JsonValue>, o: StructInner)", "internal fun to(o: Plain,"} {
+	js := files["src/main/kotlin/p/_Json.kt"]
+	for _, head := range []string{"internal fun to(o: Inner,", "internal fun from(j: kotlin.collections.Map<String, _JsonValue>, o: Inner)", "internal fun to(o: Plain,"} {
 		if !strings.Contains(js, "    "+ann+"    "+head) {
-			t.Errorf("Json.kt: %q is not preceded by the deprecation suppression", head)
+			t.Errorf("_Json.kt: %q is not preceded by the deprecation suppression", head)
 		}
 	}
 	if strings.Contains(js, "    "+ann+"    internal fun to(o: Clean,") {
-		t.Error("Json.kt: Clean touches no deprecated field and must not be suppressed")
+		t.Error("_Json.kt: Clean touches no deprecated field and must not be suppressed")
 	}
-	if !strings.Contains(files["src/main/kotlin/p/Main.kt"], "Plain.decode(wire).kept.toLong()") {
+	if !strings.Contains(files["src/main/kotlin/p/_Main.kt"], "Plain.decode(wire).kept.toLong()") {
 		t.Error("bench sink must skip the deprecated field")
 	}
 	// An i64 is already a Long: .toLong() would be a compiler warning.
-	if !strings.Contains(files["src/main/kotlin/p/Main.kt"], "Wide.decode(wire).w\n") {
+	if !strings.Contains(files["src/main/kotlin/p/_Main.kt"], "Wide.decode(wire).w\n") {
 		t.Error("bench sink on an i64 field must not call the redundant .toLong()")
 	}
 }

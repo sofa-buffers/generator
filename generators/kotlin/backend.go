@@ -36,17 +36,14 @@ func (*Backend) Generate(s *ir.Schema, cfg map[string]any) ([]generator.File, er
 		size:    generator.NewSizePolicy(cfg),
 	}
 	dir := "src/main/kotlin/" + strings.ReplaceAll(g.pkg, ".", "/") + "/"
-	if err := checkFieldNames(s); err != nil {
-		return nil, err
-	}
-	if err := g.checkUnions(); err != nil {
-		return nil, err
-	}
 	var files []generator.File
-	// Every named type gets its OWN file. Kotlin would allow several public
-	// declarations per file, but a type reached from two messages must be
-	// emitted ONCE or the package does not compile, and one-file-per-type is the
-	// simplest spelling of that rule.
+	// Every named type gets its OWN file, named after its class. Kotlin would
+	// allow several public declarations per file, but a type reached from two
+	// messages must be emitted ONCE or the package does not compile, and
+	// one-file-per-type is the simplest spelling of that rule. Type identifiers
+	// differ even once case is folded (ARCHITECTURE §8, "Naming"), so no two
+	// files meet on a case-insensitive filesystem either, and the harness files
+	// start with `_`, which no type identifier does.
 	for _, key := range g.namedTypes() {
 		nt := s.Named[key]
 		files = append(files, generator.File{
@@ -55,7 +52,7 @@ func (*Backend) Generate(s *ir.Schema, cfg map[string]any) ([]generator.File, er
 		})
 	}
 	for _, m := range s.Messages {
-		files = append(files, generator.File{Path: dir + exported(m.Name) + ".kt", Content: g.messageFile(m)})
+		files = append(files, generator.File{Path: dir + msgName(m) + ".kt", Content: g.messageFile(m)})
 	}
 	if cfgString(cfg, "emit", "sources") == "project" {
 		files = append(files, g.projectFiles(s, cfg, dir)...)
@@ -257,7 +254,7 @@ func (g *gen) namedTypeFile(key string, nt *ir.NamedType) []byte {
 	case ir.CatUnion:
 		g.emitUnionClass(f, key, nt)
 	default:
-		g.emitClass(f, g.typeName(key), nt.Fields, nt.Summary, false)
+		g.emitClass(f, g.typeName(key), "", nt.Fields, nt.Summary)
 	}
 	return f.bytes()
 }
@@ -308,7 +305,8 @@ func (g *gen) emitBitfieldConsts(f *kfile, name string, nt *ir.NamedType) {
 }
 
 // enumConstName renders a schema constant name as a Kotlin constant identifier.
-// Schema names already match `[A-Za-z][A-Za-z0-9_]*`, so only a hard-keyword
+// A constant is a member of its type's `object`, and schema names are already
+// legal Kotlin identifiers (ARCHITECTURE §8, "Naming"), so only a hard-keyword
 // collision needs the backtick escape.
 func enumConstName(name string) string {
 	if ktHardKeywords[name] {
@@ -322,7 +320,7 @@ func enumConstName(name string) string {
 func (g *gen) messageFile(m *ir.Message) []byte {
 	f := &kfile{}
 	g.header(f)
-	g.emitClass(f, exported(m.Name), m.Fields, m.Summary, true)
+	g.emitClass(f, msgName(m), visitorName(m), m.Fields, m.Summary)
 	return f.bytes()
 }
 
@@ -344,18 +342,29 @@ func anyDeprecated(fields []*ir.Field) bool {
 	return false
 }
 
-func (g *gen) emitClass(f *kfile, name string, fields []*ir.Field, summary string, isMessage bool) {
+// emitClass writes the class of a struct or, when vis names its decode visitor,
+// of a message.
+func (g *gen) emitClass(f *kfile, name, vis string, fields []*ir.Field, summary string) {
+	isMessage := vis != ""
 	f.kdoc("", summary)
 	if anyDeprecated(fields) {
 		f.line("%s", deprecationSuppress)
 	}
 	f.line("public class %s {", name)
-	for _, fld := range fields {
+	props := make([]string, len(fields))
+	for i, fld := range fields {
+		props[i] = ktIdent(fld.Name)
+	}
+	setters := jvmSetterRenames(props)
+	for i, fld := range fields {
 		f.kdoc("    ", fieldDoc(fld, generator.BoundNote(fld, generator.StorageDynamic)))
 		if fld.Deprecated {
 			f.line("    @Deprecated(\"This field is deprecated and may be removed in a future version.\")")
 		}
-		f.line("    public var %s: %s = %s", ktIdent(fld.Name), g.ktType(fld), g.ktDefaultValue(fld))
+		if s, ok := setters[props[i]]; ok {
+			f.line("    %s", s)
+		}
+		f.line("    public var %s: %s = %s", props[i], g.ktType(fld), g.ktDefaultValue(fld))
 	}
 	f.blank()
 
@@ -375,7 +384,7 @@ func (g *gen) emitClass(f *kfile, name string, fields []*ir.Field, summary strin
 
 	if isMessage {
 		f.blank()
-		g.emitMessageAPI(f, name, fields)
+		g.emitMessageAPI(f, name, vis, fields)
 	}
 	// Hoisted omit-compare defaults. `serialize` only ever READS them, so one
 	// shared instance per field suffices and encode stops rebuilding the literal
@@ -400,14 +409,14 @@ func (g *gen) emitClass(f *kfile, name string, fields []*ir.Field, summary strin
 	f.blank()
 
 	if isMessage {
-		g.emitVisitor(f, name, fields)
+		g.emitVisitor(f, name, vis, fields)
 	}
 }
 
 // emitMessageAPI writes the closed public entry-point set of CORELIB_PLAN §6.1.1
 // -- encode / encodeTo / decode / tryDecode / decoder -- plus the incremental
 // Decoder and the companion holding the statics.
-func (g *gen) emitMessageAPI(f *kfile, name string, fields []*ir.Field) {
+func (g *gen) emitMessageAPI(f *kfile, name, vis string, fields []*ir.Field) {
 	ms := g.messageSize(name, fields)
 
 	// encode(): the one-shot convenience, and the one place generated code owns
@@ -462,7 +471,7 @@ func (g *gen) emitMessageAPI(f *kfile, name string, fields []*ir.Field) {
 	f.line("    }")
 	f.blank()
 
-	g.emitDecoder(f, name)
+	g.emitDecoder(f, name, vis)
 	f.blank()
 
 	f.line("    public companion object {")
@@ -506,7 +515,7 @@ func (g *gen) emitMessageAPI(f *kfile, name string, fields []*ir.Field) {
 	// The stream answers exactly once, as feed's return value (CORELIB_PLAN
 	// §5.2), so the verdict is taken here and checked from a local -- there is no
 	// second question to ask it.
-	f.line("            val st = ist.feed(data, %sVisitor(m))", name)
+	f.line("            val st = ist.feed(data, %s(m))", vis)
 	f.line("            check(st == DecodeStatus.COMPLETE) { \"%s: stream ended mid-field (\" + st + \")\" }", name)
 	f.line("            return m")
 	f.line("        }")
@@ -529,7 +538,7 @@ func (g *gen) emitMessageAPI(f *kfile, name string, fields []*ir.Field) {
 	f.line("        public fun tryDecode(data: ByteArray, out: %s): DecodeStatus {", name)
 	f.line("            out.reset()")
 	f.line("            val ist = IStream()")
-	f.line("            return ist.feed(data, %sVisitor(out))", name)
+	f.line("            return ist.feed(data, %s(out))", vis)
 	f.line("        }")
 	f.blank()
 	f.line("        /**")
@@ -545,7 +554,7 @@ func (g *gen) emitMessageAPI(f *kfile, name string, fields []*ir.Field) {
 // and resumes at any byte boundary, so this class carries no parse state of its
 // own -- it exists to make that reachable from outside, which an internal
 // Visitor was not.
-func (g *gen) emitDecoder(f *kfile, name string) {
+func (g *gen) emitDecoder(f *kfile, name, vis string) {
 	f.line("    /**")
 	f.line("     * Incremental decoder for [%s]: hold one and feed the message as bytes", name)
 	f.line("     * arrive.")
@@ -560,7 +569,7 @@ func (g *gen) emitDecoder(f *kfile, name string) {
 	f.line("    public class Decoder {")
 	f.line("        private val m = %s()", name)
 	f.line("        private val ist = IStream()")
-	f.line("        private val v = %sVisitor(m)", name)
+	f.line("        private val v = %s(m)", vis)
 	f.blank()
 	f.line("        /**")
 	f.line("         * Feed the next chunk, of any size.")

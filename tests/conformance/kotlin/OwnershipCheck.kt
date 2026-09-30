@@ -96,11 +96,11 @@ private fun sample(): Myfirstmessage {
     m.someunion.option2 = "union payload"
     m.somestructwitharray.label = "struct label"
     m.someunionarray = mutableListOf(
-        MyfirstmessageSomeunionarrayElem().also { it.asstring = "union row" },
+        Myfirstmessage_Someunionarray().also { it.asstring = "union row" },
     )
     m.somemap = mutableListOf(
-        MyfirstmessageSomemapElem().also { it.key = "first key"; it.value = 1u },
-        MyfirstmessageSomemapElem().also { it.key = "second key"; it.value = 2u },
+        Myfirstmessage_Somemap().also { it.key = "first key"; it.value = 1u },
+        Myfirstmessage_Somemap().also { it.key = "second key"; it.value = 2u },
     )
     return m
 }
