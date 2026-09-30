@@ -1,0 +1,149 @@
+# The shared name-collision schema (docs/ARCHITECTURE.md §8, "Naming").
+#
+# Every name here is legal under the three naming rules, and every one of them
+# used to clash in at least one target: two schema paths that joined or folded
+# to one identifier, a type spelled like a role the generator derives from
+# another type, or a type spelled like a fixed, imported or builtin name the
+# generated module uses. Each conformance suite builds this schema against the
+# real corelib and round-trips names.json through it — the generator exits 0
+# on broken output, so only building catches a clash.
+#
+# Keep every $defs type used by exactly one message: a $defs type shared by
+# two messages is a separate C/C++ defect (one definition per header), not a
+# naming one.
+version: 1
+$defs:
+  struct:
+    # A $defs type has no category prefix any more; `struct_point` below used
+    # to spell the same identifier (StructPoint).
+    point:
+      x: { id: 0, type: i32 }
+      y: { id: 1, type: i32 }
+  enum:
+    color: { red: 0, green: 1, blue: 2 }
+  bitfield:
+    flags:
+      on: { pos: 0 }
+      id: { pos: 1 }
+  union:
+    # Used with two default_ids below, so it splits into one type per default;
+    # `shape_default_pt` (a message) and `shape_default.pt` (the inline option
+    # of the union below) spelled the old variant name.
+    shape:
+      num: { id: 0, type: u8 }
+      pt: { id: 1, type: struct, fields: { x: { id: 0, type: u8 } } }
+    shape_default:
+      pt: { id: 0, type: struct, fields: { y: { id: 0, type: u16 } } }
+      other: { id: 1, type: u8 }
+
+messages:
+  # --- path clashes -------------------------------------------------------
+  m:
+    payload:
+      a: { id: 0, type: struct, fields: { b: { id: 0, type: u8 } } }
+      # role words as inline paths: M_Decoder / M_Visitor / M_New next to the
+      # roles M__Decoder, _M__Visitor, M__New
+      decoder: { id: 1, type: struct, fields: { x: { id: 0, type: u8 } } }
+      visitor: { id: 2, type: enum, enum: { off: 0, on: 1 } }
+      new: { id: 3, type: bitfield, bits: { x: { pos: 0 }, y: { pos: 1 } } }
+      # an array's inline element takes the field's path; `arr_elem` is the
+      # old suffix
+      arr: { id: 4, type: array, items: { type: struct, count: 2, fields: { v: { id: 0, type: u8 } } } }
+      arr_elem: { id: 5, type: struct, fields: { w: { id: 0, type: u16 } } }
+      u: { id: 6, type: union, oneof: { id: { id: 0, type: u8 }, default: { id: 1, type: struct, fields: { z: { id: 0, type: u8 } } } } }
+      s1: { id: 7, type: union, default_id: 0, oneof: { $ref: '#/$defs/union/shape' } }
+      s2: { id: 8, type: union, default_id: 1, oneof: { $ref: '#/$defs/union/shape' } }
+      sd: { id: 9, type: union, oneof: { $ref: '#/$defs/union/shape_default' } }
+      col: { id: 10, type: enum, enum: { $ref: '#/$defs/enum/color' }, default: 0 }
+      fl: { id: 11, type: bitfield, bits: { $ref: '#/$defs/bitfield/flags' } }
+  m_a: { payload: { x: { id: 0, type: u8 } } }
+  m_decoder: { payload: { x: { id: 0, type: u8 } } }
+  m_visitor: { payload: { x: { id: 0, type: u8 } } }
+  new_m: { payload: { x: { id: 0, type: u8 } } }
+  a:
+    payload:
+      b_c: { id: 0, type: struct, fields: { x: { id: 0, type: u8 } } }
+  a_b:
+    payload:
+      c: { id: 0, type: struct, fields: { y: { id: 0, type: u16 } } }
+  struct_point:
+    payload:
+      p: { id: 0, type: struct, fields: { $ref: '#/$defs/struct/point' } }
+  shape_default_pt: { payload: { x: { id: 0, type: u8 } } }
+  color_red: { payload: { x: { id: 0, type: u8 } } }
+  flags_on: { payload: { x: { id: 0, type: u8 } } }
+
+  # --- generator roles and fixed names ------------------------------------
+  decoder: { payload: { x: { id: 0, type: u8 } } }
+  visitor: { payload: { x: { id: 0, type: u8 } } }
+  encoder: { payload: { x: { id: 0, type: u8 } } }
+  decode_error: { payload: { x: { id: 0, type: u8 } } }
+  max_size: { payload: { x: { id: 0, type: u8 } } }
+  max_dyn_string_len: { payload: { x: { id: 0, type: u8 } } }
+  reassembly: { payload: { x: { id: 0, type: u8 } } }
+  unbounded: { payload: { x: { id: 0, type: u8 } } }
+  status: { payload: { x: { id: 0, type: u8 } } }
+  field: { payload: { x: { id: 0, type: u8 } } }
+  binding: { payload: { x: { id: 0, type: u8 } } }
+  companion: { payload: { x: { id: 0, type: u8 } } }
+  program: { payload: { x: { id: 0, type: u8 } } }
+  json: { payload: { x: { id: 0, type: u8 } } }
+  json_value: { payload: { x: { id: 0, type: u8 } } }
+  main: { payload: { x: { id: 0, type: u8 } } }
+  message: { payload: { x: { id: 0, type: u8 } } }
+  types: { payload: { x: { id: 0, type: u8 } } }
+  sofab: { payload: { x: { id: 0, type: u8 } } }
+  sofab_visitor: { payload: { x: { id: 0, type: u8 } } }
+
+  # --- corelib names ------------------------------------------------------
+  seq: { payload: { x: { id: 0, type: u8 } } }
+  o_stream: { payload: { x: { id: 0, type: u8 } } }
+  i_stream: { payload: { x: { id: 0, type: u8 } } }
+  i_visitor: { payload: { x: { id: 0, type: u8 } } }
+  decode_status: { payload: { x: { id: 0, type: u8 } } }
+  payload_acc: { payload: { x: { id: 0, type: u8 } } }
+  sofab_error: { payload: { x: { id: 0, type: u8 } } }
+  sofab_exception: { payload: { x: { id: 0, type: u8 } } }
+  wire_type: { payload: { x: { id: 0, type: u8 } } }
+  array_kind: { payload: { x: { id: 0, type: u8 } } }
+
+  # --- language builtins and standard library -----------------------------
+  string: { payload: { x: { id: 0, type: u8 } } }
+  list: { payload: { x: { id: 0, type: u8 } } }
+  map: { payload: { x: { id: 0, type: u8 } } }
+  object: { payload: { x: { id: 0, type: u8 } } }
+  array: { payload: { x: { id: 0, type: u8 } } }
+  boolean: { payload: { x: { id: 0, type: u8 } } }
+  long: { payload: { x: { id: 0, type: u8 } } }
+  int: { payload: { x: { id: 0, type: u8 } } }
+  any: { payload: { x: { id: 0, type: u8 } } }
+  system: { payload: { x: { id: 0, type: u8 } } }
+  math: { payload: { x: { id: 0, type: u8 } } }
+  console: { payload: { x: { id: 0, type: u8 } } }
+  exception: { payload: { x: { id: 0, type: u8 } } }
+  error: { payload: { x: { id: 0, type: u8 } } }
+  number: { payload: { x: { id: 0, type: u8 } } }
+  record: { payload: { x: { id: 0, type: u8 } } }
+  big_int: { payload: { x: { id: 0, type: u8 } } }
+  uint8_array: { payload: { x: { id: 0, type: u8 } } }
+  uint8_list: { payload: { x: { id: 0, type: u8 } } }
+  byte_array: { payload: { x: { id: 0, type: u8 } } }
+  bytes_builder: { payload: { x: { id: 0, type: u8 } } }
+  endian: { payload: { x: { id: 0, type: u8 } } }
+  platform: { payload: { x: { id: 0, type: u8 } } }
+  vec: { payload: { x: { id: 0, type: u8 } } }
+  option: { payload: { x: { id: 0, type: u8 } } }
+  result: { payload: { x: { id: 0, type: u8 } } }
+  box: { payload: { x: { id: 0, type: u8 } } }
+  serialize: { payload: { x: { id: 0, type: u8 } } }
+  read: { payload: { x: { id: 0, type: u8 } } }
+  none: { payload: { x: { id: 0, type: u8 } } }
+  self: { payload: { x: { id: 0, type: u8 } } }
+  std: { payload: { x: { id: 0, type: u8 } } }
+  deprecated: { payload: { x: { id: 0, type: u8 } } }
+  override: { payload: { x: { id: 0, type: u8 } } }
+
+  # --- file names ---------------------------------------------------------
+  foo_test: { payload: { x: { id: 0, type: u8 } } }
+  x_windows: { payload: { x: { id: 0, type: u8 } } }
+  stdint: { payload: { x: { id: 0, type: u8 } } }
