@@ -34,6 +34,9 @@ func (*Backend) Generate(s *ir.Schema, cfg map[string]any) ([]generator.File, er
 	if err := g.checkPackageNames(); err != nil {
 		return nil, err
 	}
+	if err := g.checkFieldNames(); err != nil {
+		return nil, err
+	}
 	project := cfgString(cfg, "emit", "sources") == "project"
 	// In a project the package gets its own directory so the harness can import
 	// it; in sources mode the files are emitted flat for the caller to place.

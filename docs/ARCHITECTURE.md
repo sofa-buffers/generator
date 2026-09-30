@@ -726,8 +726,15 @@ a reimplementation should emit code that honors all of them:
   backend and rename, say, Python's `field` in all of them. Every such list is
   guarded by a **collision test** that uses each listed name as a field (message,
   nested struct, union option) and compiles or imports the result against the
-  real corelib, because the generator exits 0 on broken output. Done for C++ and
-  Python; the other backends still keep separate keyword and member tables.
+  real corelib, because the generator exits 0 on broken output. Done for C++,
+  Python and Go; the other backends still keep separate keyword and member tables.
+  A list names what the type carries, **inherited members included**: Go's lists
+  the whole `sofab.Visitor` interface and what the embedded `sofab.StringCheck`
+  promotes, not only the callbacks a type declares — a field that hides a
+  promoted method compiles, but the type stops satisfying the interface, or (a
+  field `SetStringCheck`) silently stops receiving the decode's UTF-8 policy.
+  Where a backend folds schema names (Go camel-cases `a_b` and `aB` to one `AB`),
+  two fields landing on one member are a generation error naming both.
 - **Emit pure ASCII *that the generator authors*.** Every byte a backend writes
   on its own — banners, separators, Makefiles, READMEs, scaffolding — must be ASCII
   (`< 0x80`): use ASCII punctuation (`-`, not the em-dash `—`). `TestGeneratedOutputIsASCII`
