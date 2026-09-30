@@ -492,7 +492,7 @@ func (g *gen) frames(m *ir.Message) []frame {
 		for _, fld := range fields {
 			switch {
 			case fld.Kind == ir.KindStruct || fld.Kind == ir.KindUnion:
-				cl := loc + "_" + fld.Name
+				cl := locChild(loc, fld.Name)
 				// Below a union option every path goes through <opt>_mut(); a
 				// union reached that way is assigned through the reference it
 				// returns.
@@ -508,7 +508,7 @@ func (g *gen) frames(m *ir.Message) []frame {
 				if un != nil {
 					ap = "(*" + ap + ")"
 				}
-				addArray(depth+1, loc+"_"+fld.Name, ap, fld.Elem, fld.ElemRef, fld.ElemItems, fld.ElemMaxHas, fld.ElemMax, capOf(fld.HasCount, fld.Count))
+				addArray(depth+1, locChild(loc, fld.Name), ap, fld.Elem, fld.ElemRef, fld.ElemItems, fld.ElemMaxHas, fld.ElemMax, capOf(fld.HasCount, fld.Count))
 			}
 		}
 	}
@@ -1210,6 +1210,8 @@ func (g *gen) emitVisitor(f *rfile, name string, fields []*ir.Field) {
 	f.line("#[derive(Clone, Copy, PartialEq)]")
 	// A variant spells the schema path it stands for (Root_a_b): the field names
 	// stay readable in the dispatch arms, and the enum is private to the module.
+	// An underscore inside a field name is doubled (locChild), so the path a.b
+	// and a field a_b are two variants, not one defined twice.
 	f.line("#[allow(non_camel_case_types)] // variants spell the schema path (Root_a_b), not a type name")
 	f.line("enum _Loc {")
 	for _, fr := range fs {
@@ -1691,11 +1693,11 @@ func (g *gen) emitVisitor(f *rfile, name string, fields []*ir.Field) {
 						// A struct/union option is selected where its frame opens,
 						// so an empty frame still switches (MESSAGE_SPEC §7.4.1); a
 						// held one is kept and its scope continues (§7.4 merge).
-						add("            (_Loc::%s, %d) => { %s; _Loc::%s },", fr.loc, fld.ID, member(fr, fld), fr.loc+"_"+fld.Name)
+						add("            (_Loc::%s, %d) => { %s; _Loc::%s },", fr.loc, fld.ID, member(fr, fld), locChild(fr.loc, fld.Name))
 					case fld.Kind == ir.KindStruct || fld.Kind == ir.KindUnion:
-						add("            (_Loc::%s, %d) => _Loc::%s,", fr.loc, fld.ID, fr.loc+"_"+fld.Name)
+						add("            (_Loc::%s, %d) => _Loc::%s,", fr.loc, fld.ID, locChild(fr.loc, fld.Name))
 					case fld.Kind == ir.KindArray && isWrapperElem(fld.Elem):
-						add("            (_Loc::%s, %d) => { %s.clear(); _Loc::%s },", fr.loc, fld.ID, member(fr, fld), fr.loc+"_"+fld.Name)
+						add("            (_Loc::%s, %d) => { %s.clear(); _Loc::%s },", fr.loc, fld.ID, member(fr, fld), locChild(fr.loc, fld.Name))
 					}
 				}
 			case fkStructArr:

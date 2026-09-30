@@ -73,6 +73,22 @@ Two things worth knowing before switching it off under `corelib: rs`:
 This is the Rust analogue of the C++ [`allow_dynamic`](cpp.md#allow_dynamic),
 and behaves the same way.
 
+## Field names
+
+A field's struct member is the field's schema name. A field named like a Rust
+keyword is written as a raw identifier — the field `type` is `r#type` — so it
+keeps its name; serde strips the `r#`, so the JSON key is unchanged. The four
+keywords Rust refuses as raw identifiers, `self`, `Self`, `crate` and `super`,
+get a trailing underscore instead (`self_`) and a `serde(rename)` that keeps the
+JSON key. A method never collides with a field in Rust, so `encode` or
+`serialize` stay as they are. Two fields that end up with the same member —
+`self` and `self_` — fail generation, naming both; so do two constants of one
+enum or bitfield that differ only in case (`a` and `A` are both `A`). A struct
+with a field that is not snake_case — `Self_`, `a__b`, or a schema name such as
+`legacyId` — carries `#[allow(non_snake_case)]`, so a `-D warnings` build
+accepts the name the schema chose. The list lives in
+`generators/rust/reserved.go`.
+
 ## Unions
 
 A `union` holds exactly one of its options. It is a Rust `enum` with one
@@ -157,7 +173,9 @@ accessor whose name is on this list gets a trailing underscore: `which`,
 `to_owned`, `clone_into`, `borrow`, `borrow_mut`, `into`, `try_into`,
 `type_id` — the union's own members and the methods it has from its derives
 and the standard library's blanket impls, which a same-named accessor would
-shadow. Option `which` is `which_()` and `which_mut()`; option `borrow` is
+shadow — and `new`, `as_mut`, `deref_mut`, which clippy refuses as look-alikes
+of a constructor or the standard traits' methods (option `as` is `r#as()` and
+`as_mut_()`). Option `which` is `which_()` and `which_mut()`; option `borrow` is
 `borrow_()` and `borrow_mut_()`. Two options that would produce the same
 variant, accessor or id constant — `a_b` and `aB`, or `x` and `x_mut` — fail
 generation, naming both.
