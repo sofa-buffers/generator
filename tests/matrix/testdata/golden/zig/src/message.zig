@@ -82,7 +82,7 @@ pub const Scalars = struct {
     /// error.IncompleteMessage; malformed input with error.InvalidMessage.
     pub fn decode(alloc: std.mem.Allocator, data: []const u8) DecodeError!Scalars {
         var m: Scalars = .{};
-        var v: _dec_Scalars = .{ .m = &m, .alloc = alloc };
+        var v: _Scalars__Visitor = .{ .m = &m, .alloc = alloc };
         const st = try sofab.decode(data, &v);
         // A scalar array over its schema count, or a wrapper-array element
         // id at/beyond the schema count: an index above the schema capacity
@@ -119,7 +119,7 @@ pub const Scalars = struct {
     /// produced it.
     pub const Decoder = struct {
         is: sofab.IStream = sofab.IStream.init(),
-        v: _dec_Scalars,
+        v: _Scalars__Visitor,
 
         /// Feed the next chunk, of any size. `.complete` means the bytes
         /// ended on a field boundary, `.incomplete` mid-field -- neither
@@ -153,7 +153,7 @@ pub const Scalars = struct {
 
 /// Flat-visitor decoder for Scalars: a (location, id) state machine over the
 /// corelib's streaming callbacks, with a bounded location stack.
-const _dec_Scalars = struct {
+const _Scalars__Visitor = struct {
     m: *Scalars,
     alloc: std.mem.Allocator,
     stack: [256]_Loc = undefined,
@@ -169,7 +169,7 @@ const _dec_Scalars = struct {
         dead, // skipped subtree: an undeclared sequence id, a S7.3 wire-type mismatch, or a failed per-element allocation
     };
 
-    pub fn unsigned(self: *_dec_Scalars, id: sofab.Id, value: sofab.Unsigned) void {
+    pub fn unsigned(self: *_Scalars__Visitor, id: sofab.Id, value: sofab.Unsigned) void {
         if (self.askip > 0) {
             self.askip -= 1;
             return;
@@ -204,7 +204,7 @@ const _dec_Scalars = struct {
         }
     }
 
-    pub fn signed(self: *_dec_Scalars, id: sofab.Id, value: sofab.Signed) void {
+    pub fn signed(self: *_Scalars__Visitor, id: sofab.Id, value: sofab.Signed) void {
         if (self.askip > 0) {
             self.askip -= 1;
             return;
@@ -225,7 +225,7 @@ const _dec_Scalars = struct {
         }
     }
 
-    pub fn fp32(self: *_dec_Scalars, id: sofab.Id, value: f32) void {
+    pub fn fp32(self: *_Scalars__Visitor, id: sofab.Id, value: f32) void {
         if (self.askip > 0) {
             self.askip -= 1;
             return;
@@ -239,7 +239,7 @@ const _dec_Scalars = struct {
         }
     }
 
-    pub fn fp64(self: *_dec_Scalars, id: sofab.Id, value: f64) void {
+    pub fn fp64(self: *_Scalars__Visitor, id: sofab.Id, value: f64) void {
         if (self.askip > 0) {
             self.askip -= 1;
             return;
@@ -253,7 +253,7 @@ const _dec_Scalars = struct {
         }
     }
 
-    pub fn arrayBegin(self: *_dec_Scalars, id: sofab.Id, kind: sofab.ArrayKind, count: usize) void {
+    pub fn arrayBegin(self: *_Scalars__Visitor, id: sofab.Id, kind: sofab.ArrayKind, count: usize) void {
         self.askip = switch (kind) {
             .unsigned => switch (self.cur) {
                 .root => switch (id) {
@@ -319,14 +319,14 @@ const _dec_Scalars = struct {
     /// This is the SCHEMA-BOUNDED entry point. A `maxlen` is a validity bound and
     /// stays the caller's, decided on `total` before this call; a field the
     /// schema leaves unbounded goes through _takeCapped instead.
-    fn _take(self: *_dec_Scalars, total: usize, offset: usize, chunk: []const u8) ?[]const u8 {
+    fn _take(self: *_Scalars__Visitor, total: usize, offset: usize, chunk: []const u8) ?[]const u8 {
         return self.acc.take(self.alloc, total, offset, chunk, false) catch {
             self.inv = true;
             return null;
         };
     }
 
-    pub fn sequenceBegin(self: *_dec_Scalars, _: sofab.Id) void {
+    pub fn sequenceBegin(self: *_Scalars__Visitor, _: sofab.Id) void {
         if (self.sp < self.stack.len) {
             self.stack[self.sp] = self.cur;
             self.sp += 1;
@@ -334,7 +334,7 @@ const _dec_Scalars = struct {
         self.cur = .dead;
     }
 
-    pub fn sequenceEnd(self: *_dec_Scalars) void {
+    pub fn sequenceEnd(self: *_Scalars__Visitor) void {
         if (self.sp > 0) {
             self.sp -= 1;
             self.cur = self.stack[self.sp];

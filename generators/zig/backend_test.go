@@ -64,8 +64,8 @@ func TestZigStructural(t *testing.T) {
 		"pub fn decode(alloc: std.mem.Allocator, data: []const u8) DecodeError!Myfirstmessage {",
 		"const st = try sofab.decode(data, &v);",                 // corelib-zig feed(chunk)->Status: bind it (generator#120)
 		"if (st == .incomplete) return error.IncompleteMessage;", // truncated input rejected, distinct from INVALID
-		"const _dec_Myfirstmessage = struct {",                   // flat-visitor decoder
-		"pub fn sequenceBegin(self: *_dec_Myfirstmessage",        // location-stack nesting
+		"const _Myfirstmessage__Visitor = struct {",              // flat-visitor decoder
+		"pub fn sequenceBegin(self: *_Myfirstmessage__Visitor",   // location-stack nesting
 		"pub const MAX_SIZE: usize =",
 		"someu64: u64 = 18446744073709551615,",                                           // schema default in the declaration
 		"someuintarray: sofab.FixedArray(u32, 4) = .init(&.{ 0, 1, 1000, 4294967295 }),", // count:N native array: the corelib storage, value and length together
@@ -74,7 +74,7 @@ func TestZigStructural(t *testing.T) {
 		"someboolarray: sofab.FixedArray(bool, 8) = .init(&.{ true, true, false }),",
 		"somestring: []const u8 = \"\",",                                                     // slice storage: the bytes are the message's, allocated by decode
 		"someblob: []const u8 = &.{ 72, 101, 108, 108, 111 },",                               // blob default bytes
-		"somemap: []const MyfirstmessageSomemap",                                             // dynamic composite array -> slice
+		"somemap: []const Myfirstmessage_Somemap",                                            // dynamic composite array -> slice
 		"if (!std.mem.eql(u32, self.someuintarray.slice(), &.{ 0, 1, 1000, 4294967295 })) {", // omit-guard vs default, over the VALUE (items[0..len])
 		"std.mem.sliceAsBytes",                                                               // bool array 0/1 lowering
 		"self.m.someuintarray.push(@intCast(value), &self.inv)",                              // capacity-checked store on the corelib storage (generator#100)
@@ -225,7 +225,7 @@ messages:
 		// bounded struct: reserveElem bounds the index BEFORE it grows, and `id`
 		// reaches it unincremented -- forming id + 1 in front of the bound is
 		// exactly what §6.2.1 rules out.
-		`.root_bp => blk: { if (!(sofab.arrays.reserveElem(MBpElem, .{ .schema = 2 }, self.alloc, &(self.m.bp), id, .{}) catch { self.inv = true; break :blk .dead; })) break :blk .dead;`,
+		`.root_bp => blk: { if (!(sofab.arrays.reserveElem(M_Bp, .{ .schema = 2 }, self.alloc, &(self.m.bp), id, .{}) catch { self.inv = true; break :blk .dead; })) break :blk .dead;`,
 		// and the same bound is still latched at the element's LENGTH WORD, where
 		// §5.2 wants the verdict for a message truncated right after it.
 		`.root_bs => { try sofab.arrays.overIndex(.{ .schema = 4 }, id); if (total > 16) return sofab.Error.InvalidMessage; },`,
@@ -853,7 +853,7 @@ messages:
 	for _, want := range []string{
 		"askip: usize = 0,", // the discard counter
 		"if (self.askip > 0) { self.askip -= 1; return; }",
-		"pub fn arrayBegin(self: *_dec_M, id: sofab.Id, kind: sofab.ArrayKind, count: usize) void {",
+		"pub fn arrayBegin(self: *_M__Visitor, id: sofab.Id, kind: sofab.ArrayKind, count: usize) void {",
 		"self.askip = switch (kind) {",
 		"            .unsigned => switch (self.cur) {",
 		"            .fp32 => switch (self.cur) {",
@@ -887,7 +887,7 @@ messages:
 		t.Fatalf("generate: %v", err)
 	}
 	scalarOnly := string(scf[0].Content)
-	if !containsCode(scalarOnly, "pub fn arrayBegin(self: *_dec_M, _: sofab.Id, kind: sofab.ArrayKind, count: usize) void {") {
+	if !containsCode(scalarOnly, "pub fn arrayBegin(self: *_M__Visitor, _: sofab.Id, kind: sofab.ArrayKind, count: usize) void {") {
 		t.Errorf("scalar-only message.zig must emit arrayBegin with an unused id:\n%s", scalarOnly)
 	}
 }
@@ -1159,7 +1159,7 @@ messages:
 	}
 	// The element predicate itself: the explicit form of the "no child was
 	// written" test the lazy framing only encodes implicitly for a FIELD.
-	if !containsCode(m, "pub fn isDefault(self: *const VecFixedElem) bool {\n        if (self.k != 0) return false;\n        return true;\n    }") {
+	if !containsCode(m, "pub fn isDefault(self: *const Vec_Fixed) bool {\n        if (self.k != 0) return false;\n        return true;\n    }") {
 		t.Errorf("every struct type must carry the all-default predicate:\n%s", m)
 	}
 }
@@ -1247,7 +1247,7 @@ messages:
 
 	for _, want := range []string{
 		// placement, not append -- and the gap-fill that precedes it
-		"                if (!(sofab.arrays.reserveElem(VecObjsElem, .{ .schema = 4 }, self.alloc, &(self.m.objs), id, .{}) catch { self.inv = true; break :blk .dead; })) break :blk .dead;\n                self.ei_root_objs = id;\n                break :blk .root_objs_e;",
+		"                if (!(sofab.arrays.reserveElem(Vec_Objs, .{ .schema = 4 }, self.alloc, &(self.m.objs), id, .{}) catch { self.inv = true; break :blk .dead; })) break :blk .dead;\n                self.ei_root_objs = id;\n                break :blk .root_objs_e;",
 		// the child stores address that element, never the last appended one
 		"sofab.arrays.at(self.m.objs, self.ei_root_objs).k = @intCast(value); },",
 		// the schema bound still rejects an out-of-range element id, which also
@@ -1256,7 +1256,7 @@ messages:
 		// (CORELIB_PLAN §6.2.1), which is why the call takes `id` itself
 		"self.alloc, &(self.m.objs), id, .{})",
 		// the unbounded twin takes the other category, at the same position
-		"sofab.arrays.reserveElem(VecDynElem, .{ .receiver = max_dyn_array_count }, self.alloc, &(self.m.dyn), id, .{})",
+		"sofab.arrays.reserveElem(Vec_Dyn, .{ .receiver = max_dyn_array_count }, self.alloc, &(self.m.dyn), id, .{})",
 	} {
 		if !containsCode(m, want) {
 			t.Errorf("message.zig missing %q:\n%s", want, m)
@@ -1348,10 +1348,10 @@ messages:
 		// A count:N wrapper array is the empty slice, exactly like a count-less one.
 		`    strs: []const []const u8 = &.{},`,
 		`    blobs: []const []const u8 = &.{},`,
-		"    objs: []const VecObjsElem = &.{},",
+		"    objs: []const Vec_Objs = &.{},",
 		"    rows: []const []const []const u8 = &.{},",
 		"    dstrs: []const []const u8 = &.{},",
-		"    dobjs: []const VecDobjsElem = &.{},",
+		"    dobjs: []const Vec_Dobjs = &.{},",
 		// The native twin agrees: N of inline capacity, length 0.
 		"    nums: sofab.FixedArray(u32, 3) = .{},",
 	} {
@@ -1719,7 +1719,7 @@ messages:
 		t.Fatalf("generate: %v", err)
 	}
 	m := string(files[0].Content)
-	want := "    pub fn sequenceBegin(self: *_dec_Probe, _: sofab.Id) void {\n" +
+	want := "    pub fn sequenceBegin(self: *_Probe__Visitor, _: sofab.Id) void {\n" +
 		"        if (self.sp < self.stack.len) {\n" +
 		"            self.stack[self.sp] = self.cur;\n" +
 		"            self.sp += 1;\n" +
@@ -1764,7 +1764,7 @@ messages:
 
 	// Zig's hook is the only one in the family that RETURNS an error rather than
 	// setting a sticky flag, so the reject is `return sofab.Error.InvalidMessage`.
-	if !containsCode(m, "pub fn fixlenBegin(self: *_dec_M, id: sofab.Id, subtype: sofab.FixlenType, total: usize) sofab.Error!void {") {
+	if !containsCode(m, "pub fn fixlenBegin(self: *_M__Visitor, id: sofab.Id, subtype: sofab.FixlenType, total: usize) sofab.Error!void {") {
 		t.Fatal("no fixlenBegin, or the wrong signature (it must be fallible)")
 	}
 	if !containsCode(m, ".string => switch (self.cur) {") ||
@@ -1906,7 +1906,7 @@ messages:
 		`.root_dblbs => { const chunk = self._takeCapped(total, offset, _chunk, max_dyn_blob_len) orelse return; sofab.arrays.placeElem([]const u8, .{ .receiver = max_dyn_array_count }, self.alloc, &(self.m.dblbs), id, "", chunk) catch { self.lim = true; }; },`,
 		// sequenceBegin: the cap goes into the reservation, and the refusal breaks
 		// to the dead scope.
-		"if (!(sofab.arrays.reserveElem(MDobjsElem, .{ .receiver = max_dyn_array_count }, self.alloc, &(self.m.dobjs), id, .{}) catch { self.lim = true; break :blk .dead; })) break :blk .dead;",
+		"if (!(sofab.arrays.reserveElem(M_Dobjs, .{ .receiver = max_dyn_array_count }, self.alloc, &(self.m.dobjs), id, .{}) catch { self.lim = true; break :blk .dead; })) break :blk .dead;",
 		// a native matrix ROW: its id is the outer array's length and its own
 		// element count sizes the row, so reserveRow takes the cap twice -- once
 		// per bound -- and decides the index before the count (#386).
@@ -1929,7 +1929,7 @@ messages:
 	// would answer INVALID for bytes that are well formed (§6.2.1).
 	for _, gone := range []string{
 		"&(self.m.dstrs), id, \"\", chunk) catch { self.inv",
-		"reserveElem(MDobjsElem, .{ .schema",
+		"reserveElem(M_Dobjs, .{ .schema",
 		"reserveRow(u32, .{ .schema = ", // both of dmat's bounds are the cap
 	} {
 		if containsCode(m, gone) {
@@ -2043,7 +2043,7 @@ messages:
 	}
 	m := string(files[0].Content)
 	takeStr := strings.Join([]string{
-		"    fn _takeStr(self: *_dec_M, total: usize, offset: usize, chunk: []const u8) ?[]const u8 {",
+		"    fn _takeStr(self: *_M__Visitor, total: usize, offset: usize, chunk: []const u8) ?[]const u8 {",
 		"        if (offset == 0 and chunk.len >= total) {",
 		"            const src = chunk[0..total];",
 		"            if (!sofab.utf8Valid(src)) { self.inv = true; return null; }",
@@ -2058,7 +2058,7 @@ messages:
 		t.Errorf("_takeStr must validate the source before it copies:\n%s", m)
 	}
 	takeStrCapped := strings.Join([]string{
-		"    fn _takeStrCapped(self: *_dec_M, total: usize, offset: usize, chunk: []const u8, cap: usize) ?[]const u8 {",
+		"    fn _takeStrCapped(self: *_M__Visitor, total: usize, offset: usize, chunk: []const u8, cap: usize) ?[]const u8 {",
 		"        self.acc.beginCapped(total, cap) catch { self.lim = true; return null; };",
 		"        return self._takeStr(total, offset, chunk);",
 		"    }",
@@ -2097,13 +2097,13 @@ messages:
 		t.Fatalf("generate: %v", err)
 	}
 	m := string(files[0].Content)
-	if containsCode(m, "fn _takeStr(self: *_dec_B,") || containsCode(m, "fn _takeStrCapped(self: *_dec_B,") {
+	if containsCode(m, "fn _takeStr(self: *_B__Visitor,") || containsCode(m, "fn _takeStrCapped(self: *_B__Visitor,") {
 		t.Errorf("a decoder without strings must not emit the string binds:\n%s", m)
 	}
-	if !containsCode(m, "fn _takeStr(self: *_dec_S,") {
+	if !containsCode(m, "fn _takeStr(self: *_S__Visitor,") {
 		t.Errorf("a decoder with a bounded string must emit _takeStr:\n%s", m)
 	}
-	if containsCode(m, "fn _takeStrCapped(self: *_dec_S,") {
+	if containsCode(m, "fn _takeStrCapped(self: *_S__Visitor,") {
 		t.Errorf("a decoder whose only string is schema-bounded must not emit _takeStrCapped:\n%s", m)
 	}
 }

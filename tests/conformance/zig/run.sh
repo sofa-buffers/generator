@@ -74,6 +74,35 @@ zig_build() {
     ( cd "$2" && zig build --release=fast --cache-dir .zig-cache --global-cache-dir "$WORK/zig-global-cache" )
 }
 
+# zig_build_all DEF OUT-DIR -- zig_build, with every public declaration of
+# message.zig referenced first. Zig analyses only what something reaches, and a
+# name clash that is not a duplicate declaration -- an "ambiguous reference" in
+# a size constant or an accessor nothing calls -- would otherwise build clean.
+# The collision schemas use it; the reference block goes into the harness only,
+# never into generated code a user keeps.
+zig_build_all() {
+    zig_gen "$1" "$2"
+    cat >> "$2/src/main.zig" <<'ZIG'
+
+// run.sh (zig_build_all): force semantic analysis of every public declaration.
+comptime {
+    _refAll(message);
+}
+fn _refAll(comptime T: type) void {
+    @setEvalBranchQuota(1_000_000);
+    inline for (comptime std.meta.declarations(T)) |d| {
+        const v = @field(T, d.name);
+        _ = &v;
+        if (@TypeOf(v) == type) switch (@typeInfo(v)) {
+            .@"struct", .@"union", .@"enum" => _refAll(v),
+            else => {},
+        };
+    }
+}
+ZIG
+    ( cd "$2" && zig build --release=fast --cache-dir .zig-cache --global-cache-dir "$WORK/zig-global-cache" )
+}
+
 # zig_typecheck DEF OUT-DIR [CFG] -- generate and COMPILE ONLY. The corpus
 # projects assert one thing, "every definition produces code that builds", and
 # their binaries are never run; a Debug build proves exactly that while skipping
@@ -832,7 +861,7 @@ echo "==> corpus builds ($(ls "$ROOT"/tests/matrix/corpus/defs/*.yaml | wc -l) d
 # on a package that does not build, so it must build, and every value of
 # reserved.json must come back under its schema name.
 echo "==> reserved names: every listed name as a field builds and round-trips"
-zig_build "$ROOT/tests/conformance/zig/reserved.yaml" "$WORK/reserved"
+zig_build_all "$ROOT/tests/conformance/zig/reserved.yaml" "$WORK/reserved"
 "$WORK/reserved/zig-out/bin/harness" encode m < "$ROOT/tests/conformance/zig/reserved.json" > "$WORK/reserved.bin" \
     || { echo "FAIL: reserved.json did not encode"; exit 1; }
 "$WORK/reserved/zig-out/bin/harness" decode m < "$WORK/reserved.bin" > "$WORK/reserved.out" \
@@ -846,6 +875,23 @@ if bad:
     sys.exit(f"mismatch on {bad}: got {[got.get(k) for k in bad]}")
 PY
 echo "==> reserved names OK"
+
+# The shared name-collision schema (ARCHITECTURE §8, "Naming"): two schema paths
+# that joined or folded to one identifier, a type spelled like a role, a fixed,
+# imported or builtin name. Every message must compile -- zig_build_all
+# references every public declaration, so none escapes semantic analysis -- and
+# message `m`, which reaches every type of the schema, must round-trip
+# names.json as data.
+echo "==> names: the shared collision schema builds and round-trips"
+zig_build_all "$ROOT/tests/conformance/lib/names.yaml" "$WORK/names"
+"$WORK/names/zig-out/bin/harness" encode m < "$ROOT/tests/conformance/lib/names.json" > "$WORK/names.bin" \
+    || { echo "FAIL: names.json did not encode"; exit 1; }
+"$WORK/names/zig-out/bin/harness" decode m < "$WORK/names.bin" > "$WORK/names.out" \
+    || { echo "FAIL: names.bin did not decode"; exit 1; }
+python3 "$ROOT/tests/conformance/lib/json_equal.py" "$(cat "$ROOT/tests/conformance/lib/names.json")" "$(cat "$WORK/names.out")" \
+    --label "zig names round-trip" \
+    || { echo "FAIL: names.json did not round-trip through message m"; exit 1; }
+echo "==> names OK"
 
 
 # Declared integer width is a VALIDITY bound (MESSAGE_SPEC S7.1 + documentation#32,

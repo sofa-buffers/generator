@@ -6,6 +6,7 @@ import (
 	"strings"
 
 	"github.com/sofa-buffers/generator/internal/ir"
+	"github.com/sofa-buffers/generator/internal/naming"
 )
 
 func cfgString(cfg map[string]any, key, dflt string) string {
@@ -15,34 +16,27 @@ func cfgString(cfg map[string]any, key, dflt string) string {
 	return dflt
 }
 
-func exported(name string) string {
-	parts := strings.FieldsFunc(name, func(r rune) bool { return r == '_' })
-	var b strings.Builder
-	for _, p := range parts {
-		if p == "" {
-			continue
-		}
-		b.WriteString(strings.ToUpper(p[:1]))
-		b.WriteString(p[1:])
+// typeBase is the type channel's identifier of a named type (ARCHITECTURE §8,
+// "Naming"): naming.TypeIdent of its schema path, and for a $defs union split
+// by default_id the variant role `__Default<Option>`. It is UNESCAPED: roles
+// and private companions are derived from it, and the declaration itself is
+// typeIdent.
+func typeBase(nt *ir.NamedType) string {
+	t := naming.TypeIdent(nt.Path)
+	if nt.Variant != "" {
+		t += "__Default" + naming.Pascal(nt.Variant)
 	}
-	if b.Len() == 0 {
-		return "X"
-	}
-	return b.String()
+	return t
 }
 
-func (g *gen) typeName(key string) string {
-	parts := strings.FieldsFunc(key, func(r rune) bool { return r == '/' || r == '_' })
-	var b strings.Builder
-	for _, p := range parts {
-		if p == "" {
-			continue
-		}
-		b.WriteString(strings.ToUpper(p[:1]))
-		b.WriteString(p[1:])
-	}
-	return b.String()
-}
+// typeIdent is the Zig identifier a named type is declared and referenced by:
+// typeBase, escaped (zigTypeEscape).
+func typeIdent(nt *ir.NamedType) string { return zigTypeEscape(typeBase(nt)) }
+
+// msgBase / msgIdent are typeBase / typeIdent for a message, whose path is its
+// own name.
+func msgBase(m *ir.Message) string  { return naming.TypeIdent([]string{m.Name}) }
+func msgIdent(m *ir.Message) string { return zigTypeEscape(msgBase(m)) }
 
 // isWrapperElem reports whether an array element lowers to a wrapper sequence
 // (vs a native array), i.e. it needs its own decode frame.
@@ -171,7 +165,7 @@ func (g *gen) zigType(f *ir.Field) string {
 	case ir.KindBitfield:
 		return bitfieldBacking(f.Ref.Target)
 	case ir.KindStruct, ir.KindUnion:
-		return g.typeName(f.Ref.Key)
+		return typeIdent(f.Ref.Target)
 	case ir.KindArray:
 		if elem, n, ok := g.fixedNativeArray(f); ok {
 			return fmt.Sprintf("sofab.FixedArray(%s, %d)", elem, n)
@@ -196,7 +190,7 @@ func (g *gen) zigArrayElem(elem ir.Kind, ref *ir.TypeRef, items *ir.ArrayElem) s
 	case ir.KindBitfield:
 		return bitfieldBacking(ref.Target)
 	case ir.KindStruct, ir.KindUnion:
-		return g.typeName(ref.Key)
+		return typeIdent(ref.Target)
 	case ir.KindArray:
 		return "[]const " + g.zigArrayElem(items.Elem, items.ElemRef, items.ElemItems)
 	default: // numeric

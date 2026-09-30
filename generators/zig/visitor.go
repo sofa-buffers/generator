@@ -88,7 +88,7 @@ func memberAcc(fr frame, fld *ir.Field) string {
 // value are one statement, which discards the option held before.
 func leafStore(fr frame, fld *ir.Field, val string) string {
 	if fr.union {
-		return fmt.Sprintf("%s = .{ .%s = %s }", fr.path, optIdent(fld.Name), val)
+		return fmt.Sprintf("%s = .{ .%s = %s }", fr.path, optIdent(fr.fields, fld.Name), val)
 	}
 	return fr.path + "." + zigIdent(fld.Name) + " = " + val
 }
@@ -153,7 +153,7 @@ func (g *gen) frames(m *ir.Message) []frame {
 			}
 			out = append(out, frame{
 				loc: loc, path: path, kind: fkStructArr, elemLoc: el, idx: idx,
-				elemType: g.typeName(ref.Key), elemFill: fill, cap: cap,
+				elemType: typeIdent(ref.Target), elemFill: fill, cap: cap,
 			})
 			walkFields(el, elPath, ref.Target.Fields, elem == ir.KindUnion)
 		case ir.KindArray:
@@ -466,14 +466,14 @@ func declaredWidthGuard(k ir.Kind, ref *ir.TypeRef) string {
 	return ""
 }
 
-func (g *gen) emitDecoder(f *zfile, name string, fields []*ir.Field) {
+func (g *gen) emitDecoder(f *zfile, name, vis string, fields []*ir.Field) {
 	fs := g.frames(&ir.Message{Name: name, Fields: fields})
 	use := visitorUseOf(fs)
 	g.msgLim = g.msgLimitGuards(fields) // for the emitters that cannot reach fields
 
 	f.line("/// Flat-visitor decoder for %s: a (location, id) state machine over the", name)
 	f.line("/// corelib's streaming callbacks, with a bounded location stack.")
-	f.line("const _dec_%s = struct {", name)
+	f.line("const %s = struct {", vis)
 	f.line("    m: *%s,", name)
 	f.line("    alloc: std.mem.Allocator,")
 	// Always present, even for a message that declares no sequence of its own:
@@ -542,37 +542,37 @@ func (g *gen) emitDecoder(f *zfile, name string, fields []*ir.Field) {
 	f.line("    };")
 
 	if use.unsigned {
-		g.emitIntVisit(f, fs, name, false)
+		g.emitIntVisit(f, fs, vis, false)
 	}
 	if use.signed {
-		g.emitIntVisit(f, fs, name, true)
+		g.emitIntVisit(f, fs, vis, true)
 	}
 	if use.fp32 {
-		g.emitFloatVisit(f, fs, name, ir.KindFP32, "fp32", "f32")
+		g.emitFloatVisit(f, fs, vis, ir.KindFP32, "fp32", "f32")
 	}
 	if use.fp64 {
-		g.emitFloatVisit(f, fs, name, ir.KindFP64, "fp64", "f64")
+		g.emitFloatVisit(f, fs, vis, ir.KindFP64, "fp64", "f64")
 	}
 	// Every schema bound the LENGTH WORD already decides, latched at that word.
-	g.emitFixlenBegin(f, fs, name)
+	g.emitFixlenBegin(f, fs, vis)
 
 	if use.str {
-		g.emitPayloadVisit(f, fs, name, ir.KindString, "string")
+		g.emitPayloadVisit(f, fs, vis, ir.KindString, "string")
 	}
 	if use.blob {
-		g.emitPayloadVisit(f, fs, name, ir.KindBlob, "blob")
+		g.emitPayloadVisit(f, fs, vis, ir.KindBlob, "blob")
 	}
 	// arrayBegin is emitted for its own array-target work, and additionally
 	// whenever the §7.3 guard needs a place to arm itself. The corelib calls it
 	// through @hasDecl, so emitting it for the guard alone is enough.
 	if use.scalarArray || arrSkip {
-		g.emitArrayBegin(f, fs, name, arrSkip)
+		g.emitArrayBegin(f, fs, vis, arrSkip)
 	}
 	// Unconditional: corelib-zig only checks @hasDecl for the callback, it does NOT
 	// skip the subtree on its own (istream.zig T_SEQUENCE_START), so a visitor
 	// without sequenceBegin would let an unknown sequence's children arrive with
 	// `cur` still on the enclosing scope and bind there (generator#268 / F-0044).
-	g.emitSequence(f, fs, name)
+	g.emitSequence(f, fs, vis)
 	f.line("};")
 	f.blank()
 }
@@ -858,7 +858,7 @@ func (g *gen) emitIntVisit(f *zfile, fs []frame, name string, signed bool) {
 		idParam = "_"
 	}
 	f.blank()
-	f.line("    pub fn %s(self: *_dec_%s, %s: sofab.Id, value: %s) void {", cb, name, idParam, vt)
+	f.line("    pub fn %s(self: *%s, %s: sofab.Id, value: %s) void {", cb, name, idParam, vt)
 	// §7.3 (generator#183): discard the elements of an integer array delivered to
 	// a scalar-declared id. arrayBegin armed the count; this self-terminates
 	// without an array-end callback and survives feed chunk boundaries.
@@ -914,7 +914,7 @@ func (g *gen) emitFloatVisit(f *zfile, fs []frame, name string, kind ir.Kind, cb
 		idParam = "_"
 	}
 	f.blank()
-	f.line("    pub fn %s(self: *_dec_%s, %s: sofab.Id, value: %s) void {", cb, name, idParam, ztype)
+	f.line("    pub fn %s(self: *%s, %s: sofab.Id, value: %s) void {", cb, name, idParam, ztype)
 	// §7.3 (generator#193): discard the elements of an fp array delivered to a
 	// scalar-declared id. arrayBegin armed the count; this self-terminates without
 	// an array-end callback and survives feed chunk boundaries. Always present:
@@ -990,7 +990,7 @@ func (g *gen) emitFixlenBegin(f *zfile, fs []frame, name string) {
 	f.line("    /// word must not downgrade the verdict. The subtype switch is S7.3 -- a")
 	f.line("    /// contradicting fixlen kind at this id is a SKIPPED field, not this")
 	f.line("    /// field's length.")
-	f.line("    pub fn fixlenBegin(self: *_dec_%s, %s: sofab.Id, subtype: sofab.FixlenType, %s: usize) sofab.Error!void {", name, idP, totalP)
+	f.line("    pub fn fixlenBegin(self: *%s, %s: sofab.Id, subtype: sofab.FixlenType, %s: usize) sofab.Error!void {", name, idP, totalP)
 	f.line("        switch (subtype) {")
 	for _, a := range []struct {
 		variant string
@@ -1316,7 +1316,7 @@ func (g *gen) emitPayloadVisit(f *zfile, fs []frame, name string, kind ir.Kind, 
 		}
 	}
 	f.blank()
-	f.line("    pub fn %s(self: *_dec_%s, id: sofab.Id, total: usize, offset: usize, _chunk: []const u8) void {", cb, name)
+	f.line("    pub fn %s(self: *%s, id: sofab.Id, total: usize, offset: usize, _chunk: []const u8) void {", cb, name)
 	// The corelib delivers a payload in as many pieces as the feed chunks split
 	// it into, and `_take` / `_takeCapped` hand the arm ONE contiguous slice so
 	// none of the stores below has to know about chunking.
@@ -1382,7 +1382,7 @@ func (g *gen) emitTakeStr(f *zfile, name string, usedTake, usedCapped bool) {
 	f.line("    /// the validator does not re-read a copy it just stored. Invalid UTF-8")
 	f.line("    /// is INVALID and returns null. A payload split across feed chunks is")
 	f.line("    /// stitched first -- it has no contiguous source until then.")
-	f.line("    fn _takeStr(self: *_dec_%s, total: usize, offset: usize, chunk: []const u8) ?[]const u8 {", name)
+	f.line("    fn _takeStr(self: *%s, total: usize, offset: usize, chunk: []const u8) ?[]const u8 {", name)
 	f.line("        if (offset == 0 and chunk.len >= total) {")
 	f.line("            const src = chunk[0..total];")
 	f.line("            if (!sofab.utf8Valid(src)) { self.inv = true; return null; }")
@@ -1397,7 +1397,7 @@ func (g *gen) emitTakeStr(f *zfile, name string, usedTake, usedCapped bool) {
 		f.line("    /// _takeStr for a string the schema leaves unbounded: the receiver cap")
 		f.line("    /// is compared at the ANNOUNCED length, on every chunk, before a byte is")
 		f.line("    /// read, validated or copied -- the comparison _takeCapped makes.")
-		f.line("    fn _takeStrCapped(self: *_dec_%s, total: usize, offset: usize, chunk: []const u8, cap: usize) ?[]const u8 {", name)
+		f.line("    fn _takeStrCapped(self: *%s, total: usize, offset: usize, chunk: []const u8, cap: usize) ?[]const u8 {", name)
 		f.line("        self.acc.beginCapped(total, cap) catch { self.lim = true; return null; };")
 		f.line("        return self._takeStr(total, offset, chunk);")
 		f.line("    }")
@@ -1582,7 +1582,7 @@ func (g *gen) emitArrayBegin(f *zfile, fs []frame, name string, arrSkip bool) {
 		}
 	}
 	f.blank()
-	f.line("    pub fn arrayBegin(self: *_dec_%s, %s: sofab.Id, %s: sofab.ArrayKind, %s: usize) void {", name, idParam, kindParam, countParam)
+	f.line("    pub fn arrayBegin(self: *%s, %s: sofab.Id, %s: sofab.ArrayKind, %s: usize) void {", name, idParam, kindParam, countParam)
 	if visitorUseOf(fs).dynAlloc {
 		f.line("        self.ai = 0;")
 	}
@@ -1754,7 +1754,7 @@ func (g *gen) emitSequence(f *zfile, fs []frame, name string) {
 	f.line("    /// This is the SCHEMA-BOUNDED entry point. A `maxlen` is a validity bound and")
 	f.line("    /// stays the caller's, decided on `total` before this call; a field the")
 	f.line("    /// schema leaves unbounded goes through _takeCapped instead.")
-	f.line("    fn _take(self: *_dec_%s, total: usize, offset: usize, chunk: []const u8) ?[]const u8 {", name)
+	f.line("    fn _take(self: *%s, total: usize, offset: usize, chunk: []const u8) ?[]const u8 {", name)
 	f.line("        return self.acc.take(self.alloc, total, offset, chunk, false) catch { self.inv = true; return null; };")
 	f.line("    }")
 	if g.msgLim {
@@ -1768,7 +1768,7 @@ func (g *gen) emitSequence(f *zfile, fs []frame, name string) {
 		f.line("    /// The two failures stay apart: LimitExceeded is the receiver refusing a")
 		f.line("    /// well-formed length, a policy verdict; OutOfMemory is the allocator")
 		f.line("    /// having no room for one that was accepted.")
-		f.line("    fn _takeCapped(self: *_dec_%s, total: usize, offset: usize, chunk: []const u8, cap: usize) ?[]const u8 {", name)
+		f.line("    fn _takeCapped(self: *%s, total: usize, offset: usize, chunk: []const u8, cap: usize) ?[]const u8 {", name)
 		f.line("        return self.acc.takeCapped(self.alloc, total, offset, chunk, false, cap) catch |e| {")
 		f.line("            switch (e) {")
 		f.line("                error.LimitExceeded => self.lim = true,")
@@ -1784,7 +1784,7 @@ func (g *gen) emitSequence(f *zfile, fs []frame, name string) {
 		idParam = "id"
 	}
 	f.blank()
-	f.line("    pub fn sequenceBegin(self: *_dec_%s, %s: sofab.Id) void {", name, idParam)
+	f.line("    pub fn sequenceBegin(self: *%s, %s: sofab.Id) void {", name, idParam)
 	f.line("        if (self.sp < self.stack.len) {")
 	f.line("            self.stack[self.sp] = self.cur;")
 	f.line("            self.sp += 1;")
@@ -1826,7 +1826,7 @@ func (g *gen) emitSequence(f *zfile, fs []frame, name string) {
 }
 
 func (g *gen) emitSequenceEnd(f *zfile, name string) {
-	f.line("    pub fn sequenceEnd(self: *_dec_%s) void {", name)
+	f.line("    pub fn sequenceEnd(self: *%s) void {", name)
 	// Nothing to fill in on the way out: the wire count M IS a compact array's
 	// length and the highest present element id IS a wrapper array's last index
 	// (MESSAGE_SPEC §3/§5.1), so what arrived is the whole value. A declared

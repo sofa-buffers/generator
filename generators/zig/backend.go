@@ -30,12 +30,6 @@ func (*Backend) Lang() string { return "zig" }
 // Generate emits src/message.zig; project mode adds build.zig + build.zig.zon
 // and a JSON encode/decode harness (src/main.zig).
 func (*Backend) Generate(s *ir.Schema, cfg map[string]any) ([]generator.File, error) {
-	if err := checkFieldNames(s); err != nil {
-		return nil, err
-	}
-	if err := checkUnionNames(s); err != nil {
-		return nil, err
-	}
 	g := &gen{
 		schema:  s,
 		banner:  cfgString(cfg, "tool_banner", "sofabgen"),
@@ -235,23 +229,23 @@ func (g *gen) module(s *ir.Schema) []byte {
 		nt := s.Named[key]
 		switch nt.Category {
 		case ir.CatStruct:
-			g.emitStruct(f, g.typeName(key), nt.Fields, false, "")
+			g.emitStruct(f, typeIdent(nt), "", nt.Fields, false, "")
 		case ir.CatUnion:
-			g.emitUnion(f, g.typeName(key), nt)
+			g.emitUnion(f, typeIdent(nt), nt)
 		}
 	}
 	for _, m := range s.Messages {
-		g.emitStruct(f, exported(m.Name), m.Fields, true, m.Summary)
+		g.emitStruct(f, msgIdent(m), visitorName(msgBase(m)), m.Fields, true, m.Summary)
 	}
 	for _, m := range s.Messages {
-		g.emitDecoder(f, exported(m.Name), m.Fields)
+		g.emitDecoder(f, msgIdent(m), visitorName(msgBase(m)), m.Fields)
 	}
 	return f.bytes()
 }
 
 func (g *gen) emitEnum(f *zfile, nt *ir.NamedType) {
 	backing := enumBacking(nt)
-	f.line("pub const %s = struct {", strings.ToLower(g.typeName(nt.Key)))
+	f.line("pub const %s = struct {", typeIdent(nt))
 	for _, c := range nt.Consts {
 		f.emitDoc("    ", c.Description)
 		f.line("    pub const %s: %s = %d;", strings.ToUpper(c.Name), backing, c.Value)
@@ -262,7 +256,7 @@ func (g *gen) emitEnum(f *zfile, nt *ir.NamedType) {
 
 func (g *gen) emitBitfieldConsts(f *zfile, nt *ir.NamedType) {
 	backing := bitfieldBacking(nt)
-	f.line("pub const %s = struct {", strings.ToLower(g.typeName(nt.Key)))
+	f.line("pub const %s = struct {", typeIdent(nt))
 	for _, fl := range nt.Flags {
 		doc := fl.Description
 		if fl.HasDefault {
@@ -282,7 +276,7 @@ func (g *gen) emitBitfieldConsts(f *zfile, nt *ir.NamedType) {
 	f.blank()
 }
 
-func (g *gen) emitStruct(f *zfile, name string, fields []*ir.Field, isMessage bool, summary string) {
+func (g *gen) emitStruct(f *zfile, name, vis string, fields []*ir.Field, isMessage bool, summary string) {
 	f.emitDoc("", summary)
 	f.line("pub const %s = struct {", name)
 	// Field defaults ARE the schema defaults: a plain `.{}` message carries
@@ -348,7 +342,7 @@ func (g *gen) emitStruct(f *zfile, name string, fields []*ir.Field, isMessage bo
 		f.line("    /// error.IncompleteMessage; malformed input with error.InvalidMessage.")
 		f.line("    pub fn decode(alloc: std.mem.Allocator, data: []const u8) DecodeError!%s {", name)
 		f.line("        var m: %s = .{};", name)
-		f.line("        var v: _dec_%s = .{ .m = &m, .alloc = alloc };", name)
+		f.line("        var v: %s = .{ .m = &m, .alloc = alloc };", vis)
 		f.line("        const st = try sofab.decode(data, &v);")
 		f.line("        // A scalar array over its schema count, or a wrapper-array element")
 		f.line("        // id at/beyond the schema count: an index above the schema capacity")
@@ -365,7 +359,7 @@ func (g *gen) emitStruct(f *zfile, name string, fields []*ir.Field, isMessage bo
 		f.line("        if (st == .incomplete) return error.IncompleteMessage;")
 		f.line("        return m;")
 		f.line("    }")
-		g.emitStreamDecoder(f, name, fields)
+		g.emitStreamDecoder(f, name, vis, fields)
 	}
 	f.line("};")
 	f.blank()
@@ -700,14 +694,14 @@ func (g *gen) marshalArray(f *zfile, ind, idExpr, val string, elem ir.Kind, ref 
 // emitStreamDecoder writes the public incremental decoder: a handle on the
 // corelib's resumable IStream plus the visitor state that has to survive
 // between chunks. The corelib already suspends and resumes at any byte
-// boundary; what was missing was a public handle, since `_dec_<Msg>` is not
+// boundary; what was missing was a public handle, since the visitor `_<Msg>__Visitor` is not
 // `pub` (PLAN S5.6).
 //
 // The DESTINATION is the caller's, not a field of the Decoder. A Decoder that
 // owned its message would have to point its visitor at its own field, and Zig
 // moves structs by value -- returning one from a factory would leave that
 // pointer dangling. Taking `out: *Msg` keeps the decoder trivially movable.
-func (g *gen) emitStreamDecoder(f *zfile, name string, fields []*ir.Field) {
+func (g *gen) emitStreamDecoder(f *zfile, name, vis string, fields []*ir.Field) {
 	f.blank()
 	f.line("    /// Incremental decoder: hold one and feed the message as bytes arrive,")
 	f.line("    /// instead of buffering it whole first.")
@@ -733,7 +727,7 @@ func (g *gen) emitStreamDecoder(f *zfile, name string, fields []*ir.Field) {
 	f.line("    /// produced it.")
 	f.line("    pub const Decoder = struct {")
 	f.line("        is: sofab.IStream = sofab.IStream.init(),")
-	f.line("        v: _dec_%s,", name)
+	f.line("        v: %s,", vis)
 	f.blank()
 	f.line("        /// Feed the next chunk, of any size. `.complete` means the bytes")
 	f.line("        /// ended on a field boundary, `.incomplete` mid-field -- neither")

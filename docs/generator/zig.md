@@ -17,6 +17,30 @@ Every generated file is `zig fmt` output already: `message.zig` and, under
 files need no exclusion from such a check and never come back reformatted.
 `sofabgen` produces that layout itself and does not run `zig`.
 
+## Type names
+
+Every type is named after its place in the schema: each name along the path in
+PascalCase, joined with `_`.
+
+| schema | Zig type |
+|---|---|
+| message `vehicle_telemetry` | `VehicleTelemetry` |
+| `$defs` struct, union, enum or bitfield `point` | `Point` |
+| inline struct, union, enum or bitfield of field `a` in message `m` | `M_A` |
+| inline element type of the array field `a` in message `m` | `M_A` |
+| `$defs` union `shape` used with `default_id` on option `pt` | `Shape__DefaultPt` |
+
+An enum or a bitfield is a namespace of constants: `Color.RED`, `M_Flags.ON`.
+Every message also has a private decoder type, `_<Type>__Visitor`, which no
+schema name can spell.
+
+A type whose name the generated file already uses for something else gets a
+trailing underscore: a message `decoder` is the type `Decoder_`, since every
+message declares its own `Decoder`. Those names are `DecodeError`, `Decoder`,
+`MAX_SIZE` and `MAX_SIZE_LIMIT`. Everything derived from the type keeps the
+unescaped name (`_Decoder__Visitor`). The list lives in
+`generators/zig/reserved.go`.
+
 ## Field names
 
 A field's struct field is the field's schema name. A field named like a Zig
@@ -27,12 +51,6 @@ underscore instead — the field `encode` is `encode_`. Those declarations are
 `serialize` and `isDefault`, and on a message also `encode`, `decode`,
 `Decoder`, `decoder`, `MAX_SIZE` and `MAX_SIZE_LIMIT`. Only the field changes:
 the wire is keyed by the field id, and the JSON key stays the schema name.
-
-Two fields that end up with the same field — `encode` and `encode_` — fail
-generation, naming both; so do two constants of one enum or bitfield that
-differ only in case (`a` and `A` are both `A`), and a message or type whose Zig
-name is `DecodeError`, which the generated file declares itself. The list lives
-in `generators/zig/reserved.go`.
 
 ## Unions
 
@@ -52,33 +70,33 @@ shape:
 ```
 
 ```zig
-pub const MShape = union(enum) {
+pub const M_Shape = union(enum) {
     num: u16,
     name: []const u8,
-    pt: MShapePt,
+    pt: M_Shape_Pt,
 
     pub const num_id: sofab.Id = 0;
     pub const name_id: sofab.Id = 1;
     pub const pt_id: sofab.Id = 2;
 
-    pub const init: MShape = .{ .pt = .{} };
+    pub const init: M_Shape = .{ .pt = .{} };
 
-    pub fn which(self: *const MShape) sofab.Id;
-    pub fn numMut(self: *MShape) *u16;
-    pub fn nameMut(self: *MShape) *[]const u8;
-    pub fn ptMut(self: *MShape) *MShapePt;
-    pub fn serialize(self: *const MShape, os: *sofab.OStream) sofab.Error!void;
-    pub fn isDefault(self: *const MShape) bool;
+    pub fn which(self: *const M_Shape) sofab.Id;
+    pub fn numMut(self: *M_Shape) *u16;
+    pub fn nameMut(self: *M_Shape) *[]const u8;
+    pub fn ptMut(self: *M_Shape) *M_Shape_Pt;
+    pub fn serialize(self: *const M_Shape, os: *sofab.OStream) sofab.Error!void;
+    pub fn isDefault(self: *const M_Shape) bool;
 };
 ```
 
-A union field is declared `shape: MShape = .init`, so a fresh message holds the
+A union field is declared `shape: M_Shape = .init`, so a fresh message holds the
 union's default.
 
 | operation | Zig |
 |---|---|
 | which option is held | `x.which()` → the option's id; or `switch (x) { .num => |n| …, … }` |
-| option ids | `MShape.pt_id` |
+| option ids | `M_Shape.pt_id` |
 | test | `x == .pt` |
 | read | `switch (x)`, or `x.pt` once `x == .pt` holds |
 | select with a value | `x = .{ .num = 7 }` |
@@ -86,7 +104,7 @@ union's default.
 | back to the default | `x = .init` |
 
 ```zig
-var s: MShape = .init;           // holds pt at its default: .{ .x = 7, .y = 0 }
+var s: M_Shape = .init;           // holds pt at its default: .{ .x = 7, .y = 0 }
 s = .{ .num = 7 };               // now num = 7; pt is gone
 s.ptMut().y = 2;                 // pt again, from its default: .{ .x = 7, .y = 2 }
 if (s == .pt) useIt(s.pt.x);
@@ -119,18 +137,19 @@ or union). The union is as large as its largest option plus its tag; nothing is
 allocated to hold it.
 
 **Names.** The fields are the option names; the accessors are
-`<option>Mut` and the id constants `<option>_id`. An option named like a Zig
+`<option>Mut` with the option's first letter lower-cased (option `Pt` has
+`ptMut()`), and the id constants `<option>_id`. An option named like a Zig
 keyword is a quoted identifier (`@"error"`, with `errorMut()` and `error_id`).
 An option whose name is one of the declarations listed under
-[Field names](#field-names), or one of the union's own — `init`, `which` — gets
-a trailing underscore on its field (option `which` is the field `which_`,
-with `whichMut()` and `which_id`). Two options that would produce the same
-member — `x` and `xMut`, `x` and `x_id`, or `init` and `init_` — fail
-generation, naming both.
+[Field names](#field-names), one of the union's own — `init`, `which` — or the
+accessor or id constant of another option gets a trailing underscore on its
+field: option `which` is the field `which_`, with `whichMut()` and `which_id`;
+beside an option `x`, an option `x_id` is the field `x_id_` and an option
+`xMut` the field `xMut_`.
 
 **`$defs` unions** used with different `default_id`s are one type per
-`default_id`, named after `<Name>_default_<option>`: `UnionShapeDefaultPt` and
-`UnionShapeDefaultNum`.
+`default_id`, named `<Type>__Default<Option>`: `Shape__DefaultPt` and
+`Shape__DefaultNum`.
 
 **Defaults.** `init` holds the `default_id` option at that option's own
 default; an omitted `default_id` means the option with the lowest id. Each

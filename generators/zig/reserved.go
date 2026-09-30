@@ -1,11 +1,6 @@
 package zig
 
-import (
-	"fmt"
-	"strings"
-
-	"github.com/sofa-buffers/generator/internal/ir"
-)
+import "strings"
 
 // One reserved-name list for the Zig backend (generator#239). A Zig container's
 // fields and declarations share one namespace, so a field may take neither a
@@ -67,11 +62,60 @@ func zigIdent(name string) string {
 	return name
 }
 
-// zigFileScope are the file-scope declarations message.zig carries besides the
-// generated types: a message or named type whose Zig type name lands on one is a
-// duplicate member of the file (`decode_error` is the type DecodeError). `std`
-// and `sofab` need no entry: a type name is PascalCase.
-var zigFileScope = map[string]bool{"DecodeError": true}
+// zigTypeReserved are the type identifiers a generated type must not take
+// (ARCHITECTURE §8, "Naming": the escape channel). A type identifier is
+// PascalCase, so only a name starting upper-case can meet one; the file's own
+// lower-case names (`std`, `sofab`, `max_dyn_*`), Zig's primitives and the
+// generated members (`serialize`, `init`, `<option>Mut`, ...) cannot. What is
+// left is every upper-case name the generated code declares and refers to
+// unqualified inside a container that also refers to a type -- Zig rejects such
+// a reference as ambiguous, even when the two declarations live in different
+// containers (a message's `Decoder` against a file-scope type `Decoder`):
+//
+//   - DecodeError: the file-scope error set every decode() returns.
+//   - Decoder: the incremental decoder every message declares; its methods and
+//     `decoder()` name it unqualified.
+//   - MAX_SIZE, MAX_SIZE_LIMIT: every message's size constants; MAX_SIZE refers
+//     to MAX_SIZE_LIMIT. Both are type identifiers too (a message `MAX` with an
+//     inline field `SIZE` is the type MAX_SIZE).
+//
+// Everything else is unreachable rather than listed: the visitor behind
+// decode() is private (`_<T>__Visitor`), and the harness names every type
+// qualified (`message.<T>`) and its helpers with a prefix (`toJson_<T>`).
+var zigTypeReserved = map[string]bool{
+	"DecodeError":    true,
+	"Decoder":        true,
+	"MAX_SIZE":       true,
+	"MAX_SIZE_LIMIT": true,
+}
+
+// zigTypeEscape is a type identifier as declared: with a trailing `_` when it is
+// reserved (zigTypeReserved). A type identifier never ends with `_`, so the
+// escaped one meets no other type. Roles and private companions are built from
+// the UNESCAPED identifier.
+func zigTypeEscape(t string) string {
+	if zigTypeReserved[t] {
+		return t + "_"
+	}
+	return t
+}
+
+// visitorName is the private flat-visitor type behind a message's decode():
+// `_` + the message's UNESCAPED type identifier + `__Visitor`. No schema name
+// starts with `_`, and a type identifier has no `__`, so it meets nothing else.
+func visitorName(base string) string { return "_" + base + "__Visitor" }
+
+// Parameters and locals. Zig rejects a parameter or local that shadows ANY
+// declaration of an enclosing container, which for generated code means the
+// file scope and the type's own container. The generated ones (`self`, `os`,
+// `alloc`, `data`, `out`, `chunk`, `id`, `value`, `m`, `v`, `st`, `_i0`, ...)
+// are fixed lower-case words, so none of them can meet a declaration there:
+// every type is PascalCase, the file's other names are `std`, `sofab`,
+// `DecodeError` and `max_dyn_*`, a container's fixed declarations are none of
+// those words, and the only schema-derived declarations inside a container --
+// a union's `<option>_id` and `<option>Mut` -- end in `_id` or `Mut`, which no
+// parameter or local does. Fields do not shadow: they are reached through
+// `self.` only. So they stay readable instead of `_`-prefixed.
 
 // locChild is the _Loc tag of the field `name` below the tag `loc`. The tags
 // spell the schema path joined by `_` (root_a_b), so an underscore INSIDE a name
@@ -80,69 +124,4 @@ var zigFileScope = map[string]bool{"DecodeError": true}
 // read the other way.
 func locChild(loc, name string) string {
 	return loc + "_" + strings.ReplaceAll(name, "_", "__")
-}
-
-// checkFieldNames rejects what the list cannot prevent: two struct fields that
-// give one Zig field (`encode` is mangled to `encode_`, which a field `encode_`
-// already is), two constants of one enum or bitfield that give one Zig
-// constant (they are upper-cased, so `a` and `A` are both `A`), and a type
-// named after a file-scope declaration (zigFileScope). zig would report
-// a duplicate member far from the schema. Union options are checkUnionNames'.
-// Located: the error names the type and both names.
-func checkFieldNames(s *ir.Schema) error {
-	dup := func(owner, what string, names []string, ident func(string) string) error {
-		seen := map[string]string{}
-		for _, n := range names {
-			id := bareIdent(ident(n))
-			if prev, ok := seen[id]; ok {
-				return fmt.Errorf("zig: %s: %s %q and %q both generate %s; rename one", owner, what, prev, n, id)
-			}
-			seen[id] = n
-		}
-		return nil
-	}
-	fieldNames := func(fields []*ir.Field) []string {
-		out := make([]string, len(fields))
-		for i, f := range fields {
-			out[i] = f.Name
-		}
-		return out
-	}
-	for _, key := range s.NamedOrder {
-		nt := s.Named[key]
-		var err error
-		switch nt.Category {
-		case ir.CatStruct:
-			err = dup("struct "+key, "fields", fieldNames(nt.Fields), zigIdent)
-		case ir.CatEnum:
-			names := make([]string, len(nt.Consts))
-			for i, c := range nt.Consts {
-				names[i] = c.Name
-			}
-			err = dup("enum "+key, "constants", names, strings.ToUpper)
-		case ir.CatBitfield:
-			names := make([]string, len(nt.Flags))
-			for i, fl := range nt.Flags {
-				names[i] = fl.Name
-			}
-			err = dup("bitfield "+key, "flags", names, strings.ToUpper)
-		}
-		if err != nil {
-			return err
-		}
-	}
-	for _, m := range s.Messages {
-		if err := dup("message "+m.Name, "fields", fieldNames(m.Fields), zigIdent); err != nil {
-			return err
-		}
-		if n := exported(m.Name); zigFileScope[n] {
-			return fmt.Errorf("zig: message %q is the type %s, which message.zig already declares; rename the message", m.Name, n)
-		}
-	}
-	for _, key := range s.NamedOrder {
-		if n := (&gen{}).typeName(key); zigFileScope[n] {
-			return fmt.Errorf("zig: %s is the type %s, which message.zig already declares; rename it", key, n)
-		}
-	}
-	return nil
 }
