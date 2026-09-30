@@ -800,6 +800,31 @@ for def in "$ROOT"/tests/matrix/corpus/defs/*.yaml "$ROOT"/examples/messages/rea
 done
 echo "==> corpus builds ($(ls "$ROOT"/tests/matrix/corpus/defs/*.yaml | wc -l) definitions + $(ls "$ROOT"/examples/messages/realworld/*.yaml | wc -l) realworld files)"
 
+# The reserved-name collision test (ARCHITECTURE §8): reserved.yaml uses every
+# name on generators/csharp/reserved.go's list as a message field, a nested
+# struct field and a union option, plus the one path clash a visitor location
+# constant can hit (TestReservedSchemaFile keeps it in step with the list;
+# TestCSharpNamesInScope keeps the list in step with the generated classes). The
+# generator exits 0 on code that does not build, so the project must build
+# warning-free, and every value of reserved.json must come back under its
+# schema name.
+echo "==> reserved names: every listed name as a field builds and round-trips"
+build "$ROOT/tests/conformance/csharp/reserved.yaml" "$WORK/reserved"
+RH="dotnet $WORK/reserved/bin/Debug/net9.0/harness.dll"
+$RH encode m < "$ROOT/tests/conformance/csharp/reserved.json" > "$WORK/reserved.bin" \
+    || { echo "FAIL: reserved.json did not encode"; exit 1; }
+$RH decode m < "$WORK/reserved.bin" > "$WORK/reserved.out" \
+    || { echo "FAIL: reserved.bin did not decode"; exit 1; }
+python3 - "$ROOT/tests/conformance/csharp/reserved.json" "$WORK/reserved.out" <<'PY' \
+    || { echo "FAIL: a reserved-name field did not round-trip under its schema name"; exit 1; }
+import json, sys
+want, got = (json.load(open(p)) for p in sys.argv[1:3])
+bad = [k for k in want if got.get(k) != want[k]]
+if bad:
+    sys.exit(f"mismatch on {bad}: got {[got.get(k) for k in bad]}")
+PY
+echo "==> reserved names OK"
+
 # Narrow shapes. A visitor is emitted per message, and each callback's dispatch
 # exists only when the message declares a field of that callback's kind -- so a
 # message that LACKS kinds is where an empty `switch ((cur, id)) { }` (CS1522) or

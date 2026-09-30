@@ -22,6 +22,9 @@ func (*Backend) Lang() string { return "csharp" }
 
 func (*Backend) Generate(s *ir.Schema, cfg map[string]any) ([]generator.File, error) {
 	g := &gen{schema: s, ns: cfgString(cfg, "namespace", "Message"), banner: cfgString(cfg, "tool_banner", "sofabgen"), license: generator.LicenseID(cfg), limits: resolveLimits(cfg), size: generator.NewSizePolicy(cfg)}
+	if err := g.checkFieldNames(); err != nil {
+		return nil, err
+	}
 	if err := g.checkUnions(); err != nil {
 		return nil, err
 	}
@@ -162,6 +165,11 @@ func (g *gen) emitClass(f *cfile, name, summary string, fields []*ir.Field, isMe
 		emitDoc(f, "    ", fieldDoc(fld, generator.BoundNote(fld, generator.StorageDynamic)))
 		if fld.Deprecated {
 			f.line("    [Obsolete]")
+		}
+		if csRenamed(fld.Name) {
+			// A mangled field keeps the schema name as its JSON key; `@name` needs
+			// nothing, System.Text.Json already writes it without the `@`.
+			f.line("    [System.Text.Json.Serialization.JsonPropertyName(%q)]", fld.Name)
 		}
 		f.line("    public %s %s%s;", g.csType(fld), csIdent(fld.Name), g.csInit(fld))
 	}

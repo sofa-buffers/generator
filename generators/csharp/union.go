@@ -60,22 +60,11 @@ type unionShape struct {
 	d        *unionOpt
 }
 
-// unionFixed is the union type's own member set -- what it declares itself and
-// what every C# class inherits from object. An option property landing on one of
-// them takes the trailing underscore (`which` -> `Which_`), as does one landing
-// on the type's own name (CS0542). Everything else an option derives is checked
-// for collisions instead (checkUnionNames).
-var unionFixed = map[string]bool{
-	"Which": true, "Clear": true, "Serialize": true, "IsDefault": true,
-	"Equals": true, "GetHashCode": true, "GetType": true, "ToString": true,
-	"MemberwiseClone": true, "Finalize": true, "ReferenceEquals": true,
-}
-
 // unionOptProp is the property an option is reached through: the option name in
 // PascalCase, mangled off the union's fixed members and its type name.
 func unionOptProp(typeName string, fld *ir.Field) string {
 	p := exported(fld.Name)
-	if unionFixed[p] || p == typeName {
+	if unionFixed[p] || csReserved(p) || p == typeName {
 		p += "_"
 	}
 	return p
@@ -134,7 +123,7 @@ func (g *gen) unionShapeOf(key string, nt *ir.NamedType) *unionShape {
 // and both options.
 func checkUnionNames(u *unionShape) error {
 	owner := map[string]string{"_which": "", u.typeName: ""}
-	for n := range unionFixed {
+	for n := range unionFixedAll() {
 		owner[n] = ""
 	}
 	for _, o := range u.opts {
