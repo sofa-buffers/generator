@@ -28,7 +28,7 @@ class Scalars {
   double f64 = -2.5;
   bool flag = true;
   /// Schema bound: count 4 is a CAPACITY, not a length -- starts empty; over 4 elements is INVALID, never truncated.
-  final sofab.InlineInt64Array flags = sofab.InlineInt64Array(4);
+  final sofab.InlineInt64Array flags = sofab.InlineInt64Array(4, range: sofab.ElemRange.boolean);
 
   void serialize(sofab.Encoder e) {
     if (u8min != 0) { e.writeUnsigned(0, u8min); }
