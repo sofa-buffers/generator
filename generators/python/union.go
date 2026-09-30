@@ -1,7 +1,6 @@
 package python
 
 import (
-	"fmt"
 	"strings"
 
 	"github.com/sofa-buffers/generator/internal/ir"
@@ -59,10 +58,16 @@ type unionShape struct {
 
 // unionOptProp is the property an option is reached through: the option's name,
 // mangled as a struct member's is (pyIdent), with the trailing underscore where it
-// lands on one of the members only a union has (unionReserved).
+// lands on one of the members only a union has (unionReserved) or is spelled
+// like a member the union derives from an option (unionDerivedShape).
+//
+// That makes the whole union namespace injective without a check: the derived
+// members (`has_<opt>`, `mutable_<opt>`, `<OPT>_ID`) never end with `_` and are
+// distinct per option (options have distinct folds), and every property that
+// could spell one of them is escaped.
 func unionOptProp(name string) string {
 	p := pyIdent(name)
-	if unionReserved[p] {
+	if p == name && (unionReserved[name] || unionDerivedShape(name)) {
 		return p + "_"
 	}
 	return p
@@ -85,7 +90,7 @@ func (g *gen) unionShapeOf(nt *ir.NamedType) *unionShape {
 	if u, ok := g.unions[nt]; ok {
 		return u
 	}
-	u := &unionShape{typeName: g.typeName(nt.Key), nt: nt, byField: map[*ir.Field]*unionOpt{}}
+	u := &unionShape{typeName: typeIdent(nt), nt: nt, byField: map[*ir.Field]*unionOpt{}}
 	for _, fld := range nt.Fields {
 		cp := *fld
 		switch fld.Kind {
@@ -116,60 +121,13 @@ func (g *gen) unionShapeOf(nt *ir.NamedType) *unionShape {
 	return u
 }
 
-// checkUnionNames rejects a union whose options derive the same name. A Python
-// class has ONE namespace -- properties, methods and class attributes alike -- so
-// the properties, the has_/mutable_ methods and the id constants are checked as
-// one set with the union's own members (`a_id` gives the property `a_id` and `A`
-// the constant `A_ID`, but `A_ID` and `a` both give `A_ID`). Located: the error
-// names the union and both options.
-func checkUnionNames(u *unionShape) error {
-	owner := map[string]string{}
-	for _, set := range []map[string]bool{pyMembers, pyEvaluated, unionReserved} {
-		for m := range set {
-			owner[m] = ""
-		}
-	}
-	owner["_which"], owner["_value"], owner["_is_default"] = "", "", ""
-	for _, o := range u.opts {
-		names := []string{o.prop, o.has, o.idConst}
-		if o.mut != "" {
-			names = append(names, o.mut)
-		}
-		for _, n := range names {
-			prev, ok := owner[n]
-			switch {
-			case ok && prev == "":
-				return fmt.Errorf("python backend: union %s: option %q generates the member %s, which the union type already has; rename the option", u.nt.Key, o.orig.Name, n)
-			case ok && prev != o.orig.Name:
-				return fmt.Errorf("python backend: union %s: options %q and %q both generate the member %s; rename one", u.nt.Key, prev, o.orig.Name, n)
-			}
-			owner[n] = o.orig.Name
-		}
-	}
-	return nil
-}
-
-// checkUnions runs checkUnionNames over every union type of the schema.
-func (g *gen) checkUnions(s *ir.Schema) error {
-	for _, key := range s.NamedOrder {
-		nt := s.Named[key]
-		if nt.Category != ir.CatUnion {
-			continue
-		}
-		if err := checkUnionNames(g.unionShapeOf(nt)); err != nil {
-			return err
-		}
-	}
-	return nil
-}
-
 // pyDefaultValue is a field's default as an EXPRESSION -- what pyDefault spells
 // as a dataclass default, with a fresh object for the mutable kinds instead of a
 // `field(default_factory=...)`.
 func (g *gen) pyDefaultValue(fld *ir.Field) string {
 	switch fld.Kind {
 	case ir.KindStruct, ir.KindUnion:
-		return g.typeName(fld.Ref.Key) + "()"
+		return g.refName(fld.Ref) + "()"
 	case ir.KindArray:
 		if lit, ok := g.pyNativeArrayDefault(fld); ok {
 			return lit

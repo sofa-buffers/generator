@@ -163,7 +163,7 @@ def main(argv):
     # --- H: an element field whose id the root table also names ---------------
     o = message.E()
     o.ratio = 1.5
-    row = message.ERowsElem()
+    row = message.E_Rows()
     row.when.k = 99
     row.ratio = 42.25
     o.rows = [row]

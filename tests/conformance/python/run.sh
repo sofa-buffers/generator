@@ -255,6 +255,17 @@ grep -q "def on_unsigned_array" "$WORK/bools/message.py" || {
     echo "FAIL: bool_tolerant.yaml no longer reaches the visitor's array hook (route 'many')"; exit 1
 }
 
+# The shared name-collision schema (ARCHITECTURE §8, "Naming"): every message
+# and type in it is spelled like a name the generated module already has -- an
+# import, a module constant, a keyword, a role, another path. Python rebinds a
+# name silently, so a clash does not fail generation or even compilation; it
+# fails at import or at the first decode. Generated once, out here, so the ruff
+# gate at the end lints it with the rest; imported and round-tripped on every
+# engine in the loop below.
+( cd "$ROOT" && go run ./cmd/sofabgen --format=off --config "$WORK/cfg.yaml" --lang python \
+    --in "$ROOT/tests/conformance/lib/names.yaml" --out "$WORK/names" )
+python3 -m py_compile "$WORK/names/message.py" "$WORK/names/harness.py"
+
 ENGINES="native python"
 [ "$NATIVE" = yes ] || ENGINES=python
 for ENGINE in $ENGINES; do
@@ -263,6 +274,16 @@ for ENGINE in $ENGINES; do
     # the second pass a duplicate of the first, silently -- so the leg ASSERTS the
     # engine it claims instead of printing whichever one it got.
     require_engine "$ENGINE"
+
+    echo "==> names.yaml imports and round-trips, engine=$ENGINE (ARCHITECTURE §8, Naming)"
+    # Message `m` carries the path clashes; names.json is its non-default value.
+    NAMES_OUT=$(cd "$WORK/names" && python3 harness.py encode m < "$ROOT/tests/conformance/lib/names.json" \
+        | python3 harness.py decode m)
+    python3 "$ROOT/tests/conformance/lib/json_equal.py" "$(cat "$ROOT/tests/conformance/lib/names.json")" "$NAMES_OUT" \
+        --label "python/$ENGINE: names.yaml message m round-trips" || exit 1
+    # Every other message, one-shot and streamed, plus the module's own names.
+    python3 "$ROOT/tests/conformance/python/names_check.py" "$WORK/names" || exit 1
+    echo "   [$ENGINE] names OK"
     echo "==> bounded encode buffer is exactly MAX_SIZE, engine=$ENGINE (ARCHITECTURE §9.6)"
     check_maxsize_fill "python/$ENGINE" python3 "$WORK/fill/harness.py" encode fill
 

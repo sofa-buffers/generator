@@ -33,12 +33,10 @@ func (*Backend) Generate(s *ir.Schema, cfg map[string]any) ([]generator.File, er
 		size:    generator.NewSizePolicy(cfg),
 	}
 	g.resolveReassembly(s)
-	if err := checkConstNames(s); err != nil {
-		return nil, err
-	}
-	if err := g.checkUnions(s); err != nil {
-		return nil, err
-	}
+	// No name check: every name the module declares comes from a channel that
+	// keeps distinct schema names distinct (ARCHITECTURE §8, "Naming"). Enum
+	// constants and bitfield flags are upper-cased, which the fold rule keeps
+	// apart; union members are escaped by shape (unionDerivedShape).
 	module := g.module(s)
 	files := []generator.File{{Path: "message.py", Content: module}}
 	if cfgString(cfg, "emit", "sources") == "project" {
@@ -76,6 +74,9 @@ type gen struct {
 	bind *bindPlan
 	// unions caches each union type's options and derived names (union.go).
 	unions map[*ir.NamedType]*unionShape
+	// bases maps a class name to its unescaped type identifier, which its private
+	// names (visitor, locations, tables) are derived from.
+	bases map[string]string
 }
 
 // scopesFor returns a class's scope tree, built once and reused: buildBindPlan
@@ -254,7 +255,7 @@ func (g *gen) module(s *ir.Schema) []byte {
 	// sentinel, is imported exactly where a call names it. Read off the emitted
 	// text rather than re-derived, for the reason visitorNeeds is: a second walk
 	// over the schema has to agree with the emitter by hand.
-	if strings.Contains(decodeSection, "SofaLimitError") {
+	if usesName(decodeSection, "SofaLimitError", "(") {
 		names = append(names, "SofaLimitError")
 	}
 	for _, fn := range []string{"reserve_elem", "reserve_leaf", "reserve_row"} {
@@ -367,13 +368,13 @@ func (g *gen) typeSection(s *ir.Schema) string {
 		nt := s.Named[key]
 		switch nt.Category {
 		case ir.CatStruct:
-			g.emitDataclass(f, g.typeName(key), nt.Summary, nt.Fields, nil)
+			g.emitDataclass(f, typeIdent(nt), nt.Summary, nt.Fields, nil)
 		case ir.CatUnion:
-			g.emitDataclass(f, g.typeName(key), nt.Summary, nt.Fields, g.unionShapeOf(nt))
+			g.emitDataclass(f, typeIdent(nt), nt.Summary, nt.Fields, g.unionShapeOf(nt))
 		}
 	}
 	for _, m := range s.Messages {
-		g.emitDataclass(f, exported(m.Name), m.Summary, m.Fields, nil)
+		g.emitDataclass(f, msgIdent(m), m.Summary, m.Fields, nil)
 	}
 	return f.b.String()
 }
@@ -419,8 +420,10 @@ func (g *gen) decodeSection(s *ir.Schema) string {
 	// are emitted ahead of this section, and the shared _StreamDecoder has to know
 	// whether any visitor in the module carries one.
 	g.plans = map[string]*bindPlan{}
+	g.bases = map[string]string{}
 	for _, c := range g.decodeClasses(s) {
-		if p := g.buildBindPlan(c.name, g.scopesFor(c)); p != nil {
+		g.bases[c.name] = c.base
+		if p := g.buildBindPlan(c, g.scopesFor(c)); p != nil {
 			g.plans[c.name] = p
 		}
 	}
@@ -449,7 +452,8 @@ func (g *gen) decodeSection(s *ir.Schema) string {
 // decodeClass is one generated class with a visitor: the struct/union
 // dataclasses, then the messages, in emission order.
 type decodeClass struct {
-	name   string
+	name   string // the class name
+	base   string // its identifier before the escape: what private names derive from
 	fields []*ir.Field
 	union  *unionShape // non-nil for a union type
 }
@@ -460,13 +464,13 @@ func (g *gen) decodeClasses(s *ir.Schema) []decodeClass {
 		nt := s.Named[key]
 		switch nt.Category {
 		case ir.CatStruct:
-			out = append(out, decodeClass{g.typeName(key), nt.Fields, nil})
+			out = append(out, decodeClass{typeIdent(nt), baseIdent(nt), nt.Fields, nil})
 		case ir.CatUnion:
-			out = append(out, decodeClass{g.typeName(key), nt.Fields, g.unionShapeOf(nt)})
+			out = append(out, decodeClass{typeIdent(nt), baseIdent(nt), nt.Fields, g.unionShapeOf(nt)})
 		}
 	}
 	for _, m := range s.Messages {
-		out = append(out, decodeClass{exported(m.Name), m.Fields, nil})
+		out = append(out, decodeClass{msgIdent(m), msgBase(m), m.Fields, nil})
 	}
 	return out
 }
@@ -583,7 +587,7 @@ func pyExpectedWire(fld *ir.Field) string {
 }
 
 func (g *gen) emitEnum(f *pyfile, nt *ir.NamedType) {
-	f.line("class %s(IntEnum):", g.typeName(nt.Key))
+	f.line("class %s(IntEnum):", typeIdent(nt))
 	for _, c := range nt.Consts {
 		// Sphinx attribute comment(s) carrying the constant's description, above
 		// the member so pydoc/Sphinx attaches it to the enum value.
@@ -594,6 +598,9 @@ func (g *gen) emitEnum(f *pyfile, nt *ir.NamedType) {
 		}
 		f.line("    %s = %d", strings.ToUpper(c.Name), c.Value)
 	}
+	// The name a dataclass default reads the enum through (enumAlias): a class
+	// body could have rebound the enum's own name by then.
+	f.line("%s = %s", enumAlias(nt), typeIdent(nt))
 	f.blank()
 }
 
@@ -610,7 +617,7 @@ func (g *gen) emitEnum(f *pyfile, nt *ir.NamedType) {
 // requires-python >= 3.9. Rejecting an UNDECLARED bit is the decoder's job in any
 // case (MESSAGE_SPEC S1, enforced in on_field), not the type's.
 func (g *gen) emitBitfieldConsts(f *pyfile, nt *ir.NamedType) {
-	f.line("class %s(IntFlag):", g.typeName(nt.Key))
+	f.line("class %s(IntFlag):", typeIdent(nt))
 	for _, fl := range nt.Flags {
 		// Sphinx attribute comment(s): the flag description, with the schema
 		// default appended as "(default: true/false)" when the flag has one.

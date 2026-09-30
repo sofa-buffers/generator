@@ -44,7 +44,7 @@ func benchSink(m *ir.Message, expr string) string {
 		switch f.Kind {
 		case ir.KindU8, ir.KindU16, ir.KindU32, ir.KindU64,
 			ir.KindI8, ir.KindI16, ir.KindI32, ir.KindI64:
-			return expr + "." + f.Name
+			return expr + "." + pyIdent(f.Name)
 		}
 	}
 	return "id(" + expr + ")"
@@ -69,7 +69,7 @@ func (g *gen) emitBench(f *pyfile, s *ir.Schema) {
 	f.line("    # in one and not the other would land wholly in the delta.")
 	f.line("    gc.disable()")
 	for _, m := range s.Messages {
-		mt := exported(m.Name)
+		mt := msgIdent(m)
 		low := strings.ToLower(m.Name)
 		f.line("    if w in ('encode_%s', 'decode_%s'):", low, low)
 		f.line("        obj = message.%s.from_jsonable(json.loads(data))", mt)
@@ -98,7 +98,7 @@ func (g *gen) harness(s *ir.Schema) []byte {
 	f.blank()
 	f.line("MESSAGES = {")
 	for _, m := range s.Messages {
-		f.line("    %q: message.%s,", m.Name, exported(m.Name))
+		f.line("    %q: message.%s,", m.Name, msgIdent(m))
 	}
 	f.line("}")
 	f.blank()

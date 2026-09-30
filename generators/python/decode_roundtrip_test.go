@@ -261,7 +261,7 @@ messages:
 import sys
 import sofab
 from sofab import SofaIncompleteError
-from message import Table, TableDeepElemElem, TableRowsElem
+from message import Table, Table_Deep, Table_Rows
 
 
 def varint(v):
@@ -330,8 +330,8 @@ for desc, wire, want in CASES:
         bad += 1
         print("[%s] mistyped %s: want %s, got %s" % (sofab.IMPL, desc, want, got))
 
-m = Table(rows=[TableRowsElem(k=7), TableRowsElem(k=0), TableRowsElem(k=9)],
-          deep=[[TableDeepElemElem(v=1)], [], [TableDeepElemElem(v=2), TableDeepElemElem(v=3)]], tail=9)
+m = Table(rows=[Table_Rows(k=7), Table_Rows(k=0), Table_Rows(k=9)],
+          deep=[[Table_Deep(v=1)], [], [Table_Deep(v=2), Table_Deep(v=3)]], tail=9)
 back = Table.decode(m.encode())
 if back != m:
     bad += 1

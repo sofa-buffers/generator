@@ -152,7 +152,7 @@ class Scalars:
         larger one to feed larger chunks. What is SKIPPED never enters it,
         whatever its size.
         """
-        return _StreamDecoder(cls, _ScalarsVisitor, reassembly)
+        return _StreamDecoder(cls, _Scalars__Visitor, reassembly)
 
     @classmethod
     def decode(cls, data: bytes) -> "Scalars":
@@ -167,7 +167,7 @@ class Scalars:
         INCOMPLETE stays distinguishable from INVALID.
         """
         o = cls()
-        v = _ScalarsVisitor(o)
+        v = _Scalars__Visitor(o)
         d = Decoder(visitor=v, max_dyn_array_count=65536, max_dyn_string_len=1048576, max_dyn_blob_len=4194304,
                     reassembly=MAX_FIELD_SPAN)
         st = d.feed(data)
@@ -234,7 +234,7 @@ class _StreamDecoder:
 # option of those shapes. Every other union is a one-of table: the decoder
 # writes the held option's id into its `which_at` slot, and a re-selected
 # option starts again from the `default=` / `default_id=` its rows state.
-_BIND_Scalars = (Binding(closed=True)
+_Scalars__Bind = (Binding(closed=True)
     .unsigned(0, at=0, count_at=1, max_value=255)
     .unsigned(1, at=2, count_at=3, max_value=255)
     .unsigned(2, at=4, count_at=5)
@@ -245,15 +245,15 @@ _BIND_Scalars = (Binding(closed=True)
     .boolean(7, at=14, count_at=15)
     .boolean_array(8, at=16, cap=4, count_at=20)
 )
-_W_Scalars = _BIND_Scalars.tree_words_required
-_O_Scalars = _BIND_Scalars.tree_objects_required
+_Scalars__Words = _Scalars__Bind.tree_words_required
+_Scalars__Objects = _Scalars__Bind.tree_objects_required
 # Every slot starts at ALL ONES, which no arrival can write: an array's count
 # slot holds its element count and every other kind's holds 1. That is what
 # tells a field that never arrived from one that arrived EMPTY -- an empty
 # array replaces the default, and a zero count slot could not say so.
-_FILL_Scalars = b"\xff" * (_W_Scalars * 8)
+_Scalars__Fill = b"\xff" * (_Scalars__Words * 8)
 
-class _ScalarsVisitor(Visitor):
+class _Scalars__Visitor(Visitor):
     """Decode handler for :class:`Scalars`: a destination table and nothing else.
 
     Every id this schema declares is on the table, so the decoder writes each
@@ -265,7 +265,7 @@ class _ScalarsVisitor(Visitor):
 
     def __init__(self, o: Scalars) -> None:
         self._o = o
-        self._w = bytearray(_FILL_Scalars)
+        self._w = bytearray(_Scalars__Fill)
         self._ob: list = []
         # Typed views over the one buffer: no copy, no second buffer.
         self._vu = memoryview(self._w).cast("Q")
@@ -283,7 +283,7 @@ class _ScalarsVisitor(Visitor):
         The table is ``closed``, so an id it does not name is skipped by the
         codec: nothing reaches this class at all.
         """
-        return (_BIND_Scalars, self._w, self._ob)
+        return (_Scalars__Bind, self._w, self._ob)
 
     def scatter(self) -> None:
         """Move the table's slots onto the message.
