@@ -762,28 +762,3 @@ func (g *gen) reachable(m *ir.Message) []string {
 	visit(m.Fields)
 	return order
 }
-
-// javaKeywords are Java reserved words. Java has no raw-identifier escape, so a
-// field with such a name is mangled (trailing underscore); the JSON key keeps the
-// original name (emitted as a separate string literal).
-var javaKeywords = map[string]bool{
-	"abstract": true, "assert": true, "boolean": true, "break": true, "byte": true,
-	"case": true, "catch": true, "char": true, "class": true, "const": true,
-	"continue": true, "default": true, "do": true, "double": true, "else": true,
-	"enum": true, "extends": true, "final": true, "finally": true, "float": true,
-	"for": true, "goto": true, "if": true, "implements": true, "import": true,
-	"instanceof": true, "int": true, "interface": true, "long": true, "native": true,
-	"new": true, "package": true, "private": true, "protected": true, "public": true,
-	"return": true, "short": true, "static": true, "strictfp": true, "super": true,
-	"switch": true, "synchronized": true, "this": true, "throw": true, "throws": true,
-	"transient": true, "try": true, "void": true, "volatile": true, "while": true,
-	"true": true, "false": true, "null": true, "var": true, "record": true, "yield": true,
-}
-
-// javaIdent mangles a field name that is a Java keyword (trailing underscore).
-func javaIdent(name string) string {
-	if javaKeywords[name] {
-		return name + "_"
-	}
-	return name
-}

@@ -287,7 +287,9 @@ func (g *gen) emitUnionAccessors(f *jfile, o *unionOpt) {
 	dep()
 	f.line("    public boolean has%s() { return which == %s; }", o.base, o.idConst)
 	dep()
-	f.line("    public void set%s(%s v) { which = %s; %s = v; }", o.base, t, o.idConst, o.slot)
+	// `this.` on the slot: an option named `v` would otherwise assign the
+	// parameter to itself and leave the union holding nothing.
+	f.line("    public void set%s(%s v) { which = %s; this.%s = v; }", o.base, t, o.idConst, o.slot)
 	if !unionMutable(o.f) {
 		return
 	}

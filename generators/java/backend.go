@@ -24,6 +24,9 @@ func (*Backend) Lang() string { return "java" }
 func (*Backend) Generate(s *ir.Schema, cfg map[string]any) ([]generator.File, error) {
 	g := &gen{schema: s, pkg: cfgString(cfg, "package", "message"), banner: cfgString(cfg, "tool_banner", "sofabgen"), license: generator.LicenseID(cfg), limits: resolveLimits(s, cfg), size: generator.NewSizePolicy(cfg)}
 	dir := "src/main/java/" + strings.ReplaceAll(g.pkg, ".", "/") + "/"
+	if err := checkFieldNames(s); err != nil {
+		return nil, err
+	}
 	if err := g.checkUnions(); err != nil {
 		return nil, err
 	}
