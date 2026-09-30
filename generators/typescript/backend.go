@@ -31,6 +31,9 @@ func (*Backend) Generate(s *ir.Schema, cfg map[string]any) ([]generator.File, er
 	if err := checkFieldNames(s); err != nil {
 		return nil, err
 	}
+	if err := checkConstNames(s); err != nil {
+		return nil, err
+	}
 	if err := g.checkUnions(s); err != nil {
 		return nil, err
 	}

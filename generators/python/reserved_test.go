@@ -127,3 +127,17 @@ func TestReservedNamesImport(t *testing.T) {
 		t.Fatalf("module with every reserved name as a field does not import/round-trip: %v\n%s", err, out)
 	}
 }
+
+// TestConstNameCollision: two enum constants or bitfield flags that give one
+// generated name (`c` and `C` are both C) are a generation error naming both.
+func TestConstNameCollision(t *testing.T) {
+	for _, src := range []string{
+		"version: 1\nmessages:\n  m:\n    payload:\n      e: { id: 0, type: enum, enum: { c: 0, C: 1 } }\n",
+		"version: 1\n$defs:\n  bitfield:\n    F: { z: { pos: 0 }, Z: { pos: 1 } }\nmessages:\n  m:\n    payload:\n      f: { id: 0, type: bitfield, bits: { $ref: '#/$defs/bitfield/F' } }\n",
+	} {
+		_, err := (&Backend{}).Generate(schema(t, src), map[string]any{})
+		if err == nil || !strings.Contains(err.Error(), "both generate") {
+			t.Errorf("want a collision error for:\n%s\ngot %v", src, err)
+		}
+	}
+}

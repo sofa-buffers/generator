@@ -139,7 +139,9 @@ is `encode_`. Those names are:
   `property`, `field`, `list`, `REASSEMBLY`.
 
 Only the attribute changes: the wire is keyed by the field id, and the JSON key
-stays the schema name. The list lives in `generators/python/reserved.go`.
+stays the schema name. Enum constants and bitfield flags are upper-cased, so
+two that differ only in case (`c` and `C`) fail generation, naming both. The
+list lives in `generators/python/reserved.go`.
 
 ## Unions
 

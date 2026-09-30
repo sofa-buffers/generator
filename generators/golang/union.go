@@ -135,17 +135,26 @@ func checkUnionNames(u *unionShape) error {
 	return nil
 }
 
-// checkPackageNames rejects an option-id constant that collides with any other
-// package-level identifier the backend emits. Such a constant is named after its
+// checkPackageNames rejects two package-level identifiers the backend emits
+// with one name -- a type, an enum or bitfield constant, a message
+// declaration, an option-id constant. Such a constant is named after its
 // type and option (<Type><Opt>ID), so it can land on a type name, an enum or
 // bitfield constant, a message's generated constants and functions, or another
 // union's constant -- none of which the Core name check can see.
 func (g *gen) checkPackageNames() error {
 	seen := map[string]string{}
+	// Every package-level name is claimed once: a type, an enum or bitfield
+	// constant (<Type><Name>, so `E.a_b` and `EA.b` are both EnumEAB), a
+	// message's declarations. A second claim is a duplicate declaration.
+	var clash error
 	add := func(name, what string) {
-		if _, ok := seen[name]; !ok {
-			seen[name] = what
+		if prev, ok := seen[name]; ok {
+			if clash == nil && prev != what {
+				clash = fmt.Errorf("go backend: %s and %s both generate the package-level name %s; rename one", prev, what, name)
+			}
+			return
 		}
+		seen[name] = what
 	}
 	for _, key := range g.schema.NamedOrder {
 		nt := g.schema.Named[key]
@@ -154,11 +163,11 @@ func (g *gen) checkPackageNames() error {
 		switch nt.Category {
 		case ir.CatEnum:
 			for _, c := range nt.Consts {
-				add(tn+exported(c.Name), "a constant of the enum "+tn)
+				add(tn+exported(c.Name), fmt.Sprintf("constant %q of the enum %s", c.Name, tn))
 			}
 		case ir.CatBitfield:
 			for _, fl := range nt.Flags {
-				add(tn+exported(fl.Name), "a constant of the bitfield "+tn)
+				add(tn+exported(fl.Name), fmt.Sprintf("flag %q of the bitfield %s", fl.Name, tn))
 			}
 		}
 	}
@@ -171,6 +180,9 @@ func (g *gen) checkPackageNames() error {
 	}
 	for _, n := range []string{"MaxDynArrayCount", "MaxDynStringLen", "MaxDynBlobLen", "_caps", "_isDefaulter"} {
 		add(n, "a package declaration")
+	}
+	if clash != nil {
+		return clash
 	}
 	var keys []string
 	for _, key := range g.schema.NamedOrder {

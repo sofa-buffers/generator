@@ -1,5 +1,11 @@
 package cpp
 
+import (
+	"fmt"
+
+	"github.com/sofa-buffers/generator/internal/ir"
+)
+
 // One reserved-name list for the C++ backend (generator#239): every name a
 // schema field cannot take as a member of a generated type, whatever the reason
 // -- a keyword, or a member the generated class already declares. The struct
@@ -65,4 +71,84 @@ func cppIdent(name string) string {
 		return name + "_"
 	}
 	return name
+}
+
+// checkConstNames rejects two constants of one enum or two flags of one
+// bitfield that give one generated name: the backend spells them through
+// exported(), so `a_b` and `aB` are both AB. The compiler would reject the
+// duplicate far from the schema. Located: the error names the type and both
+// names.
+func checkConstNames(s *ir.Schema) error {
+	dup := func(owner, what string, names []string) error {
+		seen := map[string]string{}
+		for _, n := range names {
+			id := exported(n)
+			if prev, ok := seen[id]; ok {
+				return fmt.Errorf("cpp: %s: %s %q and %q both generate %s; rename one", owner, what, prev, n, id)
+			}
+			seen[id] = n
+		}
+		return nil
+	}
+	for _, key := range s.NamedOrder {
+		nt := s.Named[key]
+		switch nt.Category {
+		case ir.CatEnum:
+			names := make([]string, len(nt.Consts))
+			for i, c := range nt.Consts {
+				names[i] = c.Name
+			}
+			if err := dup("enum "+key, "constants", names); err != nil {
+				return err
+			}
+		case ir.CatBitfield:
+			names := make([]string, len(nt.Flags))
+			for i, fl := range nt.Flags {
+				names[i] = fl.Name
+			}
+			if err := dup("bitfield "+key, "flags", names); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
+// checkNamespaceNames rejects two namespace-level names the backend emits with
+// one spelling. A bitfield's flags are enumerators of an unscoped enum,
+// spelled <Type><Flag>, so they share the namespace with every type: `F.a_b`
+// and `FA.b` are both BitfieldFAB, and so is a bitfield type `FAB`. (An
+// enum's constants are members of an enum class, scoped to it, and
+// checkConstNames covers them.) Located: the error names both owners.
+func (g *gen) checkNamespaceNames(s *ir.Schema) error {
+	seen := map[string]string{}
+	claim := func(name, what string) error {
+		if prev, ok := seen[name]; ok && prev != what {
+			return fmt.Errorf("cpp: %s and %s both generate the name %s; rename one", prev, what, name)
+		}
+		seen[name] = what
+		return nil
+	}
+	for _, m := range s.Messages {
+		if err := claim(exported(m.Name), "message "+m.Name); err != nil {
+			return err
+		}
+	}
+	for _, key := range s.NamedOrder {
+		if err := claim(g.typeName(key), key); err != nil {
+			return err
+		}
+	}
+	for _, key := range s.NamedOrder {
+		nt := s.Named[key]
+		if nt.Category != ir.CatBitfield {
+			continue
+		}
+		for _, fl := range nt.Flags {
+			if err := claim(g.typeName(key)+exported(fl.Name), fmt.Sprintf("flag %q of %s", fl.Name, key)); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
 }

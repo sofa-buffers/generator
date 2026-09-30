@@ -130,8 +130,10 @@ The statics (`fromJSON`, `decode`, `MAX_SIZE`) are a namespace of their own, so
 a field may take their names. Only the member changes: the wire is keyed by the
 field id, and the JSON key stays the schema name. Two fields that end up with
 the same member — `encode` and `encode_`, or an `fp32` field `f` (whose raw-bytes
-companion is `fFp32Raw`) and a field `fFp32Raw` — fail generation, naming both.
-The list lives in `generators/typescript/reserved.go`.
+companion is `fFp32Raw`) and a field `fFp32Raw` — fail generation, naming both;
+so do two constants of one enum or flags of one bitfield that give the same
+member (`a_b` and `aB` are both `AB`). The list lives in
+`generators/typescript/reserved.go`.
 
 ## Unions
 

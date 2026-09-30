@@ -84,7 +84,7 @@ func (ss *tsScopeSet) object(g *gen, locName, path string, nt *ir.NamedType) int
 	for _, fld := range nt.Fields {
 		switch fld.Kind {
 		case ir.KindStruct, ir.KindUnion:
-			sc.seqChild[fld.ID] = ss.object(g, locName+"_"+fld.Name,
+			sc.seqChild[fld.ID] = ss.object(g, locChild(locName, fld.Name),
 				g.memberPath(sc, fld), fld.Ref.Target)
 			ss.scopes[sc.seqChild[fld.ID]].parent = sc.id
 		case ir.KindArray:
@@ -92,7 +92,7 @@ func (ss *tsScopeSet) object(g *gen, locName, path string, nt *ir.NamedType) int
 			// array<kind> at THIS scope; only a wrapper-sequence array opens a
 			// scope of its own.
 			if !nativeArrayElem(fld.Elem) {
-				sc.seqChild[fld.ID] = ss.array(g, locName+"_"+fld.Name,
+				sc.seqChild[fld.ID] = ss.array(g, locChild(locName, fld.Name),
 					g.memberAcc(sc, fld), fld.Name,
 					fld.Elem, fld.ElemRef, fld.ElemItems,
 					capOf(fld.HasCount, fld.Count), fld.ElemMaxHas, fld.ElemMax)

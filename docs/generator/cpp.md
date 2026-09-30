@@ -87,7 +87,11 @@ trailing underscore — the field `class` is the member `class_`, and `encode` i
   `try_decode`.
 
 Only the member changes: the wire is keyed by the field id, and the JSON key
-stays the schema name. The list lives in `generators/cpp/reserved.go`.
+stays the schema name. Enum constants and bitfield flags are written in
+PascalCase, so two that give the same name (`a_b` and `aB` are both `AB`) fail
+generation, naming both. Bitfield flags are prefixed with their type and share
+the namespace, so a flag of one bitfield and one of another can clash too
+(`F.a_b` and `FA.b` are both `BitfieldFAB`). The list lives in `generators/cpp/reserved.go`.
 
 ## Unions
 
