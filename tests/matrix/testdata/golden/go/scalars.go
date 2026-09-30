@@ -162,8 +162,8 @@ func (m *Scalars) ArrayUnsigned(id sofab.ID, _ int, v uint64) error {
 	return nil
 }
 
-// NewScalars returns a Scalars with schema defaults applied.
-func NewScalars() *Scalars {
+// Scalars__New returns a Scalars with schema defaults applied.
+func Scalars__New() *Scalars {
 	m := &Scalars{}
 	m.U8min = 0
 	m.U8max = 255
@@ -176,27 +176,27 @@ func NewScalars() *Scalars {
 	return m
 }
 
-// ScalarsMaxSize is this message's worst-case encoded size, derived from the
+// Scalars__MaxSize is this message's worst-case encoded size, derived from the
 // schema: no value of it can encode to more.
-const ScalarsMaxSize = 55
+const Scalars__MaxSize = 55
 
-// ScalarsMaxDepth is the deepest sequence nesting encoding this message opens,
+// Scalars__MaxDepth is the deepest sequence nesting encoding this message opens,
 // derived from the schema: no value of it nests deeper.
-const ScalarsMaxDepth = 0
+const Scalars__MaxDepth = 0
 
-// _ScalarsEncOpts bounds this message's encoders to one level: ScalarsMaxDepth
+// _Scalars__EncOpts bounds this message's encoders to one level: Scalars__MaxDepth
 // is 0, and WithMaxDepth(0) would mean no bound. It is package-level so
 // passing it allocates nothing per call.
-var _ScalarsEncOpts = []sofab.Option{sofab.WithMaxDepth(1)}
+var _Scalars__EncOpts = []sofab.Option{sofab.WithMaxDepth(1)}
 
 // Encode serializes the message into a buffer this call allocates and owns.
 //
-// The buffer is exactly ScalarsMaxSize bytes -- the schema's worst case -- so a
+// The buffer is exactly Scalars__MaxSize bytes -- the schema's worst case -- so a
 // conformant value always fits. A value filled past a declared count/maxlen
 // does not, and is reported rather than truncated.
 func (m *Scalars) Encode() ([]byte, error) {
-	buf := make([]byte, ScalarsMaxSize)
-	e, err := sofab.NewEncoderBuffer(buf, 0, _ScalarsEncOpts...)
+	buf := make([]byte, Scalars__MaxSize)
+	e, err := sofab.NewEncoderBuffer(buf, 0, _Scalars__EncOpts...)
 	if err != nil {
 		return nil, err
 	}
@@ -217,7 +217,7 @@ func (m *Scalars) EncodeTo(w io.Writer) error {
 	e, err := sofab.NewEncoderSink(scratch[:], 0, func(_ *sofab.Encoder, b []byte) error {
 		_, werr := w.Write(b)
 		return werr
-	}, _ScalarsEncOpts...)
+	}, _Scalars__EncOpts...)
 	if err != nil {
 		return err
 	}
@@ -225,7 +225,7 @@ func (m *Scalars) EncodeTo(w io.Writer) error {
 	return e.Flush()
 }
 
-// DecodeScalars parses bytes into a new message (with defaults pre-applied).
+// Scalars__Decode parses bytes into a new message (with defaults pre-applied).
 // Decode feeds the buffer to the corelib's decoder in one go, dispatching
 // each field to the message's sofab.Visitor implementation.
 //
@@ -234,21 +234,21 @@ func (m *Scalars) EncodeTo(w io.Writer) error {
 // and copies. The message therefore outlives data, and data may be reused
 // or mutated the moment this returns.
 //
-// Use this when the message is already in memory. DecodeScalarsFrom is the
+// Use this when the message is already in memory. Scalars__DecodeFrom is the
 // streaming twin for a message that is not.
-func DecodeScalars(data []byte) (*Scalars, error) {
-	m := NewScalars()
+func Scalars__Decode(data []byte) (*Scalars, error) {
+	m := Scalars__New()
 	if err := sofab.AcceptBytes(data, m); err != nil {
 		return nil, err
 	}
 	return m, nil
 }
 
-// DecodeScalarsFrom parses a message straight out of r (with defaults pre-applied).
+// Scalars__DecodeFrom parses a message straight out of r (with defaults pre-applied).
 //
 // The wire image is never held whole in memory: r is drained in chunks and
 // each field is dispatched as its bytes arrive, so what bounds memory is
-// the chunk plus the largest single field, not the message. DecodeScalars is
+// the chunk plus the largest single field, not the message. Scalars__Decode is
 // the in-memory path for bytes you already hold; this is the one to reach
 // for over a network connection, a file, or any producer that outruns the
 // memory you want to spend.
@@ -258,8 +258,8 @@ func DecodeScalars(data []byte) (*Scalars, error) {
 // streamed, at every chunk boundary. A reader that ends inside a field is
 // INCOMPLETE, which is sofab.ErrIncomplete here: only the caller's framing
 // knows whether more could still have come (S5.2.4).
-func DecodeScalarsFrom(r io.Reader) (*Scalars, error) {
-	m := NewScalars()
+func Scalars__DecodeFrom(r io.Reader) (*Scalars, error) {
+	m := Scalars__New()
 	scratch := make([]byte, 4096)
 	out, err := sofab.NewDecoder(m).FeedFrom(r, scratch)
 	if err != nil {

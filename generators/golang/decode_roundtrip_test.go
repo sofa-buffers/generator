@@ -10,7 +10,7 @@ import (
 // TestGoDecodeRoundTrip compiles the generated code for the canonical example
 // schema against a real corelib-go checkout and runs an encode -> AcceptBytes
 // decode -> re-encode round trip, asserting the re-encoded bytes are identical.
-// This exercises the visitor decode path (Decode<Msg> via sofab.AcceptBytes)
+// This exercises the visitor decode path (<Msg>__Decode via sofab.AcceptBytes)
 // across scalars, native arrays, string/blob/struct/union arrays and a matrix —
 // the encode conformance test only covers marshal. Gated on SOFAB_GO_CORELIB.
 func TestGoDecodeRoundTrip(t *testing.T) {
@@ -62,7 +62,7 @@ import (
 )
 
 func TestExampleRoundTrip(t *testing.T) {
-	m := msg.NewMyfirstmessage()
+	m := msg.Myfirstmessage__New()
 	m.Someu32 = 123456
 	m.Somei32 = -4242
 	m.Someu64 = 18446744073709551000
@@ -80,7 +80,7 @@ func TestExampleRoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	got, err := msg.DecodeMyfirstmessage(enc)
+	got, err := msg.Myfirstmessage__Decode(enc)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -107,7 +107,7 @@ func TestExampleRoundTrip(t *testing.T) {
 // generated code controls. Should that ever become a reused scratch, this test
 // is what notices.
 func TestDecodedMessageOwnsItsBytes(t *testing.T) {
-	m := msg.NewMyfirstmessage()
+	m := msg.Myfirstmessage__New()
 	m.Somestring = "héllo wörld"
 	m.Someblob = []byte{1, 2, 3, 4, 5}
 	m.Someuintarray = []uint32{9, 8, 7, 6}
@@ -123,7 +123,7 @@ func TestDecodedMessageOwnsItsBytes(t *testing.T) {
 	}
 	want := append([]byte(nil), enc...)
 
-	got, err := msg.DecodeMyfirstmessage(enc)
+	got, err := msg.Myfirstmessage__Decode(enc)
 	if err != nil {
 		t.Fatal(err)
 	}

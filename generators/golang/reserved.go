@@ -1,11 +1,5 @@
 package golang
 
-import (
-	"fmt"
-
-	"github.com/sofa-buffers/generator/internal/ir"
-)
-
 // One reserved-name list for the Go backend (generator#239): every name a
 // schema field cannot take as a member of a generated type. Go keywords need no
 // entry -- a field is exported, so its name starts upper-case and no keyword
@@ -17,7 +11,7 @@ import (
 // Go has no identifier escape, so a name on the list is mangled with a trailing
 // underscore. The wire is keyed by id and the `json` tag keeps the schema name,
 // so neither changes; only the Go field does. The struct path (goFieldName) and
-// the union path (unionShapeOf, checkUnionNames) both read the list; a union
+// the union path (unionShapeOf) both read the list; a union
 // adds only the members it alone has (unionReserved).
 
 // goVisitorMembers are the sofab.Visitor callbacks every generated struct,
@@ -69,74 +63,79 @@ func goFieldName(name string) string {
 	return n
 }
 
-// checkFieldNames rejects a struct or message whose fields derive the same Go
-// field. exported() folds underscores into camel case, so `a_b` and `aB` are
-// both `AB`, and `encode_` lands on the mangled `encode`. Located: the error
-// names the type and both fields.
-func (g *gen) checkFieldNames() error {
-	check := func(owner string, fields []*ir.Field) error {
-		seen := map[string]string{}
-		for _, f := range fields {
-			n := goFieldName(f.Name)
-			if prev, ok := seen[n]; ok {
-				return fmt.Errorf("go backend: %s: fields %q and %q both generate the Go field %s; rename one", owner, prev, f.Name, n)
-			}
-			seen[n] = f.Name
-		}
-		return nil
-	}
-	for _, key := range g.schema.NamedOrder {
-		if nt := g.schema.Named[key]; nt.Category == ir.CatStruct {
-			if err := check("struct "+key, nt.Fields); err != nil {
-				return err
-			}
-		}
-	}
-	for _, m := range g.schema.Messages {
-		if err := check("message "+m.Name, m.Fields); err != nil {
-			return err
-		}
-	}
-	return nil
+// No field-name check follows goFieldName, and none is needed: the naming rules
+// (ARCHITECTURE §8, "Naming") give the fields of one scope distinct folds, so
+// their Pascal names differ, and a mangled name ends in "_", which no schema
+// name does. The same holds for enum constants and bitfield flags, which are
+// children of their type (Type_Name).
+
+// goPackageNames are the EXPORTED package-level names the generated package
+// declares itself, beside the types (the escape channel of ARCHITECTURE §8,
+// "Naming"). A type identifier spelled like one takes a trailing underscore
+// (escapeType). Everything else the package declares at package level is out
+// of a type identifier's reach without an entry:
+//
+//   - a message's companions are roles (M__New, M__Decode, M__MaxSize, ...),
+//     and enum constants, bitfield flags and union option ids are children
+//     (Color_Red, U_Opt__ID): no type identifier contains "__", and the path
+//     of an enum, a bitfield or a union option has no child to spell the rest;
+//   - the private names (_isDefaulter, _caps, _M__EncOpts) start with "_";
+//   - imports (sofab, io, fmt, json, bytes, ...), Go's keywords and predeclared
+//     identifiers are all lower-case, and a type identifier starts upper-case;
+//   - the harness (emit: project) is package main of its own, and names the
+//     generated types only qualified (message.M).
+var goPackageNames = map[string]bool{
+	// The receiver-side decode limits (sofab_visitor.go), exported for the
+	// caller: a message `max_dyn_string_len` is the type MaxDynStringLen_.
+	"MaxDynArrayCount": true,
+	"MaxDynStringLen":  true,
+	"MaxDynBlobLen":    true,
 }
 
-// checkConstNames rejects two constants of one enum or two flags of one
-// bitfield that give one generated name: the backend spells them through
-// exported(), so `a_b` and `aB` are both AB. The compiler would reject the
-// duplicate far from the schema. Located: the error names the type and both
-// names.
-func checkConstNames(s *ir.Schema) error {
-	dup := func(owner, what string, names []string) error {
-		seen := map[string]string{}
-		for _, n := range names {
-			id := exported(n)
-			if prev, ok := seen[id]; ok {
-				return fmt.Errorf("go backend: %s: %s %q and %q both generate %s; rename one", owner, what, prev, n, id)
-			}
-			seen[id] = n
-		}
-		return nil
+// escapeType is the escape channel: a type identifier on goPackageNames takes a
+// trailing underscore, which no type identifier ends with.
+func escapeType(t string) string {
+	if goPackageNames[t] {
+		return t + "_"
 	}
-	for _, key := range s.NamedOrder {
-		nt := s.Named[key]
-		switch nt.Category {
-		case ir.CatEnum:
-			names := make([]string, len(nt.Consts))
-			for i, c := range nt.Consts {
-				names[i] = c.Name
-			}
-			if err := dup("enum "+key, "constants", names); err != nil {
-				return err
-			}
-		case ir.CatBitfield:
-			names := make([]string, len(nt.Flags))
-			for i, fl := range nt.Flags {
-				names[i] = fl.Name
-			}
-			if err := dup("bitfield "+key, "flags", names); err != nil {
-				return err
-			}
+	return t
+}
+
+// unionMember reports whether n is a member every union type already has: a
+// name on the list, or one only a union declares.
+func unionMember(n string) bool { return goReserved(n) || unionReserved[n] }
+
+// accessorPrefixes are the words a union's per-option accessors put in front
+// of the option's Pascal name: Set<Opt>, Has<Opt>, Mut<Opt>.
+var accessorPrefixes = []string{"Set", "Has", "Mut"}
+
+// unionGetter is the getter of an option whose Pascal name is p. It is p, with
+// a trailing underscore when p is a union member or when p itself reads as an
+// accessor of another option: `set_x` is SetX, the setter of `x`, so the getter
+// of `set_x` is SetX_. A Pascal name never contains "_", so a getter either has
+// none or ends in one.
+func unionGetter(p string) string {
+	if unionMember(p) {
+		return p + "_"
+	}
+	for _, pre := range accessorPrefixes {
+		if len(p) > len(pre) && p[:len(pre)] == pre && p[len(pre)] >= 'A' && p[len(pre)] <= 'Z' {
+			return p + "_"
 		}
 	}
-	return nil
+	return p
+}
+
+// unionAccessor is prefix+p, or prefix+"_"+p when that spells a union member
+// (the setter of an option `string_check` would hide the promoted
+// SetStringCheck and silently drop the decode's UTF-8 policy). The inner
+// underscore is a spelling no getter has -- a getter's only "_" is its last
+// byte -- and no other accessor: the prefix is fixed and p is distinct per
+// option. So every option's accessors are distinct from every other's and from
+// the union's own members, by construction.
+func unionAccessor(prefix, p string) string {
+	if n := prefix + p; !unionMember(n) {
+		return n
+	}
+	return prefix + "_" + p
 }

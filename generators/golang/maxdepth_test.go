@@ -70,13 +70,13 @@ func TestGoEncodeMaxDepth(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			got := genGo(t, schemaFromYAMLString(t, "version: 1\nmessages:\n  d:\n    payload:\n      "+strings.TrimSpace(tc.payload)+"\n"), map[string]any{})["d.go"]
-			arg := "DMaxDepth"
+			arg := "D__MaxDepth"
 			if tc.depth == 0 {
 				arg = "1"
 			}
 			for _, want := range []string{
-				"const DMaxDepth = " + strconv.Itoa(tc.depth) + "\n",
-				"var _DEncOpts = []sofab.Option{sofab.WithMaxDepth(" + arg + ")}",
+				"const D__MaxDepth = " + strconv.Itoa(tc.depth) + "\n",
+				"var _D__EncOpts = []sofab.Option{sofab.WithMaxDepth(" + arg + ")}",
 			} {
 				if !strings.Contains(got, want) {
 					t.Errorf("missing %q:\n%s", want, got)
@@ -84,14 +84,14 @@ func TestGoEncodeMaxDepth(t *testing.T) {
 			}
 			// Every Encoder the file constructs takes the bound: Encode (buffer or
 			// sink arm) and EncodeTo, and no constructor is left without it.
-			if n, all := strings.Count(got, "_DEncOpts...)"), strings.Count(got, "sofab.NewEncoder"); n != all || n != 2 {
+			if n, all := strings.Count(got, "_D__EncOpts...)"), strings.Count(got, "sofab.NewEncoder"); n != all || n != 2 {
 				t.Errorf("%d of %d encoder constructors pass the bound, want 2 of 2:\n%s", n, all, got)
 			}
 		})
 	}
 
 	deep := genGo(t, schemaFromYAMLString(t, deepSchema), map[string]any{})["deep.go"]
-	if !strings.Contains(deep, "const DeepMaxDepth = 6\n") {
+	if !strings.Contains(deep, "const Deep__MaxDepth = 6\n") {
 		t.Errorf("deepSchema opens six frames at once:\n%s", deep)
 	}
 }
@@ -150,24 +150,24 @@ import (
 	msg "rt/message"
 )
 
-func mid() msg.StructMid {
-	return msg.StructMid{
-		Leaves: []msg.StructLeaf{{N: 1}, {Tags: []string{"a", "bc"}, N: 2}},
+func mid() msg.Mid {
+	return msg.Mid{
+		Leaves: []msg.Leaf{{N: 1}, {Tags: []string{"a", "bc"}, N: 2}},
 		Cube:   [][][][]byte{{{{1}}, {{2, 3}, {4}}}, {{{5}}}},
 	}
 }
 
 func deep() *msg.Deep {
-	m := msg.NewDeep()
+	m := msg.Deep__New()
 	m.Mid = mid()
-	m.Rows = [][]msg.StructMid{{mid()}, {mid(), mid()}}
+	m.Rows = [][]msg.Mid{{mid()}, {mid(), mid()}}
 	m.U.SetM(mid())
 	return m
 }
 
 func TestDeepRoundTrip(t *testing.T) {
-	if msg.DeepMaxDepth != 6 {
-		t.Fatalf("DeepMaxDepth = %d, want 6", msg.DeepMaxDepth)
+	if msg.Deep__MaxDepth != 6 {
+		t.Fatalf("DeepMaxDepth = %d, want 6", msg.Deep__MaxDepth)
 	}
 	m := deep()
 	enc, err := m.Encode()
@@ -181,7 +181,7 @@ func TestDeepRoundTrip(t *testing.T) {
 	if !bytes.Equal(enc, sink.Bytes()) {
 		t.Fatalf("Encode and EncodeTo disagree:\n %x\n %x", enc, sink.Bytes())
 	}
-	got, err := msg.DecodeDeep(enc)
+	got, err := msg.Deep__Decode(enc)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -197,14 +197,14 @@ func TestDeepRoundTrip(t *testing.T) {
 // One level tighter than the generated bound must refuse the same value: the
 // bound is the exact depth the marshal reaches, not merely a safe one.
 func TestDeepBoundIsTight(t *testing.T) {
-	buf := make([]byte, msg.DeepMaxSize)
-	e, err := sofab.NewEncoderBuffer(buf, 0, sofab.WithMaxDepth(msg.DeepMaxDepth-1))
+	buf := make([]byte, msg.Deep__MaxSize)
+	e, err := sofab.NewEncoderBuffer(buf, 0, sofab.WithMaxDepth(msg.Deep__MaxDepth-1))
 	if err != nil {
 		t.Fatal(err)
 	}
 	deep().Serialize(e)
 	if err := e.Flush(); !errors.Is(err, sofab.ErrArgument) {
-		t.Fatalf("depth %d must refuse the value with ErrArgument, got %v", msg.DeepMaxDepth-1, err)
+		t.Fatalf("depth %d must refuse the value with ErrArgument, got %v", msg.Deep__MaxDepth-1, err)
 	}
 }
 `

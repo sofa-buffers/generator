@@ -6,6 +6,7 @@ import (
 	"strings"
 
 	"github.com/sofa-buffers/generator/internal/ir"
+	"github.com/sofa-buffers/generator/internal/naming"
 )
 
 func cfgString(cfg map[string]any, key, dflt string) string {
@@ -20,38 +21,45 @@ func cfgBool(cfg map[string]any, key string) bool {
 	return b
 }
 
-// exported converts a schema name to an exported Go identifier (PascalCase,
-// underscores folded into camel case).
-func exported(name string) string {
-	parts := strings.FieldsFunc(name, func(r rune) bool { return r == '_' })
-	var b strings.Builder
-	for _, p := range parts {
-		if p == "" {
-			continue
-		}
-		b.WriteString(strings.ToUpper(p[:1]))
-		b.WriteString(p[1:])
-	}
-	if b.Len() == 0 {
-		return "X"
-	}
-	return b.String()
+// exported is a schema name as an exported Go identifier: naming.Pascal
+// (`vehicle_telemetry` -> VehicleTelemetry). The naming rules keep it distinct
+// within a scope.
+func exported(name string) string { return naming.Pascal(name) }
+
+// typeName is the Go type identifier of the named type at graph key key
+// (ARCHITECTURE §8, "Naming"): see typeIdent.
+func (g *gen) typeName(key string) string {
+	return typeIdent(g.schema.Named[key])
 }
 
-// typeName is the exported Go type name for a named-type graph key (e.g.
-// "struct/Point" -> "StructPoint", "msg_somestruct" -> "MsgSomestruct").
-func (g *gen) typeName(key string) string {
-	parts := strings.FieldsFunc(key, func(r rune) bool { return r == '/' || r == '_' })
-	var b strings.Builder
-	for _, p := range parts {
-		if p == "" {
-			continue
-		}
-		b.WriteString(strings.ToUpper(p[:1]))
-		b.WriteString(p[1:])
+// typeBase is a named type's identifier before the escape: the path spelled
+// by naming.TypeIdent, plus, for a variant of a split union, the role
+// "__Default" + the Pascal option name. Everything DERIVED from the type -- an
+// enum constant, a bitfield flag, a union option's id constant -- is built
+// from this, never from the escaped identifier.
+func typeBase(nt *ir.NamedType) string {
+	t := naming.TypeIdent(nt.Path)
+	if nt.Variant != "" {
+		t += "__Default" + naming.Pascal(nt.Variant)
 	}
-	return b.String()
+	return t
 }
+
+// typeIdent is the Go identifier a named type is declared under: typeBase,
+// escaped with a trailing underscore when it spells a package-level name the
+// generated package declares itself (reserved.go).
+func typeIdent(nt *ir.NamedType) string { return escapeType(typeBase(nt)) }
+
+// msgBase and msgIdent are typeBase and typeIdent for a message, whose path is
+// its own name.
+func msgBase(m *ir.Message) string  { return naming.TypeIdent([]string{m.Name}) }
+func msgIdent(m *ir.Message) string { return escapeType(msgBase(m)) }
+
+// msgFile is a message's file: its folded name (naming.Lower), which has no
+// "_". So it can end neither in `_test` nor in a `_<GOOS>`/`_<GOARCH>` build
+// constraint, and it never meets the package's fixed files, which all carry one
+// (sofab_types.go, sofab_visitor.go).
+func msgFile(m *ir.Message) string { return naming.Lower([]string{m.Name}) + ".go" }
 
 // goType is the Go field type for a field.
 func (g *gen) goType(f *ir.Field) string {
