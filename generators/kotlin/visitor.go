@@ -79,9 +79,9 @@ func (g *gen) frames(m *ir.Message) []frame {
 		for _, fld := range fields {
 			switch {
 			case fld.Kind == ir.KindStruct || fld.Kind == ir.KindUnion:
-				walk(loc+"_"+fld.Name, memberPath(path, fld, uni), fld.Ref.Target.Fields, fld.Kind == ir.KindUnion)
+				walk(locChild(loc, fld.Name), memberPath(path, fld, uni), fld.Ref.Target.Fields, fld.Kind == ir.KindUnion)
 			case fld.Kind == ir.KindArray && seqArrayElem(fld.Elem):
-				addArray(loc+"_"+fld.Name, memberPath(path, fld, uni), fld.Elem, fld.ElemRef, fld.ElemItems, fld.ElemMaxHas, fld.ElemMax, capOf(fld.HasCount, fld.Count))
+				addArray(locChild(loc, fld.Name), memberPath(path, fld, uni), fld.Elem, fld.ElemRef, fld.ElemItems, fld.ElemMaxHas, fld.ElemMax, capOf(fld.HasCount, fld.Count))
 			}
 		}
 	}
@@ -1237,10 +1237,10 @@ func (g *gen) emitSequenceCbs(f *kfile, fs []frame) {
 						// this callback. Select if not held -- a held option continues
 						// its scope (§7.4 merge), another one is discarded and this one
 						// starts from its default.
-						arms = append(arms, fmt.Sprintf("%d -> { %s; cur = %d }", fld.ID, memberPath(fr.path, fld, true), locIndex(fs, fr.loc+"_"+fld.Name)))
+						arms = append(arms, fmt.Sprintf("%d -> { %s; cur = %d }", fld.ID, memberPath(fr.path, fld, true), locIndex(fs, locChild(fr.loc, fld.Name))))
 						continue
 					}
-					arms = append(arms, fmt.Sprintf("%d -> cur = %d", fld.ID, locIndex(fs, fr.loc+"_"+fld.Name)))
+					arms = append(arms, fmt.Sprintf("%d -> cur = %d", fld.ID, locIndex(fs, locChild(fr.loc, fld.Name))))
 				case fld.Kind == ir.KindArray && seqArrayElem(fld.Elem):
 					// §7.4: an array wrapper IS the array's value, so a later
 					// occurrence REPLACES it whole. The clear sits inside this
@@ -1249,7 +1249,7 @@ func (g *gen) emitSequenceCbs(f *kfile, fs []frame) {
 					// a §7.3-skipped later occurrence cannot wipe a valid earlier
 					// array. In a union the mutable accessor selects the option first.
 					arms = append(arms, fmt.Sprintf("%d -> { %s.clear(); cur = %d }",
-						fld.ID, memberPath(fr.path, fld, fr.uni), locIndex(fs, fr.loc+"_"+fld.Name)))
+						fld.ID, memberPath(fr.path, fld, fr.uni), locIndex(fs, locChild(fr.loc, fld.Name))))
 				}
 			}
 			// A skipping default even when this scope declares no sequence at

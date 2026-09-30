@@ -25,6 +25,28 @@ This holds in both `emit` modes — `sources` emits the same tree without the
 Gradle build. Changing the package changes the paths, so point `output_dir` at
 the root of a source tree, not at the package directory itself.
 
+## Field names
+
+A field's property is the field's schema name. A field named like a Kotlin hard
+keyword is escaped with backticks — the field `class` is `` `class` `` — so it
+keeps its name. A field whose name the generated class already uses for another
+declaration gets a trailing underscore instead, because backticks cannot help
+there — the field `encode` is `encode_`. Those names are:
+
+- the members every generated class or its companion object declares:
+  `serialize`, `isDefault`, `reset`, `encode`, `encodeTo`, `decode`,
+  `tryDecode`, `decoder`, `Decoder`, `MAX_SIZE`, `MAX_SIZE_LIMIT`,
+  `ENC_SCRATCH`;
+- the names the class body uses in front of a dot — `DecodeStatus`, `Long`,
+  `Seq`. Inside the class a property of such a name would take precedence, and
+  a call like `Seq.boolsToBytes(...)` would no longer compile.
+
+Only the property changes: the wire is keyed by the field id, and the JSON key
+stays the schema name. Two fields that end up with the same property or the
+same JVM accessor — `encode` and `encode_`, `foo` and `Foo` (both `getFoo`),
+or `isOpen` and `open` (both `setOpen`) — fail generation, naming both. The list lives in
+`generators/kotlin/reserved.go`.
+
 ## Unions
 
 A `union` holds exactly one of its options. It is a class of its own whose
@@ -132,8 +154,8 @@ need it to stay as it was. `reset()` works the same way, and a message's
 **Names.** The property is the option name, escaped with backticks where it is
 a Kotlin keyword (`` `class` ``); `has<Option>` and `mutable<Option>` carry the
 option name in upper camel case; the id constant is the option name in upper
-case plus `_ID`. An option named `which`, `reset`, `serialize` or `isDefault`
-(or like another generated member, such as `encode`) gets a trailing
+case plus `_ID`. An option whose name is reserved for a field (see
+[Field names](#field-names)) or is the union's own `which` gets a trailing
 underscore: `x.which_`. Two options that would produce the same member
 (`foo_bar` and `fooBar` both give `hasFooBar`, `a`'s `A_ID` and an option named
 `A_ID`) fail generation, naming both.
