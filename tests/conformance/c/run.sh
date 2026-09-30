@@ -634,6 +634,15 @@ for def in "$ROOT"/tests/matrix/corpus/defs/*.yaml "$ROOT"/examples/messages/rea
 done
 echo "==> corpus compiles ($(ls "$ROOT"/tests/matrix/corpus/defs/*.yaml | wc -l) definitions + $(ls "$ROOT"/examples/messages/realworld/*.yaml | wc -l) realworld)"
 
+# The loop above builds as C99, where the words C23 added (`nullptr`, `typeof`,
+# `constexpr`, ...) are plain identifiers, so a missing entry in cKeywords would
+# pass it. A user may build the generated code as C23: the keyword corpus is
+# built once more under that standard (-std=c2x, which GCC 13 already knows).
+gcc -std=c2x -O2 $WARNFLAGS -DSOFAB_OBJECT_DESCR_PROFILE=3 -I"$INC" -I"$WORK/corpus/keywords" \
+    -c "$WORK/corpus/keywords/keywords.c" -o /dev/null \
+    || { echo "FAIL: corpus def keywords did not compile as C23"; exit 1; }
+echo "==> keyword corpus compiles as C23"
+
 # Every corpus and realworld file as emit:project, harness included, under the
 # exported $WARNFLAGS: the harness is generated code too, and the loop above
 # compiles only the generated types. A schema with no message is where the

@@ -57,6 +57,33 @@ messages:
 	}
 }
 
+// TestC23KeywordsAndBoolMacrosAreMangled: before C23, `bool`/`true`/`false` are
+// <stdbool.h> macros the corelib headers pull in, so a member `true` expands to
+// `uint32_t 1;`; from C23 they are keywords, alongside `nullptr`, `typeof`,
+// `constexpr` and the rest. Either way the member must be mangled.
+func TestC23KeywordsAndBoolMacrosAreMangled(t *testing.T) {
+	const src = `version: 1
+messages:
+  kw:
+    payload:
+      "true":        { id: 0, type: u32 }
+      "false":       { id: 1, type: u32 }
+      nullptr:       { id: 2, type: u32 }
+      typeof_unqual: { id: 3, type: u32 }
+      constexpr:     { id: 4, type: u32 }
+`
+	files := genCFromYAMLCfg(t, src, map[string]any{})
+	h, ok := files["kw.h"]
+	if !ok {
+		t.Fatal("no kw.h")
+	}
+	for _, name := range []string{"true", "false", "nullptr", "typeof_unqual", "constexpr"} {
+		if !strings.Contains(h, "uint32_t "+name+"_;") {
+			t.Errorf("member %q is not mangled to %s_:\n%s", name, name, h)
+		}
+	}
+}
+
 func genProject(t *testing.T) map[string][]byte {
 	t.Helper()
 	files, err := (&Backend{}).Generate(buildExampleIR(t), map[string]any{"emit": "project", "symbol_prefix": "sofab_"})

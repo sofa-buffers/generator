@@ -1532,10 +1532,14 @@ func cfgString(cfg map[string]any, key, dflt string) string {
 	return dflt
 }
 
-// cKeywords are C reserved words (C99/C11). C has no identifier escape, so a
-// field with such a name is mangled (trailing underscore); the struct member and
-// its descriptor entry use the mangled name, while the JSON harness keys (emitted
-// elsewhere as string literals) keep the original name.
+// cKeywords are the names a C struct member cannot take: the C99/C11 reserved
+// words, the words C23 added (a user may build the generated code with
+// -std=c23), and the <stdbool.h> macros the corelib headers pull in -- before
+// C23 `bool`, `true` and `false` are macros, so a member `true` expands to `1`.
+// C has no identifier escape, so a field with such a name is mangled (trailing
+// underscore); the struct member and its descriptor entry use the mangled name,
+// while the JSON harness keys (emitted elsewhere as string literals) keep the
+// original name.
 var cKeywords = map[string]bool{
 	"auto": true, "break": true, "case": true, "char": true, "const": true,
 	"continue": true, "default": true, "do": true, "double": true, "else": true,
@@ -1543,7 +1547,11 @@ var cKeywords = map[string]bool{
 	"if": true, "inline": true, "int": true, "long": true, "register": true,
 	"restrict": true, "return": true, "short": true, "signed": true, "sizeof": true,
 	"static": true, "struct": true, "switch": true, "typedef": true, "union": true,
-	"unsigned": true, "void": true, "volatile": true, "while": true, "bool": true,
+	"unsigned": true, "void": true, "volatile": true, "while": true,
+	// C23 keywords; bool/true/false are <stdbool.h> macros before C23.
+	"alignas": true, "alignof": true, "bool": true, "constexpr": true, "false": true,
+	"nullptr": true, "static_assert": true, "thread_local": true, "true": true,
+	"typeof": true, "typeof_unqual": true,
 }
 
 // cIdent mangles a field name that is a C keyword (trailing underscore).

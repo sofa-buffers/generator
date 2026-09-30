@@ -1,9 +1,10 @@
 # Field names that are reserved words in one or more target languages. Each
-# backend must escape (Rust `r#`, C# `@`) or mangle (C/C++/Java/Python trailing
-# `_`) them, or be keyword-safe by construction (Go exports/capitalises, TS allows
-# keyword member names) — without changing the wire (keyed by id) or JSON names.
+# backend uses the language's own escape where it has one (Rust `r#`, C# `@`,
+# Kotlin backticks, Zig `@"..."`), mangles with a trailing `_` where it has none
+# (C/C++/Java/Python/Dart, TS `constructor`), or is keyword-safe by construction
+# (Go exports/capitalises) — without changing the wire (keyed by id) or JSON names.
 # Guards keyword handling across every backend, and any new one. See generators/*
-# (cIdent/cppIdent/csIdent/javaIdent/pyIdent/rustIdent).
+# (cIdent/cppIdent/csIdent/dartIdent/javaIdent/ktIdent/pyIdent/rustIdent/tsIdent/zigIdent).
 version: 1
 $defs:
   struct:
@@ -102,6 +103,18 @@ messages:
       break:      { id: 74, type: u32 }
       continue:   { id: 75, type: u32 }
       catch:      { id: 76, type: u32 }
+      # C23 keywords and the <stdbool.h> macros (true/false expand to 1/0 before C23);
+      # quoted, or YAML reads them as booleans
+      "true":        { id: 79, type: u32 }
+      "false":       { id: 80, type: u32 }
+      nullptr:       { id: 81, type: u32 }
+      alignas:       { id: 82, type: u32 }
+      constexpr:     { id: 83, type: u32 }
+      static_assert: { id: 84, type: u32 }
+      thread_local:  { id: 85, type: u32 }
+      typeof_unqual: { id: 86, type: u32 }
+      # TypeScript: a class body rejects a field named `constructor`
+      constructor:   { id: 87, type: u32 }
       # keyword-named array (exercises array_begin field-name escaping)
       for:        { id: 77, type: array, items: { type: u8, count: 3 } }
       # keyword-named nested struct (exercises sequence path escaping)
