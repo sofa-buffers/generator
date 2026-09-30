@@ -77,5 +77,5 @@ bench_build_ir() {
 bench_cmd_ir() {
     echo "$(_kotlin_java) -XX:+UnlockExperimentalVMOptions -XX:+UseEpsilonGC -Xms4g -Xmx4g \
 -XX:-TieredCompilation -XX:-BackgroundCompilation -XX:CompileThreshold=2000 \
--XX:hashCode=2 -cp $(cat "$1/.classpath") message.MainKt bench $2"
+-XX:hashCode=2 -cp $(cat "$1/.classpath") message._MainKt bench $2"
 }

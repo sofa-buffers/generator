@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	"github.com/sofa-buffers/generator/internal/ir"
+	"github.com/sofa-buffers/generator/internal/naming"
 )
 
 func cfgString(cfg map[string]any, key, dflt string) string {
@@ -20,37 +21,37 @@ func cfgString(cfg map[string]any, key, dflt string) string {
 // Identifiers
 // ---------------------------------------------------------------------------
 
-// exported upper-camels a schema name for a generated type.
-func exported(name string) string {
-	parts := strings.FieldsFunc(name, func(r rune) bool { return r == '_' })
-	var b strings.Builder
-	for _, p := range parts {
-		if p == "" {
-			continue
-		}
-		b.WriteString(strings.ToUpper(p[:1]))
-		b.WriteString(p[1:])
+// typeName is the generated Kotlin class (or object) of the named type at the
+// IR key: its schema path in naming.TypeIdent (ARCHITECTURE §8, "Naming") --
+// `Point` for a $defs struct `point`, `M_A` for the inline struct of field `a`
+// in message `m` and for the inline element struct of an array field `a` -- and
+// a split $defs union's variant in the role channel, `Shape__DefaultPt`. The
+// identifier is escaped (ktTypeIdent) where it would take a name the package
+// already uses. The same identifier names the type's file.
+func (g *gen) typeName(key string) string {
+	nt := g.schema.Named[key]
+	t := naming.TypeIdent(nt.Path)
+	if nt.Variant != "" {
+		// A variant is a role of its union's type: a TypeIdent never contains
+		// `__`, so no path and no other variant spells this.
+		t += "__Default" + naming.Pascal(nt.Variant)
 	}
-	if b.Len() == 0 {
-		return "X"
-	}
-	return b.String()
+	return ktTypeIdent(t)
 }
 
-// typeName is the generated Kotlin type name for a shared IR type key
-// ("struct/Point" -> "Point", "message_field_elem" -> "MessageFieldElem").
-func (g *gen) typeName(key string) string {
-	parts := strings.FieldsFunc(key, func(r rune) bool { return r == '/' || r == '_' })
-	var b strings.Builder
-	for _, p := range parts {
-		if p == "" {
-			continue
-		}
-		b.WriteString(strings.ToUpper(p[:1]))
-		b.WriteString(p[1:])
-	}
-	return b.String()
-}
+// msgName is the generated Kotlin class of a message, and its file: the name
+// in naming.TypeIdent, escaped like every type (ktTypeIdent).
+func msgName(m *ir.Message) string { return ktTypeIdent(msgIdent(m)) }
+
+// msgIdent is a message's UNESCAPED type identifier. The names the backend
+// derives from a message -- its private visitor, the harness's bench entry --
+// are built from this, never from the escaped class name (ARCHITECTURE §8).
+func msgIdent(m *ir.Message) string { return naming.TypeIdent([]string{m.Name}) }
+
+// visitorName is the decode visitor of a message: `_` + its unescaped
+// identifier + `__Visitor`. It is the private channel -- no schema name starts
+// with `_` -- so no type, escaped or not, can take it.
+func visitorName(m *ir.Message) string { return "_" + msgIdent(m) + "__Visitor" }
 
 // ---------------------------------------------------------------------------
 // Type mapping

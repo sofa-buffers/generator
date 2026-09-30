@@ -89,24 +89,24 @@ func mustNotContain(t *testing.T, what, src string, bads ...string) {
 // object -- a fresh union allocates nothing for the struct, union and list
 // options it does not hold.
 func TestKotlinUnionStorage(t *testing.T) {
-	u := genUnion(t)[unionDir+"MU.kt"]
-	mustContain(t, "MU", u,
+	u := genUnion(t)[unionDir+"M_U.kt"]
+	mustContain(t, "M_U", u,
 		"public const val NUM_ID: Int = 0",
 		"public const val PT_ID: Int = 2",
 		"    public var which: Int = PT_ID\n        private set\n",
 		"    private var _num: UShort = 5u.toUShort()\n",
 		"    private var _s: String = \"\"\n",
-		"    private var _pt: MUPt? = MUPt()\n",
+		"    private var _pt: M_U_Pt? = M_U_Pt()\n",
 		"    private var _arr: UShortArray = Seq.EMPTY_USHORTS\n",
 		"    private var _strs: MutableList<String>? = null\n",
 		"    private var _bl: ByteArray = Seq.EMPTY_BYTES\n",
-		"    private var _inner: MUInner? = null\n",
+		"    private var _inner: M_U_Inner? = null\n",
 		"    private var _f: Float = 1.5f\n",
 		"    private var _flags: BooleanArray = Seq.EMPTY_BOOLEANS\n")
-	mustNotContain(t, "MU", u, "Any", "public var num: UShort =", "MUInner()\n    private")
+	mustNotContain(t, "M_U", u, "Any", "public var num: UShort =", "M_U_Inner()\n    private")
 	// A scalar default_id's slot holds its default from the start.
-	z := genUnion(t)[unionDir+"MZ.kt"]
-	mustContain(t, "MZ", z, "    public var which: Int = A_ID\n", "    private var _a: UByte = 0u.toUByte()\n", "    private var _b: UByte = 3u.toUByte()\n")
+	z := genUnion(t)[unionDir+"M_Z.kt"]
+	mustContain(t, "M_Z", z, "    public var which: Int = A_ID\n", "    private var _a: UByte = 0u.toUByte()\n", "    private var _b: UByte = 3u.toUByte()\n")
 }
 
 // The property getter reads the slot only while its option is held and
@@ -114,28 +114,28 @@ func TestKotlinUnionStorage(t *testing.T) {
 // selects; mutable<Opt>() selects at the default ONLY when another option is
 // held, and never resets a held one.
 func TestKotlinUnionAccessors(t *testing.T) {
-	u := genUnion(t)[unionDir+"MU.kt"]
-	mustContain(t, "MU", u,
+	u := genUnion(t)[unionDir+"M_U.kt"]
+	mustContain(t, "M_U", u,
 		"    public var num: UShort\n        get() = if (which == NUM_ID) this._num else 5u.toUShort()\n        set(v) { which = NUM_ID; _num = v }\n",
 		"public fun hasNum(): Boolean = which == NUM_ID",
 		`get() = if (which == S_ID) this._s else ""`,
-		"get() = if (which == PT_ID) this._pt!! else MUPt()",
+		"get() = if (which == PT_ID) this._pt!! else M_U_Pt()",
 		"get() = if (which == ARR_ID) this._arr else Seq.EMPTY_USHORTS",
 		"get() = if (which == STRS_ID) this._strs!! else mutableListOf()",
 		"get() = if (which == BL_ID) this._bl else Seq.EMPTY_BYTES",
 		"get() = if (which == F_ID) this._f else 1.5f",
 		"set(v) { which = PT_ID; _pt = v }")
-	mustContain(t, "MU.mutablePt", memberBody(t, u, "public fun mutablePt(): MUPt {"),
-		"var s = _pt\n        if (s == null) { s = MUPt(); _pt = s } else if (which != PT_ID) s.reset()\n        which = PT_ID\n        return s")
-	mustContain(t, "MU.mutableStrs", memberBody(t, u, "public fun mutableStrs(): MutableList<String> {"),
+	mustContain(t, "M_U.mutablePt", memberBody(t, u, "public fun mutablePt(): M_U_Pt {"),
+		"var s = _pt\n        if (s == null) { s = M_U_Pt(); _pt = s } else if (which != PT_ID) s.reset()\n        which = PT_ID\n        return s")
+	mustContain(t, "M_U.mutableStrs", memberBody(t, u, "public fun mutableStrs(): MutableList<String> {"),
 		"if (s == null) { s = mutableListOf(); _strs = s } else if (which != STRS_ID) s.clear()")
-	mustContain(t, "MU.mutableInner", u, "public fun mutableInner(): MUInner {")
+	mustContain(t, "M_U.mutableInner", u, "public fun mutableInner(): M_U_Inner {")
 	// A primitive array (boolean included) is replaced whole through its
 	// property: no mutable accessor.
-	mustNotContain(t, "MU", u, "mutableArr", "mutableNum", "mutableS(", "mutableFlags", "mutableBl")
-	mustContain(t, "MU.reset", memberBody(t, u, "public fun reset() {"),
-		"which = PT_ID\n        val s = _pt; if (s == null) _pt = MUPt() else s.reset()")
-	mustContain(t, "MZ.reset", memberBody(t, genUnion(t)[unionDir+"MZ.kt"], "public fun reset() {"),
+	mustNotContain(t, "M_U", u, "mutableArr", "mutableNum", "mutableS(", "mutableFlags", "mutableBl")
+	mustContain(t, "M_U.reset", memberBody(t, u, "public fun reset() {"),
+		"which = PT_ID\n        val s = _pt; if (s == null) _pt = M_U_Pt() else s.reset()")
+	mustContain(t, "M_Z.reset", memberBody(t, genUnion(t)[unionDir+"M_Z.kt"], "public fun reset() {"),
 		"which = A_ID\n        _a = 0u.toUByte()")
 }
 
@@ -144,9 +144,9 @@ func TestKotlinUnionAccessors(t *testing.T) {
 // option is forced -- unguarded, a compact array as its count, a struct, union or
 // wrapper-array option closed with the KEEPING end.
 func TestKotlinUnionEncodeArms(t *testing.T) {
-	u := genUnion(t)[unionDir+"MU.kt"]
+	u := genUnion(t)[unionDir+"M_U.kt"]
 	ser := memberBody(t, u, "public fun serialize(os: OStream) {")
-	mustContain(t, "MU.serialize", ser,
+	mustContain(t, "M_U.serialize", ser,
 		"when (which) {",
 		"NUM_ID -> {\n                os.writeUnsigned(0, this._num.toLong())\n            }",
 		"S_ID -> {\n                os.writeString(1, this._s)\n            }",
@@ -157,13 +157,13 @@ func TestKotlinUnionEncodeArms(t *testing.T) {
 		"F_ID -> {\n                os.writeFp32(7, this._f)\n            }",
 		"FLAGS_ID -> {\n                os.writeArrayUnsigned(8, Seq.boolsToBytes(this._flags))\n            }")
 	strs := ser[strings.Index(ser, "STRS_ID ->"):strings.Index(ser, "BL_ID ->")]
-	mustContain(t, "MU.serialize strs", strs, "= this._strs!!", "os.writeSequenceBeginLazy(4)", "os.writeSequenceEndKeep()")
+	mustContain(t, "M_U.serialize strs", strs, "= this._strs!!", "os.writeSequenceBeginLazy(4)", "os.writeSequenceEndKeep()")
 	// No ≠-default guard on any forced option.
-	mustNotContain(t, "MU.serialize", ser, "if (this._num", "if (this._f", "this._s.isNotEmpty()", "this._arr.isNotEmpty()", "this._bl.isNotEmpty()", "this._flags.isNotEmpty()")
-	mustContain(t, "MU.isDefault", u,
+	mustNotContain(t, "M_U.serialize", ser, "if (this._num", "if (this._f", "this._s.isNotEmpty()", "this._arr.isNotEmpty()", "this._bl.isNotEmpty()", "this._flags.isNotEmpty()")
+	mustContain(t, "M_U.isDefault", u,
 		"internal fun isDefault(): Boolean = which == PT_ID && this._pt!!.isDefault()")
-	z := genUnion(t)[unionDir+"MZ.kt"]
-	mustContain(t, "MZ", z,
+	z := genUnion(t)[unionDir+"M_Z.kt"]
+	mustContain(t, "M_Z", z,
 		"A_ID -> {\n                if (this._a != 0u.toUByte()) os.writeUnsigned(0, this._a.toLong())",
 		"B_ID -> {\n                os.writeUnsigned(1, this._b.toLong())",
 		"internal fun isDefault(): Boolean = which == A_ID && !(this._a != 0u.toUByte())")
@@ -175,7 +175,7 @@ func TestKotlinUnionEncodeArms(t *testing.T) {
 // fires before the payload and for whatever fixlen subtype arrived.
 func TestKotlinUnionDecodeSwitch(t *testing.T) {
 	m := genUnion(t)[unionDir+"M.kt"]
-	vis := m[strings.Index(m, "internal class MVisitor"):]
+	vis := m[strings.Index(m, "internal class _M__Visitor"):]
 	mustContain(t, "scalar option", vis,
 		`0 -> { if (value < 0L || value > 65535L) throw SofabException(SofabError.INVALID_MSG, "num: value outside declared width u16"); m.u.num = value.toUShort() }`,
 		"7 -> { m.u.f = value }",
@@ -207,11 +207,11 @@ func TestKotlinUnionDecodeSwitch(t *testing.T) {
 		"6 -> { m.u.mutableInner(); cur = ",
 		// An array of unions fills its gaps from the element type's constructor --
 		// per type, so each $defs split fills with its own default option.
-		"Seq.reserveElem(m.v, id, 3, MAX_DYN_ARRAY_COUNT) { MVElem() }",
-		"Seq.reserveElem(m.pe, id, 3, MAX_DYN_ARRAY_COUNT) { UnionPickDefaultN() }",
+		"Seq.reserveElem(m.v, id, 3, MAX_DYN_ARRAY_COUNT) { M_V() }",
+		"Seq.reserveElem(m.pe, id, 3, MAX_DYN_ARRAY_COUNT) { Pick__DefaultN() }",
 		"1 -> { m.v[_ex_Root_v].mutableP(); cur = ",
 		"1 -> { m.pf.mutableT(); cur = ")
-	mustNotContain(t, "sequence options", sb, "m.u.pt =", "m.u.inner =", "MUPt()")
+	mustNotContain(t, "sequence options", sb, "m.u.pt =", "m.u.inner =", "M_U_Pt()")
 }
 
 // One type per (union, default_id): the $defs union used with default_id 1 and
@@ -219,32 +219,32 @@ func TestKotlinUnionDecodeSwitch(t *testing.T) {
 // default option.
 func TestKotlinUnionSplitDefaults(t *testing.T) {
 	out := genUnion(t)
-	mustContain(t, "Pick_default_t", out[unionDir+"UnionPickDefaultT.kt"],
-		"public var which: Int = T_ID", "private var _t: UnionPickT? = UnionPickT()")
-	mustContain(t, "Pick_default_n", out[unionDir+"UnionPickDefaultN.kt"],
-		"public var which: Int = N_ID", "private var _n: UShort = 6u.toUShort()", "private var _t: UnionPickT? = null\n")
+	mustContain(t, "Pick_default_t", out[unionDir+"Pick__DefaultT.kt"],
+		"public var which: Int = T_ID", "private var _t: Pick_T? = Pick_T()")
+	mustContain(t, "Pick_default_n", out[unionDir+"Pick__DefaultN.kt"],
+		"public var which: Int = N_ID", "private var _n: UShort = 6u.toUShort()", "private var _t: Pick_T? = null\n")
 	mustContain(t, "M", out[unionDir+"M.kt"],
-		"public var pf: UnionPickDefaultT = UnionPickDefaultT()")
+		"public var pf: Pick__DefaultT = Pick__DefaultT()")
 }
 
 // The JSON harness renders exactly the held option and selects what it reads.
 func TestKotlinUnionJSONHarness(t *testing.T) {
-	j := genUnion(t)[unionDir+"Json.kt"]
-	to := memberBody(t, j, "internal fun to(o: MU, b: StringBuilder) {")
-	mustContain(t, "Json.to(MU)", to,
+	j := genUnion(t)[unionDir+"_Json.kt"]
+	to := memberBody(t, j, "internal fun to(o: M_U, b: kotlin.text.StringBuilder) {")
+	mustContain(t, "Json.to(M_U)", to,
 		"when (o.which) {",
-		"MU.NUM_ID -> {\n                b.append(\"\\\"num\\\":\")\n                b.append(o.num)",
+		"M_U.NUM_ID -> {\n                b.append(\"\\\"num\\\":\")\n                b.append(o.num)",
 		"to(o.pt, b)")
 	// One member only: no separator between members, as a product type had.
-	mustNotContain(t, "Json.to(MU)", to, "\n        b.append(',')\n")
-	from := memberBody(t, j, "internal fun from(j: Map<String, JsonValue>, o: MU) {")
-	mustContain(t, "Json.from(MU)", from,
+	mustNotContain(t, "Json.to(M_U)", to, "\n        b.append(',')\n")
+	from := memberBody(t, j, "internal fun from(j: kotlin.collections.Map<String, _JsonValue>, o: M_U) {")
+	mustContain(t, "Json.from(M_U)", from,
 		"for ((k, e) in j) {",
 		"\"num\" -> {\n                    o.num = e.uint().toUShort()",
 		"from(e.obj(), o.mutablePt())",
 		"o.arr = UShortArray(_a0.size)",
 		"val _u = o.mutableStrs()",
-		"o.bl = Json.toBytes(e.arr())",
+		"o.bl = _Json.toBytes(e.arr())",
 		"o.flags = BooleanArray(_a0.size)")
 }
 
@@ -270,8 +270,10 @@ func genKotlinErr(t *testing.T, src string) error {
 }
 
 // A keyword option is backtick-escaped, an option named after the tag or a
-// generated member takes the trailing underscore; two options deriving one
-// member are a located error naming both.
+// generated member takes the trailing underscore, and so does one spelled like
+// an id constant. No valid pair of options is refused (ARCHITECTURE §8): a
+// property beside a same-named function compiles, and an `is` option beside the
+// one its setter would share a JVM name with gets its own setter name.
 func TestKotlinUnionNames(t *testing.T) {
 	out := genFromYAML(t, `version: 1
 messages:
@@ -279,30 +281,27 @@ messages:
     payload:
       u: { id: 0, type: union, oneof: { class: { id: 0, type: u8 }, which: { id: 1, type: string, maxlen: 4 }, reset: { id: 2, type: u8 } } }
 `, map[string]any{})
-	mustContain(t, "NU", out[unionDir+"NU.kt"],
+	mustContain(t, "N_U", out[unionDir+"N_U.kt"],
 		"    public var `class`: UByte\n",
 		"public fun hasClass(): Boolean = which == CLASS_ID",
 		"    private var _which: String = \"\"\n",
 		"    public var which_: String\n        get() = if (which == WHICH_ID) this._which else \"\"",
 		"    public var reset_: UByte\n")
 	mustContain(t, "N visitor", out[unionDir+"N.kt"], "m.u.`class` = value.toUByte()", "m.u.which_ = s", "m.u.reset_ = value.toUByte()")
-	for _, c := range []struct{ src, want string }{
-		{`version: 1
+
+	out = genFromYAML(t, `version: 1
 messages:
   N:
     payload:
-      u: { id: 0, type: union, oneof: { foo_bar: { id: 0, type: u8 }, fooBar: { id: 1, type: u8 } } }
-`, `options "foo_bar" and "fooBar" both generate the member hasFooBar`},
-		{`version: 1
-messages:
-  N:
-    payload:
-      u: { id: 0, type: union, oneof: { a: { id: 0, type: u8 }, A_ID: { id: 1, type: u8 } } }
-`, `options "a" and "A_ID" both generate the member A_ID`},
-	} {
-		err := genKotlinErr(t, c.src)
-		if err == nil || !strings.Contains(err.Error(), c.want) {
-			t.Errorf("want an error containing %q, got %v", c.want, err)
-		}
-	}
+      u: { id: 0, type: union, oneof: { a: { id: 0, type: u8 }, A_ID: { id: 1, type: u8 }, foo: { id: 2, type: u8 }, hasFoo: { id: 3, type: u8 }, open: { id: 4, type: u8 }, isOpen: { id: 5, type: u8 } } }
+`, map[string]any{})
+	mustContain(t, "N_U", out[unionDir+"N_U.kt"],
+		"public const val A_ID: Int = 0",
+		"public const val A_ID_ID: Int = 1",
+		"    public var A_ID_: UByte\n",
+		"public fun hasFoo(): Boolean = which == FOO_ID",
+		"    public var hasFoo: UByte\n",
+		"    @set:kotlin.jvm.JvmName(\"setIsOpen__\")\n    public var isOpen: UByte\n",
+		"    public var open: UByte\n")
+	mustContain(t, "N visitor", out[unionDir+"N.kt"], "m.u.A_ID_ = value.toUByte()")
 }
