@@ -113,6 +113,26 @@ In JSON, a `bigint`-carried bitfield is a decimal **string**, as `u64` is under
 `int64: bigint` — `fromJSON` accepts both the string and a plain number. A
 `number`-carried one is a plain JSON number.
 
+## Field names
+
+A field's member is the field's schema name. Every keyword is a valid class
+member in TypeScript, so `class` or `typeof` stay as they are. A field whose name
+the generated class already uses as an instance member gets a trailing
+underscore — the field `encode` is `encode_`. Those names are:
+
+- `constructor`, which a class body rejects as a field;
+- the methods every generated class declares: `serialize`, `toJSON`,
+  `isDefault`, and on a message also `encode`;
+- the members every object inherits: `toString`, `toLocaleString`, `valueOf`,
+  `hasOwnProperty`, `isPrototypeOf`, `propertyIsEnumerable`.
+
+The statics (`fromJSON`, `decode`, `MAX_SIZE`) are a namespace of their own, so
+a field may take their names. Only the member changes: the wire is keyed by the
+field id, and the JSON key stays the schema name. Two fields that end up with
+the same member — `encode` and `encode_`, or an `fp32` field `f` (whose raw-bytes
+companion is `fFp32Raw`) and a field `fFp32Raw` — fail generation, naming both.
+The list lives in `generators/typescript/reserved.go`.
+
 ## Unions
 
 A `union` holds exactly one of its options. It is a class of its own whose
@@ -223,9 +243,9 @@ longer held.
 
 **Names.** The members are the option name: the getter/setter `<option>`,
 `has<Option>()`, `mutable<Option>()` and the constant `<OPTION>_ID` (the name
-upper-cased). An option whose name would land on one of the union's own members
-(`which`, `clear`, `serialize`, `isDefault`, `toJSON`, `constructor`, or a
-member every object inherits, such as `toString`) gets a trailing underscore: an
+upper-cased). An option whose name is reserved for a field (see
+[Field names](#field-names)) or is one of the union's own members (`which`,
+`clear`) gets a trailing underscore: an
 option `which` is `which_`, with `hasWhich()` and `WHICH_ID`. Two options that
 would produce the same member (`foo_bar` and `fooBar` both give `hasFooBar()`;
 `f`'s `fFp32Raw` and an option named `fFp32Raw`; `a_b` and `A_B` both give

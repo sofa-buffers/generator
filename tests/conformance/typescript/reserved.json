@@ -1,0 +1,34 @@
+{
+  "clear": 1,
+  "constructor": 2,
+  "encode": 3,
+  "f": 1.5,
+  "hasOwnProperty": 4,
+  "inner": {
+    "clear": 2,
+    "constructor": 3,
+    "encode": 4,
+    "hasOwnProperty": 5,
+    "isDefault": 6,
+    "isPrototypeOf": 7,
+    "propertyIsEnumerable": 8,
+    "serialize": 9,
+    "toJSON": 10,
+    "toLocaleString": 11,
+    "toString": 12,
+    "valueOf": 13,
+    "which": 14
+  },
+  "isDefault": 5,
+  "isPrototypeOf": 6,
+  "propertyIsEnumerable": 7,
+  "serialize": 8,
+  "toJSON": 9,
+  "toLocaleString": 10,
+  "toString": 11,
+  "u": {
+    "which": 9
+  },
+  "valueOf": 12,
+  "which": 13
+}
