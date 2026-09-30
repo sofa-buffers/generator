@@ -34,11 +34,15 @@ func (*Backend) Generate(s *ir.Schema, cfg map[string]any) ([]generator.File, er
 	if err := checkBounded(s); err != nil {
 		return nil, err
 	}
-	if err := g.checkMacroNames(s); err != nil {
-		return nil, err
-	}
-	if err := g.checkMemberNames(s); err != nil {
-		return nil, err
+	// The harness's per-message bench entry points share the typedefs' ordinary
+	// namespace; a typedef spelled like one takes the escape (typeName). They
+	// are collected in sources mode as well, so a type keeps one spelling
+	// whichever mode generated it.
+	g.harnessNames = map[string]bool{}
+	for _, m := range s.Messages {
+		low := strings.ToLower(m.Name)
+		g.harnessNames["run_encode_"+low] = true
+		g.harnessNames["run_decode_"+low] = true
 	}
 	project := cfgString(cfg, "emit", "sources") == "project"
 	srcDir := ""
@@ -51,10 +55,9 @@ func (*Backend) Generate(s *ir.Schema, cfg map[string]any) ([]generator.File, er
 		if err != nil {
 			return nil, err
 		}
-		base := strings.ToLower(m.Name)
 		files = append(files,
-			generator.File{Path: srcDir + base + ".h", Content: h},
-			generator.File{Path: srcDir + base + ".c", Content: c},
+			generator.File{Path: srcDir + headerFile(m), Content: h},
+			generator.File{Path: srcDir + sourceFile(m), Content: c},
 		)
 	}
 	if project {
@@ -69,16 +72,15 @@ type gen struct {
 	banner  string
 	license string               // SPDX id, "" to omit the header line
 	size    generator.SizePolicy // max_message_size ceiling for unbounded messages
-	// macros maps every macro the backend defines to its owner, as
-	// checkMacroNames claimed them; checkMemberNames refuses a member of the
-	// same name, which the preprocessor would replace.
-	macros map[string]string
+	// harnessNames are the harness's per-message names a typedef could be
+	// spelled like (typeName escapes it).
+	harnessNames map[string]bool
 }
 
 // objectPlan is the fully-resolved emission plan for one C object (the message,
 // a struct/union, or a synthetic array-of-string/blob element holder).
 type objectPlan struct {
-	key      string // unique plan key
+	key      string // the object's base (names.go), unique per object
 	cType    string // C struct type name (with _t)
 	descr    string // descriptor symbol
 	members  []member
@@ -87,7 +89,7 @@ type objectPlan struct {
 	defaults []defaultInit // non-zero leaf-field defaults, for the const image
 	// blobLenInits materialize a sized blob's declared default used-length in the
 	// generated _init: sofab_object_init copies the blob buffer from the default
-	// image but not the companion _len member (it is not a descriptor field), so
+	// image but not the companion __len member (it is not a descriptor field), so
 	// _init sets it explicitly, otherwise the declared default decodes as empty.
 	blobLenInits []blobLenInit
 	maxField     int64
@@ -130,9 +132,10 @@ type defaultInit struct {
 }
 
 // blobLenInit records a sized blob whose schema default is non-empty: _init sets
-// member+"_len" to length so the declared default materializes on init/decode.
+// its length companion (lenMember) to length so the declared default
+// materializes on init/decode.
 type blobLenInit struct {
-	member string // blob member name (its length companion is member+"_len")
+	member string // the blob's length companion (lenMember)
 	length int64  // decoded default byte length (0..maxlen)
 }
 
@@ -176,13 +179,13 @@ func memberNote(f *ir.Field) string {
 		// no companion to forget.
 		return generator.BoundNote(f, generator.StorageFixed)
 	case f.Kind == ir.KindBlob:
-		return generator.BoundDoc{Storage: generator.StorageCompanion, LenMember: name + "_len"}.Note(f)
+		return generator.BoundDoc{Storage: generator.StorageCompanion, LenMember: lenMember(f.Name)}.Note(f)
 	case f.Kind == ir.KindArray && isHolderElem(f.Elem):
 		// A wrapper array lowers to a holder struct, so its length lives inside
 		// the member rather than beside it.
 		return generator.BoundDoc{Storage: generator.StorageCompanion, LenMember: name + ".len"}.Note(f)
 	case f.Kind == ir.KindArray:
-		return generator.BoundDoc{Storage: generator.StorageCompanion, LenMember: name + "_len"}.Note(f)
+		return generator.BoundDoc{Storage: generator.StorageCompanion, LenMember: lenMember(f.Name)}.Note(f)
 	}
 	return ""
 }
@@ -203,8 +206,8 @@ type fieldEntry struct {
 // Kotlin's `const val`s beside a still-raw field) precisely because the two
 // are independent).
 type bitfieldPlan struct {
-	key    string
-	prefix string // macro prefix, e.g. MESSAGE_FRIDGE_ALARMS
+	key    string // the bitfield's base
+	prefix string // the flags' macro prefix, e.g. MESSAGE_FRIDGE___ALARMS
 	one    string // the shifted literal: (uint32_t)1, or (uint64_t)1 for a uint64_t field
 	flags  []*ir.BitfieldFlag
 }
@@ -217,7 +220,7 @@ func (g *gen) registerBitfield(ref *ir.TypeRef, bitfields map[string]*bitfieldPl
 	if ref == nil || ref.Target == nil {
 		return
 	}
-	key := "named/" + ref.Key
+	key := g.ntBase(ref.Target)
 	if _, ok := bitfields[key]; ok {
 		return
 	}
@@ -233,16 +236,17 @@ func (g *gen) registerBitfield(ref *ir.TypeRef, bitfields map[string]*bitfieldPl
 	}
 	bitfields[key] = &bitfieldPlan{
 		key:    key,
-		prefix: strings.ToUpper(g.prefix + sanitize(key, "")),
+		prefix: strings.ToUpper(key),
 		one:    one,
 		flags:  ref.Target.Flags,
 	}
 	*order = append(*order, key)
 }
 
-// macro is the #define name of one declared flag.
+// macro is the #define name of one declared flag: a bitfield has no child
+// paths, so its flag extends the bitfield's path — MESSAGE_M___FLAGS___ON.
 func (bp *bitfieldPlan) macro(fl *ir.BitfieldFlag) string {
-	return bp.prefix + "_" + strings.ToUpper(sanitizeKey(fl.Name))
+	return bp.prefix + "___" + strings.ToUpper(fl.Name)
 }
 
 // messagePlans collects m's object plans in post-order (nested before
@@ -251,81 +255,8 @@ func (bp *bitfieldPlan) macro(fl *ir.BitfieldFlag) string {
 func (g *gen) messagePlans(m *ir.Message) (plans map[string]*objectPlan, order []string, bitfields map[string]*bitfieldPlan, bitfieldOrder []string, err error) {
 	plans = map[string]*objectPlan{}
 	bitfields = map[string]*bitfieldPlan{}
-	msgKey := "message/" + m.Name
-	err = g.collect(msgKey, g.cType(msgKey, m.Name), m.Fields, nil, plans, &order, bitfields, &bitfieldOrder)
+	err = g.collect(g.msgBase(m), []string{m.Name}, m.Fields, nil, plans, &order, bitfields, &bitfieldOrder)
 	return plans, order, bitfields, bitfieldOrder, err
-}
-
-// checkMacroNames rejects a schema whose generated macros would collide. C has
-// one flat macro namespace across every header a translation unit includes, so
-// the check spans the whole schema, not one message: a flag macro is
-// <PREFIX><owner path>_<FLAG>, and message "a"'s field "b" with flag "h" is
-// MESSAGE_A_B_H — the include guard of a sibling message "a_b", which then
-// silently skips its whole header. The same goes for another message's
-// _MAX_SIZE, and for two field/flag splits that join to one identifier (field
-// "a_b" flag "c" vs field "a" flag "b_c"). A $ref-shared bitfield emitted in
-// two headers is not a clash: both copies are the identical definition, which
-// C admits, so owners are keyed by bitfield, not by message.
-func (g *gen) checkMacroNames(s *ir.Schema) error {
-	owners := map[string]string{}
-	claim := func(name, owner string) error {
-		if prev, ok := owners[name]; ok && prev != owner {
-			return fmt.Errorf("generated C macro %s would be defined for both %s and %s; rename one of them", name, prev, owner)
-		}
-		owners[name] = owner
-		return nil
-	}
-	for _, m := range s.Messages {
-		if err := claim(strings.ToUpper(g.prefix+m.Name+"_H"), fmt.Sprintf("message %q's include guard", m.Name)); err != nil {
-			return err
-		}
-		if err := claim(strings.ToUpper(g.prefix+m.Name+"_MAX_SIZE"), fmt.Sprintf("message %q's MAX_SIZE", m.Name)); err != nil {
-			return err
-		}
-		ms, err := g.size.Resolve(m.Name, m.Fields)
-		if err != nil {
-			return err
-		}
-		if !ms.Bounded {
-			if err := claim(strings.ToUpper(g.prefix+m.Name+"_MAX_SIZE_LIMIT"), fmt.Sprintf("message %q's MAX_SIZE_LIMIT", m.Name)); err != nil {
-				return err
-			}
-		}
-	}
-	for _, m := range s.Messages {
-		_, _, bitfields, bitfieldOrder, err := g.messagePlans(m)
-		if err != nil {
-			return err
-		}
-		for _, k := range bitfieldOrder {
-			bp := bitfields[k]
-			for _, fl := range bp.flags {
-				if err := claim(bp.macro(fl), fmt.Sprintf("flag %q of bitfield %s", fl.Name, strings.TrimPrefix(bp.key, "named/"))); err != nil {
-					return err
-				}
-			}
-		}
-		// A union's option ids share the flat macro namespace as well: option
-		// "fl_id"'s MESSAGE_U_FL_ID_ID is safe, but a bitfield option "fl" with a
-		// flag "id" (MESSAGE_U_FL_ID) meets the id of an option "fl".
-		plans, order, _, _, err := g.messagePlans(m)
-		if err != nil {
-			return err
-		}
-		for _, k := range order {
-			p := plans[k]
-			if p.union == nil {
-				continue
-			}
-			for _, f := range p.union.Fields {
-				if err := claim(g.optionMacro(k, f), fmt.Sprintf("option %q of union %s", f.Name, strings.TrimPrefix(k, "named/"))); err != nil {
-					return err
-				}
-			}
-		}
-	}
-	g.macros = owners
-	return nil
 }
 
 // ---- message emission ---------------------------------------------------
@@ -335,11 +266,11 @@ func (g *gen) message(m *ir.Message) (hdr, src []byte, err error) {
 	if err != nil {
 		return nil, nil, err
 	}
-	msgKey := "message/" + m.Name
+	msgKey := g.msgBase(m)
 
 	caps := g.capabilities(m)
-	guardName := strings.ToUpper(g.prefix + m.Name + "_H")
-	msgType := g.cType(msgKey, m.Name)
+	guardName := macro(msgKey, "H")
+	msgType := g.typeName(msgKey)
 	// Both id-width guards bound EVERY id this header puts on the wire, not just
 	// the top object's: a nested object has a descriptor of its own, and its
 	// fields ride the same (id<<3)|type header, accumulated in the same
@@ -352,13 +283,13 @@ func (g *gen) message(m *ir.Message) (hdr, src []byte, err error) {
 		}
 	}
 
-	// checkMacroNames (run once over the schema in Generate) already proved
-	// these and every flag macro unique across all headers.
-	sizeMacro := strings.ToUpper(g.prefix + m.Name + "_MAX_SIZE")
-	sizeLimitMacro := strings.ToUpper(g.prefix + m.Name + "_MAX_SIZE_LIMIT")
+	// Every macro is a role (or a path) of a base, so no two headers and no
+	// member can spell one alike (names.go).
+	sizeMacro := macro(msgKey, "MAX_SIZE")
+	sizeLimitMacro := macro(msgKey, "MAX_SIZE_LIMIT")
 
 	h := &cfile{}
-	h.banner(g.banner, g.license, strings.ToLower(m.Name)+".h", m.Name)
+	h.banner(g.banner, g.license, headerFile(m), m.Name)
 	h.line("#ifndef %s", guardName)
 	h.line("#define %s", guardName)
 	h.blank()
@@ -386,9 +317,10 @@ func (g *gen) message(m *ir.Message) (hdr, src []byte, err error) {
 	// such an option at its default is `sofab_object_init(&<descr>, &x.u.<opt>)`.
 	var seqDescrs []string
 	seenDescr := map[string]bool{}
+	seenOption := map[string]bool{}
 	for _, k := range order {
 		if p := plans[k]; p.union != nil {
-			g.emitUnionConsts(h, p)
+			g.emitUnionConsts(h, p, seenOption)
 			for _, d := range p.seqOptDescrs {
 				if !seenDescr[d] {
 					seenDescr[d] = true
@@ -429,8 +361,8 @@ func (g *gen) message(m *ir.Message) (hdr, src []byte, err error) {
 	h.line("#endif /* %s */", guardName)
 
 	c := &cfile{}
-	c.banner(g.banner, g.license, strings.ToLower(m.Name)+".c", m.Name)
-	c.line(`#include "%s.h"`, strings.ToLower(m.Name))
+	c.banner(g.banner, g.license, sourceFile(m), m.Name)
+	c.line(`#include "%s"`, headerFile(m))
 	c.blank()
 	c.line("#include <string.h>")
 	c.blank()
@@ -450,18 +382,20 @@ func unionOf(ref *ir.TypeRef) *ir.NamedType {
 	return nil
 }
 
-// collect walks an id scope, appending object plans in post-order. un is the
-// union named type when the scope is a union's options, nil otherwise.
-func (g *gen) collect(key, cType string, fields []*ir.Field, un *ir.NamedType, plans map[string]*objectPlan, order *[]string, bitfields map[string]*bitfieldPlan, bitfieldOrder *[]string) error {
+// collect walks an id scope, appending object plans in post-order. key is the
+// object's base, path its schema path (a split union variant shares its path
+// with its siblings, and so its options' holders). un is the union named type
+// when the scope is a union's options, nil otherwise.
+func (g *gen) collect(key string, path []string, fields []*ir.Field, un *ir.NamedType, plans map[string]*objectPlan, order *[]string, bitfields map[string]*bitfieldPlan, bitfieldOrder *[]string) error {
 	if _, done := plans[key]; done {
 		return nil
 	}
-	p := &objectPlan{key: key, cType: cType, descr: g.descrSym(key), union: un}
+	p := &objectPlan{key: key, cType: g.typeName(key), descr: descrSym(key), union: un}
 	if un != nil {
 		p.optDecl = map[int64]string{}
 	}
 	// A union option is addressed through the overlay: u.<option>.
-	path := func(f *ir.Field) string {
+	at := func(f *ir.Field) string {
 		if un != nil {
 			return "u." + cIdent(f.Name)
 		}
@@ -493,8 +427,8 @@ func (g *gen) collect(key, cType string, fields []*ir.Field, un *ir.NamedType, p
 		}
 		switch {
 		case f.Kind == ir.KindStruct || f.Kind == ir.KindUnion:
-			ck := "named/" + f.Ref.Key
-			if err := g.collect(ck, g.cType(ck, f.Ref.Target.Name), f.Ref.Target.Fields, unionOf(f.Ref), plans, order, bitfields, bitfieldOrder); err != nil {
+			ck := g.ntBase(f.Ref.Target)
+			if err := g.collect(ck, f.Ref.Target.Path, f.Ref.Target.Fields, unionOf(f.Ref), plans, order, bitfields, bitfieldOrder); err != nil {
 				return err
 			}
 			if _, ok := nestedIdx[ck]; !ok {
@@ -505,15 +439,16 @@ func (g *gen) collect(key, cType string, fields []*ir.Field, un *ir.NamedType, p
 			p.members = append(p.members, member{decl: decl, align: ir.AlignRank(f), doc: memberDoc(f), note: note, deprecated: f.Deprecated})
 			p.fields = append(p.fields, fieldEntry{macro: fmt.Sprintf(
 				"    SOFAB_OBJECT_FIELD_SEQUENCE(%d, %s, %s, SOFAB_OBJECT_FIELDTYPE_SEQUENCE, %d),",
-				f.ID, p.cType, path(f), nestedIdx[ck])})
+				f.ID, p.cType, at(f), nestedIdx[ck])})
 			if un != nil {
 				p.optDecl[f.ID] = decl
-				p.seqOptDescrs = append(p.seqOptDescrs, g.descrSym(ck))
+				p.seqOptDescrs = append(p.seqOptDescrs, descrSym(ck))
 			}
 		case f.Kind == ir.KindArray && isHolderElem(f.Elem):
 			// string/blob/struct/union/nested-array elements lower to a wrapper
-			// sequence: a synthetic holder object with one field per element.
-			ck := key + "/" + f.Name + "#elems"
+			// sequence: a synthetic holder object with one field per element,
+			// named as a role of the field's path.
+			ck := g.holderBase(fieldPath(path, f.Name))
 			ep := g.buildHolder(ck, specOfField(f), plans, order, bitfields, bitfieldOrder)
 			if _, ok := nestedIdx[ck]; !ok {
 				nestedIdx[ck] = len(p.nested)
@@ -523,10 +458,10 @@ func (g *gen) collect(key, cType string, fields []*ir.Field, un *ir.NamedType, p
 			p.members = append(p.members, member{decl: decl, align: ir.AlignRank(f), doc: memberDoc(f), note: note, deprecated: f.Deprecated})
 			p.fields = append(p.fields, fieldEntry{macro: fmt.Sprintf(
 				"    SOFAB_OBJECT_FIELD_SEQUENCE(%d, %s, %s, SOFAB_OBJECT_FIELDTYPE_SEQUENCE, %d),",
-				f.ID, p.cType, path(f), nestedIdx[ck])})
+				f.ID, p.cType, at(f), nestedIdx[ck])})
 			if un != nil {
 				p.optDecl[f.ID] = decl
-				p.seqOptDescrs = append(p.seqOptDescrs, g.descrSym(ck))
+				p.seqOptDescrs = append(p.seqOptDescrs, descrSym(ck))
 			}
 		case un != nil:
 			// A leaf union option. Its own default is never stored anywhere: only
@@ -540,7 +475,7 @@ func (g *gen) collect(key, cType string, fields []*ir.Field, un *ir.NamedType, p
 			p.fields = append(p.fields, fieldEntry{macro: entry})
 			p.optDecl[f.ID] = decl
 		default:
-			decl, entry, err := g.scalarMember(p.cType, f, path(f))
+			decl, entry, err := g.scalarMember(p.cType, f, at(f))
 			if err != nil {
 				return err
 			}
@@ -555,12 +490,12 @@ func (g *gen) collect(key, cType string, fields []*ir.Field, un *ir.NamedType, p
 			// image itself is elided ([0,0,0] is the LENGTH-3 array of zeros, not the
 			// empty array).
 			if n, ok := arrayDefaultLen(f); ok {
-				p.defaults = append(p.defaults, defaultInit{ident: cIdent(f.Name) + "_len", expr: fmt.Sprintf("%d", n)})
+				p.defaults = append(p.defaults, defaultInit{ident: lenMember(f.Name), expr: fmt.Sprintf("%d", n)})
 			}
 			if expr, ok := g.cDefaultInit(f); ok {
 				p.defaults = append(p.defaults, defaultInit{ident: cIdent(f.Name), expr: expr})
 				if n, ok := blobDefaultRawLen(f); ok {
-					p.blobLenInits = append(p.blobLenInits, blobLenInit{member: cIdent(f.Name), length: n})
+					p.blobLenInits = append(p.blobLenInits, blobLenInit{member: lenMember(f.Name), length: n})
 				}
 			}
 		}
@@ -612,10 +547,18 @@ func isHolderElem(k ir.Kind) bool {
 // per element, id = 0-based index (per MESSAGE_SPEC). It handles string/blob
 // (a fixlen field each), struct/union (a nested sequence each) and nested arrays
 // (an inner array, or an inner holder sequence, each). Recurses for deep nesting.
+//
+// key is the holder's base: a role of the array field's path (holderBase), and
+// for a nested array's inner holder that base + "_inner". The split variants of
+// a $defs union share their options' paths and so their holders, which are
+// identical: the second call returns the first plan.
 func (g *gen) buildHolder(key string, spec arraySpec, plans map[string]*objectPlan, order *[]string, bitfields map[string]*bitfieldPlan, bitfieldOrder *[]string) *objectPlan {
+	if p, done := plans[key]; done {
+		return p
+	}
 	// A holder's fields are the fixed element slots 0..N-1, so an over-index element
 	// id (>= N) is INVALID, not an unknown-field skip: mark it a fixed-seq holder.
-	p := &objectPlan{key: key, cType: g.cType(key, "elems"), descr: g.descrSym(key), fixedSeq: true}
+	p := &objectPlan{key: key, cType: g.typeName(key), descr: descrSym(key), fixedSeq: true}
 	// checkBounded guarantees a count on every array, so the capacity is the
 	// schema count directly (no zero-sizing fallback).
 	cap := spec.count
@@ -665,8 +608,8 @@ func (g *gen) buildHolder(key string, spec arraySpec, plans map[string]*objectPl
 		// Each element is itself a nested object (struct/union): the element type
 		// is emitted as a normal named object, and every holder slot is a sequence
 		// referencing that one descriptor (nested_idx 0).
-		ek := "named/" + spec.ref.Key
-		if err := g.collect(ek, g.cType(ek, spec.ref.Target.Name), spec.ref.Target.Fields, unionOf(spec.ref), plans, order, bitfields, bitfieldOrder); err == nil {
+		ek := g.ntBase(spec.ref.Target)
+		if err := g.collect(ek, spec.ref.Target.Path, spec.ref.Target.Fields, unionOf(spec.ref), plans, order, bitfields, bitfieldOrder); err == nil {
 			p.nested = append(p.nested, ek)
 		}
 		p.members = append(p.members, member{decl: fmt.Sprintf("%s%s items[%d];", lead, plans[ek].cType, cap)})
@@ -678,7 +621,7 @@ func (g *gen) buildHolder(key string, spec arraySpec, plans map[string]*objectPl
 		inner := specOfItems(spec.items)
 		if isHolderElem(inner.elem) {
 			// Inner element is itself a holder: each slot is a sequence to it.
-			ik := key + "/inner"
+			ik := key + "_inner"
 			ip := g.buildHolder(ik, inner, plans, order, bitfields, bitfieldOrder)
 			p.nested = append(p.nested, ik)
 			p.members = append(p.members, member{decl: fmt.Sprintf("%s%s items[%d];", lead, ip.cType, cap)})
@@ -762,8 +705,8 @@ func (g *gen) scalarMember(cType string, f *ir.Field, at string) (decl, entry st
 		// separate them, and because a byte buffer has alignment 1 it always abuts
 		// the length with no padding. This is the C counterpart of C++ FixedBytes.
 		lenT := blobLenC(f.Maxlen)
-		decl = fmt.Sprintf("%s %s_len; uint8_t %s[%d];", lenT, mn, mn, f.Maxlen)
-		entry = fmt.Sprintf("    SOFAB_OBJECT_FIELD_BLOB_SIZED(%d, %s, %s, %s_len),", f.ID, cType, mn, mn)
+		decl = fmt.Sprintf("%s %s; uint8_t %s[%d];", lenT, lenMember(f.Name), mn, f.Maxlen)
+		entry = fmt.Sprintf("    SOFAB_OBJECT_FIELD_BLOB_SIZED(%d, %s, %s, %s),", f.ID, cType, mn, lenMember(f.Name))
 	case ir.KindEnum:
 		decl = fmt.Sprintf("%s %s;", enumC(f.Ref), mn)
 		entry = field(f.ID, cType, at, "SIGNED")
@@ -786,8 +729,8 @@ func (g *gen) scalarMember(cType string, f *ir.Field, at string) (decl, entry st
 		// (see lenWidth for how the width is chosen).
 		et := g.arrayElemCType(f.Elem, f.ElemRef)
 		w := lenWidth(f.Count, cScalarWidth(et))
-		decl = fmt.Sprintf("%s %s_len; %s %s[%d];", lenC(w), mn, et, mn, f.Count)
-		entry = fmt.Sprintf("    SOFAB_OBJECT_FIELD_ARRAY_SIZED(%d, %s, %s, %s_len, %s),", f.ID, cType, mn, mn, arrayFieldType(f.Elem))
+		decl = fmt.Sprintf("%s %s; %s %s[%d];", lenC(w), lenMember(f.Name), et, mn, f.Count)
+		entry = fmt.Sprintf("    SOFAB_OBJECT_FIELD_ARRAY_SIZED(%d, %s, %s, %s, %s),", f.ID, cType, mn, lenMember(f.Name), arrayFieldType(f.Elem))
 	default:
 		return "", "", fmt.Errorf("field %q: unsupported kind %s for C backend", f.Name, f.Kind)
 	}
@@ -1031,7 +974,7 @@ func (g *gen) emitDescriptor(c *cfile, p *objectPlan) {
 		c.line("#pragma GCC diagnostic push")
 		c.line(`#pragma GCC diagnostic ignored "-Wdeprecated-declarations"`)
 	}
-	c.line("static const sofab_object_descr_field_t %s[] = {", g.fieldsSym(p.key))
+	c.line("static const sofab_object_descr_field_t %s[] = {", fieldsSym(p.key))
 	for _, fe := range p.fields {
 		c.line("%s", fe.macro)
 	}
@@ -1041,12 +984,12 @@ func (g *gen) emitDescriptor(c *cfile, p *objectPlan) {
 	// struct/union/sequence children — byte-identical to the historical form).
 	nested, nestedCount := "NULL", 0
 	if len(p.nested) > 0 {
-		c.line("static const sofab_object_descr_t *const %s[] = {", g.nestedSym(p.key))
+		c.line("static const sofab_object_descr_t *const %s[] = {", nestedSym(p.key))
 		for _, nk := range p.nested {
-			c.line("    &%s,", g.descrSym(nk))
+			c.line("    &%s,", descrSym(nk))
 		}
 		c.line("};")
-		nested, nestedCount = g.nestedSym(p.key), len(p.nested)
+		nested, nestedCount = nestedSym(p.key), len(p.nested)
 	}
 
 	// A const default image seeds sofab_object_init and is the corelib's
@@ -1056,23 +999,23 @@ func (g *gen) emitDescriptor(c *cfile, p *objectPlan) {
 	// order-independent, so the widest-first member reordering is irrelevant.
 	if p.union != nil {
 		c.line("const sofab_object_descr_t %s = SOFAB_OBJECT_DESCR_UNION(%s, %d, %s, %d, %s, %s, which);",
-			p.descr, g.fieldsSym(p.key), len(p.fields), nested, nestedCount, g.unionImage(c, p), p.cType)
+			p.descr, fieldsSym(p.key), len(p.fields), nested, nestedCount, g.unionImage(c, p), p.cType)
 	} else if len(p.defaults) > 0 {
 		// A holder (fixedSeq) never carries a defaults image (its elements default to
 		// empty/zero), so WITH_DEFAULTS and SEQ are mutually exclusive in practice.
-		c.line("static const %s %s = {", p.cType, g.defaultsSym(p.key))
+		c.line("static const %s %s = {", p.cType, defaultsSym(p.key))
 		for _, d := range p.defaults {
 			c.line("    .%s = %s,", d.ident, d.expr)
 		}
 		c.line("};")
 		c.line("const sofab_object_descr_t %s = SOFAB_OBJECT_DESCR_WITH_DEFAULTS(%s, %d, %s, %d, &%s);",
-			p.descr, g.fieldsSym(p.key), len(p.fields), nested, nestedCount, g.defaultsSym(p.key))
+			p.descr, fieldsSym(p.key), len(p.fields), nested, nestedCount, defaultsSym(p.key))
 	} else if p.fixedSeq {
 		c.line("const sofab_object_descr_t %s = SOFAB_OBJECT_DESCR_SEQ_SIZED(%s, %d, %s, %d, %s, len);",
-			p.descr, g.fieldsSym(p.key), len(p.fields), nested, nestedCount, p.cType)
+			p.descr, fieldsSym(p.key), len(p.fields), nested, nestedCount, p.cType)
 	} else {
 		c.line("const sofab_object_descr_t %s = SOFAB_OBJECT_DESCR(%s, %d, %s, %d);",
-			p.descr, g.fieldsSym(p.key), len(p.fields), nested, nestedCount)
+			p.descr, fieldsSym(p.key), len(p.fields), nested, nestedCount)
 	}
 	if p.hasDeprecated {
 		c.line("#pragma GCC diagnostic pop")
@@ -1081,13 +1024,14 @@ func (g *gen) emitDescriptor(c *cfile, p *objectPlan) {
 }
 
 func (g *gen) emitProtos(h *cfile, m *ir.Message, msgType string, root *objectPlan) {
-	pfx := g.prefix + strings.ToLower(m.Name)
+	pfx := root.key
+	decT := g.typeName(role(pfx, "decoder"))
 	h.doc("Initialize a %s with its schema defaults (non-default fields zeroed).", m.Name)
-	h.line("void %s_init(%s *msg);", pfx, msgType)
+	h.line("void %s(%s *msg);", role(pfx, "init"), msgType)
 	h.doc("Encode msg into buf[buflen]; *used receives the byte count. Returns sofab_ret_t.")
-	h.line("sofab_ret_t %s_encode(const %s *msg, uint8_t *buf, size_t buflen, size_t *used);", pfx, msgType)
-	h.doc("Decode buf[len] into msg (call %s_init first to apply defaults). Returns sofab_ret_t.", pfx)
-	h.line("sofab_ret_t %s_decode(%s *msg, const uint8_t *buf, size_t len);", pfx, msgType)
+	h.line("sofab_ret_t %s(const %s *msg, uint8_t *buf, size_t buflen, size_t *used);", role(pfx, "encode"), msgType)
+	h.doc("Decode buf[len] into msg (call %s first to apply defaults). Returns sofab_ret_t.", role(pfx, "init"))
+	h.line("sofab_ret_t %s(%s *msg, const uint8_t *buf, size_t len);", role(pfx, "decode"), msgType)
 	h.blank()
 
 	// Streaming. The one-shot functions above own their stream for the length of
@@ -1103,7 +1047,7 @@ func (g *gen) emitProtos(h *cfile, m *ir.Message, msgType string, root *objectPl
 		"stream the message may exceed its buffer: the buffer is drained as it\n" +
 		"fills, so what bounds memory is the buffer, not the message. The caller\n" +
 		"flushes the tail with sofab_ostream_flush().")
-	h.line("sofab_ret_t %s_encode_to(sofab_ostream_t *os, const %s *msg);", pfx, msgType)
+	h.line("sofab_ret_t %s(sofab_ostream_t *os, const %s *msg);", role(pfx, "encode_to"), msgType)
 	h.blank()
 	h.doc("Incremental decoder: hold one and feed the message as bytes arrive,\n" +
 		"instead of buffering it whole first.\n" +
@@ -1117,31 +1061,32 @@ func (g *gen) emitProtos(h *cfile, m *ir.Message, msgType string, root *objectPl
 	h.line("typedef struct {")
 	h.line("    sofab_istream_t is;")
 	h.line("    sofab_object_decoder_t dec[%d];", g.maxDepth(m.Fields)+1)
-	h.line("} %s_decoder_t;", pfx)
+	h.line("} %s;", decT)
 	h.blank()
-	h.doc("Bind a decoder to msg. Call %s_init on msg first to apply defaults.", pfx)
-	h.line("void %s_decoder_init(%s_decoder_t *d, %s *msg);", pfx, pfx, msgType)
+	h.doc("Bind a decoder to msg. Call %s on msg first to apply defaults.", role(pfx, "init"))
+	h.line("void %s(%s *d, %s *msg);", role(pfx, "decoder_init"), decT, msgType)
 	h.blank()
-	h.doc("Feed the next chunk. See %s_decoder_t for what the return value means.", pfx)
-	h.line("sofab_ret_t %s_decoder_feed(%s_decoder_t *d, const void *buf, size_t len);", pfx, pfx)
+	h.doc("Feed the next chunk. See %s for what the return value means.", decT)
+	h.line("sofab_ret_t %s(%s *d, const void *buf, size_t len);", role(pfx, "decoder_feed"), decT)
 }
 
 func (g *gen) emitFuncs(c *cfile, m *ir.Message, msgType string, root *objectPlan) {
-	pfx := g.prefix + strings.ToLower(m.Name)
+	pfx := root.key
+	decT := g.typeName(role(pfx, "decoder"))
 
-	c.line("void %s_init(%s *msg) {", pfx, msgType)
+	c.line("void %s(%s *msg) {", role(pfx, "init"), msgType)
 	// Zero first: sofab_object_init only writes descriptor fields, so a sized
-	// blob's companion _len member (not a descriptor field) would otherwise be
+	// blob's companion length member (not a descriptor field) would otherwise be
 	// left uninitialized and drive a garbage-length encode (issue #128).
 	c.line("    memset(msg, 0, sizeof(*msg));")
 	c.line("    sofab_object_init(&%s, msg);", root.descr)
 	for _, b := range root.blobLenInits {
-		c.line("    msg->%s_len = %d;", b.member, b.length)
+		c.line("    msg->%s = %d;", b.member, b.length)
 	}
 	c.line("}")
 	c.blank()
 
-	c.line("sofab_ret_t %s_encode(const %s *msg, uint8_t *buf, size_t buflen, size_t *used) {", pfx, msgType)
+	c.line("sofab_ret_t %s(const %s *msg, uint8_t *buf, size_t buflen, size_t *used) {", role(pfx, "encode"), msgType)
 	c.line("    sofab_ostream_t ctx;")
 	c.line("    sofab_ret_t ret;")
 	c.line("    sofab_ostream_init(&ctx, buf, buflen, 0, NULL, NULL);")
@@ -1151,12 +1096,12 @@ func (g *gen) emitFuncs(c *cfile, m *ir.Message, msgType string, root *objectPla
 	c.line("}")
 	c.blank()
 
-	c.line("sofab_ret_t %s_encode_to(sofab_ostream_t *os, const %s *msg) {", pfx, msgType)
+	c.line("sofab_ret_t %s(sofab_ostream_t *os, const %s *msg) {", role(pfx, "encode_to"), msgType)
 	c.line("    return sofab_object_encode(os, &%s, msg);", root.descr)
 	c.line("}")
 	c.blank()
 
-	c.line("void %s_decoder_init(%s_decoder_t *d, %s *msg) {", pfx, pfx, msgType)
+	c.line("void %s(%s *d, %s *msg) {", role(pfx, "decoder_init"), decT, msgType)
 	c.line("    memset(d->dec, 0, sizeof(d->dec));")
 	c.line("    d->dec[0].info = &%s;", root.descr)
 	c.line("    d->dec[0].dst = (uint8_t *)msg;")
@@ -1165,16 +1110,16 @@ func (g *gen) emitFuncs(c *cfile, m *ir.Message, msgType string, root *objectPla
 	c.line("}")
 	c.blank()
 
-	c.line("sofab_ret_t %s_decoder_feed(%s_decoder_t *d, const void *buf, size_t len) {", pfx, pfx)
+	c.line("sofab_ret_t %s(%s *d, const void *buf, size_t len) {", role(pfx, "decoder_feed"), decT)
 	c.line("    return sofab_istream_feed(&d->is, buf, len);")
 	c.line("}")
 	c.blank()
 
 	// One-shot decode is the incremental one fed once, so the two cannot drift.
-	c.line("sofab_ret_t %s_decode(%s *msg, const uint8_t *buf, size_t len) {", pfx, msgType)
-	c.line("    %s_decoder_t d;", pfx)
-	c.line("    %s_decoder_init(&d, msg);", pfx)
-	c.line("    return %s_decoder_feed(&d, buf, len);", pfx)
+	c.line("sofab_ret_t %s(%s *msg, const uint8_t *buf, size_t len) {", role(pfx, "decode"), msgType)
+	c.line("    %s d;", decT)
+	c.line("    %s(&d, msg);", role(pfx, "decoder_init"))
+	c.line("    return %s(&d, buf, len);", role(pfx, "decoder_feed"))
 	c.line("}")
 }
 
@@ -1324,37 +1269,7 @@ func (g *gen) capabilities(m *ir.Message) capset {
 	return caps
 }
 
-// ---- naming + small helpers --------------------------------------------
-
-func (g *gen) cType(key, name string) string { return g.prefix + sanitize(key, name) + "_t" }
-func (g *gen) descrSym(key string) string    { return "_" + g.prefix + "descr_" + sanitizeKey(key) }
-func (g *gen) fieldsSym(key string) string   { return "_" + g.prefix + "fields_" + sanitizeKey(key) }
-func (g *gen) nestedSym(key string) string   { return "_" + g.prefix + "nested_" + sanitizeKey(key) }
-func (g *gen) defaultsSym(key string) string { return "_" + g.prefix + "defaults_" + sanitizeKey(key) }
-
-func sanitize(key, name string) string {
-	// message/<name> and named/<cat>/<Name> -> a readable, unique identifier.
-	switch {
-	case strings.HasPrefix(key, "message/"):
-		return sanitizeKey(strings.TrimPrefix(key, "message/"))
-	case strings.HasPrefix(key, "named/"):
-		return sanitizeKey(strings.TrimPrefix(key, "named/"))
-	default:
-		return sanitizeKey(key)
-	}
-}
-
-func sanitizeKey(s string) string {
-	var b strings.Builder
-	for _, r := range s {
-		if r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z' || r >= '0' && r <= '9' || r == '_' {
-			b.WriteRune(r)
-		} else {
-			b.WriteByte('_')
-		}
-	}
-	return b.String()
-}
+// ---- small helpers ------------------------------------------------------
 
 func field(id int64, cType, name, ftype string) string {
 	return fmt.Sprintf("    SOFAB_OBJECT_FIELD(%d, %s, %s, SOFAB_OBJECT_FIELDTYPE_%s),", id, cType, name, ftype)

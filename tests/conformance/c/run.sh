@@ -85,8 +85,8 @@ YAML
     --in "$ROOT/tests/conformance/lib/maxsize_fill.yaml" --out "$WORK/fillproj" )
 make -C "$WORK/fillproj" SOFAB_C_CORELIB="$CORELIB" >/dev/null
 # The macro carries the project's symbol_prefix (sofab_ above), upper-cased.
-check_maxsize_constant c "$WORK/fillproj/generated/fill.h" \
-    "^#define SOFAB_FILL_MAX_SIZE $SOFAB_MAXSIZE_FILL_BYTES\$"
+check_maxsize_constant c "$WORK/fillproj/generated/fill_sofab.h" \
+    "^#define SOFAB_FILL__MAX_SIZE $SOFAB_MAXSIZE_FILL_BYTES\$"
 check_maxsize_fill c "$WORK/fillproj/harness/harness" encode fill
 
 echo "==> streaming: encode through a sink, feed the decoder byte by byte"
@@ -162,7 +162,7 @@ gcc -std=c99 $WARNFLAGS -fsanitize=address -I"$INC" -I"$WORK/stream" \
 
 echo "==> verifying capability guards fire when a feature is stripped"
 if gcc -std=c99 -DSOFAB_DISABLE_SEQUENCE_SUPPORT -I"$INC" -I"$WORK/gen" \
-        -c "$WORK"/gen/myfirstmessage.c -o /dev/null 2>/dev/null; then
+        -c "$WORK"/gen/myfirstmessage_sofab.c -o /dev/null 2>/dev/null; then
     echo "FAIL: expected a capability-guard #error with SEQUENCE disabled"
     exit 1
 fi
@@ -192,13 +192,13 @@ sed -e 's/widebf/narrowbf/' -e 's/pos: 40/pos: 31/' "$WORK/widebf.yaml" > "$WORK
 ( cd "$ROOT" && go run ./cmd/sofabgen --lang c --in "$WORK/widebf.yaml" --out "$WORK/widebf" >/dev/null )
 ( cd "$ROOT" && go run ./cmd/sofabgen --lang c --in "$WORK/narrowbf.yaml" --out "$WORK/narrowbf" >/dev/null )
 if gcc -std=c99 -DSOFAB_DISABLE_INT64_SUPPORT -I"$INC" -I"$WORK/widebf" \
-        -c "$WORK"/widebf/widebf.c -o /dev/null 2>/dev/null; then
+        -c "$WORK"/widebf/widebf_sofab.c -o /dev/null 2>/dev/null; then
     echo "FAIL: a uint64_t-backed bitfield must not compile against a corelib built with"
     echo "      SOFAB_DISABLE_INT64_SUPPORT -- encode would return E_ARGUMENT (generator#539)"
     exit 1
 fi
 gcc -std=c99 $WARNFLAGS -DSOFAB_DISABLE_INT64_SUPPORT -I"$INC" -I"$WORK/narrowbf" \
-    -c "$WORK"/narrowbf/narrowbf.c -o /dev/null || {
+    -c "$WORK"/narrowbf/narrowbf_sofab.c -o /dev/null || {
     echo "FAIL: a uint32_t-backed bitfield must still build on a 32-bit value corelib"
     exit 1
 }
@@ -225,7 +225,7 @@ sed -e 's/wideid/narrowid/' -e 's/536870912/536870911/' "$WORK/wideid.yaml" > "$
 ( cd "$ROOT" && go run ./cmd/sofabgen --lang c --in "$WORK/narrowid.yaml" --out "$WORK/narrowid" >/dev/null )
 BIG="-DSOFAB_OBJECT_DESCR_PROFILE=SOFAB_OBJECT_DESCR_BIG"
 if gcc -std=c99 -DSOFAB_DISABLE_INT64_SUPPORT $BIG -I"$INC" -I"$WORK/wideid" \
-        -c "$WORK"/wideid/wideid.c -o /dev/null 2>/dev/null; then
+        -c "$WORK"/wideid/wideid_sofab.c -o /dev/null 2>/dev/null; then
     echo "FAIL: an id above SOFAB_ID_MAX must not compile on a SOFAB_DISABLE_INT64_SUPPORT"
     echo "      build -- every encode of that field would return InvalidArgument (generator#529)"
     exit 1
@@ -233,14 +233,14 @@ fi
 # Control 1: one id lower and the same build succeeds, so the guard is a ceiling
 # and not a blanket refusal of large ids.
 gcc -std=c99 $WARNFLAGS -DSOFAB_DISABLE_INT64_SUPPORT $BIG -I"$INC" -I"$WORK/narrowid" \
-    -c "$WORK"/narrowid/narrowid.c -o /dev/null || {
+    -c "$WORK"/narrowid/narrowid_sofab.c -o /dev/null || {
     echo "FAIL: an id AT SOFAB_ID_MAX must still compile on a 32-bit value build"
     exit 1
 }
 # Control 2: the rejected schema builds on the full 64-bit value build, so what
 # rejected it above is the value width and not the descriptor profile.
 gcc -std=c99 $WARNFLAGS $BIG -I"$INC" -I"$WORK/wideid" \
-    -c "$WORK"/wideid/wideid.c -o /dev/null || {
+    -c "$WORK"/wideid/wideid_sofab.c -o /dev/null || {
     echo "FAIL: the 64-bit value build has no narrowed id ceiling and must accept the schema"
     exit 1
 }
@@ -639,7 +639,7 @@ echo "==> corpus compiles ($(ls "$ROOT"/tests/matrix/corpus/defs/*.yaml | wc -l)
 # pass it. A user may build the generated code as C23: the keyword corpus is
 # built once more under that standard (-std=c2x, which GCC 13 already knows).
 gcc -std=c2x -O2 $WARNFLAGS -DSOFAB_OBJECT_DESCR_PROFILE=3 -I"$INC" -I"$WORK/corpus/keywords" \
-    -c "$WORK/corpus/keywords/keywords.c" -o /dev/null \
+    -c "$WORK/corpus/keywords/keywords_sofab.c" -o /dev/null \
     || { echo "FAIL: corpus def keywords did not compile as C23"; exit 1; }
 echo "==> keyword corpus compiles as C23"
 
@@ -709,7 +709,7 @@ echo "==> negative: a guard fires when a used feature is disabled in the corelib
 # (the full example uses every feature; each disable macro must trip its #error)
 for flag in FIXLEN_SUPPORT ARRAY_SUPPORT SEQUENCE_SUPPORT FP64_SUPPORT INT64_SUPPORT; do
     if gcc -std=c99 -DSOFAB_OBJECT_DESCR_PROFILE=3 -DSOFAB_DISABLE_$flag -I"$INC" -I"$WORK/gen" \
-            -c "$WORK"/gen/myfirstmessage.c -o /dev/null 2>/dev/null; then
+            -c "$WORK"/gen/myfirstmessage_sofab.c -o /dev/null 2>/dev/null; then
         echo "FAIL: expected a capability-guard #error with $flag disabled"
         exit 1
     fi
@@ -904,5 +904,32 @@ python3 "$ROOT/tests/conformance/lib/check_defaults.py" --emit-schema >> "$WORK/
 make -C "$WORK/defaults" SOFAB_C_CORELIB="$CORELIB" >/dev/null
 python3 "$ROOT/tests/conformance/lib/check_defaults.py" "C" \
     -- "$WORK/defaults/harness/harness"
+
+# Conflict-free names (ARCHITECTURE §8 "Naming", generator#624): the shared
+# name-collision schema -- path clashes (m_a beside m.a, a.b_c beside a_b.c, a
+# $defs type beside struct_<name>), every role word, fixed, imported and builtin
+# name as a message, and a message `stdint` whose header must not shadow
+# <stdint.h> through -Igenerated -- must build against the real corelib under the
+# strict warning set, harness included, and round-trip message `m`. Generating
+# is not enough: the generator exits 0 on broken output. Built twice: with the
+# default symbol_prefix, and with `sofab_`, the corelib's own prefix, which puts
+# every generated name beside the corelib's in one namespace.
+echo "==> conflict-free names: tests/conformance/lib/names.yaml builds and round-trips (generator#624)"
+cat > "$WORK/names-default.yaml" <<YAML
+generic: { emit: project }
+YAML
+for cfg in names-default proj; do
+    ( cd "$ROOT" && go run ./cmd/sofabgen --config "$WORK/$cfg.yaml" --lang c \
+        --in "$ROOT/tests/conformance/lib/names.yaml" --out "$WORK/names-$cfg" >/dev/null )
+    make -C "$WORK/names-$cfg" SOFAB_C_CORELIB="$CORELIB" >/dev/null \
+        || { echo "FAIL: names.yaml ($cfg) did not build"; exit 1; }
+    NAMES_IN=$(cat "$ROOT/tests/conformance/lib/names.json")
+    NAMES_OUT=$(printf '%s' "$NAMES_IN" | "$WORK/names-$cfg/harness/harness" encode m \
+        | "$WORK/names-$cfg/harness/harness" decode m) \
+        || { echo "FAIL: names.yaml ($cfg): message m did not round-trip"; exit 1; }
+    python3 "$ROOT/tests/conformance/lib/json_equal.py" "$NAMES_IN" "$NAMES_OUT" \
+        --label "C ($cfg): names.yaml message m round-trips" || exit 1
+done
+echo "==> names.yaml builds and round-trips (default prefix and sofab_)"
 
 echo "PASS"

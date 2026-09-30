@@ -144,17 +144,17 @@ size_t strlen(const char *s) {
  * const-fold or elide the encode/decode work; everything reachable from here
  * is what a real firmware consumer pays for. */
 void reset(void) {
-    static uint8_t buf[MESSAGE_VEHICLETELEMETRY_MAX_SIZE];
+    static uint8_t buf[MESSAGE_VEHICLETELEMETRY__MAX_SIZE];
     message_VehicleTelemetry_t v;
-    message_vehicletelemetry_init(&v);
+    message_VehicleTelemetry__init(&v);
     v.odometer_m = *(volatile uint64_t *)0x20001000;
 
     size_t used = 0;
-    message_vehicletelemetry_encode(&v, buf, sizeof(buf), &used);
+    message_VehicleTelemetry__encode(&v, buf, sizeof(buf), &used);
 
     message_VehicleTelemetry_t d;
-    message_vehicletelemetry_init(&d);
-    message_vehicletelemetry_decode(&d, buf, used);
+    message_VehicleTelemetry__init(&d);
+    message_VehicleTelemetry__decode(&d, buf, used);
 
     *(volatile uint64_t *)0x20000000 = d.odometer_m ^ (uint64_t)used;
     for (;;) { }

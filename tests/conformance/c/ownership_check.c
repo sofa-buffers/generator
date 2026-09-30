@@ -53,7 +53,7 @@
  * SPDX-License-Identifier: MIT
  */
 
-#include "fill.h"
+#include "fill_sofab.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -62,7 +62,7 @@
 /* 'A': see the header note. An aliased string destination must still encode. */
 #define SCRIBBLE 0x41
 
-static uint8_t g_want[MESSAGE_FILL_MAX_SIZE];
+static uint8_t g_want[MESSAGE_FILL__MAX_SIZE];
 static size_t  g_want_len;
 static int     g_failures;
 
@@ -79,9 +79,9 @@ static void hexdump(const char *label, const uint8_t *b, size_t n)
  *  different bytes. */
 static void must_match(const char *what, const message_fill_t *m)
 {
-    uint8_t again[MESSAGE_FILL_MAX_SIZE];
+    uint8_t again[MESSAGE_FILL__MAX_SIZE];
     size_t  n = 0;
-    if (message_fill_encode(m, again, sizeof again, &n) != SOFAB_RET_OK) {
+    if (message_fill__encode(m, again, sizeof again, &n) != SOFAB_RET_OK) {
         printf("FAIL: %s: re-encoding the decoded message failed -- a destination "
                "aliased the storage it was decoded from\n", what);
         g_failures++;
@@ -92,7 +92,7 @@ static void must_match(const char *what, const message_fill_t *m)
         hexdump("want", g_want, g_want_len);
         hexdump("got ", again, n);
         printf("  f_str = \"%s\"  f_blob = ", m->f_str);
-        for (unsigned i = 0; i < m->f_blob_len; i++) { printf("%02x", m->f_blob[i]); }
+        for (unsigned i = 0; i < m->f_blob__len; i++) { printf("%02x", m->f_blob[i]); }
         printf("\n");
         for (unsigned i = 0; i < m->f_arr_str.len; i++) {
             printf("  f_arr_str.items[%u] = \"%s\"\n", i, m->f_arr_str.items[i]);
@@ -106,7 +106,7 @@ static void must_match(const char *what, const message_fill_t *m)
  *  lengths the streaming check happens to need. */
 static void sample(message_fill_t *m)
 {
-    message_fill_init(m);
+    message_fill__init(m);
 
     m->f_bool = 1;
     m->f_u64  = UINT64_MAX;
@@ -114,16 +114,16 @@ static void sample(message_fill_t *m)
     m->f_fp64 = 1.0;
 
     memcpy(m->f_str, "123456789", 9);
-    m->f_blob_len = 7;
+    m->f_blob__len = 7;
     memset(m->f_blob, 0xAB, 7);
 
-    m->f_arr_u32_len = 5;
+    m->f_arr_u32__len = 5;
     for (int i = 0; i < 5; i++) { m->f_arr_u32[i] = UINT32_MAX; }
-    m->f_arr_u64_len = 3;
+    m->f_arr_u64__len = 3;
     for (int i = 0; i < 3; i++) { m->f_arr_u64[i] = UINT64_MAX - (uint64_t)i; }
-    m->f_arr_fp32_len = 4;
+    m->f_arr_fp32__len = 4;
     for (int i = 0; i < 4; i++) { m->f_arr_fp32[i] = 1.5f * (float)(i + 1); }
-    m->f_arr_fp64_len = 2;
+    m->f_arr_fp64__len = 2;
     for (int i = 0; i < 2; i++) { m->f_arr_fp64[i] = -2.25 * (double)(i + 1); }
 
     m->f_arr_str.len = 3;
@@ -144,7 +144,7 @@ int main(void)
     message_fill_t m;
     sample(&m);
 
-    if (message_fill_encode(&m, g_want, sizeof g_want, &g_want_len) != SOFAB_RET_OK) {
+    if (message_fill__encode(&m, g_want, sizeof g_want, &g_want_len) != SOFAB_RET_OK) {
         printf("FAIL: encoding the sample failed\n");
         return 2;
     }
@@ -158,10 +158,10 @@ int main(void)
         memcpy(buf, g_want, g_want_len);
 
         message_fill_t got;
-        message_fill_init(&got);
+        message_fill__init(&got);
         /* Unchecked, a failed decode leaves an all-default message that
          * re-encodes identically twice and the whole check passes vacuously. */
-        if (message_fill_decode(&got, buf, g_want_len) != SOFAB_RET_OK) {
+        if (message_fill__decode(&got, buf, g_want_len) != SOFAB_RET_OK) {
             printf("FAIL: one-shot decode failed\n");
             free(buf);
             return 1;
@@ -176,13 +176,13 @@ int main(void)
      * carries the whole message, which is the only one guaranteed to deliver
      * every payload inside a single chunk. */
     {
-        const size_t sizes[] = {1, 2, 3, 7, 16, MESSAGE_FILL_MAX_SIZE};
+        const size_t sizes[] = {1, 2, 3, 7, 16, MESSAGE_FILL__MAX_SIZE};
         for (unsigned s = 0; s < sizeof sizes / sizeof sizes[0]; s++) {
             const size_t size = sizes[s];
             message_fill_t got;
-            message_fill_init(&got);
-            message_fill_decoder_t d;
-            message_fill_decoder_init(&d, &got);
+            message_fill__init(&got);
+            message_fill__decoder_t d;
+            message_fill__decoder_init(&d, &got);
 
             sofab_ret_t r = SOFAB_RET_OK;
             for (size_t off = 0; off < g_want_len; off += size) {
@@ -192,7 +192,7 @@ int main(void)
                 uint8_t *chunk = malloc(n);
                 if (chunk == NULL) { printf("FAIL: out of memory\n"); return 2; }
                 memcpy(chunk, g_want + off, n);
-                r = message_fill_decoder_feed(&d, chunk, n);
+                r = message_fill__decoder_feed(&d, chunk, n);
                 memset(chunk, SCRIBBLE, n);
                 free(chunk);
                 if (r != SOFAB_RET_OK && r != SOFAB_RET_INCOMPLETE) {

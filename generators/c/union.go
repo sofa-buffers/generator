@@ -61,31 +61,38 @@ func unionMemberNote(f *ir.Field) string {
 	return memberNote(f)
 }
 
-// unionPrefix is the macro prefix of a union's option ids, built exactly like a
-// bitfield's flag prefix: <PREFIX><named key>, upper-cased.
-func (g *gen) unionPrefix(key string) string {
-	return strings.ToUpper(g.prefix + sanitize(key, ""))
-}
-
-// optionMacro is the #define naming one option's id, e.g. MESSAGE_SHAPE_PT_ID.
-func (g *gen) optionMacro(key string, f *ir.Field) string {
-	return g.unionPrefix(key) + "_" + strings.ToUpper(sanitizeKey(f.Name)) + "_ID"
+// optionMacro is the #define naming one option's id: the option extends the
+// union's PATH (not its base: the split variants of a $defs union share their
+// options, and so these macros), and the id is a role of it, all upper-cased —
+// MESSAGE_M___SHAPE___PT__ID.
+func (g *gen) optionMacro(un *ir.NamedType, f *ir.Field) string {
+	return macro(g.base(fieldPath(un.Path, f.Name)), "ID")
 }
 
 // emitUnionConsts emits the option-id macros of one union type — what `which`
-// is compared against and assigned — and names the default option.
-func (g *gen) emitUnionConsts(h *cfile, p *objectPlan) {
-	d := p.union.DefaultOption()
-	h.doc("Option ids of %s (the value of its `which`); a fresh value holds %s.", p.cType, d.Name)
+// is compared against and assigned — and names the default option. seen holds
+// the macros the header already defines: two split variants of one $defs union
+// share them.
+func (g *gen) emitUnionConsts(h *cfile, p *objectPlan, seen map[string]bool) {
+	if seen[g.optionMacro(p.union, p.union.Fields[0])] {
+		return // a sibling variant defined them
+	}
+	if p.union.Variant != "" {
+		h.doc("Option ids of the union %s (the value of `which` in each of its default_id variants).", g.base(p.union.Path))
+	} else {
+		h.doc("Option ids of %s (the value of its `which`); a fresh value holds %s.", p.cType, p.union.DefaultOption().Name)
+	}
 	for _, f := range p.union.Fields {
-		h.line("#define %s %d", g.optionMacro(p.key, f), f.ID)
+		m := g.optionMacro(p.union, f)
+		seen[m] = true
+		h.line("#define %s %d", m, f.ID)
 	}
 	h.blank()
 }
 
 // emitUnionMembers writes the tag and the option overlay of a union type.
 func (g *gen) emitUnionMembers(h *cfile, p *objectPlan) {
-	h.line("    sofab_object_descr_id_t which;  /**< The held option: one of the %s_*_ID macros. */", g.unionPrefix(p.key))
+	h.line("    sofab_object_descr_id_t which;  /**< The held option: one of the %s___*__ID macros. */", strings.ToUpper(g.base(p.union.Path)))
 	h.line("    union {")
 	for _, m := range p.members {
 		g.emitMember(h, m, "        ")
@@ -116,7 +123,7 @@ func (g *gen) unionImage(c *cfile, p *objectPlan) string {
 	un := p.union
 	d := un.DefaultOption()
 	id := *un.DefaultID
-	sym := g.defaultsSym(p.key)
+	sym := defaultsSym(p.key)
 	if isSeqOption(d) {
 		if id == 0 {
 			return "NULL"
@@ -128,10 +135,10 @@ func (g *gen) unionImage(c *cfile, p *objectPlan) string {
 	if id == 0 && !nonZero {
 		return "NULL"
 	}
-	imgT := "_" + g.prefix + "defimg_" + sanitizeKey(p.key) + "_t"
+	imgT := private(p.key, "defimg_t")
 	align := lenC(g.cAlignFields(un.Fields))
 	c.line("typedef struct { sofab_object_descr_id_t which; union { %s %s _align; } u; } %s;", p.optDecl[d.ID], align, imgT)
-	c.line("typedef char _%sdefimg_%s_at_u[(offsetof(%s, u) == offsetof(%s, u)) ? 1 : -1];", g.prefix, sanitizeKey(p.key), imgT, p.cType)
+	c.line("typedef char %s[(offsetof(%s, u) == offsetof(%s, u)) ? 1 : -1];", private(p.key, "defimg_at_u"), imgT, p.cType)
 	init := fmt.Sprintf(".which = %d", id)
 	if nonZero {
 		init += fmt.Sprintf(", .u.%s = %s", cIdent(d.Name), expr)
@@ -140,11 +147,11 @@ func (g *gen) unionImage(c *cfile, p *objectPlan) string {
 	return "&" + sym
 }
 
-// optionDescr is the descriptor symbol of a sequence option of the union at key
-// (the one collect records in seqOptDescrs), for the harness's select-at-default.
-func (g *gen) optionDescr(key string, f *ir.Field) string {
+// optionDescr is the descriptor symbol of a sequence option of union un (the
+// one collect records in seqOptDescrs), for the harness's select-at-default.
+func (g *gen) optionDescr(un *ir.NamedType, f *ir.Field) string {
 	if f.Kind == ir.KindStruct || f.Kind == ir.KindUnion {
-		return g.descrSym("named/" + f.Ref.Key)
+		return descrSym(g.ntBase(f.Ref.Target))
 	}
-	return g.descrSym(key + "/" + f.Name + "#elems")
+	return descrSym(g.holderBase(fieldPath(un.Path, f.Name)))
 }

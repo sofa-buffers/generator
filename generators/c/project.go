@@ -126,7 +126,7 @@ func (g *gen) harness(s *ir.Schema) []byte {
 	h.line("#include <string.h>")
 	h.line(`#include "sofab_test_json.h"`)
 	for _, m := range s.Messages {
-		h.line(`#include "%s.h"`, strings.ToLower(m.Name))
+		h.line(`#include "%s"`, headerFile(m))
 	}
 	h.blank()
 
@@ -152,9 +152,10 @@ func (g *gen) harness(s *ir.Schema) []byte {
 	for _, key := range s.NamedOrder {
 		nt := s.Named[key]
 		if nt.Category == ir.CatStruct || nt.Category == ir.CatUnion {
-			ct := g.cType("named/"+key, nt.Name)
-			h.line("static void %s_to_json(const %s *o, FILE *out);", g.jsonFn(key), ct)
-			h.line("static void %s_from_json(const sofab_json_t *j, %s *o);", g.jsonFn(key), ct)
+			b := g.ntBase(nt)
+			ct := g.typeName(b)
+			h.line("static void %s(const %s *o, FILE *out);", toJSON(b), ct)
+			h.line("static void %s(const sofab_json_t *j, %s *o);", fromJSON(b), ct)
 		}
 	}
 	h.blank()
@@ -162,19 +163,20 @@ func (g *gen) harness(s *ir.Schema) []byte {
 	// Emit to_json/from_json for every struct/union named type, then messages.
 	for _, key := range s.NamedOrder {
 		nt := s.Named[key]
+		b := g.ntBase(nt)
 		switch nt.Category {
 		case ir.CatStruct:
-			g.emitToJSON(h, g.cType("named/"+key, nt.Name), g.jsonFn(key), nt.Fields)
-			g.emitFromJSON(h, g.cType("named/"+key, nt.Name), g.jsonFn(key), nt.Fields)
+			g.emitToJSON(h, g.typeName(b), b, nt.Fields)
+			g.emitFromJSON(h, g.typeName(b), b, nt.Fields)
 		case ir.CatUnion:
-			g.emitUnionToJSON(h, "named/"+key, g.cType("named/"+key, nt.Name), g.jsonFn(key), nt)
-			g.emitUnionFromJSON(h, "named/"+key, g.cType("named/"+key, nt.Name), g.jsonFn(key), nt)
+			g.emitUnionToJSON(h, g.typeName(b), b, nt)
+			g.emitUnionFromJSON(h, g.typeName(b), b, nt)
 		}
 	}
 	for _, m := range s.Messages {
-		ct := g.cType("message/"+m.Name, m.Name)
-		g.emitToJSON(h, ct, g.jsonFnName(m.Name), m.Fields)
-		g.emitFromJSON(h, ct, g.jsonFnName(m.Name), m.Fields)
+		b := g.msgBase(m)
+		g.emitToJSON(h, g.typeName(b), b, m.Fields)
+		g.emitFromJSON(h, g.typeName(b), b, m.Fields)
 	}
 
 	g.emitMain(h, s)
@@ -190,11 +192,13 @@ func (g *gen) harness(s *ir.Schema) []byte {
 	return body.bytes()
 }
 
-func (g *gen) jsonFn(key string) string   { return g.prefix + sanitizeKey(key) }
-func (g *gen) jsonFnName(n string) string { return g.prefix + sanitizeKey(n) }
+// toJSON and fromJSON are the harness's converters of the object at base:
+// private roles, so no generated name and no harness helper spells one.
+func toJSON(base string) string   { return private(base, "to_json") }
+func fromJSON(base string) string { return private(base, "from_json") }
 
-func (g *gen) emitToJSON(h *cfile, cType, fn string, fields []*ir.Field) {
-	h.line("static void %s_to_json(const %s *o, FILE *out) {", fn, cType)
+func (g *gen) emitToJSON(h *cfile, cType, base string, fields []*ir.Field) {
+	h.line("static void %s(const %s *o, FILE *out) {", toJSON(base), cType)
 	h.line(`    fputc('{', out);`)
 	for i, f := range fields {
 		if i > 0 {
@@ -236,16 +240,16 @@ func (g *gen) valueToJSON(h *cfile, f *ir.Field, acc string, inUnion bool, ind s
 	case ir.KindString:
 		h.line(`%sjson_str(out, %s);`, ind, acc)
 	case ir.KindBlob:
-		// A scalar/struct-field blob is a sized blob (companion _len member): print
+		// A scalar/struct-field blob is a sized blob (companion __len member): print
 		// only the used bytes, not the full fixed capacity, else a sub-maxlen blob
 		// shows trailing zero padding (issue #128).
 		if inUnion {
 			h.line(`%sjson_bytes(out, %s.data, %s.len);`, ind, acc, acc)
 		} else {
-			h.line(`%sjson_bytes(out, %s, %s_len);`, ind, acc, acc)
+			h.line(`%sjson_bytes(out, %s, %s__len);`, ind, acc, acc)
 		}
 	case ir.KindStruct, ir.KindUnion:
-		h.line(`%s%s_to_json(&%s, out);`, ind, g.jsonFn(f.Ref.Key), acc)
+		h.line(`%s%s(&%s, out);`, ind, toJSON(g.ntBase(f.Ref.Target)), acc)
 	case ir.KindArray:
 		spec := specOfField(f)
 		ref := g.arrayRef(spec, acc)
@@ -264,11 +268,11 @@ func (g *gen) valueToJSON(h *cfile, f *ir.Field, acc string, inUnion bool, ind s
 type arrRef struct{ store, length, lenType string }
 
 // arrayRef resolves the storage of an array VALUE reached through acc, given its
-// element spec. The value is either a compact array (acc is the array, acc_len
+// element spec. The value is either a compact array (acc is the array, acc__len
 // its length) or a wrapper holder (acc is the holder, acc.len its element count).
 func (g *gen) arrayRef(spec arraySpec, acc string) arrRef {
 	if !isHolderElem(spec.elem) {
-		return arrRef{store: acc, length: acc + "_len", lenType: lenC(g.cAlignArray(spec))}
+		return arrRef{store: acc, length: acc + "__len", lenType: lenC(g.cAlignArray(spec))}
 	}
 	return arrRef{store: acc, length: acc + ".len", lenType: lenC(g.cAlignArray(spec))}
 }
@@ -312,7 +316,7 @@ func (g *gen) arrayValueToJSON(h *cfile, spec arraySpec, ref arrRef, ind string,
 		// buffer capacity — the element is a { len; buf[]; } holder slot.
 		h.line(`%s    json_bytes(out, %s.buf, %s.len);`, ind, slot, slot)
 	case ir.KindStruct, ir.KindUnion:
-		h.line(`%s    %s_to_json(&%s, out);`, ind, g.jsonFn(spec.ref.Key), slot)
+		h.line(`%s    %s(&%s, out);`, ind, toJSON(g.ntBase(spec.ref.Target)), slot)
 	case ir.KindArray:
 		inner := specOfItems(spec.items)
 		g.arrayValueToJSON(h, inner, g.arrayRefSlot(inner, slot), ind+"    ", depth+1)
@@ -323,8 +327,8 @@ func (g *gen) arrayValueToJSON(h *cfile, spec arraySpec, ref arrRef, ind string,
 	h.line(`%sfputc(']', out);`, ind)
 }
 
-func (g *gen) emitFromJSON(h *cfile, cType, fn string, fields []*ir.Field) {
-	h.line("static void %s_from_json(const sofab_json_t *j, %s *o) {", fn, cType)
+func (g *gen) emitFromJSON(h *cfile, cType, base string, fields []*ir.Field) {
+	h.line("static void %s(const sofab_json_t *j, %s *o) {", fromJSON(base), cType)
 	h.line("    const sofab_json_t *c;")
 	h.line("    (void)c;")
 	for _, f := range fields {
@@ -372,10 +376,10 @@ func (g *gen) valueFromJSON(h *cfile, f *ir.Field, acc string, inUnion bool) {
 		if inUnion {
 			h.line("        %s.len = (%s)json_to_bytes(c, %s.data, sizeof(%s.data));", acc, blobLenC(f.Maxlen), acc, acc)
 		} else {
-			h.line("        %s_len = (%s)json_to_bytes(c, %s, sizeof(%s));", acc, blobLenC(f.Maxlen), acc, acc)
+			h.line("        %s__len = (%s)json_to_bytes(c, %s, sizeof(%s));", acc, blobLenC(f.Maxlen), acc, acc)
 		}
 	case ir.KindStruct, ir.KindUnion:
-		h.line("        %s_from_json(c, &%s);", g.jsonFn(f.Ref.Key), acc)
+		h.line("        %s(c, &%s);", fromJSON(g.ntBase(f.Ref.Target)), acc)
 	case ir.KindArray:
 		spec := specOfField(f)
 		ref := g.arrayRef(spec, acc)
@@ -389,12 +393,12 @@ func (g *gen) valueFromJSON(h *cfile, f *ir.Field, acc string, inUnion bool) {
 // emitUnionToJSON prints a union as an object with exactly ONE member, the held
 // option: {"<option>": value} — also when that is the default option at its
 // default.
-func (g *gen) emitUnionToJSON(h *cfile, key, cType, fn string, nt *ir.NamedType) {
-	h.line("static void %s_to_json(const %s *o, FILE *out) {", fn, cType)
+func (g *gen) emitUnionToJSON(h *cfile, cType, base string, nt *ir.NamedType) {
+	h.line("static void %s(const %s *o, FILE *out) {", toJSON(base), cType)
 	h.line(`    fputc('{', out);`)
 	h.line("    switch (o->which) {")
 	for _, f := range nt.Fields {
-		h.line("    case %s:", g.optionMacro(key, f))
+		h.line("    case %s:", g.optionMacro(nt, f))
 		if f.Deprecated {
 			h.line("#pragma GCC diagnostic push")
 			h.line(`#pragma GCC diagnostic ignored "-Wdeprecated-declarations"`)
@@ -417,8 +421,8 @@ func (g *gen) emitUnionToJSON(h *cfile, key, cType, fn string, nt *ir.NamedType)
 // emitUnionFromJSON reads {"<option>": value}: the member present selects that
 // option — the tag, then its value; a sequence option is first put at its own
 // default through its descriptor, exactly as a caller selects one.
-func (g *gen) emitUnionFromJSON(h *cfile, key, cType, fn string, nt *ir.NamedType) {
-	h.line("static void %s_from_json(const sofab_json_t *j, %s *o) {", fn, cType)
+func (g *gen) emitUnionFromJSON(h *cfile, cType, base string, nt *ir.NamedType) {
+	h.line("static void %s(const sofab_json_t *j, %s *o) {", fromJSON(base), cType)
 	h.line("    const sofab_json_t *c;")
 	for _, f := range nt.Fields {
 		if f.Deprecated {
@@ -428,9 +432,9 @@ func (g *gen) emitUnionFromJSON(h *cfile, key, cType, fn string, nt *ir.NamedTyp
 		acc := "o->u." + cIdent(f.Name)
 		h.line(`    c = sofab_json_get(j, "%s");`, f.Name)
 		h.line("    if (c) {")
-		h.line("        o->which = %s;", g.optionMacro(key, f))
+		h.line("        o->which = %s;", g.optionMacro(nt, f))
 		if isSeqOption(f) {
-			h.line("        sofab_object_init(&%s, &%s);", g.optionDescr(key, f), acc)
+			h.line("        sofab_object_init(&%s, &%s);", g.optionDescr(nt, f), acc)
 		}
 		g.valueFromJSON(h, f, acc, true)
 		h.line("    }")
@@ -477,7 +481,7 @@ func (g *gen) arrayValueFromJSON(h *cfile, spec arraySpec, ref arrRef, jnode, in
 		// slot's companion so encode emits exactly those bytes.
 		h.line("%s    %s.len = (%s)json_to_bytes(%s, %s.buf, sizeof(%s.buf));", ind, slot, blobLenC(spec.max), ev, slot, slot)
 	case ir.KindStruct, ir.KindUnion:
-		h.line("%s    %s_from_json(%s, &%s);", ind, g.jsonFn(spec.ref.Key), ev, slot)
+		h.line("%s    %s(%s, &%s);", ind, fromJSON(g.ntBase(spec.ref.Target)), ev, slot)
 	case ir.KindArray:
 		inner := specOfItems(spec.items)
 		g.arrayValueFromJSON(h, inner, g.arrayRefSlot(inner, slot), ev, ind+"    ", depth+1)
@@ -497,15 +501,15 @@ func (g *gen) arrayValueFromJSON(h *cfile, spec arraySpec, ref arrRef, jnode, in
 // start, JSON parsing and the decode input's pre-encode all happen in main, before
 // collection is toggled on. Same shape as corelib-c-cpp/bench/c/bench.c.
 //
-// The barrier is on the wrapper only: message_<m>_encode and the corelib calls
+// The barrier is on the wrapper only: message_<m>__encode and the corelib calls
 // inside it still inline freely, which is the cost being measured.
 func (g *gen) emitBench(h *cfile, s *ir.Schema) {
 	h.line("/* ---- bench workloads (one op each; see tests/bench/README.md) ---- */")
 	for _, m := range s.Messages {
-		ct := g.cType("message/"+m.Name, m.Name)
-		pfx := g.prefix + strings.ToLower(m.Name)
+		b := g.msgBase(m)
+		ct := g.typeName(b)
 		low := strings.ToLower(m.Name)
-		maxSize := strings.ToUpper(g.prefix + m.Name + "_MAX_SIZE")
+		maxSize := macro(b, "MAX_SIZE")
 
 		// File-scope state: keeps the measured buffers off the stack (so stack
 		// setup is not part of the op) and lets main observe the results after
@@ -517,13 +521,13 @@ func (g *gen) emitBench(h *cfile, s *ir.Schema) {
 		h.blank()
 		h.line("__attribute__((noinline)) void run_encode_%s(void) {", low)
 		h.line("    size_t used = 0;")
-		h.line("    if (%s_encode(&_bench_%s_in, _bench_%s_wire, sizeof(_bench_%s_wire), &used) != SOFAB_RET_OK) used = 0;", pfx, low, low, low)
+		h.line("    if (%s(&_bench_%s_in, _bench_%s_wire, sizeof(_bench_%s_wire), &used) != SOFAB_RET_OK) used = 0;", role(b, "encode"), low, low, low)
 		h.line("    _bench_%s_wire_len = used;", low)
 		h.line("}")
 		h.blank()
 		h.line("__attribute__((noinline)) void run_decode_%s(void) {", low)
-		h.line("    %s_init(&_bench_%s_out);", pfx, low)
-		h.line("    (void)%s_decode(&_bench_%s_out, _bench_%s_wire, _bench_%s_wire_len);", pfx, low, low, low)
+		h.line("    %s(&_bench_%s_out);", role(b, "init"), low)
+		h.line("    (void)%s(&_bench_%s_out, _bench_%s_wire, _bench_%s_wire_len);", role(b, "decode"), low, low, low)
 		h.line("}")
 		h.blank()
 	}
@@ -544,11 +548,10 @@ func (g *gen) emitBenchMain(h *cfile, s *ir.Schema) {
 	}
 	for _, m := range s.Messages {
 		low := strings.ToLower(m.Name)
-		pfx := g.prefix + low
-		fn := g.jsonFnName(m.Name)
+		b := g.msgBase(m)
 		h.line(`    if (strcmp(w, "encode_%s") == 0 || strcmp(w, "decode_%s") == 0) {`, low, low)
-		h.line("        %s_init(&_bench_%s_in);", pfx, low)
-		h.line("        %s_from_json(root, &_bench_%s_in);", fn, low)
+		h.line("        %s(&_bench_%s_in);", role(b, "init"), low)
+		h.line("        %s(root, &_bench_%s_in);", fromJSON(b), low)
 		h.line("        sofab_json_free(root);")
 		h.line(`        if (strcmp(w, "encode_%s") == 0) {`, low)
 		h.line("            run_encode_%s();", low)
@@ -625,29 +628,29 @@ func (g *gen) emitMain(h *cfile, s *ir.Schema) {
 	h.line("    }")
 	h.blank()
 	for i, m := range s.Messages {
-		ct := g.cType("message/"+m.Name, m.Name)
-		fn := g.jsonFnName(m.Name)
-		pfx := g.prefix + strings.ToLower(m.Name)
+		b := g.msgBase(m)
+		ct := g.typeName(b)
+		decT := g.typeName(role(b, "decoder"))
 		cond := fmt.Sprintf("strcmp(msg, %q) == 0", m.Name)
 		kw := "if"
 		if i > 0 {
 			kw = "else if"
 		}
 		h.line("    %s (%s) {", kw, cond)
-		h.line("        %s obj; %s_init(&obj);", ct, pfx)
+		h.line("        %s obj; %s(&obj);", ct, role(b, "init"))
 		h.line(`        if (strcmp(mode, "encode") == 0) {`)
 		h.line("            char err[128];")
 		h.line("            sofab_json_t *root = sofab_json_parse((const char *)in, len, err, sizeof(err));")
 		h.line(`            if (!root) { fprintf(stderr, "json: %%s\n", err); return 1; }`)
-		h.line("            %s_from_json(root, &obj);", fn)
+		h.line("            %s(root, &obj);", fromJSON(b))
 		h.line("            sofab_json_free(root);")
-		h.line("            unsigned char out[%s];", strings.ToUpper(g.prefix+m.Name+"_MAX_SIZE"))
+		h.line("            unsigned char out[%s];", macro(b, "MAX_SIZE"))
 		h.line("            size_t used = 0;")
-		h.line("            if (%s_encode(&obj, out, sizeof(out), &used) != SOFAB_RET_OK) return 1;", pfx)
+		h.line("            if (%s(&obj, out, sizeof(out), &used) != SOFAB_RET_OK) return 1;", role(b, "encode"))
 		h.line("            fwrite(out, 1, used, stdout);")
 		h.line(`        } else if (strcmp(mode, "decode") == 0) {`)
-		h.line("            if (%s_decode(&obj, in, len) != SOFAB_RET_OK) return 1;", pfx)
-		h.line("            %s_to_json(&obj, stdout);", fn)
+		h.line("            if (%s(&obj, in, len) != SOFAB_RET_OK) return 1;", role(b, "decode"))
+		h.line("            %s(&obj, stdout);", toJSON(b))
 		h.line("            fputc('\\n', stdout);")
 		// The same bytes through the SAME corelib stream, fed ONE BYTE per feed.
 		// `decode` above is the incremental decoder fed once, so it never makes the
@@ -662,14 +665,14 @@ func (g *gen) emitMain(h *cfile, s *ir.Schema) {
 		// is what gives the verdict for the message as a whole: the last one-byte
 		// feed can only say whether THOSE bytes ended on a field boundary.
 		h.line(`        } else if (strcmp(mode, "streamdecode") == 0) {`)
-		h.line("            %s_decoder_t d;", pfx)
+		h.line("            %s d;", decT)
 		h.line("            sofab_ret_t ret;")
 		h.line("            size_t i;")
-		h.line("            %s_decoder_init(&d, &obj);", pfx)
-		h.line("            for (i = 0; i < len; i++) { (void)%s_decoder_feed(&d, in + i, 1); }", pfx)
-		h.line("            ret = %s_decoder_feed(&d, NULL, 0);", pfx)
+		h.line("            %s(&d, &obj);", role(b, "decoder_init"))
+		h.line("            for (i = 0; i < len; i++) { (void)%s(&d, in + i, 1); }", role(b, "decoder_feed"))
+		h.line("            ret = %s(&d, NULL, 0);", role(b, "decoder_feed"))
 		h.line("            if (ret != SOFAB_RET_OK) { fprintf(stderr, \"decode error: %%s\\n\", sofab_ret_name(ret)); return 1; }")
-		h.line("            %s_to_json(&obj, stdout);", fn)
+		h.line("            %s(&obj, stdout);", toJSON(b))
 		h.line("            fputc('\\n', stdout);")
 		// Surface the §7 decode OUTCOME rather than a bare pass/fail, so a
 		// conformance run can assert the INVALID-vs-INCOMPLETE distinction that an
@@ -682,7 +685,7 @@ func (g *gen) emitMain(h *cfile, s *ir.Schema) {
 		// (generators/cpp/project.go), and both always exit 0: the category is on
 		// line 1 of stdout, not in the status.
 		h.line(`        } else if (strcmp(mode, "status") == 0) {`)
-		h.line("            sofab_ret_t _ret = %s_decode(&obj, in, len);", pfx)
+		h.line("            sofab_ret_t _ret = %s(&obj, in, len);", role(b, "decode"))
 		h.line("            fputs(sofab_ret_name(_ret), stdout);")
 		h.line("            fputc('\\n', stdout);")
 		h.line(`        } else { fprintf(stderr, "unknown mode\n"); return 2; }`)
