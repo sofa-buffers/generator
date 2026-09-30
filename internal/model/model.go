@@ -27,7 +27,10 @@ func Build(doc *parser.Document) (*ir.Schema, error) {
 	if !ok {
 		return nil, fmt.Errorf("document root is not a mapping")
 	}
-	b := &builder{schema: &ir.Schema{Named: map[string]*ir.NamedType{}}}
+	b := &builder{
+		schema: &ir.Schema{Named: map[string]*ir.NamedType{}},
+		origin: map[string]string{},
+	}
 
 	if ver, ok := asInt(root["version"]); ok {
 		b.schema.Version = int(ver)
@@ -45,16 +48,59 @@ func Build(doc *parser.Document) (*ir.Schema, error) {
 			b.schema.Messages = append(b.schema.Messages, b.buildMessage(name, m))
 		}
 	}
+	if len(b.errs) > 0 {
+		return nil, b.errs
+	}
 	return b.schema, nil
 }
 
-type builder struct{ schema *ir.Schema }
+// Error is one definition the model cannot lower, located by the JSON pointer
+// of the schema element it comes from.
+type Error struct {
+	Loc string
+	Msg string
+}
 
-func (b *builder) register(nt *ir.NamedType) {
-	if _, exists := b.schema.Named[nt.Key]; !exists {
-		b.schema.NamedOrder = append(b.schema.NamedOrder, nt.Key)
+func (e Error) Error() string { return e.Loc + ": " + e.Msg }
+
+// Errors aggregates every problem found while lowering one document.
+type Errors []Error
+
+func (es Errors) Error() string {
+	var b strings.Builder
+	fmt.Fprintf(&b, "%d model error(s):", len(es))
+	for _, e := range es {
+		b.WriteString("\n  - ")
+		b.WriteString(e.Error())
 	}
+	return b.String()
+}
+
+type builder struct {
+	schema *ir.Schema
+	origin map[string]string // graph key -> location of the element that claimed it
+	errs   Errors
+}
+
+// register adds nt to the graph under its key, and reports false when that key
+// is already taken. Each $defs entry and each inline composite registers
+// exactly once, so a second claim is always a DIFFERENT schema element: an
+// inline key is its owner's key and its field name joined by "_", so `m.a_b`
+// and `m_a.b` both lower to `m_a_b`, and `$defs` struct `P`'s inline field `f`
+// lands on `struct/P_f`, the key of a `$defs` struct `P_f`. Replacing the
+// first type would silently give its fields the second one's layout, so the
+// claim is refused and located at both elements.
+func (b *builder) register(nt *ir.NamedType, loc string) bool {
+	if prev, taken := b.origin[nt.Key]; taken {
+		b.errs = append(b.errs, Error{Loc: loc, Msg: fmt.Sprintf(
+			"this type and the one at %s both lower to the type key %q, so one would replace the other; rename one",
+			prev, nt.Key)})
+		return false
+	}
+	b.origin[nt.Key] = loc
+	b.schema.NamedOrder = append(b.schema.NamedOrder, nt.Key)
 	b.schema.Named[nt.Key] = nt
+	return true
 }
 
 func (b *builder) buildDefs(defs map[string]any) {
@@ -65,6 +111,7 @@ func (b *builder) buildDefs(defs map[string]any) {
 		}
 		for _, name := range sortedKeys(group) {
 			key := cat + "/" + name
+			loc := "#/$defs/" + cat + "/" + name
 			switch cat {
 			case "struct", "union":
 				category := ir.CatStruct
@@ -72,12 +119,14 @@ func (b *builder) buildDefs(defs map[string]any) {
 					category = ir.CatUnion
 				}
 				nt := &ir.NamedType{Category: category, Name: name, Key: key}
-				b.register(nt) // register before recursing (supports self-reference)
-				nt.Fields = b.buildFields(group[name], key)
+				// register before recursing (supports self-reference)
+				if b.register(nt, loc) {
+					nt.Fields = b.buildFields(group[name], key, loc)
+				}
 			case "enum":
-				b.register(b.buildEnum(name, key, group[name]))
+				b.register(b.buildEnum(name, key, group[name]), loc)
 			case "bitfield":
-				b.register(b.buildBitfield(name, key, group[name]))
+				b.register(b.buildBitfield(name, key, group[name]), loc)
 			}
 		}
 	}
@@ -89,14 +138,15 @@ func (b *builder) buildMessage(name string, m map[string]any) *ir.Message {
 		msg.Summary = strings.TrimSpace(s)
 	}
 	if payload, ok := m["payload"].(map[string]any); ok {
-		msg.Fields = b.buildFields(payload, name)
+		msg.Fields = b.buildFields(payload, name, "#/messages/"+name+"/payload")
 	}
 	return msg
 }
 
 // buildFields lowers an id scope (payload / struct fields / union options),
-// returning fields sorted by id then name (ascending-id order, §6.1).
-func (b *builder) buildFields(node any, parentKey string) []*ir.Field {
+// returning fields sorted by id then name (ascending-id order, §6.1). loc is
+// the JSON pointer of the scope; a field's is loc + "/" + its name.
+func (b *builder) buildFields(node any, parentKey, loc string) []*ir.Field {
 	m, ok := node.(map[string]any)
 	if !ok {
 		return nil
@@ -107,7 +157,7 @@ func (b *builder) buildFields(node any, parentKey string) []*ir.Field {
 		if !ok {
 			continue
 		}
-		fields = append(fields, b.buildField(name, fdef, parentKey))
+		fields = append(fields, b.buildField(name, fdef, parentKey, loc+"/"+name))
 	}
 	sort.SliceStable(fields, func(i, j int) bool {
 		if fields[i].ID != fields[j].ID {
@@ -118,7 +168,7 @@ func (b *builder) buildFields(node any, parentKey string) []*ir.Field {
 	return fields
 }
 
-func (b *builder) buildField(name string, f map[string]any, parentKey string) *ir.Field {
+func (b *builder) buildField(name string, f map[string]any, parentKey, loc string) *ir.Field {
 	fld := &ir.Field{Name: name}
 	if id, ok := asInt(f["id"]); ok {
 		fld.ID = id
@@ -148,14 +198,14 @@ func (b *builder) buildField(name string, f map[string]any, parentKey string) *i
 		}
 		fld.Default = f["default"]
 	case "enum":
-		fld.Ref = b.refForComposite(f["enum"], ir.CatEnum, name, parentKey)
+		fld.Ref = b.refForComposite(f["enum"], ir.CatEnum, name, parentKey, loc)
 		fld.Default = f["default"]
 	case "bitfield":
-		fld.Ref = b.refForComposite(f["bits"], ir.CatBitfield, name, parentKey)
+		fld.Ref = b.refForComposite(f["bits"], ir.CatBitfield, name, parentKey, loc)
 	case "struct":
-		fld.Ref = b.refForComposite(f["fields"], ir.CatStruct, name, parentKey)
+		fld.Ref = b.refForComposite(f["fields"], ir.CatStruct, name, parentKey, loc)
 	case "union":
-		fld.Ref = b.refForComposite(f["oneof"], ir.CatUnion, name, parentKey)
+		fld.Ref = b.refForComposite(f["oneof"], ir.CatUnion, name, parentKey, loc)
 		if id, ok := asInt(f["default_id"]); ok {
 			// Default keeps the raw schema value for the docs target; the
 			// site's default_id travels on the TypeRef to analysis, which
@@ -164,14 +214,14 @@ func (b *builder) buildField(name string, f map[string]any, parentKey string) *i
 			fld.Ref.DefaultID = &id
 		}
 	case "array":
-		b.buildArray(fld, f, name, parentKey)
+		b.buildArray(fld, f, name, parentKey, loc)
 	default: // scalars + boolean
 		fld.Default = f["default"]
 	}
 	return fld
 }
 
-func (b *builder) buildArray(fld *ir.Field, f map[string]any, name, parentKey string) {
+func (b *builder) buildArray(fld *ir.Field, f map[string]any, name, parentKey, loc string) {
 	items, _ := f["items"].(map[string]any)
 	etyp, _ := items["type"].(string)
 	fld.Elem = kindOf(etyp)
@@ -181,27 +231,28 @@ func (b *builder) buildArray(fld *ir.Field, f map[string]any, name, parentKey st
 	if ml, ok := asInt(items["maxlen"]); ok {
 		fld.ElemMaxHas, fld.ElemMax = true, ml
 	}
-	fld.ElemRef = b.elemRef(etyp, items, name, parentKey)
+	fld.ElemRef = b.elemRef(etyp, items, name, parentKey, loc+"/items")
 	if etyp == "array" {
 		inner, _ := items["items"].(map[string]any)
-		fld.ElemItems = b.buildArrayElem(inner, name+"_elem", parentKey)
+		fld.ElemItems = b.buildArrayElem(inner, name+"_elem", parentKey, loc+"/items/items")
 	}
 	fld.Default = f["default"]
 }
 
 // elemRef hoists/refs a composite array element type (enum/bitfield/struct/union)
 // to a shared NamedType, reusing the field-level inline-hoisting path. Returns
-// nil for leaf elements (scalars/string/blob/boolean) and nested arrays.
-func (b *builder) elemRef(etyp string, items map[string]any, name, parentKey string) *ir.TypeRef {
+// nil for leaf elements (scalars/string/blob/boolean) and nested arrays. loc is
+// the JSON pointer of items.
+func (b *builder) elemRef(etyp string, items map[string]any, name, parentKey, loc string) *ir.TypeRef {
 	switch etyp {
 	case "enum":
-		return b.refForComposite(items["enum"], ir.CatEnum, name+"_elem", parentKey)
+		return b.refForComposite(items["enum"], ir.CatEnum, name+"_elem", parentKey, loc)
 	case "bitfield":
-		return b.refForComposite(items["bits"], ir.CatBitfield, name+"_elem", parentKey)
+		return b.refForComposite(items["bits"], ir.CatBitfield, name+"_elem", parentKey, loc)
 	case "struct":
-		return b.refForComposite(items["fields"], ir.CatStruct, name+"_elem", parentKey)
+		return b.refForComposite(items["fields"], ir.CatStruct, name+"_elem", parentKey, loc)
 	case "union":
-		ref := b.refForComposite(items["oneof"], ir.CatUnion, name+"_elem", parentKey)
+		ref := b.refForComposite(items["oneof"], ir.CatUnion, name+"_elem", parentKey, loc)
 		if id, ok := asInt(items["default_id"]); ok {
 			ref.DefaultID = &id // the element site's default_id (bound in analysis)
 		}
@@ -211,7 +262,7 @@ func (b *builder) elemRef(etyp string, items map[string]any, name, parentKey str
 }
 
 // buildArrayElem lowers a nested array element (items.items...) recursively.
-func (b *builder) buildArrayElem(items map[string]any, name, parentKey string) *ir.ArrayElem {
+func (b *builder) buildArrayElem(items map[string]any, name, parentKey, loc string) *ir.ArrayElem {
 	if items == nil {
 		return nil
 	}
@@ -223,10 +274,10 @@ func (b *builder) buildArrayElem(items map[string]any, name, parentKey string) *
 	if ml, ok := asInt(items["maxlen"]); ok {
 		e.ElemMaxHas, e.ElemMax = true, ml
 	}
-	e.ElemRef = b.elemRef(etyp, items, name, parentKey)
+	e.ElemRef = b.elemRef(etyp, items, name, parentKey, loc)
 	if etyp == "array" {
 		inner, _ := items["items"].(map[string]any)
-		e.ElemItems = b.buildArrayElem(inner, name+"_elem", parentKey)
+		e.ElemItems = b.buildArrayElem(inner, name+"_elem", parentKey, loc+"/items")
 	}
 	return e
 }
@@ -234,8 +285,9 @@ func (b *builder) buildArrayElem(items map[string]any, name, parentKey string) *
 // refForComposite resolves a composite member to a shared NamedType. If the
 // sub-definition is {$ref: "#/$defs/<cat>/<Name>"} it points at that graph key;
 // otherwise it hoists the inline definition into a synthetic NamedType named
-// after its owner (PLAN §5.3 nested-type namespacing).
-func (b *builder) refForComposite(def any, cat ir.Category, fieldName, parentKey string) *ir.TypeRef {
+// after its owner (PLAN §5.3 nested-type namespacing). loc is the JSON pointer
+// of the site that defines it.
+func (b *builder) refForComposite(def any, cat ir.Category, fieldName, parentKey, loc string) *ir.TypeRef {
 	if key, ok := refKey(def); ok {
 		return &ir.TypeRef{Key: key}
 	}
@@ -244,16 +296,21 @@ func (b *builder) refForComposite(def any, cat ir.Category, fieldName, parentKey
 	switch cat {
 	case ir.CatStruct, ir.CatUnion:
 		nt := &ir.NamedType{Category: cat, Name: synthKey, Key: synthKey, Inline: true}
-		b.register(nt)
-		nt.Fields = b.buildFields(def, synthKey)
+		if b.register(nt, loc) {
+			sub := "/fields"
+			if cat == ir.CatUnion {
+				sub = "/oneof"
+			}
+			nt.Fields = b.buildFields(def, synthKey, loc+sub)
+		}
 	case ir.CatEnum:
 		nt := b.buildEnum(synthKey, synthKey, def)
 		nt.Inline = true
-		b.register(nt)
+		b.register(nt, loc)
 	case ir.CatBitfield:
 		nt := b.buildBitfield(synthKey, synthKey, def)
 		nt.Inline = true
-		b.register(nt)
+		b.register(nt, loc)
 	}
 	return &ir.TypeRef{Key: synthKey}
 }
