@@ -9,6 +9,7 @@ import (
 
 	"github.com/sofa-buffers/generator/internal/generator"
 	"github.com/sofa-buffers/generator/internal/ir"
+	"github.com/sofa-buffers/generator/internal/naming"
 )
 
 // ---- config helpers -------------------------------------------------------
@@ -41,42 +42,49 @@ func cfgString(cfg map[string]any, key, dflt string) string {
 // always exposed its equivalent (`<name>Fp32Raw`) as a public field. Matching
 // that also keeps the ENCODE side reachable: a caller who wants to emit a
 // signaling NaN has no other way to say so, since the double cannot carry it.
-func fp32BitsField(name string) string { return dartIdent(name) + "Fp32Bits" }
+//
+// Its name is `<member>Fp32Bits`, allocated after every field of the class
+// (memberAlloc), so a sibling field spelled like it keeps its name and the
+// companion takes the trailing `_`.
+func (g *gen) fp32BitsField(f *ir.Field) string { return g.field(f).bits }
 
-// typeName renders a graph key ("struct/Point", "enum/Colour", or an inline
-// synthetic like "msg_field") as a PascalCase Dart type name.
-func (g *gen) typeName(key string) string {
-	parts := strings.FieldsFunc(key, func(r rune) bool { return r == '/' || r == '_' })
-	var b strings.Builder
-	for _, p := range parts {
-		if p == "" {
-			continue
-		}
-		b.WriteString(strings.ToUpper(p[:1]))
-		b.WriteString(p[1:])
+// ---- type names (ARCHITECTURE §8, "Naming") --------------------------------
+//
+// Dart has no nested classes, so every class is top-level in the one library:
+//
+//	type           naming.TypeIdent(path)             M, M_A, Point
+//	split variant  TypeIdent + "__Default" + Pascal   Shape__DefaultPt
+//	role           raw type + "__" + Role             M__Decoder
+//	private        "_" + raw type + "__" + Role       _M__Visitor, _M__ToJson
+//	escape         type + "_"                         String_ (typeEscape)
+//
+// Roles and privates are built from the UNESCAPED identifier: they carry `__`,
+// which no type identifier and no name a list holds contains.
+
+// rawTypeName is the unescaped identifier of the named type at graph key `key`:
+// naming.TypeIdent of its path, plus the variant for a split union.
+func (g *gen) rawTypeName(key string) string {
+	nt := g.schema.Named[key]
+	raw := naming.TypeIdent(nt.Path)
+	if nt.Variant != "" {
+		raw += "__Default" + naming.Pascal(nt.Variant)
 	}
-	if b.Len() == 0 {
-		return "X"
-	}
-	return b.String()
+	return raw
 }
 
-// exported PascalCases a message name into its Dart class name.
-func exported(name string) string {
-	parts := strings.FieldsFunc(name, func(r rune) bool { return r == '_' })
-	var b strings.Builder
-	for _, p := range parts {
-		if p == "" {
-			continue
-		}
-		b.WriteString(strings.ToUpper(p[:1]))
-		b.WriteString(p[1:])
-	}
-	if b.Len() == 0 {
-		return "X"
-	}
-	return b.String()
-}
+// typeName is the class of the named type at graph key `key`.
+func (g *gen) typeName(key string) string { return typeEscape(g.rawTypeName(key)) }
+
+// messageRaw is the unescaped identifier of message `name`; messageClass its
+// class.
+func messageRaw(name string) string   { return naming.TypeIdent([]string{name}) }
+func messageClass(name string) string { return typeEscape(messageRaw(name)) }
+
+// decoderName is a message's public incremental decoder (a role).
+func decoderName(raw string) string { return raw + "__Decoder" }
+
+// visitorName is a struct's, union's or message's private decode visitor.
+func visitorName(raw string) string { return "_" + raw + "__Visitor" }
 
 // ---- doc comments ---------------------------------------------------------
 
@@ -225,7 +233,7 @@ func (g *gen) dartInit(f *ir.Field) string {
 	case ir.KindArray:
 		if nativeArrayElem(f.Elem) {
 			ctor := fmt.Sprintf("%s(%d%s)", inlineArrayType(f.Elem), initialCap(f), g.rangeArg(f.Elem, f.ElemRef))
-			if def, ok := defaultRef(f); ok {
+			if def, ok := g.defaultRef(f); ok {
 				return fmt.Sprintf(" = %s..assign(%s)", ctor, def)
 			}
 			return " = " + ctor
@@ -233,7 +241,7 @@ func (g *gen) dartInit(f *ir.Field) string {
 		return " = <" + g.dartArrayElemType(f.Elem, f.ElemRef, f.ElemItems) + ">[]"
 	case ir.KindString, ir.KindBlob:
 		ctor := fmt.Sprintf("%s(%d)", g.dartType(f), initialCap(f))
-		if def, ok := defaultRef(f); ok {
+		if def, ok := g.defaultRef(f); ok {
 			return fmt.Sprintf(" = %s..assign(%s)", ctor, def)
 		}
 		return " = " + ctor
@@ -353,16 +361,16 @@ func (g *gen) dartDefaultValue(f *ir.Field) string {
 // two typed lists of one element type and an element-by-element walk from a
 // plain List -- once per defaulted field of every object built, the bench row's
 // struct-array elements included.
-func defaultRef(f *ir.Field) (string, bool) {
+func (g *gen) defaultRef(f *ir.Field) (string, bool) {
 	if !hasDestDefault(f) {
 		return "", false
 	}
-	return "_" + dartIdent(f.Name) + "Default", true
+	return g.field(f).def, true
 }
 
 // defaultDecl is the static declaration defaultRef names.
 func (g *gen) defaultDecl(f *ir.Field) string {
-	ref, _ := defaultRef(f)
+	ref, _ := g.defaultRef(f)
 	lit, _ := g.defaultLit(f)
 	t := storageType(f)
 	return fmt.Sprintf("static final %s %s = %s.fromList(%s);", t, ref, t, lit)

@@ -186,10 +186,10 @@ sofab.InlineBytes b(List<int> v) => sofab.InlineBytes.of(v);
 List<sofab.InlineString> strs(List<String> v) =>
     [for (final s in v) sofab.InlineString.of(s)];
 
-StructMid mid() => StructMid()
+Mid mid() => Mid()
   ..leaves = [
-    StructLeaf()..n = 1,
-    StructLeaf()
+    Leaf()..n = 1,
+    Leaf()
       ..tags = strs(['a', 'bc'])
       ..n = 2,
   ]

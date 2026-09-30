@@ -94,15 +94,42 @@ uses gets a trailing underscore; Dart has no way to escape a name. The field
   `BytesBuilder`, `Deprecated`, `Float32List`, `Float64List`, `Int64List`, and
   the limit constants `maxDynArrayCount`, `maxDynBlobLen`, `maxDynStringLen`.
 
+A field spelled like a class the file declares (see [Type names](#type-names))
+gets the trailing underscore too, since it would hide that class: the field `M`
+of the message `m` is `M_`. Where the underscore lands on another class name,
+another one is added (`String` is `String__` in a schema that also has a
+message `string`, whose class is `String_`).
+
 Only the member changes: the wire is keyed by the field id, and the JSON key
-stays the schema name. Two fields that end up with the same member — `encode`
-and `encode_`, or an `fp32` field `f` (whose bits companion is `fFp32Bits`) and
-a field `fFp32Bits` — fail generation, naming both; so does a field spelled like
-a generated class (`M` or `MDecoder` for the message `m`, `StructPoint` for a
-struct `Point`), which would hide that class. The same holds for a union
-option. Enum constants and bitfield flags are named the same way: two that end
-up with the same name (`class` and `class_`), or one spelled like its own class,
-fail generation too. The list lives in `generators/dart/reserved.go`.
+stays the schema name. A field always keeps its own name when a member the
+generator derives would take it: an `fp32` field `f` has its bits companion in
+`fFp32Bits`, but beside a field named `fFp32Bits` the companion is
+`fFp32Bits_`. Enum constants and bitfield flags are named the same way: `class`
+is `class_`, and a constant spelled like its own class takes the underscore. The
+lists live in `generators/dart/reserved.go`.
+
+## Type names
+
+Every class is top-level in `message.dart`, named after the schema path of its
+type, each name in PascalCase and joined with `_`:
+
+| schema | class |
+|---|---|
+| message `vehicle_telemetry` | `VehicleTelemetry` |
+| `$defs` struct, union, enum or bitfield `point` | `Point` |
+| inline struct, union, enum or bitfield of field `a` in message `m` | `M_A` |
+| inline element struct or union of an array field `a` in message `m` | `M_A` |
+| inline option `pt` of that union | `M_A_Pt` |
+| a `$defs` union `shape` used with `default_id` of its option `pt` | `Shape__DefaultPt` |
+| a message's incremental decoder | `M__Decoder` |
+
+A type spelled like a name the generated code uses unqualified — a
+`dart:core` or `dart:typed_data` type such as `String`, `List`, `Map`,
+`Object`, `BigInt`, `Uint8List`, `Endian`, `Deprecated` — takes a trailing
+underscore: the message `string` is `String_`, with the decoder
+`String__Decoder`. The generated harness imports `dart:io`, `dart:convert` and
+`dart:typed_data` under a prefix, so their other names (`File`, `Platform`,
+`Int32List`, …) are free.
 
 ## Unions
 
@@ -123,7 +150,7 @@ shape:
 ```
 
 ```dart
-class MShape {
+class M_Shape {
   static const int numId = 0;
   static const int nameId = 1;
   static const int ptId = 2;
@@ -139,10 +166,10 @@ class MShape {
   bool get hasName;
   sofab.InlineString mutableName();
 
-  MShapePt get pt;
-  set pt(MShapePt v);
+  M_Shape_Pt get pt;
+  set pt(M_Shape_Pt v);
   bool get hasPt;
-  MShapePt mutablePt();
+  M_Shape_Pt mutablePt();
 
   List<sofab.InlineString> get tags;
   set tags(List<sofab.InlineString> v);
@@ -156,7 +183,7 @@ class MShape {
 | operation | Dart |
 |---|---|
 | which option is held | `x.which` → the option's id |
-| option ids | `MShape.ptId` (`<option>Id` constants) |
+| option ids | `M_Shape.ptId` (`<option>Id` constants) |
 | test | `x.hasPt` |
 | read | `x.pt` |
 | select with a value | `x.num_ = 7`, `x.pt = p` |
@@ -171,9 +198,9 @@ if (m.shape.hasPt) {
   use(m.shape.pt.x);
 }
 switch (m.shape.which) {
-  case MShape.numId:
+  case M_Shape.numId:
     use(m.shape.num_);
-  case MShape.ptId:
+  case M_Shape.ptId:
     use(m.shape.pt.y);
 }
 m.shape.mutableName().assignString('Ada'); // name, from empty
@@ -217,15 +244,16 @@ fp32 member: assigning the value clears them; to write a signaling NaN, assign
 `mutable<Option>()` use it in PascalCase, and the constant is `<option>Id`. An
 option whose name is reserved for a field (see [Field names](#field-names))
 gets a trailing underscore, as a field does (`num` → `num_`); so does one
-landing on the union's own `which` or on the union's class name: an option
+landing on the union's own `which` or on a class name: an option
 `which` is `which_`,
-with `hasWhich` and `whichId`. Two options that would produce the same member
-(`foo_bar` and `fooBar` both give `hasFooBar`; `a`'s `aId` and an option named
-`aId`; `x`'s `hasX` and an option named `hasX`) fail generation, naming both.
+with `hasWhich` and `whichId`. An option keeps its own name when a member
+derived from another option would take it, and the derived member takes the
+underscore: beside an option `aId`, the option `a`'s constant is `aId_`; beside
+an option `hasX`, the option `x`'s test is `hasX_`.
 
 **`$defs` unions** used with different `default_id`s are one class per
-`default_id`, named after `<Name>_default_<option>`: `UnionShapeDefaultPt` and
-`UnionShapeDefaultNum`.
+`default_id`, named after the union and the default option:
+`Shape__DefaultPt` and `Shape__DefaultNum`.
 
 **Defaults.** A new union holds the `default_id` option at that option's own
 default; an omitted `default_id` means the option with the lowest id. Each

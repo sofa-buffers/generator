@@ -72,14 +72,14 @@ Myfirstmessage _sample() {
       sofab.InlineBytes.of([8]),
     ]
     ..someunionarray = [
-      MyfirstmessageSomeunionarrayElem()
+      Myfirstmessage_Someunionarray()
         ..mutableAsstring().assignString('row payload'),
     ]
     ..somemap = [
-      MyfirstmessageSomemapElem()
+      Myfirstmessage_Somemap()
         ..key.assignString('first key')
         ..value = 1,
-      MyfirstmessageSomemapElem()
+      Myfirstmessage_Somemap()
         ..key.assignString('second key')
         ..value = 2,
     ];

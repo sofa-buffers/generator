@@ -69,7 +69,7 @@ func TestModuleShape(t *testing.T) {
 		"static const int maxDepth = 2;",
 		"static sofab.DecodeStatus tryDecode(Uint8List data, Myfirstmessage out) {",
 		"static Myfirstmessage decode(Uint8List data) {",
-		"class _MyfirstmessageVisitor extends sofab.MessageVisitor {",
+		"class _Myfirstmessage__Visitor extends sofab.MessageVisitor {",
 		"static const int maxSize =",
 	} {
 		if !strings.Contains(out, want) {
@@ -81,7 +81,7 @@ func TestModuleShape(t *testing.T) {
 func TestEnumBitfieldConstants(t *testing.T) {
 	out := genFor(t, exampleDef, map[string]any{})
 	// enum/bitfield lower to an abstract-final class of static const int values.
-	if !strings.Contains(out, "abstract final class MyfirstmessageSomeenum {") {
+	if !strings.Contains(out, "abstract final class Myfirstmessage_Someenum {") {
 		t.Error("enum not lowered to an abstract final class")
 	}
 	if !strings.Contains(out, "static const int ") {
@@ -413,7 +413,7 @@ func TestDartHeaderVisitorReject(t *testing.T) {
 		{"sofab.InlineInt64Array? onSignedArray(int id, int count) {", "case 16:\n        if (count > 5) invalidate();\n        return o.someintarray;"},
 		{"sofab.InlineFloat32Array? onFp32Array(int id, int count) {", "case 17:\n        if (count > 3) invalidate();\n        return o.somefloatarray;"},
 	} {
-		body := methodBody(out, "class _MyfirstmessageVisitor", c.sig)
+		body := methodBody(out, "class _Myfirstmessage__Visitor", c.sig)
 		if !strings.Contains(body, c.arm) {
 			t.Errorf("%s is missing the header arm %q:\n%s", c.sig, c.arm, body)
 		}
@@ -421,7 +421,7 @@ func TestDartHeaderVisitorReject(t *testing.T) {
 	// Each id is answered by exactly one call: someuintarray (15) is unsigned, so
 	// a signed or fixlen array at id 15 has no arm and is skipped.
 	for _, sig := range []string{"onSignedArray(int id", "onFp32Array(int id", "onFp64Array(int id", "onString(int id", "onBlob(int id"} {
-		if strings.Contains(methodBody(out, "class _MyfirstmessageVisitor", sig), "case 15:") {
+		if strings.Contains(methodBody(out, "class _Myfirstmessage__Visitor", sig), "case 15:") {
 			t.Errorf("id 15 (array<u32>) answered in %s: a contradicting wire kind must be skipped (§7.3)", sig)
 		}
 	}
@@ -480,7 +480,7 @@ func TestDecodeLimitsPlumbing(t *testing.T) {
 		// an unbounded destination starts empty
 		"final sofab.InlineString s = sofab.InlineString(0);",
 		// the decode entry points drive the visitor and nothing else
-		"sofab.Decoder.decode(data, _DynVisitor(out));",
+		"sofab.Decoder.decode(data, _Dyn__Visitor(out));",
 	} {
 		if !strings.Contains(out, want) {
 			t.Errorf("generated module missing %q:\n%s", want, out)
@@ -564,11 +564,11 @@ func TestDartDeclinesUnboundDestinations(t *testing.T) {
 		{"sofab.InlineString? onString(int id, int length) {", "    }\n    return null;"},
 		{"sofab.InlineInt64Array? onUnsignedArray(int id, int count) {", "    }\n    return null;"},
 	} {
-		if body := methodBody(out, "class _MVisitor", c.sig); !strings.Contains(body, c.want) {
+		if body := methodBody(out, "class _M__Visitor", c.sig); !strings.Contains(body, c.want) {
 			t.Errorf("%s must answer null for an id it does not bind:\n%s", c.sig, body)
 		}
 	}
-	nv := out[strings.Index(out, "class _NVisitor"):]
+	nv := out[strings.Index(out, "class _N__Visitor"):]
 	for _, notWant := range []string{"onString(", "onBlob(", "onUnsignedArray(", "onSignedArray(", "onFp32Array(", "onFp64Array(", "onSequenceStart("} {
 		if strings.Contains(nv, notWant) {
 			t.Errorf("a scope binding no such field must inherit the skipping default, not override %q:\n%s", notWant, nv)
@@ -623,7 +623,7 @@ func TestDartCountIsACapacityNotALength(t *testing.T) {
 		// Initializers: empty for every count:N array, wrapper and native alike. A
 		// native array's N sizes its STORAGE -- the capacity the codec decodes into
 		// -- and its length starts at 0.
-		"  List<VecFixedElem> fixed = <VecFixedElem>[];",
+		"  List<Vec_Fixed> fixed = <Vec_Fixed>[];",
 		"  List<sofab.InlineString> fstrs = <sofab.InlineString>[];",
 		"  List<sofab.InlineBytes> fblobs = <sofab.InlineBytes>[];",
 		"  final sofab.InlineInt64Array fnums = sofab.InlineInt64Array(4, range: const sofab.ElemRange(0, 4294967295));",
@@ -651,7 +651,7 @@ func TestDartCountIsACapacityNotALength(t *testing.T) {
 	// materialized to N element defaults, a short default tail-padded to N, the
 	// trailing-run trim on encode and the fill-to-N on decode.
 	for _, notWant := range []string{
-		"<VecFixedElem>[VecFixedElem(),",
+		"<Vec_Fixed>[Vec_Fixed(),",
 		"<sofab.InlineString>[sofab.InlineString(",
 		"<sofab.InlineBytes>[sofab.InlineBytes(",
 		"<int>[0, 0, 0, 0]",
@@ -744,8 +744,8 @@ func TestDartCollectorsPlaceByIDAndAreBounded(t *testing.T) {
 	for _, want := range []string{
 		// the schema count reaches every collector as its cap; count-less is -1, and
 		// the ROW collectors take the OUTER array's cap (a row id is its index there)
-		"sofab.MessageSeq<VecFixedElem>(o.fixed, 5,",
-		"sofab.MessageSeq<VecDynamicElem>(o.dynamic_, -1,",
+		"sofab.MessageSeq<Vec_Fixed>(o.fixed, 5,",
+		"sofab.MessageSeq<Vec_Dynamic>(o.dynamic_, -1,",
 		// ...and beside each schema bound its receiver sibling, ALWAYS emitted:
 		// corelib-dart requires them (§6.2.1 gives that library no number to
 		// invent) and consults each one only where the schema bound beside it is
@@ -837,7 +837,7 @@ func TestDartArrayHeaderBoundIsKeyedByElementKind(t *testing.T) {
 		{"sofab.InlineInt64Array? onSignedArray(int id, int count) {", "      case 3:\n        if (count > 9) invalidate();\n        return o.ss;"},
 	}
 	for i, c := range calls {
-		body := methodBody(out, "class _VecVisitor", c.sig)
+		body := methodBody(out, "class _Vec__Visitor", c.sig)
 		if !strings.Contains(body, c.arm) {
 			t.Errorf("%s is missing the arm %q:\n%s", c.sig, c.arm, body)
 		}
@@ -871,7 +871,7 @@ func TestDartSkippedStringIsNotValidated(t *testing.T) {
 		"      sa: { id: 3, type: array, items: { type: string, count: 4 } }\n"
 	out := genFor(t, writeDef(t, src), map[string]any{})
 
-	body := methodBody(out, "class _MVisitor", "sofab.InlineString? onString(int id, int length) {")
+	body := methodBody(out, "class _M__Visitor", "sofab.InlineString? onString(int id, int length) {")
 	for _, want := range []string{
 		// The maxlen bound reads the announced wire length, at the header.
 		"      case 0:\n        if (length > 8) invalidate();\n        return o.s;",
@@ -914,8 +914,8 @@ func TestDartStringFreeScopeSkipsStrings(t *testing.T) {
 	out := genFor(t, writeDef(t, src), map[string]any{})
 
 	for _, decl := range []string{
-		"class _MVisitor extends sofab.MessageVisitor {",
-		"class _MNVisitor extends sofab.MessageVisitor {",
+		"class _M__Visitor extends sofab.MessageVisitor {",
+		"class _M_N__Visitor extends sofab.MessageVisitor {",
 	} {
 		if !strings.Contains(out, decl) {
 			t.Errorf("missing %q:\n%s", decl, out)
@@ -936,7 +936,7 @@ func TestDartStringScopeFallsThroughToSkip(t *testing.T) {
 	src := "version: 1\nmessages:\n  M:\n    payload:\n" +
 		"      s: { id: 0, type: string, maxlen: 8 }\n"
 	out := genFor(t, writeDef(t, src), map[string]any{})
-	body := methodBody(out, "class _MVisitor", "sofab.InlineString? onString(int id, int length) {\n    switch (id) {")
+	body := methodBody(out, "class _M__Visitor", "sofab.InlineString? onString(int id, int length) {\n    switch (id) {")
 	if body == "" {
 		t.Fatalf("expected an id switch in the string header call:\n%s", out)
 	}
@@ -959,7 +959,7 @@ func TestDartNoConvertImport(t *testing.T) {
 			"      sa: { id: 1, type: array, items: { type: string, count: 4 } }\n",
 	} {
 		out := genFor(t, writeDef(t, src), map[string]any{})
-		if strings.Contains(out, "import 'dart:convert';") {
+		if strings.Contains(out, "import 'dart:convert'") {
 			t.Errorf("no generated module may import dart:convert:\n%s", out)
 		}
 	}
@@ -1032,7 +1032,7 @@ messages:
 	// The only generated visitor is the message's own, and it overrides
 	// onSequenceStart with arms for its declared sequences and `return null` for
 	// everything else.
-	if body := methodBody(got, "class _ProbeVisitor", "sofab.MessageVisitor? onSequenceStart(int id) {"); !strings.HasSuffix(body, "    }\n    return null;") {
+	if body := methodBody(got, "class _Probe__Visitor", "sofab.MessageVisitor? onSequenceStart(int id) {"); !strings.HasSuffix(body, "    }\n    return null;") {
 		t.Errorf("onSequenceStart must skip every sequence it does not bind:\n%s", body)
 	}
 	// The leaf collectors are corelib types since corelib-dart#74, and inherit the
@@ -1167,7 +1167,7 @@ func TestDartCallerOwnsTheEncodeBuffer(t *testing.T) {
 func TestDartStructsGetNoEncodeEntryPoint(t *testing.T) {
 	mod := genFor(t, writeDef(t, "version: 1\nmessages:\n  M:\n    payload:\n"+
 		"      p: { id: 0, type: struct, fields: { x: { id: 0, type: i32 } } }\n"), map[string]any{})
-	cls := mod[strings.Index(mod, "class MP {"):strings.Index(mod, "class M {")]
+	cls := mod[strings.Index(mod, "class M_P {"):strings.Index(mod, "class M {")]
 	if strings.Contains(cls, "Uint8List encode()") || strings.Contains(cls, "maxSize") {
 		t.Errorf("a struct must not carry a message encode entry point:\n%s", cls)
 	}
@@ -1633,33 +1633,33 @@ messages:
 			t.Errorf("%s still emits the unread _isDefault getter", path)
 		}
 	}
-	for _, gone := range []string{"ignore_for_file", "_StructPVisitor", "_f32FromBits", "import 'dart:typed_data';"} {
+	for _, gone := range []string{"ignore_for_file", "_P__Visitor", "_f32FromBits", "import 'dart:typed_data';"} {
 		if strings.Contains(bare["lib/message.dart"], gone) {
 			t.Errorf("defs-only message.dart emits %q, which nothing uses", gone)
 		}
 	}
-	for _, gone := range []string{"ignore_for_file", "_toJsonStructP", "_benchSink", "final warmup", "import 'dart:convert';", "import 'package:harness/message.dart';", "as sofab;"} {
+	for _, gone := range []string{"ignore_for_file", "_P__ToJson", "_benchSink", "final warmup", "import 'dart:convert' as convert;", "import 'package:harness/message.dart';", "as sofab;"} {
 		if strings.Contains(bare["bin/harness.dart"], gone) {
 			t.Errorf("defs-only harness.dart emits %q, which nothing uses", gone)
 		}
 	}
 	// With a message: P is reached through the array and keeps its visitor and
 	// codec; Q is reached by nothing and keeps only its class.
-	for _, want := range []string{"class _StructPVisitor ", "class StructQ {", "_f32FromBits(", deprecatedIgnore} {
+	for _, want := range []string{"class _P__Visitor ", "class Q {", "_f32FromBits(", deprecatedIgnore} {
 		if !strings.Contains(full["lib/message.dart"], want) {
 			t.Errorf("message.dart missing %q", want)
 		}
 	}
-	if strings.Contains(full["lib/message.dart"], "_StructQVisitor") {
-		t.Error("message.dart emits a visitor for StructQ, which no message reaches")
+	if strings.Contains(full["lib/message.dart"], "_Q__Visitor") {
+		t.Error("message.dart emits a visitor for Q, which no message reaches")
 	}
-	for _, want := range []string{"_toJsonStructP(", "int _benchSink = 0;", "final warmup", deprecatedIgnore} {
+	for _, want := range []string{"_P__ToJson(", "int _benchSink = 0;", "final warmup", deprecatedIgnore} {
 		if !strings.Contains(full["bin/harness.dart"], want) {
 			t.Errorf("harness.dart missing %q", want)
 		}
 	}
-	if strings.Contains(full["bin/harness.dart"], "_toJsonStructQ") {
-		t.Error("harness.dart emits a codec for StructQ, which no message reaches")
+	if strings.Contains(full["bin/harness.dart"], "_Q__ToJson") {
+		t.Error("harness.dart emits a codec for Q, which no message reaches")
 	}
 }
 

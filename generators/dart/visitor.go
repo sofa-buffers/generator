@@ -53,7 +53,7 @@ import (
 // option descends into mutable<Opt>()'s object, which a held option continues
 // (§7.4 merge) and a newly selected one enters at its default; a wrapper-array
 // option clears the list mutable<Opt>() returns (§7.4 replace).
-func (g *gen) emitVisitor(f *dfile, typeName string, fields []*ir.Field, u *unionShape) {
+func (g *gen) emitVisitor(f *dfile, typeName, raw string, fields []*ir.Field, u *unionShape) {
 	var uns, sig, f32, f32bits, f64 []string
 	var str, blob, uArr, sArr, f32Arr, f64Arr []string
 	var seq []string
@@ -66,7 +66,7 @@ func (g *gen) emitVisitor(f *dfile, typeName string, fields []*ir.Field, u *unio
 	}
 
 	for _, fld := range fields {
-		acc := "o." + dartIdent(fld.Name)
+		acc := "o." + g.member(fld)
 		// dest is what an aggregate header arm hands over, seqObj what a struct/
 		// union descent enters: the member itself, or in a union the option's
 		// select-if-not-held accessor.
@@ -75,7 +75,7 @@ func (g *gen) emitVisitor(f *dfile, typeName string, fields []*ir.Field, u *unio
 		if u != nil {
 			opt = u.byField[fld]
 			acc = "o." + opt.prop
-			dest = "o.mutable" + opt.base + "()"
+			dest = "o." + opt.mutable + "()"
 			seqObj = dest
 		}
 		switch fld.Kind {
@@ -96,7 +96,7 @@ func (g *gen) emitVisitor(f *dfile, typeName string, fields []*ir.Field, u *unio
 				f32bits = append(f32bits, arm(fld.ID, acc+" = _f32FromBits(bits);\n        o."+opt.bits+" = bits;"))
 				continue
 			}
-			bitsAcc := "o." + fp32BitsField(fld.Name)
+			bitsAcc := "o." + g.fp32BitsField(fld)
 			f32 = append(f32, arm(fld.ID, acc+" = value;\n        "+bitsAcc+" = null;"))
 			f32bits = append(f32bits, arm(fld.ID, bitsAcc+" = bits;\n        "+acc+" = _f32FromBits(bits);"))
 		case ir.KindFP64:
@@ -109,7 +109,7 @@ func (g *gen) emitVisitor(f *dfile, typeName string, fields []*ir.Field, u *unio
 		case ir.KindBlob:
 			blob = append(blob, retArm(fld.ID, g.destReturn(fld, dest, "length", g.limits.blobHas, g.elemMaxExpr(ir.KindBlob))))
 		case ir.KindStruct, ir.KindUnion:
-			seq = append(seq, retArm(fld.ID, fmt.Sprintf("return %s(%s);", visitorName(g.typeName(fld.Ref.Key)), seqObj)))
+			seq = append(seq, retArm(fld.ID, fmt.Sprintf("return %s(%s);", visitorName(g.rawTypeName(fld.Ref.Key)), seqObj)))
 		case ir.KindArray:
 			if !nativeArrayElem(fld.Elem) {
 				// Wrapper-sequence array: clear, then descend into a collector. The
@@ -141,8 +141,8 @@ func (g *gen) emitVisitor(f *dfile, typeName string, fields []*ir.Field, u *unio
 		}
 	}
 
-	f.line("class %s extends sofab.MessageVisitor {", visitorName(typeName))
-	f.line("  %s(this.o);", visitorName(typeName))
+	f.line("class %s extends sofab.MessageVisitor {", visitorName(raw))
+	f.line("  %s(this.o);", visitorName(raw))
 	f.line("  final %s o;", typeName)
 	emitSwitch(f, "void onUnsigned(int id, int value)", uns)
 	emitSwitch(f, "void onSigned(int id, int value)", sig)
@@ -392,7 +392,7 @@ func (g *gen) collector(out string, elem ir.Kind, ref *ir.TypeRef, items *ir.Arr
 		return fmt.Sprintf("sofab.BlobSeq(%s, %d, %d%s, relemMax: %s)", out, cap, emax, rcap, g.elemMaxExpr(ir.KindBlob))
 	case ir.KindStruct, ir.KindUnion:
 		t := g.typeName(ref.Key)
-		return fmt.Sprintf("sofab.MessageSeq<%s>(%s, %d, () => %s(), (x) => %s(x)%s)", t, out, cap, t, visitorName(t), rcap)
+		return fmt.Sprintf("sofab.MessageSeq<%s>(%s, %d, () => %s(), (x) => %s(x)%s)", t, out, cap, t, visitorName(g.rawTypeName(ref.Key)), rcap)
 	case ir.KindArray:
 		// The row collectors take the OUTER array's cap: a row's element id is its
 		// index in this array (§5.1), so cap is what bounds it -- and so is the

@@ -896,8 +896,10 @@ echo "==> corpus builds ($(ls "$ROOT"/tests/matrix/corpus/defs/*.yaml | wc -l) d
 
 # The reserved-name collision test (ARCHITECTURE §8): reserved.yaml uses every
 # name on generators/dart/reserved.go's list as a message field, a nested struct
-# field and a union option (TestReservedSchemaFile keeps it in step with the
-# list; TestDartNamesInScope keeps the list in step with the generated classes).
+# field and a union option (case twins in a scope of their own), every name a
+# type is escaped away from as a message, and the member collisions that are
+# escaped rather than refused (TestReservedSchemaFile keeps it in step with the
+# list; TestDartNamesInScope keeps the list in step with the generated code).
 # The generator exits 0 on a class that does not analyze, so the project must
 # analyze with --fatal-infos and compile, and every value of reserved.json must
 # come back under its schema name.
@@ -916,6 +918,21 @@ if bad:
     sys.exit(f"mismatch on {bad}: got {[got.get(k) for k in bad]}")
 PY
 echo "==> reserved names OK"
+
+# The shared name-collision schema (ARCHITECTURE §8, "Naming"): every path
+# clash, role word, fixed, imported and builtin name as a type. Every message
+# must analyze and compile -- the generator exits 0 on a class that does not --
+# and message m must round-trip names.json.
+echo "==> names: the shared name-collision schema analyzes, compiles and round-trips"
+build "$ROOT/tests/conformance/lib/names.yaml" "$WORK/names"
+"$WORK/names/harness" encode m < "$ROOT/tests/conformance/lib/names.json" > "$WORK/names.bin" \
+    || { echo "FAIL: names.json did not encode"; exit 1; }
+"$WORK/names/harness" decode m < "$WORK/names.bin" > "$WORK/names.out" \
+    || { echo "FAIL: names.bin did not decode"; exit 1; }
+python3 "$ROOT/tests/conformance/lib/json_equal.py" \
+    "$(cat "$ROOT/tests/conformance/lib/names.json")" "$(cat "$WORK/names.out")" --label names \
+    || { echo "FAIL: names.json did not round-trip"; exit 1; }
+echo "==> names OK"
 
 # Declared integer width is a VALIDITY bound (MESSAGE_SPEC S7.1 + documentation#32,
 # generator#266, Crucible F-0033 / codegen defect G-0026). A value outside the
@@ -1092,6 +1109,7 @@ format_gen dart "$WORK/fmt/strlim" --config "$WORK/cfg-strlim.yaml" --in "$WORK/
 format_gen dart "$WORK/fmt/growth" --config "$WORK/cfg-limit.yaml" --in "$WORK/growth.yaml"
 format_gen dart "$WORK/fmt/repeated" --config "$WORK/cfg.yaml" --in "$WORK/repeated.yaml"
 format_gen dart "$WORK/fmt/union" --config "$WORK/cfg.yaml" --in "$WORK/union.yaml"
+format_gen dart "$WORK/fmt/names" --config "$WORK/cfg.yaml" --in "$ROOT/tests/conformance/lib/names.yaml"
 check_format dart "$WORK/fmt"
 
 # ... and it still builds. A formatter is supposed to move whitespace only, but
