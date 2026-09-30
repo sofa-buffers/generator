@@ -36,13 +36,6 @@ import (
 // option. The selection itself is the library's (std::variant::emplace) or one
 // placement-new per option; no generic tagged-union helper is emitted.
 
-// unionReserved are the members a union type declares itself; an option whose
-// name would collide with one is mangled with the backend's usual trailing
-// underscore, exactly like a C++ keyword.
-var unionReserved = map[string]bool{
-	"which": true, "Which": true, "reset": true, "serialize": true, "deserialize": true,
-}
-
 // unionOpt is one option of a union type with every name the backend derives
 // from it.
 type unionOpt struct {

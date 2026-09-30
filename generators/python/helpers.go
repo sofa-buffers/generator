@@ -452,25 +452,3 @@ func (g *gen) pyArrayFromJSON(src string, elem ir.Kind, ref *ir.TypeRef, items *
 		return fmt.Sprintf("list(%s)", src)
 	}
 }
-
-// pyKeywords are Python's (hard) reserved words — invalid as attribute names.
-// (`match`/`case` are soft keywords, valid as identifiers, so not included.) No
-// escape exists, so such a field is mangled (trailing underscore); the JSON key
-// (a separate string literal) keeps the original name.
-var pyKeywords = map[string]bool{
-	"False": true, "None": true, "True": true, "and": true, "as": true,
-	"assert": true, "async": true, "await": true, "break": true, "class": true,
-	"continue": true, "def": true, "del": true, "elif": true, "else": true,
-	"except": true, "finally": true, "for": true, "from": true, "global": true,
-	"if": true, "import": true, "in": true, "is": true, "lambda": true,
-	"nonlocal": true, "not": true, "or": true, "pass": true, "raise": true,
-	"return": true, "try": true, "while": true, "with": true, "yield": true,
-}
-
-// pyIdent mangles a field name that is a Python keyword (trailing underscore).
-func pyIdent(name string) string {
-	if pyKeywords[name] {
-		return name + "_"
-	}
-	return name
-}

@@ -14,6 +14,8 @@ set -eu
 # Corelib checkout + ref pinning (docs/CI.md).
 . "$(dirname "$0")/../lib/corelib.sh"
 . "$(dirname "$0")/../lib/maxsize_fill.sh"
+# shellcheck source=../lib/backend_tests.sh
+. "$(dirname "$0")/../lib/backend_tests.sh"
 
 ROOT=$(cd "$(dirname "$0")/../../.." && pwd)
 CPP="${1:-${SOFAB_CPP_DIR:-}}"
@@ -1015,6 +1017,15 @@ run_variant cpp-static "" false "-I$CPP/include" SOFAB_CPP_DIR="$CPP" SOFAB_C_DI
 # SOFAB_C_DIR; the generated Makefile compiles + links its C sources.
 run_variant c-cpp-dynamic "c-cpp" true "-I$CC/src/include" SOFAB_C_DIR="$CC"
 run_variant c-cpp-static  "c-cpp" false "-I$CC/src/include" SOFAB_C_DIR="$CC"
+
+# The backend's own gated Go tests -- the union compile/run-time gates and the
+# reserved-name collision test -- against both corelibs, every skip a failure
+# (tests/conformance/lib/backend_tests.sh). They need two checkouts and
+# run_backend_tests hands over one variable, so the c-cpp one is exported here.
+echo "==> backend Go tests against both corelibs"
+SOFAB_C_DIR="$CC"
+export SOFAB_C_DIR
+run_backend_tests generators/cpp SOFAB_CPP_DIR "$CPP"
 
 # Receiver-side decode limits (generator#102), pure corelib-cpp only (the c-cpp
 # profile is statically schema-bounded). An unbounded array claiming more than
