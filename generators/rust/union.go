@@ -6,6 +6,7 @@ import (
 
 	"github.com/sofa-buffers/generator/internal/generator"
 	"github.com/sofa-buffers/generator/internal/ir"
+	"github.com/sofa-buffers/generator/internal/naming"
 )
 
 // A schema union is a native Rust enum with one tuple variant per option, so it
@@ -59,8 +60,26 @@ type unionOpt struct {
 	isD     bool   // the union's default option (default_id)
 }
 
+// The option members, spelled so that no two can meet (ARCHITECTURE §8, the
+// member channel). A schema name has no `__` and no trailing `_`, and the names
+// of one union have distinct folds, so:
+//
+//   - a variant is Pascal(opt): injective, and `Self` -- the one PascalCase
+//     keyword -- takes the trailing `_` no Pascal name ends with;
+//   - an id constant is UPPER(opt)_ID: injective (a shared upper-case spelling
+//     is a shared fold), and a getter that could spell one is escaped below;
+//   - a getter is the option's own name, escaped with a trailing `_` when it is
+//     a keyword that cannot be raw, a member the type already has
+//     (unionReserved), a name ending in `_mut` (the mutable accessor's shape) or
+//     an all-upper-case name ending in `_ID` (the id constant's shape) -- so no
+//     unescaped getter has the shape of either, and no escaped one (it ends in
+//     `_`) has the shape of anything else;
+//   - the mutable accessor is <opt>_mut; where that is a member the type already
+//     has (as_mut, borrow_mut, deref_mut) it is <opt>__mut instead, the one
+//     spelling in the impl that contains `__`.
+
 func optVariant(name string) string {
-	v := exported(name)
+	v := naming.Pascal(name)
 	if v == "Self" { // the one PascalCase keyword
 		v += "_"
 	}
@@ -68,18 +87,19 @@ func optVariant(name string) string {
 }
 
 func optGetter(name string) string {
-	if unionReserved[name] {
+	if unionReserved[name] || rustNonRaw[name] || strings.HasSuffix(name, "_mut") ||
+		(strings.HasSuffix(name, "_ID") && strings.ToUpper(name) == name) {
 		return name + "_"
 	}
 	return rustIdent(name)
 }
 
-// optMut is the select-if-not-held accessor's name. Built from the raw option
-// name: `<keyword>_mut` is never a keyword, but it can be a reserved member
-// (option `borrow` -> `borrow_mut`), which takes the trailing underscore.
+// optMut is the select-if-not-held accessor's name, built from the raw option
+// name: `<keyword>_mut` is never a keyword, but it can be a member the type
+// already has (option `borrow` -> `borrow_mut`), which takes `__mut`.
 func optMut(name string) string {
 	if unionReserved[name+"_mut"] {
-		return name + "_mut_"
+		return name + "__mut"
 	}
 	return name + "_mut"
 }
@@ -102,39 +122,6 @@ func unionOptions(nt *ir.NamedType) []*unionOpt {
 	return out
 }
 
-// checkUnionNames rejects a union whose options derive the same Rust name --
-// two variants (`a_b` / `aB` -> AB), or two members of the impl's value
-// namespace (`x_mut`'s getter against `x`'s mutable accessor, `a`/`A` -> A_ID,
-// or a getter on an id constant) -- before rustc reports a duplicate definition
-// that points at nothing in the schema.
-func checkUnionNames(s *ir.Schema) error {
-	for _, key := range s.NamedOrder {
-		nt := s.Named[key]
-		if nt.Category != ir.CatUnion {
-			continue
-		}
-		variants := map[string]string{}
-		values := map[string]string{}
-		for _, o := range unionOptions(nt) {
-			if prev, ok := variants[o.variant]; ok {
-				return fmt.Errorf("rust: union %q: options %q and %q both generate the enum variant %q; rename one", key, prev, o.f.Name, o.variant)
-			}
-			variants[o.variant] = o.f.Name
-			for _, n := range []string{o.getter, o.mut, o.idConst} {
-				bare := strings.TrimPrefix(n, "r#")
-				if bare == "which" || bare == "serialize" {
-					return fmt.Errorf("rust: union %q: option %q generates %q, which the union type already defines; rename the option", key, o.f.Name, bare)
-				}
-				if prev, ok := values[bare]; ok {
-					return fmt.Errorf("rust: union %q: options %q and %q both generate %q; rename one", key, prev, o.f.Name, bare)
-				}
-				values[bare] = o.f.Name
-			}
-		}
-	}
-	return nil
-}
-
 // emitUnion emits one union type: the enum, its Default (default_id at that
 // option's own default) and the impl with the ids, which(), the accessors and
 // serialize.
@@ -149,11 +136,14 @@ func (g *gen) emitUnion(f *rfile, name string, nt *ir.NamedType) {
 	f.line("/// own default.")
 	if g.noStd {
 		f.line("#[derive(Debug, Clone, PartialEq)]")
-		f.line("#[cfg_attr(feature = \"serde\", derive(Serialize, Deserialize))]")
+		f.line("#[cfg_attr(feature = \"serde\", derive(serde::Serialize, serde::Deserialize))]")
 	} else {
-		f.line("#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]")
+		f.line("#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]")
 	}
 	f.line(unionEnumAllow)
+	if a := typeNameAllow(name); a != "" {
+		f.line("%s", a)
+	}
 	f.line("pub enum %s {", name)
 	for _, o := range opts {
 		f.emitDoc("    ", fieldDoc(o.f, generator.BoundNote(o.f, g.storage(o.f))))
@@ -195,10 +185,10 @@ func (g *gen) emitUnion(f *rfile, name string, nt *ir.NamedType) {
 	f.line("impl %s {", name)
 	for _, o := range opts {
 		f.line("    /// The id of option `%s`.", o.f.Name)
-		f.line("    pub const %s: Id = %d;", o.idConst, o.f.ID)
+		f.line("    pub const %s: sofab::Id = %d;", o.idConst, o.f.ID)
 	}
 	f.line("    /// The id of the option this union holds.")
-	f.line("    pub fn which(&self) -> Id {")
+	f.line("    pub fn which(&self) -> sofab::Id {")
 	f.line("        match self {")
 	for _, o := range opts {
 		f.line("            Self::%s(_) => Self::%s,", o.variant, o.idConst)
@@ -242,7 +232,7 @@ func (g *gen) emitUnion(f *rfile, name string, nt *ir.NamedType) {
 	// and the enclosing lazy frame drops it); any other option is written even at
 	// its own default, a sequence-framed one as a present frame (end_keep), since
 	// an omitted option would read back as default_id.
-	f.line("    pub fn serialize<_F: sofab::Flush>(&self, os: &mut OStream<'_, _F>) {")
+	f.line("    pub fn serialize<_F: sofab::Flush>(&self, os: &mut sofab::OStream<'_, _F>) {")
 	f.line("        match self {")
 	for _, o := range opts {
 		g.emitUnionArm(f, o)
@@ -271,9 +261,9 @@ func (g *gen) emitUnionArm(f *rfile, o *unionOpt) {
 	// member of the same kind cannot drift apart.
 	switch fld.Kind {
 	case ir.KindU8, ir.KindU16, ir.KindU32, ir.KindU64, ir.KindBitfield:
-		guarded(g.rustLeafNe("*v", fld), fmt.Sprintf("let _ = os.write_unsigned(%d, *v as Unsigned);", id))
+		guarded(g.rustLeafNe("*v", fld), fmt.Sprintf("let _ = os.write_unsigned(%d, *v as sofab::Unsigned);", id))
 	case ir.KindI8, ir.KindI16, ir.KindI32, ir.KindI64, ir.KindEnum:
-		guarded(g.rustLeafNe("*v", fld), fmt.Sprintf("let _ = os.write_signed(%d, *v as Signed);", id))
+		guarded(g.rustLeafNe("*v", fld), fmt.Sprintf("let _ = os.write_signed(%d, *v as sofab::Signed);", id))
 	case ir.KindBool:
 		guarded(g.rustLeafNe("*v", fld), fmt.Sprintf("let _ = os.write_boolean(%d, *v);", id))
 	case ir.KindFP32:

@@ -81,13 +81,35 @@ keeps its name; serde strips the `r#`, so the JSON key is unchanged. The four
 keywords Rust refuses as raw identifiers, `self`, `Self`, `crate` and `super`,
 get a trailing underscore instead (`self_`) and a `serde(rename)` that keeps the
 JSON key. A method never collides with a field in Rust, so `encode` or
-`serialize` stay as they are. Two fields that end up with the same member —
-`self` and `self_` — fail generation, naming both; so do two constants of one
-enum or bitfield that differ only in case (`a` and `A` are both `A`). A struct
-with a field that is not snake_case — `Self_`, `a__b`, or a schema name such as
-`legacyId` — carries `#[allow(non_snake_case)]`, so a `-D warnings` build
-accepts the name the schema chose. The list lives in
-`generators/rust/reserved.go`.
+`serialize` stay as they are. A struct with a field that is not snake_case —
+`Self_`, or a schema name such as `legacyId` — carries
+`#[allow(non_snake_case)]`, so a `-D warnings` build accepts the name the schema
+chose. The list lives in `generators/rust/reserved.go`.
+
+## Type names
+
+Every type is named after its place in the schema, each name in PascalCase and
+joined with `_`:
+
+| schema | Rust |
+|---|---|
+| message `vehicle_telemetry` | `VehicleTelemetry` |
+| `$defs` struct, union, enum or bitfield `point` | `Point` |
+| inline struct or union of field `a` in message `m` | `M_A` |
+| inline element of an array field `a` in message `m` | `M_A` |
+| `$defs` union `shape` used with `default_id` of option `pt` | `Shape__DefaultPt` |
+| the incremental decoder of message `m` | `M__Decoder` |
+
+An enum or bitfield is a module of that name holding one constant per value or
+flag, upper-cased: `Color::RED`, `Flags::ON`.
+
+A type whose name would be one the generated module uses itself — `DecodeError`,
+a name from the Rust prelude such as `Vec`, `Option`, `String` or `Default`, or
+the keyword `Self` — gets a trailing underscore: a message `vec` is `Vec_`, and
+its decoder is still `Vec__Decoder`. The corelib and serde are only ever named
+by path (`sofab::OStream`, `serde::Serialize`), so a message called `o_stream`
+or `serialize` keeps its name. A type spelled with `_` or `__` carries
+`#[allow(non_camel_case_types)]`.
 
 ## Unions
 
@@ -106,49 +128,49 @@ shape:
 ```
 
 ```rust
-pub enum MShape {
+pub enum M_Shape {
     Num(u16),
     Name(String),
-    Pt(MShapePt),
+    Pt(M_Shape_Pt),
 }
 
-impl Default for MShape { /* MShape::Pt(MShapePt::default()) */ }
+impl Default for M_Shape { /* M_Shape::Pt(M_Shape_Pt::default()) */ }
 
-impl MShape {
-    pub const NUM_ID: Id = 0;
-    pub const NAME_ID: Id = 1;
-    pub const PT_ID: Id = 2;
-    pub fn which(&self) -> Id;
+impl M_Shape {
+    pub const NUM_ID: sofab::Id = 0;
+    pub const NAME_ID: sofab::Id = 1;
+    pub const PT_ID: sofab::Id = 2;
+    pub fn which(&self) -> sofab::Id;
 
     pub fn num(&self) -> Option<&u16>;
     pub fn num_mut(&mut self) -> &mut u16;
-    pub fn pt(&self) -> Option<&MShapePt>;
-    pub fn pt_mut(&mut self) -> &mut MShapePt;
+    pub fn pt(&self) -> Option<&M_Shape_Pt>;
+    pub fn pt_mut(&mut self) -> &mut M_Shape_Pt;
     // ... likewise for name
 }
 ```
 
 | operation | Rust |
 |---|---|
-| which option is held | `x.which()` → the option's id; or `match x { MShape::Num(v) => …, … }` |
-| option ids | `MShape::PT_ID` |
-| test | `matches!(x, MShape::Pt(_))` |
+| which option is held | `x.which()` → the option's id; or `match x { M_Shape::Num(v) => …, … }` |
+| option ids | `M_Shape::PT_ID` |
+| test | `matches!(x, M_Shape::Pt(_))` |
 | read | `match`, or `x.pt()` → `Some(&value)` when `pt` is held, else `None` |
-| select with a value | `x = MShape::Num(7)` |
+| select with a value | `x = M_Shape::Num(7)` |
 | select at the default and edit in place | `x.pt_mut().y = 2` |
-| back to the default | `x = MShape::default()` |
+| back to the default | `x = M_Shape::default()` |
 
 ```rust
-let mut s = MShape::default();  // holds pt at its default: { x: 7, y: 0 }
-s = MShape::Num(7);             // now num = 7; pt is gone
+let mut s = M_Shape::default();  // holds pt at its default: { x: 7, y: 0 }
+s = M_Shape::Num(7);             // now num = 7; pt is gone
 s.pt_mut().y = 2;               // pt again, from its default: { x: 7, y: 2 }
 if let Some(p) = s.pt() { use_it(p.x); }
 match &s {
-    MShape::Num(n) => use_it(*n),
-    MShape::Name(n) => use_it(n),
-    MShape::Pt(p) => use_it(p),
+    M_Shape::Num(n) => use_it(*n),
+    M_Shape::Name(n) => use_it(n),
+    M_Shape::Pt(p) => use_it(p),
 }
-s = MShape::default();          // pt at its default again
+s = M_Shape::default();          // pt at its default again
 ```
 
 **`<option>_mut()`** selects the option at its own default if another one is
@@ -174,11 +196,14 @@ accessor whose name is on this list gets a trailing underscore: `which`,
 `type_id` — the union's own members and the methods it has from its derives
 and the standard library's blanket impls, which a same-named accessor would
 shadow — and `new`, `as_mut`, `deref_mut`, which clippy refuses as look-alikes
-of a constructor or the standard traits' methods (option `as` is `r#as()` and
-`as_mut_()`). Option `which` is `which_()` and `which_mut()`; option `borrow` is
-`borrow_()` and `borrow_mut_()`. Two options that would produce the same
-variant, accessor or id constant — `a_b` and `aB`, or `x` and `x_mut` — fail
-generation, naming both.
+of a constructor or the standard traits' methods. Option `which` is `which_()`
+and `which_mut()`. A getter also gets the underscore when its name has the shape
+of another member: an option ending in `_mut` (`x_mut_()` beside `x_mut()`, the
+accessor of option `x`), or an all-upper-case one ending in `_ID` (`A_ID_()`
+beside the constant `A_ID` of option `a`). Where `<option>_mut` itself is on the
+list, the mutable accessor is `<option>__mut` instead: option `as` is `r#as()`
+and `as__mut()`, option `borrow` is `borrow_()` and `borrow__mut()`. So no two
+options ever produce the same variant, accessor or id constant.
 
 **Code size (`no_std`).** On `corelib: rs-no-std` every `<option>_mut()` of a
 union with more than one option is `#[inline(never)]`: the decoder reaches an
@@ -187,8 +212,8 @@ copy of the select is smaller than one per store. `std` leaves inlining to the
 compiler.
 
 **`$defs` unions** used with different `default_id`s are one enum per
-`default_id`, named after `<Name>_default_<option>`: `UnionShapeDefaultPt` and
-`UnionShapeDefaultNum`.
+`default_id`, named `<Name>__Default<Option>`: `Shape__DefaultPt` and
+`Shape__DefaultNum`.
 
 **Defaults.** `Default` holds the `default_id` option at that option's own
 default; an omitted `default_id` means the option with the lowest id. Each

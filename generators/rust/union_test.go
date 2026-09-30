@@ -107,24 +107,24 @@ func TestRustUnionIsAnEnum(t *testing.T) {
 		if cfg["corelib"] == "rs-no-std" {
 			rename = `    #[cfg_attr(feature = "serde", serde(rename = "num"))]`
 		}
-		wantAll(t, cfg, block(t, m, "pub enum MU {"), "the union is not an enum with one renamed variant per option",
+		wantAll(t, cfg, block(t, m, "pub enum M_U {"), "the union is not an enum with one renamed variant per option",
 			rename+"\n    Num(u16),",
-			"    Pt(MUPt),",
-			"    Box(MUBox),",
+			"    Pt(M_U_Pt),",
+			"    Box(M_U_Box),",
 			"    Which(bool),",
 		)
-		if strings.Contains(block(t, m, "pub enum MU {"), "pub num") || strings.Contains(m, "pub struct MU {") {
+		if strings.Contains(block(t, m, "pub enum M_U {"), "pub num") || strings.Contains(m, "pub struct M_U {") {
 			t.Errorf("%v: the union is still a record of every option", cfg)
 		}
-		wantAll(t, cfg, block(t, m, "impl Default for MU {"), "Default must hold default_id (pt) at its default",
+		wantAll(t, cfg, block(t, m, "impl Default for M_U {"), "Default must hold default_id (pt) at its default",
 			"        Self::Pt(Default::default())")
 		// the split $defs union: one type per default_id, each with its own Default
-		wantAll(t, cfg, block(t, m, "impl Default for UnionPickDefaultN {"), "the n-default split type", "        Self::N(6)")
-		wantAll(t, cfg, block(t, m, "impl Default for UnionPickDefaultT {"), "the t-default split type", "        Self::T(Default::default())")
+		wantAll(t, cfg, block(t, m, "impl Default for Pick__DefaultN {"), "the n-default split type", "        Self::N(6)")
+		wantAll(t, cfg, block(t, m, "impl Default for Pick__DefaultT {"), "the t-default split type", "        Self::T(Default::default())")
 		wantAll(t, cfg, m, "each site holds the split type of its own default_id",
-			"    pub pf: UnionPickDefaultT,", "    pub po: UnionPickDefaultN,")
+			"    pub pf: Pick__DefaultT,", "    pub po: Pick__DefaultN,")
 		// an array of unions gap-fills with the element type's Default: its D (s)
-		wantAll(t, cfg, block(t, m, "impl Default for MVElem {"), "the element union's Default is its default_id",
+		wantAll(t, cfg, block(t, m, "impl Default for M_V {"), "the element union's Default is its default_id",
 			"        Self::S(")
 	}
 }
@@ -137,24 +137,24 @@ func TestRustUnionIsAnEnum(t *testing.T) {
 func TestRustUnionAccessors(t *testing.T) {
 	for _, cfg := range unionCfgs {
 		m := moduleFromYAML(t, unionSrc, cfg)
-		imp := block(t, m, "impl MU {")
+		imp := block(t, m, "impl M_U {")
 		wantAll(t, cfg, imp, "the union API is incomplete",
-			"    pub const NUM_ID: Id = 0;",
-			"    pub const WHICH_ID: Id = 6;",
-			"    pub fn which(&self) -> Id {",
+			"    pub const NUM_ID: sofab::Id = 0;",
+			"    pub const WHICH_ID: sofab::Id = 6;",
+			"    pub fn which(&self) -> sofab::Id {",
 			"            Self::Pt(_) => Self::PT_ID,",
 			"    pub fn num(&self) -> Option<&u16> {",
 			"        match self { Self::Num(v) => Some(v), _ => None }",
-			"    pub fn pt_mut(&mut self) -> &mut MUPt {",
+			"    pub fn pt_mut(&mut self) -> &mut M_U_Pt {",
 			"        if !matches!(self, Self::Pt(_)) { *self = Self::Pt(Default::default()); }",
 			"        match self { Self::Pt(v) => v, _ => unreachable!() }",
 			"        if !matches!(self, Self::Num(_)) { *self = Self::Num(5); }",
-			"    pub fn r#box(&self) -> Option<&MUBox> {",
-			"    pub fn box_mut(&mut self) -> &mut MUBox {",
+			"    pub fn r#box(&self) -> Option<&M_U_Box> {",
+			"    pub fn box_mut(&mut self) -> &mut M_U_Box {",
 			"    pub fn which_(&self) -> Option<&bool> {",
 			"    pub fn which_mut(&mut self) -> &mut bool {",
 		)
-		wantAll(t, cfg, block(t, m, "impl MOne {"), "a single-option union destructures irrefutably",
+		wantAll(t, cfg, block(t, m, "impl M_One {"), "a single-option union destructures irrefutably",
 			"        let Self::Only(v) = self;\n        Some(v)",
 			"        let Self::Only(v) = self;\n        v")
 		// Footprint: the no_std select is out of line (one copy per option); std
@@ -164,7 +164,7 @@ func TestRustUnionAccessors(t *testing.T) {
 		if got := strings.Contains(imp, noinl); got != (cfg["corelib"] == "rs-no-std") {
 			t.Errorf("%v: #[inline(never)] on pt_mut = %v, want it exactly on no_std:\n%s", cfg, got, imp)
 		}
-		if strings.Contains(block(t, m, "impl MOne {"), mutNoInline) {
+		if strings.Contains(block(t, m, "impl M_One {"), mutNoInline) {
 			t.Errorf("%v: a single-option union's accessor is kept out of line", cfg)
 		}
 	}
@@ -177,11 +177,11 @@ func TestRustUnionAccessors(t *testing.T) {
 func TestRustUnionReservedMembers(t *testing.T) {
 	src := "version: 1\nmessages:\n  m: { payload: { u: { id: 0, type: union, oneof: { to_owned: { id: 0, type: u8 }, borrow: { id: 1, type: u8 }, into: { id: 2, type: u8 }, clone_from: { id: 3, type: u8 }, type_id: { id: 4, type: u8 } } } } }\n"
 	m := moduleFromYAML(t, src, map[string]any{"corelib": "rs"})
-	wantAll(t, nil, block(t, m, "impl MU {"), "a reserved member is shadowed",
+	wantAll(t, nil, block(t, m, "impl M_U {"), "a reserved member is shadowed",
 		"    pub fn to_owned_(&self) -> Option<&u8> {",
 		"    pub fn to_owned_mut(&mut self) -> &mut u8 {",
 		"    pub fn borrow_(&self) -> Option<&u8> {",
-		"    pub fn borrow_mut_(&mut self) -> &mut u8 {",
+		"    pub fn borrow__mut(&mut self) -> &mut u8 {",
 		"    pub fn into_(&self) -> Option<&u8> {",
 		"    pub fn clone_from_(&self) -> Option<&u8> {",
 		"    pub fn type_id_(&self) -> Option<&u8> {")
@@ -189,11 +189,6 @@ func TestRustUnionReservedMembers(t *testing.T) {
 		if strings.Contains(m, bad) {
 			t.Errorf("a union accessor shadows a trait method: %q", bad)
 		}
-	}
-	// option `borrow_mut` would take borrow's accessor name: a located error.
-	_, err := generateYAML(t, "version: 1\nmessages:\n  m: { payload: { u: { id: 0, type: union, oneof: { borrow: { id: 0, type: u8 }, borrow_mut: { id: 1, type: u8 } } } } }\n", map[string]any{"corelib": "rs"})
-	if err == nil || !strings.Contains(err.Error(), `options "borrow" and "borrow_mut" both generate "borrow_mut_"`) {
-		t.Errorf("borrow / borrow_mut: want a located clash, got %v", err)
 	}
 }
 
@@ -217,7 +212,7 @@ messages:
 `
 	for _, cfg := range unionCfgs {
 		m := moduleFromYAML(t, src, cfg)
-		dec := m[strings.Index(m, "mod m_dec {"):]
+		dec := m[strings.Index(m, "mod _M__Decode {"):]
 		if strings.Contains(sliceFn(t, m, "    fn string("), "st_mut().name.clear()") {
 			t.Errorf("%v: the string completion store calls the accessor per touch", cfg)
 		}
@@ -243,9 +238,9 @@ messages:
 func TestRustUnionEncodeArms(t *testing.T) {
 	for _, cfg := range unionCfgs {
 		m := moduleFromYAML(t, unionSrc, cfg)
-		ser := sliceFn(t, block(t, m, "impl MU {"), "    pub fn serialize<")
+		ser := sliceFn(t, block(t, m, "impl M_U {"), "    pub fn serialize<")
 		wantAll(t, cfg, ser, "an encode arm is wrong",
-			"            Self::Num(v) => { let _ = os.write_unsigned(0, *v as Unsigned); }",
+			"            Self::Num(v) => { let _ = os.write_unsigned(0, *v as sofab::Unsigned); }",
 			"            Self::S(v) => { let _ = os.write_str(1, v); }",
 			"            Self::Pt(v) => { let _ = os.write_sequence_begin_lazy(2); v.serialize(os); let _ = os.write_sequence_end(); }",
 			"            Self::Arr(v) => {\n                let _ = os.write_array_unsigned(3, v);\n            }",
@@ -260,11 +255,11 @@ func TestRustUnionEncodeArms(t *testing.T) {
 			}
 		}
 		// default_id at its default is omitted: the guard sits on D alone
-		wantAll(t, cfg, sliceFn(t, block(t, m, "impl UnionPickDefaultN {"), "    pub fn serialize<"), "D keeps its guard",
-			"            Self::N(v) => { if *v != 6 { let _ = os.write_unsigned(0, *v as Unsigned); } }",
+		wantAll(t, cfg, sliceFn(t, block(t, m, "impl Pick__DefaultN {"), "    pub fn serialize<"), "D keeps its guard",
+			"            Self::N(v) => { if *v != 6 { let _ = os.write_unsigned(0, *v as sofab::Unsigned); } }",
 			"            Self::T(v) => { let _ = os.write_sequence_begin_lazy(1); v.serialize(os); let _ = os.write_sequence_end_keep(); }")
-		wantAll(t, cfg, sliceFn(t, block(t, m, "impl MVElem {"), "    pub fn serialize<"), "the element union's D is guarded, the other forced",
-			"            Self::I(v) => { let _ = os.write_signed(0, *v as Signed); }",
+		wantAll(t, cfg, sliceFn(t, block(t, m, "impl M_V {"), "    pub fn serialize<"), "the element union's D is guarded, the other forced",
+			"            Self::I(v) => { let _ = os.write_signed(0, *v as sofab::Signed); }",
 			"            Self::S(v) => { if !v.is_empty() { let _ = os.write_str(1, v); } }")
 		// the union FIELD keeps its framing: a union at its default leaves the lazy
 		// frame empty and the dropping end removes it
@@ -287,22 +282,22 @@ func TestRustUnionDecodeSwitch(t *testing.T) {
 		m := moduleFromYAML(t, unionSrc, cfg)
 		unsigned := sliceFn(t, m, "    fn unsigned(")
 		wantAll(t, cfg, unsigned, "a scalar option does not select by assigning its variant behind the width guard",
-			"(_Loc::Root_u, 0) => { if value > 65535 { self.inv = true; return; }; self.m.u = MU::Num(value as u16) },",
-			"(_Loc::Root_u, 6) => self.m.u = MU::Which(value != 0),",
+			"(_Loc::Root_u, 0) => { if value > 65535 { self.inv = true; return; }; self.m.u = M_U::Num(value as u16) },",
+			"(_Loc::Root_u, 6) => self.m.u = M_U::Which(value != 0),",
 			"self.m.u.arr_mut().push(value as u16)",
 			"(_Loc::Root_u_box, 0) => { if value > 255 { self.inv = true; return; }; self.m.u.box_mut().z = value as u8 },",
-			"self.m.pf = UnionPickDefaultT::N(value as u16)",
+			"self.m.pf = Pick__DefaultT::N(value as u16)",
 			"self.m.pf.t_mut().k = value as u8",
 		)
 		signed := sliceFn(t, m, "    fn signed(")
 		wantAll(t, cfg, signed, "a union element's scalar option does not assign the element's variant",
-			"self.m.v[self._ix0] = MVElem::I(value as i32)",
+			"self.m.v[self._ix0] = M_V::I(value as i32)",
 			"self.m.u.pt_mut().x = value as i32")
 		str := sliceFn(t, m, "    fn string(")
 		if cfg["corelib"] == "rs" && cfg["allow_dynamic"] == nil {
 			wantAll(t, cfg, str, "a string option is not selected at the completion store",
-				"(_Loc::Root_u, 1) => self.m.u = MU::S(_s),",
-				"(_Loc::Root_v_e, 1) => self.m.v[self._ix0] = MVElem::S(_s),",
+				"(_Loc::Root_u, 1) => self.m.u = M_U::S(_s),",
+				"(_Loc::Root_v_e, 1) => self.m.v[self._ix0] = M_V::S(_s),",
 				"sofab::seq::place_elem(&mut (*self.m.u.strs_mut()), id,")
 		}
 		if cfg["corelib"] == "rs-no-std" && cfg["allow_dynamic"] == nil {
@@ -315,18 +310,18 @@ func TestRustUnionDecodeSwitch(t *testing.T) {
 		if feed < 0 {
 			t.Fatalf("%v: no payload feed in string():\n%s", cfg, str)
 		}
-		if pre := str[:feed]; strings.Contains(pre, "_mut()") || strings.Contains(pre, "MU::") {
+		if pre := str[:feed]; strings.Contains(pre, "_mut()") || strings.Contains(pre, "M_U::") {
 			t.Errorf("%v: a union option is touched before the payload is complete:\n%s", cfg, pre)
 		}
-		if fb := sliceFn(t, m, "    fn fixlen_begin("); strings.Contains(fb, "_mut()") || strings.Contains(fb, "MU::") {
+		if fb := sliceFn(t, m, "    fn fixlen_begin("); strings.Contains(fb, "_mut()") || strings.Contains(fb, "M_U::") {
 			t.Errorf("%v: fixlen_begin selects a union option; it must only latch bounds:\n%s", cfg, fb)
 		}
 		ab := sliceFn(t, m, "    fn array_begin(")
 		// A dynamic Vec is pre-sized after the clear, so the accessor's result is
 		// bound once rather than called twice.
-		arrArm := "(ArrayKind::Unsigned, _Loc::Root_u, 3) => { if count > 4 { self.inv = true; self.afill = 0; return; }; self.m.u.arr_mut().clear() },"
+		arrArm := "(sofab::ArrayKind::Unsigned, _Loc::Root_u, 3) => { if count > 4 { self.inv = true; self.afill = 0; return; }; self.m.u.arr_mut().clear() },"
 		if cfg["allow_dynamic"] == true || (cfg["corelib"] == "rs" && cfg["allow_dynamic"] == nil) {
-			arrArm = "(ArrayKind::Unsigned, _Loc::Root_u, 3) => { if count > 4 { self.inv = true; self.afill = 0; return; }; let _d = self.m.u.arr_mut(); _d.clear(); _d.reserve_exact(count) },"
+			arrArm = "(sofab::ArrayKind::Unsigned, _Loc::Root_u, 3) => { if count > 4 { self.inv = true; self.afill = 0; return; }; let _d = self.m.u.arr_mut(); _d.clear(); _d.reserve_exact(count) },"
 		}
 		wantAll(t, cfg, ab, "a compact-array option is not selected in its kind-keyed arm behind the over-count reject", arrArm)
 		sb := sliceFn(t, m, "    fn sequence_begin(")
@@ -340,37 +335,44 @@ func TestRustUnionDecodeSwitch(t *testing.T) {
 		// never an unconditional re-emplace in a hook: a variant is only ever
 		// assigned whole by a LEAF store, and a sequence option only through its
 		// select-if-not-held accessor
-		for _, bad := range []string{"= MU::Pt(", "= MU::Box(", "= MU::Strs(", "= MU::Arr(", "= UnionPickDefaultT::T("} {
-			if strings.Contains(m[strings.Index(m, "mod m_dec {"):], bad) {
+		for _, bad := range []string{"= M_U::Pt(", "= M_U::Box(", "= M_U::Strs(", "= M_U::Arr(", "= Pick__DefaultT::T("} {
+			if strings.Contains(m[strings.Index(m, "mod _M__Decode {"):], bad) {
 				t.Errorf("%v: the decoder re-emplaces a sequence/array option (%q), which wipes what a repeated or resumed occurrence already decoded", cfg, bad)
 			}
 		}
 	}
 }
 
-// Two options that derive the same Rust name are a located generation error
-// naming both -- never a duplicate definition for rustc to report.
-func TestRustUnionNameClash(t *testing.T) {
-	for _, c := range []struct{ oneof, want string }{
-		{`{ a_b: { id: 0, type: u8 }, aB: { id: 1, type: u8 } }`, `options "a_b" and "aB" both generate the enum variant "AB"`},
-		{`{ x: { id: 0, type: u8 }, x_mut: { id: 1, type: u8 } }`, `options "x" and "x_mut" both generate "x_mut"`},
-		{`{ a: { id: 0, type: u8 }, A: { id: 1, type: u16 } }`, `both generate`},
-	} {
-		src := "version: 1\nmessages:\n  m: { payload: { u: { id: 0, type: union, oneof: " + c.oneof + " } } }\n"
-		_, err := generateYAML(t, src, map[string]any{"corelib": "rs"})
-		if err == nil || !strings.Contains(err.Error(), c.want) {
-			t.Errorf("oneof %s: want an error containing %q, got %v", c.oneof, c.want, err)
-		}
-	}
+// Options whose derived members share a shape -- a getter `x_mut` beside the
+// mutable accessor of `x`, a getter `A_ID` beside the id constant of `a`, the
+// escaped getter of `borrow_mut` beside the accessor of `borrow` -- are kept
+// apart by the member spelling, never refused.
+func TestRustUnionMembersAreDistinct(t *testing.T) {
+	src := "version: 1\nmessages:\n  m: { payload: { u: { id: 0, type: union, oneof: { x: { id: 0, type: u8 }, x_mut: { id: 1, type: u8 }, a: { id: 2, type: u8 }, A_ID: { id: 3, type: u8 }, borrow: { id: 4, type: u8 }, borrow_mut: { id: 5, type: u8 } } } } }\n"
+	m := moduleFromYAML(t, src, map[string]any{"corelib": "rs"})
+	wantAll(t, nil, block(t, m, "impl M_U {"), "the members are not the channel spellings",
+		"    pub fn x(&self) -> Option<&u8> {",
+		"    pub fn x_mut(&mut self) -> &mut u8 {",
+		"    pub fn x_mut_(&self) -> Option<&u8> {",
+		"    pub fn x_mut_mut(&mut self) -> &mut u8 {",
+		"    pub const A_ID: sofab::Id = 2;",
+		"    pub const A_ID_ID: sofab::Id = 3;",
+		"    pub fn A_ID_(&self) -> Option<&u8> {",
+		"    pub fn borrow_(&self) -> Option<&u8> {",
+		"    pub fn borrow__mut(&mut self) -> &mut u8 {",
+		"    pub fn borrow_mut_(&self) -> Option<&u8> {",
+		"    pub fn borrow_mut_mut(&mut self) -> &mut u8 {",
+	)
 	// `self` cannot be a variant: PascalCase Self is a keyword.
-	m := moduleFromYAML(t, "version: 1\nmessages:\n  m: { payload: { u: { id: 0, type: union, oneof: { self: { id: 0, type: u8 }, b: { id: 1, type: u8 } } } } }\n", map[string]any{"corelib": "rs"})
+	m = moduleFromYAML(t, "version: 1\nmessages:\n  m: { payload: { u: { id: 0, type: union, oneof: { self: { id: 0, type: u8 }, b: { id: 1, type: u8 } } } } }\n", map[string]any{"corelib": "rs"})
 	wantAll(t, nil, m, "the `self` option is not mangled", "    Self_(u8),", "    pub fn self_(&self) -> Option<&u8> {", "    pub fn self_mut(&mut self) -> &mut u8 {")
 }
 
 // The union enum carries its one narrow allow, and only the union enum does.
 func TestRustUnionEnumAllowSitsOnTheEnum(t *testing.T) {
 	m := moduleFromYAML(t, unionSrc, map[string]any{"corelib": "rs"})
-	if n, e := strings.Count(m, unionEnumAllow+"\npub enum "), strings.Count(m, unionEnumAllow); n != e || n != 5 {
+	n := strings.Count(m, unionEnumAllow+"\npub enum ") + strings.Count(m, unionEnumAllow+"\n"+typeNameAllow("M_U")+"\npub enum ")
+	if e := strings.Count(m, unionEnumAllow); n != e || n != 5 {
 		t.Errorf("union enum allow on %d enums of %d uses, want 5 of 5", n, e)
 	}
 }

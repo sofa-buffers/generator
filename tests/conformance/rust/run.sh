@@ -986,6 +986,25 @@ if bad:
 PY
     echo "==> [$label] reserved names OK"
 
+    # The shared name-collision schema (ARCHITECTURE §8, "Naming"): every
+    # message of tests/conformance/lib/names.yaml -- path clashes, role words,
+    # corelib/serde/prelude/harness names as types -- must build clippy-clean on
+    # this profile, and message m must round-trip names.json, through the
+    # whole-buffer and the byte-at-a-time decoder alike.
+    echo "==> [$label] names: the shared name-collision schema builds and round-trips"
+    rust_build "$ROOT/tests/conformance/lib/names.yaml" "$WORK/names-$label"
+    rust_clippy "$WORK/names-$label"
+    NAMES_IN=$(cat "$ROOT/tests/conformance/lib/names.json")
+    ( cd "$WORK/names-$label" && cargo run -q -- encode m ) < "$ROOT/tests/conformance/lib/names.json" > "$WORK/names-$label.bin" \
+        || { echo "FAIL: [$label] names.json did not encode"; exit 1; }
+    for mode in decode streamdecode; do
+        NAMES_OUT=$(cd "$WORK/names-$label" && cargo run -q -- $mode m < "$WORK/names-$label.bin") \
+            || { echo "FAIL: [$label] names m did not $mode"; exit 1; }
+        python3 "$ROOT/tests/conformance/lib/json_equal.py" "$NAMES_IN" "$NAMES_OUT" --label "[$label] names m ($mode)" \
+            || { echo "FAIL: [$label] names m did not round-trip ($mode)"; exit 1; }
+    done
+    echo "==> [$label] names OK"
+
     # Gate 10 (ARCHITECTURE §12), for this leg: what a user receives when they
     # ASK for the format pass -- `--format=require` -- must satisfy
     # `rustfmt --check`, so their own `cargo fmt --check` over a tree holding

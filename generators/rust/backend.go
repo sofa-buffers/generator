@@ -15,7 +15,7 @@ package rust
 
 import (
 	"fmt"
-	"regexp"
+
 	"strings"
 
 	"github.com/sofa-buffers/generator/internal/generator"
@@ -65,15 +65,6 @@ func (*Backend) Generate(s *ir.Schema, cfg map[string]any) ([]generator.File, er
 		if err := g.checkBounded(s); err != nil {
 			return nil, err
 		}
-	}
-	if err := g.checkReservedNames(s); err != nil {
-		return nil, err
-	}
-	if err := checkFieldNames(s); err != nil {
-		return nil, err
-	}
-	if err := checkUnionNames(s); err != nil {
-		return nil, err
 	}
 	files := []generator.File{{Path: "src/message.rs", Content: g.module(s)}}
 	if cfgString(cfg, "emit", "sources") == "project" {
@@ -260,85 +251,15 @@ func (g *gen) module(s *ir.Schema) []byte {
 	if g.license != "" {
 		f.line("// SPDX-License-Identifier: %s", g.license)
 	}
-	// The body is rendered first so the imports can be exactly the names it uses:
-	// an import nothing reads is an unused_imports warning in the user's crate.
-	b := &rfile{}
-	g.moduleBody(b, s)
-	body := b.b.String()
-	// ArrayKind is only referenced by the per-message decoder's array_begin (and
-	// only when the schema has a scalar array); it is gated behind the no-std
-	// `array` feature, so it is imported there on demand, not crate-wide. The
-	// per-message decoder modules reach these names through `use super::*`.
-	if names := usedNames(body, "OStream", "IStream", "Visitor", "Id", "Unsigned", "Signed"); len(names) > 0 {
-		f.line("%s", useDecl("sofab", names))
-	}
-	if names := usedNames(body, "Serialize", "Deserialize"); len(names) > 0 {
-		// serde is optional under no_std: the derives are gated behind a `serde`
-		// cargo feature (off in the heap-free firmware build, on for the JSON
-		// harness), so the import must be gated too. The std profile always
-		// derives serde.
-		if g.noStd {
-			f.line("#[cfg(feature = \"serde\")]")
-		}
-		f.line("%s", useDecl("serde", names))
-	}
 	f.blank()
-	f.b.WriteString(body)
+	// Nothing is imported: the corelib, serde and the standard crates are
+	// spelled as paths (sofab::OStream, serde::Serialize, core::fmt), so no
+	// schema type can shadow one of them (ARCHITECTURE §8, "Naming").
+	g.moduleBody(f, s)
 	return f.bytes()
 }
 
-// lineCommentStart is the offset of the `//` that opens a line comment in one
-// line of generated Rust, or len(ln) when there is none. A `//` inside a string
-// literal -- a schema default such as "http://host" -- does not open one. The
-// generator writes string literals with %q, so they never span lines.
-func lineCommentStart(ln string) int {
-	inStr := false
-	for i := 0; i < len(ln); i++ {
-		switch c := ln[i]; {
-		case inStr && c == '\\':
-			i++ // skip the escaped byte
-		case c == '"':
-			inStr = !inStr
-		case !inStr && c == '/' && i+1 < len(ln) && ln[i+1] == '/':
-			return i
-		}
-	}
-	return len(ln)
-}
-
-// useDecl spells `use path::{a, b};`, or `use path::a;` for a single name.
-func useDecl(path string, names []string) string {
-	if len(names) == 1 {
-		return fmt.Sprintf("use %s::%s;", path, names[0])
-	}
-	return fmt.Sprintf("use %s::{%s};", path, strings.Join(names, ", "))
-}
-
-// usedNamePat matches an unqualified use of an identifier: not preceded by `::`
-// (a path such as sofab::Unsigned needs no import) or by an identifier byte.
-func usedNamePat(name string) *regexp.Regexp {
-	return regexp.MustCompile(`(^|[^:\w])` + name + `\b`)
-}
-
-// usedNames returns, in the order given, the names that Rust code in text
-// refers to unqualified. Line comments are dropped first, so a doc comment that
-// mentions a type does not keep its import alive.
-func usedNames(text string, names ...string) []string {
-	var code strings.Builder
-	for _, ln := range strings.Split(text, "\n") {
-		code.WriteString(ln[:lineCommentStart(ln)])
-		code.WriteByte('\n')
-	}
-	var out []string
-	for _, n := range names {
-		if usedNamePat(n).MatchString(code.String()) {
-			out = append(out, n)
-		}
-	}
-	return out
-}
-
-// moduleBody renders everything in src/message.rs below the imports.
+// moduleBody renders everything in src/message.rs below the header.
 func (g *gen) moduleBody(f *rfile, s *ir.Schema) {
 	// capability guard for the whole crate. corelib-rs-no-std gates wire types
 	// behind Cargo features and exposes require!() to assert them; corelib-rs
@@ -388,52 +309,14 @@ func (g *gen) moduleBody(f *rfile, s *ir.Schema) {
 		nt := s.Named[key]
 		switch nt.Category {
 		case ir.CatStruct:
-			g.emitStruct(f, g.typeName(key), nt.Fields, false, "")
+			g.emitStruct(f, namedIdent(nt), nt.Fields, nil, "")
 		case ir.CatUnion:
-			g.emitUnion(f, g.typeName(key), nt)
+			g.emitUnion(f, namedIdent(nt), nt)
 		}
 	}
 	for _, m := range s.Messages {
-		g.emitStruct(f, exported(m.Name), m.Fields, true, m.Summary)
+		g.emitStruct(f, msgIdent(m), m.Fields, m, m.Summary)
 	}
-}
-
-// rustReservedNames are the module-scope Rust type names the emitted crate has
-// already spent, mapped to what spends them. A schema element whose Rust name
-// lands on one of these produces a module with two definitions of that name --
-// rustc E0428 or E0255 -- with nothing in the diagnostic pointing back at the
-// schema, so the check below turns it into a generator-time error naming the
-// element instead.
-//
-// Only names that reach the TOP level of src/message.rs belong here. A named
-// enum or bitfield emits a lowercase `pub mod`, which cannot collide with a
-// type, and ArrayKind/FixlenType are imported inside the per-message decoder
-// module rather than crate-wide.
-//
-// Only a MESSAGE can land on one. A named struct or union is emitted under its
-// graph key, which carries its category -- `struct/Point` becomes `StructPoint`
-// -- so its name is out of reach of this set by construction.
-var rustReservedNames = map[string]string{
-	"DecodeError": "the crate's own decode verdict enum",
-	"OStream":     "an encoder type imported from the corelib",
-	"IStream":     "a decoder type imported from the corelib",
-	"Visitor":     "a decode-callback trait imported from the corelib",
-	"Id":          "a field-id type imported from the corelib",
-	"Unsigned":    "a wire-scalar type imported from the corelib",
-	"Signed":      "a wire-scalar type imported from the corelib",
-}
-
-// checkReservedNames rejects a schema whose Rust type names collide with what
-// the crate defines or imports for itself, before rustc has to.
-func (g *gen) checkReservedNames(s *ir.Schema) error {
-	for _, m := range s.Messages {
-		name := exported(m.Name)
-		if spent := rustReservedNames[name]; spent != "" {
-			return fmt.Errorf("rust: message %q generates the type name %q, which the emitted "+
-				"crate already uses for %s -- rename the message", m.Name, name, spent)
-		}
-	}
-	return nil
 }
 
 // emitDecodeError emits the crate's decode verdict type.
@@ -503,8 +386,15 @@ func (g *gen) emitDecodeError(f *rfile) {
 	}
 }
 
+// leafModAllow sits on the module an enum or bitfield becomes. The module is
+// named with the type identifier -- modules and types share Rust's type
+// namespace, so the identifier channel keeps it apart from every other type --
+// which is not snake_case.
+const leafModAllow = "#[allow(non_snake_case)] // named like the schema type it stands for"
+
 func (g *gen) emitEnum(f *rfile, nt *ir.NamedType) {
-	f.line("pub mod %s {", strings.ToLower(g.typeName(nt.Key)))
+	f.line(leafModAllow)
+	f.line("pub mod %s {", namedIdent(nt))
 	for _, c := range nt.Consts {
 		f.emitDoc("    ", c.Description)
 		f.line("    pub const %s: %s = %d;", strings.ToUpper(c.Name), enumBacking(nt), c.Value)
@@ -514,7 +404,8 @@ func (g *gen) emitEnum(f *rfile, nt *ir.NamedType) {
 }
 
 func (g *gen) emitBitfieldConsts(f *rfile, nt *ir.NamedType) {
-	f.line("pub mod %s {", strings.ToLower(g.typeName(nt.Key)))
+	f.line(leafModAllow)
+	f.line("pub mod %s {", namedIdent(nt))
 	for _, fl := range nt.Flags {
 		f.emitDoc("    ", flagDoc(fl))
 		f.line("    pub const %s: %s = 1 << %d;", strings.ToUpper(fl.Name), bitfieldBacking(nt), fl.Pos)
@@ -642,7 +533,10 @@ func (g *gen) fieldsHaveFloatDefault(fields []*ir.Field) bool {
 	return false
 }
 
-func (g *gen) emitStruct(f *rfile, name string, fields []*ir.Field, isMessage bool, summary string) {
+// emitStruct emits a struct type; msg is the message it is, nil for a $defs or
+// inline struct.
+func (g *gen) emitStruct(f *rfile, name string, fields []*ir.Field, msg *ir.Message, summary string) {
+	isMessage := msg != nil
 	// rustdoc summary attaches to the struct that immediately follows.
 	f.emitDoc("", summary)
 	// Encoding is sparse-canonical (MESSAGE_SPEC S2): a field equal to its default
@@ -654,10 +548,10 @@ func (g *gen) emitStruct(f *rfile, name string, fields []*ir.Field, isMessage bo
 	// profile always derives it.
 	if g.noStd {
 		f.line("#[derive(Debug, Clone, PartialEq)]")
-		f.line("#[cfg_attr(feature = \"serde\", derive(Serialize, Deserialize))]")
+		f.line("#[cfg_attr(feature = \"serde\", derive(serde::Serialize, serde::Deserialize))]")
 		f.line("#[cfg_attr(feature = \"serde\", serde(default))]")
 	} else {
-		f.line("#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]")
+		f.line("#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]")
 		f.line("#[serde(default)]")
 	}
 	// On the struct, not the field: a field-level allow does not reach the
@@ -667,6 +561,9 @@ func (g *gen) emitStruct(f *rfile, name string, fields []*ir.Field, isMessage bo
 			f.line("%s", a)
 			break
 		}
+	}
+	if a := typeNameAllow(name); a != "" {
+		f.line("%s", a)
 	}
 	f.line("pub struct %s {", name)
 	for _, fld := range fields {
@@ -733,7 +630,7 @@ func (g *gen) emitStruct(f *rfile, name string, fields []*ir.Field, isMessage bo
 	// into a buffer (NoFlush) or straight into a transport that drains the
 	// buffer as it fills -- the corelib supports both, and pinning the signature
 	// to NoFlush made the streaming half unreachable from generated code.
-	f.line("    pub fn serialize<_F: sofab::Flush>(&self, os: &mut OStream<'_, _F>) {")
+	f.line("    pub fn serialize<_F: sofab::Flush>(&self, os: &mut sofab::OStream<'_, _F>) {")
 	for _, fld := range fields {
 		g.emitSerialize(f, fld)
 	}
@@ -746,7 +643,7 @@ func (g *gen) emitStruct(f *rfile, name string, fields []*ir.Field, isMessage bo
 			f.line("    pub fn encode(&self) -> heapless::Vec<u8, %d> {", size)
 			f.line("        let mut buf: heapless::Vec<u8, %d> = heapless::Vec::new();", size)
 			f.line("        let _ = buf.resize_default(%d);", size)
-			f.line("        let used = { let mut os = OStream::new(&mut buf); self.serialize(&mut os); os.bytes_used() };")
+			f.line("        let used = { let mut os = sofab::OStream::new(&mut buf); self.serialize(&mut os); os.bytes_used() };")
 			f.line("        buf.truncate(used);")
 			f.line("        buf")
 			f.line("    }")
@@ -755,7 +652,7 @@ func (g *gen) emitStruct(f *rfile, name string, fields []*ir.Field, isMessage bo
 			// always holds the message.
 			f.line("    pub fn encode(&self) -> Vec<u8> {")
 			f.line("        let mut buf = vec![0u8; Self::MAX_SIZE];")
-			f.line("        let used = { let mut os = OStream::new(&mut buf); self.serialize(&mut os); os.bytes_used() };")
+			f.line("        let used = { let mut os = sofab::OStream::new(&mut buf); self.serialize(&mut os); os.bytes_used() };")
 			f.line("        buf.truncate(used);")
 			f.line("        buf")
 			f.line("    }")
@@ -778,7 +675,7 @@ func (g *gen) emitStruct(f *rfile, name string, fields []*ir.Field, isMessage bo
 			// here: the scratch is a fixed 512 bytes, far above any MIN_OUTPUT_BUFFER
 			// (<= 20 by §5.1), and the offset is 0. It is still matched rather than
 			// unwrapped, so this stays panic-free for the no_std profile too.
-			f.line("            if let Ok(mut os) = OStream::with_flush(&mut scratch, 0, |_d: &[u8]| out.extend_from_slice(_d)) {")
+			f.line("            if let Ok(mut os) = sofab::OStream::with_flush(&mut scratch, 0, |_d: &[u8]| out.extend_from_slice(_d)) {")
 			f.line("                self.serialize(&mut os);")
 			// corelib-rs's flush() returns a #[must_use] Result; the sink is an
 			// infallible Vec push, so there is nothing to report. The discard is
@@ -790,25 +687,25 @@ func (g *gen) emitStruct(f *rfile, name string, fields []*ir.Field, isMessage bo
 			f.line("    }")
 		}
 		f.line("    pub fn decode(data: &[u8]) -> Self {")
-		f.line("        %s_dec::decode(data)", strings.ToLower(name))
+		f.line("        %s::decode(data)", privateIdent(msg, "Decode"))
 		f.line("    }")
 		f.line("    /// Decode a whole buffer, surfacing the accept/reject verdict --")
 		f.line("    /// a truncated tail included, which is `DecodeError::Incomplete` and")
 		f.line("    /// not a half-filled value.")
 		f.line("    pub fn try_decode(data: &[u8]) -> Result<Self, DecodeError> {")
-		f.line("        %s_dec::try_decode(data)", strings.ToLower(name))
+		f.line("        %s::try_decode(data)", privateIdent(msg, "Decode"))
 		f.line("    }")
 		f.line("    /// An incremental decoder for this message: hold it and feed chunks as")
 		f.line("    /// they arrive, instead of buffering the whole message first.")
-		f.line("    pub fn decoder() -> %sDecoder {", name)
-		f.line("        %sDecoder::new()", name)
+		f.line("    pub fn decoder() -> %s {", roleIdent(msg, "Decoder"))
+		f.line("        %s::new()", roleIdent(msg, "Decoder"))
 		f.line("    }")
 	}
 	f.line("}")
 	f.blank()
 
 	if isMessage {
-		g.emitVisitor(f, name, fields)
+		g.emitVisitor(f, msg, name, fields)
 	}
 }
 
@@ -817,9 +714,9 @@ func (g *gen) emitSerialize(f *rfile, fld *ir.Field) {
 	var write string
 	switch fld.Kind {
 	case ir.KindU8, ir.KindU16, ir.KindU32, ir.KindU64, ir.KindBitfield:
-		write = fmt.Sprintf("let _ = os.write_unsigned(%d, %s as Unsigned);", fld.ID, acc)
+		write = fmt.Sprintf("let _ = os.write_unsigned(%d, %s as sofab::Unsigned);", fld.ID, acc)
 	case ir.KindI8, ir.KindI16, ir.KindI32, ir.KindI64, ir.KindEnum:
-		write = fmt.Sprintf("let _ = os.write_signed(%d, %s as Signed);", fld.ID, acc)
+		write = fmt.Sprintf("let _ = os.write_signed(%d, %s as sofab::Signed);", fld.ID, acc)
 	case ir.KindBool:
 		write = fmt.Sprintf("let _ = os.write_boolean(%d, %s);", fld.ID, acc)
 	case ir.KindFP32:
@@ -999,12 +896,12 @@ func (g *gen) serializeArray(f *rfile, ind, idExpr, val string, elem ir.Kind, re
 		// §2, applied to an element. At the LAST index it is written whatever its
 		// value: see lastElemExpr.
 		f.line("%slet _ = os.write_sequence_begin_lazy(%s);", ind, idExpr)
-		f.line("%sfor (%s, %s) in %s.iter().enumerate() { if !%s.is_empty() || %s { let _ = os.write_str(%s as Id, %s); } }", ind, iv, ev, val, ev, lastElemExpr(iv, val), iv, ev)
+		f.line("%sfor (%s, %s) in %s.iter().enumerate() { if !%s.is_empty() || %s { let _ = os.write_str(%s as sofab::Id, %s); } }", ind, iv, ev, val, ev, lastElemExpr(iv, val), iv, ev)
 		emitSeqEnd(f, ind, keepIf)
 	case ir.KindBlob:
 		// A blob element is a leaf, exactly like the string element above.
 		f.line("%slet _ = os.write_sequence_begin_lazy(%s);", ind, idExpr)
-		f.line("%sfor (%s, %s) in %s.iter().enumerate() { if !%s.is_empty() || %s { let _ = os.write_blob(%s as Id, %s); } }", ind, iv, ev, val, ev, lastElemExpr(iv, val), iv, ev)
+		f.line("%sfor (%s, %s) in %s.iter().enumerate() { if !%s.is_empty() || %s { let _ = os.write_blob(%s as sofab::Id, %s); } }", ind, iv, ev, val, ev, lastElemExpr(iv, val), iv, ev)
 		emitSeqEnd(f, ind, keepIf)
 	case ir.KindStruct, ir.KindUnion:
 		// A sequence-form element obeys the SAME rule as the leaf elements above --
@@ -1016,7 +913,7 @@ func (g *gen) serializeArray(f *rfile, ind, idExpr, val string, elem ir.Kind, re
 		// that presence is what fixes the array's length.
 		f.line("%slet _ = os.write_sequence_begin_lazy(%s);", ind, idExpr)
 		f.line("%sfor (%s, %s) in %s.iter().enumerate() {", ind, iv, ev, val)
-		f.line("%s    let _ = os.write_sequence_begin_lazy(%s as Id); %s.serialize(os);", ind, iv, ev)
+		f.line("%s    let _ = os.write_sequence_begin_lazy(%s as sofab::Id); %s.serialize(os);", ind, iv, ev)
 		emitSeqEnd(f, ind+"    ", lastElemExpr(iv, val))
 		f.line("%s}", ind)
 		emitSeqEnd(f, ind, keepIf)
@@ -1029,13 +926,13 @@ func (g *gen) serializeArray(f *rfile, ind, idExpr, val string, elem ir.Kind, re
 			// equal to the element default (the empty row) is not written at all, and
 			// the last row always is.
 			f.line("%s    if !%s.is_empty() || %s {", ind, ev, lastElemExpr(iv, val))
-			g.serializeArray(f, ind+"        ", fmt.Sprintf("%s as Id", iv), ev, items.Elem, items.ElemRef, items.ElemItems, items.Count, items.HasCount, depth+1, "")
+			g.serializeArray(f, ind+"        ", fmt.Sprintf("%s as sofab::Id", iv), ev, items.Elem, items.ElemRef, items.ElemItems, items.Count, items.HasCount, depth+1, "")
 			f.line("%s    }", ind)
 		} else {
 			// A wrapper row has its own frame, so it takes the closer instead -- the
 			// same interior/last choice, expressed the same way as for a struct
 			// element above.
-			g.serializeArray(f, ind+"    ", fmt.Sprintf("%s as Id", iv), ev, items.Elem, items.ElemRef, items.ElemItems, items.Count, items.HasCount, depth+1, lastElemExpr(iv, val))
+			g.serializeArray(f, ind+"    ", fmt.Sprintf("%s as sofab::Id", iv), ev, items.Elem, items.ElemRef, items.ElemItems, items.Count, items.HasCount, depth+1, lastElemExpr(iv, val))
 		}
 		f.line("%s}", ind)
 		emitSeqEnd(f, ind, keepIf)
