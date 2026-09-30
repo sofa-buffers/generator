@@ -3,8 +3,6 @@ package typescript
 import (
 	"strings"
 	"testing"
-
-	"github.com/sofa-buffers/generator/internal/ir"
 )
 
 // unionSrc has a union whose default option is a struct at a non-zero default
@@ -90,19 +88,19 @@ func mustNotContain(t *testing.T, what, src string, bads ...string) {
 // scalars, strings and typed arrays at their default, object slots at null --
 // with only default_id's object built.
 func TestTSUnionStorage(t *testing.T) {
-	u := tsClass(t, genUnionMode(t, "bigint"), "MU")
-	mustContain(t, "MU storage", u,
+	u := tsClass(t, genUnionMode(t, "bigint"), "M_U")
+	mustContain(t, "M_U storage", u,
 		"  static readonly NUM_ID = 0;",
 		"  static readonly PT_ID = 2;",
 		"  static readonly WHICH_ID = 10;",
 		"  private _which: number = 2;",
 		"  private _num: number = 5;",
 		`  private _s: string = "";`,
-		"  private _pt: MUPt | null = new MUPt();", // default_id: built
+		"  private _pt: M_U_Pt | null = new M_U_Pt();", // default_id: built
 		"  private _arr: Uint16Array = _E_Uint16Array;",
 		"  private _strs: string[] | null = null;",
 		"  private _bl: Uint8Array | null = null;",
-		"  private _inner: MUInner | null = null;",
+		"  private _inner: M_U_Inner | null = null;",
 		"  private _f: number = 1.5;",
 		"  private _fFp32Raw: Uint8Array | null = null;",
 		"  private _fa: Float32Array = _E_Float32Array;",
@@ -114,11 +112,11 @@ func TestTSUnionStorage(t *testing.T) {
 		"  get which(): number {\n    return this._which;\n  }",
 	)
 	// No product-type member survives: an option is reached through its accessor.
-	mustNotContain(t, "MU storage", u, "  num: number", "  pt: MUPt =", "  s: string =")
+	mustNotContain(t, "M_U storage", u, "  num: number", "  pt: M_U_Pt =", "  s: string =")
 	// A union whose default option is a scalar builds nothing at all.
-	z := tsClass(t, genUnionMode(t, "bigint"), "MZ")
-	mustContain(t, "MZ storage", z, "  private _which: number = 0;", "  private _a: number = 0;", "  private _b: number = 3;")
-	mustNotContain(t, "MZ storage", z, "_leave", "| null = new ")
+	z := tsClass(t, genUnionMode(t, "bigint"), "M_Z")
+	mustContain(t, "M_Z storage", z, "  private _which: number = 0;", "  private _a: number = 0;", "  private _b: number = 3;")
+	mustNotContain(t, "M_Z storage", z, "_leave", "| null = new ")
 }
 
 // TestTSUnionAccessors pins the API and the select-if-not-held rule: a getter of
@@ -126,18 +124,18 @@ func TestTSUnionStorage(t *testing.T) {
 // mutable<Opt>() switches only when another option is held and never resets a
 // held one; a real switch releases what the option left behind held.
 func TestTSUnionAccessors(t *testing.T) {
-	u := tsClass(t, genUnionMode(t, "bigint"), "MU")
-	mustContain(t, "MU accessors", u,
+	u := tsClass(t, genUnionMode(t, "bigint"), "M_U")
+	mustContain(t, "M_U accessors", u,
 		"  get num(): number {\n    return this._which === 0 ? this._num : 5;\n  }",
 		"  set num(v: number) {\n    if (this._which !== 0) {\n      this._leave();\n      this._which = 0;\n    }\n    this._num = v;\n  }",
 		"  hasNum(): boolean {\n    return this._which === 0;\n  }",
 		// A getter of an object option not held builds a fresh default and keeps it
 		// off the union.
-		"  get pt(): MUPt {\n    return this._which === 2 ? this._pt! : new MUPt();\n  }",
+		"  get pt(): M_U_Pt {\n    return this._which === 2 ? this._pt! : new M_U_Pt();\n  }",
 		// Select if not held.
-		"  mutablePt(): MUPt {\n    if (this._which !== 2) {\n      this._leave();\n      this._which = 2;\n      this._pt = new MUPt();\n    }\n    return this._pt!;\n  }",
+		"  mutablePt(): M_U_Pt {\n    if (this._which !== 2) {\n      this._leave();\n      this._which = 2;\n      this._pt = new M_U_Pt();\n    }\n    return this._pt!;\n  }",
 		"  mutableStrs(): string[] {\n    if (this._which !== 4) {",
-		"  mutableInner(): MUInner {",
+		"  mutableInner(): M_U_Inner {",
 		// fp32: a new value drops the NaN bytes; the bytes select at the default.
 		"  set f(v: number) {\n    if (this._which !== 7) {\n      this._leave();\n      this._which = 7;\n    }\n    this._f = v;\n    this._fFp32Raw = null;\n  }",
 		"  get fFp32Raw(): Uint8Array | null {\n    return this._which === 7 ? this._fFp32Raw : null;\n  }",
@@ -145,14 +143,14 @@ func TestTSUnionAccessors(t *testing.T) {
 		// The release on a real switch: object slots to null, a string to "", a
 		// typed array to the shared empty one; numbers and booleans hold nothing.
 		"  private _leave(): void {\n    switch (this._which) {\n      case 1:\n        this._s = \"\";\n        break;\n      case 2:\n        this._pt = null;\n        break;\n      case 3:\n        this._arr = _E_Uint16Array;\n        break;",
-		"  clear(): void {\n    this._leave();\n    this._which = 2;\n    this._pt = new MUPt();\n  }",
+		"  clear(): void {\n    this._leave();\n    this._which = 2;\n    this._pt = new M_U_Pt();\n  }",
 	)
 	// A replaced-whole kind (scalar, string, blob, native array) has no mutable
 	// accessor: nothing about it is edited in place.
-	mustNotContain(t, "MU accessors", u, "mutableNum(", "mutableS(", "mutableBl(", "mutableArr(", "mutableFa(")
+	mustNotContain(t, "M_U accessors", u, "mutableNum(", "mutableS(", "mutableBl(", "mutableArr(", "mutableFa(")
 	// A union with no option that holds anything selects with a bare tag store.
-	z := tsClass(t, genUnionMode(t, "bigint"), "MZ")
-	mustContain(t, "MZ accessors", z, "  set b(v: number) {\n    this._which = 1;\n    this._b = v;\n  }")
+	z := tsClass(t, genUnionMode(t, "bigint"), "M_Z")
+	mustContain(t, "M_Z accessors", z, "  set b(v: number) {\n    this._which = 1;\n    this._b = v;\n  }")
 }
 
 // TestTSUnionEncodeArms pins MESSAGE_SPEC §4.2's encode rule: serialize is one
@@ -161,8 +159,8 @@ func TestTSUnionAccessors(t *testing.T) {
 // ≠-default guard, the empty value as its empty payload, a struct/union/wrapper
 // option closed with the KEEPING end.
 func TestTSUnionEncodeArms(t *testing.T) {
-	u := tsClass(t, genUnionMode(t, "bigint"), "MU")
-	mustContain(t, "MU serialize", u,
+	u := tsClass(t, genUnionMode(t, "bigint"), "M_U")
+	mustContain(t, "M_U serialize", u,
 		"  serialize(os: OStream): void {\n    switch (this._which) {",
 		// default_id: guarded, dropping end.
 		"      case 2: {\n        os.writeSequenceBeginLazy(2);\n        this._pt!.serialize(os);\n        os.writeSequenceEnd();\n        break;\n      }",
@@ -181,12 +179,12 @@ func TestTSUnionEncodeArms(t *testing.T) {
 		// isDefault agrees: default_id held AND at its own default.
 		"  isDefault(): boolean {\n    return this._which === 2 && this._pt!.isDefault();\n  }",
 	)
-	mustNotContain(t, "MU serialize", u,
+	mustNotContain(t, "M_U serialize", u,
 		"if (this._num !== 5)", `if (this._s !== "")`, "if (this._arr.length !== 0)",
 		"if (this._bl!.length !== 0)", "if (this._bo !== true)", "if (this._f !== 1.5)")
 	// A scalar default_id keeps its guard.
-	z := tsClass(t, genUnionMode(t, "bigint"), "MZ")
-	mustContain(t, "MZ serialize", z,
+	z := tsClass(t, genUnionMode(t, "bigint"), "M_Z")
+	mustContain(t, "M_Z serialize", z,
 		"      case 0: {\n        if (this._a !== 0) {\n          os.writeUnsigned(0, this._a);\n        }",
 		"      case 1: {\n        os.writeUnsigned(1, this._b);")
 	// The union FIELD keeps its lazy frame and dropping end: it vanishes exactly
@@ -202,8 +200,8 @@ func TestTSUnionEncodeArms(t *testing.T) {
 // value and filling the one the union then holds.
 func TestTSUnionLongModes(t *testing.T) {
 	long := genUnionMode(t, "long")
-	q := tsClass(t, long, "MQ")
-	mustContain(t, "MQ long", q,
+	q := tsClass(t, long, "M_Q")
+	mustContain(t, "M_Q long", q,
 		"  private _big: Long = Long.ZERO;",
 		"  set sig(v: Long | bigint | number) {\n    this._which = 1;\n    this._sig = Long.fromValue(v);\n  }",
 		"      case 0: {\n        os.writeUnsignedLong(0, this._big);\n        break;\n      }",
@@ -211,25 +209,25 @@ func TestTSUnionLongModes(t *testing.T) {
 		"    return this._which === 1 && this._sig.low === 0 && this._sig.high === 0;",
 		`        return { "big": this._big.toString(false) };`,
 	)
-	la := tsClass(t, long, "MLa")
-	mustContain(t, "MLa long", la,
+	la := tsClass(t, long, "M_La")
+	mustContain(t, "M_La long", la,
 		"  private _ls: Long[] | null = null;",
 		"  set ls(v: readonly (Long | bigint | number)[]) {",
 		"    this._ls = v.map(Long.fromValue);",
 		"        os.writeUnsignedArrayLong(1, this._ls!);",
 	)
-	mustContain(t, "MLa decode", long,
+	mustContain(t, "M_La decode", long,
 		"this.o.la.ls = []; const _d = this.o.la.ls; this._a",
 		"if (kind !== ArrayKind.Unsigned) break; if (count > 2)",
 	)
-	num := tsClass(t, genUnionMode(t, "number"), "MQ")
-	mustContain(t, "MQ number", num,
+	num := tsClass(t, genUnionMode(t, "number"), "M_Q")
+	mustContain(t, "M_Q number", num,
 		"  private _sig: number = 0;",
 		"      case 0: {\n        os.writeUnsigned(0, this._big);",
 		"        if (this._sig !== 0) {\n          os.writeSigned(1, this._sig);",
 	)
-	big := tsClass(t, genUnionMode(t, "bigint"), "MQ")
-	mustContain(t, "MQ bigint", big,
+	big := tsClass(t, genUnionMode(t, "bigint"), "M_Q")
+	mustContain(t, "M_Q bigint", big,
 		"  private _sig: bigint = 0n;",
 		"        if (this._sig !== 0n) {\n          os.writeSigned(1, this._sig);",
 	)
@@ -255,8 +253,8 @@ func TestTSUnionDecodeSwitch(t *testing.T) {
 		// fp32: the setter selects and drops old bytes; a NaN's bytes follow.
 		"case 7: { const _u = this.o.u; _u.f = v; if (Number.isNaN(v)) _u.fFp32Raw = fp32RawBytes(bits); break; }",
 		// struct/union option: selected at its begin, reached through mutable below.
-		"case 2: { this.o.u.mutablePt(); this._c = _L_M_u_pt; return true; }",
-		"case 6: { this.o.u.mutableInner(); this._c = _L_M_u_inner; return true; }",
+		"case 2: { this.o.u.mutablePt(); this._c = _M__Loc_u_pt; return true; }",
+		"case 6: { this.o.u.mutableInner(); this._c = _M__Loc_u_inner; return true; }",
 		"this.o.u.mutablePt().x = _v;",
 		"this.o.u.mutableInner().b = _v;",
 		// wrapper option: a fresh destination per occurrence (§7.4 replace).
@@ -278,27 +276,27 @@ func TestTSUnionDecodeSwitch(t *testing.T) {
 func TestTSUnionGapFillPerType(t *testing.T) {
 	mod := genUnionMode(t, "bigint")
 	mustContain(t, "gap fill", mod,
-		"const _MK_UnionPickDefaultN = () => new UnionPickDefaultN();",
-		"new FramedSeq<UnionPickDefaultN>(_t, _MK_UnionPickDefaultN, 3,",
-		"const _MK_MVElem = () => new MVElem();",
-		"export class UnionPickDefaultT {",
-		"  private _which: number = 1;\n  private _n: number = 6;\n  private _t: UnionPickT | null = new UnionPickT();",
+		"const _Pick__DefaultN__Make = () => new Pick__DefaultN();",
+		"new FramedSeq<Pick__DefaultN>(_t, _Pick__DefaultN__Make, 3,",
+		"const _M_V__Make = () => new M_V();",
+		"export class Pick__DefaultT {",
+		"  private _which: number = 1;\n  private _n: number = 6;\n  private _t: Pick_T | null = new Pick_T();",
 	)
-	n := tsClass(t, mod, "UnionPickDefaultN")
-	mustContain(t, "UnionPickDefaultN", n, "  private _which: number = 0;", "  private _t: UnionPickT | null = null;")
+	n := tsClass(t, mod, "Pick__DefaultN")
+	mustContain(t, "Pick__DefaultN", n, "  private _which: number = 0;", "  private _t: Pick_T | null = null;")
 }
 
 // TestTSUnionJSON: exactly ONE member, the held option -- printed even for
 // default_id at its default -- and fromJSON selects what it reads.
 func TestTSUnionJSON(t *testing.T) {
-	u := tsClass(t, genUnionMode(t, "bigint"), "MU")
-	mustContain(t, "MU JSON", u,
+	u := tsClass(t, genUnionMode(t, "bigint"), "M_U")
+	mustContain(t, "M_U JSON", u,
 		"  toJSON(): Record<string, unknown> {\n    switch (this._which) {\n      case 0:\n        return { \"num\": this._num };",
 		`        return { "arr": Array.from(this._arr) };`,
 		`        return { "inner": this._inner!.toJSON() };`,
 		"    }\n    return { \"pt\": this._pt!.toJSON() };\n  }",
 		`    if ("num" in d) o.num = d["num"] as number;`,
-		`    if ("pt" in d) o.pt = MUPt.fromJSON(d["pt"] as Record<string, unknown>);`,
+		`    if ("pt" in d) o.pt = M_U_Pt.fromJSON(d["pt"] as Record<string, unknown>);`,
 		`    if ("which" in d) o.which_ = d["which"] as number;`,
 	)
 }
@@ -307,31 +305,40 @@ func TestTSUnionJSON(t *testing.T) {
 // only in a forced union option's arm; a union FIELD and default_id's frame keep
 // the dropping end.
 func TestTSLazySequenceFramingUnion(t *testing.T) {
-	u := tsClass(t, genUnionMode(t, "bigint"), "MU")
+	u := tsClass(t, genUnionMode(t, "bigint"), "M_U")
 	// inner (union) and strs (wrapper): forced. pt (struct): default_id.
 	if got, want := strings.Count(u, "os.writeSequenceEndKeep();"), 2; got != want {
-		t.Errorf("MU: writeSequenceEndKeep() count = %d, want %d (the two forced sequence options)", got, want)
+		t.Errorf("M_U: writeSequenceEndKeep() count = %d, want %d (the two forced sequence options)", got, want)
 	}
 	if got, want := strings.Count(u, "os.writeSequenceEnd();"), 1; got != want {
-		t.Errorf("MU: writeSequenceEnd() count = %d, want %d (default_id's struct frame)", got, want)
+		t.Errorf("M_U: writeSequenceEnd() count = %d, want %d (default_id's struct frame)", got, want)
 	}
 }
 
-// TestTSUnionNameErrors: options deriving the same member are a located error
-// naming both; an option landing on a union member is renamed, not refused.
-func TestTSUnionNameErrors(t *testing.T) {
-	for _, tc := range []struct{ src, want string }{
-		{`      u: { id: 0, type: union, default_id: 0, oneof: { foo_bar: { id: 0, type: u8 }, fooBar: { id: 1, type: u8 } } }`,
-			`options "foo_bar" and "fooBar" both generate the member hasFooBar`},
-		{`      u: { id: 0, type: union, default_id: 0, oneof: { f: { id: 0, type: fp32 }, fFp32Raw: { id: 1, type: u8 } } }`,
-			`options "f" and "fFp32Raw" both generate the member fFp32Raw`},
-		{`      u: { id: 0, type: union, default_id: 0, oneof: { a_b: { id: 0, type: u8 }, A_B: { id: 1, type: u8 } } }`,
-			`both generate the member`},
+// TestTSUnionDerivedMembersYield: no union is refused for its option names. An
+// option's property keeps the schema name (mangled only where the reserved list
+// says so); a member the backend DERIVES from an option -- has<Opt>,
+// mutable<Opt>, the fp32 raw-bytes companion -- takes a trailing `_` where a
+// sibling option or a fixed member already has that name.
+func TestTSUnionDerivedMembersYield(t *testing.T) {
+	src := "version: 1\nmessages:\n  M:\n    payload:\n" +
+		"      u: { id: 0, type: union, default_id: 0, oneof: { x: { id: 0, type: u8 }, hasX: { id: 1, type: u8 }," +
+		" p: { id: 2, type: struct, fields: { v: { id: 0, type: u8 } } }, mutableP: { id: 3, type: u8 }," +
+		" f: { id: 4, type: fp32 }, fFp32Raw: { id: 5, type: u8 }, own_property: { id: 6, type: u8 }, which: { id: 7, type: u8 } } }\n"
+	u := tsClass(t, genTSWith(t, src, map[string]any{}), "M_U")
+	for _, want := range []string{
+		"  get hasX(): number {", // the option keeps its name...
+		"  hasX_(): boolean {",   // ...and x's has<Opt> yields
+		"  hasHasX(): boolean {",
+		"  get mutableP(): number {",
+		"  mutableP_(): M_U_P {",
+		"  get fFp32Raw(): number {",
+		"  get fFp32Raw_(): Uint8Array | null {",
+		"  hasOwnProperty_(): boolean {", // never replaces Object's
+		"  get which_(): number {",       // the reserved-list mangle stands
 	} {
-		src := "version: 1\nmessages:\n  M:\n    payload:\n" + tc.src + "\n"
-		_, err := (&Backend{}).Generate(schema(t, src), map[string]any{})
-		if err == nil || !strings.Contains(err.Error(), "typescript backend: union ") || !strings.Contains(err.Error(), tc.want) {
-			t.Errorf("%s: err = %v, want one naming %q", tc.src, err, tc.want)
+		if !strings.Contains(u, want) {
+			t.Errorf("union M_U lacks %q", want)
 		}
 	}
 	// Landing on a fixed member renames with the trailing underscore.
@@ -339,13 +346,6 @@ func TestTSUnionNameErrors(t *testing.T) {
 		if got := unionOptProp(name); got != name+"_" {
 			t.Errorf("unionOptProp(%q) = %q, want %q", name, got, name+"_")
 		}
-	}
-	// ...and a name already taken by a fixed member is refused when the rename
-	// itself cannot help: here the slot of `which_` is `_which_`, taken by
-	// nothing, so both options generate.
-	if err := checkUnionNames((&gen{}).unionShapeOf("k", &ir.NamedType{Key: "k", Category: ir.CatUnion, DefaultID: ptr(0),
-		Fields: []*ir.Field{{Name: "which", ID: 0, Kind: ir.KindU8}, {Name: "x", ID: 1, Kind: ir.KindU8}}})); err != nil {
-		t.Errorf("an option named after the tag must be renamed, not refused: %v", err)
 	}
 }
 

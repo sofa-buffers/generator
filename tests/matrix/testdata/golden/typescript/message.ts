@@ -130,7 +130,7 @@ export class Scalars {
 
   static decode(bytes: Uint8Array): Scalars {
     const o = new Scalars();
-    _decode(bytes, new _ScalarsVis(o, new PayloadAcc()));
+    _decode(bytes, new _Scalars__Visitor(o, new PayloadAcc()));
     return o;
   }
 }
@@ -138,7 +138,7 @@ export class Scalars {
 // Dispatch locations for Scalars: one per sequence-framed scope in its tree.
 // A field id is only unique WITHIN a scope -- a nested sequence opens a fresh
 // id space -- so the visitor below keys every hook on (location, id).
-const _L_Scalars = 0;
+const _Scalars__Loc = 0;
 
 /**
  * Flat decode visitor for {@link Scalars}.
@@ -148,14 +148,14 @@ const _L_Scalars = 0;
  * and every hook keys on it. sequenceBegin sets it; sequenceEnd restores the
  * parent, which is static: the scopes form a tree, so no stack is needed.
  */
-class _ScalarsVis implements Visitor {
-  private _c = _L_Scalars;
+class _Scalars__Visitor implements Visitor {
+  private _c = _Scalars__Loc;
   private readonly _tq: BoolArrayTarget = { bool: _E_Uint8Array };
   private _a0Flags: Uint8Array = _E_Uint8Array;
   constructor(readonly o: Scalars, readonly a: PayloadAcc) {}
   sequenceBegin(): boolean { return false; }
   unsigned(id: number, v: number | bigint): void {
-    if (this._c !== _L_Scalars) return;
+    if (this._c !== _Scalars__Loc) return;
     switch (id) {
     case 0: { const _v = v as number; if (_v > 255) throw new SofabError(SofabErrorCode.InvalidMsg, "u8min: value outside declared width u8"); this.o.u8min = _v; break; }
     case 1: { const _v = v as number; if (_v > 255) throw new SofabError(SofabErrorCode.InvalidMsg, "u8max: value outside declared width u8"); this.o.u8max = _v; break; }
@@ -165,7 +165,7 @@ class _ScalarsVis implements Visitor {
     }
   }
   signed(id: number, v: number | bigint): void {
-    if (this._c !== _L_Scalars) return;
+    if (this._c !== _Scalars__Loc) return;
     switch (id) {
     case 3: { const _v = v as number; if (_v < -128 || _v > 127) throw new SofabError(SofabErrorCode.InvalidMsg, "i8min: value outside declared width i8"); this.o.i8min = _v; break; }
     case 4: this.o.i64min = typeof v === "bigint" ? v : BigInt(v); break;
@@ -173,28 +173,28 @@ class _ScalarsVis implements Visitor {
     }
   }
   fp32(id: number, v: number, bits: number): void {
-    if (this._c !== _L_Scalars) return;
+    if (this._c !== _Scalars__Loc) return;
     switch (id) {
     case 5: { this.o.f32 = v; this.o.f32Fp32Raw = Number.isNaN(v) ? fp32RawBytes(bits) : null; break; }
     default: break;
     }
   }
   fp64(id: number, v: number): void {
-    if (this._c !== _L_Scalars) return;
+    if (this._c !== _Scalars__Loc) return;
     switch (id) {
     case 6: this.o.f64 = v; break;
     default: break;
     }
   }
   arrayBegin(id: number, kind: ArrayKind, count: number): void {
-    if (this._c !== _L_Scalars) return;
+    if (this._c !== _Scalars__Loc) return;
     switch (id) {
     case 8: { if (kind !== ArrayKind.Unsigned) break; if (count > 4) throw new SofabError(SofabErrorCode.InvalidMsg, "flags: array count above schema capacity 4"); const _d = new Uint8Array(count); this.o.flags = _d; this._a0Flags = _d; break; }
     default: break;
     }
   }
   arrayBulk(id: number, kind: ArrayKind): ArrayTarget | null {
-    if (this._c !== _L_Scalars) return null;
+    if (this._c !== _Scalars__Loc) return null;
     switch (id) {
     case 8: {
       if (kind !== ArrayKind.Unsigned) break;
@@ -222,13 +222,13 @@ class _ScalarsVis implements Visitor {
  * blob copied before it reaches the destination, so a chunk may be reused as
  * soon as `feed` returns.
  */
-export class ScalarsDecoder {
+export class Scalars__Decoder {
   private readonly out: Scalars;
   private readonly is: IStream;
 
   constructor(out?: Scalars) {
     this.out = out ?? new Scalars();
-    this.is = new IStream(new _ScalarsVis(this.out, new PayloadAcc()));
+    this.is = new IStream(new _Scalars__Visitor(this.out, new PayloadAcc()));
   }
 
   /**

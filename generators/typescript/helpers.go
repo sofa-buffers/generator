@@ -8,6 +8,7 @@ import (
 
 	"github.com/sofa-buffers/generator/internal/generator"
 	"github.com/sofa-buffers/generator/internal/ir"
+	"github.com/sofa-buffers/generator/internal/naming"
 )
 
 func cfgString(cfg map[string]any, key, dflt string) string {
@@ -149,36 +150,7 @@ func fp32RawDoc(f *ir.Field) string {
 // companion — the twin of storage() for the value slot. An fp32 field is never
 // Long-backed, so there is no private backing field to bypass here.
 func (g *gen) fp32RawStorage(recv string, f *ir.Field) string {
-	return recv + "." + fp32RawName(f.Name)
-}
-
-func exported(name string) string {
-	parts := strings.FieldsFunc(name, func(r rune) bool { return r == '_' })
-	var b strings.Builder
-	for _, p := range parts {
-		if p == "" {
-			continue
-		}
-		b.WriteString(strings.ToUpper(p[:1]))
-		b.WriteString(p[1:])
-	}
-	if b.Len() == 0 {
-		return "X"
-	}
-	return b.String()
-}
-
-func (g *gen) typeName(key string) string {
-	parts := strings.FieldsFunc(key, func(r rune) bool { return r == '/' || r == '_' })
-	var b strings.Builder
-	for _, p := range parts {
-		if p == "" {
-			continue
-		}
-		b.WriteString(strings.ToUpper(p[:1]))
-		b.WriteString(p[1:])
-	}
-	return b.String()
+	return recv + "." + g.fp32Raw[f]
 }
 
 func isBig(k ir.Kind) bool { return k == ir.KindU64 || k == ir.KindI64 }
@@ -331,7 +303,7 @@ func (g *gen) tsArrayType(elem ir.Kind, ref *ir.TypeRef, items *ir.ArrayElem) st
 		// enum: the alias intersects the typed array with an index signature, so
 		// `m.modes[0]` is `Mode` and not `number`, while the storage stays a plain
 		// `Int8Array` the codec fills without touching an element.
-		return enumArrayAlias(g.typeName(ref.Key))
+		return enumArrayAlias(g.typeRaw(ref.Key))
 	case ir.KindU64, ir.KindI64:
 		if g.longArrays() {
 			return "Long[]"
@@ -342,9 +314,6 @@ func (g *gen) tsArrayType(elem ir.Kind, ref *ir.TypeRef, items *ir.ArrayElem) st
 	}
 	return "number[]"
 }
-
-// enumArrayAlias names the emitted type alias for an array of one enum.
-func enumArrayAlias(enumName string) string { return enumName + "Array" }
 
 func (g *gen) tsDefault(f *ir.Field) string {
 	switch f.Kind {
@@ -510,7 +479,7 @@ func (g *gen) enumMember(nt *ir.NamedType, def any) (string, bool) {
 	}
 	for _, c := range nt.Consts {
 		if c.Value == v {
-			return exported(c.Name), true
+			return naming.Pascal(c.Name), true
 		}
 	}
 	return "", false
@@ -790,7 +759,7 @@ func (g *gen) tsArrayFromJSON(src string, elem ir.Kind, ref *ir.TypeRef, items *
 		return fmt.Sprintf("(%s as Record<string, unknown>[]).map((%s) => %s.fromJSON(%s))", src, x, g.typeName(ref.Key), x)
 	case ir.KindEnum:
 		return fmt.Sprintf("new %s(%s as number[]) as %s",
-			g.tsTypedArray(elem, ref), src, enumArrayAlias(g.typeName(ref.Key)))
+			g.tsTypedArray(elem, ref), src, enumArrayAlias(g.typeRaw(ref.Key)))
 	case ir.KindArray:
 		return fmt.Sprintf("(%s as unknown[]).map((%s) => %s)", src, x, g.tsArrayFromJSON(x, items.Elem, items.ElemRef, items.ElemItems, depth+1))
 	case ir.KindBitfield:

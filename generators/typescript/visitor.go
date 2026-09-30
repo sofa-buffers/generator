@@ -6,6 +6,7 @@ import (
 	"strings"
 
 	"github.com/sofa-buffers/generator/internal/ir"
+	"github.com/sofa-buffers/generator/internal/naming"
 )
 
 // This file emits the decode half: a FLAT visitor per generated class
@@ -33,7 +34,7 @@ import (
 // tsScope is one dispatch location in a flat visitor.
 type tsScope struct {
 	id   int
-	name string // location constant, e.g. "_L_Point_start"
+	name string // location constant, e.g. "_Point__Loc_start"
 
 	// Object scope: fields dispatch by id, `path` names the object they land on.
 	fields   []*ir.Field
@@ -64,9 +65,9 @@ type tsScopeSet struct{ scopes []*tsScope }
 
 // buildScopes walks a class's tree and assigns one scope per sequence-framed
 // location reachable from it, rooted at the class itself.
-func (g *gen) buildScopes(typeName string, nt *ir.NamedType) []*tsScope {
+func (g *gen) buildScopes(raw string, nt *ir.NamedType) []*tsScope {
 	ss := &tsScopeSet{}
-	ss.object(g, typeName, "this.o", nt)
+	ss.object(g, scopeRoot(raw), "this.o", nt)
 	return ss.scopes
 }
 
@@ -74,7 +75,7 @@ func (g *gen) buildScopes(typeName string, nt *ir.NamedType) []*tsScope {
 // scopes its sequence-framed fields open.
 func (ss *tsScopeSet) object(g *gen, locName, path string, nt *ir.NamedType) int {
 	sc := &tsScope{
-		id: len(ss.scopes), name: "_L_" + locName,
+		id: len(ss.scopes), name: locName,
 		fields: nt.Fields, path: path, seqChild: map[int64]int{}, child: -1, parent: -1,
 	}
 	if nt.Category == ir.CatUnion {
@@ -106,7 +107,7 @@ func (ss *tsScopeSet) object(g *gen, locName, path string, nt *ir.NamedType) int
 func (ss *tsScopeSet) array(g *gen, locName, arrPath, loc string, elem ir.Kind, ref *ir.TypeRef,
 	items *ir.ArrayElem, cap int64, emHas bool, em int64) int {
 	sc := &tsScope{
-		id: len(ss.scopes), name: "_L_" + locName,
+		id: len(ss.scopes), name: locName,
 		isArr: true, arrPath: arrPath, elem: elem, elemRef: ref, elemItems: items,
 		cap: cap, elemMaxHas: emHas, elemMax: em, loc: loc, child: -1, parent: -1,
 	}
@@ -179,7 +180,7 @@ func (g *gen) memberAcc(sc *tsScope, f *ir.Field) string {
 // lands on the held object whether or not the begin arm ran in this feed.
 func (g *gen) memberPath(sc *tsScope, f *ir.Field) string {
 	if sc.union != nil {
-		return fmt.Sprintf("%s.mutable%s()", sc.path, sc.union.byField[f].base)
+		return fmt.Sprintf("%s.%s()", sc.path, sc.union.byField[f].mutable)
 	}
 	return g.visStorage(sc.path, f)
 }
@@ -192,9 +193,6 @@ func unionLongBacked(g *gen, sc *tsScope, f *ir.Field) bool {
 	return sc.union != nil && g.longBacked(f)
 }
 
-// visitorName is the flat visitor class emitted for one generated type.
-func visitorName(typeName string) string { return "_" + typeName + "Vis" }
-
 // --- entry points -----------------------------------------------------------
 
 // emitDecode generates the class-side half of the decode surface: the single
@@ -205,10 +203,10 @@ func visitorName(typeName string) string { return "_" + typeName + "Vis" }
 // CORELIB_PLAN §6.1.1 closes the generated object's name set to
 // encode/decode/try_decode/serialize/deserialize/decoder and names `decode_from`
 // and `decode_into` among the spellings a port must not invent beside them.
-func (g *gen) emitDecode(f *tsfile, name string) {
+func (g *gen) emitDecode(f *tsfile, name, raw string) {
 	f.line("  static decode(bytes: Uint8Array): %s {", name)
 	f.line("    const o = new %s();", name)
-	f.line("    _decode(bytes, new %s(o, new PayloadAcc()));", visitorName(name))
+	f.line("    _decode(bytes, new %s(o, new PayloadAcc()));", visitorName(raw))
 	f.line("    return o;")
 	f.line("  }")
 }
@@ -217,8 +215,8 @@ func (g *gen) emitDecode(f *tsfile, name string) {
 
 // emitVisitor writes the flat visitor class for one generated type, preceded by
 // its location constants.
-func (g *gen) emitVisitor(f *tsfile, name string, nt *ir.NamedType) {
-	scopes := g.buildScopes(name, nt)
+func (g *gen) emitVisitor(f *tsfile, name, raw string, nt *ir.NamedType) {
+	scopes := g.buildScopes(raw, nt)
 
 	f.line("// Dispatch locations for %s: one per sequence-framed scope in its tree.", name)
 	f.line("// A field id is only unique WITHIN a scope -- a nested sequence opens a fresh")
@@ -251,7 +249,7 @@ func (g *gen) emitVisitor(f *tsfile, name string, nt *ir.NamedType) {
 	g.emitArrayCbs(hooks, scopes)
 	hookText := hooks.b.String()
 
-	f.line("class %s implements Visitor {", visitorName(name))
+	f.line("class %s implements Visitor {", visitorName(raw))
 	f.line("  private _c = %s;", scopes[0].name)
 	for _, sc := range scopes {
 		if sc.ix != "" {
@@ -636,8 +634,7 @@ func (g *gen) gapValue(sc *tsScope) string {
 		}
 		return g.factory(mkArr, "(): never[] => []")
 	}
-	t := g.typeName(sc.elemRef.Key)
-	return g.factory("_MK_"+t, fmt.Sprintf("() => new %s()", t))
+	return g.factory(makeName(g.typeRaw(sc.elemRef.Key)), fmt.Sprintf("() => new %s()", g.typeName(sc.elemRef.Key)))
 }
 
 // seqCtor builds the collector for one wrapper array: the schema bounds first
@@ -1361,7 +1358,7 @@ func (g *gen) arrElemType(sc *tsScope) string {
 // one level up. Scoped by location as well as name: the same field name may occur
 // in two scopes of one tree.
 func arrayDst(sc *tsScope, f *ir.Field) string {
-	return fmt.Sprintf("_a%d%s", sc.id, exported(f.Name))
+	return fmt.Sprintf("_a%d%s", sc.id, naming.Pascal(f.Name))
 }
 
 // --- shared -----------------------------------------------------------------
@@ -1508,7 +1505,7 @@ func tsArrayKind(elem ir.Kind) string {
 // --- module-level decode support -------------------------------------------
 
 // emitDecoderClass writes the public incremental decoder for one message.
-func (g *gen) emitDecoderClass(f *tsfile, name string) {
+func (g *gen) emitDecoderClass(f *tsfile, name, raw string) {
 	f.line("/**")
 	f.line(" * Incremental decoder for {@link %s}: hold one and feed the message as", name)
 	f.line(" * bytes arrive, instead of buffering it whole first.")
@@ -1524,13 +1521,13 @@ func (g *gen) emitDecoderClass(f *tsfile, name string) {
 	f.line(" * blob copied before it reaches the destination, so a chunk may be reused as")
 	f.line(" * soon as `feed` returns.")
 	f.line(" */")
-	f.line("export class %sDecoder {", name)
+	f.line("export class %s {", decoderName(raw))
 	f.line("  private readonly out: %s;", name)
 	f.line("  private readonly is: IStream;")
 	f.blank()
 	f.line("  constructor(out?: %s) {", name)
 	f.line("    this.out = out ?? new %s();", name)
-	f.line("    this.is = new IStream(new %s(this.out, new PayloadAcc()));", visitorName(name))
+	f.line("    this.is = new IStream(new %s(this.out, new PayloadAcc()));", visitorName(raw))
 	f.line("  }")
 	f.blank()
 	f.line("  /**")
