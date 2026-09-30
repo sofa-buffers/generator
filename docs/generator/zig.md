@@ -17,6 +17,23 @@ Every generated file is `zig fmt` output already: `message.zig` and, under
 files need no exclusion from such a check and never come back reformatted.
 `sofabgen` produces that layout itself and does not run `zig`.
 
+## Field names
+
+A field's struct field is the field's schema name. A field named like a Zig
+keyword is a quoted identifier — the field `error` is `@"error"` — so it keeps
+its name. In Zig a struct's fields and declarations share one namespace, so a
+field named after a declaration the generated struct carries gets a trailing
+underscore instead — the field `encode` is `encode_`. Those declarations are
+`serialize` and `isDefault`, and on a message also `encode`, `decode`,
+`Decoder`, `decoder`, `MAX_SIZE` and `MAX_SIZE_LIMIT`. Only the field changes:
+the wire is keyed by the field id, and the JSON key stays the schema name.
+
+Two fields that end up with the same field — `encode` and `encode_` — fail
+generation, naming both; so do two constants of one enum or bitfield that
+differ only in case (`a` and `A` are both `A`), and a message or type whose Zig
+name is `DecodeError`, which the generated file declares itself. The list lives
+in `generators/zig/reserved.go`.
+
 ## Unions
 
 A `union` holds exactly one of its options. It is a Zig tagged union
@@ -104,9 +121,9 @@ allocated to hold it.
 **Names.** The fields are the option names; the accessors are
 `<option>Mut` and the id constants `<option>_id`. An option named like a Zig
 keyword is a quoted identifier (`@"error"`, with `errorMut()` and `error_id`).
-An option whose name is one of the union's own declarations — `init`, `which`,
-`serialize`, `isDefault` — or one of `marshal`, `encode`, `decode`, `MAX_SIZE`
-gets a trailing underscore on its field (option `which` is the field `which_`,
+An option whose name is one of the declarations listed under
+[Field names](#field-names), or one of the union's own — `init`, `which` — gets
+a trailing underscore on its field (option `which` is the field `which_`,
 with `whichMut()` and `which_id`). Two options that would produce the same
 member — `x` and `xMut`, `x` and `x_id`, or `init` and `init_` — fail
 generation, naming both.
