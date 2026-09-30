@@ -713,6 +713,21 @@ a reimplementation should emit code that honors all of them:
   the escape, and it generalises: a name colliding with a **generated member**
   (`encode`, `reset`, …) is *mangled*, because an escape answers the grammar and
   not another declaration.
+- **One reserved-name list per language.** A keyword is only one way a name can
+  be taken. A field must equally not take a member the generated class declares
+  (C++ `encode()` — a redeclaration; Python `encode` — the attribute silently
+  shadows the method), nor a name the class body *evaluates* while the class is
+  being defined (Python `classmethod`, `field`, `list`: a field bound earlier in
+  the one class scope rebinds it, and the module fails at import or a later
+  default silently changes). Each backend keeps all three kinds in **one list of
+  its own**, `generators/<lang>/reserved.go`, read by the struct path and the
+  union path alike; a union adds only the members it alone has. The list is per
+  language and never shared: a shared list would be the union over every
+  backend and rename, say, Python's `field` in all of them. Every such list is
+  guarded by a **collision test** that uses each listed name as a field (message,
+  nested struct, union option) and compiles or imports the result against the
+  real corelib, because the generator exits 0 on broken output. Done for C++ and
+  Python; the other backends still keep separate keyword and member tables.
 - **Emit pure ASCII *that the generator authors*.** Every byte a backend writes
   on its own — banners, separators, Makefiles, READMEs, scaffolding — must be ASCII
   (`< 0x80`): use ASCII punctuation (`-`, not the em-dash `—`). `TestGeneratedOutputIsASCII`

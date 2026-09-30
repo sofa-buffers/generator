@@ -57,31 +57,13 @@ type unionShape struct {
 	byField  map[*ir.Field]*unionOpt
 }
 
-// unionFixed are the names an option property must not take: the union class's
-// own members, and the builtins its body evaluates while the class is being
-// defined -- the `@property` and `@classmethod` decorators. A class body is one
-// scope, so an option property named `property` would rebind the decorator the
-// next option's `@property` evaluates, and `classmethod` the one on
-// from_jsonable/decoder/decode: the module would fail at import. A name landing
-// on one takes the trailing underscore. Option names start with a letter (the
-// schema's name pattern), so the underscored and dunder members cannot be
-// reached. Every other builtin the class mentions sits in a method body or a
-// postponed annotation, which read the module scope, not the class's.
-var unionFixed = []string{
-	"which", "clear", "serialize", "encode", "decode", "decoder",
-	"to_jsonable", "from_jsonable", "MAX_SIZE", "MAX_SIZE_LIMIT",
-	"property", "classmethod",
-}
-
 // unionOptProp is the property an option is reached through: the option's name,
-// keyword-mangled as a struct member's is, with the trailing underscore where it
-// lands on one of the union's own members.
+// mangled as a struct member's is (pyIdent), with the trailing underscore where it
+// lands on one of the members only a union has (unionReserved).
 func unionOptProp(name string) string {
 	p := pyIdent(name)
-	for _, m := range unionFixed {
-		if p == m {
-			return p + "_"
-		}
+	if unionReserved[p] {
+		return p + "_"
 	}
 	return p
 }
@@ -142,8 +124,10 @@ func (g *gen) unionShapeOf(nt *ir.NamedType) *unionShape {
 // names the union and both options.
 func checkUnionNames(u *unionShape) error {
 	owner := map[string]string{}
-	for _, m := range unionFixed {
-		owner[m] = ""
+	for _, set := range []map[string]bool{pyMembers, pyEvaluated, unionReserved} {
+		for m := range set {
+			owner[m] = ""
+		}
 	}
 	owner["_which"], owner["_value"], owner["_is_default"] = "", "", ""
 	for _, o := range u.opts {

@@ -123,6 +123,23 @@ Under `auto` and under `require` alike, a formatter that RUNS and rejects a
 generated file fails the generation with that file named — that is a generator
 bug, and writing the file would only move it into your build.
 
+## Field names
+
+A field's attribute is the field's schema name. Python has no way to escape a
+reserved name, so a field whose name the generated class cannot take gets a
+trailing underscore — the field `class` is the attribute `class_`, and `encode`
+is `encode_`. Those names are:
+
+- the Python keywords;
+- the members every generated class declares itself: `serialize`, `encode`,
+  `decode`, `decoder`, `to_jsonable`, `from_jsonable`, `MAX_SIZE`,
+  `MAX_SIZE_LIMIT`;
+- the names the class body evaluates while the class is being defined, which a
+  field of the same name would rebind for everything after it: `classmethod`,
+  `property`, `field`, `list`, `REASSEMBLY`.
+
+Only the attribute changes: the wire is keyed by the field id, and the JSON key
+stays the schema name. The list lives in `generators/python/reserved.go`.
 
 ## Unions
 
@@ -212,13 +229,11 @@ Selecting a struct, union or array option that is not held — through
 an object obtained earlier is never reset behind your back, it is merely no
 longer held.
 
-**Names.** The members are the option name: the property `<option>` (a Python
-keyword takes a trailing underscore, as a field does), `has_<option>()`,
-`mutable_<option>()` and the constant `<OPTION>_ID` (the name upper-cased). An
-option whose name would land on one of the union's own members (`which`,
-`clear`, `serialize`, `encode`, `decode`, `decoder`, `to_jsonable`,
-`from_jsonable`, `MAX_SIZE`) or on a builtin the class body uses (`property`,
-`classmethod`) gets a trailing underscore: an option `which` is the property
+**Names.** The members are the option name: the property `<option>`,
+`has_<option>()`, `mutable_<option>()` and the constant `<OPTION>_ID` (the name
+upper-cased). An option whose name is reserved for a field (see
+[Field names](#field-names)) or is one of the union's own members (`which`,
+`clear`) gets a trailing underscore: an option `which` is the property
 `which_`, with `has_which()` and `WHICH_ID`. A class has one
 namespace, so two options that would produce the same member (`a` and `A_ID`
 both give `A_ID`; `x` and `has_x` both give `has_x`) fail generation, naming

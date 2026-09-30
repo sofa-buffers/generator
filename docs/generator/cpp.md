@@ -74,6 +74,21 @@ Two things worth knowing before switching it on under `corelib: cpp`:
 Wraps every generated type; the default is `message`. `generic.namespace` sets
 it for every target that has one, and this key overrides that for C++ alone.
 
+## Field names
+
+A field's member is the field's schema name. C++ has no way to escape a reserved
+name, so a field whose name the generated class cannot take as a member gets a
+trailing underscore — the field `class` is the member `class_`, and `encode` is
+`encode_`. Those names are:
+
+- the C++ keywords;
+- the members every generated class declares itself: `serialize`,
+  `deserialize`, `reset`, and on a message also `encode`, `encodeTo`, `decode`,
+  `try_decode`.
+
+Only the member changes: the wire is keyed by the field id, and the JSON key
+stays the schema name. The list lives in `generators/cpp/reserved.go`.
+
 ## Unions
 
 A `union` holds exactly one of its options. It is a class of its own (a
@@ -154,9 +169,9 @@ alternative per option in id order. With `corelib: c-cpp` — freestanding, no
 new option with placement `new`. The options' own types follow `allow_dynamic`
 as any member does. The API is the same on both.
 
-**Accessor names** are the option names. An option named like a C++ keyword or
-like one of the union's own members (`which`, `Which`, `reset`, `serialize`,
-`deserialize`) gets a trailing underscore: option `reset` is `reset_()`,
+**Accessor names** are the option names. An option whose name is reserved for a
+field (see [Field names](#field-names)) or is one of the union's own members
+(`which`, `Which`) gets a trailing underscore: option `reset` is `reset_()`,
 `set_reset_()`, `has_reset_()`, `mutable_reset_()`. Two options whose accessors
 would coincide — `foo` and `set_foo` — fail generation, naming both.
 
