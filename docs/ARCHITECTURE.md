@@ -328,14 +328,19 @@ needs equivalent data structures:
 - **`Message`** — `Name`, `Summary`, ordered `Fields`.
 - **`NamedType`** — a shared `struct`/`union`/`enum`/`bitfield`: a `Category`,
   `Name`/`Key`, an optional `Summary`, an `Inline` flag (marks hoisted inline
-  definitions; synthetic keys `<parentKey>_<fieldName>` / `<name>_elem`), and
-  one of `Fields` (struct/union), `Consts` (enum), `Flags` (bitfield). The
-  synthetic join is ambiguous — `m.a_b` and `m_a.b` both give `m_a_b`, and a
-  `$defs` struct `P`'s inline field `f` gives `struct/P_f`, the key of a `$defs`
-  struct `P_f` — so the model refuses a key claimed twice (`model.Errors`,
-  located at the second element and naming the first) instead of replacing the
-  first type. No backend could catch it later: the replaced type is already
-  gone from the graph, and the code it generates compiles. A
+  definitions), its schema `Path` and, for a split union, its `Variant` (both
+  below and in §8, "Naming"), and one of `Fields` (struct/union), `Consts`
+  (enum), `Flags` (bitfield). A `$defs` key is `<category>/<name>`; an inline
+  key is its owner's key and the field name joined with `.` (`m.a`,
+  `struct/P.f`), and an array field's inline element type takes the field's own
+  key — the field declares no other inline type. `.` appears in no name, so keys
+  are distinct by construction; they used to join with `_`, and `m.a_b` and
+  `m_a.b` (or `$defs` struct `P`'s field `f` and a struct `P_f`) lowered to one
+  key, one type silently replacing the other (generator#624). The model still
+  refuses a key claimed twice (`model.Errors`, located at both elements) as an
+  internal invariant. `Path` is what backends name a type after: its top-level
+  name (the `$defs` name, or the message that declares it inline), then the
+  field and option names down to the declaring site. A
   union's default option is a property of the **type**: `NamedType.DefaultID`
   is always set after analysis (the site's `default_id`, else the lowest option
   id), and `DefaultOption()` / `IsDefaultOption(f)` (`internal/ir/union.go`) are
@@ -343,13 +348,13 @@ needs equivalent data structures:
   every union site — `Field.Ref`, `Field.ElemRef` and each nested
   `ArrayElem.ElemRef`, whose raw `default_id` the model carries on
   `TypeRef.DefaultID` — and a `$defs` union used with several distinct
-  effective `default_id`s is **split** into one `NamedType` per id, named
-  `<Name>_default_<option>` (key `<Key>_default_<option>`), registered at the
-  original's `NamedOrder` position in ascending id order, with every site
-  repointed; the variants share the original's `Fields`. A variant whose name
-  **folds** (lowercase, non-alphanumerics dropped) onto an existing type's key or
-  name is a located analysis error, because every backend derives identifiers
-  from the key by case changes and separator removal. So a constructor, an
+  effective `default_id`s is **split** into one `NamedType` per id — keyed
+  `<Key>~<option>`, with the original's `Name` and `Path` and the default
+  option's name as `Variant` — registered at the original's `NamedOrder`
+  position in ascending id order, with every site repointed; the variants share
+  the original's `Fields`. Backends name a variant through `Variant` in the role
+  channel (§8, "Naming"), which no schema name reaches, so a split never meets
+  another type and is never refused. So a constructor, an
   array-of-union gap fill and an omission test all bake in the one default of
   their type. `Field.Default` on a union field is the raw schema `default_id`,
   kept for the `docs` target only.
@@ -5569,8 +5574,9 @@ target renders the same metadata as HTML page content
   default.
   - **One type per (union, `default_id`).** The default is carried by the union
     **type** (`NamedType.DefaultID`, §6), never by the site, so a `$defs` union
-    referenced with different `default_id`s is split by analysis into
-    `<Name>_default_<option>` types. That is what makes every type-level default
+    referenced with different `default_id`s is split by analysis into one type
+    per default (`NamedType.Variant`; spelled `Shape__DefaultPt` and the like,
+    §8 "Naming"). That is what makes every type-level default
     correct without a site parameter: a constructor, Rust `T: Default`, a Go zero
     value plus `setDefaults`, a C default image, a GC corelib's element factory,
     and an array-of-union gap fill.
