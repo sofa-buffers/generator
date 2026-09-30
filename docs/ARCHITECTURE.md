@@ -692,17 +692,24 @@ a reimplementation should emit code that honors all of them:
   schema but was never consumed and has been pruned.)
 - **Escape reserved-word field names.** A schema field name may collide with a
   target-language keyword (`where`, `class`, `int`, …); the backend must make it a
-  valid identifier — *escape* where the language allows (Rust `r#name`, C#
-  `@name`, Kotlin `` `name` ``), *mangle* otherwise (C/C++/Java/Python trailing
-  `_`), or be keyword-safe by construction (Go exports/capitalises; TS allows
-  keyword member names). A few
-  words can't be escaped at all (Rust `self`/`Self`/`crate`/`super`) and must be
-  mangled. The **wire is unaffected** (keyed by id) and the **JSON name stays the
+  valid identifier. **Where the language has its own escape for a reserved word,
+  that escape is used, always** (Rust `r#name`, C# `@name`, Kotlin `` `name` ``,
+  Zig `@"name"`): it keeps the member spelled as the schema spells it. Only a
+  language without one *mangles* with a trailing `_` (C/C++/Java/Python/Dart), and
+  a language whose member position takes keywords as they are needs neither (Go
+  exports/capitalises; TS accepts every keyword as a class member). A few
+  words can't be escaped at all (Rust `self`/`Self`/`crate`/`super`; TS
+  `constructor`, which a class body rejects in every spelling) and must be
+  mangled. "Keyword" means whatever the member position rejects in a build the
+  user may reasonably run, not only the current standard's list: C reserves the
+  C23 keywords and the `<stdbool.h>` macros `bool`/`true`/`false`, which expand to
+  a constant before C23. The **wire is unaffected** (keyed by id) and the **JSON name stays the
   original** — keep the raw name for JSON keys, and add a rename when the
   identifier was mangled (escapes like `r#`/`@` are serializer-transparent). The
   `keywords.yaml` corpus compiles a keyword-heavy schema in every backend to guard
-  this (and any new backend). Per-backend helpers: `cIdent`/`cppIdent`/`csIdent`/
-  `javaIdent`/`ktIdent`/`pyIdent`/`rustIdent`. Kotlin carries a second rule beside
+  this (and any new backend); the C harness builds it once more as C23. Per-backend
+  helpers: `cIdent`/`cppIdent`/`csIdent`/`dartIdent`/`javaIdent`/`ktIdent`/`pyIdent`/
+  `rustIdent`/`tsIdent`/`zigIdent`. Kotlin carries a second rule beside
   the escape, and it generalises: a name colliding with a **generated member**
   (`encode`, `reset`, …) is *mangled*, because an escape answers the grammar and
   not another declaration.

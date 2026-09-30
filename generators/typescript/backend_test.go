@@ -630,6 +630,48 @@ messages:
       i:    { id: 5, type: i64, default: -7 }
 `
 
+// TestConstructorFieldIsMangled: a class body rejects a field (or an accessor
+// pair) named `constructor` -- "Classes may not have a field named
+// 'constructor'" -- so tsIdent mangles it to `constructor_`, on every path that
+// reaches the member: the plain field, the int64:long accessor pair, arrays and
+// a nested struct's field. The JSON key and the error text keep the schema name.
+func TestConstructorFieldIsMangled(t *testing.T) {
+	const src = `version: 1
+$defs:
+  struct:
+    Inner:
+      constructor: { id: 0, type: u8 }
+messages:
+  m:
+    payload:
+      constructor: { id: 0, type: u8 }
+      inner:       { id: 1, type: struct, fields: { $ref: '#/$defs/struct/Inner' } }
+  big:
+    payload:
+      constructor: { id: 0, type: i64 }
+  arr:
+    payload:
+      constructor: { id: 0, type: array, items: { type: u64, count: 4 } }
+`
+	for _, mode := range []string{"bigint", "long", "number"} {
+		out := genTSWith(t, src, map[string]any{"int64": mode})
+		for _, bad := range []*regexp.Regexp{
+			regexp.MustCompile(`(?m)^  constructor\s*[:=]`),
+			regexp.MustCompile(`\b(get|set) constructor\(`),
+			regexp.MustCompile(`\.constructor\b`),
+		} {
+			if loc := bad.FindStringIndex(out); loc != nil {
+				t.Errorf("int64=%s: unmangled member %q:\n%s", mode, out[loc[0]:loc[1]], out)
+			}
+		}
+		for _, want := range []string{"constructor_", `"constructor":`, `"constructor" in d`} {
+			if !strings.Contains(out, want) {
+				t.Errorf("int64=%s: missing %q:\n%s", mode, want, out)
+			}
+		}
+	}
+}
+
 func genTSWith(t *testing.T, src string, cfg map[string]any) string {
 	t.Helper()
 	files, err := (&Backend{}).Generate(schema(t, src), cfg)

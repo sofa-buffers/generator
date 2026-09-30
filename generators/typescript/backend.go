@@ -556,7 +556,7 @@ func (g *gen) emitClass(f *tsfile, name, summary string, fields []*ir.Field, isM
 			continue
 		}
 		f.emitDoc("  ", fieldDoc(fld, generator.BoundNote(fld, generator.StorageDynamic)))
-		f.line("  %s: %s = %s;", fld.Name, g.tsType(fld), g.tsDefault(fld))
+		f.line("  %s: %s = %s;", tsIdent(fld.Name), g.tsType(fld), g.tsDefault(fld))
 		if fp32RawCompanion(fld) {
 			// The value slot above is the field's API; this is its wire companion
 			// (MESSAGE_SPEC §4.6, generator#235). A JS number is a 64-bit double and
@@ -682,15 +682,15 @@ func (g *gen) emitLongAccessor(f *tsfile, fld *ir.Field) {
 	t := g.tsType(fld)
 	f.line("  private _%s: %s = %s;", fld.Name, t, g.tsDefault(fld))
 	f.emitDoc("  ", fieldDoc(fld, generator.BoundNote(fld, generator.StorageDynamic)))
-	f.line("  get %s(): %s { return this._%s; }", fld.Name, t, fld.Name)
+	f.line("  get %s(): %s { return this._%s; }", tsIdent(fld.Name), t, fld.Name)
 	if isBig(fld.Kind) {
 		// Scalar: the same shape one level down from the array setter. Long.fromValue
 		// returns a Long argument as-is, so assigning a Long costs nothing and
 		// assigning a bigint/number converts exactly once, here.
-		f.line("  set %s(v: Long | bigint | number) { this._%s = Long.fromValue(v); }", fld.Name, fld.Name)
+		f.line("  set %s(v: Long | bigint | number) { this._%s = Long.fromValue(v); }", tsIdent(fld.Name), fld.Name)
 		return
 	}
-	f.line("  set %s(vals: %s) { this._%s = %s; }", fld.Name, g.longSetterParam(fld), fld.Name, g.longConvert("vals", fld.Elem, fld.ElemItems, 0))
+	f.line("  set %s(vals: %s) { this._%s = %s; }", tsIdent(fld.Name), g.longSetterParam(fld), fld.Name, g.longConvert("vals", fld.Elem, fld.ElemItems, 0))
 }
 
 // longSetterParam is the accessor setter's parameter type: element positions

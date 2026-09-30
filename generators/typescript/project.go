@@ -268,7 +268,7 @@ func (g *gen) benchSinkExpr(mt string, m *ir.Message) string {
 // pull and the chunked workloads share one definition of "cheap unelidable read".
 func (g *gen) benchSinkOn(obj string, m *ir.Message) string {
 	fld := benchSinkField(m)
-	acc := obj + "." + fld
+	acc := obj + "." + tsIdent(fld)
 	for _, x := range m.Fields {
 		if x.Name == fld && g.longScalars() && isBig(x.Kind) {
 			return acc + ".low"

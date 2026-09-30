@@ -156,7 +156,7 @@ func (g *gen) visStorage(recv string, f *ir.Field) string {
 	if g.longBacked(f) {
 		return fmt.Sprintf("%s[%q]", recv, "_"+f.Name)
 	}
-	return recv + "." + f.Name
+	return recv + "." + tsIdent(f.Name)
 }
 
 // memberAcc is the expression a scope's field f is read and stored through: the
