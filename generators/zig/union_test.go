@@ -118,27 +118,27 @@ func section(t *testing.T, m, head string) string {
 // union field and a union array's gap fill both start from it.
 func TestZigUnionIsTaggedUnion(t *testing.T) {
 	m, _ := unionFiles(t)
-	u := section(t, m, "pub const MU = union(enum) {")
+	u := section(t, m, "pub const M_U = union(enum) {")
 	wantCode(t, u, "the union is a tagged union with one field per option",
-		"num: u16,", "s: []const u8,", "pt: MUPt,", "arr: sofab.FixedArray(u16, 4),",
-		"strs: []const []const u8,", "box: MUBox,", "which_: bool,", `@"error": []const u8,`, "inner: MUInner,",
+		"num: u16,", "s: []const u8,", "pt: M_U_Pt,", "arr: sofab.FixedArray(u16, 4),",
+		"strs: []const []const u8,", "box: M_U_Box,", "which_: bool,", `@"error": []const u8,`, "inner: M_U_Inner,",
 		// D is `pt` (id 2), not the first option.
-		"pub const init: MU = .{ .pt = .{} };")
-	wantCode(t, m, "a union field starts from its type's init", "u: MU = .init,")
+		"pub const init: M_U = .{ .pt = .{} };")
+	wantCode(t, m, "a union field starts from its type's init", "u: M_U = .init,")
 	// A union option that is itself a union starts from ITS init (b = -2).
 	wantCode(t, m, "a nested union's init is its own default_id",
-		"pub const init: MUInner = .{ .b = -2 };",
+		"pub const init: M_U_Inner = .{ .b = -2 };",
 		"if (self.* != .inner) self.* = .{ .inner = .init };")
 	// The $defs union splits per default_id (§1.1); each split type bakes its own D.
 	wantCode(t, m, "split $defs types carry their own default",
-		"pub const init: UnionPickDefaultT = .{ .t = .{} };",
-		"pub const init: UnionPickDefaultN = .{ .n = 6 };",
-		"pf: UnionPickDefaultT = .init,", "po: UnionPickDefaultN = .init,")
+		"pub const init: Pick__DefaultT = .{ .t = .{} };",
+		"pub const init: Pick__DefaultN = .{ .n = 6 };",
+		"pf: Pick__DefaultT = .init,", "po: Pick__DefaultN = .init,")
 	// The element gap fill is the element type's init: D = `s` at "".
 	wantCode(t, m, "an array of unions fills its gaps with the element type's init",
-		"pub const init: MVElem = .{ .s = \"\" };",
-		"sofab.arrays.reserveElem(MVElem, .{ .schema = 4 }, self.alloc, &(self.m.v), id, .init)")
-	if containsCode(m, "MU = .{}") || containsCode(m, "reserveElem(MVElem, .{ .schema = 4 }, self.alloc, &(self.m.v), id, .{})") {
+		"pub const init: M_V = .{ .s = \"\" };",
+		"sofab.arrays.reserveElem(M_V, .{ .schema = 4 }, self.alloc, &(self.m.v), id, .init)")
+	if containsCode(m, "M_U = .{}") || containsCode(m, "reserveElem(M_V, .{ .schema = 4 }, self.alloc, &(self.m.v), id, .{})") {
 		t.Errorf("a union must never be built as a product-type `.{}`:\n%s", m)
 	}
 }
@@ -148,19 +148,19 @@ func TestZigUnionIsTaggedUnion(t *testing.T) {
 // keyword option is a quoted identifier.
 func TestZigUnionAccessors(t *testing.T) {
 	m, _ := unionFiles(t)
-	u := section(t, m, "pub const MU = union(enum) {")
+	u := section(t, m, "pub const M_U = union(enum) {")
 	wantCode(t, u, "the union API",
 		"pub const num_id: sofab.Id = 0;", "pub const error_id: sofab.Id = 7;", "pub const which_id: sofab.Id = 6;",
-		"pub fn which(self: *const MU) sofab.Id { return switch (self.*) { .num => num_id,",
+		"pub fn which(self: *const M_U) sofab.Id { return switch (self.*) { .num => num_id,",
 		".which_ => which_id,", `.@"error" => error_id,`,
 		// select if not held: the option is (re)built only when another one is held.
-		"pub fn ptMut(self: *MU) *MUPt { if (self.* != .pt) self.* = .{ .pt = .{} }; return &self.pt; }",
-		"pub fn numMut(self: *MU) *u16 { if (self.* != .num) self.* = .{ .num = 5 }; return &self.num; }",
-		"pub fn whichMut(self: *MU) *bool { if (self.* != .which_) self.* = .{ .which_ = false }; return &self.which_; }",
-		`pub fn errorMut(self: *MU) *[]const u8 { if (self.* != .@"error") self.* = .{ .@"error" = "" }; return &self.@"error"; }`)
+		"pub fn ptMut(self: *M_U) *M_U_Pt { if (self.* != .pt) self.* = .{ .pt = .{} }; return &self.pt; }",
+		"pub fn numMut(self: *M_U) *u16 { if (self.* != .num) self.* = .{ .num = 5 }; return &self.num; }",
+		"pub fn whichMut(self: *M_U) *bool { if (self.* != .which_) self.* = .{ .which_ = false }; return &self.which_; }",
+		`pub fn errorMut(self: *M_U) *[]const u8 { if (self.* != .@"error") self.* = .{ .@"error" = "" }; return &self.@"error"; }`)
 	// A single-option union holds that option always: no tag test.
-	one := section(t, m, "pub const MOne = union(enum) {")
-	wantCode(t, one, "a single-option accessor", "pub fn onlyMut(self: *MOne) *u8 { return &self.only; }")
+	one := section(t, m, "pub const M_One = union(enum) {")
+	wantCode(t, one, "a single-option accessor", "pub fn onlyMut(self: *M_One) *u8 { return &self.only; }")
 }
 
 // Encode (§0 / MESSAGE_SPEC §4.2): default_id is guarded and closed with the
@@ -169,7 +169,7 @@ func TestZigUnionAccessors(t *testing.T) {
 // the keeping end; isDefault is "D held and D at its default".
 func TestZigUnionEncodeArms(t *testing.T) {
 	m, _ := unionFiles(t)
-	u := section(t, m, "pub const MU = union(enum) {")
+	u := section(t, m, "pub const M_U = union(enum) {")
 	wantCode(t, u, "encode arms",
 		".num => { try os.writeUnsigned(0, self.num); },",
 		".s => { try os.writeString(1, self.s); },",
@@ -180,9 +180,9 @@ func TestZigUnionEncodeArms(t *testing.T) {
 		".which_ => { try os.writeBoolean(6, self.which_); },",
 		`.@"error" => { try os.writeBlob(7, self.@"error"); },`,
 		".inner => { try os.writeSequenceBeginLazy(8); try self.inner.serialize(os); try os.writeSequenceEndKeep(); },",
-		"pub fn isDefault(self: *const MU) bool { return self.* == .pt and self.pt.isDefault(); }")
+		"pub fn isDefault(self: *const M_U) bool { return self.* == .pt and self.pt.isDefault(); }")
 	// A leaf D keeps the ordinary field's ≠-default guard.
-	inner := section(t, m, "pub const MUInner = union(enum) {")
+	inner := section(t, m, "pub const M_U_Inner = union(enum) {")
 	wantCode(t, inner, "a leaf default_id is guarded; the other option is not",
 		".a => { try os.writeUnsigned(0, self.a); },",
 		".b => { if (self.b != -2) try os.writeSigned(1, self.b); },",
@@ -204,7 +204,7 @@ func TestZigUnionEncodeArms(t *testing.T) {
 // select-if-not-held accessor. Nothing re-emplaces a held option.
 func TestZigUnionDecodeSwitch(t *testing.T) {
 	m, _ := unionFiles(t)
-	dec := section(t, m, "const _dec_M = struct {")
+	dec := section(t, m, "const _M__Visitor = struct {")
 	wantCode(t, dec, "the decode switch",
 		// scalar: switch and store are one assignment, after the width guard.
 		"0 => { if (value > 65535) { self.inv = true; return; } self.m.u = .{ .num = @intCast(value) }; },",
@@ -249,32 +249,35 @@ func TestZigUnionDecodeSwitch(t *testing.T) {
 func TestZigUnionJSON(t *testing.T) {
 	_, h := unionFiles(t)
 	wantCode(t, h, "the union JSON form",
-		"fn toJson_MU(o: *const message.MU, w: *std.Io.Writer) std.Io.Writer.Error!void { switch (o.*) {",
+		"fn toJson_M_U(o: *const message.M_U, w: *std.Io.Writer) std.Io.Writer.Error!void { switch (o.*) {",
 		`.num => { try w.writeAll("{\"num\":"); try w.print("{d}", .{o.num}); try w.writeByte('}'); },`,
-		`.pt => { try w.writeAll("{\"pt\":"); try toJson_MUPt(&o.pt, w); try w.writeByte('}'); },`,
-		"var o: message.MU = .init;",
+		`.pt => { try w.writeAll("{\"pt\":"); try toJson_M_U_Pt(&o.pt, w); try w.writeByte('}'); },`,
+		"var o: message.M_U = .init;",
 		`if (obj.get("num")) |x| o.numMut().* = @intCast(jsonU64(x));`,
-		`if (obj.get("pt")) |x| o.ptMut().* = fromJson_MUPt(alloc, x);`,
+		`if (obj.get("pt")) |x| o.ptMut().* = fromJson_M_U_Pt(alloc, x);`,
 		`o.arrMut().*.set(t0[0..n0]);`)
 }
 
-// Options that derive the same Zig member fail generation, naming both.
+// Options that spell another option's derived member generate: the option takes
+// the trailing `_` of a declaration clash, the derived member keeps its name.
 func TestZigUnionNameClash(t *testing.T) {
-	for _, c := range []struct{ a, b, member string }{
-		{"a", "aMut", "aMut"},
-		{"a", "a_id", "a_id"},
-		{"init", "init_", "init_"},
+	for _, c := range []struct{ a, b, field, member string }{
+		{"a", "aMut", "aMut_: u8,", "pub fn aMut(self: *M_U) *u8 {"},
+		{"a", "a_id", "a_id_: u8,", "pub const a_id: sofab.Id = 0;"},
+		{"init", "x", "init_: u8,", "pub const init: M_U = .{ .init_ = 0 };"},
+		{"X", "xMut", "xMut_: u8,", "pub fn xMut(self: *M_U) *u8 {"},
 	} {
 		src := "version: 1\nmessages:\n  m:\n    payload:\n      u: { id: 0, type: union, oneof: { " +
 			c.a + ": { id: 0, type: u8 }, " + c.b + ": { id: 1, type: u8 } } }\n"
-		_, err := generateYAML(t, src, map[string]any{})
-		if err == nil {
-			t.Errorf("options %q and %q must fail generation", c.a, c.b)
+		files, err := generateYAML(t, src, map[string]any{})
+		if err != nil {
+			t.Errorf("options %q and %q must generate: %v", c.a, c.b, err)
 			continue
 		}
-		for _, w := range []string{c.a, c.b, c.member} {
-			if !strings.Contains(err.Error(), w) {
-				t.Errorf("clash error for %q/%q does not name %q: %v", c.a, c.b, w, err)
+		u := section(t, string(files[0].Content), "pub const M_U = union(enum) {")
+		for _, w := range []string{c.field, c.member} {
+			if !strings.Contains(u, w) {
+				t.Errorf("options %q/%q: missing %q in:\n%s", c.a, c.b, w, u)
 			}
 		}
 	}

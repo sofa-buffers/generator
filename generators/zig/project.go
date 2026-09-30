@@ -89,9 +89,14 @@ const zigReadme = "# Generated SofaBuffers Zig package\n\n" +
 // The never_inline barrier is on the wrapper only, so encode/decode and the corelib
 // still inline into it — that inlining is the cost being measured. std.mem.
 // doNotOptimizeAway keeps the results live.
+//
+// The workload and symbol names spell the message name lower-cased, which is
+// what the bench rows name. That is injective: lower-casing keeps every `_`, so
+// two messages that lower-case alike share a fold, which the validator refuses.
+// The `_bench_<name>_<role>` globals stay apart too, since no role contains `_`.
 func (g *gen) emitBench(f *zfile, s *ir.Schema) {
 	for _, m := range s.Messages {
-		mt := exported(m.Name)
+		mt := msgIdent(m)
 		low := strings.ToLower(m.Name)
 		f.line("var _bench_%s_in: message.%s = undefined;", low, mt)
 		f.line("var _bench_%s_wire: []const u8 = &[_]u8{};", low)
@@ -119,12 +124,12 @@ func (g *gen) emitBench(f *zfile, s *ir.Schema) {
 		f.line("fn benchMain(alloc: std.mem.Allocator, w: []const u8, input: []const u8) !void {")
 	}
 	for _, m := range s.Messages {
-		mt := exported(m.Name)
+		mb := msgBase(m)
 		low := strings.ToLower(m.Name)
 		f.line("    if (std.mem.eql(u8, w, \"encode_%s\") or std.mem.eql(u8, w, \"decode_%s\")) {", low, low)
 		f.line("        const v = try std.json.parseFromSliceLeaky(std.json.Value, alloc, input, .{});")
 		f.line("        _bench_%s_alloc = alloc;", low)
-		f.line("        _bench_%s_in = fromJson_%s(alloc, v);", low, mt)
+		f.line("        _bench_%s_in = fromJson_%s(alloc, v);", low, mb)
 		// @call(.never_inline) at the CALL SITE, not just `export fn`: ReleaseFast
 		// happily inlines the body into benchMain and leaves the exported symbol as
 		// an unreferenced copy, so --toggle-collect matches a function that is never
@@ -165,13 +170,13 @@ func (g *gen) harness(s *ir.Schema) []byte {
 		nt := s.Named[key]
 		switch nt.Category {
 		case ir.CatStruct:
-			g.emitJSON(f, g.typeName(key), nt.Fields)
+			g.emitJSON(f, typeBase(nt), typeIdent(nt), nt.Fields)
 		case ir.CatUnion:
-			g.emitUnionJSON(f, g.typeName(key), nt)
+			g.emitUnionJSON(f, typeBase(nt), typeIdent(nt), nt)
 		}
 	}
 	for _, m := range s.Messages {
-		g.emitJSON(f, exported(m.Name), m.Fields)
+		g.emitJSON(f, msgBase(m), msgIdent(m), m.Fields)
 	}
 
 	g.emitBench(f, s)
@@ -200,15 +205,15 @@ func (g *gen) harness(s *ir.Schema) []byte {
 	f.line("    }")
 	f.blank()
 	for _, m := range s.Messages {
-		mt := exported(m.Name)
+		mt, mb := msgIdent(m), msgBase(m)
 		f.line("    if (std.mem.eql(u8, name, %q)) {", m.Name)
 		f.line("        if (std.mem.eql(u8, mode, \"encode\")) {")
 		f.line("            const v = try std.json.parseFromSliceLeaky(std.json.Value, alloc, input, .{});")
-		f.line("            const obj = fromJson_%s(alloc, v);", mt)
+		f.line("            const obj = fromJson_%s(alloc, v);", mb)
 		f.line("            try out.writeAll(try obj.encode(alloc));")
 		f.line("        } else if (std.mem.eql(u8, mode, \"decode\")) {")
 		f.line("            const obj = try message.%s.decode(alloc, input);", mt)
-		f.line("            try toJson_%s(&obj, out);", mt)
+		f.line("            try toJson_%s(&obj, out);", mb)
 		f.line("            try out.writeByte('\\n');")
 		// The same bytes through the incremental decoder (PLAN §5.6), fed ONE BYTE
 		// per feed. A whole-buffer feed would exercise the Decoder's signature
@@ -249,7 +254,7 @@ func (g *gen) harness(s *ir.Schema) []byte {
 		f.line("                std.debug.print(\"decode error: {s} [finish={s}]\\n\", .{ @errorName(e), @errorName(e) });")
 		f.line("                std.process.exit(1);")
 		f.line("            };")
-		f.line("            try toJson_%s(&obj, out);", mt)
+		f.line("            try toJson_%s(&obj, out);", mb)
 		f.line("            try out.writeByte('\\n');")
 		f.line("        } else {")
 		f.line("            std.process.exit(2);")
@@ -335,9 +340,9 @@ fn jsonWriteBytes(b: []const u8, w: *std.Io.Writer) !void {
 `
 
 // emitJSON writes toJson_<T> / fromJson_<T> for one generated struct type.
-func (g *gen) emitJSON(f *zfile, name string, fields []*ir.Field) {
+func (g *gen) emitJSON(f *zfile, base, name string, fields []*ir.Field) {
 	// toJson: every field, schema order, schema names.
-	f.line("fn toJson_%s(o: *const message.%s, w: *std.Io.Writer) std.Io.Writer.Error!void {", name, name)
+	f.line("fn toJson_%s(o: *const message.%s, w: *std.Io.Writer) std.Io.Writer.Error!void {", base, name)
 	f.line("    try w.writeByte('{');")
 	for i, fld := range fields {
 		comma := ","
@@ -362,7 +367,7 @@ func (g *gen) emitJSON(f *zfile, name string, fields []*ir.Field) {
 	// fromJson: tolerant member-by-member load over std.json.Value. Zig
 	// rejects unused AND pointlessly-discarded names alike, so the discards
 	// are emitted exactly when a name goes unused.
-	f.line("fn fromJson_%s(alloc: std.mem.Allocator, v: std.json.Value) message.%s {", name, name)
+	f.line("fn fromJson_%s(alloc: std.mem.Allocator, v: std.json.Value) message.%s {", base, name)
 	f.line("    var o: message.%s = .{};", name)
 	f.line("    const obj = switch (v) {")
 	f.line("        .object => |ob| ob,")
@@ -387,9 +392,9 @@ func (g *gen) emitJSON(f *zfile, name string, fields []*ir.Field) {
 // printed even when that is default_id at its default. fromJson starts from
 // `init` and selects each member present through <opt>Mut(), so an object
 // naming no option reads as the union's default.
-func (g *gen) emitUnionJSON(f *zfile, name string, nt *ir.NamedType) {
+func (g *gen) emitUnionJSON(f *zfile, base, name string, nt *ir.NamedType) {
 	opts := unionOptions(nt)
-	f.line("fn toJson_%s(o: *const message.%s, w: *std.Io.Writer) std.Io.Writer.Error!void {", name, name)
+	f.line("fn toJson_%s(o: *const message.%s, w: *std.Io.Writer) std.Io.Writer.Error!void {", base, name)
 	f.line("    switch (o.*) {")
 	for _, o := range opts {
 		acc := "o." + o.ident
@@ -408,7 +413,7 @@ func (g *gen) emitUnionJSON(f *zfile, name string, nt *ir.NamedType) {
 	f.line("}")
 	f.blank()
 
-	f.line("fn fromJson_%s(alloc: std.mem.Allocator, v: std.json.Value) message.%s {", name, name)
+	f.line("fn fromJson_%s(alloc: std.mem.Allocator, v: std.json.Value) message.%s {", base, name)
 	f.line("    var o: message.%s = .init;", name)
 	f.line("    const obj = switch (v) {")
 	f.line("        .object => |ob| ob,")
@@ -447,7 +452,7 @@ func (g *gen) emitToJSONValue(f *zfile, ind, acc string, e ir.ArrayElem, depth i
 	case ir.KindBlob:
 		f.line("%stry jsonWriteBytes(%s, w);", ind, acc)
 	case ir.KindStruct, ir.KindUnion:
-		f.line("%stry toJson_%s(&%s, w);", ind, g.typeName(e.ElemRef.Key), acc)
+		f.line("%stry toJson_%s(&%s, w);", ind, typeBase(e.ElemRef.Target), acc)
 	case ir.KindArray:
 		// e.ElemItems describes the element; recurse per element.
 		ev := fmt.Sprintf("_e%d", depth)
@@ -488,7 +493,7 @@ func (g *gen) emitFromJSONField(f *zfile, fld *ir.Field, acc string) {
 	case ir.KindBlob:
 		f.line("    if (%s) |x| %s = jsonBlob(alloc, x);", get, acc)
 	case ir.KindStruct, ir.KindUnion:
-		f.line("    if (%s) |x| %s = fromJson_%s(alloc, x);", get, acc, g.typeName(fld.Ref.Key))
+		f.line("    if (%s) |x| %s = fromJson_%s(alloc, x);", get, acc, typeBase(fld.Ref.Target))
 	case ir.KindArray:
 		f.line("    if (%s) |x| switch (x) {", get)
 		f.line("        .array => |a0| {")
@@ -523,7 +528,7 @@ func arrayElemOf(f *ir.Field) ir.ArrayElem {
 func (g *gen) harnessElemType(e ir.ArrayElem) string {
 	switch e.Elem {
 	case ir.KindStruct, ir.KindUnion:
-		return "message." + g.typeName(e.ElemRef.Key)
+		return "message." + typeIdent(e.ElemRef.Target)
 	case ir.KindArray:
 		return "[]const " + g.harnessElemType(*e.ElemItems)
 	}
@@ -573,7 +578,7 @@ func (g *gen) fromJSONElemExpr(e ir.ArrayElem, depth int) string {
 	case ir.KindBlob:
 		return fmt.Sprintf("jsonBlob(alloc, %s)", it)
 	case ir.KindStruct, ir.KindUnion:
-		return fmt.Sprintf("fromJson_%s(alloc, %s)", g.typeName(e.ElemRef.Key), it)
+		return fmt.Sprintf("fromJson_%s(alloc, %s)", typeBase(e.ElemRef.Target), it)
 	case ir.KindArray:
 		inner := e.ElemItems
 		innerType := g.harnessElemType(*inner)

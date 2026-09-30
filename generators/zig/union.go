@@ -1,7 +1,6 @@
 package zig
 
 import (
-	"fmt"
 	"strings"
 
 	"github.com/sofa-buffers/generator/internal/generator"
@@ -39,19 +38,37 @@ type unionOpt struct {
 	isD     bool   // the union's default option (default_id)
 }
 
-// optIdent renders an option name as the tagged-union field identifier.
-func optIdent(name string) string {
+// optIdent renders the option `name` of a union with the options `opts` as its
+// tagged-union field. A Zig container's fields and declarations share one
+// namespace, and the union declares, besides its fixed members (unionDecls and
+// the struct list zigIdent reads), two members per option: `<opt>_id` and
+// `<opt>Mut`. An option spelled like any of them -- `init`, or `a_id` beside an
+// option `a`, or `aMut` beside it -- takes the trailing `_` of a declaration
+// clash. Options are distinct, no option ends with `_` and no derived member
+// does either, so every field and member of the union stays distinct.
+func optIdent(opts []*ir.Field, name string) string {
 	if unionDecls[name] {
 		return name + "_"
+	}
+	for _, o := range opts {
+		if name == optConst(o.Name) || name == optMut(o.Name) {
+			return name + "_"
+		}
 	}
 	return zigIdent(name)
 }
 
-// optMut is the select-if-not-held accessor's name. Built from the raw option
-// name: `<keyword>Mut` is never a keyword, and nothing reserved ends in `Mut`.
-func optMut(name string) string { return name + "Mut" }
+// optMut is the select-if-not-held accessor's name: the option name with its
+// first letter lower-cased, then `Mut`. Lower-casing the first letter keeps
+// options apart (two options of one union never share a fold) and makes the
+// accessor a name no type identifier can be -- those start upper-case, and Zig
+// rejects a reference that two declarations of one name could mean. `<x>Mut`
+// is never a keyword, and nothing the union declares otherwise ends in `Mut`.
+func optMut(name string) string { return strings.ToLower(name[:1]) + name[1:] + "Mut" }
 
-// optConst is the option-id constant's name.
+// optConst is the option-id constant's name. Its last segment is the lower-case
+// `id`, so it is never a type identifier either (each of those segments starts
+// upper-case).
 func optConst(name string) string { return name + "_id" }
 
 // unionOptions lists nt's options in IR order with their derived names.
@@ -60,51 +77,13 @@ func unionOptions(nt *ir.NamedType) []*unionOpt {
 	for _, f := range nt.Fields {
 		out = append(out, &unionOpt{
 			f:       f,
-			ident:   optIdent(f.Name),
+			ident:   optIdent(nt.Fields, f.Name),
 			mut:     optMut(f.Name),
 			idConst: optConst(f.Name),
 			isD:     nt.IsDefaultOption(f),
 		})
 	}
 	return out
-}
-
-// bareIdent strips the @"..." quoting of a keyword identifier.
-func bareIdent(s string) string {
-	if strings.HasPrefix(s, `@"`) {
-		return strings.TrimSuffix(strings.TrimPrefix(s, `@"`), `"`)
-	}
-	return s
-}
-
-// checkUnionNames rejects a union whose options derive the same Zig member --
-// option `aMut` against option `a`'s accessor, option `a_id` against option
-// `a`'s id constant, option `init_` against the mangled field of option `init`
-// -- before zig reports a duplicate member that points at nothing in the schema.
-// A container's fields and declarations share one namespace in Zig.
-func checkUnionNames(s *ir.Schema) error {
-	for _, key := range s.NamedOrder {
-		nt := s.Named[key]
-		if nt.Category != ir.CatUnion {
-			continue
-		}
-		members := map[string]string{}
-		for _, o := range unionOptions(nt) {
-			for _, n := range []string{bareIdent(o.ident), o.mut, o.idConst} {
-				if unionDecls[n] {
-					return fmt.Errorf("zig: union %q: option %q generates %q, which the union type already defines; rename the option", key, o.f.Name, n)
-				}
-				if prev, ok := members[n]; ok {
-					if prev == o.f.Name {
-						continue
-					}
-					return fmt.Errorf("zig: union %q: options %q and %q both generate the member %q; rename one", key, prev, o.f.Name, n)
-				}
-				members[n] = o.f.Name
-			}
-		}
-	}
-	return nil
 }
 
 // emitUnion emits one union type: the tagged union, its id constants, `init`
