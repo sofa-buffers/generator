@@ -47,9 +47,42 @@ names are:
   `Seq.reset(...)` would no longer compile.
 
 Only the field changes: the wire is keyed by the field id, and the JSON key
-stays the schema name. Two fields that end up with the same field — `int` and
-`int_` — fail generation, naming both. The list lives in
-`generators/java/reserved.go`.
+stays the schema name. A schema name never ends with `_`, so a renamed field
+cannot meet another one. The list lives in `generators/java/reserved.go`.
+
+## Class names
+
+Every class is named after its schema path, each name in PascalCase and the
+path joined with `_`:
+
+| schema | class | file |
+|---|---|---|
+| message `vehicle_telemetry` | `VehicleTelemetry` | `VehicleTelemetry.java` |
+| `$defs` struct or union `point` | `Point` | `Point.java` |
+| inline struct of field `pos` in message `m` | `M_Pos` | `M_Pos.java` |
+| inline struct element of array field `pts` in message `m` | `M_Pts` | `M_Pts.java` |
+| inline struct option `pt` of union field `u` in message `m` | `M_U_Pt` | `M_U_Pt.java` |
+| `$defs` union `shape` used with `default_id` of option `pt` | `Shape__DefaultPt` | `Shape__DefaultPt.java` |
+
+Enums and bitfields lower to `long` and have no class.
+
+A class whose name the generated code already uses for something else gets a
+trailing underscore — a message `string` is the class `String_` in
+`String_.java`, since the generated classes use `java.lang.String`. Those names
+are the nested `Decoder` class every message declares, the corelib-java types
+the generated code uses (`OStream`, `IStream`, `Visitor`, `Seq`, …), the
+`java.util` and `java.io` types it uses (`List`, `ArrayList`, `Arrays`,
+`IOException`), and the `java.lang` types and annotations it uses (`String`,
+`Long`, `Object`, `System`, `Deprecated`, `Override`, …). The list is
+`javaTypeNames` in `generators/java/reserved.go`.
+
+Each message's decode visitor is a package-private class `_<Message>__Visitor`
+in the message's file.
+
+In `emit: project` the harness (`Json`, `Main`) is the subpackage
+`<package>.harness` — `src/main/java/<package>/harness/` — so a message `json`
+or `main` is an ordinary class of the generated package. The jar's main class is
+`<package>.harness.Main`.
 
 ## Unions
 
@@ -70,7 +103,7 @@ shape:
 ```
 
 ```java
-public class MShape {
+public class M_Shape {
     public static final int NUM_ID = 0;
     public static final int NAME_ID = 1;
     public static final int PT_ID = 2;
@@ -86,10 +119,10 @@ public class MShape {
     public boolean hasName();
     public void setName(String v);
 
-    public MShapePt getPt();
+    public M_Shape_Pt getPt();
     public boolean hasPt();
-    public void setPt(MShapePt v);
-    public MShapePt mutablePt();
+    public void setPt(M_Shape_Pt v);
+    public M_Shape_Pt mutablePt();
 
     public List<String> getTags();
     public boolean hasTags();
@@ -103,7 +136,7 @@ public class MShape {
 | operation | Java |
 |---|---|
 | which option is held | `x.which()` → the option's id |
-| option ids | `MShape.PT_ID` (`<OPTION>_ID` constants) |
+| option ids | `M_Shape.PT_ID` (`<OPTION>_ID` constants) |
 | test | `x.hasPt()` |
 | read | `x.getPt()` |
 | select with a value | `x.setNum(7)` |
@@ -118,8 +151,8 @@ if (m.shape.hasPt()) {
     use(m.shape.getPt().x);
 }
 switch (m.shape.which()) {
-case MShape.NUM_ID: use(m.shape.getNum()); break;
-case MShape.PT_ID:  use(m.shape.getPt().y); break;
+case M_Shape.NUM_ID: use(m.shape.getNum()); break;
+case M_Shape.PT_ID:  use(m.shape.getPt().y); break;
 default: break;
 }
 m.shape.reset();            // pt at its default again
@@ -157,15 +190,12 @@ unions in place.
 `set<Option>`, `has<Option>`, `mutable<Option>`; the id constant is the option
 name in upper case plus `_ID`. An option named `class` gets a trailing
 underscore (`getClass_()`, `setClass_()`), because `getClass()` belongs to
-`Object`. An option is held in a private field of its own name, mangled as a
-field is (see [Field names](#field-names)), and `which` for the union's own tag
-takes a trailing underscore. Two options that would produce the same accessor
-(`foo_bar` and `fooBar` both give `getFooBar`) or the same constant (`a`'s
-`A_ID` and an option named `A_ID`) fail generation, naming both.
+`Object`. An option is held in the private field `_<option>`; the union's own
+tag is `which`.
 
 **`$defs` unions** used with different `default_id`s are one class per
-`default_id`, named after `<Name>_default_<option>`: `UnionShapeDefaultPt` and
-`UnionShapeDefaultNum`.
+`default_id`, named `<Name>__Default<Option>`: `Shape__DefaultPt` and
+`Shape__DefaultNum`.
 
 **Defaults.** A new union holds the `default_id` option at that option's own
 default; an omitted `default_id` means the option with the lowest id. Each

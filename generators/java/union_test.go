@@ -3,10 +3,6 @@ package java
 import (
 	"strings"
 	"testing"
-
-	"github.com/sofa-buffers/generator/internal/analysis"
-	"github.com/sofa-buffers/generator/internal/model"
-	"github.com/sofa-buffers/generator/internal/parser"
 )
 
 // unionSrc has a union whose default option is a struct at a non-zero default
@@ -88,53 +84,53 @@ func mustNotContain(t *testing.T, what, src string, bads ...string) {
 // own type, no Object slot, and only default_id's slot constructed -- a fresh
 // union allocates nothing for the options it does not hold.
 func TestJavaUnionStorage(t *testing.T) {
-	u := genUnion(t)[unionDir+"MU.java"]
+	u := genUnion(t)[unionDir+"M_U.java"]
 	mustContain(t, "MU", u,
 		"public static final int NUM_ID = 0;",
 		"public static final int PT_ID = 2;",
 		"    private int which = PT_ID;\n",
-		"    private long num;\n",
-		"    private String s;\n",
-		"    private MUPt pt = new MUPt();\n",
-		"    private short[] arr;\n",
-		"    private List<String> strs;\n",
-		"    private byte[] bl;\n",
-		"    private MUInner inner;\n",
-		"    private float f;\n",
-		"    private List<Boolean> flags;\n",
+		"    private long _num;\n",
+		"    private String _s;\n",
+		"    private M_U_Pt _pt = new M_U_Pt();\n",
+		"    private short[] _arr;\n",
+		"    private List<String> _strs;\n",
+		"    private byte[] _bl;\n",
+		"    private M_U_Inner _inner;\n",
+		"    private float _f;\n",
+		"    private List<Boolean> _flags;\n",
 		"public int which() { return which; }")
-	mustNotContain(t, "MU", u, "Object ", "public long num", "new MUInner();\n")
+	mustNotContain(t, "MU", u, "Object ", "public long num", "new M_U_Inner();\n")
 	// A scalar default_id's slot holds its default from the start.
-	z := genUnion(t)[unionDir+"MZ.java"]
-	mustContain(t, "MZ", z, "    private int which = A_ID;\n", "    private long a;\n", "    private long b;\n")
+	z := genUnion(t)[unionDir+"M_Z.java"]
+	mustContain(t, "MZ", z, "    private int which = A_ID;\n", "    private long _a;\n", "    private long _b;\n")
 }
 
 // A getter reads the slot only while its option is held and otherwise returns
 // the option's own default, storing nothing; a setter selects; mutable<Opt>()
 // selects at the default ONLY when another option is held.
 func TestJavaUnionAccessors(t *testing.T) {
-	u := genUnion(t)[unionDir+"MU.java"]
+	u := genUnion(t)[unionDir+"M_U.java"]
 	mustContain(t, "MU", u,
-		"public long getNum() { return which == NUM_ID ? num : 5L; }",
+		"public long getNum() { return which == NUM_ID ? _num : 5L; }",
 		"public boolean hasNum() { return which == NUM_ID; }",
-		"public void setNum(long v) { which = NUM_ID; this.num = v; }",
-		`public String getS() { return which == S_ID ? s : ""; }`,
-		"public MUPt getPt() { return which == PT_ID ? pt : new MUPt(); }",
-		"public short[] getArr() { return which == ARR_ID ? arr : Seq.EMPTY_SHORTS; }",
-		"public List<String> getStrs() { return which == STRS_ID ? strs : new ArrayList<>(); }",
-		"public byte[] getBl() { return which == BL_ID ? bl : Seq.EMPTY_BYTES; }",
-		"public float getF() { return which == F_ID ? f : 1.5f; }")
-	mustContain(t, "MU.mutablePt", methodBody(t, u, "public MUPt mutablePt() {"),
-		"if (which != PT_ID || pt == null) {\n            if (pt == null) pt = new MUPt(); else pt.reset();\n            which = PT_ID;\n        }\n        return pt;")
+		"public void setNum(long v) { which = NUM_ID; this._num = v; }",
+		`public String getS() { return which == S_ID ? _s : ""; }`,
+		"public M_U_Pt getPt() { return which == PT_ID ? _pt : new M_U_Pt(); }",
+		"public short[] getArr() { return which == ARR_ID ? _arr : Seq.EMPTY_SHORTS; }",
+		"public List<String> getStrs() { return which == STRS_ID ? _strs : new ArrayList<>(); }",
+		"public byte[] getBl() { return which == BL_ID ? _bl : Seq.EMPTY_BYTES; }",
+		"public float getF() { return which == F_ID ? _f : 1.5f; }")
+	mustContain(t, "MU.mutablePt", methodBody(t, u, "public M_U_Pt mutablePt() {"),
+		"if (which != PT_ID || _pt == null) {\n            if (_pt == null) _pt = new M_U_Pt(); else _pt.reset();\n            which = PT_ID;\n        }\n        return _pt;")
 	mustContain(t, "MU.mutableStrs", methodBody(t, u, "public List<String> mutableStrs() {"),
-		"if (which != STRS_ID || strs == null) {\n            strs = Seq.reset(strs);\n            which = STRS_ID;")
+		"if (which != STRS_ID || _strs == null) {\n            _strs = Seq.reset(_strs);\n            which = STRS_ID;")
 	mustContain(t, "MU.mutableFlags", u, "public List<Boolean> mutableFlags() {")
 	// A primitive array is replaced whole through its setter: no mutable accessor.
 	mustNotContain(t, "MU", u, "mutableArr", "mutableNum", "mutableS(")
 	mustContain(t, "MU.reset", methodBody(t, u, "public void reset() {"),
-		"which = PT_ID;\n        if (pt == null) pt = new MUPt(); else pt.reset();")
-	mustContain(t, "MZ.reset", methodBody(t, genUnion(t)[unionDir+"MZ.java"], "public void reset() {"),
-		"which = A_ID;\n        a = 0L;")
+		"which = PT_ID;\n        if (_pt == null) _pt = new M_U_Pt(); else _pt.reset();")
+	mustContain(t, "MZ.reset", methodBody(t, genUnion(t)[unionDir+"M_Z.java"], "public void reset() {"),
+		"which = A_ID;\n        _a = 0L;")
 }
 
 // Encode: one arm per held option. default_id is written like an ordinary field
@@ -142,29 +138,29 @@ func TestJavaUnionAccessors(t *testing.T) {
 // option is forced -- unguarded, a compact array as its count, a struct, union or
 // wrapper-array option closed with the KEEPING end.
 func TestJavaUnionEncodeArms(t *testing.T) {
-	u := genUnion(t)[unionDir+"MU.java"]
+	u := genUnion(t)[unionDir+"M_U.java"]
 	ser := methodBody(t, u, "public void serialize(OStream os) throws IOException {")
 	mustContain(t, "MU.serialize", ser,
 		"switch (which) {",
-		"case NUM_ID: {\n            os.writeUnsigned(0, this.num);\n            break;",
-		`os.writeString(1, this.s == null ? "" : this.s);`,
-		"os.writeSequenceBeginLazy(2); (this.pt == null ? new MUPt() : this.pt).serialize(os); os.writeSequenceEnd();",
-		"os.writeArrayUnsigned(3, (this.arr == null ? Seq.EMPTY_SHORTS : this.arr));",
-		"os.writeBlob(5, this.bl == null ? Seq.EMPTY_BYTES : this.bl);",
-		"os.writeSequenceBeginLazy(6); (this.inner == null ? new MUInner() : this.inner).serialize(os); os.writeSequenceEndKeep();",
-		"case F_ID: {\n            os.writeFp32(7, this.f);",
-		"os.writeArrayUnsigned(8, Seq.boolsToLongs(Seq.orEmpty(this.flags)));")
+		"case NUM_ID: {\n            os.writeUnsigned(0, this._num);\n            break;",
+		`os.writeString(1, this._s == null ? "" : this._s);`,
+		"os.writeSequenceBeginLazy(2); (this._pt == null ? new M_U_Pt() : this._pt).serialize(os); os.writeSequenceEnd();",
+		"os.writeArrayUnsigned(3, (this._arr == null ? Seq.EMPTY_SHORTS : this._arr));",
+		"os.writeBlob(5, this._bl == null ? Seq.EMPTY_BYTES : this._bl);",
+		"os.writeSequenceBeginLazy(6); (this._inner == null ? new M_U_Inner() : this._inner).serialize(os); os.writeSequenceEndKeep();",
+		"case F_ID: {\n            os.writeFp32(7, this._f);",
+		"os.writeArrayUnsigned(8, Seq.boolsToLongs(Seq.orEmpty(this._flags)));")
 	strs := ser[strings.Index(ser, "case STRS_ID:"):strings.Index(ser, "case BL_ID:")]
 	mustContain(t, "MU.serialize strs", strs, "os.writeSequenceBeginLazy(4);", "os.writeSequenceEndKeep();")
 	// No ≠-default guard on any forced option.
-	mustNotContain(t, "MU.serialize", ser, "if (this.num", "if (this.f", "!this.s.isEmpty()", "this.arr.length != 0", "if (this.bl")
+	mustNotContain(t, "MU.serialize", ser, "if (this.num", "if (this.f", "!this._s.isEmpty()", "this._arr.length != 0", "if (this.bl")
 	mustContain(t, "MU.isDefault", methodBody(t, u, "boolean isDefault() {"),
-		"return which == PT_ID && !(this.pt != null && !this.pt.isDefault());")
-	z := genUnion(t)[unionDir+"MZ.java"]
+		"return which == PT_ID && !(this._pt != null && !this._pt.isDefault());")
+	z := genUnion(t)[unionDir+"M_Z.java"]
 	mustContain(t, "MZ", z,
-		"case A_ID: {\n            if (this.a != 0L) { os.writeUnsigned(0, this.a); }",
-		"case B_ID: {\n            os.writeUnsigned(1, this.b);",
-		"return which == A_ID && !(this.a != 0L);")
+		"case A_ID: {\n            if (this._a != 0L) { os.writeUnsigned(0, this._a); }",
+		"case B_ID: {\n            os.writeUnsigned(1, this._b);",
+		"return which == A_ID && !(this._a != 0L);")
 }
 
 // Decode: every store into a union option is its setter, and every path into a
@@ -173,7 +169,7 @@ func TestJavaUnionEncodeArms(t *testing.T) {
 // before the payload and for whatever fixlen subtype arrived.
 func TestJavaUnionDecodeSwitch(t *testing.T) {
 	m := genUnion(t)[unionDir+"M.java"]
-	vis := m[strings.Index(m, "class MVisitor"):]
+	vis := m[strings.Index(m, "class _M__Visitor"):]
 	mustContain(t, "scalar option", vis,
 		`if (value < 0 || value > 65535L) throw Sofab.invalid("num: value outside declared width u16"); m.u.setNum(value); break;`,
 		"case 7: m.u.setF(value); break;",
@@ -204,11 +200,11 @@ func TestJavaUnionDecodeSwitch(t *testing.T) {
 		"case 6: m.u.mutableInner(); cur = ",
 		// An array of unions fills its gaps from the element type's constructor --
 		// per type, so each $defs split fills with its own default option.
-		"Seq.reserveElem(m.v, id, MVElem::new, SCHEMA_COUNT_3);",
-		"Seq.reserveElem(m.pe, id, UnionPickDefaultN::new, SCHEMA_COUNT_3);",
+		"Seq.reserveElem(m.v, id, M_V::new, SCHEMA_COUNT_3);",
+		"Seq.reserveElem(m.pe, id, Pick__DefaultN::new, SCHEMA_COUNT_3);",
 		"m.v.get(_ex_Root_v).mutableP(); cur = ",
 		"case 1: m.pf.mutableT(); cur = ")
-	mustNotContain(t, "sequence options", sb, "setPt(", "setInner(", "new MUPt()")
+	mustNotContain(t, "sequence options", sb, "setPt(", "setInner(", "new M_U_Pt()")
 }
 
 // One type per (union, default_id): the $defs union used with default_id 1 and
@@ -216,23 +212,23 @@ func TestJavaUnionDecodeSwitch(t *testing.T) {
 // default option.
 func TestJavaUnionSplitDefaults(t *testing.T) {
 	out := genUnion(t)
-	mustContain(t, "Pick_default_t", out[unionDir+"UnionPickDefaultT.java"],
-		"private int which = T_ID;", "private UnionPickT t = new UnionPickT();")
-	mustContain(t, "Pick_default_n", out[unionDir+"UnionPickDefaultN.java"],
-		"private int which = N_ID;", "private long n = 6L;", "private UnionPickT t;\n")
+	mustContain(t, "Pick_default_t", out[unionDir+"Pick__DefaultT.java"],
+		"private int which = T_ID;", "private Pick_T _t = new Pick_T();")
+	mustContain(t, "Pick_default_n", out[unionDir+"Pick__DefaultN.java"],
+		"private int which = N_ID;", "private long _n = 6L;", "private Pick_T _t;\n")
 	mustContain(t, "M", out[unionDir+"M.java"],
-		"public UnionPickDefaultT pf = new UnionPickDefaultT();")
+		"public Pick__DefaultT pf = new Pick__DefaultT();")
 }
 
 // The JSON harness renders exactly the held option and selects what it reads.
 func TestJavaUnionJSONHarness(t *testing.T) {
-	j := genUnion(t)[unionDir+"Json.java"]
-	to := methodBody(t, j, "static void to(MU o, StringBuilder b) {")
+	j := genUnion(t)[unionDir+"harness/Json.java"]
+	to := methodBody(t, j, "static void to(message.M_U o, StringBuilder b) {")
 	mustContain(t, "Json.to(MU)", to,
 		"switch (o.which()) {",
-		"case MU.NUM_ID: {\n        b.append(\"\\\"num\\\":\");\n        b.append(o.getNum());",
+		"case message.M_U.NUM_ID: {\n        b.append(\"\\\"num\\\":\");\n        b.append(o.getNum());",
 		"to(o.getPt(), b);")
-	from := methodBody(t, j, "static void from(JsonObject j, MU o) {")
+	from := methodBody(t, j, "static void from(JsonObject j, message.M_U o) {")
 	mustContain(t, "Json.from(MU)", from,
 		"for (Map.Entry<String, JsonElement> me : j.entrySet()) {",
 		`case "num": {`+"\n            o.setNum(e.getAsLong());",
@@ -242,59 +238,25 @@ func TestJavaUnionJSONHarness(t *testing.T) {
 		"o.setBl(Json.toBytes(e.getAsJsonArray()));")
 }
 
-func genJavaErr(t *testing.T, src string) error {
-	t.Helper()
-	doc, err := parser.Parse([]byte(src), "dyn.yaml")
-	if err != nil {
-		t.Fatal(err)
-	}
-	resolved, _ := doc.Resolve()
-	if errs := parser.Validate(resolved); errs != nil {
-		t.Fatalf("invalid: %v", errs)
-	}
-	s, err := model.Build(doc)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := analysis.Analyze(s); err != nil {
-		t.Fatal(err)
-	}
-	_, err = (&Backend{}).Generate(s, map[string]any{})
-	return err
-}
-
-// An option named after Object's final getClass, and one named after the tag,
-// are mangled; two options deriving one accessor or one field are a located
-// error naming both.
+// An option named after Object's final getClass is mangled; an option named
+// after the tag, or after another option's id constant, is kept apart by the
+// slot channel: every slot is `_` + the option name, which no tag, constant or
+// other slot spells. Nothing is refused.
 func TestJavaUnionNames(t *testing.T) {
 	out := genJavaFromYAML(t, `version: 1
 messages:
   N:
     payload:
-      u: { id: 0, type: union, oneof: { class: { id: 0, type: u8 }, which: { id: 1, type: string, maxlen: 4 } } }
+      u: { id: 0, type: union, oneof: { class: { id: 0, type: u8 }, which: { id: 1, type: string, maxlen: 4 }, a: { id: 2, type: u8 }, A_ID: { id: 3, type: u8 } } }
 `, map[string]any{})
-	mustContain(t, "NU", out[unionDir+"NU.java"],
-		"public long getClass_() { return which == CLASS_ID ? class_ : 0L; }",
-		"public void setClass_(long v) { which = CLASS_ID; this.class_ = v; }",
-		"private String which_;",
-		"public String getWhich() { return which == WHICH_ID ? which_ : \"\"; }")
-	for _, c := range []struct{ src, want string }{
-		{`version: 1
-messages:
-  N:
-    payload:
-      u: { id: 0, type: union, oneof: { foo_bar: { id: 0, type: u8 }, fooBar: { id: 1, type: u8 } } }
-`, `options "foo_bar" and "fooBar" both generate the accessors getFooBar/setFooBar`},
-		{`version: 1
-messages:
-  N:
-    payload:
-      u: { id: 0, type: union, oneof: { a: { id: 0, type: u8 }, A_ID: { id: 1, type: u8 } } }
-`, `options "a" and "A_ID" both generate the field A_ID`},
-	} {
-		err := genJavaErr(t, c.src)
-		if err == nil || !strings.Contains(err.Error(), c.want) {
-			t.Errorf("want an error containing %q, got %v", c.want, err)
-		}
-	}
+	mustContain(t, "N_U", out[unionDir+"N_U.java"],
+		"public long getClass_() { return which == CLASS_ID ? _class : 0L; }",
+		"public void setClass_(long v) { which = CLASS_ID; this._class = v; }",
+		"private String _which;",
+		"public String getWhich() { return which == WHICH_ID ? _which : \"\"; }",
+		"public static final int A_ID = 2;",
+		"public static final int A_ID_ID = 3;",
+		"private long _a;",
+		"private long _A_ID;",
+		"public long getAID() { return which == A_ID_ID ? _A_ID : 0L; }")
 }

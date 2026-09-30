@@ -832,8 +832,9 @@ echo "==> corpus compiles ($(ls "$ROOT"/tests/matrix/corpus/defs/*.yaml | wc -l)
 
 # The reserved-name collision test (ARCHITECTURE §8): reserved.yaml uses every
 # name on generators/java/reserved.go's list as a message field, a nested struct
-# field and a union option (TestReservedSchemaFile keeps it in step with the
-# list; TestJavaNamesInScope keeps the list in step with the generated classes).
+# field and a union option, and every type-level name (javaTypeNames) as a
+# message of its own (TestReservedSchemaFile keeps it in step with the list;
+# TestJavaNamesInScope keeps the list in step with the generated classes).
 # The generator exits 0 on a class that does not compile, so the project must
 # build warning-free, and every value of reserved.json -- the union holding
 # option `v`, the setters' parameter name -- must come back under its schema name.
@@ -852,6 +853,21 @@ if bad:
     sys.exit(f"mismatch on {bad}: got {[got.get(k) for k in bad]}")
 PY
 echo "==> reserved names OK"
+
+# The shared name-collision schema (ARCHITECTURE §8, "Naming"): every path
+# clash, role word, fixed, corelib and builtin name as a message, a $defs type
+# and an inline path. Every class must build warning-free -- the generator exits
+# 0 on a clash, so only building catches one -- and message m round-trips
+# names.json.
+echo "==> names: the shared name-collision schema builds and round-trips"
+build "$ROOT/tests/conformance/lib/names.yaml" "$WORK/names"
+java -jar "$WORK/names/target/harness.jar" encode m < "$ROOT/tests/conformance/lib/names.json" > "$WORK/names.bin" \
+    || { echo "FAIL: names.json did not encode"; exit 1; }
+java -jar "$WORK/names/target/harness.jar" decode m < "$WORK/names.bin" > "$WORK/names.out" \
+    || { echo "FAIL: names.bin did not decode"; exit 1; }
+python3 "$ROOT/tests/conformance/lib/json_equal.py" "$(cat "$ROOT/tests/conformance/lib/names.json")" "$(cat "$WORK/names.out")" \
+    --label "Java: names.yaml message m round-trips" || exit 1
+echo "==> names OK"
 
 # The message-less realworld files as emit:project, harness included, under
 # $MVN_STRICT: the harness is generated code too, and a schema with no message

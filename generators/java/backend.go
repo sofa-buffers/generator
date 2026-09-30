@@ -24,12 +24,6 @@ func (*Backend) Lang() string { return "java" }
 func (*Backend) Generate(s *ir.Schema, cfg map[string]any) ([]generator.File, error) {
 	g := &gen{schema: s, pkg: cfgString(cfg, "package", "message"), banner: cfgString(cfg, "tool_banner", "sofabgen"), license: generator.LicenseID(cfg), limits: resolveLimits(s, cfg), size: generator.NewSizePolicy(cfg)}
 	dir := "src/main/java/" + strings.ReplaceAll(g.pkg, ".", "/") + "/"
-	if err := checkFieldNames(s); err != nil {
-		return nil, err
-	}
-	if err := g.checkUnions(); err != nil {
-		return nil, err
-	}
 	var files []generator.File
 	// Every named struct/union gets its OWN file, so it can be public: Java
 	// allows one public top-level class per file, and the message owns that slot
@@ -38,12 +32,12 @@ func (*Backend) Generate(s *ir.Schema, cfg map[string]any) ([]generator.File, er
 	for _, key := range g.namedTypes() {
 		nt := s.Named[key]
 		files = append(files, generator.File{
-			Path:    dir + g.typeName(key) + ".java",
+			Path:    dir + typeIdent(nt) + ".java",
 			Content: g.namedTypeFile(key, nt),
 		})
 	}
 	for _, m := range s.Messages {
-		files = append(files, generator.File{Path: dir + exported(m.Name) + ".java", Content: g.messageFile(m)})
+		files = append(files, generator.File{Path: dir + messageIdent(m.Name) + ".java", Content: g.messageFile(m)})
 	}
 	if cfgString(cfg, "emit", "sources") == "project" {
 		files = append(files, g.projectFiles(s, cfg, dir)...)
@@ -75,6 +69,10 @@ type gen struct {
 	// stable, and it counts per method rather than per nesting depth because two
 	// array FIELDS of one class share a scope and would otherwise collide.
 	tmpN int
+	// qual prefixes every generated class a type expression names: empty in the
+	// generated package, "<package>." while the harness (its own package) is
+	// emitted -- see harnessType.
+	qual string
 }
 
 // messageSize resolves a message's worst-case encoded size via the shared walk
@@ -236,7 +234,7 @@ func (g *gen) namedTypeFile(key string, nt *ir.NamedType) []byte {
 		g.emitUnionClass(f, key, nt)
 		return f.bytes()
 	}
-	g.emitClass(f, g.typeName(key), nt.Fields, nt.Summary, false, true)
+	g.emitClass(f, typeIdent(nt), "", nt.Fields, nt.Summary, false, true)
 	return f.bytes()
 }
 
@@ -251,17 +249,19 @@ func (g *gen) messageFile(m *ir.Message) []byte {
 	f.line("import java.util.*;")
 	f.blank()
 
-	g.emitClass(f, exported(m.Name), m.Fields, m.Summary, true, true)
+	g.emitClass(f, messageIdent(m.Name), visitorIdent(m.Name), m.Fields, m.Summary, true, true)
 	return f.bytes()
 }
 
-func (g *gen) emitClass(f *jfile, name string, fields []*ir.Field, summary string, isMessage, isPublic bool) {
-	vis := ""
+// emitClass writes one class. vis names a message's decode visitor (empty for a
+// named struct, which has none).
+func (g *gen) emitClass(f *jfile, name, vis string, fields []*ir.Field, summary string, isMessage, isPublic bool) {
+	mod := ""
 	if isPublic {
-		vis = "public "
+		mod = "public "
 	}
 	f.javadoc("", summary)
-	f.line("%sclass %s {", vis, name)
+	f.line("%sclass %s {", mod, name)
 	for _, fld := range fields {
 		f.javadoc("    ", fieldDoc(fld, generator.AppendDoc(generator.BoundNote(fld, generator.StorageDynamic), javaWideU64Note(fld))))
 		if fld.Deprecated {
@@ -337,7 +337,7 @@ func (g *gen) emitClass(f *jfile, name string, fields []*ir.Field, summary strin
 		// (generator#105).
 		f.line("    public static %s decode(byte[] data) {", name)
 		f.line("        %s m = new %s();", name, name)
-		f.line("        try { new IStream().feed(data, new %sVisitor(m)); }", name)
+		f.line("        try { new IStream().feed(data, new %s(m)); }", vis)
 		f.line("        catch (Exception e) { throw new RuntimeException(e); }")
 		f.line("        return m;")
 		f.line("    }")
@@ -355,7 +355,7 @@ func (g *gen) emitClass(f *jfile, name string, fields []*ir.Field, summary strin
 		f.line("    public static DecodeStatus tryDecode(byte[] data, %s out) throws SofabException {", name)
 		f.line("        out.reset();")
 		f.line("        IStream is = new IStream();")
-		f.line("        return is.feed(data, new %sVisitor(out));", name)
+		f.line("        return is.feed(data, new %s(out));", vis)
 		f.line("    }")
 		// Streaming decode (PLAN §5.6). The corelib's IStream is resumable, so
 		// the only thing missing was a public handle on it: `decoder()` binds a
@@ -369,13 +369,13 @@ func (g *gen) emitClass(f *jfile, name string, fields []*ir.Field, summary strin
 		f.line("        return new Decoder();")
 		f.line("    }")
 		f.blank()
-		g.emitDecoder(f, name)
+		g.emitDecoder(f, name, vis)
 	}
 	f.line("}")
 	f.blank()
 
 	if isMessage {
-		g.emitVisitor(f, name, fields)
+		g.emitVisitor(f, name, vis, fields)
 	}
 }
 
@@ -385,7 +385,7 @@ func (g *gen) emitClass(f *jfile, name string, fields []*ir.Field, summary strin
 // the IStream), so this class carries no parse state of its own -- it exists to
 // make that reachable from outside the generated package, which a
 // package-private Visitor was not (PLAN §5.6).
-func (g *gen) emitDecoder(f *jfile, name string) {
+func (g *gen) emitDecoder(f *jfile, name, vis string) {
 	f.line("    /**")
 	f.line("     * Incremental decoder for {@link %s}: hold one and feed the message as", name)
 	f.line("     * bytes arrive.")
@@ -401,7 +401,7 @@ func (g *gen) emitDecoder(f *jfile, name string) {
 	f.line("    public static final class Decoder {")
 	f.line("        private final %s m = new %s();", name, name)
 	f.line("        private final IStream is = new IStream();")
-	f.line("        private final %sVisitor v = new %sVisitor(m);", name, name)
+	f.line("        private final %s v = new %s(m);", vis, vis)
 	f.blank()
 	f.line("        /**")
 	f.line("         * Feed the next chunk, of any size. Returns {@code COMPLETE} if it")
@@ -577,7 +577,7 @@ func (g *gen) emitResetField(f *jfile, fld *ir.Field) {
 	switch fld.Kind {
 	case ir.KindStruct, ir.KindUnion:
 		// Recurse rather than re-allocate; a null field is materialized once.
-		f.line("        if (%s == null) %s = new %s(); else %s.reset();", acc, acc, g.typeName(fld.Ref.Key), acc)
+		f.line("        if (%s == null) %s = new %s(); else %s.reset();", acc, acc, g.refType(fld.Ref), acc)
 	case ir.KindArray:
 		if primitiveArrayElem(fld.Elem) {
 			// A declared default is copied back over the existing storage when the
@@ -669,7 +669,7 @@ func (g *gen) emitMarshalAt(f *jfile, ind string, fld *ir.Field, acc string, for
 		if forced {
 			end = "os.writeSequenceEndKeep();"
 		}
-		f.line("%sos.writeSequenceBeginLazy(%d); (%s == null ? new %s() : %s).serialize(os); %s", ind, fld.ID, acc, g.typeName(fld.Ref.Key), acc, end)
+		f.line("%sos.writeSequenceBeginLazy(%d); (%s == null ? new %s() : %s).serialize(os); %s", ind, fld.ID, acc, g.refType(fld.Ref), acc, end)
 		return
 	case ir.KindArray:
 		g.emitMarshalArray(f, ind, fld, acc, forced)
@@ -910,7 +910,7 @@ func (g *gen) marshalArray(f *jfile, ind, idExpr, val string, elem ir.Kind, ref 
 		// presence is what fixes the array's length.
 		lv := g.elemLoopList(f, ind, val, elem, ref, items)
 		f.line("%sos.writeSequenceBeginLazy(%s);", ind, idExpr)
-		f.line("%sfor (int %s = 0; %s < %s.size(); %s++) { os.writeSequenceBeginLazy(%s); (%s.get(%s) == null ? new %s() : %s.get(%s)).serialize(os); %s }", ind, iv, iv, lv, iv, iv, lv, iv, g.typeName(ref.Key), lv, iv, seqEndStmt(lastElemExpr(iv, lv)))
+		f.line("%sfor (int %s = 0; %s < %s.size(); %s++) { os.writeSequenceBeginLazy(%s); (%s.get(%s) == null ? new %s() : %s.get(%s)).serialize(os); %s }", ind, iv, iv, lv, iv, iv, lv, iv, g.refType(ref), lv, iv, seqEndStmt(lastElemExpr(iv, lv)))
 		f.line("%s%s", ind, seqEndStmt(keepIf))
 	case ir.KindArray:
 		lv := g.elemLoopList(f, ind, val, elem, ref, items)

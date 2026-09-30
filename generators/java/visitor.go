@@ -105,7 +105,7 @@ func (g *gen) frames(m *ir.Message) []frame {
 			out = append(out, frame{kind: fkSeqLeaf, loc: loc, listExpr: listExpr, elemKind: elem, elemMaxHas: elemMaxHas, cap: cap, emax: boundOf(elemMaxHas, elemMax)})
 		case ir.KindStruct, ir.KindUnion:
 			elemLoc := loc + "_e"
-			out = append(out, frame{kind: fkSeqObj, loc: loc, listExpr: listExpr, childLoc: elemLoc, elemType: g.typeName(ref.Key), cap: cap})
+			out = append(out, frame{kind: fkSeqObj, loc: loc, listExpr: listExpr, childLoc: elemLoc, elemType: g.refType(ref), cap: cap})
 			// The element id IS the array index (MESSAGE_SPEC §5.1), so the element
 			// a child field writes into is the one sequenceBegin PLACED at that
 			// index -- NOT the last one appended. Java's flat visitor has no
@@ -1063,7 +1063,7 @@ func framesTouchDeprecated(fs []frame) bool {
 	return false
 }
 
-func (g *gen) emitVisitor(f *jfile, name string, fields []*ir.Field) {
+func (g *gen) emitVisitor(f *jfile, name, vis string, fields []*ir.Field) {
 	fs := g.frames(&ir.Message{Name: name, Fields: fields})
 	limArr, limStr, limBlob := g.activeLimits(fs) // per-visitor decode limits (generator#102)
 	g.limArr = limArr                             // for indexBound, which cannot reach fs
@@ -1073,7 +1073,7 @@ func (g *gen) emitVisitor(f *jfile, name string, fields []*ir.Field) {
 		// field from it is a javac [deprecation] warning; decoding it is intended.
 		f.line("@SuppressWarnings(\"deprecation\") // decode must still fill deprecated fields")
 	}
-	f.line("class %sVisitor implements Visitor {", name)
+	f.line("class %s implements Visitor {", vis)
 	f.line("    private final %s m;", name)
 	f.line("    private int cur = 0;")
 	// The SKIPPED-SUBTREE scope. sequenceBegin moves here for any (scope, id) the
@@ -1173,7 +1173,7 @@ func (g *gen) emitVisitor(f *jfile, name string, fields []*ir.Field) {
 			f.line("    private static final Bound %s = Bound.schema(%d);", schemaCountConst(n), n)
 		}
 	}
-	f.line("    %sVisitor(%s msg) { m = msg; }", name, name)
+	f.line("    %s(%s msg) { m = msg; }", vis, name)
 	f.blank()
 
 	// unsigned: u*/bitfield scalars, bool, unsigned/bool array elements, and

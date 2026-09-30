@@ -59,7 +59,7 @@ func TestJavaStructural(t *testing.T) {
 		"public byte[] encode()",
 		"public static Myfirstmessage decode(byte[] data)",
 		"public static DecodeStatus tryDecode(byte[] data, Myfirstmessage out) throws SofabException", // status-surfacing decode (#105)
-		"class MyfirstmessageVisitor implements Visitor {",
+		"class _Myfirstmessage__Visitor implements Visitor {",
 		"public void sequenceBegin(int id)",                                             // flat-visitor nesting
 		"public long someu64 = 0xFFFFFFFFFFFFFFFFL;",                                    // a u64 default is a compile-time constant, not a runtime parse (#479)
 		"public int[] someuintarray = new int[]{0, 1, 1000, -1};",                       // primitive array (was List<Long>)
@@ -176,7 +176,7 @@ func TestJavaOverIndexWrapperArray(t *testing.T) {
 		`Seq.placeElem(m.bb, id, Seq.EMPTY_BYTES, _b, SCHEMA_COUNT_3); break;`,
 		// The struct-element arm reserves the slot by id (generator#247) through the
 		// same corelib layer, and keeps only the routing that follows it.
-		`: Seq.reserveElem(m.bp, id, MBpElem::new, SCHEMA_COUNT_2);`,
+		`: Seq.reserveElem(m.bp, id, M_Bp::new, SCHEMA_COUNT_2);`,
 		// ...and the length word names the same bound, on its own.
 		`Seq.checkIndex(id, SCHEMA_COUNT_4);`,
 		`Seq.checkIndex(id, SCHEMA_COUNT_3);`,
@@ -742,7 +742,7 @@ messages:
 		"public float[] pf32 = new float[]{1.5f};",
 		// --- count:N wrapper arrays start empty too.
 		"public List<String> fstr = new ArrayList<>();",
-		"public List<MFobjElem> fobj = new ArrayList<>();",
+		"public List<M_Fobj> fobj = new ArrayList<>();",
 		// --- dynamic: unchanged.
 		"public int[] du = Seq.EMPTY_INTS;",
 		"public List<Boolean> db = new ArrayList<>();",
@@ -803,13 +803,13 @@ messages:
 	for _, want := range []string{
 		// A struct FIELD: opened lazily, closed with the dropping end, so an
 		// all-default nested object vanishes instead of becoming an empty wrapper.
-		"os.writeSequenceBeginLazy(0); (this.st == null ? new MSt() : this.st).serialize(os); os.writeSequenceEnd();",
+		"os.writeSequenceBeginLazy(0); (this.st == null ? new M_St() : this.st).serialize(os); os.writeSequenceEnd();",
 		// A wrapper-array FIELD (string/blob elements): same -- depth 0 drops.
 		"os.writeSequenceBeginLazy(1);",
 		"os.writeSequenceBeginLazy(2);",
 		// A struct ELEMENT chooses its closer from its position in the VALUE.
 		"os.writeSequenceBeginLazy(3);",
-		"os.writeSequenceBeginLazy(_i0); (_t2.get(_i0) == null ? new MObjsElem() : _t2.get(_i0)).serialize(os); if (_i0 == _t2.size() - 1) os.writeSequenceEndKeep(); else os.writeSequenceEnd();",
+		"os.writeSequenceBeginLazy(_i0); (_t2.get(_i0) == null ? new M_Objs() : _t2.get(_i0)).serialize(os); if (_i0 == _t2.size() - 1) os.writeSequenceEndKeep(); else os.writeSequenceEnd();",
 		// A nested wrapper ROW is an element too, and takes the same choice.
 		"os.writeSequenceBeginLazy(4);",
 		"            if (_i0 == _t3.size() - 1) os.writeSequenceEndKeep(); else os.writeSequenceEnd();",
@@ -871,7 +871,7 @@ messages:
 	m := files["src/main/java/message/M.java"]
 	// The nested struct is its own public class in its own file (generator#305),
 	// so its half of the reset contract is asserted there.
-	st := files["src/main/java/message/MSt.java"]
+	st := files["src/main/java/message/M_St.java"]
 	for _, want := range []string{
 		// Public, so a caller driving the Visitor by hand can re-arm too.
 		"    public void reset() {",
@@ -886,7 +886,7 @@ messages:
 		"        else this.fixd = _arrdef_fixd.clone();",
 		"        this.bools = Seq.reset(this.bools);\n        this.bools.addAll(_arrdef_bools);",
 		// A nested object recurses instead of being re-allocated.
-		"        if (this.st == null) this.st = new MSt(); else this.st.reset();",
+		"        if (this.st == null) this.st = new M_St(); else this.st.reset();",
 		// The reuse entry point re-arms before feeding.
 		"    public static DecodeStatus tryDecode(byte[] data, M out) throws SofabException {\n        out.reset();",
 	} {
@@ -897,7 +897,7 @@ messages:
 	// The struct's own reset(), in the struct's own file: it empties its
 	// container in place, exactly as the message does.
 	for _, want := range []string{
-		"public class MSt {",
+		"public class M_St {",
 		"    public void reset() {",
 		"        this.inner = Seq.reset(this.inner);",
 	} {
@@ -970,15 +970,15 @@ func TestJavaWrapperArrayInteriorSparseLastAlwaysWritten(t *testing.T) {
 	for _, want := range []string{
 		// The loop runs over the value as written -- only a null is absorbed --
 		// with or without a count.
-		"List<VecFixedElem> _t0 = Seq.orEmpty(this.fixed);",
-		"List<VecDynamicElem> _t1 = Seq.orEmpty(this.dynamic);",
+		"List<Vec_Fixed> _t0 = Seq.orEmpty(this.fixed);",
+		"List<Vec_Dynamic> _t1 = Seq.orEmpty(this.dynamic);",
 		"List<String> _t2 = Seq.orEmpty(this.fstrs);",
 		"for (int _i0 = 0; _i0 < _t0.size(); _i0++) { os.writeSequenceBeginLazy(_i0);",
 		// A sequence-form element takes the POSITIONAL closer: dropping in the
 		// interior (where an all-default element becomes an id gap), keeping at the
 		// last index. Identical for the count:N and the count-less array.
-		"(_t0.get(_i0) == null ? new VecFixedElem() : _t0.get(_i0)).serialize(os); if (_i0 == _t0.size() - 1) os.writeSequenceEndKeep(); else os.writeSequenceEnd();",
-		"(_t1.get(_i0) == null ? new VecDynamicElem() : _t1.get(_i0)).serialize(os); if (_i0 == _t1.size() - 1) os.writeSequenceEndKeep(); else os.writeSequenceEnd();",
+		"(_t0.get(_i0) == null ? new Vec_Fixed() : _t0.get(_i0)).serialize(os); if (_i0 == _t0.size() - 1) os.writeSequenceEndKeep(); else os.writeSequenceEnd();",
+		"(_t1.get(_i0) == null ? new Vec_Dynamic() : _t1.get(_i0)).serialize(os); if (_i0 == _t1.size() - 1) os.writeSequenceEndKeep(); else os.writeSequenceEnd();",
 		// A leaf element: the same rule, unconditional now rather than count-gated.
 		`String _e0 = _t2.get(_i0); if (_e0 == null) _e0 = ""; if (!_e0.isEmpty() || _i0 == _t2.size() - 1) os.writeString(_i0, _e0);`,
 		`String _e0 = _t3.get(_i0); if (_e0 == null) _e0 = ""; if (!_e0.isEmpty() || _i0 == _t3.size() - 1) os.writeString(_i0, _e0);`,
@@ -1033,8 +1033,8 @@ func TestJavaWrapperElementsArePlacedByID(t *testing.T) {
 	for _, want := range []string{
 		// placement, not append -- the reservation the corelib makes, and the
 		// element-index register the routing that follows reads back
-		"Seq.reserveElem(m.fixed, id, VecFixedElem::new, SCHEMA_COUNT_5); _ex_Root_fixed = id;",
-		"Seq.reserveElem(m.dynamic, id, VecDynamicElem::new, CAP_DYN_ARRAY_COUNT); _ex_Root_dynamic = id;",
+		"Seq.reserveElem(m.fixed, id, Vec_Fixed::new, SCHEMA_COUNT_5); _ex_Root_fixed = id;",
+		"Seq.reserveElem(m.dynamic, id, Vec_Dynamic::new, CAP_DYN_ARRAY_COUNT); _ex_Root_dynamic = id;",
 		// a child field of the element resolves through the PLACED index (the §7.1
 		// width guard for the u32 destination precedes the store; see
 		// TestJavaDeclaredWidthIsAValidityBound)
@@ -1054,7 +1054,7 @@ func TestJavaWrapperElementsArePlacedByID(t *testing.T) {
 	}
 
 	// The defect this replaced: appending ignored the id entirely.
-	if strings.Contains(got, "m.fixed.add(new VecFixedElem()); cur =") {
+	if strings.Contains(got, "m.fixed.add(new Vec_Fixed()); cur =") {
 		t.Errorf("struct-array elements must not be appended id-blind:\n%s", got)
 	}
 	// And the gap fill it needed is the corelib's, not emitted per array.
@@ -1147,7 +1147,7 @@ messages:
 		"public List<String> strs = new ArrayList<>();",
 		"public int[] nums = Seq.EMPTY_INTS;",
 		"public List<byte[]> blobs = new ArrayList<>();",
-		"public List<MObjsElem> objs = new ArrayList<>();",
+		"public List<M_Objs> objs = new ArrayList<>();",
 		"public List<String> dyn = new ArrayList<>();",
 		// reset() re-arms to the same value, in place, and adds nothing.
 		"        this.strs = Seq.reset(this.strs);\n        this.nums = Seq.EMPTY_INTS;",
@@ -1464,7 +1464,7 @@ messages:
 	files := genJavaFromYAML(t, src, map[string]any{"package": "com.example.two"})
 
 	const dir = "src/main/java/com/example/two/"
-	pointFile, ok := files[dir+"StructPoint.java"]
+	pointFile, ok := files[dir+"Point.java"]
 	if !ok {
 		var have []string
 		for p := range files {
@@ -1474,7 +1474,7 @@ messages:
 		t.Fatalf("the shared struct has no file of its own; emitted: %v", have)
 	}
 
-	if !strings.Contains(pointFile, "public class StructPoint {") {
+	if !strings.Contains(pointFile, "public class Point {") {
 		t.Error("a schema struct must be public — a caller outside the package has to name it")
 	}
 	if !strings.Contains(pointFile, "package com.example.two;") {
@@ -1484,18 +1484,18 @@ messages:
 	// Declared once, in its own file and nowhere else: two declarations in one
 	// package do not compile.
 	for path, body := range files {
-		if path == dir+"StructPoint.java" {
+		if path == dir+"Point.java" {
 			continue
 		}
-		if strings.Contains(body, "class StructPoint") {
-			t.Errorf("%s also declares StructPoint — duplicate class in one package", path)
+		if strings.Contains(body, "class Point") {
+			t.Errorf("%s also declares Point — duplicate class in one package", path)
 		}
 	}
 
 	// The generated plumbing stays package-private: it is not schema surface.
 	msg := files[dir+"First.java"]
-	if !strings.Contains(msg, "class FirstVisitor implements Visitor {") ||
-		strings.Contains(msg, "public class FirstVisitor") {
+	if !strings.Contains(msg, "class _First__Visitor implements Visitor {") ||
+		strings.Contains(msg, "public class _First__Visitor") {
 		t.Error("the decode visitor must stay package-private")
 	}
 
@@ -1648,7 +1648,7 @@ messages:
 		"private static final Bound CAP_DYN_ARRAY_COUNT = Bound.receiver(MAX_DYN_ARRAY_COUNT);",
 		`Seq.placeElem(m.dstrs, id, "", _s, CAP_DYN_ARRAY_COUNT);`,
 		`Seq.placeElem(m.dblbs, id, Seq.EMPTY_BYTES, _b, CAP_DYN_ARRAY_COUNT);`,
-		`Seq.reserveElem(m.dobjs, id, MDobjsElem::new, CAP_DYN_ARRAY_COUNT);`,
+		`Seq.reserveElem(m.dobjs, id, M_Dobjs::new, CAP_DYN_ARRAY_COUNT);`,
 	} {
 		if !strings.Contains(m, want) {
 			t.Errorf("M.java missing wrapper index cap %q:\n%s", want, m)
@@ -1852,7 +1852,7 @@ func TestJavaDecoderAsksTheStreamForItsVerdict(t *testing.T) {
 	m := exampleFile(t)
 	for _, want := range []string{
 		// The one-shot needs no memory: feed's return IS the answer.
-		"        return is.feed(data, new MyfirstmessageVisitor(out));",
+		"        return is.feed(data, new _Myfirstmessage__Visitor(out));",
 		// Feed forwards and nothing more: no assignment, no catch.
 		"            return feed(chunk, 0, chunk.length);",
 		"            return is.feed(chunk, off, len, v);",
@@ -2659,7 +2659,7 @@ func TestJavaNarrowBitfieldArrayIsWidenedForJSON(t *testing.T) {
 		"      en:   { id: 3, type: array, items: { type: enum, count: 4, enum: { A: 0, B: 1 } } }\n"+
 		"      u8:   { id: 4, type: array, items: { type: u8, count: 4 } }\n",
 		map[string]any{"emit": "project"})
-	j := files["src/main/java/message/Json.java"]
+	j := files["src/main/java/message/harness/Json.java"]
 	if j == "" {
 		t.Fatal("no Json.java generated")
 	}
@@ -2717,27 +2717,27 @@ messages:
 	const ann = `@SuppressWarnings("deprecation")`
 	for _, name := range []string{"Outer", "Plain"} {
 		src := files["src/main/java/p/"+name+".java"]
-		if !strings.Contains(src, ann+" // decode must still fill deprecated fields\nclass "+name+"Visitor") {
+		if !strings.Contains(src, ann+" // decode must still fill deprecated fields\nclass _"+name+"__Visitor") {
 			t.Errorf("%sVisitor writes a deprecated field but carries no deprecation suppression", name)
 		}
 	}
 	if c := files["src/main/java/p/Clean.java"]; strings.Contains(c, "SuppressWarnings") {
 		t.Error("Clean touches no deprecated field and must carry no suppression")
 	}
-	js := files["src/main/java/p/Json.java"]
+	js := files["src/main/java/p/harness/Json.java"]
 	sup := "    " + ann + " // the harness round-trips deprecated fields too\n"
-	for _, head := range []string{"static void to(StructInner ", "static void from(JsonObject j, StructInner ", "static void to(Plain ", "static void from(JsonObject j, Plain "} {
+	for _, head := range []string{"static void to(p.Inner ", "static void from(JsonObject j, p.Inner ", "static void to(p.Plain ", "static void from(JsonObject j, p.Plain "} {
 		if !strings.Contains(js, sup+"    "+head) {
 			t.Errorf("Json.java: %q is not preceded by the deprecation suppression", head)
 		}
 	}
-	for _, head := range []string{"static void to(Outer ", "static void to(Clean "} {
+	for _, head := range []string{"static void to(p.Outer ", "static void to(p.Clean "} {
 		if strings.Contains(js, sup+"    "+head) {
 			t.Errorf("Json.java: %q touches no deprecated field directly and must not be suppressed", head)
 		}
 	}
-	main := files["src/main/java/p/Main.java"]
-	if !strings.Contains(main, "benchSink ^= Plain.decode(wire).int_;") {
+	main := files["src/main/java/p/harness/Main.java"]
+	if !strings.Contains(main, "benchSink ^= p.Plain.decode(wire).int_;") {
 		t.Errorf("bench sink must skip the deprecated field and spell the keyword field via javaIdent:\n%s", javaMethod(t, main, "private static void benchOp_plain("))
 	}
 	if !strings.Contains(files["pom.xml"], "<arg>-Xlint:all</arg>") {
