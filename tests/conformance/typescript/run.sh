@@ -129,6 +129,25 @@ YAML
 # generated with the default (bigint) and the mode comparison is vacuous.
 gen() { ( cd "$ROOT" && go run ./cmd/sofabgen --config "${3:-$WORK/cfg.yaml}" --format=off --lang typescript --in "$1" --out "$2" ); }
 
+# $TH runs the generated harness.ts of the project it is started in. The suite
+# starts a harness several hundred times (a shared driver spawns one process per
+# case and verb), and `npx tsx` pays ~0.35 s of npx resolution and on-the-fly
+# transpiling on every start; plain `node` on a bundle pays ~0.08 s. So the
+# project is bundled once with the esbuild tsx already installs, and bundled
+# again whenever any .ts in it is newer than the bundle -- a project a leg
+# regenerates or patches never runs stale code. Nothing is lost: tsx never
+# typechecked either, that is tsc_strict's job.
+TH="$WORK/th"
+cat > "$TH" <<'SH'
+#!/bin/sh
+if [ ! -f harness.mjs ] || [ -n "$(find . -maxdepth 1 -name '*.ts' -newer harness.mjs)" ]; then
+    npx --no esbuild harness.ts --bundle --platform=node --format=esm \
+        --outfile=harness.mjs --log-level=warning || exit 1
+fi
+exec node harness.mjs "$@"
+SH
+chmod +x "$TH"
+
 # Instantiate the differential decode harness into a generated project. Defined
 # here rather than beside its first heavy use: the int64 legs above the streaming
 # section reach for it too.
@@ -161,7 +180,7 @@ echo "==> JSON encode -> decode round-trip"
 # default the example subject carried no blob array at all, so only nested_rows
 # exercised the kind.
 IN='{"someu8":200,"someu16":4242,"someu32":3000000,"someu64":1234567890123456,"somei8":-42,"somei16":31000,"somei32":123456789,"somei64":-1234567890123456,"somefp32":1.5,"somefp64":-2.5,"somebool":false,"somestring":"round trip","someblob":[1,2,3,4],"someenum":33,"somebitfield":1,"someuintarray":[9,8,7,6],"someintarray":[-1,-2,-3,-4,-5],"somefloatarray":[0.5,0.25,-0.75],"somestringarray":["a","bb","ccc"],"someblobarray":[[1],[2,3]],"somestruct":{"nestedint":12,"nestedstring":"deep","nestedstruct":{"deepint":99}},"someunion":{"option1":4242},"somestructwitharray":{"label":"lbl","values":[9,9,9,9]},"somestructarray":[{"x":1,"y":2},{"x":-3,"y":-4}],"somematrix":[[1,2,3,4],[5,6,7,8]],"someunionarray":[{"asint":7},{"asint":-8}],"someenumarray":[1,0,2,1],"someboolarray":[false,false,true],"somebitfieldarray":[1,2,3],"somemap":[{"key":"k","value":5}]}'
-OUT=$(cd "$WORK/ex" && printf '%s' "$IN" | npx tsx harness.ts encode myfirstmessage | npx tsx harness.ts decode myfirstmessage)
+OUT=$(cd "$WORK/ex" && printf '%s' "$IN" | "$TH" encode myfirstmessage | "$TH" decode myfirstmessage)
 echo "$OUT" | grep -q '"someu64":"1234567890123456"' || { echo "FAIL: u64 round-trip"; exit 1; }
 echo "$OUT" | grep -q '"deepint":99' || { echo "FAIL: nested struct round-trip"; exit 1; }
 echo "==> round-trip OK"
@@ -176,13 +195,13 @@ echo "==> round-trip OK"
 # (cpp orders by schema id, go alphabetically), and a blob is base64 here and a
 # byte array there -- all rendering, no wire fact.
 FULL="$OUT"
-OUT2=$(cd "$WORK/ex" && printf '%s' "$FULL" | npx tsx harness.ts encode myfirstmessage | npx tsx harness.ts decode myfirstmessage)
+OUT2=$(cd "$WORK/ex" && printf '%s' "$FULL" | "$TH" encode myfirstmessage | "$TH" decode myfirstmessage)
 python3 "$ROOT/tests/conformance/lib/json_equal.py" "$FULL" "$OUT2" \
     --label "TypeScript: the whole message round-trips to itself" || exit 1
 echo "==> full-message round-trip OK ($(python3 -c "import json,sys;print(len(json.loads(sys.argv[1])))" "$FULL") fields compared as data)"
 # Every field must sit OFF its schema default, or the round trip above compares
 # a default with itself and cannot tell a working decode from a broken one.
-BASE=$(cd "$WORK/ex" && printf '%s' '{}' | npx tsx harness.ts encode myfirstmessage | npx tsx harness.ts decode myfirstmessage)
+BASE=$(cd "$WORK/ex" && printf '%s' '{}' | "$TH" encode myfirstmessage | "$TH" decode myfirstmessage)
 python3 "$ROOT/tests/conformance/lib/check_nondefault.py" "$BASE" "$FULL" \
     --label "typescript: round-trip fixture" || exit 1
 echo "==> round-trip fixture OK (no field sits on its schema default)"
@@ -211,7 +230,7 @@ check_maxsize_constant typescript "$WORK/fill/message.ts" \
 quote_big_ints() {
     python3 -c 'import re,sys; sys.stdout.write(re.sub(r"-?\d+(?![\d.eE\"])", lambda m: "\"%s\"" % m.group(0) if abs(int(m.group(0))) > 2**53 else m.group(0), sys.stdin.read()))'
 }
-fill_encode() { quote_big_ints | ( cd "$WORK/fill" && npx tsx harness.ts encode fill ); }
+fill_encode() { quote_big_ints | ( cd "$WORK/fill" && "$TH" encode fill ); }
 check_maxsize_fill typescript fill_encode
 
 # ...and the other side of owning the buffer: a value the caller filled PAST its
@@ -239,10 +258,10 @@ echo "==> encode-buffer ownership OK"
 echo "==> over-count scalar array must reject (generator#100)"
 printf '\173\005\001\002\003\004\005' > "$WORK/overcount.bin"
 printf '\173\004\001\002\003\004' > "$WORK/control.bin"
-if (cd "$WORK/ex" && npx tsx harness.ts decode myfirstmessage) < "$WORK/overcount.bin" >/dev/null 2>&1; then
+if (cd "$WORK/ex" && "$TH" decode myfirstmessage) < "$WORK/overcount.bin" >/dev/null 2>&1; then
     echo "FAIL: over-count scalar array (5 > count 4) must be INVALID"; exit 1
 fi
-(cd "$WORK/ex" && npx tsx harness.ts decode myfirstmessage) < "$WORK/control.bin" >/dev/null || { echo "FAIL: control (count == 4) must decode"; exit 1; }
+(cd "$WORK/ex" && "$TH" decode myfirstmessage) < "$WORK/control.bin" >/dev/null || { echo "FAIL: control (count == 4) must decode"; exit 1; }
 echo "==> over-count reject OK"
 
 # Over-count AND truncated: INVALID dominates INCOMPLETE (generator#216 / F-0032,
@@ -255,12 +274,12 @@ echo "==> over-count reject OK"
 # Wire: 7b (id 15 unsigned-array) 06 (count 6) 01 02 (2 of 6 elements) <EOF>.
 echo "==> over-count + truncation must be INVALID, not INCOMPLETE (generator#216)"
 printf '\173\006\001\002' > "$WORK/overcount_trunc.bin"
-ST=$( (cd "$WORK/ex" && npx tsx harness.ts status myfirstmessage) < "$WORK/overcount_trunc.bin" | head -n1 )
+ST=$( (cd "$WORK/ex" && "$TH" status myfirstmessage) < "$WORK/overcount_trunc.bin" | head -n1 )
 [ "$ST" = "INVALID" ] || { echo "FAIL: over-count(6>4)+truncated -> $ST (want INVALID)"; exit 1; }
 # Precision control: an IN-BOUND count (4 == bound) genuinely truncated (2 of 4
 # then EOF) is a clean truncation and MUST stay INCOMPLETE.
 printf '\173\004\001\002' > "$WORK/incount_trunc.bin"
-ST=$( (cd "$WORK/ex" && npx tsx harness.ts status myfirstmessage) < "$WORK/incount_trunc.bin" | head -n1 )
+ST=$( (cd "$WORK/ex" && "$TH" status myfirstmessage) < "$WORK/incount_trunc.bin" | head -n1 )
 [ "$ST" = "INCOMPLETE" ] || { echo "FAIL: in-bound(4==4)+truncated -> $ST (want INCOMPLETE)"; exit 1; }
 echo "==> over-count/truncation ordering OK"
 
@@ -274,12 +293,12 @@ echo "==> over-count/truncation ordering OK"
 # Wire: 7b (id 15 unsigned-array) 04 (count 4) 80 80 80 80 10 (2^32) <EOF>.
 echo "==> over-width element + truncation must be INVALID (generator#267)"
 printf '\173\004\200\200\200\200\020' > "$WORK/overwidth_trunc.bin"
-ST=$( (cd "$WORK/ex" && npx tsx harness.ts status myfirstmessage) < "$WORK/overwidth_trunc.bin" | head -n1 )
+ST=$( (cd "$WORK/ex" && "$TH" status myfirstmessage) < "$WORK/overwidth_trunc.bin" | head -n1 )
 [ "$ST" = "INVALID" ] || { echo "FAIL: over-width element + truncated -> $ST (want INVALID)"; exit 1; }
 # Precision control: an IN-RANGE element cut at the same offset decides nothing,
 # so the truncation IS the verdict.
 printf '\173\004\001' > "$WORK/inwidth_trunc.bin"
-ST=$( (cd "$WORK/ex" && npx tsx harness.ts status myfirstmessage) < "$WORK/inwidth_trunc.bin" | head -n1 )
+ST=$( (cd "$WORK/ex" && "$TH" status myfirstmessage) < "$WORK/inwidth_trunc.bin" | head -n1 )
 [ "$ST" = "INCOMPLETE" ] || { echo "FAIL: in-range element + truncated -> $ST (want INCOMPLETE)"; exit 1; }
 echo "==> element-width/truncation ordering OK"
 
@@ -291,10 +310,10 @@ echo "==> element-width/truncation ordering OK"
 echo "==> over-index wrapper array must reject (generator#142)"
 printf '\226\001\052\012\170\007' > "$WORK/overindex.bin"
 printf '\226\001\042\012\170\007' > "$WORK/overindex_control.bin"
-if (cd "$WORK/ex" && npx tsx harness.ts decode myfirstmessage) < "$WORK/overindex.bin" >/dev/null 2>&1; then
+if (cd "$WORK/ex" && "$TH" decode myfirstmessage) < "$WORK/overindex.bin" >/dev/null 2>&1; then
     echo "FAIL: over-index wrapper element (id 5 >= count 5) must be INVALID"; exit 1
 fi
-(cd "$WORK/ex" && npx tsx harness.ts decode myfirstmessage) < "$WORK/overindex_control.bin" >/dev/null || { echo "FAIL: control (index 4 < 5) must decode"; exit 1; }
+(cd "$WORK/ex" && "$TH" decode myfirstmessage) < "$WORK/overindex_control.bin" >/dev/null || { echo "FAIL: control (index 4 < 5) must decode"; exit 1; }
 echo "==> over-index reject OK"
 
 # Over-maxlen scalar blob (Option B / MESSAGE_SPEC S7.1): someblob (id 12) declares
@@ -303,10 +322,10 @@ echo "==> over-index reject OK"
 echo "==> over-maxlen string/blob must reject (Option B, S7.1)"
 printf '\142\213\001\001\001\001\001\001\001\001\001\001\001\001\001\001\001\001\001\001' > "$WORK/overmaxlen.bin"
 printf '\142\203\001\001\001\001\001\001\001\001\001\001\001\001\001\001\001\001\001' > "$WORK/overmaxlen_control.bin"
-if (cd "$WORK/ex" && npx tsx harness.ts decode myfirstmessage) < "$WORK/overmaxlen.bin" >/dev/null 2>&1; then
+if (cd "$WORK/ex" && "$TH" decode myfirstmessage) < "$WORK/overmaxlen.bin" >/dev/null 2>&1; then
     echo "FAIL: over-maxlen blob (17 > maxlen 16) must be INVALID"; exit 1
 fi
-(cd "$WORK/ex" && npx tsx harness.ts decode myfirstmessage) < "$WORK/overmaxlen_control.bin" >/dev/null || { echo "FAIL: control (16 == maxlen) must decode"; exit 1; }
+(cd "$WORK/ex" && "$TH" decode myfirstmessage) < "$WORK/overmaxlen_control.bin" >/dev/null || { echo "FAIL: control (16 == maxlen) must decode"; exit 1; }
 echo "==> over-maxlen reject OK"
 
 # Over-maxlen AND truncated: INVALID dominates INCOMPLETE (generator#216 / F-0032,
@@ -317,12 +336,12 @@ echo "==> over-maxlen reject OK"
 # Wire: 62 (blob id 12) 8b 01 (fixlen word: len 17, blob subtype) 01 (1 of 17) <EOF>.
 echo "==> over-maxlen + truncation must be INVALID, not INCOMPLETE (generator#216)"
 printf '\142\213\001\001' > "$WORK/overmaxlen_trunc.bin"
-ST=$( (cd "$WORK/ex" && npx tsx harness.ts status myfirstmessage) < "$WORK/overmaxlen_trunc.bin" | head -n1 )
+ST=$( (cd "$WORK/ex" && "$TH" status myfirstmessage) < "$WORK/overmaxlen_trunc.bin" | head -n1 )
 [ "$ST" = "INVALID" ] || { echo "FAIL: over-maxlen(17>16)+truncated -> $ST (want INVALID)"; exit 1; }
 # Precision control: an IN-BOUND length (16 == maxlen) genuinely truncated (1 of 16
 # payload bytes then EOF) is a clean truncation and MUST stay INCOMPLETE.
 printf '\142\203\001\001' > "$WORK/inmaxlen_trunc.bin"
-ST=$( (cd "$WORK/ex" && npx tsx harness.ts status myfirstmessage) < "$WORK/inmaxlen_trunc.bin" | head -n1 )
+ST=$( (cd "$WORK/ex" && "$TH" status myfirstmessage) < "$WORK/inmaxlen_trunc.bin" | head -n1 )
 [ "$ST" = "INCOMPLETE" ] || { echo "FAIL: in-bound(16==16)+truncated -> $ST (want INCOMPLETE)"; exit 1; }
 echo "==> over-maxlen/truncation ordering OK"
 
@@ -338,13 +357,13 @@ echo "==> contradictory wire type must skip (MESSAGE_SPEC S7.3, generator#174)"
 printf '\001\006' > "$WORK/wiremismatch.bin"
 printf '\000\011' > "$WORK/wiremismatch_control.bin"
 printf '\006\007' > "$WORK/wiremismatch_seq.bin"
-OUT=$( (cd "$WORK/ex" && npx tsx harness.ts decode myfirstmessage) < "$WORK/wiremismatch.bin" ) \
+OUT=$( (cd "$WORK/ex" && "$TH" decode myfirstmessage) < "$WORK/wiremismatch.bin" ) \
     || { echo "FAIL: mismatched wire type must skip, not fail the decode"; exit 1; }
 echo "$OUT" | grep -q '"someu8":7' || { echo "FAIL: skipped field must keep its default 7; got: $OUT"; exit 1; }
-OUT=$( (cd "$WORK/ex" && npx tsx harness.ts decode myfirstmessage) < "$WORK/wiremismatch_control.bin" ) \
+OUT=$( (cd "$WORK/ex" && "$TH" decode myfirstmessage) < "$WORK/wiremismatch_control.bin" ) \
     || { echo "FAIL: control (correct wire type) must decode"; exit 1; }
 echo "$OUT" | grep -q '"someu8":9' || { echo "FAIL: control must decode to 9; got: $OUT"; exit 1; }
-OUT=$( (cd "$WORK/ex" && npx tsx harness.ts decode myfirstmessage) < "$WORK/wiremismatch_seq.bin" ) \
+OUT=$( (cd "$WORK/ex" && "$TH" decode myfirstmessage) < "$WORK/wiremismatch_seq.bin" ) \
     || { echo "FAIL: sequence header on a scalar field must skip, not fail the decode"; exit 1; }
 echo "$OUT" | grep -q '"someu8":7' || { echo "FAIL: skipped sequence must keep the default 7; got: $OUT"; exit 1; }
 echo "==> wire-type skip OK"
@@ -359,7 +378,7 @@ echo "==> wire-type skip OK"
 #       a6 01 (seq start id 20) 16 07 (empty seq id 2) 07 (seq end)
 echo "==> re-opened struct scope must merge (MESSAGE_SPEC S7.4, generator#175)"
 printf '\246\001\012\012\170\007\246\001\026\007\007' > "$WORK/reopen_struct.bin"
-OUT=$( (cd "$WORK/ex" && npx tsx harness.ts decode myfirstmessage) < "$WORK/reopen_struct.bin" ) \
+OUT=$( (cd "$WORK/ex" && "$TH" decode myfirstmessage) < "$WORK/reopen_struct.bin" ) \
     || { echo "FAIL: re-opened struct must decode"; exit 1; }
 echo "$OUT" | grep -q '"nestedstring":"x"' || { echo "FAIL: re-opened struct must retain nestedstring \"x\"; got: $OUT"; exit 1; }
 echo "==> struct scope merge OK"
@@ -373,7 +392,7 @@ echo "==> struct scope merge OK"
 #       07 (seq end) 96 01 (seq start id 18) 02 0a 63 (string id 0 "c") 07 (seq end)
 echo "==> re-opened array wrapper must replace (MESSAGE_SPEC S7.4, generator#175)"
 printf '\226\001\002\012\141\012\012\142\007\226\001\002\012\143\007' > "$WORK/reopen_array.bin"
-OUT=$( (cd "$WORK/ex" && npx tsx harness.ts decode myfirstmessage) < "$WORK/reopen_array.bin" ) \
+OUT=$( (cd "$WORK/ex" && "$TH" decode myfirstmessage) < "$WORK/reopen_array.bin" ) \
     || { echo "FAIL: re-opened array wrapper must decode"; exit 1; }
 echo "$OUT" | grep -q '"somestringarray":\["c"' || { echo "FAIL: re-opened array wrapper must start with the second opening's element 0 == \"c\"; got: $OUT"; exit 1; }
 if echo "$OUT" | grep -q '"somestringarray":\["c","b"'; then
@@ -391,10 +410,10 @@ echo "==> array wrapper replace OK"
 echo "==> fixlen subtype mismatch must skip (MESSAGE_SPEC S7.3, generator#174)"
 printf '\112\012\170' > "$WORK/subtype_mismatch.bin"
 printf '\112\101\000\000\000\000\000\000\004\100' > "$WORK/subtype_control.bin"
-OUT=$( (cd "$WORK/ex" && npx tsx harness.ts decode myfirstmessage) < "$WORK/subtype_mismatch.bin" ) \
+OUT=$( (cd "$WORK/ex" && "$TH" decode myfirstmessage) < "$WORK/subtype_mismatch.bin" ) \
     || { echo "FAIL: fixlen subtype mismatch must skip, not fail the decode"; exit 1; }
 echo "$OUT" | grep -q '"somefp64":3.14159265358979' || { echo "FAIL: skipped fixlen field must keep its default; got: $OUT"; exit 1; }
-OUT=$( (cd "$WORK/ex" && npx tsx harness.ts decode myfirstmessage) < "$WORK/subtype_control.bin" ) \
+OUT=$( (cd "$WORK/ex" && "$TH" decode myfirstmessage) < "$WORK/subtype_control.bin" ) \
     || { echo "FAIL: control (correct fp64 subtype) must decode"; exit 1; }
 echo "$OUT" | grep -q '"somefp64":2.5' || { echo "FAIL: control must decode to 2.5; got: $OUT"; exit 1; }
 echo "==> fixlen subtype skip OK"
@@ -438,7 +457,7 @@ for surface in decode streamdecode; do
     fi
     python3 "$ROOT/tests/conformance/lib/check_skipped_string_utf8.py" "typescript" \
         --cwd "$WORK/ex" --verb "$surface" $SU_CAT \
-        -- npx tsx harness.ts
+        -- "$TH"
 done
 
 # ...and the same question one level up, on a fixlen ARRAY, where the answer is
@@ -478,7 +497,7 @@ for surface in decode streamdecode; do
     if [ "$surface" = decode ]; then FA_CAT="--status-verb status"; else FA_CAT=""; fi
     python3 "$ROOT/tests/conformance/lib/check_fixlen_array_subtype.py" "typescript" \
         --cwd "$WORK/ex" --verb "$surface" $FA_CAT \
-        -- npx tsx harness.ts
+        -- "$TH"
 done
 
 # S7.3 x S7.4, array wrapper (generator#174 + generator#175): "An occurrence
@@ -493,7 +512,7 @@ done
 # Asserted as a prefix: heap profiles render ["a"], fixed-capacity ones pad.
 echo "==> mis-typed later occurrence must not clear the array (MESSAGE_SPEC S7.4, generator#175)"
 printf '\226\001\002\012\141\007\220\001\005' > "$WORK/skipped_occ_array.bin"
-OUT=$( (cd "$WORK/ex" && npx tsx harness.ts decode myfirstmessage) < "$WORK/skipped_occ_array.bin" ) \
+OUT=$( (cd "$WORK/ex" && "$TH" decode myfirstmessage) < "$WORK/skipped_occ_array.bin" ) \
     || { echo "FAIL: mis-typed later occurrence must decode, not error"; exit 1; }
 echo "$OUT" | grep -q '"somestringarray":\["a"' || { echo "FAIL: skipped occurrence must not clear the array (element 0 == \"a\" lost); got: $OUT"; exit 1; }
 echo "==> skipped occurrence keeps array OK"
@@ -506,7 +525,7 @@ echo "==> skipped occurrence keeps array OK"
 #       a0 01 (id 20, UNSIGNED) 05
 echo "==> mis-typed later occurrence must not clear the struct (MESSAGE_SPEC S7.4, generator#175)"
 printf '\246\001\012\012\170\007\240\001\005' > "$WORK/skipped_occ_struct.bin"
-OUT=$( (cd "$WORK/ex" && npx tsx harness.ts decode myfirstmessage) < "$WORK/skipped_occ_struct.bin" ) \
+OUT=$( (cd "$WORK/ex" && "$TH" decode myfirstmessage) < "$WORK/skipped_occ_struct.bin" ) \
     || { echo "FAIL: mis-typed later occurrence must decode, not error"; exit 1; }
 echo "$OUT" | grep -q '"nestedstring":"x"' || { echo "FAIL: skipped occurrence must not clear the struct (nestedstring \"x\" lost); got: $OUT"; exit 1; }
 echo "==> skipped occurrence keeps struct OK"
@@ -537,7 +556,7 @@ ln -s "$WORK/ex/node_modules" "$WORK/nolim/node_modules"
 tsc_strict "$WORK/lim"
 printf '\003\005\001\002\003\004\005' > "$WORK/overlimit.bin"
 printf '\003\004\001\002\003\004' > "$WORK/atlimit.bin"
-if (cd "$WORK/lim" && npx tsx harness.ts decode dyn) < "$WORK/overlimit.bin" >/dev/null 2>"$WORK/limerr.txt"; then
+if (cd "$WORK/lim" && "$TH" decode dyn) < "$WORK/overlimit.bin" >/dev/null 2>"$WORK/limerr.txt"; then
     echo "FAIL: dynamic array count 5 must exceed max_dyn_array_count 4"; exit 1
 fi
 grep -q "a: array count above configured limit 4" "$WORK/limerr.txt" \
@@ -546,7 +565,7 @@ grep -q "a: array count above configured limit 4" "$WORK/limerr.txt" \
 # and the nolim project below decodes them (CORELIB_PLAN S6.2.1). Read through the
 # `status` mode, not by grepping stderr -- a thrown stack trace echoes the source
 # line, so grepping it would match the generated code rather than the outcome.
-ST=$( (cd "$WORK/lim" && npx tsx harness.ts status dyn) < "$WORK/overlimit.bin" | head -n1 )
+ST=$( (cd "$WORK/lim" && "$TH" status dyn) < "$WORK/overlimit.bin" | head -n1 )
 [ "$ST" = "LIMIT_EXCEEDED" ] \
     || { echo "FAIL: an over-cap count is a policy rejection, got $ST"; exit 1; }
 # The corelib is handed no cap at all, by any module: every receiver bound is a
@@ -556,8 +575,8 @@ grep -q "_LIMITS" "$WORK/lim/message.ts" \
     && { echo "FAIL: a generated module must pass the corelib no DecodeLimits"; exit 1; }
 grep -q "_decode(bytes, new _DynVis(o, new PayloadAcc()));" "$WORK/lim/message.ts" \
     || { echo "FAIL: decode() must take the bytes and the visitor, nothing else"; exit 1; }
-(cd "$WORK/lim" && npx tsx harness.ts decode dyn) < "$WORK/atlimit.bin" >/dev/null || { echo "FAIL: count == limit (4) must decode"; exit 1; }
-(cd "$WORK/nolim" && npx tsx harness.ts decode dyn) < "$WORK/overlimit.bin" >/dev/null || { echo "FAIL: default-cap project must accept count 5"; exit 1; }
+(cd "$WORK/lim" && "$TH" decode dyn) < "$WORK/atlimit.bin" >/dev/null || { echo "FAIL: count == limit (4) must decode"; exit 1; }
+(cd "$WORK/nolim" && "$TH" decode dyn) < "$WORK/overlimit.bin" >/dev/null || { echo "FAIL: default-cap project must accept count 5"; exit 1; }
 echo "==> decode limits OK"
 
 # A refusal is TERMINAL, and the corelib is what holds that (CORELIB_PLAN S5.2 for
@@ -580,7 +599,7 @@ echo "==> a refusal is terminal: finish refuses under the same code (generator#5
 printf '\000\377\377\377\377\377\377\377\377\377\377\001' > "$WORK/varint_overflow.bin"
 latch() {   # <project-dir> <fixture> <want-code> <message>
     ldir=$1 lfx=$2 lwant=$3 lmsg=$4
-    if (cd "$ldir" && npx tsx harness.ts streamdecode "$lmsg") \
+    if (cd "$ldir" && "$TH" streamdecode "$lmsg") \
             < "$lfx" >/dev/null 2>"$WORK/latch.err"; then
         echo "FAIL: $(basename "$lfx") must be refused by the streaming decoder"; exit 1
     fi
@@ -614,11 +633,11 @@ echo "==> a S7.3-skipped field is never capped (CORELIB_PLAN S6.2.1, generator#4
 printf '\004\005\000\000\000\000\000' > "$WORK/skipmistyped.bin"
 printf '\113\005\001\001\001\001\001' > "$WORK/skipunknown.bin"
 for v in skipmistyped skipunknown; do
-    ST=$( (cd "$WORK/lim" && npx tsx harness.ts status dyn) < "$WORK/$v.bin" | head -n1 )
+    ST=$( (cd "$WORK/lim" && "$TH" status dyn) < "$WORK/$v.bin" | head -n1 )
     [ "$ST" = "COMPLETE" ] \
         || { echo "FAIL: $v -- an over-cap SKIPPED array must leave the decode COMPLETE, got $ST"; exit 1; }
     # ...and skipped means the field is not touched at all: `a` keeps its default.
-    OUT=$( (cd "$WORK/lim" && npx tsx harness.ts decode dyn) < "$WORK/$v.bin" )
+    OUT=$( (cd "$WORK/lim" && "$TH" decode dyn) < "$WORK/$v.bin" )
     echo "$OUT" | grep -q '"a":\[\]' \
         || { echo "FAIL: $v -- a skipped field must bind nothing; got: $OUT"; exit 1; }
 done
@@ -626,7 +645,7 @@ done
 # matching kind is the field's own count, and is still LIMIT_EXCEEDED -- pinned
 # above via $WORK/overlimit.bin, re-read here as the category (S6.3), since a
 # backend that simply stopped capping would pass both rows above.
-ST=$( (cd "$WORK/lim" && npx tsx harness.ts status dyn) < "$WORK/overlimit.bin" | head -n1 )
+ST=$( (cd "$WORK/lim" && "$TH" status dyn) < "$WORK/overlimit.bin" | head -n1 )
 [ "$ST" = "LIMIT_EXCEEDED" ] \
     || { echo "FAIL: the matching-kind over-cap control must stay LIMIT_EXCEEDED, got $ST"; exit 1; }
 echo "==> skipped-field cap exclusivity OK"
@@ -658,26 +677,26 @@ ln -s "$WORK/ex/node_modules" "$WORK/wnolim/node_modules"
 tsc_strict "$WORK/wlim"
 # The bytes are produced by the UNCAPPED project, so they are well formed by
 # construction and the capped project's refusal can only be a policy one.
-printf '%s' '{"w":["abcdefgh"]}' | (cd "$WORK/wnolim" && npx tsx harness.ts encode wdyn) > "$WORK/wrap8.bin"
-if (cd "$WORK/wlim" && npx tsx harness.ts decode wdyn) < "$WORK/wrap8.bin" >/dev/null 2>"$WORK/wraperr.txt"; then
+printf '%s' '{"w":["abcdefgh"]}' | (cd "$WORK/wnolim" && "$TH" encode wdyn) > "$WORK/wrap8.bin"
+if (cd "$WORK/wlim" && "$TH" decode wdyn) < "$WORK/wrap8.bin" >/dev/null 2>"$WORK/wraperr.txt"; then
     echo "FAIL: an 8-byte unbounded wrapper element must exceed max_dyn_string_len 4"; exit 1
 fi
 grep -q "exceeds the receiver cap 4" "$WORK/wraperr.txt" \
     || { echo "FAIL: the over-cap element must name the receiver cap"; cat "$WORK/wraperr.txt"; exit 1; }
-ST=$( (cd "$WORK/wlim" && npx tsx harness.ts status wdyn) < "$WORK/wrap8.bin" | head -n1 )
+ST=$( (cd "$WORK/wlim" && "$TH" status wdyn) < "$WORK/wrap8.bin" | head -n1 )
 [ "$ST" = "LIMIT_EXCEEDED" ] \
     || { echo "FAIL: an over-cap element is a policy rejection, got $ST"; exit 1; }
-(cd "$WORK/wnolim" && npx tsx harness.ts decode wdyn) < "$WORK/wrap8.bin" >/dev/null \
+(cd "$WORK/wnolim" && "$TH" decode wdyn) < "$WORK/wrap8.bin" >/dev/null \
     || { echo "FAIL: default-cap project must accept an 8-byte element"; exit 1; }
 # The exemption: the SAME 8 bytes at an element the schema bounds at 16 decode
 # under the same cap of 4. The schema bound governs and the cap never applies --
 # this is what the raised residual DecodeLimits used to buy, one module at a time.
-printf '%s' '{"w":["abcdefgh"]}' | (cd "$WORK/wnolim" && npx tsx harness.ts encode wbnd) > "$WORK/wrapb8.bin"
-(cd "$WORK/wlim" && npx tsx harness.ts decode wbnd) < "$WORK/wrapb8.bin" >/dev/null \
+printf '%s' '{"w":["abcdefgh"]}' | (cd "$WORK/wnolim" && "$TH" encode wbnd) > "$WORK/wrapb8.bin"
+(cd "$WORK/wlim" && "$TH" decode wbnd) < "$WORK/wrapb8.bin" >/dev/null \
     || { echo "FAIL: a schema-bounded element must not be capped (S6.2.1)"; exit 1; }
 # ...and over its own bound it is INVALID, not a policy rejection.
-printf '%s' '{"w":["0123456789abcdefg"]}' | (cd "$WORK/wnolim" && npx tsx harness.ts encode wbnd) > "$WORK/wrapb17.bin"
-ST=$( (cd "$WORK/wlim" && npx tsx harness.ts status wbnd) < "$WORK/wrapb17.bin" | head -n1 )
+printf '%s' '{"w":["0123456789abcdefg"]}' | (cd "$WORK/wnolim" && "$TH" encode wbnd) > "$WORK/wrapb17.bin"
+ST=$( (cd "$WORK/wlim" && "$TH" status wbnd) < "$WORK/wrapb17.bin" | head -n1 )
 [ "$ST" = "INVALID" ] \
     || { echo "FAIL: over the schema maxlen is INVALID, got $ST"; exit 1; }
 echo "==> wrapper-element caps OK"
@@ -698,7 +717,7 @@ echo "==> shared-vector decode conformance (skip matrix)"
 for surface in decode streamdecode; do
     python3 "$ROOT/tests/conformance/lib/check_vectors_decode.py" \
         "$CORELIB/assets/test_vectors.json" "TypeScript" --mode "$surface" \
-        --cwd "$WORK/conf" -- npx tsx harness.ts
+        --cwd "$WORK/conf" -- "$TH"
 done
 
 # fp32 signaling-NaN bit-for-bit round-trip (issue #235). A JS number is a 64-bit
@@ -727,7 +746,7 @@ python3 "$ROOT/tests/conformance/lib/check_fp32_nan.py" "TypeScript" \
     --scalar-message vecf32 --scalar-field a \
     --array-message vecf32a --array-field a \
     --array-default-message vecf32ad --array-default-field a \
-    --expect 10 --expect-normalize 2 --cwd "$WORK/conf" -- npx tsx harness.ts
+    --expect 10 --expect-normalize 2 --cwd "$WORK/conf" -- "$TH"
 
 # int64: long / number — the Long-backed 64-bit hot path must be wire-identical
 # to the default bigint representation (issue #51; corelib-ts #19/#20).
@@ -771,7 +790,7 @@ YAML
 done
 tsc_strict "$WORK/i64-long"
 tsc_strict "$WORK/i64-number"
-enc64() { ( cd "$WORK/i64-$1" && printf '%s' "$2" | npx tsx harness.ts encode m64 ); }
+enc64() { ( cd "$WORK/i64-$1" && printf '%s' "$2" | "$TH" encode m64 ); }
 # Full 64-bit range (scalars beyond 2^53): bigint vs long. ud == its schema
 # default exercises the longArrEq omission guard.
 I64FULL='{"us":["1","18446744073709551615","4294967296"],"is":["-1","-9223372036854775808","9223372036854775807"],"ud":["1","18446744073709551615"],"u":"18446744073709551615","i":"-9223372036854775808","n":{"nu":"18446744073709551615","ni":"-9223372036854775808"},"rows":[["1","18446744073709551615"],["0","4294967296"]]}'
@@ -791,8 +810,8 @@ enc64 long "$I64SAFE" > "$WORK/i64_safe_long.bin"
 cmp -s "$WORK/i64_safe_bigint.bin" "$WORK/i64_safe_long.bin" || { echo "FAIL: int64: long wire drift (safe-integer scalars)"; exit 1; }
 # Decode parity: long mode reproduces the bigint mode's JSON from the same bytes.
 for bin in "$WORK/i64_full_bigint.bin" "$WORK/i64_safe_bigint.bin"; do
-    DEC_A=$( cd "$WORK/i64-bigint" && npx tsx harness.ts decode m64 < "$bin" )
-    DEC_B=$( cd "$WORK/i64-long"   && npx tsx harness.ts decode m64 < "$bin" )
+    DEC_A=$( cd "$WORK/i64-bigint" && "$TH" decode m64 < "$bin" )
+    DEC_B=$( cd "$WORK/i64-long"   && "$TH" decode m64 < "$bin" )
     [ "$DEC_A" = "$DEC_B" ] || { echo "FAIL: int64: long decode drift ($bin)"; exit 1; }
 done
 # ...and the DECLARED type must be the type the field actually holds. The cursor
@@ -939,7 +958,7 @@ mk_stream_check "$WORK/i64-long" \
 # ...and the in-range control still decodes to the exact value, so the reject is
 # a bound and not a blanket.
 printf '\060\377\001' > "$WORK/w_long_u8_255.bin"
-OUT=$( (cd "$WORK/i64-long" && npx tsx harness.ts decode m64) < "$WORK/w_long_u8_255.bin" ) \
+OUT=$( (cd "$WORK/i64-long" && "$TH" decode m64) < "$WORK/w_long_u8_255.bin" ) \
     || { echo "FAIL: in-range control 255 must decode on the Long channel"; exit 1; }
 echo "$OUT" | tr -d " " | grep -q '"w":255' || { echo "FAIL: control must keep 255 exactly; got: $OUT"; exit 1; }
 echo "==> Long-channel narrowing OK (over-width rejected, in-range exact)"
@@ -990,7 +1009,7 @@ echo "==> int64: long corpus typechecks ($n64 definitions with a 64-bit field)"
 # id-keyed placement has to restore.
 echo "==> nested wrapper rows round-trip"
 NR='{"strrows":[["a","bb","ccc"],["","","zz"]],"blobrows":[[[1,2],[3]],[[],[9,9,9,9]]],"structrows":[[{"x":1,"y":2},{"x":0,"y":0}],[{"x":-7,"y":8},{"x":3,"y":4}]],"strcube":[[["p","q"],["","r"]],[["s",""],["t","u"]]],"numrows":[[1,2,3],[4,5,6]],"fprows":[[1.5,2.5],[0,3.25]],"enumrows":[[0,1,2],[2]],"bfrows":[[1,2,3],[0]],"boolrows":[[true,false,true],[false]]}'
-NROUT=$(cd "$WORK/corpus/nested_rows" && printf '%s' "$NR" | npx tsx harness.ts encode NestedRows | npx tsx harness.ts decode NestedRows)
+NROUT=$(cd "$WORK/corpus/nested_rows" && printf '%s' "$NR" | "$TH" encode NestedRows | "$TH" decode NestedRows)
 [ "$NROUT" = "$NR" ] || { echo "FAIL: nested wrapper row round-trip drift"; echo "  in : $NR"; echo "  out: $NROUT"; exit 1; }
 echo "==> nested wrapper rows OK"
 
@@ -1102,11 +1121,11 @@ printf '\000\200\002'     > "$WORK/w_u8_256.bin"
 printf '\010\360\242\004' > "$WORK/w_u16_70000.bin"
 printf '\000\377\001'     > "$WORK/w_u8_255_ctl.bin"
 for v in w_u8_16383 w_u8_256 w_u16_70000; do
-    if (cd "$WORK/ex" && npx tsx harness.ts decode myfirstmessage) < "$WORK/$v.bin" >/dev/null 2>&1; then
+    if (cd "$WORK/ex" && "$TH" decode myfirstmessage) < "$WORK/$v.bin" >/dev/null 2>&1; then
         echo "FAIL: $v must be INVALID (S7.1) -- neither masked to the width nor kept"; exit 1
     fi
 done
-OUT=$( (cd "$WORK/ex" && npx tsx harness.ts decode myfirstmessage) < "$WORK/w_u8_255_ctl.bin" ) || { echo "FAIL: in-range control 255 must decode"; exit 1; }
+OUT=$( (cd "$WORK/ex" && "$TH" decode myfirstmessage) < "$WORK/w_u8_255_ctl.bin" ) || { echo "FAIL: in-range control 255 must decode"; exit 1; }
 echo "$OUT" | tr -d ' ' | grep -q '"someu8":255' || { echo "FAIL: control must keep 255 exactly; got: $OUT"; exit 1; }
 echo "==> declared-width reject OK"
 
@@ -1128,7 +1147,7 @@ ln -s "$WORK/ex/node_modules" "$WORK/growth/node_modules"
 # the cases' indices are offsets onto it, so a mismatch moves the boundary.
 python3 "$ROOT/tests/conformance/lib/check_growth.py" \
     "$CORELIB/assets/test_vectors.json" "TypeScript" --cap 4 \
-    --cwd "$WORK/growth" -- npx tsx harness.ts
+    --cwd "$WORK/growth" -- "$TH"
 
 # An `enum` and a `bitfield` are bound by the WIDTH their declaration IMPLIES
 # (MESSAGE_SPEC S1, generator#516): for an enum the smallest SIGNED type holding
@@ -1155,7 +1174,7 @@ ln -s "$WORK/ex/node_modules" "$WORK/closed/node_modules"
 python3 "$ROOT/tests/conformance/lib/check_declared_width_kinds.py" "typescript" \
     --cwd "$WORK/closed" --status-verb status \
     --stream-verb streamdecode --stream-invalid-pattern 'INVALID_MSG' \
-    -- npx tsx harness.ts
+    -- "$TH"
 
 # Native arrays at every length, for every element kind (generator#550). The
 # array hand-off (corelib-ts#177) is the ONLY way an array's elements reach a
@@ -1183,7 +1202,7 @@ ln -s "$WORK/ex/node_modules" "$WORK/arrlen/node_modules"
 tsc_strict "$WORK/arrlen"
 for surface in decode streamdecode; do
     python3 "$ROOT/tests/conformance/lib/check_array_lengths.py" "typescript" \
-        --cwd "$WORK/arrlen" --verb "$surface" -- npx tsx harness.ts
+        --cwd "$WORK/arrlen" --verb "$surface" -- "$TH"
 done
 # ...and the same shapes under the two Long modes, where a 64-bit array is a
 # `Long[]` rather than a `bigint[]` and therefore takes a different destination
@@ -1194,7 +1213,7 @@ for mode in long number; do
     ln -s "$WORK/ex/node_modules" "$WORK/arrlen-$mode/node_modules"
     tsc_strict "$WORK/arrlen-$mode"
     python3 "$ROOT/tests/conformance/lib/check_array_lengths.py" "typescript int64: $mode" \
-        --cwd "$WORK/arrlen-$mode" -- npx tsx harness.ts
+        --cwd "$WORK/arrlen-$mode" -- "$TH"
 done
 
 # MESSAGE_SPEC §7.4 -- a field id REPEATED inside one scope (generator#523). The
@@ -1215,7 +1234,7 @@ python3 "$ROOT/tests/conformance/lib/check_repeated_id.py" --emit-schema >> "$WO
 gen "$WORK/repeated.yaml" "$WORK/repeated"
 ln -s "$WORK/ex/node_modules" "$WORK/repeated/node_modules"
 python3 "$ROOT/tests/conformance/lib/check_repeated_id.py" "TypeScript" \
-    --cwd "$WORK/repeated" -- npx tsx harness.ts
+    --cwd "$WORK/repeated" -- "$TH"
 
 # MESSAGE_SPEC §4.2 / §7.4.1 (generator#608): a union holds exactly ONE option.
 # A fresh one holds default_id at that option's default; a held option other
@@ -1252,7 +1271,7 @@ for mode in bigint long number; do
     [ "$mode" = number ] && safe="--int64-safe"
     python3 "$ROOT/tests/conformance/lib/check_union.py" "TypeScript int64: $mode" \
         --int64-json string $safe --sizes 1 \
-        --cwd "$WORK/union-$mode" -- npx tsx harness.ts
+        --cwd "$WORK/union-$mode" -- "$TH"
     ( cd "$WORK/union-$mode" && npx tsx union_api_check.ts ) \
         || { echo "FAIL: union API (int64: $mode)"; exit 1; }
 done
@@ -1266,7 +1285,7 @@ python3 "$ROOT/tests/conformance/lib/check_defaults.py" --emit-schema >> "$WORK/
 gen "$WORK/defaults.yaml" "$WORK/defaults"
 ln -s "$WORK/ex/node_modules" "$WORK/defaults/node_modules"
 python3 "$ROOT/tests/conformance/lib/check_defaults.py" "TypeScript" \
-    --cwd "$WORK/defaults" -- npx tsx harness.ts
+    --cwd "$WORK/defaults" -- "$TH"
 
 # Every generated project in the run, typechecked under $TSC_STRICT (ARCHITECTURE
 # §12 gate 9). Several legs only RUN their project through tsx, which does not
