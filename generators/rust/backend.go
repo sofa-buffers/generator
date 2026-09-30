@@ -69,6 +69,9 @@ func (*Backend) Generate(s *ir.Schema, cfg map[string]any) ([]generator.File, er
 	if err := g.checkReservedNames(s); err != nil {
 		return nil, err
 	}
+	if err := checkFieldNames(s); err != nil {
+		return nil, err
+	}
 	if err := checkUnionNames(s); err != nil {
 		return nil, err
 	}
@@ -656,6 +659,14 @@ func (g *gen) emitStruct(f *rfile, name string, fields []*ir.Field, isMessage bo
 	} else {
 		f.line("#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]")
 		f.line("#[serde(default)]")
+	}
+	// On the struct, not the field: a field-level allow does not reach the
+	// lint rustc raises for that field (measured: Self_ still failed -D warnings).
+	for _, fld := range fields {
+		if a := nonSnakeAllow(rustIdent(fld.Name)); a != "" {
+			f.line("%s", a)
+			break
+		}
 	}
 	f.line("pub struct %s {", name)
 	for _, fld := range fields {

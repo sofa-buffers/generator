@@ -962,6 +962,30 @@ YAML
     done
     echo "==> [$label] corpus builds clippy-clean ($(ls "$ROOT"/tests/matrix/corpus/defs/*.yaml | wc -l) definitions + $(ls "$ROOT"/examples/messages/realworld/*.yaml | wc -l) realworld)"
 
+    # The reserved-name collision test (ARCHITECTURE §8): reserved.yaml uses every
+    # name on generators/rust/reserved.go's list as a message field, a nested
+    # struct field and a union option, plus the one path clash a _Loc variant can
+    # hit (TestReservedSchemaFile keeps it in step with the list). The generator
+    # exits 0 on a crate that does not build, so it must build clippy-clean on
+    # this profile, and every value of reserved.json must come back under its
+    # schema name -- a raw identifier or a mangled keyword must not reach the JSON.
+    echo "==> [$label] reserved names: every listed name as a field builds and round-trips"
+    rust_build "$ROOT/tests/conformance/rust/reserved.yaml" "$WORK/reserved-$label"
+    rust_clippy "$WORK/reserved-$label"
+    ( cd "$WORK/reserved-$label" && cargo run -q -- encode m ) < "$ROOT/tests/conformance/rust/reserved.json" > "$WORK/reserved-$label.bin" \
+        || { echo "FAIL: [$label] reserved.json did not encode"; exit 1; }
+    ( cd "$WORK/reserved-$label" && cargo run -q -- decode m ) < "$WORK/reserved-$label.bin" > "$WORK/reserved-$label.out" \
+        || { echo "FAIL: [$label] reserved.bin did not decode"; exit 1; }
+    python3 - "$ROOT/tests/conformance/rust/reserved.json" "$WORK/reserved-$label.out" <<'PY' \
+        || { echo "FAIL: [$label] a reserved-name field did not round-trip under its schema name"; exit 1; }
+import json, sys
+want, got = (json.load(open(p)) for p in sys.argv[1:3])
+bad = [k for k in want if got.get(k) != want[k]]
+if bad:
+    sys.exit(f"mismatch on {bad}: got {[got.get(k) for k in bad]}")
+PY
+    echo "==> [$label] reserved names OK"
+
     # Gate 10 (ARCHITECTURE §12), for this leg: what a user receives when they
     # ASK for the format pass -- `--format=require` -- must satisfy
     # `rustfmt --check`, so their own `cargo fmt --check` over a tree holding

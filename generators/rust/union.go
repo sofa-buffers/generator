@@ -25,22 +25,6 @@ import (
 // serde's externally tagged form IS the JSON form ({"<option>": value}), so no
 // JSON code is generated either.
 
-// unionReserved are the value-namespace members a union type has without any
-// option: its own API, the methods of the traits it derives (Debug, Clone,
-// PartialEq, Default, serde's two), and the methods the standard library's
-// blanket impls give every such type (ToOwned, Borrow, BorrowMut, Into,
-// TryInto, Any). A same-named inherent method would shadow one at a call site
-// (`u.clone()`, `u.to_owned()`), so a generated accessor that would land on one
-// -- the getter `<opt>` or the mutable `<opt>_mut` -- takes the backend's
-// trailing underscore, exactly as a keyword that cannot be a raw identifier
-// does.
-var unionReserved = map[string]bool{
-	"which": true, "serialize": true, "deserialize": true,
-	"default": true, "clone": true, "clone_from": true, "eq": true, "ne": true, "fmt": true,
-	"to_owned": true, "clone_into": true, "borrow": true, "borrow_mut": true,
-	"into": true, "try_into": true, "type_id": true,
-}
-
 // unionEnumAllow sits on every union enum. A union is as large as its largest
 // option, and that IS the design: boxing the large one would allocate on every
 // selection, and the heap-free profile has nothing to box into
@@ -224,6 +208,9 @@ func (g *gen) emitUnion(f *rfile, name string, nt *ir.NamedType) {
 	for _, o := range opts {
 		typ := g.rustType(o.f)
 		f.line("    /// `%s` when it is the option held.", o.f.Name)
+		if a := nonSnakeAllow(o.getter); a != "" {
+			f.line("    %s", a)
+		}
 		f.line("    pub fn %s(&self) -> Option<&%s> {", o.getter, typ)
 		if single {
 			f.line("        let Self::%s(v) = self;", o.variant)
@@ -236,6 +223,9 @@ func (g *gen) emitUnion(f *rfile, name string, nt *ir.NamedType) {
 		f.line("    /// (the one held before is dropped). An option already held is kept as is.")
 		if g.noStd && !single {
 			f.line("    %s", mutNoInline)
+		}
+		if a := nonSnakeAllow(o.mut); a != "" {
+			f.line("    %s", a)
 		}
 		f.line("    pub fn %s(&mut self) -> &mut %s {", o.mut, typ)
 		if single {
