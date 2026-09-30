@@ -1,11 +1,6 @@
 package java
 
-import (
-	"fmt"
-	"strings"
-
-	"github.com/sofa-buffers/generator/internal/ir"
-)
+import "strings"
 
 // One reserved-name list for the Java backend (generator#239): every name a
 // schema field cannot take as a field of a generated class. Java keeps fields
@@ -21,9 +16,14 @@ import (
 //
 // Java has no identifier escape, so a name on the list is mangled with a
 // trailing underscore; the JSON key is a separate string literal and the wire
-// is keyed by id, so neither changes. The struct path (javaIdent) and the union
-// slots (unionSlot) read the list. TestJavaNamesInScope keeps javaStatics and
-// javaQualifiers equal to what the generated classes actually use.
+// is keyed by id, so neither changes. The struct path (javaIdent) reads the
+// list; a union's slots are `_`-led (unionSlot) and need none of it. Names
+// can no longer end with `_` or differ only in case and underscores (the
+// validator's naming rules), so a mangled field meets no other field.
+//
+// The type-level half -- the names a generated CLASS cannot take -- is
+// javaTypeNames below. TestJavaNamesInScope keeps javaStatics, javaQualifiers
+// and javaTypeNames equal to what the generated files actually use.
 
 // javaKeywords are Java reserved words. Java has no raw-identifier escape, so a
 // field with such a name is mangled (trailing underscore); the JSON key keeps the
@@ -65,37 +65,6 @@ func javaIdent(name string) string {
 	return name
 }
 
-// checkFieldNames rejects a struct or message whose fields give one Java field:
-// a mangled name landing on a field that already has it (`int` and `int_`).
-// javac would report a duplicate variable far from the schema. Union slots are
-// checkUnionNames'. Located: the error names the type and both fields.
-func checkFieldNames(s *ir.Schema) error {
-	check := func(owner string, fields []*ir.Field) error {
-		seen := map[string]string{}
-		for _, f := range fields {
-			n := javaIdent(f.Name)
-			if prev, ok := seen[n]; ok {
-				return fmt.Errorf("java backend: %s: fields %q and %q both generate the field %s; rename one", owner, prev, f.Name, n)
-			}
-			seen[n] = f.Name
-		}
-		return nil
-	}
-	for _, key := range s.NamedOrder {
-		if nt := s.Named[key]; nt.Category == ir.CatStruct {
-			if err := check("struct "+key, nt.Fields); err != nil {
-				return err
-			}
-		}
-	}
-	for _, m := range s.Messages {
-		if err := check("message "+m.Name, m.Fields); err != nil {
-			return err
-		}
-	}
-	return nil
-}
-
 // locChild is the decoder frame of the field `name` below the frame `loc`. The
 // frames are named by the schema path joined with `_` and looked up by name
 // (locIndex), so an underscore INSIDE a name is doubled: the path a.b is
@@ -104,4 +73,63 @@ func checkFieldNames(s *ir.Schema) error {
 // a letter, so the doubling cannot be read the other way.
 func locChild(loc, name string) string {
 	return loc + "_" + strings.ReplaceAll(name, "_", "__")
+}
+
+// javaTypeNames is the type-level half of the list (ARCHITECTURE §8, "Naming"):
+// every simple name a generated class file of the package uses for something
+// other than a schema type. A class of the generated package shadows the
+// on-demand imports (`org.sofabuffers.sofab.*`, `java.util.*`) and java.lang
+// alike (JLS 6.4.1), and a nested class shadows every outer class of its name, so
+// a type identifier on this list is escaped with a trailing underscore
+// (escapeType) -- a type identifier never ends with one. TestJavaNamesInScope
+// keeps the list equal to what the generated files use.
+//
+// The harness (project mode) is not on it: it lives in its own package and names
+// every generated class fully qualified, so no schema name reaches it.
+var javaTypeNames = map[string]string{
+	// declared by the generated code itself
+	"Decoder": "the nested incremental decoder class of every message",
+	// corelib-java (org.sofabuffers.sofab.*)
+	"ArrayKind":      "corelib: array element kind in Visitor.arrayBegin",
+	"Bound":          "corelib: schema/receiver bound handed to Seq and IStream",
+	"DecodeStatus":   "corelib: tryDecode/feed verdict",
+	"FixlenType":     "corelib: the fixlen subtype in Visitor.fixlenBegin",
+	"IStream":        "corelib: the decoder stream",
+	"OStream":        "corelib: the encoder stream",
+	"PayloadAcc":     "corelib: string/blob chunk accumulator",
+	"Seq":            "corelib: array placement helpers",
+	"Sofab":          "corelib: validation helpers",
+	"SofabError":     "corelib: error codes",
+	"SofabException": "corelib: the checked decode error",
+	"Visitor":        "corelib: the decode visitor interface",
+	// java.io / java.util (imported on demand)
+	"IOException": "java.io: serialize's throws clause",
+	"Arrays":      "java.util: array compares",
+	"ArrayList":   "java.util: wrapper array storage",
+	"List":        "java.util: wrapper array type",
+	// java.lang
+	"Boolean":               "java.lang: boolean array element",
+	"Deprecated":            "java.lang: the @Deprecated annotation",
+	"Double":                "java.lang: fp64 array element",
+	"Exception":             "java.lang: decode()'s catch",
+	"Float":                 "java.lang: fp32 array element",
+	"IllegalStateException": "java.lang: Decoder.finish()",
+	"Long":                  "java.lang: boxed integer element, Long.parseUnsignedLong",
+	"Object":                "java.lang: the bulk-array destination",
+	"Override":              "java.lang: the @Override annotation",
+	"RuntimeException":      "java.lang: encode()/decode() wrap",
+	"String":                "java.lang: string fields",
+	"SuppressWarnings":      "java.lang: the @SuppressWarnings annotation",
+	"System":                "java.lang: System.arraycopy",
+}
+
+// escapeType is a type identifier as the class it names: with a trailing
+// underscore where the generated code already means something by it
+// (javaTypeNames). Roles and private names are built from the unescaped
+// identifier.
+func escapeType(t string) string {
+	if _, ok := javaTypeNames[t]; ok {
+		return t + "_"
+	}
+	return t
 }

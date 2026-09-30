@@ -76,14 +76,14 @@ public class Scalars {
     }
     public static Scalars decode(byte[] data) {
         Scalars m = new Scalars();
-        try { new IStream().feed(data, new ScalarsVisitor(m)); }
+        try { new IStream().feed(data, new _Scalars__Visitor(m)); }
         catch (Exception e) { throw new RuntimeException(e); }
         return m;
     }
     public static DecodeStatus tryDecode(byte[] data, Scalars out) throws SofabException {
         out.reset();
         IStream is = new IStream();
-        return is.feed(data, new ScalarsVisitor(out));
+        return is.feed(data, new _Scalars__Visitor(out));
     }
     /**
      * An incremental decoder for this message: hold it and feed chunks as
@@ -108,7 +108,7 @@ public class Scalars {
     public static final class Decoder {
         private final Scalars m = new Scalars();
         private final IStream is = new IStream();
-        private final ScalarsVisitor v = new ScalarsVisitor(m);
+        private final _Scalars__Visitor v = new _Scalars__Visitor(m);
 
         /**
          * Feed the next chunk, of any size. Returns {@code COMPLETE} if it
@@ -161,7 +161,7 @@ public class Scalars {
     }
 }
 
-class ScalarsVisitor implements Visitor {
+class _Scalars__Visitor implements Visitor {
     private final Scalars m;
     private int cur = 0;
     private static final int _DEAD = -1;
@@ -172,7 +172,7 @@ class ScalarsVisitor implements Visitor {
     private int[] stk = new int[16];    // sequence scope stack (unboxed, was ArrayDeque<Integer>)
     private int sp = 0;
     private final PayloadAcc acc = new PayloadAcc();
-    ScalarsVisitor(Scalars msg) { m = msg; }
+    _Scalars__Visitor(Scalars msg) { m = msg; }
 
     public void unsigned(int id, long value) {
         // An element of the array arrayBegin armed: its destination is already

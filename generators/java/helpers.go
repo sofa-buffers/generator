@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	"github.com/sofa-buffers/generator/internal/ir"
+	"github.com/sofa-buffers/generator/internal/naming"
 )
 
 func cfgString(cfg map[string]any, key, dflt string) string {
@@ -105,33 +106,35 @@ func (g *gen) javaArrayElemLit(elem ir.Kind, v any) string {
 	}
 }
 
-func exported(name string) string {
-	parts := strings.FieldsFunc(name, func(r rune) bool { return r == '_' })
-	var b strings.Builder
-	for _, p := range parts {
-		if p == "" {
-			continue
-		}
-		b.WriteString(strings.ToUpper(p[:1]))
-		b.WriteString(p[1:])
+// typeIdent is the Java class of a named struct or union (ARCHITECTURE §8,
+// "Naming"): naming.TypeIdent of its schema path, a split union variant with
+// the role `__Default<Variant>` added, and a name the generated code already
+// means something by escaped with a trailing underscore (escapeType).
+func typeIdent(nt *ir.NamedType) string {
+	t := naming.TypeIdent(nt.Path)
+	if nt.Variant != "" {
+		// A role: `__` never occurs in a type identifier, so no path, no escape
+		// and no other variant spells it.
+		return t + "__Default" + naming.Pascal(nt.Variant)
 	}
-	if b.Len() == 0 {
-		return "X"
-	}
-	return b.String()
+	return escapeType(t)
 }
 
-func (g *gen) typeName(key string) string {
-	parts := strings.FieldsFunc(key, func(r rune) bool { return r == '/' || r == '_' })
-	var b strings.Builder
-	for _, p := range parts {
-		if p == "" {
-			continue
-		}
-		b.WriteString(strings.ToUpper(p[:1]))
-		b.WriteString(p[1:])
-	}
-	return b.String()
+// refType is the class a struct/union reference names: unqualified inside the
+// generated package, fully qualified (g.qual) while the harness is emitted.
+func (g *gen) refType(ref *ir.TypeRef) string { return g.qual + typeIdent(ref.Target) }
+
+// messageIdent is the Java class of a message: its name as a one-segment
+// path, escaped like any other type identifier.
+func messageIdent(name string) string {
+	return escapeType(naming.TypeIdent([]string{name}))
+}
+
+// visitorIdent is the package-private decode visitor of a message: the private
+// channel `_<T>__Visitor`, built from the UNESCAPED type identifier. No schema
+// name starts with `_`, so it meets no type and no other visitor.
+func visitorIdent(name string) string {
+	return "_" + naming.TypeIdent([]string{name}) + "__Visitor"
 }
 
 // primitiveArrayElem reports whether an array element lowers to a Java primitive
@@ -383,7 +386,7 @@ func (g *gen) javaType(f *ir.Field) string {
 	case ir.KindBlob:
 		return "byte[]"
 	case ir.KindStruct, ir.KindUnion:
-		return g.typeName(f.Ref.Key)
+		return g.refType(f.Ref)
 	case ir.KindArray:
 		if primitiveArrayElem(f.Elem) {
 			return primArrayBase(f.Elem, f.ElemRef) + "[]"
@@ -419,7 +422,7 @@ func (g *gen) javaArrayElemType(elem ir.Kind, ref *ir.TypeRef, items *ir.ArrayEl
 	case ir.KindBool:
 		return "Boolean"
 	case ir.KindStruct, ir.KindUnion:
-		return g.typeName(ref.Key)
+		return g.refType(ref)
 	case ir.KindArray:
 		if primitiveArrayElem(items.Elem) {
 			return primArrayBase(items.Elem, items.ElemRef) + "[]"
@@ -433,7 +436,7 @@ func (g *gen) javaArrayElemType(elem ir.Kind, ref *ir.TypeRef, items *ir.ArrayEl
 func (g *gen) javaInit(f *ir.Field) string {
 	switch f.Kind {
 	case ir.KindStruct, ir.KindUnion:
-		return " = new " + g.typeName(f.Ref.Key) + "()"
+		return " = new " + g.refType(f.Ref) + "()"
 	case ir.KindArray:
 		// A native scalar array is a leaf field: materialize its schema default so
 		// an omitted default array reconstructs correctly and serialize can compare

@@ -1,14 +1,15 @@
 package java
 
 import (
-	"fmt"
 	"strings"
 
 	"github.com/sofa-buffers/generator/internal/ir"
+	"github.com/sofa-buffers/generator/internal/naming"
 )
 
 // A schema union is a Java class that holds exactly ONE option (MESSAGE_SPEC
-// §4.2): a private tag `which` plus one private, typed slot per option. Its API:
+// §4.2): a private tag `which` plus one private, typed slot `_<opt>` per option.
+// Its API:
 //
 //	<OPT>_ID          the option's id, a public static final int
 //	which()           the id of the option held
@@ -41,7 +42,7 @@ type unionOpt struct {
 	// compare static, no literal.
 	f       *ir.Field
 	base    string // <Opt>: the option name in Java casing, getClass-guarded
-	slot    string // the private slot
+	slot    string // the private slot: `_` + the option name
 	idConst string // <OPT>_ID
 	isD     bool   // the union's default option (default_id)
 }
@@ -61,25 +62,26 @@ type unionShape struct {
 // land on an inherited or union method: every one carries a get/set/has/mutable
 // prefix, and the union's own methods (which, reset, serialize, isDefault) carry
 // none.
+//
+// Pascal keeps two options of one union apart: their names differ in their
+// folds (the validator's naming rules), and so do their Pascal forms.
 func unionOptBase(fld *ir.Field) string {
-	b := exported(fld.Name)
+	b := naming.Pascal(fld.Name)
 	if b == "Class" {
 		b += "_"
 	}
 	return b
 }
 
-// unionSlot is the private field holding an option. The tag is `which`, so an
-// option named `which` takes the trailing underscore.
-func unionSlot(fld *ir.Field) string {
-	s := javaIdent(fld.Name)
-	if s == "which" {
-		s += "_"
-	}
-	return s
-}
+// unionSlot is the private field holding an option: `_` + the option's schema
+// name. No schema name starts with `_`, so a slot meets neither the tag `which`
+// nor an id constant (`<OPT>_ID` starts with a letter), and it needs no keyword
+// escape.
+func unionSlot(fld *ir.Field) string { return "_" + fld.Name }
 
-// unionIDConst names an option's id constant.
+// unionIDConst names an option's id constant. Two options of one union have
+// distinct folds, so their upper-cased names differ too; the `_ID` suffix keeps
+// the constant off the tag `which` and off every `_`-led slot.
 func unionIDConst(fld *ir.Field) string { return strings.ToUpper(fld.Name) + "_ID" }
 
 // unionMutable reports whether an option gets a mutable<Opt>() accessor: the
@@ -97,7 +99,7 @@ func unionMutable(fld *ir.Field) bool {
 }
 
 func (g *gen) unionShapeOf(key string, nt *ir.NamedType) *unionShape {
-	u := &unionShape{typeName: g.typeName(key), nt: nt}
+	u := &unionShape{typeName: typeIdent(nt), nt: nt}
 	for _, fld := range nt.Fields {
 		cp := *fld
 		switch fld.Kind {
@@ -117,48 +119,6 @@ func (g *gen) unionShapeOf(key string, nt *ir.NamedType) *unionShape {
 		}
 	}
 	return u
-}
-
-// checkUnionNames rejects a union whose options derive the same Java member:
-// two options with the same accessor base (`foo_bar` / `fooBar` both give
-// getFooBar), or an id constant or slot landing on another option's field (`a`'s
-// A_ID against an option named `A_ID`). Located: the error names the union and
-// both options.
-func checkUnionNames(u *unionShape) error {
-	methods := map[string]string{}
-	fields := map[string]string{"which": ""}
-	for _, o := range u.opts {
-		if prev, ok := methods[o.base]; ok {
-			return fmt.Errorf("java backend: union %s: options %q and %q both generate the accessors get%s/set%s; rename one", u.nt.Key, prev, o.f.Name, o.base, o.base)
-		}
-		methods[o.base] = o.f.Name
-		for _, n := range []string{o.slot, o.idConst} {
-			prev, ok := fields[n]
-			switch {
-			case ok && prev == "":
-				return fmt.Errorf("java backend: union %s: option %q generates the field %s, which the union type already has; rename the option", u.nt.Key, o.f.Name, n)
-			case ok && prev != o.f.Name:
-				return fmt.Errorf("java backend: union %s: options %q and %q both generate the field %s; rename one", u.nt.Key, prev, o.f.Name, n)
-			}
-			fields[n] = o.f.Name
-		}
-	}
-	return nil
-}
-
-// checkUnions runs checkUnionNames over every union type the schema's messages
-// reach.
-func (g *gen) checkUnions() error {
-	for _, key := range g.namedTypes() {
-		nt := g.schema.Named[key]
-		if nt.Category != ir.CatUnion {
-			continue
-		}
-		if err := checkUnionNames(g.unionShapeOf(key, nt)); err != nil {
-			return err
-		}
-	}
-	return nil
 }
 
 // unionDefaultExpr is what get<Opt>() returns while another option is held: the
@@ -263,7 +223,7 @@ func (g *gen) emitUnionSlotReset(f *jfile, ind string, o *unionOpt) {
 	s := o.slot
 	switch {
 	case o.f.Kind == ir.KindStruct || o.f.Kind == ir.KindUnion:
-		f.line("%sif (%s == null) %s = new %s(); else %s.reset();", ind, s, s, g.typeName(o.f.Ref.Key), s)
+		f.line("%sif (%s == null) %s = new %s(); else %s.reset();", ind, s, s, g.refType(o.f.Ref), s)
 	case o.f.Kind == ir.KindArray && !primitiveArrayElem(o.f.Elem):
 		f.line("%s%s = Seq.reset(%s);", ind, s, s)
 	default:
@@ -287,8 +247,7 @@ func (g *gen) emitUnionAccessors(f *jfile, o *unionOpt) {
 	dep()
 	f.line("    public boolean has%s() { return which == %s; }", o.base, o.idConst)
 	dep()
-	// `this.` on the slot: an option named `v` would otherwise assign the
-	// parameter to itself and leave the union holding nothing.
+	// `this.` on the slot: it names the field whatever the parameter is called.
 	f.line("    public void set%s(%s v) { which = %s; this.%s = v; }", o.base, t, o.idConst, o.slot)
 	if !unionMutable(o.f) {
 		return
