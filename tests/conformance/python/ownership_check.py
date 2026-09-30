@@ -103,12 +103,12 @@ def sample(message):
     # A union holds one option; the property setter selects it.
     m.someunion.option2 = "union payload"
     m.somestructwitharray.label = "struct label"
-    row = message.MyfirstmessageSomeunionarrayElem()
+    row = message.Myfirstmessage_Someunionarray()
     row.asstring = "union row"
     m.someunionarray = [row]
     m.somemap = [
-        message.MyfirstmessageSomemapElem(key="first key", value=1),
-        message.MyfirstmessageSomemapElem(key="second key", value=2),
+        message.Myfirstmessage_Somemap(key="first key", value=1),
+        message.Myfirstmessage_Somemap(key="second key", value=2),
     ]
     return m
 

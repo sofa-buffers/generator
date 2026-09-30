@@ -136,15 +136,15 @@ messages:
 	for _, want := range []string{
 		// Two subtrees are bindable whole, so both are entered and both tables are
 		// closed -- which is the promise that nothing inside them needs a visitor.
-		"_BIND_M_when = (Binding(closed=True)",
-		"_BIND_M_where = (Binding(closed=True)",
-		"    .sequence(0, child=_BIND_M_when)",
-		"    .sequence(1, child=_BIND_M_where)",
+		"_M__Bind__when = (Binding(closed=True)",
+		"_M__Bind__where = (Binding(closed=True)",
+		"    .sequence(0, child=_M__Bind__when)",
+		"    .sequence(1, child=_M__Bind__where)",
 		"        if U[1] != _ABSENT: m.when.sec = U[0]",
 		// The message's own table is NOT closed: it still has fields of its own
 		// that only the visitor can handle, so an id it does not name has to reach
 		// the visitor as before.
-		"_BIND_M = (Binding()",
+		"_M__Bind = (Binding()",
 	} {
 		if !strings.Contains(mod, want) {
 			t.Errorf("a bindable subtree must be entered and closed, missing %q:\n%s", want, mod)
@@ -155,16 +155,16 @@ messages:
 		// table must not descend into it -- an unknown id inside would otherwise
 		// be offered to the visitor under the MESSAGE's location.
 		"    .sequence(3,",
-		"_BIND_M_mixed",
+		"_M__Bind__mixed",
 		// ...and the two scopes the table entered leave no dispatch behind.
-		"_L_M_when = ", "_L_M_where = ",
+		"_M__Loc__when = ", "_M__Loc__where = ",
 	} {
 		if strings.Contains(mod, gone) {
 			t.Errorf("a scope with an unbindable field must stay on the visitor, found %q:\n%s", gone, mod)
 		}
 	}
 	// `mixed` keeps its location, its own scalar's store and its wrapper array.
-	for _, want := range []string{"_L_M_mixed = ", "_L_M_mixed_tags = "} {
+	for _, want := range []string{"_M__Loc__mixed = ", "_M__Loc__mixed__tags = "} {
 		if !strings.Contains(mod, want) {
 			t.Errorf("the unbindable subtree must keep its dispatch, missing %q:\n%s", want, mod)
 		}
@@ -185,7 +185,7 @@ messages:
       n:    { id: 2, type: u8 }
 `
 	mod := string(genPy(t, schema(t, src), map[string]any{})["message.py"])
-	if !strings.Contains(mod, "_BIND_M = (Binding(closed=True)") {
+	if !strings.Contains(mod, "_M__Bind = (Binding(closed=True)") {
 		t.Errorf("a class the table covers whole must close its root table:\n%s", mod)
 	}
 	// Every table in this module is closed, so no `Binding()` appears anywhere --
@@ -193,9 +193,9 @@ messages:
 	if !strings.Contains(mod, "from sofab import Binding, ") {
 		t.Errorf("a module whose every table is closed must still import Binding:\n%s", mod)
 	}
-	vis := mod[strings.Index(mod, "class _MVisitor("):]
+	vis := mod[strings.Index(mod, "class _M__Visitor("):]
 	for _, gone := range []string{
-		"def on_", "self._c", "self._s", "_L_M",
+		"def on_", "self._c", "self._s", "_M__Loc",
 	} {
 		if strings.Contains(vis, gone) {
 			t.Errorf("a closed table leaves no dispatch behind, found %q:\n%s", gone, vis)
@@ -247,8 +247,8 @@ func TestPythonScatterRunsOnlyOnAComplete(t *testing.T) {
 		"        st = self._d.feed(chunk)\n        if st is Status.COMPLETE:",
 		// the arrival test, and the prefill that makes it mean something
 		"_ABSENT = 0xFFFFFFFFFFFFFFFF",
-		`_FILL_Myfirstmessage = bytearray(b"\xff" * (_W_Myfirstmessage * 8))`,
-		"        self._w = bytearray(_FILL_Myfirstmessage)",
+		`_Myfirstmessage__Fill = bytearray(b"\xff" * (_Myfirstmessage__Words * 8))`,
+		"        self._w = bytearray(_Myfirstmessage__Fill)",
 		"        if U[22] != _ABSENT: m.somestring = OB[0]",
 	} {
 		if !strings.Contains(mod, want) {
@@ -267,7 +267,9 @@ func TestPythonScatterRunsOnlyOnAComplete(t *testing.T) {
 //
 // Measured before the fix, on exactly this schema: `a.b` decoded the sibling's
 // values and the sibling decoded nothing -- on both engines, with and without a
-// destination table.
+// destination table. The names are now injective by construction: a path joins
+// its segments with `__`, which no schema name contains (`_M__Loc__a__b` for
+// a.b, `_M__Loc__a_b` for a_b).
 func TestPythonScopeNamesAreUnique(t *testing.T) {
 	const src = `
 version: 1
@@ -283,7 +285,7 @@ messages:
       z:   { id: 2, type: u64 }
 `
 	mod := string(genPy(t, schema(t, src), map[string]any{})["message.py"])
-	for _, decl := range []string{"_BIND_M_a_b = ", "_BIND_M_a_b_2 = ", "_L_M_a_b = ", "_L_M_a_b_2 = "} {
+	for _, decl := range []string{"_M__Bind__a__b = ", "_M__Bind__a_b = ", "_M__Loc__a__b = ", "_M__Loc__a_b = "} {
 		if n := strings.Count(mod, decl); n > 1 {
 			t.Errorf("%q is declared %d times -- the later one wins and two scopes share it:\n%s",
 				decl, n, mod)
@@ -291,7 +293,7 @@ messages:
 	}
 	// Both halves of the pair exist, so the two scopes really are distinguished
 	// rather than one of them having been dropped.
-	for _, want := range []string{"_BIND_M_a_b = ", "_BIND_M_a_b_2 = "} {
+	for _, want := range []string{"_M__Bind__a__b = ", "_M__Bind__a_b = "} {
 		if !strings.Contains(mod, want) {
 			t.Errorf("missing %q -- the colliding scopes must BOTH get a table:\n%s", want, mod)
 		}

@@ -189,7 +189,8 @@ type bindArm struct {
 
 // bindPlan is everything one class's table tree needs.
 type bindPlan struct {
-	name    string
+	name    string       // the class name
+	base    string       // its unescaped type identifier, which the private names derive from
 	tables  []*bindTable // root first, children after
 	boundSc map[int]bool // scope id -> entered by the table, so it has no visitor arms
 	boundFd map[int]idSet
@@ -243,7 +244,7 @@ func (a *slotAlloc) object() int64      { at := a.objects; a.objects++; return a
 
 // buildBindPlan decides what one class's table carries, or returns nil when it
 // would carry too little to pay for itself.
-func (g *gen) buildBindPlan(name string, scopes []*pyScope) *bindPlan {
+func (g *gen) buildBindPlan(c decodeClass, scopes []*pyScope) *bindPlan {
 	if scopes[0].union != nil {
 		// A union class's own fields are its options, so its table would be a
 		// one-of table at the ROOT -- the visitor's own location, with the union
@@ -252,7 +253,7 @@ func (g *gen) buildBindPlan(name string, scopes []*pyScope) *bindPlan {
 		// own, and this path keeps the visitor exactly as before.
 		return nil
 	}
-	p := &bindPlan{name: name, boundSc: map[int]bool{}, boundFd: map[int]idSet{}}
+	p := &bindPlan{name: c.name, base: c.base, boundSc: map[int]bool{}, boundFd: map[int]idSet{}}
 	// A table is CLOSED when its scope needs nothing from the visitor, which is
 	// the same question that decides whether a parent may descend into it.
 	p.closed = g.bindableSubtree(scopes, scopes[0], map[int]bool{})
@@ -341,13 +342,11 @@ func resetLosesDefault(fld *ir.Field) bool {
 func (g *gen) bindScope(p *bindPlan, alloc *slotAlloc, scopes []*pyScope,
 	sc *pyScope, path string, inOption bool) *bindTable {
 
-	// Named after the scope, not after the path: two different paths can spell
-	// one name (a field `a` whose struct has a field `b`, beside a sibling field
-	// `a_b`), and the scope tree has already made that unique -- see scopeSet.uniq.
-	// Deriving it here rather than rebuilding it is what keeps the two in step: a
-	// duplicate table name would hand both scopes the SAME Binding, so one would
-	// decode into the other's slots and the other into none.
-	t := &bindTable{name: bindTableName(sc), closed: g.bindableSubtree(scopes, sc, map[int]bool{}), which: -1, path: path}
+	// Named after the scope's own path suffix, with the location constant's
+	// injective spelling (scopeSet): a duplicate table name would hand two
+	// scopes the SAME Binding, so one would decode into the other's slots and
+	// the other into none.
+	t := &bindTable{name: bindTableName(p.base, sc), closed: g.bindableSubtree(scopes, sc, map[int]bool{}), which: -1, path: path}
 	// A union's own option rows are inside an option's subtree only when the
 	// union itself is: a top-level option is written whole by its own arrival,
 	// so the reset's value for it is never read.
@@ -426,11 +425,18 @@ func (g *gen) bindScope(p *bindPlan, alloc *slotAlloc, scopes []*pyScope,
 	return t
 }
 
-// bindTableName is a scope's Binding, named after the scope's own unique
-// location name so no two scopes can ever share one table.
-func bindTableName(sc *pyScope) string {
-	return "_BIND_" + strings.TrimPrefix(sc.name, "_L_")
+// bindTableName is a scope's Binding: `_` + base + `__Bind` + the scope's path,
+// the same private spelling as its location constant (scopeSet) with another
+// role word, so no two scopes can ever share one table.
+func bindTableName(base string, sc *pyScope) string {
+	return "_" + base + "__Bind" + sc.suffix
 }
+
+// words, objects and fill are a class's table sizes and slot prefill:
+// `_` + base + `__Words` / `__Objects` / `__Fill`.
+func (p *bindPlan) words() string   { return "_" + p.base + "__Words" }
+func (p *bindPlan) objects() string { return "_" + p.base + "__Objects" }
+func (p *bindPlan) fill() string    { return "_" + p.base + "__Fill" }
 
 // bindable reports whether a table entry can carry this field with every rule
 // the visitor's own store applies -- see the two rules at the top of this file.
@@ -728,8 +734,8 @@ func (g *gen) emitBindTables(f *pyfile, p *bindPlan) {
 	for i := len(p.tables) - 1; i >= 0; i-- {
 		emitOneTable(f, p.tables[i])
 	}
-	f.line("_W_%s = %s.tree_words_required", p.name, p.tables[0].name)
-	f.line("_O_%s = %s.tree_objects_required", p.name, p.tables[0].name)
+	f.line("%s = %s.tree_words_required", p.words(), p.tables[0].name)
+	f.line("%s = %s.tree_objects_required", p.objects(), p.tables[0].name)
 	f.line("# Every slot starts at ALL ONES, which no arrival can write: an array's count")
 	f.line("# slot holds its element count and every other kind's holds 1. That is what")
 	f.line("# tells a field that never arrived from one that arrived EMPTY -- an empty")
@@ -743,21 +749,21 @@ func (g *gen) emitBindTables(f *pyfile, p *bindPlan) {
 	// rather than a switch that replays the option's reset first. The result is
 	// the same either way, so it is a saved reset, not a correctness rule.
 	if !p.oneOf {
-		f.line("_FILL_%s = b\"\\xff\" * (_W_%s * 8)", p.name, p.name)
+		f.line("%s = b\"\\xff\" * (%s * 8)", p.fill(), p.words())
 		f.blank()
 		return
 	}
-	f.line("_FILL_%s = bytearray(b\"\\xff\" * (_W_%s * 8))", p.name, p.name)
+	f.line("%s = bytearray(b\"\\xff\" * (%s * 8))", p.fill(), p.words())
 	f.line("# A union's which slot starts at its default_id instead, so it states the value")
 	f.line("# an absent union or an empty frame holds. Absence does not depend on it --")
 	f.line("# scatter() tests each option's own arrival -- but the first arrival of")
 	f.line("# default_id then continues the held option instead of resetting it.")
 	for _, t := range p.tables {
 		if t.which >= 0 {
-			f.line("memoryview(_FILL_%s).cast(\"Q\")[%d] = %d  # %s", p.name, t.which, t.whichDef, t.path)
+			f.line("memoryview(%s).cast(\"Q\")[%d] = %d  # %s", p.fill(), t.which, t.whichDef, t.path)
 		}
 	}
-	f.line("_FILL_%s = bytes(_FILL_%s)", p.name, p.name)
+	f.line("%s = bytes(%s)", p.fill(), p.fill())
 	f.blank()
 }
 
@@ -798,9 +804,9 @@ func emitOneTable(f *pyfile, t *bindTable) {
 // says can change it -- which is what §6.6 asks of a decode's storage: every
 // slot exists before a byte is read and no path grows one.
 func (g *gen) emitBindStorage(f *pyfile, p *bindPlan) {
-	f.line("        self._w = bytearray(_FILL_%s)", p.name)
+	f.line("        self._w = bytearray(%s)", p.fill())
 	if p.needObj {
-		f.line("        self._ob: list = [None] * _O_%s", p.name)
+		f.line("        self._ob: list = [None] * %s", p.objects())
 	} else {
 		f.line("        self._ob: list = []")
 	}

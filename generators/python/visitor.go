@@ -33,8 +33,9 @@ import (
 
 // pyScope is one dispatch location in a flat visitor.
 type pyScope struct {
-	id   int
-	name string // location constant, e.g. "_L_Point_start"
+	id     int
+	name   string // location constant, e.g. "_Point__Loc__start"
+	suffix string // the path part of it, e.g. "__start"; "" for the class itself
 
 	// Object scope: fields dispatch by id, `path` names the object they land on.
 	fields   []*ir.Field
@@ -60,45 +61,39 @@ type pyScope struct {
 	union *unionShape
 }
 
+// A scope's location constant and its destination table are module-level
+// PRIVATE names (ARCHITECTURE §8, "Naming"): `_` + the class's unescaped type
+// identifier + `__Loc` (or `__Bind`) + the scope's path inside the class, each
+// segment prefixed with `__`:
+//
+//	_M__Loc            the class itself
+//	_M__Loc__a__b      field b of the struct in field a
+//	_M__Loc__arr__e    an element of the wrapper array arr (`__r`: a row)
+//
+// Injective by construction: a type identifier has no `__`, so the first `__`
+// ends it; a schema name has no `__` and no leading or trailing `_`, so the path
+// splits back into its segments -- the path `a.b` is `__a__b`, a field `a_b`
+// is `__a_b`. The element and row markers `e`/`r` only ever follow an ARRAY
+// scope, whose children are never fields. Two classes, or a location and a
+// table, cannot share a name either: the class identifier and the role word
+// differ.
+
 type scopeSet struct {
 	g      *gen
+	base   string // the class's unescaped type identifier
 	scopes []*pyScope
-	// Every location name ever handed out. A scope is named after the PATH that
-	// reaches it, and two different paths can spell the same name: a field `a`
-	// holding a struct with a field `b` gives `_L_M_a_b`, and so does a sibling
-	// field named `a_b`. Both would then be emitted as module-level constants,
-	// the second binding would win, and the two scopes would dispatch against one
-	// id -- so one of them would take the other's values, with no error anywhere.
-	// Measured before this map existed, on a schema with exactly that pair: the
-	// nested struct decoded the sibling's values and the sibling decoded nothing.
-	// The same name is the destination table's too (binding.go derives it from
-	// this one), where a collision would hand two scopes the same Binding.
-	used map[string]bool
-}
-
-// uniq hands out a location name that no other scope in this tree has. The
-// suffix is only ever reached by a collision, so the common output is unchanged;
-// and because EVERY name goes through here, a suffix that happens to spell
-// another scope's name is disambiguated in its turn.
-func (ss *scopeSet) uniq(base string) string {
-	if ss.used == nil {
-		ss.used = map[string]bool{}
-	}
-	name := base
-	for i := 2; ss.used[name]; i++ {
-		name = fmt.Sprintf("%s_%d", base, i)
-	}
-	ss.used[name] = true
-	return name
 }
 
 // buildScopes walks a class's tree and assigns one scope per sequence-framed
 // location reachable from it, rooted at the class itself.
 func (g *gen) buildScopes(c decodeClass) []*pyScope {
-	ss := &scopeSet{g: g}
-	ss.object(c.name, "self._o", c.fields, c.union)
+	ss := &scopeSet{g: g, base: c.base}
+	ss.object("", "self._o", c.fields, c.union)
 	return ss.scopes
 }
+
+// loc is the location constant of the scope at path `suffix`.
+func (ss *scopeSet) loc(suffix string) string { return "_" + ss.base + "__Loc" + suffix }
 
 // unionOf returns the union shape a struct/union reference names, nil for a
 // struct.
@@ -111,7 +106,7 @@ func (ss *scopeSet) unionOf(ref *ir.TypeRef) *unionShape {
 
 func (ss *scopeSet) object(locName, path string, fields []*ir.Field, u *unionShape) int {
 	sc := &pyScope{
-		id: len(ss.scopes), name: ss.uniq("_L_" + locName),
+		id: len(ss.scopes), name: ss.loc(locName), suffix: locName,
 		fields: fields, path: path, seqChild: map[int64]int{}, child: -1, union: u,
 	}
 	ss.scopes = append(ss.scopes, sc)
@@ -126,7 +121,7 @@ func (ss *scopeSet) object(locName, path string, fields []*ir.Field, u *unionSha
 		switch fld.Kind {
 		case ir.KindStruct, ir.KindUnion:
 			sc.seqChild[fld.ID] = ss.object(
-				locName+"_"+fld.Name,
+				locName+"__"+fld.Name,
 				dest,
 				fld.Ref.Target.Fields, ss.unionOf(fld.Ref))
 		case ir.KindArray:
@@ -134,7 +129,7 @@ func (ss *scopeSet) object(locName, path string, fields []*ir.Field, u *unionSha
 			// wrapper-sequence array opens a scope of its own.
 			if !isNativeArrayElem(fld.Elem) {
 				sc.seqChild[fld.ID] = ss.array(
-					locName+"_"+fld.Name,
+					locName+"__"+fld.Name,
 					dest,
 					fld.Name,
 					fld.Elem, fld.ElemRef, fld.ElemItems,
@@ -148,7 +143,7 @@ func (ss *scopeSet) object(locName, path string, fields []*ir.Field, u *unionSha
 func (ss *scopeSet) array(locName, arrPath, loc string, elem ir.Kind, ref *ir.TypeRef,
 	items *ir.ArrayElem, cap int64, emHas bool, em int64) int {
 	sc := &pyScope{
-		id: len(ss.scopes), name: ss.uniq("_L_" + locName),
+		id: len(ss.scopes), name: ss.loc(locName), suffix: locName,
 		isArr: true, arrPath: arrPath, elem: elem, elemRef: ref, elemItems: items,
 		cap: cap, elemMaxHas: emHas, elemMax: em, loc: loc, child: -1,
 	}
@@ -156,13 +151,13 @@ func (ss *scopeSet) array(locName, arrPath, loc string, elem ir.Kind, ref *ir.Ty
 	switch elem {
 	case ir.KindStruct, ir.KindUnion:
 		sc.ix = fmt.Sprintf("_ix%d", sc.id)
-		sc.child = ss.object(locName+"_e", fmt.Sprintf("%s[self.%s]", arrPath, sc.ix), ref.Target.Fields, ss.unionOf(ref))
+		sc.child = ss.object(locName+"__e", fmt.Sprintf("%s[self.%s]", arrPath, sc.ix), ref.Target.Fields, ss.unionOf(ref))
 	case ir.KindArray:
 		// A native row arrives whole through on_*_array at THIS scope, keyed by
 		// its row index; only a wrapper row opens a scope of its own.
 		if !isNativeArrayElem(items.Elem) {
 			sc.ix = fmt.Sprintf("_ix%d", sc.id)
-			sc.child = ss.array(locName+"_r", fmt.Sprintf("%s[self.%s]", arrPath, sc.ix), loc+" row",
+			sc.child = ss.array(locName+"__r", fmt.Sprintf("%s[self.%s]", arrPath, sc.ix), loc+" row",
 				items.Elem, items.ElemRef, items.ElemItems,
 				capOf(items.HasCount, items.Count), items.ElemMaxHas, items.ElemMax)
 		}
@@ -232,7 +227,7 @@ func (g *gen) emitVisitor(f *pyfile, c decodeClass) {
 	// never called: no dispatch, no locations, no scope stack -- the object
 	// exists to declare the destinations and to move them onto the message.
 	if g.bind != nil && g.bind.closed {
-		g.emitTableOnlyVisitor(f, name)
+		g.emitTableOnlyVisitor(f, c)
 		return
 	}
 	f.line("# Dispatch locations for %s: one per sequence-framed scope in its tree.", name)
@@ -248,7 +243,7 @@ func (g *gen) emitVisitor(f *pyfile, c decodeClass) {
 	}
 	f.blank()
 
-	f.line("class _%sVisitor(Visitor):", name)
+	f.line("class %s(Visitor):", visitorIdent(c.base))
 	f.line(`    """Flat decode visitor for :class:`+"`"+`%s`+"`"+`.`, name)
 	f.line("")
 	f.line("    corelib-py's visitor is flat -- one object receives every callback at every")
@@ -296,8 +291,9 @@ func (g *gen) emitVisitor(f *pyfile, c decodeClass) {
 // the slots onto the message. Not one hook -- an id the closed table does not
 // name is skipped by the codec, sequence and all (corelib-py#150), so there is
 // nothing left for a hook to decide.
-func (g *gen) emitTableOnlyVisitor(f *pyfile, name string) {
-	f.line("class _%sVisitor(Visitor):", name)
+func (g *gen) emitTableOnlyVisitor(f *pyfile, c decodeClass) {
+	name := c.name
+	f.line("class %s(Visitor):", visitorIdent(c.base))
 	f.line(`    """Decode handler for :class:`+"`"+`%s`+"`"+`: a destination table and nothing else.`, name)
 	f.line("")
 	f.line("    Every id this schema declares is on the table, so the decoder writes each")
@@ -444,7 +440,7 @@ func (g *gen) reserveCall(sc *pyScope, idExpr string) string {
 		return fmt.Sprintf("reserve_row(%s, %s, %s, %s)", sc.arrPath, idExpr, bound, rcap)
 	default: // struct / union
 		return fmt.Sprintf("reserve_elem(%s, %s, %s, %s, %s)",
-			sc.arrPath, idExpr, g.typeName(sc.elemRef.Key), bound, rcap)
+			sc.arrPath, idExpr, g.refName(sc.elemRef), bound, rcap)
 	}
 }
 
@@ -1188,8 +1184,40 @@ func visitorNeeds(section string) (field, wire, fixlen bool) {
 	// Substring, not "WireType.": on_array_begin names the type as a bare
 	// parameter annotation, with no member access after it.
 	return strings.Contains(section, "def on_field("),
-		strings.Contains(section, "WireType"),
-		strings.Contains(section, "FixlenSubtype")
+		usesName(section, "WireType", ".", ","),
+		usesName(section, "FixlenSubtype", ".")
+}
+
+// usesName reports whether `text` uses the module-level `name` the way the
+// emitters write it: not as part of a longer identifier (a class `WireType_`, a
+// private `_WireType__Visitor`, an inline type `M_WireType`), not as an
+// attribute (`self._o.WireType`), and followed by one of `next` -- `.` for a
+// member access, `(` for a call, `,` for a parameter annotation. A name spelled
+// by the schema can take none of those shapes in the decode section, so an
+// import is never added for a use that is not one (pyflakes F401).
+func usesName(text, name string, next ...string) bool {
+	for i := 0; ; {
+		j := strings.Index(text[i:], name)
+		if j < 0 {
+			return false
+		}
+		at := i + j
+		i = at + len(name)
+		if at > 0 {
+			if c := text[at-1]; c == '.' || c == '_' || isIdentByte(c) {
+				continue
+			}
+		}
+		for _, n := range next {
+			if strings.HasPrefix(text[i:], n) {
+				return true
+			}
+		}
+	}
+}
+
+func isIdentByte(c byte) bool {
+	return c == '_' || c >= '0' && c <= '9' || c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z'
 }
 
 // isIntArrayElem reports whether a native array element rides the integer array

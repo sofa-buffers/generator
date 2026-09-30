@@ -139,9 +139,32 @@ is `encode_`. Those names are:
   `property`, `field`, `list`, `REASSEMBLY`.
 
 Only the attribute changes: the wire is keyed by the field id, and the JSON key
-stays the schema name. Enum constants and bitfield flags are upper-cased, so
-two that differ only in case (`c` and `C`) fail generation, naming both. The
+stays the schema name. Enum constants and bitfield flags are upper-cased. The
 list lives in `generators/python/reserved.go`.
+
+## Type names
+
+Every message and every `$defs` type is a class of its own, named after the
+schema name in PascalCase: a message `vehicle_telemetry` is
+`VehicleTelemetry`, a `$defs` struct `point` is `Point`. A struct, union, enum
+or bitfield declared inline is named after the path that reaches it, one
+PascalCase segment per name, joined with `_`: the inline struct of field
+`shape` in message `m` is `M_Shape`, its option `pt` is `M_Shape_Pt`, and the
+element struct of an array field `rows` is `M_Rows`.
+
+A class name the module already uses for something else gets a trailing
+underscore, so the module keeps its own meaning of it: a message `status` is
+`Status_` (`Status` stays `sofab.Status`), a message `none` is `None_`. Those
+names are the keywords `False`, `None`, `True`; the names the module imports
+(`Binding`, `ClassVar`, `Decoder`, `Encoder`, `Field`, `FixlenSubtype`,
+`IntEnum`, `IntFlag`, `SofaDecodeError`, `SofaIncompleteError`,
+`SofaLimitError`, `Status`, `UNBOUNDED`, `Visitor`, `WireType`); and the
+module's own constants (`MAX_DYN_ARRAY_COUNT`, `MAX_DYN_STRING_LEN`,
+`MAX_DYN_BLOB_LEN`, `MAX_FIELD_SPAN`, `REASSEMBLY`).
+
+Everything else the module declares for its own use starts with `_` — the
+decode visitor of a class `M` is `_M__Visitor` — so no schema name can reach
+it.
 
 ## Unions
 
@@ -164,7 +187,7 @@ shape:
 
 ```python
 @dataclass
-class MShape:
+class M_Shape:
     NUM_ID: ClassVar[int] = 0
     NAME_ID: ClassVar[int] = 1
     PT_ID: ClassVar[int] = 2
@@ -178,9 +201,9 @@ class MShape:
     name: str
     def has_name(self) -> bool: ...
 
-    pt: MShapePt
+    pt: M_Shape_Pt
     def has_pt(self) -> bool: ...
-    def mutable_pt(self) -> MShapePt: ...
+    def mutable_pt(self) -> M_Shape_Pt: ...
 
     tags: list[str]
     def has_tags(self) -> bool: ...
@@ -192,7 +215,7 @@ class MShape:
 | operation | Python |
 |---|---|
 | which option is held | `x.which` → the option's id |
-| option ids | `MShape.PT_ID` (`<OPTION>_ID` constants) |
+| option ids | `M_Shape.PT_ID` (`<OPTION>_ID` constants) |
 | test | `x.has_pt()` |
 | read | `x.pt` |
 | select with a value | `x.num = 7` |
@@ -205,7 +228,7 @@ m.shape.num = 7              # now num = 7; pt is no longer held
 m.shape.mutable_pt().y = 2   # pt again, from its default: x=7, y=2
 if m.shape.has_pt():
     use(m.shape.pt.x)
-if m.shape.which == MShape.NUM_ID:
+if m.shape.which == M_Shape.NUM_ID:
     use(m.shape.num)
 m.shape.clear()              # pt at its default again
 ```
@@ -236,14 +259,16 @@ longer held.
 upper-cased). An option whose name is reserved for a field (see
 [Field names](#field-names)) or is one of the union's own members (`which`,
 `clear`) gets a trailing underscore: an option `which` is the property
-`which_`, with `has_which()` and `WHICH_ID`. A class has one
-namespace, so two options that would produce the same member (`a` and `A_ID`
-both give `A_ID`; `x` and `has_x` both give `has_x`) fail generation, naming
-both.
+`which_`, with `has_which()` and `WHICH_ID`. A class has one namespace, so an
+option spelled like a member the union builds from another option — a name
+starting with `has_` or `mutable_`, or ending in `_ID` — gets a trailing
+underscore too: options `a` and `A_ID` are the constant `A_ID` and the property
+`A_ID_`, options `x` and `has_x` the method `has_x()` and the property
+`has_x_`.
 
 **`$defs` unions** used with different `default_id`s are one class per
-`default_id`, named after `<Name>_default_<option>`: `UnionShapeDefaultPt` and
-`UnionShapeDefaultNum`.
+`default_id`: the union's class name, `__Default` and the option name in
+PascalCase — `Shape__DefaultPt` and `Shape__DefaultNum`.
 
 **Defaults.** A new union holds the `default_id` option at that option's own
 default; an omitted `default_id` means the option with the lowest id. Each

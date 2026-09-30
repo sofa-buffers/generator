@@ -7,6 +7,7 @@ import (
 
 	"github.com/sofa-buffers/generator/internal/generator"
 	"github.com/sofa-buffers/generator/internal/ir"
+	"github.com/sofa-buffers/generator/internal/naming"
 )
 
 func cfgString(cfg map[string]any, key, dflt string) string {
@@ -16,35 +17,54 @@ func cfgString(cfg map[string]any, key, dflt string) string {
 	return dflt
 }
 
-// exported -> PascalCase class name.
-func exported(name string) string {
-	parts := strings.FieldsFunc(name, func(r rune) bool { return r == '_' })
-	var b strings.Builder
-	for _, p := range parts {
-		if p == "" {
-			continue
-		}
-		b.WriteString(strings.ToUpper(p[:1]))
-		b.WriteString(p[1:])
+// Type names (ARCHITECTURE §8, "Naming"). Every generated class and enum is
+// named after its schema path, never after its IR key:
+//
+//   - a message or $defs type: naming.TypeIdent of its path (`vehicle_telemetry`
+//     -> VehicleTelemetry, $defs struct `point` -> Point), an inline type its
+//     declaring site's path (`m.a` -> M_A);
+//   - a split $defs union variant: the union's identifier + `__Default` + the
+//     Pascal option name (Shape__DefaultPt);
+//   - on top of that, escapeType's trailing underscore where the identifier is
+//     a name the module scope already has (Status_).
+//
+// baseIdent is the identifier BEFORE the escape; every name derived from a type
+// -- its private visitor, locations, tables and enum alias, `_` + base + `__` +
+// a role -- is built from it.
+
+// baseIdent is a named type's identifier without the escape.
+func baseIdent(nt *ir.NamedType) string {
+	id := naming.TypeIdent(nt.Path)
+	if nt.Variant != "" {
+		id += "__Default" + naming.Pascal(nt.Variant)
 	}
-	if b.Len() == 0 {
-		return "X"
-	}
-	return b.String()
+	return id
 }
 
-func (g *gen) typeName(key string) string {
-	parts := strings.FieldsFunc(key, func(r rune) bool { return r == '/' || r == '_' })
-	var b strings.Builder
-	for _, p := range parts {
-		if p == "" {
-			continue
-		}
-		b.WriteString(strings.ToUpper(p[:1]))
-		b.WriteString(p[1:])
-	}
-	return b.String()
-}
+// typeIdent is a named type's class name.
+func typeIdent(nt *ir.NamedType) string { return escapeType(baseIdent(nt)) }
+
+// msgBase is a message's identifier without the escape.
+func msgBase(m *ir.Message) string { return naming.TypeIdent([]string{m.Name}) }
+
+// msgIdent is a message's class name.
+func msgIdent(m *ir.Message) string { return escapeType(msgBase(m)) }
+
+// refName is the class name a type reference resolves to.
+func (g *gen) refName(ref *ir.TypeRef) string { return typeIdent(ref.Target) }
+
+// visitorIdent is a class's private decode visitor: `_` + base + `__Visitor`.
+func visitorIdent(base string) string { return "_" + base + "__Visitor" }
+
+// visitorOf is the decode visitor of the class named `name`.
+func (g *gen) visitorOf(name string) string { return visitorIdent(g.bases[name]) }
+
+// enumAlias is the private module-level alias of an enum: `_` + base +
+// `__Enum`. A dataclass field default is evaluated in the CLASS body, where a
+// field bound earlier under the enum's own name (a field `Color` beside a field
+// of type Color) would rebind it; no field can be spelled with a leading
+// underscore, so the default reads the enum through this name instead.
+func enumAlias(nt *ir.NamedType) string { return "_" + baseIdent(nt) + "__Enum" }
 
 // pyAnnot is the dataclass field type annotation (string, lazy via __future__).
 func (g *gen) pyAnnot(f *ir.Field) string {
@@ -58,7 +78,7 @@ func (g *gen) pyAnnot(f *ir.Field) string {
 	case ir.KindBlob:
 		return "bytes"
 	case ir.KindEnum, ir.KindBitfield, ir.KindStruct, ir.KindUnion:
-		return g.typeName(f.Ref.Key)
+		return g.refName(f.Ref)
 	case ir.KindArray:
 		return g.pyArrayAnnot(f.Elem, f.ElemRef, f.ElemItems)
 	default: // integers
@@ -79,7 +99,7 @@ func (g *gen) pyArrayAnnot(elem ir.Kind, ref *ir.TypeRef, items *ir.ArrayElem) s
 	case ir.KindBool:
 		return "list[bool]"
 	case ir.KindEnum, ir.KindStruct, ir.KindUnion:
-		return "list[" + g.typeName(ref.Key) + "]"
+		return "list[" + g.refName(ref) + "]"
 	case ir.KindArray:
 		return "list[" + g.pyArrayAnnot(items.Elem, items.ElemRef, items.ElemItems) + "]"
 	default: // integers, bitfield
@@ -113,12 +133,17 @@ func (g *gen) pyDefault(f *ir.Field) string {
 	case ir.KindBlob:
 		if s, ok := f.Default.(string); ok {
 			if raw, err := base64.StdEncoding.DecodeString(strings.Join(strings.Fields(s), "")); err == nil {
-				return fmt.Sprintf("bytes(%s)", intListLit(raw))
+				// A literal, not bytes([...]): the default is evaluated in the
+				// class body, where a field named `bytes` bound earlier would
+				// rebind the builtin.
+				return pyBytesLit(raw)
 			}
 		}
 		return "b\"\""
 	case ir.KindEnum:
-		tn := g.typeName(f.Ref.Key)
+		// Through the enum's private alias: the class body evaluates this, and
+		// a field spelled like the enum class would rebind that name there.
+		tn := enumAlias(f.Ref.Target)
 		if f.Default != nil {
 			return fmt.Sprintf("%s(%s)", tn, scalarLit(f.Default))
 		}
@@ -127,7 +152,7 @@ func (g *gen) pyDefault(f *ir.Field) string {
 		return fmt.Sprintf("%d", g.bitfieldDefault(f))
 	case ir.KindStruct, ir.KindUnion:
 		// lazy lambda so the referenced class need not be defined yet.
-		return fmt.Sprintf("field(default_factory=lambda: %s())", g.typeName(f.Ref.Key))
+		return fmt.Sprintf("field(default_factory=lambda: %s())", g.refName(f.Ref))
 	case ir.KindArray:
 		// An array field gets exactly its declared `default` and nothing else. A
 		// declared `count: N` is a CAPACITY, not a length (MESSAGE_SPEC §3), so a
@@ -217,12 +242,15 @@ func scalarLit(v any) string {
 	return fmt.Sprintf("%v", v)
 }
 
-func intListLit(b []byte) string {
-	parts := make([]string, len(b))
-	for i, x := range b {
-		parts[i] = fmt.Sprintf("%d", x)
+// pyBytesLit renders raw bytes as a Python bytes literal, every byte escaped.
+func pyBytesLit(b []byte) string {
+	var sb strings.Builder
+	sb.WriteString(`b"`)
+	for _, x := range b {
+		fmt.Fprintf(&sb, `\x%02x`, x)
 	}
-	return "[" + strings.Join(parts, ", ") + "]"
+	sb.WriteByte('"')
+	return sb.String()
 }
 
 // ---- JSON helpers (canonical: blob as list[int], to match the C harness) ----
@@ -341,7 +369,7 @@ func (g *gen) emitCodec(f *pyfile, name string, ms generator.MessageSize) {
 	f.line("        larger one to feed larger chunks. What is SKIPPED never enters it,")
 	f.line("        whatever its size.")
 	f.line(`        """`)
-	f.line("        return _StreamDecoder(cls, _%sVisitor, reassembly)", name)
+	f.line("        return _StreamDecoder(cls, %s, reassembly)", g.visitorOf(name))
 	f.blank()
 	f.line("    @classmethod")
 	f.line("    def decode(cls, data: bytes) -> %q:", name)
@@ -357,10 +385,10 @@ func (g *gen) emitCodec(f *pyfile, name string, ms generator.MessageSize) {
 	f.line(`        """`)
 	f.line("        o = cls()")
 	if g.plans[name] != nil {
-		f.line("        v = _%sVisitor(o)", name)
+		f.line("        v = %s(o)", g.visitorOf(name))
 		f.line("        d = Decoder(visitor=v, %s,", g.capsArgs())
 	} else {
-		f.line("        d = Decoder(visitor=_%sVisitor(o), %s,", name, g.capsArgs())
+		f.line("        d = Decoder(visitor=%s(o), %s,", g.visitorOf(name), g.capsArgs())
 	}
 	// One call, so nothing spans a chunk boundary and the buffer is never
 	// written; the most a TRUNCATED message can leave behind is the construct in
@@ -428,7 +456,7 @@ func (g *gen) fromJSONStmt(f *pyfile, fld *ir.Field, acc string) {
 	case ir.KindBlob:
 		f.line("            %s = bytes(%s)", acc, src)
 	case ir.KindStruct, ir.KindUnion:
-		f.line("            %s = %s.from_jsonable(%s)", acc, g.typeName(fld.Ref.Key), src)
+		f.line("            %s = %s.from_jsonable(%s)", acc, g.refName(fld.Ref), src)
 	case ir.KindArray:
 		f.line("            %s = %s", acc, g.pyArrayFromJSON(src, fld.Elem, fld.ElemRef, fld.ElemItems, 0))
 	default:
@@ -445,7 +473,7 @@ func (g *gen) pyArrayFromJSON(src string, elem ir.Kind, ref *ir.TypeRef, items *
 	case ir.KindBlob:
 		return fmt.Sprintf("[bytes(%s) for %s in %s]", v, v, src)
 	case ir.KindStruct, ir.KindUnion:
-		return fmt.Sprintf("[%s.from_jsonable(%s) for %s in %s]", g.typeName(ref.Key), v, v, src)
+		return fmt.Sprintf("[%s.from_jsonable(%s) for %s in %s]", g.refName(ref), v, v, src)
 	case ir.KindArray:
 		return fmt.Sprintf("[%s for %s in %s]", g.pyArrayFromJSON(v, items.Elem, items.ElemRef, items.ElemItems, depth+1), v, src)
 	default:

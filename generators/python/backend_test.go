@@ -70,9 +70,9 @@ func TestPythonStructural(t *testing.T) {
 		"@dataclass",
 		"class Myfirstmessage:",
 		"def serialize(self, e: Encoder)",
-		"class _MyfirstmessageVisitor(Visitor):",
+		"class _Myfirstmessage__Visitor(Visitor):",
 		"def decoder(cls, reassembly: int = REASSEMBLY) -> _StreamDecoder:",
-		"class MyfirstmessageSomeenum(IntEnum):",
+		"class Myfirstmessage_Someenum(IntEnum):",
 		"def to_jsonable(self)",
 		"e.write_sequence_begin_lazy(", // every sequence opens lazily (MESSAGE_SPEC S2)
 		// The schema count is DECLARED, and the corelib applies it at the count
@@ -207,7 +207,7 @@ messages:
 		// on_schema_bound declares and off a field on_field skips. The blob cap
 		// has no constant (no unbounded blob) and travels as a literal: an
 		// omitted argument is a caller defect, not a looser bound.
-		"d = Decoder(visitor=_DynVisitor(o), max_dyn_array_count=MAX_DYN_ARRAY_COUNT, " +
+		"d = Decoder(visitor=_Dyn__Visitor(o), max_dyn_array_count=MAX_DYN_ARRAY_COUNT, " +
 			"max_dyn_string_len=MAX_DYN_STRING_LEN, max_dyn_blob_len=2048,",
 		// The reassembly buffer is the caller's too, and required (corelib-py#139).
 		// A one-shot decode never touches it, so it is sized at the construct in
@@ -235,7 +235,7 @@ messages:
 	for _, want := range []string{
 		"MAX_DYN_ARRAY_COUNT = 65536",
 		"MAX_DYN_STRING_LEN = 1048576",
-		"d = Decoder(visitor=_DynVisitor(o), max_dyn_array_count=MAX_DYN_ARRAY_COUNT, " +
+		"d = Decoder(visitor=_Dyn__Visitor(o), max_dyn_array_count=MAX_DYN_ARRAY_COUNT, " +
 			"max_dyn_string_len=MAX_DYN_STRING_LEN, max_dyn_blob_len=4194304,",
 	} {
 		if !strings.Contains(plain, want) {
@@ -288,7 +288,7 @@ messages:
 		// A STRUCT element opens a scope instead, and no on_field precedes a
 		// sequence header — so its bound sits in on_sequence_begin, which is still
 		// ahead of every byte of the element.
-		`reserve_elem(self._o.bp, fid, MBpElem, 2, MAX_DYN_ARRAY_COUNT)`,
+		`reserve_elem(self._o.bp, fid, M_Bp, 2, MAX_DYN_ARRAY_COUNT)`,
 		// Dynamic string array: no schema count, so the receiver cap applies.
 		`reserve_leaf(self._o.ds, fld.id, "", UNBOUNDED, MAX_DYN_ARRAY_COUNT)`,
 	} {
@@ -470,7 +470,7 @@ messages:
 	mod := string(genPy(t, schema(t, src), map[string]any{})["message.py"])
 	const want = `    def on_unsigned_array(self, fid: int, value: list[int]) -> None:
         c = self._c
-        if c == _L_M:
+        if c == _M__Loc:
             if fid == 0:
                 self._o.ua = value`
 	if !strings.Contains(mod, want) {
@@ -581,7 +581,7 @@ messages:
 		"fixedU32: list[int] = field(default_factory=list)",
 		"fixedBool: list[bool] = field(default_factory=list)",
 		"fixedStrs: list[str] = field(default_factory=list)",
-		"fixedObjs: list[TFixedObjsElem] = field(default_factory=list)",
+		"fixedObjs: list[T_FixedObjs] = field(default_factory=list)",
 		// ...while a declared default is still materialized, exactly as written.
 		"shortDflt: list[int] = field(default_factory=lambda: [1, 2])",
 		// _is_default has to reach the same verdict as the writer, or it omits a
@@ -941,8 +941,8 @@ messages:
 		// descends into it with a closed child table.
 		"    .unsigned(0, at=0, count_at=1, max_value=255)",
 		"    .signed(1, at=2, count_at=3, min_value=-2147483648, max_value=2147483647)",
-		"    .sequence(7, child=_BIND_M_h)",
-		"_BIND_M_h = (Binding(closed=True)",
+		"    .sequence(7, child=_M__Bind__h)",
+		"_M__Bind__h = (Binding(closed=True)",
 		// What the table cannot carry keeps the hook the corelib routes its wire
 		// type to -- that routing IS the §7.3 dispatch -- and, where the header
 		// needs testing, the on_field decline. Here that is the wrapper array of
@@ -960,7 +960,7 @@ messages:
 	// never be reached would cost a Python call per field for nothing. Scoped to
 	// the MESSAGE's visitor -- the inline struct keeps a visitor of its own, for
 	// decoding that type standalone.
-	mvis := mod[strings.Index(mod, "class _MVisitor("):]
+	mvis := mod[strings.Index(mod, "class _M__Visitor("):]
 	for _, gone := range []string{
 		"    def on_unsigned(self, fid: int, value: int) -> None:",
 		"    def on_signed(self, fid: int, value: int) -> None:",
@@ -1017,12 +1017,12 @@ messages:
             n: { id: 4, type: struct, fields: { x: { id: 0, type: u8 } } }
             w: { id: 5, type: array, items: { type: string } }
 `), map[string]any{})["message.py"])
-	vis := mod[strings.Index(mod, "class _MVisitor("):]
+	vis := mod[strings.Index(mod, "class _M__Visitor("):]
 	for _, want := range []string{
 		// The root scope: `rows` itself, a wrapper array, is its one id.
-		"        if c == _L_M:\n            return False  # every id handled here is framed as a sequence: unknown or mistyped (S7.3)\n",
+		"        if c == _M__Loc:\n            return False  # every id handled here is framed as a sequence: unknown or mistyped (S7.3)\n",
 		// The wrapper scope: every element is a struct.
-		"        elif c == _L_M_rows:\n            return False  # rows: framed as a sequence -- any other header is mistyped (S7.3)\n",
+		"        elif c == _M__Loc__rows:\n            return False  # rows: framed as a sequence -- any other header is mistyped (S7.3)\n",
 		// Inside an element: a value kind by its wire type -- plus its subtype for
 		// fp32, whose subtype a fixlen ARRAY shares -- and a sequence-framed kind
 		// unconditionally.
@@ -1271,7 +1271,7 @@ messages:
 		// slot), then descend into the element the index names -- the index
 		// register is what carries it into the element scope, and decoding INTO
 		// the object already there gives the §7.4 merge for free.
-		"            reserve_elem(self._o.objs, fid, VecObjsElem, 4, MAX_DYN_ARRAY_COUNT)\n" +
+		"            reserve_elem(self._o.objs, fid, Vec_Objs, 4, MAX_DYN_ARRAY_COUNT)\n" +
 			"            self._ix1 = fid\n",
 		"                self._o.objs[self._ix1].k = value",
 		// leaf elements: reserved at the header, then stored at the index, never
@@ -1290,7 +1290,7 @@ messages:
 		"            reserve_row(self._o.rows, fid, 2, MAX_DYN_ARRAY_COUNT)",
 		// a count-less array is placed by id like every other, bounded by the
 		// receiver cap instead of a schema count
-		"            reserve_elem(self._o.dyn, fid, VecDynElem, UNBOUNDED, MAX_DYN_ARRAY_COUNT)",
+		"            reserve_elem(self._o.dyn, fid, Vec_Dyn, UNBOUNDED, MAX_DYN_ARRAY_COUNT)",
 	} {
 		if !strings.Contains(mod, want) {
 			t.Errorf("message.py missing %q:\n%s", want, mod)
@@ -1371,7 +1371,7 @@ messages:
 	// The MERGING half: a struct element is reserved (never reset) and descended
 	// into, and nothing else. A backend that reset every re-opened element id
 	// would zero the fields the second opening does not mention.
-	if !strings.Contains(mod, "            reserve_elem(self._o.objs, fid, VecObjsElem, 2, 65536)\n            self._ix") {
+	if !strings.Contains(mod, "            reserve_elem(self._o.objs, fid, Vec_Objs, 2, 65536)\n            self._ix") {
 		t.Errorf("a struct element must be reserved and descended into, nothing more:\n%s", mod)
 	}
 	if strings.Contains(mod, "reserve_row(self._o.objs") {
@@ -1857,7 +1857,7 @@ messages:
 		// the VISITOR still owns (a bound id never reaches this hook) is the
 		// wrapper array `sa`, which never reaches it well-formed either, so the
 		// scope declines everything.
-		`        if c == _L_M:
+		`        if c == _M__Loc:
             return False  # every id handled here is framed as a sequence: unknown or mistyped (S7.3)`,
 	} {
 		if !strings.Contains(mod, want) {
@@ -1915,7 +1915,7 @@ messages:
 		`reserve_leaf(self._o.dblbs, fld.id, b"", UNBOUNDED, MAX_DYN_ARRAY_COUNT)`,
 		// An element that OPENS a scope has no on_field in front of it, so it is
 		// bounded in on_sequence_begin instead -- where fid names the index.
-		`reserve_elem(self._o.dobjs, fid, MDobjsElem, UNBOUNDED, MAX_DYN_ARRAY_COUNT)`,
+		`reserve_elem(self._o.dobjs, fid, M_Dobjs, UNBOUNDED, MAX_DYN_ARRAY_COUNT)`,
 	} {
 		if !strings.Contains(m, want) {
 			t.Errorf("message.py missing wrapper index cap %q:\n%s", want, m)
@@ -2114,14 +2114,14 @@ func TestPythonBitfieldIsIntFlagAndEnumIsIntEnum(t *testing.T) {
 	mod := string(genPy(t, schemaFile(t, "../../examples/messages/example.yaml"), map[string]any{})["message.py"])
 	for _, want := range []string{
 		"from enum import IntEnum, IntFlag",
-		"class MyfirstmessageSomeenum(IntEnum):",
-		"class MyfirstmessageSomebitfield(IntFlag):",
+		"class Myfirstmessage_Someenum(IntEnum):",
+		"class Myfirstmessage_Somebitfield(IntFlag):",
 	} {
 		if !strings.Contains(mod, want) {
 			t.Errorf("message.py is missing %q", want)
 		}
 	}
-	if strings.Contains(mod, "class MyfirstmessageSomebitfield(IntEnum):") {
+	if strings.Contains(mod, "class Myfirstmessage_Somebitfield(IntEnum):") {
 		t.Error("the bitfield is emitted as an IntEnum again: a declared combination of two flags cannot be constructed")
 	}
 }
@@ -2187,30 +2187,30 @@ func TestPythonEnumAndBitfieldWidthBoundAtEverySixPositions(t *testing.T) {
 		"    .unsigned_array(3, at=9, cap=4, count_at=13, elem_max=255)",
 		// 3. struct member -- the scope is bindable whole, so the member's width
 		// is on the struct's own (closed) table, reached from the message's.
-		"_BIND_Closed_st = (Binding(closed=True)\n    .signed(0, at=14, count_at=15, min_value=-128, max_value=127)\n    .unsigned(1, at=16, count_at=17, max_value=255)\n",
-		"    .sequence(4, child=_BIND_Closed_st)",
+		"_Closed__Bind__st = (Binding(closed=True)\n    .signed(0, at=14, count_at=15, min_value=-128, max_value=127)\n    .unsigned(1, at=16, count_at=17, max_value=255)\n",
+		"    .sequence(4, child=_Closed__Bind__st)",
 		// 4. struct-array element member.
 		fmt.Sprintf(enRej, "se: value outside declared enum width", "self._o.sa[self._ix2].se"),
 		fmt.Sprintf(bfRej, "sbf: value outside declared bitfield width", "self._o.sa[self._ix2].sbf"),
 		// 5. union member -- every option is a leaf, so the union is a one-of
 		// table (corelib-py#165) and each option's width is on its entry, where
 		// the decoder checks it at the value, before the which slot moves.
-		"_BIND_Closed_un = (Binding(closed=True, which_at=18)\n" +
+		"_Closed__Bind__un = (Binding(closed=True, which_at=18)\n" +
 			"    .signed(0, at=19, count_at=20, min_value=-128, max_value=127)\n" +
 			"    .unsigned(1, at=21, count_at=22, max_value=255)\n",
-		"    .sequence(6, child=_BIND_Closed_un)",
+		"    .sequence(6, child=_Closed__Bind__un)",
 		// ... and the union class decoded on its own keeps the visitor: the
 		// width check first, then the option switch and the store.
-		"        if c == _L_ClosedUn:\n            if fid == 0:\n" +
+		"        if c == _Closed_Un__Loc:\n            if fid == 0:\n" +
 			"                if value < -128 or value > 127:\n                    raise SofaDecodeError(\"ue: value outside declared enum width\")\n" +
 			"                _u = self._o\n                _u._which = 0\n                _u._value = value\n",
-		"        if c == _L_ClosedUn:\n            if fid == 1:\n" +
+		"        if c == _Closed_Un__Loc:\n            if fid == 1:\n" +
 			"                if (value & ~0xff) != 0:\n                    raise SofaDecodeError(\"ubf: value outside declared bitfield width\")\n" +
 			"                _u = self._o\n                _u._which = 1\n                _u._value = value\n",
 		// 6. matrix row element -- a row scope keyed by row index, so its interval
 		// is the scope's whole arm rather than one keyed by a field id.
-		"        if c == _L_Closed_mat:\n            return (None, -128, 127)\n",
-		"        elif c == _L_Closed_mbf:\n            return (None, None, 255)\n",
+		"        if c == _Closed__Loc__mat:\n            return (None, -128, 127)\n",
+		"        elif c == _Closed__Loc__mbf:\n            return (None, None, 255)\n",
 	} {
 		if !strings.Contains(mod, want) {
 			t.Errorf("Closed message.py: an enum/bitfield position stores without its §1 width bound, missing %q", want)

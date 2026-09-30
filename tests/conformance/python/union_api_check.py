@@ -8,7 +8,7 @@ nothing there would notice a getter that stores the default it returns, a
 ``clear()`` that forgets the default option's own default. This drives those
 members on the driver's own schema (``check_union.py --emit-schema``):
 
-  * a fresh union holds default_id at its own default (``UniU``: ``pt`` = x 7);
+  * a fresh union holds default_id at its own default (``Uni_U``: ``pt`` = x 7);
   * a getter of an option NOT held returns that option's default -- a fresh
     object for a struct/union/array option -- and stores nothing;
   * a setter selects and stores the reference it is given (no copy);
@@ -17,8 +17,8 @@ members on the driver's own schema (``check_union.py --emit-schema``):
   * ``clear()`` goes back to default_id at its default;
   * ``has_<opt>()``, ``which`` and the ``<OPT>_ID`` constants agree;
   * a union compares as a value (the dataclass ``__eq__``);
-  * a $defs union split per default_id: ``UnionPickDefaultT`` and
-    ``UnionPickDefaultN`` start at different options;
+  * a $defs union split per default_id: ``Pick__DefaultT`` and
+    ``Pick__DefaultN`` start at different options;
   * a gap in an array of unions is the element type's default_id at its default.
 
 Usage: union_api_check.py <generated-project-dir> <native|python>
@@ -50,11 +50,11 @@ def main(argv):
     import message as m  # noqa: E402 -- the generated project is only on the path now
 
     # ---- a fresh union: default_id at its own default -----------------------
-    u = m.UniU()
-    check("fresh UniU holds pt", u.which == m.UniU.PT_ID == 2 and u.has_pt())
-    check("fresh UniU.pt is at its default (x 7)", u.pt.x == 7 and u.pt.y == 0)
-    check("fresh UniU is default", u._is_default())
-    check("fresh UniU encodes to nothing", m.Uni().encode() == b"")
+    u = m.Uni_U()
+    check("fresh Uni_U holds pt", u.which == m.Uni_U.PT_ID == 2 and u.has_pt())
+    check("fresh Uni_U.pt is at its default (x 7)", u.pt.x == 7 and u.pt.y == 0)
+    check("fresh Uni_U is default", u._is_default())
+    check("fresh Uni_U encodes to nothing", m.Uni().encode() == b"")
 
     # ---- a getter of another option: its default, stored nowhere ------------
     check("num not held reads its default 5", u.num == 5 and not u.has_num())
@@ -65,13 +65,13 @@ def main(argv):
     arr = u.arr
     arr.append(1)
     check("appending to a detached array default is lost", u.arr == [] and u.has_pt())
-    check("reading other options left the held one alone", u.which == m.UniU.PT_ID)
+    check("reading other options left the held one alone", u.which == m.Uni_U.PT_ID)
 
     # ---- a setter selects and keeps the reference ---------------------------
-    box = m.UniUBox()
+    box = m.Uni_U_Box()
     box.z = 4
     u.box = box
-    check("setter selects box", u.which == m.UniU.BOX_ID and u.has_box() and not u.has_pt())
+    check("setter selects box", u.which == m.Uni_U.BOX_ID and u.has_box() and not u.has_pt())
     check("setter stores the reference, not a copy", u.box is box)
     box.z = 5
     check("an edit through the caller's reference is seen", u.box.z == 5)
@@ -102,7 +102,7 @@ def main(argv):
     check("clear() builds a fresh default, not the old pt", u.pt is not pt)
 
     # ---- value equality -----------------------------------------------------
-    a, b = m.UniU(), m.UniU()
+    a, b = m.Uni_U(), m.Uni_U()
     a.s, b.s = "x", "x"
     check("two unions holding the same option and value are equal", a == b)
     b.s = "y"
@@ -111,19 +111,19 @@ def main(argv):
     check("... and when the option does", a != b)
 
     # ---- a $defs union split per default_id --------------------------------
-    t, n = m.UnionPickDefaultT(), m.UnionPickDefaultN()
+    t, n = m.Pick__DefaultT(), m.Pick__DefaultN()
     check("Pick_default_t starts at t (k 2)", t.has_t() and t.t.k == 2)
     check("Pick_default_n starts at n (6)", n.has_n() and n.n == 6)
     msg = m.Uni()
-    check("the omitted-default_id site is Pick_default_n", type(msg.po) is m.UnionPickDefaultN)
-    check("the default_id: 1 site is Pick_default_t", type(msg.pf) is m.UnionPickDefaultT)
+    check("the omitted-default_id site is Pick_default_n", type(msg.po) is m.Pick__DefaultN)
+    check("the default_id: 1 site is Pick_default_t", type(msg.pf) is m.Pick__DefaultT)
 
     # ---- an array of unions fills a gap with default_id ---------------------
     # v: element 1 holds i = 3, element 0 is a gap -> default_id s at "".
-    v1 = m.UniVElem()
+    v1 = m.Uni_V()
     v1.i = 3
     src = m.Uni()
-    src.v = [m.UniVElem(), v1]
+    src.v = [m.Uni_V(), v1]
     got = m.Uni.decode(src.encode())
     check("a gap in v is s at its default", got.v[0].has_s() and got.v[0].s == "")
     check("the element after the gap holds i = 3", got.v[1].has_i() and got.v[1].i == 3)
