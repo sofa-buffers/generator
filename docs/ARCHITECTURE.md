@@ -326,7 +326,13 @@ needs equivalent data structures:
 - **`NamedType`** — a shared `struct`/`union`/`enum`/`bitfield`: a `Category`,
   `Name`/`Key`, an optional `Summary`, an `Inline` flag (marks hoisted inline
   definitions; synthetic keys `<parentKey>_<fieldName>` / `<name>_elem`), and
-  one of `Fields` (struct/union), `Consts` (enum), `Flags` (bitfield). A
+  one of `Fields` (struct/union), `Consts` (enum), `Flags` (bitfield). The
+  synthetic join is ambiguous — `m.a_b` and `m_a.b` both give `m_a_b`, and a
+  `$defs` struct `P`'s inline field `f` gives `struct/P_f`, the key of a `$defs`
+  struct `P_f` — so the model refuses a key claimed twice (`model.Errors`,
+  located at the second element and naming the first) instead of replacing the
+  first type. No backend could catch it later: the replaced type is already
+  gone from the graph, and the code it generates compiles. A
   union's default option is a property of the **type**: `NamedType.DefaultID`
   is always set after analysis (the site's `default_id`, else the lowest option
   id), and `DefaultOption()` / `IsDefaultOption(f)` (`internal/ir/union.go`) are
@@ -774,7 +780,9 @@ a reimplementation should emit code that honors all of them:
   member and every outer name used there to be on the list — a backend that
   starts writing `Math.max(...)` fails it until the name is reserved.
 
-  Known gaps, generated **type** names rather than field names: a message `m_a`
+  Known gaps, generated **type** names rather than field names (#624). Two
+  named types on one IR key are refused by the model (§6, `NamedType`); what
+  remains is per backend: a message `m_a`
   and an inline struct `a` in `m` derive one type name in every backend, and a
   generated class can hide a corelib or harness type of the same name (Java: a
   message `seq` is the class `Seq`; Zig: a message `decode_error` is refused, the

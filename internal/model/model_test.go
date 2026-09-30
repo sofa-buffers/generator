@@ -1,6 +1,7 @@
 package model_test
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/sofa-buffers/generator/internal/ir"
@@ -80,5 +81,79 @@ func TestUnionDefaultIDReachesEveryTypeRef(t *testing.T) {
 	}
 	if fs["f"].Default != int64(1) {
 		t.Errorf("union field Default = %v, want the raw default_id 1 (read by the docs target)", fs["f"].Default)
+	}
+}
+
+// Two schema elements whose type keys coincide are refused, located at the
+// second one and naming the first. An inline type's key is its owner's key and
+// its field name joined by "_", so the join is ambiguous; registering the
+// second type used to replace the first silently, giving the first element's
+// fields the second one's layout in every backend.
+func TestTypeKeyCollisionIsRefused(t *testing.T) {
+	cases := []struct {
+		name, src, loc, prev, key string
+	}{
+		{
+			name: "inline paths",
+			src: "version: 1\nmessages:\n" +
+				"  m:\n    payload:\n      a_b: {id: 0, type: struct, fields: {y: {id: 0, type: u8}}}\n" +
+				"  m_a:\n    payload:\n      b: {id: 0, type: struct, fields: {z: {id: 0, type: string, maxlen: 8}}}\n",
+			loc: "#/messages/m_a/payload/b", prev: "#/messages/m/payload/a_b", key: "m_a_b",
+		},
+		{
+			name: "inline in $defs against $defs",
+			src: "version: 1\n$defs:\n  struct:\n" +
+				"    P:\n      f: {id: 0, type: struct, fields: {y: {id: 0, type: u8}}}\n" +
+				"    P_f:\n      q: {id: 0, type: fp64}\n" +
+				"messages:\n  m:\n    payload:\n" +
+				"      p: {id: 0, type: struct, fields: {$ref: '#/$defs/struct/P'}}\n" +
+				"      r: {id: 1, type: struct, fields: {$ref: '#/$defs/struct/P_f'}}\n",
+			loc: "#/$defs/struct/P_f", prev: "#/$defs/struct/P/f", key: "struct/P_f",
+		},
+		{
+			name: "array element against a field",
+			src: "version: 1\nmessages:\n  m:\n    payload:\n" +
+				"      a: {id: 0, type: array, items: {type: struct, count: 2, fields: {y: {id: 0, type: u8}}}}\n" +
+				"      a_elem: {id: 1, type: struct, fields: {z: {id: 0, type: u16}}}\n",
+			loc: "#/messages/m/payload/a_elem", prev: "#/messages/m/payload/a/items", key: "m_a_elem",
+		},
+		{
+			name: "nested inline against a field, across categories",
+			src: "version: 1\nmessages:\n  m:\n    payload:\n" +
+				"      a: {id: 0, type: struct, fields: {b: {id: 0, type: enum, enum: {X: 0, Y: 1}}}}\n" +
+				"      a_b: {id: 1, type: union, oneof: {u: {id: 0, type: u8}, v: {id: 1, type: u16}}}\n",
+			loc: "#/messages/m/payload/a_b", prev: "#/messages/m/payload/a/fields/b", key: "m_a_b",
+		},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			doc, err := parser.Parse([]byte(c.src), "t.yaml")
+			if err != nil {
+				t.Fatal(err)
+			}
+			resolved, err := doc.Resolve()
+			if err != nil {
+				t.Fatal(err)
+			}
+			if errs := parser.Validate(resolved); errs != nil {
+				t.Fatalf("validate: %v", errs)
+			}
+			s, err := model.Build(doc)
+			if err == nil {
+				t.Fatalf("Build accepted the schema; named types: %v", s.NamedOrder)
+			}
+			errs, ok := err.(model.Errors)
+			if !ok || len(errs) != 1 {
+				t.Fatalf("want one model.Error, got %T: %v", err, err)
+			}
+			if errs[0].Loc != c.loc {
+				t.Errorf("Loc = %q, want %q", errs[0].Loc, c.loc)
+			}
+			for _, w := range []string{c.prev, `"` + c.key + `"`} {
+				if !strings.Contains(errs[0].Msg, w) {
+					t.Errorf("Msg = %q, want it to name %s", errs[0].Msg, w)
+				}
+			}
+		})
 	}
 }
