@@ -155,7 +155,7 @@ type unionSite struct {
 // default is a property of the TYPE, not of the site, so every generated
 // constructor, gap fill and omission test can bake it in. A $defs union used
 // with different effective default_ids is therefore split into one NamedType
-// per default_id, named <Name>_default_<option>, and every site is repointed at
+// per default_id, each carrying its default option as Variant, and every site is repointed at
 // its variant. An omitted default_id means the option with the lowest id.
 //
 // Only a $defs union can split: an inline union has exactly one site.
@@ -225,19 +225,15 @@ func (a *analyzer) splitUnion(nt *ir.NamedType, ss []unionSite, ids []int64) {
 		}
 		v := *nt // shallow: the Fields slice is shared, the IR is immutable after analysis
 		id := d
-		v.Name = nt.Name + "_default_" + opt.Name
-		v.Key = nt.Key + "_default_" + opt.Name
+		// "~" appears in no name and no other key, and Variant tells the
+		// backends which default this is; they name it in a channel no path
+		// segment can produce (ARCHITECTURE §8.9), so no variant can meet
+		// another type.
+		v.Key = nt.Key + "~" + opt.Name
+		v.Variant = opt.Name
 		v.DefaultID = &id
 		variants = append(variants, &v)
 		byID[d] = &v
-	}
-	for i, v := range variants {
-		if existing := a.foldedClash(v, nt, variants); existing != "" {
-			other := ids[(i+1)%len(ids)]
-			a.add(siteLoc(ss, ids[i]), "union %q is used with default_id %d and %d; the generated type %q for one of them collides with the existing type %q — rename one",
-				nt.Name, ids[i], other, v.Key, existing)
-			return
-		}
 	}
 	for _, s := range ss {
 		v := byID[s.id]
@@ -256,36 +252,6 @@ func (a *analyzer) splitUnion(nt *ir.NamedType, ss []unionSite, ids []int64) {
 		}
 	}
 	a.schema.NamedOrder = order
-}
-
-// foldedClash returns the key of a type that v collides with, or "". The test
-// is folded, not raw: every backend derives its type identifiers from the key
-// (or the name) by case changes and separator removal, so two names equal once
-// lowercased and stripped of every non-alphanumeric character clash in at least
-// one target. orig, the union being split, is ignored.
-func (a *analyzer) foldedClash(v, orig *ir.NamedType, variants []*ir.NamedType) string {
-	fk, fn := fold(v.Key), fold(v.Name)
-	for _, k := range a.schema.NamedOrder {
-		if t := a.schema.Named[k]; t != orig && (fold(t.Key) == fk || fold(t.Name) == fn) {
-			return t.Key
-		}
-	}
-	for _, w := range variants {
-		if w != v && (fold(w.Key) == fk || fold(w.Name) == fn) {
-			return w.Key
-		}
-	}
-	return ""
-}
-
-func fold(s string) string {
-	var b strings.Builder
-	for _, r := range strings.ToLower(s) {
-		if (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9') {
-			b.WriteRune(r)
-		}
-	}
-	return b.String()
 }
 
 func lowestOptionID(nt *ir.NamedType) (int64, bool) {

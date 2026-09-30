@@ -164,7 +164,10 @@ recursive `numericLeafItems` / `floatLeafItems` definitions, the Go validator
 through `checkArrayMetadata` — and the model reads both keys before its type
 switch, so an array carries `Field.Unit` / `Field.Decimals` exactly like a scalar
 and every backend's generic `(unit: …)` rendering applies unchanged. All identifiers match
-`^[A-Za-z][A-Za-z0-9_]*$`; objects are **closed** (unknown keys are rejected).
+`^[A-Za-z][A-Za-z0-9]*(_[A-Za-z0-9]+)*$` (no `__`, no trailing `_`), names in one
+scope differ in more than case and underscores, and messages share one scope with
+every `$defs` category — the three naming rules of §8.9, which make every target's
+identifiers distinct by construction; objects are **closed** (unknown keys are rejected).
 
 **Field types and their declaration keys:**
 
