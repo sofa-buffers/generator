@@ -42,6 +42,28 @@ The formatting is done in-process (`go/format`), so no Go toolchain is needed
 at generation time; source that library cannot parse is a generator bug, and
 generation then fails with an error naming the file instead of writing it.
 
+## Field names
+
+A field's Go field is the schema name in Go casing: underscores are folded into
+camel case and the first letter is upper-cased, so `max_speed` is `MaxSpeed`.
+Go has no way to escape a reserved name, so a field whose Go name the generated
+type already uses gets a trailing underscore — the field `encode` is `Encode_`,
+and `string` is `String_`. Those names are:
+
+- the `sofab.Visitor` decode callbacks every generated type implements:
+  `Unsigned`, `Signed`, `Float32`, `Float64`, `FixlenBegin`, `String`, `Bytes`,
+  `ArrayBegin`, `ArrayUnsigned`, `ArraySigned`, `ArrayFloat32`, `ArrayFloat64`,
+  `ArrayEnd`, `BeginSequence`, `EndSequence`, and the embedded `VisitorBase`;
+- the embedded `StringCheck` of a type with a string field, and what it
+  provides: `UTF8Valid`, `SetStringCheck`;
+- the methods every generated type declares: `Serialize`, and on a message also
+  `Encode`, `EncodeTo`.
+
+Only the Go field changes: the wire is keyed by the field id, and the `json` tag
+keeps the schema name. Two fields that end up with the same Go field — `a_b`
+and `aB` both give `AB`, `encode_` lands on the mangled `encode` — fail
+generation, naming both. The list lives in `generators/golang/reserved.go`.
+
 ## Unions
 
 A `union` holds exactly one of its options. It is a struct whose option slots
@@ -137,10 +159,10 @@ declared default. A union in a message from `New<Message>`, in a decoded
 message, and every element of a decoded array of unions is already there.
 
 **Names.** The accessors are the option name in Go casing: `<Option>`,
-`Set<Option>`, `Has<Option>`, `Mut<Option>`. A getter whose name would be one of
-the union's own methods — the decode callbacks (`String`, `Bytes`, `Unsigned`,
-…), `Which`, `Clear`, `Serialize`, `MarshalJSON`, `UnmarshalJSON` — gets a
-trailing underscore: an option named `string` reads as `String_()` and keeps
+`Set<Option>`, `Has<Option>`, `Mut<Option>`. A getter whose name is reserved for
+a field (see [Field names](#field-names)) or is one of the union's own methods —
+`Which`, `Clear`, `MarshalJSON`, `UnmarshalJSON` — gets a trailing underscore:
+an option named `string` reads as `String_()` and keeps
 `SetString`/`HasString`. Two options that would produce the same method (`foo`
 and `set_foo` both give `SetFoo`), an option whose `Set…` would shadow a
 promoted method (`string_check` → `SetStringCheck`), and an id constant that

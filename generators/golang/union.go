@@ -38,28 +38,11 @@ import (
 // tag store; no generic tagged-union helper exists, in the package or in
 // corelib-go.
 
-// unionFixed are the method (and embedded-field) names every union type carries
-// besides its per-option accessors: the sofab.Visitor callbacks, the embedded
-// sofab.VisitorBase / sofab.StringCheck and what StringCheck promotes, and the
-// union API. An option accessor landing on one would shadow it -- silently, for a
-// promoted method such as SetStringCheck, which would take the decode's UTF-8
-// policy off the union -- so a getter takes the backend's trailing underscore and
-// any other clash fails generation (checkUnionNames).
-var unionFixed = map[string]bool{
-	"Unsigned": true, "Signed": true, "Float32": true, "Float64": true,
-	"FixlenBegin": true, "String": true, "Bytes": true,
-	"ArrayBegin": true, "ArrayUnsigned": true, "ArraySigned": true,
-	"ArrayFloat32": true, "ArrayFloat64": true, "ArrayEnd": true,
-	"BeginSequence": true, "EndSequence": true,
-	"VisitorBase": true, "StringCheck": true, "UTF8Valid": true, "SetStringCheck": true,
-	"Which": true, "Clear": true, "Serialize": true, "MarshalJSON": true, "UnmarshalJSON": true,
-}
-
 // unionOpt is one option of a union type with every name the backend derives
 // from it.
 type unionOpt struct {
 	f       *ir.Field
-	getter  string // <Opt>, with a trailing underscore on a unionFixed name
+	getter  string // <Opt>, with a trailing underscore on a reserved name (reserved.go)
 	setter  string // Set<Opt>
 	has     string // Has<Opt>
 	mut     string // Mut<Opt>; "" for an option that is not edited in place
@@ -96,7 +79,7 @@ func (g *gen) unionShapeOf(nt *ir.NamedType) *unionShape {
 			idConst: u.typeName + base + "ID",
 			isD:     nt.IsDefaultOption(f),
 		}
-		if unionFixed[base] {
+		if goReserved(base) || unionReserved[base] {
 			o.getter = base + "_"
 		}
 		if hasMut(f.Kind) {
@@ -128,8 +111,10 @@ func (u *unionShape) tag(o *unionOpt) string {
 // both options.
 func checkUnionNames(u *unionShape) error {
 	owner := map[string]string{}
-	for n := range unionFixed {
-		owner[n] = ""
+	for _, set := range []map[string]bool{goVisitorMembers, goStringCheckMembers, goMembers, unionReserved} {
+		for n := range set {
+			owner[n] = ""
+		}
 	}
 	for _, o := range u.opts {
 		names := []string{o.getter, o.setter, o.has}
