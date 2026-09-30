@@ -36,6 +36,9 @@ func (*Backend) Generate(s *ir.Schema, cfg map[string]any) ([]generator.File, er
 		size:    generator.NewSizePolicy(cfg),
 	}
 	dir := "src/main/kotlin/" + strings.ReplaceAll(g.pkg, ".", "/") + "/"
+	if err := checkFieldNames(s); err != nil {
+		return nil, err
+	}
 	if err := g.checkUnions(); err != nil {
 		return nil, err
 	}

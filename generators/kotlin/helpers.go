@@ -20,46 +20,6 @@ func cfgString(cfg map[string]any, key, dflt string) string {
 // Identifiers
 // ---------------------------------------------------------------------------
 
-// ktHardKeywords are the Kotlin *hard* keywords: the ones that can never appear
-// where an identifier is expected. Kotlin has a real escape (backticks), so a
-// colliding field name is ESCAPED rather than mangled -- the identifier stays
-// the schema's, which keeps the JSON key and the generated member spelled the
-// same (ARCHITECTURE §8, "escape where the language allows"). Soft keywords
-// (`by`, `where`, `data`, ...) are legal identifiers already and are left alone.
-var ktHardKeywords = map[string]bool{
-	"as": true, "break": true, "class": true, "continue": true, "do": true,
-	"else": true, "false": true, "for": true, "fun": true, "if": true,
-	"in": true, "interface": true, "is": true, "null": true, "object": true,
-	"package": true, "return": true, "super": true, "this": true, "throw": true,
-	"true": true, "try": true, "typealias": true, "typeof": true, "val": true,
-	"var": true, "when": true, "while": true,
-}
-
-// ktReservedMembers are the names the generated class already gives a member.
-// A schema field with one of these names would redeclare it, so it is mangled
-// with a trailing underscore -- a backtick escape cannot help here, because the
-// clash is with another DECLARATION rather than with the grammar. The JSON key
-// keeps the schema name (see the harness, which emits fld.Name).
-var ktReservedMembers = map[string]bool{
-	"serialize": true, "isDefault": true, "reset": true, "encode": true,
-	"encodeTo": true, "decode": true, "tryDecode": true, "decoder": true,
-	"MAX_SIZE": true, "MAX_SIZE_LIMIT": true,
-}
-
-// ktIdent renders a schema field name as a Kotlin member identifier: escaped
-// with backticks when it is a hard keyword, suffixed when it would collide with
-// a generated member, and otherwise passed through unchanged. The wire is
-// unaffected (fields are keyed by id) and the JSON name stays the schema's.
-func ktIdent(name string) string {
-	if ktReservedMembers[name] {
-		return name + "_"
-	}
-	if ktHardKeywords[name] {
-		return "`" + name + "`"
-	}
-	return name
-}
-
 // exported upper-camels a schema name for a generated type.
 func exported(name string) string {
 	parts := strings.FieldsFunc(name, func(r rune) bool { return r == '_' })

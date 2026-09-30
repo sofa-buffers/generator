@@ -64,7 +64,7 @@ type unionShape struct {
 // members every class avoids take the trailing underscore; a hard keyword is
 // backtick-escaped, exactly as a struct member's name is.
 func unionOptProp(name string) string {
-	if name == "which" {
+	if unionReserved[name] {
 		return name + "_"
 	}
 	return ktIdent(name)
@@ -119,14 +119,20 @@ func (g *gen) unionShapeOf(key string, nt *ir.NamedType) *unionShape {
 // A class and its companion share one visible scope, so the properties, the
 // slots, the id constants and the has/mutable functions are checked as ONE
 // namespace, together with the union's own members: `foo_bar` and `fooBar` both
-// give hasFooBar, `a`'s A_ID lands on an option named `A_ID`. The has<Opt> check
-// also covers the JVM: `foo` and `Foo` are two Kotlin properties but one getFoo,
-// and they already share hasFoo. Located: the error names the union and both
+// give hasFooBar, `a`'s A_ID lands on an option named `A_ID`. The JVM accessors
+// are checked too (jvmAccessors): `foo` and `Foo` are both getFoo, `isOpen` and
+// `open` both setOpen. Located: the error names the union and both
 // options.
 func checkUnionNames(u *unionShape) error {
-	owner := map[string]string{"which": "", "serialize": "", "isDefault": "", "reset": ""}
+	owner := map[string]string{}
+	for _, set := range []map[string]bool{ktReservedMembers, ktQualifiers, unionReserved} {
+		for n := range set {
+			owner[n] = ""
+		}
+	}
 	for _, o := range u.opts {
-		names := []string{strings.Trim(o.prop, "`"), o.slot, o.idConst, "has" + o.base}
+		getter, setter := jvmAccessors(strings.Trim(o.prop, "`"))
+		names := []string{strings.Trim(o.prop, "`"), o.slot, o.idConst, "has" + o.base, getter, setter}
 		if unionMutable(o.f) {
 			names = append(names, "mutable"+o.base)
 		}

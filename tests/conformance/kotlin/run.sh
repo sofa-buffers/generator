@@ -885,6 +885,31 @@ done
     || { echo "FAIL: corpus definitions did not compile"; exit 1; }
 echo "==> corpus compiles ($ndefs definitions incl. every realworld file)"
 
+# The reserved-name collision test (ARCHITECTURE §8): reserved.yaml uses every
+# name on generators/kotlin/reserved.go's list as a message field, a nested
+# struct field and a union option, plus the one path clash a decoder frame name
+# can hit (TestReservedSchemaFile keeps it in step with the list;
+# TestKotlinNamesInScope keeps the list in step with the generated classes). The
+# generator exits 0 on a class that does not compile, so the project must build
+# warning-free, and every value of reserved.json must come back under its
+# schema name.
+echo "==> reserved names: every listed name as a field compiles and round-trips"
+build "$ROOT/tests/conformance/kotlin/reserved.yaml" "$WORK/reserved"
+RH="$WORK/reserved/build/install/harness/bin/harness"
+"$RH" encode m < "$ROOT/tests/conformance/kotlin/reserved.json" > "$WORK/reserved.bin" \
+    || { echo "FAIL: reserved.json did not encode"; exit 1; }
+"$RH" decode m < "$WORK/reserved.bin" > "$WORK/reserved.out" \
+    || { echo "FAIL: reserved.bin did not decode"; exit 1; }
+python3 - "$ROOT/tests/conformance/kotlin/reserved.json" "$WORK/reserved.out" <<'PY' \
+    || { echo "FAIL: a reserved-name field did not round-trip under its schema name"; exit 1; }
+import json, sys
+want, got = (json.load(open(p)) for p in sys.argv[1:3])
+bad = [k for k in want if got.get(k) != want[k]]
+if bad:
+    sys.exit(f"mismatch on {bad}: got {[got.get(k) for k in bad]}")
+PY
+echo "==> reserved names OK"
+
 # The message-less realworld files as emit:project, harness included, under
 # $KT_STRICT: the Kotlin target emits its types per message, so the corpus
 # project above gets nothing from a $defs-only file, and its harness is
