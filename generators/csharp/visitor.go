@@ -183,7 +183,7 @@ func widthThrow(k ir.Kind, ref *ir.TypeRef, name string) string {
 	if cond == "" {
 		return ""
 	}
-	return fmt.Sprintf("if (%s) throw new SofabException(SofabError.InvalidMessage, \"%s: value outside declared %s\"); ", cond, name, what)
+	return fmt.Sprintf("if (%s) throw new global::sofab.SofabException(global::sofab.SofabError.InvalidMessage, \"%s: value outside declared %s\"); ", cond, name, what)
 }
 
 // widthCond is the declared-integer-width half of widthThrow's comparison.
@@ -467,7 +467,7 @@ func (g *gen) emitStringCb(f *cfile, fs []frame) {
 	// generated code, and a schema type named `utf8` would otherwise shadow it.
 	f.line("        string _s;")
 	f.line("        if (offset == 0 && chunkLength >= total) { %s_s = global::sofab.Utf8.Decode(data, chunkOffset, total); }", wholeCapCheck(arms, ir.KindString, "MaxDynStringLen"))
-	f.line("        else _s = (pay ??= new PayloadAcc()).String(total, offset, data, chunkOffset, chunkLength, _cap);")
+	f.line("        else _s = (pay ??= new global::sofab.PayloadAcc()).String(total, offset, data, chunkOffset, chunkLength, _cap);")
 	f.line("        if (_s == null) return;   // payload incomplete: more chunks to come")
 	f.line("        switch ((cur, id)) {")
 	for _, fr := range fs {
@@ -529,8 +529,8 @@ func (g *gen) emitBlobCb(f *cfile, fs []frame) {
 	// one-chunk branch (cap check, exact-size copy), inline, so the accumulator
 	// exists only for a split payload.
 	f.line("        byte[] _b;")
-	f.line("        if (offset == 0 && chunkLength >= total) { %s_b = new byte[total]; Array.Copy(data, chunkOffset, _b, 0, total); }", wholeCapCheck(arms, ir.KindBlob, "MaxDynBlobLen"))
-	f.line("        else _b = (pay ??= new PayloadAcc()).Blob(total, offset, data, chunkOffset, chunkLength, _cap);")
+	f.line("        if (offset == 0 && chunkLength >= total) { %s_b = new byte[total]; global::System.Array.Copy(data, chunkOffset, _b, 0, total); }", wholeCapCheck(arms, ir.KindBlob, "MaxDynBlobLen"))
+	f.line("        else _b = (pay ??= new global::sofab.PayloadAcc()).Blob(total, offset, data, chunkOffset, chunkLength, _cap);")
 	f.line("        if (_b == null) return;   // payload incomplete: more chunks to come")
 	f.line("        switch ((cur, id)) {")
 	for _, fr := range fs {
@@ -539,7 +539,7 @@ func (g *gen) emitBlobCb(f *cfile, fs []frame) {
 				// Elements are keyed by index id (MESSAGE_SPEC S2): a default (empty)
 				// element is omitted on the wire, so place each value at its id and
 				// grow the list, filling any gap with the element default (empty bytes).
-				f.line("            case (%s, _): %s break;", fr.loc, seqCall("PlaceElem", fr.path+", id, Array.Empty<byte>(), _b", fr))
+				f.line("            case (%s, _): %s break;", fr.loc, seqCall("PlaceElem", fr.path+", id, global::System.Array.Empty<byte>(), _b", fr))
 			}
 			continue
 		}
@@ -563,9 +563,9 @@ func wholeCapCheck(arms []string, kind ir.Kind, constName string) string {
 	for _, a := range arms {
 		if strings.Contains(a, "_cap = "+constName+";") {
 			if kind == ir.KindBlob {
-				return "PayloadAcc.CheckBlobLength(total, _cap); "
+				return "global::sofab.PayloadAcc.CheckBlobLength(total, _cap); "
 			}
-			return "PayloadAcc.CheckStringLength(total, _cap); "
+			return "global::sofab.PayloadAcc.CheckStringLength(total, _cap); "
 		}
 	}
 	return ""
@@ -597,7 +597,7 @@ func (g *gen) emitFixlenBegin(f *cfile, fs []frame) {
 	if len(str) == 0 && len(blob) == 0 {
 		return
 	}
-	f.line("    public void FixlenBegin(int id, FixlenType subtype, int total) {")
+	f.line("    public void FixlenBegin(int id, global::sofab.FixlenType subtype, int total) {")
 	f.line("        // Decided at the LENGTH WORD, not once payload bytes arrive: a message")
 	f.line("        // that ends right after this word reaches no payload callback at all, and")
 	f.line("        // both verdicts outrank the Incomplete it would otherwise report -- a")
@@ -614,7 +614,7 @@ func (g *gen) emitFixlenBegin(f *cfile, fs []frame) {
 		if len(a.arms) == 0 {
 			continue
 		}
-		f.line("        if (subtype == FixlenType.%s) {", a.variant)
+		f.line("        if (subtype == global::sofab.FixlenType.%s) {", a.variant)
 		f.line("            switch ((cur, id)) {")
 		for _, arm := range a.arms {
 			f.line("%s", arm)
@@ -650,9 +650,9 @@ func (g *gen) capConst(fs []frame, kind ir.Kind) string {
 // makes the call, as it already did.
 func capCheck(kind ir.Kind, constName string) string {
 	if kind == ir.KindBlob {
-		return fmt.Sprintf("PayloadAcc.CheckBlobLength(total, %s);", constName)
+		return fmt.Sprintf("global::sofab.PayloadAcc.CheckBlobLength(total, %s);", constName)
 	}
-	return fmt.Sprintf("PayloadAcc.CheckStringLength(total, %s);", constName)
+	return fmt.Sprintf("global::sofab.PayloadAcc.CheckStringLength(total, %s);", constName)
 }
 
 // fixlenBeginArms builds the (scope, id) arms for one fixlen subtype. A wrapper
@@ -681,7 +681,7 @@ func (g *gen) fixlenBeginArms(fs []frame, kind ir.Kind, what, constName string) 
 				body := seqCall("CheckIndex", "id", fr) + " "
 				switch {
 				case fr.emax >= 0:
-					body += fmt.Sprintf("if (total > %d) throw new SofabException(SofabError.InvalidMessage, \"%s element: %s above schema maxlen %d\"); ", fr.emax, fr.loc, what, fr.emax)
+					body += fmt.Sprintf("if (total > %d) throw new global::sofab.SofabException(global::sofab.SofabError.InvalidMessage, \"%s element: %s above schema maxlen %d\"); ", fr.emax, fr.loc, what, fr.emax)
 				case elemCapped:
 					body += capCheck(kind, constName) + " "
 				}
@@ -695,7 +695,7 @@ func (g *gen) fixlenBeginArms(fs []frame, kind ir.Kind, what, constName string) 
 			}
 			switch {
 			case fld.HasMaxlen:
-				arms = append(arms, fmt.Sprintf("            case (%s, %d): if (total > %d) throw new SofabException(SofabError.InvalidMessage, \"%s: %s above schema maxlen %d\"); break;", fr.loc, fld.ID, fld.Maxlen, fld.Name, what, fld.Maxlen))
+				arms = append(arms, fmt.Sprintf("            case (%s, %d): if (total > %d) throw new global::sofab.SofabException(global::sofab.SofabError.InvalidMessage, \"%s: %s above schema maxlen %d\"); break;", fr.loc, fld.ID, fld.Maxlen, fld.Name, what, fld.Maxlen))
 			case constName != "":
 				arms = append(arms, fmt.Sprintf("            case (%s, %d): %s break;", fr.loc, fld.ID, capCheck(kind, constName)))
 			}
@@ -758,15 +758,15 @@ func (g *gen) emitArraySkipArm(f *cfile, fs []frame) {
 	f.line("        // matching element kind is a wire-type contradiction: discard its")
 	f.line("        // `count` elements, exactly as an unknown id would be skipped.")
 	f.line("        askip = kind switch {")
-	arm("ArrayKind.Unsigned", unsignedArrayElem)
-	arm("ArrayKind.Signed", signedArrayElem)
+	arm("global::sofab.ArrayKind.Unsigned", unsignedArrayElem)
+	arm("global::sofab.ArrayKind.Signed", signedArrayElem)
 	// The fixlen SUBTYPE (fp32 vs fp64) IS visible in this hook: the corelib reads
 	// the fixlen_word before announcing the array (CORELIB_PLAN §4.8), so an fp64
 	// header arriving at an fp32-declared id lands in the Fp64 arm, matches nothing
 	// there and arms the discard counter — the subtype contradiction is a §7.3 skip
 	// decided here, not downstream (generator#259).
-	arm("ArrayKind.Fp32", fp32ArrayElem)
-	arm("ArrayKind.Fp64", fp64ArrayElem)
+	arm("global::sofab.ArrayKind.Fp32", fp32ArrayElem)
+	arm("global::sofab.ArrayKind.Fp64", fp64ArrayElem)
 	f.line("            _ => 0,")
 	f.line("        };")
 }
@@ -803,15 +803,15 @@ func (g *gen) emitArrayFillArm(f *cfile, fs []frame) {
 	// header whose kind is not the one the declared element maps to arms the skip
 	// counter, never a fill (generator#254, extended to the two fixlen subtypes by
 	// generator#259).
-	arm("ArrayKind.Unsigned", unsignedArrayElem)
-	arm("ArrayKind.Signed", signedArrayElem)
-	arm("ArrayKind.Fp32", fp32ArrayElem)
-	arm("ArrayKind.Fp64", fp64ArrayElem)
+	arm("global::sofab.ArrayKind.Unsigned", unsignedArrayElem)
+	arm("global::sofab.ArrayKind.Signed", signedArrayElem)
+	arm("global::sofab.ArrayKind.Fp32", fp32ArrayElem)
+	arm("global::sofab.ArrayKind.Fp64", fp64ArrayElem)
 	f.line("            _ => 0,")
 	f.line("        };")
 }
 
-func (g *gen) emitVisitor(f *cfile, name string, fields []*ir.Field) {
+func (g *gen) emitVisitor(f *cfile, name, vis string, fields []*ir.Field) {
 	fs := g.frames(&ir.Message{Name: name, Fields: fields})
 	// A configured max_dyn_* cap is live only when this message actually has a
 	// schema-unbounded field of that kind — otherwise it is inert and no
@@ -834,7 +834,7 @@ func (g *gen) emitVisitor(f *cfile, name string, fields []*ir.Field) {
 	limStr := g.limits.stringHas && g.capLive(fs, ir.KindString)
 	limBlob := g.limits.blobHas && g.capLive(fs, ir.KindBlob)
 
-	f.line("internal sealed class %sVisitor : IVisitor {", name)
+	f.line("internal sealed class %s : global::sofab.IVisitor {", vis)
 	f.line("    private readonly %s m;", name)
 	f.line("    private int cur = 0;")
 	// The SKIPPED-SUBTREE scope. SequenceBegin moves here for any (scope, id) the
@@ -867,9 +867,9 @@ func (g *gen) emitVisitor(f *cfile, name string, fields []*ir.Field) {
 	f.line("    private int[] stk = new int[16];   // sequence scope stack (unboxed, was Stack<int>)")
 	f.line("    private int sp = 0;")
 	if hasPayloadDest(fs) {
-		f.line("    private PayloadAcc pay;            // lazy: only a string/blob payload split across feeds needs it")
+		f.line("    private global::sofab.PayloadAcc pay;            // lazy: only a string/blob payload split across feeds needs it")
 	}
-	f.line("    public %sVisitor(%s msg) { m = msg; }", name, name)
+	f.line("    public %s(%s msg) { m = msg; }", vis, name)
 	for i, fr := range fs {
 		f.line("    private const int %s = %d;", fr.loc, i)
 	}
@@ -970,7 +970,7 @@ func (g *gen) emitVisitor(f *cfile, name string, fields []*ir.Field) {
 	// where the field is still a List); place a fresh inner row for a
 	// native-nested (array-of-array) scope (each row arrives as ArrayBegin(index),
 	// and the index IS the row's position, see reserveRow).
-	f.line("    public void ArrayBegin(int id, ArrayKind kind, int count) {")
+	f.line("    public void ArrayBegin(int id, global::sofab.ArrayKind kind, int count) {")
 	if primArr {
 		f.line("        ai = 0;")
 	}
@@ -991,10 +991,10 @@ func (g *gen) emitVisitor(f *cfile, name string, fields []*ir.Field) {
 				guard := ""
 				switch {
 				case fr.items.HasCount:
-					guard = fmt.Sprintf("if (count > %d) throw new SofabException(SofabError.InvalidMessage, \"%s element: array count above schema capacity %d\"); ",
+					guard = fmt.Sprintf("if (count > %d) throw new global::sofab.SofabException(global::sofab.SofabError.InvalidMessage, \"%s element: array count above schema capacity %d\"); ",
 						fr.items.Count, fr.loc, fr.items.Count)
 				case limArr:
-					guard = fmt.Sprintf("if (count > MaxDynArrayCount) throw new SofabException(SofabError.LimitExceeded, \"%s element: array count above configured limit %d\"); ",
+					guard = fmt.Sprintf("if (count > MaxDynArrayCount) throw new global::sofab.SofabException(global::sofab.SofabError.LimitExceeded, \"%s element: array count above configured limit %d\"); ",
 						fr.loc, g.limits.arrayCount)
 				}
 				// A row whose header carries a different array kind than the inner
@@ -1030,10 +1030,10 @@ func (g *gen) emitVisitor(f *cfile, name string, fields []*ir.Field) {
 			guard := ""
 			switch {
 			case fld.HasCount:
-				guard = fmt.Sprintf("if (count > %d) throw new SofabException(SofabError.InvalidMessage, \"%s: array count above schema capacity %d\"); ",
+				guard = fmt.Sprintf("if (count > %d) throw new global::sofab.SofabException(global::sofab.SofabError.InvalidMessage, \"%s: array count above schema capacity %d\"); ",
 					fld.Count, fld.Name, fld.Count)
 			case limArr && fld.Kind == ir.KindArray && nativeArrayElem(fld.Elem):
-				guard = fmt.Sprintf("if (count > MaxDynArrayCount) throw new SofabException(SofabError.LimitExceeded, \"%s: array count above configured limit %d\"); ",
+				guard = fmt.Sprintf("if (count > MaxDynArrayCount) throw new global::sofab.SofabException(global::sofab.SofabError.LimitExceeded, \"%s: array count above configured limit %d\"); ",
 					fld.Name, g.limits.arrayCount)
 			}
 			if fld.Kind == ir.KindArray && primArrayElem(fld.Elem) {
@@ -1067,7 +1067,7 @@ func (g *gen) emitVisitor(f *cfile, name string, fields []*ir.Field) {
 	// fresh element then descends; a sequence-nested inner array appends a fresh
 	// inner list then descends.
 	f.line("    public void SequenceBegin(int id) {")
-	f.line("        if (sp == stk.Length) System.Array.Resize(ref stk, sp * 2);")
+	f.line("        if (sp == stk.Length) global::System.Array.Resize(ref stk, sp * 2);")
 	f.line("        stk[sp++] = cur;")
 	f.line("        switch ((cur, id)) {")
 	for _, fr := range fs {

@@ -33,19 +33,43 @@ trailing underscore instead — the field `Encode` is `Encode_`. Those names are
   a message also `Reset`, `Encode`, `EncodeTo`, `Decode`, `TryDecode`, the
   nested `Decoder` class, `MaxSize` and `MaxSizeLimit`;
 - the members every class inherits from `object`: `Equals`, `GetHashCode`,
-  `GetType`, `ToString`, `MemberwiseClone`, `Finalize`, `ReferenceEquals`;
-- the names the class body uses in front of a dot — `Array`, `DecodeStatus`,
-  `System`. Inside the class a field of such a name would be found first, and a
-  call like `System.Array.Empty<byte>()` would no longer compile.
+  `GetType`, `ToString`, `MemberwiseClone`, `Finalize`, `ReferenceEquals`.
 
 Only the field changes: the wire is keyed by the field id, and a renamed field
 carries `[JsonPropertyName]` with the schema name, so its JSON key does not
-change either. Two fields that end up with the same field — `Encode` and
-`Encode_` — fail generation, naming both, and so does a field named like its
-own class (a field `M` in the message `m`), which C# does not allow. Enum
-constants and bitfield flags are PascalCase members too: two that give the same
-one (`a_b` and `aB` are both `AB`) fail generation as well. The list
-lives in `generators/csharp/reserved.go`.
+change either. Every other name is a field as it is — `System`, `Array` or
+`List` too: the generated code writes everything it uses from outside its
+namespace fully qualified (`global::System.Array.Empty<byte>()`), which a field
+cannot hide. Enum constants and bitfield flags are PascalCase members of their
+enum. The list lives in `generators/csharp/reserved.go`.
+
+## Type names
+
+Every message and every named type is a class (or an enum) in the namespace,
+named after its schema path in PascalCase, with `_` between the path's parts:
+
+| schema | C# type |
+|---|---|
+| message `vehicle_telemetry` | `VehicleTelemetry` |
+| `$defs` struct `point` | `Point` |
+| inline struct of field `a` in message `m` | `M_A` |
+| inline element struct of an array field `arr` in message `m` | `M_Arr` |
+| `$defs` union `shape` used with `default_id` of option `pt` | `Shape__DefaultPt` |
+
+Two different schema paths never give the same type name, so every schema that
+validates generates without a clash.
+
+A type whose name is also a member of its own class — C# does not allow that —
+or `Decoder`, the name of the incremental decoder nested in every message
+class, gets a trailing underscore: the message `max_size` is `MaxSize_`, the
+message `decoder` is `Decoder_`, and a message `m` with a field `M` is the class
+`M_`.
+
+`Message.cs` imports no namespace, so a type named like a .NET or `corelib-cs`
+type — a message `system`, `array`, `o_stream` or `list` — keeps its name. The
+project harness (`Program.cs`) imports no generated namespace either: it names
+every generated type as `global::<namespace>.<Type>`, so a message may be
+called `program`, `console` or `message`.
 
 ## Unions
 
@@ -66,27 +90,27 @@ shape:
 ```
 
 ```csharp
-public sealed class MShape {
-    public const int NumId = 0;
-    public const int NameId = 1;
-    public const int PtId = 2;
-    public const int TagsId = 3;
+public sealed class M_Shape {
+    public const int Id_Num = 0;
+    public const int Id_Name = 1;
+    public const int Id_Pt = 2;
+    public const int Id_Tags = 3;
 
     public int Which { get; }
 
     public ushort Num { get; set; }
-    public bool HasNum { get; }
+    public bool Has_Num { get; }
 
     public string Name { get; set; }
-    public bool HasName { get; }
+    public bool Has_Name { get; }
 
-    public MShapePt Pt { get; set; }
-    public bool HasPt { get; }
-    public MShapePt MutablePt();
+    public M_Shape_Pt Pt { get; set; }
+    public bool Has_Pt { get; }
+    public M_Shape_Pt Mutable_Pt();
 
     public List<string> Tags { get; set; }
-    public bool HasTags { get; }
-    public List<string> MutableTags();
+    public bool Has_Tags { get; }
+    public List<string> Mutable_Tags();
 
     public void Clear();
 }
@@ -95,25 +119,25 @@ public sealed class MShape {
 | operation | C# |
 |---|---|
 | which option is held | `x.Which` → the option's id |
-| option ids | `MShape.PtId` (`<Option>Id` constants) |
-| test | `x.HasPt` |
+| option ids | `M_Shape.Id_Pt` (`Id_<Option>` constants) |
+| test | `x.Has_Pt` |
 | read | `x.Pt` |
 | select with a value | `x.Num = 7` |
-| select at the default and edit in place | `x.MutablePt().y = 2` |
+| select at the default and edit in place | `x.Mutable_Pt().y = 2` |
 | back to the default | `x.Clear()` |
 
 ```csharp
-var m = new M();            // m.shape holds pt at its default: {x: 7, y: 0}
-m.shape.Num = 7;            // now num = 7; pt is no longer held
-m.shape.MutablePt().y = 2;  // pt again, from its default: {x: 7, y: 2}
-if (m.shape.HasPt) {
+var m = new M();             // m.shape holds pt at its default: {x: 7, y: 0}
+m.shape.Num = 7;             // now num = 7; pt is no longer held
+m.shape.Mutable_Pt().y = 2;  // pt again, from its default: {x: 7, y: 2}
+if (m.shape.Has_Pt) {
     Use(m.shape.Pt.x);
 }
 switch (m.shape.Which) {
-case MShape.NumId: Use(m.shape.Num); break;
-case MShape.PtId:  Use(m.shape.Pt.y); break;
+case M_Shape.Id_Num: Use(m.shape.Num); break;
+case M_Shape.Id_Pt:  Use(m.shape.Pt.y); break;
 }
-m.shape.Clear();            // pt at its default again
+m.shape.Clear();             // pt at its default again
 ```
 
 Each option is held in a field of its own type — `num` is a `ushort`, never
@@ -124,35 +148,35 @@ struct or union at its default, an empty `List`, a zero-length array for a blob
 or a numeric array — and changes nothing; it does not select the option.
 
 **Assigning** an option's property selects that option with the value assigned;
-the option held before is no longer held. **`Mutable<Option>()`** (struct and
+the option held before is no longer held. **`Mutable_<Option>()`** (struct and
 union options, and arrays held in a `List`: strings, blobs, booleans, structs,
 unions, nested arrays) selects the option at its own default if another one is
 held, and returns it. If the option is already held it is returned as it is,
 untouched. A numeric array option (`ushort[]`, `float[]`, …) has no
-`Mutable<Option>()`: select it by assigning an array, and change its elements
+`Mutable_<Option>()`: select it by assigning an array, and change its elements
 through the array the property returns while it is held.
 
 **Ownership.** Assigning an option keeps the object it is given, as assigning a
 field does: after `x.Pt = p`, `x.Pt` returns that same `p` while `pt` is held.
 Selecting a struct, union or list option that is not held — through
-`Mutable<Option>()`, by decoding into the union, or by `Clear()` for the
+`Mutable_<Option>()`, by decoding into the union, or by `Clear()` for the
 `default_id` option — always starts from a new object at the option's default;
 an object obtained earlier is never reset behind your back, it is merely no
 longer held.
 
-**Names.** The members are the option name in PascalCase: the property
-`<Option>`, `Has<Option>`, `Mutable<Option>()` and the constant `<Option>Id`. An
-option whose name would land on a name reserved for a field (see [Field
-names](#field-names)), on one of the union's own members (`Which`, `Clear`) or
-on the union type's own name gets a trailing underscore: an option `which` is
-`Which_`, with `HasWhich_` and `Which_Id`. Two options that would produce the
-same member (`foo_bar` and `fooBar` both give `FooBar`; `a`'s `AId` and an
-option named `a_id`; `x`'s `HasX` and an option named `has_x`) fail generation,
-naming both.
+**Names.** The property is the option name in PascalCase, `<Option>`; the
+other members put a fixed word and `_` in front of it: `Has_<Option>`,
+`Mutable_<Option>()` and the constant `Id_<Option>`. The `_` keeps them apart
+from every property, so an option `a` (`Id_A`, `Has_A`) and options `a_id` or
+`has_a` (the properties `AId`, `HasA`) live side by side. An option whose
+property would land on a name reserved for a field (see [Field
+names](#field-names)) or on one of the union's own members (`Which`, `Clear`)
+gets a trailing underscore on the property only: an option `which` is
+`Which_`, with `Has_Which` and `Id_Which`.
 
 **`$defs` unions** used with different `default_id`s are one class per
-`default_id`, named after `<Name>_default_<option>`: `UnionShapeDefaultPt` and
-`UnionShapeDefaultNum`.
+`default_id`, named after the union and the default option: `Shape__DefaultPt`
+and `Shape__DefaultNum`.
 
 **Defaults.** A new union holds the `default_id` option at that option's own
 default; an omitted `default_id` means the option with the lowest id. Each

@@ -11,6 +11,7 @@ import (
 
 	"github.com/sofa-buffers/generator/internal/generator"
 	"github.com/sofa-buffers/generator/internal/ir"
+	"github.com/sofa-buffers/generator/internal/naming"
 )
 
 func init() { generator.Register(&Backend{}) }
@@ -22,12 +23,7 @@ func (*Backend) Lang() string { return "csharp" }
 
 func (*Backend) Generate(s *ir.Schema, cfg map[string]any) ([]generator.File, error) {
 	g := &gen{schema: s, ns: cfgString(cfg, "namespace", "Message"), banner: cfgString(cfg, "tool_banner", "sofabgen"), license: generator.LicenseID(cfg), limits: resolveLimits(cfg), size: generator.NewSizePolicy(cfg)}
-	if err := g.checkFieldNames(); err != nil {
-		return nil, err
-	}
-	if err := g.checkUnions(); err != nil {
-		return nil, err
-	}
+	g.nameTypes()
 	files := []generator.File{{Path: "Message.cs", Content: g.module(s)}}
 	if cfgString(cfg, "emit", "sources") == "project" {
 		files = append(files, g.projectFiles(s, cfg)...)
@@ -48,6 +44,12 @@ type gen struct {
 	// the emit path, which has no error channel of its own.
 	size    generator.SizePolicy
 	sizeErr error
+	// types and msgTypes are the C# identifier of every named type (by key) and
+	// message (by name), bases the same unescaped (nameTypes). qual prefixes a
+	// generated type where the namespace is not in scope: the harness.
+	types, bases       map[string]string
+	msgTypes, msgBases map[string]string
+	qual               string
 }
 
 // messageSize resolves a message's worst-case encoded size via the shared walk
@@ -105,10 +107,9 @@ func (g *gen) module(s *ir.Schema) []byte {
 	if g.license != "" {
 		f.line("// SPDX-License-Identifier: %s", g.license)
 	}
-	f.line("using System;")
-	f.line("using System.Collections.Generic;")
-	f.line("using System.Text;")
-	f.line("using sofab;")
+	// No using directive: every name from outside the namespace is written
+	// `global::`-qualified, so a generated type named like it (a message
+	// `o_stream`, `system`, `array`) cannot shadow it (ARCHITECTURE §8, "Naming").
 	f.blank()
 	f.line("namespace %s;", g.ns)
 	f.blank()
@@ -126,13 +127,13 @@ func (g *gen) module(s *ir.Schema) []byte {
 		nt := s.Named[key]
 		switch nt.Category {
 		case ir.CatStruct:
-			g.emitClass(f, g.typeName(key), nt.Summary, nt.Fields, false)
+			g.emitClass(f, g.typeName(key), "", nt.Summary, nt.Fields, false)
 		case ir.CatUnion:
 			g.emitUnionClass(f, key, nt)
 		}
 	}
 	for _, m := range s.Messages {
-		g.emitClass(f, exported(m.Name), m.Summary, m.Fields, true)
+		g.emitClass(f, g.msgType(m.Name), g.visitorName(m.Name), m.Summary, m.Fields, true)
 	}
 	return f.bytes()
 }
@@ -141,35 +142,35 @@ func (g *gen) emitEnum(f *cfile, nt *ir.NamedType) {
 	f.line("public enum %s : %s {", g.typeName(nt.Key), enumBacking(nt))
 	for _, c := range nt.Consts {
 		emitDoc(f, "    ", c.Description)
-		f.line("    %s = %d,", exported(c.Name), c.Value)
+		f.line("    %s = %d,", naming.Pascal(c.Name), c.Value)
 	}
 	f.line("}")
 	f.blank()
 }
 
 func (g *gen) emitBitfield(f *cfile, nt *ir.NamedType) {
-	f.line("[Flags]")
+	f.line("[global::System.Flags]")
 	f.line("public enum %s : %s {", g.typeName(nt.Key), bitfieldBacking(nt))
 	for _, fl := range nt.Flags {
 		emitDoc(f, "    ", flagDoc(fl))
-		f.line("    %s = %d,", exported(fl.Name), uint64(1)<<uint(fl.Pos))
+		f.line("    %s = %d,", naming.Pascal(fl.Name), uint64(1)<<uint(fl.Pos))
 	}
 	f.line("}")
 	f.blank()
 }
 
-func (g *gen) emitClass(f *cfile, name, summary string, fields []*ir.Field, isMessage bool) {
+func (g *gen) emitClass(f *cfile, name, vis, summary string, fields []*ir.Field, isMessage bool) {
 	emitDoc(f, "", summary)
 	f.line("public sealed class %s {", name)
 	for _, fld := range fields {
 		emitDoc(f, "    ", fieldDoc(fld, generator.BoundNote(fld, generator.StorageDynamic)))
 		if fld.Deprecated {
-			f.line("    [Obsolete]")
+			f.line("    [global::System.Obsolete]")
 		}
 		if csRenamed(fld.Name) {
 			// A mangled field keeps the schema name as its JSON key; `@name` needs
 			// nothing, System.Text.Json already writes it without the `@`.
-			f.line("    [System.Text.Json.Serialization.JsonPropertyName(%q)]", fld.Name)
+			f.line("    [global::System.Text.Json.Serialization.JsonPropertyName(%q)]", fld.Name)
 		}
 		f.line("    public %s %s%s;", g.csType(fld), csIdent(fld.Name), g.csInit(fld))
 	}
@@ -192,7 +193,7 @@ func (g *gen) emitClass(f *cfile, name, summary string, fields []*ir.Field, isMe
 	// CS0618 is its with-message twin, which suppressing instead left every use
 	// site warning.
 	dep := hasDeprecatedDirect(fields)
-	f.line("    public void Serialize(OStream os) {")
+	f.line("    public void Serialize(global::sofab.OStream os) {")
 	if dep {
 		f.line("#pragma warning disable 612 // internal access to a member marked [Obsolete] (CS0612)")
 	}
@@ -228,15 +229,15 @@ func (g *gen) emitClass(f *cfile, name, summary string, fields []*ir.Field, isMe
 		f.line("    // every call; Reset drops any state a previous, failed Encode() left.")
 		f.line("    // Do not call Encode() reentrantly from a Serialize() override on the")
 		f.line("    // same thread.")
-		f.line("    [ThreadStatic] private static byte[] _encScratch;")
-		f.line("    [ThreadStatic] private static OStream _encStream;")
+		f.line("    [global::System.ThreadStatic] private static byte[] _encScratch;")
+		f.line("    [global::System.ThreadStatic] private static global::sofab.OStream _encStream;")
 		f.line("    public byte[] Encode() {")
 		f.line("        var buf = _encScratch ??= new byte[MaxSize];")
 		f.line("        var os = _encStream;")
-		f.line("        if (os == null) { _encStream = os = new OStream(buf); } else { os.Reset(buf, 0); }")
+		f.line("        if (os == null) { _encStream = os = new global::sofab.OStream(buf); } else { os.Reset(buf, 0); }")
 		f.line("        Serialize(os);")
 		f.line("        var outp = new byte[os.BytesUsed];")
-		f.line("        Array.Copy(buf, outp, os.BytesUsed);")
+		f.line("        global::System.Array.Copy(buf, outp, os.BytesUsed);")
 		f.line("        return outp;")
 		f.line("    }")
 		// Streaming encode. Serialize writes the fields and nothing else, so a
@@ -250,7 +251,7 @@ func (g *gen) emitClass(f *cfile, name, summary string, fields []*ir.Field, isMe
 		f.line("    /// smaller than the message: it is drained as it fills, so what bounds")
 		f.line("    /// memory is the buffer, not the message.")
 		f.line("    /// </summary>")
-		f.line("    public void EncodeTo(OStream os) {")
+		f.line("    public void EncodeTo(global::sofab.OStream os) {")
 		f.line("        Serialize(os);")
 		f.line("        os.Flush();")
 		f.line("    }")
@@ -260,8 +261,8 @@ func (g *gen) emitClass(f *cfile, name, summary string, fields []*ir.Field, isMe
 		// (generator#105).
 		f.line("    public static %s Decode(byte[] data) {", name)
 		f.line("        var m = new %s();", name)
-		f.line("        var v = new %sVisitor(m);", name)
-		f.line("        new IStream().Feed(data, 0, data.Length, v);")
+		f.line("        var v = new %s(m);", vis)
+		f.line("        new global::sofab.IStream().Feed(data, 0, data.Length, v);")
 		f.line("        return m;")
 		f.line("    }")
 		// Status-surfacing one-shot decode (MESSAGE_SPEC §7): returns the
@@ -270,15 +271,15 @@ func (g *gen) emitClass(f *cfile, name, summary string, fields []*ir.Field, isMe
 		// Malformed input throws SofabException (Invalid) from Feed. msg always
 		// receives the fields decoded so far; on Incomplete the caller owns
 		// end-of-input and decides whether truncation is an error.
-		f.line("    public static DecodeStatus TryDecode(byte[] data, out %s msg) {", name)
+		f.line("    public static global::sofab.DecodeStatus TryDecode(byte[] data, out %s msg) {", name)
 		f.line("        msg = new %s();", name)
-		f.line("        return new IStream().Feed(data, 0, data.Length, new %sVisitor(msg));", name)
+		f.line("        return new global::sofab.IStream().Feed(data, 0, data.Length, new %s(msg));", vis)
 		f.line("    }")
 		// Streaming decode (PLAN §5.6). The corelib's IStream is resumable, so
 		// the only thing missing was a public handle on it: Decoder() binds a
 		// fresh destination and hands back an object whose Feed takes chunks of
 		// any size. Nested, matching the Java backend's Msg.Decoder.
-		g.emitDecoder(f, name)
+		g.emitDecoder(f, name, vis)
 	}
 	f.line("}")
 	f.blank()
@@ -291,7 +292,7 @@ func (g *gen) emitClass(f *cfile, name, summary string, fields []*ir.Field, isMe
 		if depVis {
 			f.line("#pragma warning disable 612 // internal access to a member marked [Obsolete] (CS0612)")
 		}
-		g.emitVisitor(f, name, fields)
+		g.emitVisitor(f, name, vis, fields)
 		if depVis {
 			f.line("#pragma warning restore 612")
 			f.blank()
@@ -309,7 +310,7 @@ func (g *gen) emitClass(f *cfile, name, summary string, fields []*ir.Field, isMe
 // static Decoder() factory as in Java: C# puts nested types and members in ONE
 // declaration space, so a method and a nested class cannot share the name. The
 // constructor is the factory.
-func (g *gen) emitDecoder(f *cfile, name string) {
+func (g *gen) emitDecoder(f *cfile, name, vis string) {
 	f.line("    /// <summary>")
 	f.line("    /// Incremental decoder for <see cref=\"%s\"/>: hold one and feed the", name)
 	f.line("    /// message as bytes arrive, instead of buffering it whole first.")
@@ -325,17 +326,17 @@ func (g *gen) emitDecoder(f *cfile, name string) {
 	f.line("    /// </remarks>")
 	f.line("    public sealed class Decoder {")
 	f.line("        private readonly %s _m = new %s();", name, name)
-	f.line("        private readonly IStream _is = new IStream();")
-	f.line("        private readonly %sVisitor _v;", name)
+	f.line("        private readonly global::sofab.IStream _is = new global::sofab.IStream();")
+	f.line("        private readonly %s _v;", vis)
 	f.blank()
-	f.line("        public Decoder() { _v = new %sVisitor(_m); }", name)
+	f.line("        public Decoder() { _v = new %s(_m); }", vis)
 	f.blank()
 	f.line("        /// <summary>")
 	f.line("        /// Feed the next chunk, of any size. Returns <c>Complete</c> if it")
 	f.line("        /// ended on a field boundary, <c>Incomplete</c> if it ended mid-field")
 	f.line("        /// -- neither answers whether the MESSAGE is done.")
 	f.line("        /// </summary>")
-	f.line("        public DecodeStatus Feed(byte[] chunk) => Feed(chunk, 0, chunk.Length);")
+	f.line("        public global::sofab.DecodeStatus Feed(byte[] chunk) => Feed(chunk, 0, chunk.Length);")
 	f.blank()
 	f.line("        /// <summary>As <c>Feed</c>, over a slice of <paramref name=\"chunk\"/>.</summary>")
 	// No catch, and no remembered status. A refusal is terminal and the STREAM
@@ -345,7 +346,7 @@ func (g *gen) emitDecoder(f *cfile, name string) {
 	// already hold, and flattened LimitExceeded -- a policy stop on well-formed
 	// bytes -- into an Incomplete that says something untrue about the wire.
 	// Finish asks the stream instead; see below.
-	f.line("        public DecodeStatus Feed(byte[] chunk, int off, int len) =>")
+	f.line("        public global::sofab.DecodeStatus Feed(byte[] chunk, int off, int len) =>")
 	f.line("            _is.Feed(chunk, off, len, _v);")
 	f.blank()
 	f.line("        /// <summary>The destination, holding whatever has been decoded so far.</summary>")
@@ -373,9 +374,9 @@ func (g *gen) emitDecoder(f *cfile, name string) {
 	f.line("            // The stream latched any refusal and re-throws it here,")
 	f.line("            // consuming no byte and driving no visitor callback;")
 	f.line("            // otherwise this is the outcome for everything fed so far.")
-	f.line("            var st = _is.Feed(System.Array.Empty<byte>(), 0, 0, _v);")
-	f.line("            if (st != DecodeStatus.Complete) {")
-	f.line("                throw new InvalidOperationException(")
+	f.line("            var st = _is.Feed(global::System.Array.Empty<byte>(), 0, 0, _v);")
+	f.line("            if (st != global::sofab.DecodeStatus.Complete) {")
+	f.line("                throw new global::System.InvalidOperationException(")
 	f.line("                    $\"%s: stream ended mid-field ({st})\");", name)
 	f.line("            }")
 	f.line("            return _m;")
@@ -413,10 +414,10 @@ func (g *gen) emitIsDefault(f *cfile, fields []*ir.Field, dep bool) {
 func (g *gen) fieldIsDefaultExpr(fld *ir.Field, acc string) string {
 	switch fld.Kind {
 	case ir.KindBlob:
-		if g.csDefaultValue(fld) == "Array.Empty<byte>()" {
+		if g.csDefaultValue(fld) == "global::System.Array.Empty<byte>()" {
 			return fmt.Sprintf("%s == null || %s.Length == 0", acc, acc)
 		}
-		return fmt.Sprintf("System.Linq.Enumerable.SequenceEqual(%s ?? Array.Empty<byte>(), %s)", acc, g.csDefaultValue(fld))
+		return fmt.Sprintf("global::System.Linq.Enumerable.SequenceEqual(%s ?? global::System.Array.Empty<byte>(), %s)", acc, g.csDefaultValue(fld))
 	case ir.KindStruct, ir.KindUnion:
 		// Lazily framed: the frame survives iff the nested Serialize wrote a child,
 		// which is exactly "the nested object is not default".
@@ -437,7 +438,7 @@ func (g *gen) fieldIsDefaultExpr(fld *ir.Field, acc string) string {
 func (g *gen) arrayIsDefaultExpr(fld *ir.Field, acc string) string {
 	if nativeArrayElem(fld.Elem) {
 		if _, ok := g.csArrayCompareDefault(fld); ok {
-			return fmt.Sprintf("System.Linq.Enumerable.SequenceEqual(%s, %s)", acc, arrDefName(fld))
+			return fmt.Sprintf("global::System.Linq.Enumerable.SequenceEqual(%s, %s)", acc, arrDefName(fld))
 		}
 		if primArrayElem(fld.Elem) {
 			return fmt.Sprintf("%s == null || %s.Length == 0", acc, acc)
@@ -512,14 +513,14 @@ func (g *gen) emitMarshalAt(f *cfile, ind string, fld *ir.Field, acc string, for
 		// With an empty default the content compare degenerates to a length
 		// check, sparing the LINQ SequenceEqual enumeration per call.
 		if forced {
-			f.line("%sos.WriteBlob(%d, %s ?? Array.Empty<byte>());", ind, fld.ID, acc)
+			f.line("%sos.WriteBlob(%d, %s ?? global::System.Array.Empty<byte>());", ind, fld.ID, acc)
 			return
 		}
-		if g.csDefaultValue(fld) == "Array.Empty<byte>()" {
+		if g.csDefaultValue(fld) == "global::System.Array.Empty<byte>()" {
 			f.line("%sif (%s != null && %s.Length != 0) { os.WriteBlob(%d, %s); }", ind, acc, acc, fld.ID, acc)
 			return
 		}
-		f.line("%sif (!System.Linq.Enumerable.SequenceEqual(%s ?? Array.Empty<byte>(), %s)) { os.WriteBlob(%d, %s ?? Array.Empty<byte>()); }", ind, acc, g.csDefaultValue(fld), fld.ID, acc)
+		f.line("%sif (!global::System.Linq.Enumerable.SequenceEqual(%s ?? global::System.Array.Empty<byte>(), %s)) { os.WriteBlob(%d, %s ?? global::System.Array.Empty<byte>()); }", ind, acc, g.csDefaultValue(fld), fld.ID, acc)
 		return
 	case ir.KindStruct, ir.KindUnion:
 		// MESSAGE_SPEC S2: the != default test is per field and a sequence-typed
@@ -577,7 +578,7 @@ func (g *gen) emitMarshalArray(f *cfile, ind string, fld *ir.Field, acc string, 
 		id := fmt.Sprintf("%d", fld.ID)
 		switch {
 		case primArrayElem(fld.Elem):
-			v := fmt.Sprintf("(%s ?? Array.Empty<%s>())", acc, primArrayBase(fld.Elem, fld.ElemRef))
+			v := fmt.Sprintf("(%s ?? global::System.Array.Empty<%s>())", acc, primArrayBase(fld.Elem, fld.ElemRef))
 			g.marshalArray(f, ind, id, v, fld.Elem, fld.ElemRef, fld.ElemItems, 0, true, "")
 		default:
 			// A List: the boolean array, or a wrapper array. Read once into a
@@ -604,7 +605,7 @@ func (g *gen) emitMarshalArray(f *cfile, ind string, fld *ir.Field, acc string, 
 		// Primitive array (T[]): written straight to the OStream overload with
 		// no List.ToArray temporary.
 		if _, ok := g.csArrayCompareDefault(fld); ok {
-			f.line("%sif (!System.Linq.Enumerable.SequenceEqual(%s, %s)) {", ind, acc, arrDefName(fld))
+			f.line("%sif (!global::System.Linq.Enumerable.SequenceEqual(%s, %s)) {", ind, acc, arrDefName(fld))
 		} else {
 			f.line("%sif (%s != null && %s.Length != 0) {", ind, acc, acc)
 		}
@@ -614,7 +615,7 @@ func (g *gen) emitMarshalArray(f *cfile, ind string, fld *ir.Field, acc string, 
 	}
 	if nativeArrayElem(fld.Elem) {
 		if _, ok := g.csArrayCompareDefault(fld); ok {
-			f.line("%sif (!System.Linq.Enumerable.SequenceEqual(%s, %s)) {", ind, acc, arrDefName(fld))
+			f.line("%sif (!global::System.Linq.Enumerable.SequenceEqual(%s, %s)) {", ind, acc, arrDefName(fld))
 		} else {
 			f.line("%sif (%s.Count != 0) {", ind, acc)
 		}
@@ -727,17 +728,17 @@ func (g *gen) marshalArray(f *cfile, ind, idExpr, val string, elem ir.Kind, ref 
 		if isPrim {
 			f.line("%sos.WriteArraySigned(%s, %s);", ind, idExpr, arr)
 		} else {
-			f.line("%sos.WriteArraySigned(%s, Array.ConvertAll(%s.ToArray(), _x => (%s)_x));", ind, idExpr, val, enumBacking(ref.Target))
+			f.line("%sos.WriteArraySigned(%s, global::System.Array.ConvertAll(%s.ToArray(), _x => (%s)_x));", ind, idExpr, val, enumBacking(ref.Target))
 		}
 	case ir.KindBitfield:
 		if isPrim {
 			f.line("%sos.WriteArrayUnsigned(%s, %s);", ind, idExpr, arr)
 		} else {
-			f.line("%sos.WriteArrayUnsigned(%s, Array.ConvertAll(%s.ToArray(), _x => (%s)_x));", ind, idExpr, val, bitfieldBacking(ref.Target))
+			f.line("%sos.WriteArrayUnsigned(%s, global::System.Array.ConvertAll(%s.ToArray(), _x => (%s)_x));", ind, idExpr, val, bitfieldBacking(ref.Target))
 		}
 	case ir.KindBool:
 		// boolean -> unsigned u8 array of 0/1.
-		f.line("%sos.WriteArrayUnsigned(%s, Array.ConvertAll(%s.ToArray(), _x => _x ? (byte)1 : (byte)0));", ind, idExpr, val)
+		f.line("%sos.WriteArrayUnsigned(%s, global::System.Array.ConvertAll(%s.ToArray(), _x => _x ? (byte)1 : (byte)0));", ind, idExpr, val)
 	case ir.KindString:
 		// A string element is a leaf: in the array's INTERIOR it is omitted when it
 		// equals the element default (empty), leaving an id gap the decoder restores
@@ -750,7 +751,7 @@ func (g *gen) marshalArray(f *cfile, ind, idExpr, val string, elem ir.Kind, ref 
 	case ir.KindBlob:
 		// A blob element is a leaf, exactly like the string element above.
 		f.line("%sos.WriteSequenceBeginLazy(%s);", ind, idExpr)
-		f.line("%s%s { if ((%s[%s] ?? Array.Empty<byte>()).Length != 0 || %s) os.WriteBlob(%s, %s[%s] ?? Array.Empty<byte>()); }", ind, loop, val, iv, last, iv, val, iv)
+		f.line("%s%s { if ((%s[%s] ?? global::System.Array.Empty<byte>()).Length != 0 || %s) os.WriteBlob(%s, %s[%s] ?? global::System.Array.Empty<byte>()); }", ind, loop, val, iv, last, iv, val, iv)
 		emitSeqEnd(f, ind, keepIf)
 	case ir.KindStruct, ir.KindUnion:
 		// A sequence-form element obeys the SAME rule as the leaf elements above --

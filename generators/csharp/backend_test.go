@@ -70,7 +70,7 @@ func TestCsOverIndexWrapperArray(t *testing.T) {
 		`case (Root_bs, _): global::sofab.Seq.CheckIndex(id, 4, MaxDynArrayCount);`,
 		`case (Root_bs, _): global::sofab.Seq.PlaceElem(m.bs, id, "", _s, 4, MaxDynArrayCount); break;`,
 		`case (Root_bb, _): global::sofab.Seq.CheckIndex(id, 3, MaxDynArrayCount);`,
-		`case (Root_bb, _): global::sofab.Seq.PlaceElem(m.bb, id, Array.Empty<byte>(), _b, 3, MaxDynArrayCount); break;`,
+		`case (Root_bb, _): global::sofab.Seq.PlaceElem(m.bb, id, global::System.Array.Empty<byte>(), _b, 3, MaxDynArrayCount); break;`,
 		`case (Root_bp, _): global::sofab.Seq.ReserveElem(m.bp, id, static () => new `,
 		`(), 2, MaxDynArrayCount); _ixRoot_bp = id; cur = Root_bp_e; break;`,
 	} {
@@ -108,10 +108,10 @@ func TestCsMaxlenReject(t *testing.T) {
 	for _, want := range []string{
 		// Bounded scalar string + blob: the per-field maxlen check sits at the
 		// LENGTH WORD, in FixlenBegin, and nowhere else.
-		`case (Root, 0): if (total > 8) throw new SofabException(SofabError.InvalidMessage, "s: string length above schema maxlen 8"); break;`,
-		`case (Root, 1): if (total > 8) throw new SofabException(SofabError.InvalidMessage, "b: blob length above schema maxlen 8"); break;`,
+		`case (Root, 0): if (total > 8) throw new global::sofab.SofabException(global::sofab.SofabError.InvalidMessage, "s: string length above schema maxlen 8"); break;`,
+		`case (Root, 1): if (total > 8) throw new global::sofab.SofabException(global::sofab.SofabError.InvalidMessage, "b: blob length above schema maxlen 8"); break;`,
 		// Bounded wrapper string element: keyed by the array location, element id agnostic.
-		`case (Root_ws, _): global::sofab.Seq.CheckIndex(id, -1, MaxDynArrayCount); if (total > 5) throw new SofabException(SofabError.InvalidMessage, "Root_ws element: string length above schema maxlen 5"); break;`,
+		`case (Root_ws, _): global::sofab.Seq.CheckIndex(id, -1, MaxDynArrayCount); if (total > 5) throw new global::sofab.SofabException(global::sofab.SofabError.InvalidMessage, "Root_ws element: string length above schema maxlen 5"); break;`,
 	} {
 		if !strings.Contains(m, want) {
 			t.Errorf("Message.cs missing maxlen guard %q\n%s", want, m)
@@ -174,10 +174,10 @@ func TestCsArrayAtScalarSkip(t *testing.T) {
 		"private int askip = 0;",
 		// Armed in ArrayBegin, one arm per array kind (#254).
 		"askip = kind switch {",
-		"            ArrayKind.Unsigned => (cur, id) switch {",
-		"            ArrayKind.Signed => (cur, id) switch {",
-		"            ArrayKind.Fp32 => (cur, id) switch {",
-		"            ArrayKind.Fp64 => (cur, id) switch {",
+		"            global::sofab.ArrayKind.Unsigned => (cur, id) switch {",
+		"            global::sofab.ArrayKind.Signed => (cur, id) switch {",
+		"            global::sofab.ArrayKind.Fp32 => (cur, id) switch {",
+		"            global::sofab.ArrayKind.Fp64 => (cur, id) switch {",
 		// Each declared array disarms under ITS OWN kind: the u32 array (id 2) and
 		// the nested u16 inner scope under Unsigned, the i32 array (id 3) under
 		// Signed, the fp32 array (id 4) under Fp32 (#193, re-keyed by subtype in #259).
@@ -201,25 +201,25 @@ func TestCsArrayAtScalarSkip(t *testing.T) {
 	// Unsigned and Signed are not one case (generator#254): the u32 array (id 2)
 	// must not disarm the counter for an array-signed header, nor the i32 array
 	// (id 3) for an array-unsigned one.
-	if strings.Contains(m, "ArrayKind.Unsigned or ArrayKind.Signed") {
+	if strings.Contains(m, "global::sofab.ArrayKind.Unsigned or global::sofab.ArrayKind.Signed") {
 		t.Errorf("Unsigned and Signed must be separate arms (generator#254):\n%s", m)
 	}
 	for _, want := range []string{
-		"            ArrayKind.Unsigned => (cur, id) switch {\n                (Root, 2) => 0,\n                (Root_na, _) => 0,\n                _ => count,\n            },",
-		"            ArrayKind.Signed => (cur, id) switch {\n                (Root, 3) => 0,\n                _ => count,\n            },",
+		"            global::sofab.ArrayKind.Unsigned => (cur, id) switch {\n                (Root, 2) => 0,\n                (Root_na, _) => 0,\n                _ => count,\n            },",
+		"            global::sofab.ArrayKind.Signed => (cur, id) switch {\n                (Root, 3) => 0,\n                _ => count,\n            },",
 		// The fp32 array is the ONLY disarming id under Fp32, and no id at all
 		// disarms under Fp64: this message declares no fp64 array, so every fp64
 		// header it can receive is a §7.3 skip (generator#259).
-		"            ArrayKind.Fp32 => (cur, id) switch {\n                (Root, 4) => 0,\n                _ => count,\n            },",
-		"            ArrayKind.Fp64 => (cur, id) switch {\n                _ => count,\n            },",
+		"            global::sofab.ArrayKind.Fp32 => (cur, id) switch {\n                (Root, 4) => 0,\n                _ => count,\n            },",
+		"            global::sofab.ArrayKind.Fp64 => (cur, id) switch {\n                _ => count,\n            },",
 	} {
 		if !strings.Contains(m, want) {
 			t.Errorf("Message.cs missing per-kind skip arm %q:\n%s", want, m)
 		}
 	}
 	// The collapsed fixlen category is gone from the ABI (generator#259).
-	if strings.Contains(m, "ArrayKind.Fixlen") {
-		t.Errorf("ArrayKind.Fixlen no longer exists; fixlen arrays are keyed by subtype:\n%s", m)
+	if strings.Contains(m, "global::sofab.ArrayKind.Fixlen") {
+		t.Errorf("global::sofab.ArrayKind.Fixlen no longer exists; fixlen arrays are keyed by subtype:\n%s", m)
 	}
 }
 
@@ -255,23 +255,23 @@ messages:
 	m := buildModule(t, src, "in.yaml", map[string]any{"namespace": "S"})
 	for _, want := range []string{
 		// The kind test fronts the allocation AND precedes the schema bound.
-		`case (Root, 0): if (kind != ArrayKind.Unsigned) break; if (count > 5) throw new SofabException(SofabError.InvalidMessage, "ua: array count above schema capacity 5"); m.ua = new byte[count]; break;`,
-		`case (Root, 1): if (kind != ArrayKind.Signed) break; if (count > 5) throw new SofabException(SofabError.InvalidMessage, "ia: array count above schema capacity 5"); m.ia = new sbyte[count]; break;`,
-		`case (Root, 2): if (kind != ArrayKind.Fp32) break; if (count > 3) throw new SofabException(SofabError.InvalidMessage, "fa: array count above schema capacity 3"); m.fa = new float[count]; break;`,
+		`case (Root, 0): if (kind != global::sofab.ArrayKind.Unsigned) break; if (count > 5) throw new global::sofab.SofabException(global::sofab.SofabError.InvalidMessage, "ua: array count above schema capacity 5"); m.ua = new byte[count]; break;`,
+		`case (Root, 1): if (kind != global::sofab.ArrayKind.Signed) break; if (count > 5) throw new global::sofab.SofabException(global::sofab.SofabError.InvalidMessage, "ia: array count above schema capacity 5"); m.ia = new sbyte[count]; break;`,
+		`case (Root, 2): if (kind != global::sofab.ArrayKind.Fp32) break; if (count > 3) throw new global::sofab.SofabException(global::sofab.SofabError.InvalidMessage, "fa: array count above schema capacity 3"); m.fa = new float[count]; break;`,
 		// A boolean array is a List: clearing it is decoding into it too, so the
 		// kind test fronts the Clear() as well. An ENUM array is a primitive array
 		// at the width its declaration implies, so it allocates exactly as `ia`
 		// does. boolean rides the Unsigned wire type, enum the Signed one.
-		`case (Root, 3): if (kind != ArrayKind.Unsigned) break; if (count > 2) throw new SofabException(SofabError.InvalidMessage, "ba: array count above schema capacity 2"); m.ba.Clear(); break;`,
-		`case (Root, 4): if (kind != ArrayKind.Signed) break; if (count > 2) throw new SofabException(SofabError.InvalidMessage, "ea: array count above schema capacity 2"); m.ea = new sbyte[count]; break;`,
+		`case (Root, 3): if (kind != global::sofab.ArrayKind.Unsigned) break; if (count > 2) throw new global::sofab.SofabException(global::sofab.SofabError.InvalidMessage, "ba: array count above schema capacity 2"); m.ba.Clear(); break;`,
+		`case (Root, 4): if (kind != global::sofab.ArrayKind.Signed) break; if (count > 2) throw new global::sofab.SofabException(global::sofab.SofabError.InvalidMessage, "ea: array count above schema capacity 2"); m.ea = new sbyte[count]; break;`,
 		// A count-less array has no schema bound, so the target's finite default
 		// cap governs it (§9.5, generator#385) -- like a schema bound, checked
 		// BEHIND the kind test.
-		`case (Root, 5): if (kind != ArrayKind.Unsigned) break; if (count > MaxDynArrayCount) throw new SofabException(SofabError.LimitExceeded, "da: array count above configured limit 65536"); m.da = new ushort[count]; break;`,
+		`case (Root, 5): if (kind != global::sofab.ArrayKind.Unsigned) break; if (count > MaxDynArrayCount) throw new global::sofab.SofabException(global::sofab.SofabError.LimitExceeded, "da: array count above configured limit 65536"); m.da = new ushort[count]; break;`,
 		// The skip counter is armed per kind; each id disarms under its own kind only.
-		"            ArrayKind.Unsigned => (cur, id) switch {\n                (Root, 0) => 0,\n                (Root, 3) => 0,\n                (Root, 5) => 0,\n                _ => count,\n            },",
-		"            ArrayKind.Signed => (cur, id) switch {\n                (Root, 1) => 0,\n                (Root, 4) => 0,\n                _ => count,\n            },",
-		"            ArrayKind.Fp32 => (cur, id) switch {\n                (Root, 2) => 0,\n                _ => count,\n            },",
+		"            global::sofab.ArrayKind.Unsigned => (cur, id) switch {\n                (Root, 0) => 0,\n                (Root, 3) => 0,\n                (Root, 5) => 0,\n                _ => count,\n            },",
+		"            global::sofab.ArrayKind.Signed => (cur, id) switch {\n                (Root, 1) => 0,\n                (Root, 4) => 0,\n                _ => count,\n            },",
+		"            global::sofab.ArrayKind.Fp32 => (cur, id) switch {\n                (Root, 2) => 0,\n                _ => count,\n            },",
 	} {
 		if !strings.Contains(m, want) {
 			t.Errorf("Message.cs missing §7.3 mis-typed-array guard %q:\n%s", want, m)
@@ -316,20 +316,20 @@ messages:
 	for _, want := range []string{
 		// Each declared fixlen array is fronted by ITS OWN subtype's kind test, with
 		// the schema capacity bound behind it.
-		`case (Root, 0): if (kind != ArrayKind.Fp32) break; if (count > 4) throw new SofabException(SofabError.InvalidMessage, "f32: array count above schema capacity 4"); m.f32 = new float[count]; break;`,
-		`case (Root, 1): if (kind != ArrayKind.Fp64) break; if (count > 2) throw new SofabException(SofabError.InvalidMessage, "f64: array count above schema capacity 2"); m.f64 = new double[count]; break;`,
+		`case (Root, 0): if (kind != global::sofab.ArrayKind.Fp32) break; if (count > 4) throw new global::sofab.SofabException(global::sofab.SofabError.InvalidMessage, "f32: array count above schema capacity 4"); m.f32 = new float[count]; break;`,
+		`case (Root, 1): if (kind != global::sofab.ArrayKind.Fp64) break; if (count > 2) throw new global::sofab.SofabException(global::sofab.SofabError.InvalidMessage, "f64: array count above schema capacity 2"); m.f64 = new double[count]; break;`,
 		// A count-less fixlen array has no schema bound, so the finite default cap
 		// governs it (§9.5, generator#385), behind the kind test.
-		`case (Root, 2): if (kind != ArrayKind.Fp32) break; if (count > MaxDynArrayCount) throw new SofabException(SofabError.LimitExceeded, "dyn: array count above configured limit 65536"); m.dyn = new float[count]; break;`,
+		`case (Root, 2): if (kind != global::sofab.ArrayKind.Fp32) break; if (count > MaxDynArrayCount) throw new global::sofab.SofabException(global::sofab.SofabError.LimitExceeded, "dyn: array count above configured limit 65536"); m.dyn = new float[count]; break;`,
 		// The skip counter: the fp32 ids disarm only under Fp32, the fp64 id only
 		// under Fp64. An fp64 header at id 0 therefore arms `count` discards.
-		"            ArrayKind.Fp32 => (cur, id) switch {\n                (Root, 0) => 0,\n                (Root, 2) => 0,\n                _ => count,\n            },",
-		"            ArrayKind.Fp64 => (cur, id) switch {\n                (Root, 1) => 0,\n                _ => count,\n            },",
+		"            global::sofab.ArrayKind.Fp32 => (cur, id) switch {\n                (Root, 0) => 0,\n                (Root, 2) => 0,\n                _ => count,\n            },",
+		"            global::sofab.ArrayKind.Fp64 => (cur, id) switch {\n                (Root, 1) => 0,\n                _ => count,\n            },",
 		// The fill counter is the exact complement: armed only under the matching
 		// subtype, so a mis-typed header never stores an element either.
 		"        afill = kind switch {",
-		"            ArrayKind.Fp32 => (cur, id) switch {\n                (Root, 0) => count,\n                (Root, 2) => count,\n                _ => 0,\n            },",
-		"            ArrayKind.Fp64 => (cur, id) switch {\n                (Root, 1) => count,\n                _ => 0,\n            },",
+		"            global::sofab.ArrayKind.Fp32 => (cur, id) switch {\n                (Root, 0) => count,\n                (Root, 2) => count,\n                _ => 0,\n            },",
+		"            global::sofab.ArrayKind.Fp64 => (cur, id) switch {\n                (Root, 1) => count,\n                _ => 0,\n            },",
 	} {
 		if !strings.Contains(m, want) {
 			t.Errorf("Message.cs missing subtype-keyed fixlen arm %q:\n%s", want, m)
@@ -337,15 +337,15 @@ messages:
 	}
 	for _, bad := range []string{
 		// The collapsed category is gone from the corelib ABI entirely.
-		"ArrayKind.Fixlen",
+		"global::sofab.ArrayKind.Fixlen",
 		// The bound must never precede the kind test, on either subtype: an
 		// over-count MIS-TYPED fixlen header is a skip, not an InvalidMessage.
 		"case (Root, 0): if (count > 4)",
 		"case (Root, 1): if (count > 2)",
 		// An fp64 id must never disarm the fp32 counter, nor the reverse: that is
 		// exactly the fold that let a declared float[] be sized from an fp64 header.
-		"            ArrayKind.Fp32 => (cur, id) switch {\n                (Root, 0) => 0,\n                (Root, 1) => 0,",
-		"            ArrayKind.Fp64 => (cur, id) switch {\n                (Root, 0) => 0,",
+		"            global::sofab.ArrayKind.Fp32 => (cur, id) switch {\n                (Root, 0) => 0,\n                (Root, 1) => 0,",
+		"            global::sofab.ArrayKind.Fp64 => (cur, id) switch {\n                (Root, 0) => 0,",
 	} {
 		if strings.Contains(m, bad) {
 			t.Errorf("Message.cs must not contain %q (generator#259):\n%s", bad, m)
@@ -356,34 +356,33 @@ messages:
 func TestCsStructural(t *testing.T) {
 	m := exampleModule(t)
 	for _, want := range []string{
-		"using sofab;",
 		"namespace Sofabuffers;",
 		"public sealed class Myfirstmessage {",
-		"public void Serialize(OStream os)",
+		"public void Serialize(global::sofab.OStream os)",
 		"public byte[] Encode()",
 		"public static Myfirstmessage Decode(byte[] data)",
-		"public static DecodeStatus TryDecode(byte[] data, out Myfirstmessage msg)", // status-surfacing decode (#105)
-		"internal sealed class MyfirstmessageVisitor : IVisitor {",
+		"public static global::sofab.DecodeStatus TryDecode(byte[] data, out Myfirstmessage msg)", // status-surfacing decode (#105)
+		"internal sealed class _Myfirstmessage__Visitor : global::sofab.IVisitor {",
 		"public void SequenceBegin(int id)", // flat-visitor nesting
 		"public ulong someu64 = 18446744073709551615UL;",
-		"public enum MyfirstmessageSomeenum : sbyte {",
+		"public enum Myfirstmessage_Someenum : sbyte {",
 		// Reassembly of a split payload and the strict UTF-8 verdict are the
 		// corelib's (corelib-cs#92): the value comes back on the chunk that
 		// completes it, invalid UTF-8 as INVALID (issue #85).
 		// The accumulator is created only for a payload split across feeds; one
 		// that arrives whole takes PayloadAcc's own one-chunk branch inline, cap
 		// check first.
-		"private PayloadAcc pay;",
+		"private global::sofab.PayloadAcc pay;",
 		"if (offset == 0 && chunkLength >= total) { _s = global::sofab.Utf8.Decode(data, chunkOffset, total); }",
-		"else _s = (pay ??= new PayloadAcc()).String(total, offset, data, chunkOffset, chunkLength, _cap);",
-		"if (offset == 0 && chunkLength >= total) { _b = new byte[total]; Array.Copy(data, chunkOffset, _b, 0, total); }",
-		"else _b = (pay ??= new PayloadAcc()).Blob(total, offset, data, chunkOffset, chunkLength, _cap);",
+		"else _s = (pay ??= new global::sofab.PayloadAcc()).String(total, offset, data, chunkOffset, chunkLength, _cap);",
+		"if (offset == 0 && chunkLength >= total) { _b = new byte[total]; global::System.Array.Copy(data, chunkOffset, _b, 0, total); }",
+		"else _b = (pay ??= new global::sofab.PayloadAcc()).Blob(total, offset, data, chunkOffset, chunkLength, _cap);",
 		// Encode() reuses a per-thread encoder; Reset drops whatever a previous,
 		// failed Encode() left open.
-		"[ThreadStatic] private static OStream _encStream;",
-		"if (os == null) { _encStream = os = new OStream(buf); } else { os.Reset(buf, 0); }",
+		"[global::System.ThreadStatic] private static global::sofab.OStream _encStream;",
+		"if (os == null) { _encStream = os = new global::sofab.OStream(buf); } else { os.Reset(buf, 0); }",
 		// over-count scalar array rejected as INVALID before the (untrusted-count) allocation (#100)
-		"if (count > 4) throw new SofabException(SofabError.InvalidMessage, \"someuintarray: array count above schema capacity 4\"); ",
+		"if (count > 4) throw new global::sofab.SofabException(global::sofab.SofabError.InvalidMessage, \"someuintarray: array count above schema capacity 4\"); ",
 	} {
 		if !strings.Contains(m, want) {
 			t.Errorf("Message.cs missing %q", want)
@@ -421,11 +420,11 @@ messages:
 	m := buildModule(t, []byte(src), "meta.yaml", map[string]any{"namespace": "Demo.Messages"})
 	for _, want := range []string{
 		// Deprecated field: doc note + native [Obsolete] attribute.
-		"/// Old identifier retained for backward compatibility.\n    /// Deprecated.\n    /// </summary>\n    [Obsolete]\n    public uint legacyId;",
+		"/// Old identifier retained for backward compatibility.\n    /// Deprecated.\n    /// </summary>\n    [global::System.Obsolete]\n    public uint legacyId;",
 		// Internal access to the deprecated field is CS0612-suppressed.
-		"    public void Serialize(OStream os) {\n#pragma warning disable 612 // internal access to a member marked [Obsolete] (CS0612)",
+		"    public void Serialize(global::sofab.OStream os) {\n#pragma warning disable 612 // internal access to a member marked [Obsolete] (CS0612)",
 		"#pragma warning restore 612\n    }",
-		"#pragma warning disable 612 // internal access to a member marked [Obsolete] (CS0612)\ninternal sealed class TelemetryVisitor : IVisitor {",
+		"#pragma warning disable 612 // internal access to a member marked [Obsolete] (CS0612)\ninternal sealed class _Telemetry__Visitor : global::sofab.IVisitor {",
 		// Enum constant descriptions.
 		"/// <summary>\n    /// Node is powered down.\n    /// </summary>\n    Off = 0,",
 		"/// <summary>\n    /// Node is sampling and transmitting.\n    /// </summary>\n    Active = 1,",
@@ -481,19 +480,19 @@ messages:
 		"private const long MaxDynStringLen = 4096;",
 		// Unbounded array: LimitExceeded at the count header, then a bounded
 		// initial reservation grown on demand — never `new ulong[count]`.
-		"case (Root, 1): if (kind != ArrayKind.Unsigned) break; if (count > MaxDynArrayCount) throw new SofabException(SofabError.LimitExceeded, \"arr: array count above configured limit 65536\"); m.arr = new ulong[count]; break;",
+		"case (Root, 1): if (kind != global::sofab.ArrayKind.Unsigned) break; if (count > MaxDynArrayCount) throw new global::sofab.SofabException(global::sofab.SofabError.LimitExceeded, \"arr: array count above configured limit 65536\"); m.arr = new ulong[count]; break;",
 		"m.arr[ai++] = (ulong)value;",
 		// Bounded array: only the #100 schema-capacity guard, and an alloc at the
 		// WIRE count -- `count: N` is a capacity, so M is the length (§3) and the
 		// guard is what still bounds the untrusted count.
-		"case (Root, 2): if (kind != ArrayKind.Signed) break; if (count > 100000) throw new SofabException(SofabError.InvalidMessage, \"barr: array count above schema capacity 100000\"); m.barr = new int[count]; break;",
+		"case (Root, 2): if (kind != global::sofab.ArrayKind.Signed) break; if (count > 100000) throw new global::sofab.SofabException(global::sofab.SofabError.InvalidMessage, \"barr: array count above schema capacity 100000\"); m.barr = new int[count]; break;",
 		// Unbounded string: the cap travels into PayloadAcc, which compares
 		// `total` against it before it takes a byte (CORELIB_PLAN §6.2.1,
 		// corelib-cs#101). The number is still this layer's -- passed per call,
 		// never held by the corelib and with no omitted-argument "unlimited".
 		"case (Root, 0): _cap = MaxDynStringLen; break;",
-		"else _s = (pay ??= new PayloadAcc()).String(total, offset, data, chunkOffset, chunkLength, _cap);",
-		"PayloadAcc.CheckStringLength(total, _cap); _s = global::sofab.Utf8.Decode(data, chunkOffset, total);",
+		"else _s = (pay ??= new global::sofab.PayloadAcc()).String(total, offset, data, chunkOffset, chunkLength, _cap);",
+		"global::sofab.PayloadAcc.CheckStringLength(total, _cap); _s = global::sofab.Utf8.Decode(data, chunkOffset, total);",
 	} {
 		if !strings.Contains(m, want) {
 			t.Errorf("Message.cs missing %q", want)
@@ -513,7 +512,7 @@ messages:
 	plain := buildModule(t, []byte(src), "dyn.yaml", map[string]any{})
 	for _, want := range []string{
 		"const long MaxDynArrayCount = 65536;",
-		"case (Root, 1): if (kind != ArrayKind.Unsigned) break; if (count > MaxDynArrayCount) throw new SofabException(SofabError.LimitExceeded, \"arr: array count above configured limit 65536\"); m.arr = new ulong[count]; break;",
+		"case (Root, 1): if (kind != global::sofab.ArrayKind.Unsigned) break; if (count > MaxDynArrayCount) throw new global::sofab.SofabException(global::sofab.SofabError.LimitExceeded, \"arr: array count above configured limit 65536\"); m.arr = new ulong[count]; break;",
 		"m.arr[ai++] = (ulong)value;",
 	} {
 		if !strings.Contains(plain, want) {
@@ -579,23 +578,23 @@ messages:
 		"os.WriteArraySigned(2, this.ffs);",
 		"os.WriteArrayFp32(3, this.ff32);",
 		"os.WriteArrayFp64(4, this.ff64);",
-		"os.WriteArrayUnsigned(5, Array.ConvertAll(this.fb.ToArray(), _x => _x ? (byte)1 : (byte)0));",
+		"os.WriteArrayUnsigned(5, global::System.Array.ConvertAll(this.fb.ToArray(), _x => _x ? (byte)1 : (byte)0));",
 		"os.WriteArraySigned(6, this.fe);",
 		"os.WriteArrayUnsigned(7, this.fp);",
 
 		// A fresh count:N array is EMPTY (nothing materialized to N), and a declared
 		// default shorter than N stands exactly as written (never tail-padded).
-		"public uint[] fx = Array.Empty<uint>();",
-		"public double[] ff64 = Array.Empty<double>();",
+		"public uint[] fx = global::System.Array.Empty<uint>();",
+		"public double[] ff64 = global::System.Array.Empty<double>();",
 		// ...but a small bound sizes the List's CAPACITY, so decoding up to N
 		// elements never regrows it. Count is still 0.
-		"public List<bool> fb = new(3);",
-		"public byte[] fp = Array.Empty<byte>();",
-		"public List<string> strs = new(2);",
-		"public List<string> edge = new(64);",
+		"public global::System.Collections.Generic.List<bool> fb = new(3);",
+		"public byte[] fp = global::System.Array.Empty<byte>();",
+		"public global::System.Collections.Generic.List<string> strs = new(2);",
+		"public global::System.Collections.Generic.List<string> edge = new(64);",
 		// Above presizeMaxCount, and without a count, the default capacity.
-		"public List<string> big = new();",
-		"public List<string> free = new();",
+		"public global::System.Collections.Generic.List<string> big = new();",
+		"public global::System.Collections.Generic.List<string> free = new();",
 		"public float[] ff32 = new float[]{1.5f};",
 		"public sbyte[] fe = new sbyte[]{2};",
 		"public uint[] fxd = new uint[]{1, 2};",
@@ -604,16 +603,16 @@ messages:
 		// Decode takes the M elements that arrived and nothing else: the primitive
 		// arrays allocate the WIRE count (the #100 guard still bounds it by N), the
 		// List<T> ones clear and append.
-		`case (Root, 0): if (kind != ArrayKind.Unsigned) break; if (count > 5) throw new SofabException(SofabError.InvalidMessage, "fx: array count above schema capacity 5"); m.fx = new uint[count]; break;`,
-		`case (Root, 3): if (kind != ArrayKind.Fp32) break; if (count > 4) throw new SofabException(SofabError.InvalidMessage, "ff32: array count above schema capacity 4"); m.ff32 = new float[count]; break;`,
-		`case (Root, 5): if (kind != ArrayKind.Unsigned) break; if (count > 3) throw new SofabException(SofabError.InvalidMessage, "fb: array count above schema capacity 3"); m.fb.Clear(); break;`,
+		`case (Root, 0): if (kind != global::sofab.ArrayKind.Unsigned) break; if (count > 5) throw new global::sofab.SofabException(global::sofab.SofabError.InvalidMessage, "fx: array count above schema capacity 5"); m.fx = new uint[count]; break;`,
+		`case (Root, 3): if (kind != global::sofab.ArrayKind.Fp32) break; if (count > 4) throw new global::sofab.SofabException(global::sofab.SofabError.InvalidMessage, "ff32: array count above schema capacity 4"); m.ff32 = new float[count]; break;`,
+		`case (Root, 5): if (kind != global::sofab.ArrayKind.Unsigned) break; if (count > 3) throw new global::sofab.SofabException(global::sofab.SofabError.InvalidMessage, "fb: array count above schema capacity 3"); m.fb.Clear(); break;`,
 		"case (Root, 5): if (afill == 0) break; afill--; m.fb.Add(value != 0); break;",
 		// Both kinds carry their §1 width bound between fillGuard and the store
 		// (generator#516): {0,1,2} implies an i8 and positions {0,1} imply a u8,
 		// so an element outside those intervals is INVALID -- and one inside them
 		// decodes whether or not the schema names it.
-		`case (Root, 6): if (afill == 0) break; afill--; if (value < -128 || value > 127) throw new SofabException(SofabError.InvalidMessage, "fe element: value outside declared enum width"); m.fe[ai++] = (sbyte)value; break;`,
-		`case (Root, 7): if (afill == 0) break; afill--; if (value > 255) throw new SofabException(SofabError.InvalidMessage, "fp element: value outside declared bitfield width"); m.fp[ai++] = (byte)value; break;`,
+		`case (Root, 6): if (afill == 0) break; afill--; if (value < -128 || value > 127) throw new global::sofab.SofabException(global::sofab.SofabError.InvalidMessage, "fe element: value outside declared enum width"); m.fe[ai++] = (sbyte)value; break;`,
+		`case (Root, 7): if (afill == 0) break; afill--; if (value > 255) throw new global::sofab.SofabException(global::sofab.SofabError.InvalidMessage, "fp element: value outside declared bitfield width"); m.fp[ai++] = (byte)value; break;`,
 
 		// A count:N array with no declared default is default only when EMPTY: an
 		// all-zero length-N value is a different value and stays on the wire.
@@ -676,15 +675,15 @@ messages:
 		// LEAF elements: the omit test is `!= default || last`, unconditionally —
 		// the count:N array is written exactly like the count-less one beside it.
 		`for (int _i0 = 0, _n0 = this.dynstr.Count; _i0 < _n0; _i0++) { if ((this.dynstr[_i0] ?? "") != "" || _i0 == _n0 - 1) os.WriteString(_i0, this.dynstr[_i0] ?? ""); }`,
-		`for (int _i0 = 0, _n0 = this.dynblob.Count; _i0 < _n0; _i0++) { if ((this.dynblob[_i0] ?? Array.Empty<byte>()).Length != 0 || _i0 == _n0 - 1) os.WriteBlob(_i0, this.dynblob[_i0] ?? Array.Empty<byte>()); }`,
+		`for (int _i0 = 0, _n0 = this.dynblob.Count; _i0 < _n0; _i0++) { if ((this.dynblob[_i0] ?? global::System.Array.Empty<byte>()).Length != 0 || _i0 == _n0 - 1) os.WriteBlob(_i0, this.dynblob[_i0] ?? global::System.Array.Empty<byte>()); }`,
 		`for (int _i0 = 0, _n0 = this.fixedstr.Count; _i0 < _n0; _i0++) { if ((this.fixedstr[_i0] ?? "") != "" || _i0 == _n0 - 1) os.WriteString(_i0, this.fixedstr[_i0] ?? ""); }`,
 
 		// SEQUENCE elements: the same rule, applied to the lazily-held frame. The
 		// dropping closer in the interior (an all-default element writes no child, so
 		// the frame vanishes and leaves an id gap), the keeping one at the last index.
-		"os.WriteSequenceBeginLazy(_i0); (this.fixedobj[_i0] ?? new VecFixedobjElem()).Serialize(os);\n" +
+		"os.WriteSequenceBeginLazy(_i0); (this.fixedobj[_i0] ?? new Vec_Fixedobj()).Serialize(os);\n" +
 			"            if (_i0 == _n0 - 1) os.WriteSequenceEndKeep(); else os.WriteSequenceEnd();",
-		"os.WriteSequenceBeginLazy(_i0); (this.dynobj[_i0] ?? new VecDynobjElem()).Serialize(os);\n" +
+		"os.WriteSequenceBeginLazy(_i0); (this.dynobj[_i0] ?? new Vec_Dynobj()).Serialize(os);\n" +
 			"            if (_i0 == _n0 - 1) os.WriteSequenceEndKeep(); else os.WriteSequenceEnd();",
 
 		// A NATIVE nested row has no frame of its own, so the rule lands on the write.
@@ -763,11 +762,11 @@ messages:
 	m := buildModule(t, []byte(src), "m.yaml", map[string]any{})
 	for _, want := range []string{
 		// FIELD: a struct field may vanish whole when every child is at its default.
-		"os.WriteSequenceBeginLazy(0); (this.nested ?? new MNested()).Serialize(os); os.WriteSequenceEnd();",
+		"os.WriteSequenceBeginLazy(0); (this.nested ?? new M_Nested()).Serialize(os); os.WriteSequenceEnd();",
 		// FIELD: the wrapper of a struct-element array, closed by the dropping end.
 		"        os.WriteSequenceBeginLazy(1);\n" +
 			"        for (int _i0 = 0, _n0 = this.structs.Count; _i0 < _n0; _i0++) {\n" +
-			"            os.WriteSequenceBeginLazy(_i0); (this.structs[_i0] ?? new MStructsElem()).Serialize(os);\n" +
+			"            os.WriteSequenceBeginLazy(_i0); (this.structs[_i0] ?? new M_Structs()).Serialize(os);\n" +
 			"            if (_i0 == _n0 - 1) os.WriteSequenceEndKeep(); else os.WriteSequenceEnd();\n" +
 			"        }\n" +
 			"        os.WriteSequenceEnd();",
@@ -836,11 +835,11 @@ messages:
 		// struct element: the corelib bounds the id and gap-fills, then generated
 		// code latches the id and descends — the element scope then addresses the
 		// element the id named, not the last one.
-		"case (Root_fixed, _): global::sofab.Seq.ReserveElem(m.@fixed, id, static () => new VecFixedElem(), 5, MaxDynArrayCount); " +
+		"case (Root_fixed, _): global::sofab.Seq.ReserveElem(m.@fixed, id, static () => new Vec_Fixed(), 5, MaxDynArrayCount); " +
 			"_ixRoot_fixed = id; cur = Root_fixed_e; break;",
 		"m.@fixed[_ixRoot_fixed].k = (uint)value; break;",
 		// a count-less array is placed by id too: its length is highest id + 1.
-		"global::sofab.Seq.ReserveElem(m.dynamic, id, static () => new VecDynamicElem(), -1, MaxDynArrayCount); _ixRoot_dynamic = id;",
+		"global::sofab.Seq.ReserveElem(m.dynamic, id, static () => new Vec_Dynamic(), -1, MaxDynArrayCount); _ixRoot_dynamic = id;",
 		// string leaf element: placed, with the gap filled from the element default.
 		"case (Root_fstrs, _): global::sofab.Seq.PlaceElem(m.fstrs, id, \"\", _s, 3, MaxDynArrayCount); break;",
 		// NATIVE row (the id-blind collector): placed at out[id], bounded by the outer
@@ -849,14 +848,14 @@ messages:
 		// The ROW itself is count-less, so its element count also meets the
 		// target's finite default cap (§9.5, generator#385) -- a bound on the
 		// inner array, distinct from the outer index bound beside it.
-		"case (Root_rows, _): if (kind != ArrayKind.Unsigned) break; " +
+		"case (Root_rows, _): if (kind != global::sofab.ArrayKind.Unsigned) break; " +
 			"global::sofab.Seq.ReserveRow(m.rows, id, 2, MaxDynArrayCount); " +
-			"if (count > MaxDynArrayCount) throw new SofabException(SofabError.LimitExceeded, " +
+			"if (count > MaxDynArrayCount) throw new global::sofab.SofabException(global::sofab.SofabError.LimitExceeded, " +
 			"\"Root_rows element: array count above configured limit 65536\"); " +
 			"_ixRoot_rows = id; break;",
 		// the §7.1 width guard for the u32 element follows afill-- and precedes the
 		// store (see TestCsDeclaredWidthIsAValidityBound)
-		"case (Root_rows, _): if (afill == 0) break; afill--; if (value > 4294967295) throw new SofabException(SofabError.InvalidMessage, " +
+		"case (Root_rows, _): if (afill == 0) break; afill--; if (value > 4294967295) throw new global::sofab.SofabException(global::sofab.SofabError.InvalidMessage, " +
 			"\"Root_rows element: value outside declared width u32\"); m.rows[_ixRoot_rows].Add((uint)value); break;",
 		// WRAPPER row: same placement, then the descent.
 		"case (Root_srows, _): global::sofab.Seq.ReserveRow(m.srows, id, -1, MaxDynArrayCount); " +
@@ -871,8 +870,8 @@ messages:
 	// The defects this replaced: an id-blind append, and "the last element" as the
 	// decode target.
 	for _, bad := range []string{
-		"m.rows.Add(new List<uint>()); break;",
-		"m.srows.Add(new List<string>()); cur = Root_srows_e;",
+		"m.rows.Add(new global::System.Collections.Generic.List<uint>()); break;",
+		"m.srows.Add(new global::System.Collections.Generic.List<string>()); cur = Root_srows_e;",
 		"m.rows[m.rows.Count - 1]",
 		"m.srows[m.srows.Count - 1]",
 		"m.@fixed[m.@fixed.Count - 1]",
@@ -938,7 +937,7 @@ messages:
 	// whole-payload decode and the accumulator -- which is where the buffering
 	// and the UTF-8 verdict happen, so a skipped payload is neither validated nor
 	// able to leave bytes behind for a later declared field to inherit.
-	for _, after := range []string{"Utf8.Decode(", "PayloadAcc()).String("} {
+	for _, after := range []string{"Utf8.Decode(", "global::sofab.PayloadAcc()).String("} {
 		if i := strings.Index(fn, after); i < 0 || guardEnd > i {
 			t.Errorf("String(): the destination guard must precede %q:\n%s", after, fn)
 		}
@@ -1007,8 +1006,8 @@ messages:
 	for _, want := range []string{
 		"case (Root, 0): _cap = 16; break;",
 		"case (Root, 1): _cap = MaxDynBlobLen; break;",
-		"_b = new byte[total]; Array.Copy(data, chunkOffset, _b, 0, total);",
-		"else _b = (pay ??= new PayloadAcc()).Blob(total, offset, data, chunkOffset, chunkLength, _cap);",
+		"_b = new byte[total]; global::System.Array.Copy(data, chunkOffset, _b, 0, total);",
+		"else _b = (pay ??= new global::sofab.PayloadAcc()).Blob(total, offset, data, chunkOffset, chunkLength, _cap);",
 	} {
 		if !strings.Contains(fn, want) {
 			t.Errorf("Blob() missing %q:\n%s", want, fn)
@@ -1021,7 +1020,7 @@ messages:
 		t.Errorf("a string id must not be a blob destination:\n%s", fn)
 	}
 	// The whole point: nothing is sized from the wire or copied before the gate.
-	for _, after := range []string{"new byte[total]", "PayloadAcc()).Blob("} {
+	for _, after := range []string{"new byte[total]", "global::sofab.PayloadAcc()).Blob("} {
 		if i := strings.Index(fn, after); i < 0 || guardEnd > i {
 			t.Errorf("Blob(): the destination guard must precede %q:\n%s", after, fn)
 		}
@@ -1228,12 +1227,12 @@ messages:
 `
 	got := buildModule(t, []byte(src), "w.yaml", map[string]any{})
 	for _, want := range []string{
-		`case (Root, 0): if (value > 255) throw new SofabException(SofabError.InvalidMessage, "a_u8: value outside declared width u8"); m.a_u8 = (byte)value; break;`,
-		`case (Root, 2): if (value > 4294967295) throw new SofabException(SofabError.InvalidMessage, "c_u32: value outside declared width u32"); m.c_u32 = (uint)value; break;`,
-		`case (Root, 4): if (value < -128 || value > 127) throw new SofabException(SofabError.InvalidMessage, "e_i8: value outside declared width i8"); m.e_i8 = (sbyte)value; break;`,
-		`case (Root, 6): if (value < -2147483648 || value > 2147483647) throw new SofabException(SofabError.InvalidMessage, "g_i32: value outside declared width i32"); m.g_i32 = (int)value; break;`,
+		`case (Root, 0): if (value > 255) throw new global::sofab.SofabException(global::sofab.SofabError.InvalidMessage, "a_u8: value outside declared width u8"); m.a_u8 = (byte)value; break;`,
+		`case (Root, 2): if (value > 4294967295) throw new global::sofab.SofabException(global::sofab.SofabError.InvalidMessage, "c_u32: value outside declared width u32"); m.c_u32 = (uint)value; break;`,
+		`case (Root, 4): if (value < -128 || value > 127) throw new global::sofab.SofabException(global::sofab.SofabError.InvalidMessage, "e_i8: value outside declared width i8"); m.e_i8 = (sbyte)value; break;`,
+		`case (Root, 6): if (value < -2147483648 || value > 2147483647) throw new global::sofab.SofabException(global::sofab.SofabError.InvalidMessage, "g_i32: value outside declared width i32"); m.g_i32 = (int)value; break;`,
 		// Array elements: the guard follows the fill guard (§7.3 skip stays a skip).
-		`case (Root, 8): if (afill == 0) break; afill--; if (value > 255) throw new SofabException(SofabError.InvalidMessage, "arr_u8 element: value outside declared width u8");`,
+		`case (Root, 8): if (afill == 0) break; afill--; if (value > 255) throw new global::sofab.SofabException(global::sofab.SofabError.InvalidMessage, "arr_u8 element: value outside declared width u8");`,
 	} {
 		if !strings.Contains(got, want) {
 			t.Errorf("Message.cs missing width guard %q:\n%s", want, got)
@@ -1293,16 +1292,16 @@ messages:
       sa: { id: 2, type: array, items: { type: string, count: 3, maxlen: 6 } }
 `), "b.yaml", map[string]any{})
 
-	if !strings.Contains(m, "public void FixlenBegin(int id, FixlenType subtype, int total)") {
+	if !strings.Contains(m, "public void FixlenBegin(int id, global::sofab.FixlenType subtype, int total)") {
 		t.Fatal("no FixlenBegin implementation")
 	}
-	if !strings.Contains(m, "if (subtype == FixlenType.String) {") ||
+	if !strings.Contains(m, "if (subtype == global::sofab.FixlenType.String) {") ||
 		!strings.Contains(m, "case (Root, 0): if (total > 8) throw") {
-		t.Error("a scalar string maxlen must be latched under FixlenType.String")
+		t.Error("a scalar string maxlen must be latched under global::sofab.FixlenType.String")
 	}
-	if !strings.Contains(m, "if (subtype == FixlenType.Blob) {") ||
+	if !strings.Contains(m, "if (subtype == global::sofab.FixlenType.Blob) {") ||
 		!strings.Contains(m, "case (Root, 1): if (total > 4) throw") {
-		t.Error("a scalar blob maxlen must be latched under FixlenType.Blob")
+		t.Error("a scalar blob maxlen must be latched under global::sofab.FixlenType.Blob")
 	}
 	// Over-index first, then the element maxlen -- an element that is not this
 	// array's element must not be measured against its bound.
@@ -1343,11 +1342,11 @@ messages:
 	m := buildModule(t, []byte(src), "m.yaml", map[string]any{})
 
 	for _, want := range []string{
-		`if (count > MaxDynArrayCount) throw new SofabException(SofabError.LimitExceeded, "dyn: array count above configured limit 65536"); m.dyn = new uint[count];`,
-		`if (count > 8) throw new SofabException(SofabError.InvalidMessage, "bnd: array count above schema capacity 8"); m.bnd = new uint[count];`,
+		`if (count > MaxDynArrayCount) throw new global::sofab.SofabException(global::sofab.SofabError.LimitExceeded, "dyn: array count above configured limit 65536"); m.dyn = new uint[count];`,
+		`if (count > 8) throw new global::sofab.SofabException(global::sofab.SofabError.InvalidMessage, "bnd: array count above schema capacity 8"); m.bnd = new uint[count];`,
 		`m.fps = new float[count];`,
 		// The row's id (the corelib's compare), then the row's own element count.
-		`global::sofab.Seq.ReserveRow(m.mat, id, 3, MaxDynArrayCount); if (count > 4) throw new SofabException(SofabError.InvalidMessage, "Root_mat element: array count above schema capacity 4");`,
+		`global::sofab.Seq.ReserveRow(m.mat, id, 3, MaxDynArrayCount); if (count > 4) throw new global::sofab.SofabException(global::sofab.SofabError.InvalidMessage, "Root_mat element: array count above schema capacity 4");`,
 		// A plain indexed store: the destination is already exactly `count` long.
 		`m.dyn[ai++] = (uint)value;`,
 	} {
@@ -1355,7 +1354,7 @@ messages:
 			t.Errorf("Message.cs missing %q:\n%s", want, m)
 		}
 	}
-	for _, gone := range []string{"Seq.EnsureCap", "Seq.ArrayInitCap", "Math.Min(count", "acap"} {
+	for _, gone := range []string{"Seq.EnsureCap", "Seq.ArrayInitCap", "global::System.Math.Min(count", "acap"} {
 		if strings.Contains(m, gone) {
 			t.Errorf("Message.cs must not still grow into an array (%q):\n%s", gone, m)
 		}
@@ -1384,7 +1383,7 @@ messages:
 	for _, want := range []string{
 		"private const long MaxDynArrayCount = 65536;",
 		`global::sofab.Seq.PlaceElem(m.dstrs, id, "", _s, -1, MaxDynArrayCount);`,
-		`global::sofab.Seq.PlaceElem(m.dblbs, id, Array.Empty<byte>(), _b, -1, MaxDynArrayCount);`,
+		`global::sofab.Seq.PlaceElem(m.dblbs, id, global::System.Array.Empty<byte>(), _b, -1, MaxDynArrayCount);`,
 		`global::sofab.Seq.ReserveElem(m.dobjs, id, static () => new `,
 		`global::sofab.Seq.ReserveRow(m.dmat, id, -1, MaxDynArrayCount);`,
 	} {
@@ -1433,18 +1432,18 @@ messages:
 	}
 	for _, want := range []string{
 		// A schema-unbounded string and blob: the corelib's own check, at the header.
-		"case (Root, 0): PayloadAcc.CheckStringLength(total, MaxDynStringLen); break;",
-		"case (Root, 2): PayloadAcc.CheckBlobLength(total, MaxDynBlobLen); break;",
+		"case (Root, 0): global::sofab.PayloadAcc.CheckStringLength(total, MaxDynStringLen); break;",
+		"case (Root, 2): global::sofab.PayloadAcc.CheckBlobLength(total, MaxDynBlobLen); break;",
 		// A schema-bounded one keeps InvalidMessage and its own number: §6.2.1
 		// forbids the cap on a field the schema bounds, even a maxlen above the cap.
-		`case (Root, 1): if (total > 32) throw new SofabException(SofabError.InvalidMessage, "bs: string length above schema maxlen 32"); break;`,
+		`case (Root, 1): if (total > 32) throw new global::sofab.SofabException(global::sofab.SofabError.InvalidMessage, "bs: string length above schema maxlen 32"); break;`,
 		// A schema-unbounded wrapper element carries both its array's index cap
 		// and its own length cap, over-index first: an element that is not this
 		// array's element at all must not have its length measured here.
-		`case (Root_sa, _): global::sofab.Seq.CheckIndex(id, -1, MaxDynArrayCount); PayloadAcc.CheckStringLength(total, MaxDynStringLen); break;`,
+		`case (Root_sa, _): global::sofab.Seq.CheckIndex(id, -1, MaxDynArrayCount); global::sofab.PayloadAcc.CheckStringLength(total, MaxDynStringLen); break;`,
 		// ...all of it behind the §7.3 declared-subtype gate.
-		"if (subtype == FixlenType.String) {",
-		"if (subtype == FixlenType.Blob) {",
+		"if (subtype == global::sofab.FixlenType.String) {",
+		"if (subtype == global::sofab.FixlenType.Blob) {",
 	} {
 		if !strings.Contains(fx, want) {
 			t.Errorf("FixlenBegin missing %q\ngot:\n%s", want, fx)
@@ -1531,7 +1530,7 @@ messages:
 			t.Errorf("an array count guard outside a keyed ArrayBegin arm:\n%s", trimmed)
 			continue
 		}
-		kind := strings.Index(trimmed, "if (kind != ArrayKind.")
+		kind := strings.Index(trimmed, "if (kind != global::sofab.ArrayKind.")
 		if kind < 0 || kind > strings.Index(trimmed, "if (count > ") {
 			t.Errorf("an array count guard ahead of (or without) the §7.3 kind test:\n%s", trimmed)
 		}
@@ -1558,12 +1557,12 @@ func TestCsDecoderAsksTheStreamForItsVerdict(t *testing.T) {
 	m := exampleModule(t)
 	for _, want := range []string{
 		// Feed forwards and nothing more: no assignment, no catch.
-		"public DecodeStatus Feed(byte[] chunk) => Feed(chunk, 0, chunk.Length);",
-		"        public DecodeStatus Feed(byte[] chunk, int off, int len) =>",
+		"public global::sofab.DecodeStatus Feed(byte[] chunk) => Feed(chunk, 0, chunk.Length);",
+		"        public global::sofab.DecodeStatus Feed(byte[] chunk, int off, int len) =>",
 		"            _is.Feed(chunk, off, len, _v);",
 		// Finish asks the stream and judges what it answers.
-		"            var st = _is.Feed(System.Array.Empty<byte>(), 0, 0, _v);",
-		"            if (st != DecodeStatus.Complete) {",
+		"            var st = _is.Feed(global::System.Array.Empty<byte>(), 0, 0, _v);",
+		"            if (st != global::sofab.DecodeStatus.Complete) {",
 		"                    $\"Myfirstmessage: stream ended mid-field ({st})\");",
 	} {
 		if !strings.Contains(m, want) {
@@ -1575,10 +1574,10 @@ func TestCsDecoderAsksTheStreamForItsVerdict(t *testing.T) {
 	// catch that wrote it, either mapping arm, or the accessor that read it.
 	for _, gone := range []string{
 		"_st",
-		"catch (SofabException e) {",
-		"_st = DecodeStatus.Invalid;",
-		"_st = DecodeStatus.Incomplete;",
-		"public DecodeStatus Status",
+		"catch (global::sofab.SofabException e) {",
+		"_st = global::sofab.DecodeStatus.Invalid;",
+		"_st = global::sofab.DecodeStatus.Incomplete;",
+		"public global::sofab.DecodeStatus Status",
 	} {
 		if strings.Contains(m, gone) {
 			t.Errorf("Message.cs still carries the removed status latch %q (generator#541):\n%s", gone, m)
@@ -1587,7 +1586,7 @@ func TestCsDecoderAsksTheStreamForItsVerdict(t *testing.T) {
 	// The accessor is gone from the corelib; asking the stream a second time
 	// must not come back in any form (generator#461).
 	if strings.Contains(m, "_is.Status") {
-		t.Errorf("Message.cs still reads the removed IStream.Status (generator#461):\n%s", m)
+		t.Errorf("Message.cs still reads the removed global::sofab.IStream.Status (generator#461):\n%s", m)
 	}
 }
 
@@ -1650,13 +1649,13 @@ messages:
 // "the arm is shared" is not worth trusting after the next refactor.
 func TestCsEnumAndBitfieldWidthBoundAtEverySixPositions(t *testing.T) {
 	m := buildModule(t, []byte(widthSixSrc), "width.yaml", map[string]any{})
-	const enRej = `if (value < -128 || value > 127) throw new SofabException(SofabError.InvalidMessage, `
-	const bfRej = `if (value > 255) throw new SofabException(SofabError.InvalidMessage, `
+	const enRej = `if (value < -128 || value > 127) throw new global::sofab.SofabException(global::sofab.SofabError.InvalidMessage, `
+	const bfRej = `if (value > 255) throw new global::sofab.SofabException(global::sofab.SofabError.InvalidMessage, `
 	const fill = "if (afill == 0) break; afill--; "
 	for _, want := range []string{
 		// 1. scalar
-		`case (Root, 0): ` + enRej + `"en: value outside declared enum width"); m.en = (ClosedEn)value; break;`,
-		`case (Root, 1): ` + bfRej + `"bf: value outside declared bitfield width"); m.bf = (ClosedBf)value; break;`,
+		`case (Root, 0): ` + enRej + `"en: value outside declared enum width"); m.en = (Closed_En)value; break;`,
+		`case (Root, 1): ` + bfRej + `"bf: value outside declared bitfield width"); m.bf = (Closed_Bf)value; break;`,
 		// 2. native array element — the guard sits BEHIND fillGuard, never in
 		// front of it: a bare scalar delivered at an array id is a §7.3 skip, and
 		// rejecting it ahead of the fill check would turn that skip into a
@@ -1664,14 +1663,14 @@ func TestCsEnumAndBitfieldWidthBoundAtEverySixPositions(t *testing.T) {
 		`case (Root, 2): ` + fill + enRej + `"ea element: value outside declared enum width"); m.ea[ai++] = (sbyte)value; break;`,
 		`case (Root, 3): ` + fill + bfRej + `"bfa element: value outside declared bitfield width"); m.bfa[ai++] = (byte)value; break;`,
 		// 3. struct member
-		`case (Root_st, 0): ` + enRej + `"se: value outside declared enum width"); m.st.se = (ClosedStSe)value; break;`,
-		`case (Root_st, 1): ` + bfRej + `"sbf: value outside declared bitfield width"); m.st.sbf = (ClosedStSbf)value; break;`,
+		`case (Root_st, 0): ` + enRej + `"se: value outside declared enum width"); m.st.se = (Closed_St_Se)value; break;`,
+		`case (Root_st, 1): ` + bfRej + `"sbf: value outside declared bitfield width"); m.st.sbf = (Closed_St_Sbf)value; break;`,
 		// 4. struct-array element member
-		`case (Root_sa_e, 0): ` + enRej + `"se: value outside declared enum width"); m.sa[_ixRoot_sa].se = (ClosedSaElemSe)value; break;`,
-		`case (Root_sa_e, 1): ` + bfRej + `"sbf: value outside declared bitfield width"); m.sa[_ixRoot_sa].sbf = (ClosedSaElemSbf)value; break;`,
+		`case (Root_sa_e, 0): ` + enRej + `"se: value outside declared enum width"); m.sa[_ixRoot_sa].se = (Closed_Sa_Se)value; break;`,
+		`case (Root_sa_e, 1): ` + bfRej + `"sbf: value outside declared bitfield width"); m.sa[_ixRoot_sa].sbf = (Closed_Sa_Sbf)value; break;`,
 		// 5. union member -- stored through the option's setter, which selects it
-		`case (Root_un, 0): ` + enRej + `"ue: value outside declared enum width"); m.un.Ue = (ClosedUnUe)value; break;`,
-		`case (Root_un, 1): ` + bfRej + `"ubf: value outside declared bitfield width"); m.un.Ubf = (ClosedUnUbf)value; break;`,
+		`case (Root_un, 0): ` + enRej + `"ue: value outside declared enum width"); m.un.Ue = (Closed_Un_Ue)value; break;`,
+		`case (Root_un, 1): ` + bfRej + `"ubf: value outside declared bitfield width"); m.un.Ubf = (Closed_Un_Ubf)value; break;`,
 		// 6. matrix row element
 		`case (Root_mat, _): ` + fill + enRej,
 		`case (Root_mbf, _): ` + fill + bfRej,
@@ -1691,8 +1690,8 @@ func TestCsEnumAndBitfieldWidthBoundAtEverySixPositions(t *testing.T) {
 	// could carry the destination's width, so unlike Java there is no corelib
 	// half to hand the check to and the guard may never be dropped.
 	for _, want := range []string{
-		"public enum ClosedEn : sbyte {", "public enum ClosedBf : byte {",
-		"public sbyte[] ea = Array.Empty<sbyte>();", "public byte[] bfa = Array.Empty<byte>();",
+		"public enum Closed_En : sbyte {", "public enum Closed_Bf : byte {",
+		"public sbyte[] ea = global::System.Array.Empty<sbyte>();", "public byte[] bfa = global::System.Array.Empty<byte>();",
 	} {
 		if !strings.Contains(m, want) {
 			t.Errorf("Message.cs: the width bound must not widen storage, missing %q:\n%s", want, m)
@@ -1702,10 +1701,10 @@ func TestCsEnumAndBitfieldWidthBoundAtEverySixPositions(t *testing.T) {
 	// pre-#516 stores so an arm that loses its guard in a later refactor fails
 	// here rather than only in conformance.
 	for _, bad := range []string{
-		`case (Root, 0): m.en = (ClosedEn)value;`,
-		`case (Root, 1): m.bf = (ClosedBf)value;`,
-		`case (Root_st, 0): m.st.se = (ClosedStSe)value;`,
-		`case (Root_un, 1): m.un.Ubf = (ClosedUnUbf)value;`,
+		`case (Root, 0): m.en = (Closed_En)value;`,
+		`case (Root, 1): m.bf = (Closed_Bf)value;`,
+		`case (Root_st, 0): m.st.se = (Closed_St_Se)value;`,
+		`case (Root_un, 1): m.un.Ubf = (Closed_Un_Ubf)value;`,
 	} {
 		if strings.Contains(m, bad) {
 			t.Errorf("Message.cs still stores an enum/bitfield through a bare cast (%q):\n%s", bad, m)
@@ -1753,17 +1752,17 @@ messages:
 	for _, want := range []string{
 		// The element type is the declared width, and the named type's storage is
 		// the same width: the two are one derivation, so they move together.
-		"public sbyte[] e8 = Array.Empty<sbyte>();", "public enum ME8Elem : sbyte {",
-		"public sbyte[] e8n = Array.Empty<sbyte>();", "public enum ME8nElem : sbyte {",
-		"public short[] e16 = Array.Empty<short>();", "public enum ME16Elem : short {",
-		"public int[] e32 = Array.Empty<int>();", "public enum ME32Elem : int {",
-		"public byte[] b8 = Array.Empty<byte>();", "public enum MB8Elem : byte {",
-		"public ushort[] b16 = Array.Empty<ushort>();", "public enum MB16Elem : ushort {",
-		"public uint[] b32 = Array.Empty<uint>();", "public enum MB32Elem : uint {",
-		"public ulong[] b64 = Array.Empty<ulong>();", "public enum MB64Elem : ulong {",
+		"public sbyte[] e8 = global::System.Array.Empty<sbyte>();", "public enum M_E8 : sbyte {",
+		"public sbyte[] e8n = global::System.Array.Empty<sbyte>();", "public enum M_E8n : sbyte {",
+		"public short[] e16 = global::System.Array.Empty<short>();", "public enum M_E16 : short {",
+		"public int[] e32 = global::System.Array.Empty<int>();", "public enum M_E32 : int {",
+		"public byte[] b8 = global::System.Array.Empty<byte>();", "public enum M_B8 : byte {",
+		"public ushort[] b16 = global::System.Array.Empty<ushort>();", "public enum M_B16 : ushort {",
+		"public uint[] b32 = global::System.Array.Empty<uint>();", "public enum M_B32 : uint {",
+		"public ulong[] b64 = global::System.Array.Empty<ulong>();", "public enum M_B64 : ulong {",
 		// The boolean array keeps the List: no width is shared with its member.
-		"public List<bool> bl = new(4);",
-		// A declared default is the bare number at that width — no `(MEdElem)`
+		"public global::System.Collections.Generic.List<bool> bl = new(4);",
+		// A declared default is the bare number at that width — no `(M_Ed)`
 		// cast in front of it — and the omit-compare static matches it exactly.
 		"public short[] ed = new short[]{-200, 200};",
 		"private static readonly short[] _arrdef_ed = new short[]{-200, 200};",
@@ -1772,14 +1771,14 @@ messages:
 		"os.WriteArrayUnsigned(7, this.b64);",
 		// Decode allocates once, at the wire count the schema bound just admitted,
 		// and fills by index behind the §1 guard.
-		`case (Root, 0): if (kind != ArrayKind.Signed) break; if (count > 4) throw new SofabException(SofabError.InvalidMessage, "e8: array count above schema capacity 4"); m.e8 = new sbyte[count]; break;`,
-		`case (Root, 5): if (kind != ArrayKind.Unsigned) break; if (count > 4) throw new SofabException(SofabError.InvalidMessage, "b16: array count above schema capacity 4"); m.b16 = new ushort[count]; break;`,
-		`case (Root, 2): if (afill == 0) break; afill--; if (value < -32768 || value > 32767) throw new SofabException(SofabError.InvalidMessage, "e16 element: value outside declared enum width"); m.e16[ai++] = (short)value; break;`,
-		`case (Root, 6): if (afill == 0) break; afill--; if (value > 4294967295) throw new SofabException(SofabError.InvalidMessage, "b32 element: value outside declared bitfield width"); m.b32[ai++] = (uint)value; break;`,
+		`case (Root, 0): if (kind != global::sofab.ArrayKind.Signed) break; if (count > 4) throw new global::sofab.SofabException(global::sofab.SofabError.InvalidMessage, "e8: array count above schema capacity 4"); m.e8 = new sbyte[count]; break;`,
+		`case (Root, 5): if (kind != global::sofab.ArrayKind.Unsigned) break; if (count > 4) throw new global::sofab.SofabException(global::sofab.SofabError.InvalidMessage, "b16: array count above schema capacity 4"); m.b16 = new ushort[count]; break;`,
+		`case (Root, 2): if (afill == 0) break; afill--; if (value < -32768 || value > 32767) throw new global::sofab.SofabException(global::sofab.SofabError.InvalidMessage, "e16 element: value outside declared enum width"); m.e16[ai++] = (short)value; break;`,
+		`case (Root, 6): if (afill == 0) break; afill--; if (value > 4294967295) throw new global::sofab.SofabException(global::sofab.SofabError.InvalidMessage, "b32 element: value outside declared bitfield width"); m.b32[ai++] = (uint)value; break;`,
 		// A matrix ROW is unchanged: the corelib hands its elements over one at a
 		// time into a List that grows, so it keeps the named type and the bridge.
-		"public List<List<MMatElemElem>> mat = new(2);",
-		"os.WriteArraySigned(_i0, Array.ConvertAll(this.mat[_i0].ToArray(), _x => (sbyte)_x));",
+		"public global::System.Collections.Generic.List<global::System.Collections.Generic.List<M_Mat>> mat = new(2);",
+		"os.WriteArraySigned(_i0, global::System.Array.ConvertAll(this.mat[_i0].ToArray(), _x => (sbyte)_x));",
 	} {
 		if !strings.Contains(m, want) {
 			t.Errorf("Message.cs missing %q:\n%s", want, m)
@@ -1787,12 +1786,12 @@ messages:
 	}
 	for _, bad := range []string{
 		// The List shape and both of its allocations, gone from the direct fields.
-		"public List<ME8Elem>", "public List<MB8Elem>", "public List<MEdElem>",
-		"Array.ConvertAll(this.e8", "Array.ConvertAll(this.b8", "Array.ConvertAll(this.ed",
+		"public global::System.Collections.Generic.List<M_E8>", "public global::System.Collections.Generic.List<M_B8>", "public global::System.Collections.Generic.List<M_Ed>",
+		"global::System.Array.ConvertAll(this.e8", "global::System.Array.ConvertAll(this.b8", "global::System.Array.ConvertAll(this.ed",
 		"m.e8.Add(", "m.b8.Clear();", "m.b64.Add(",
 	} {
 		if strings.Contains(m, bad) {
-			t.Errorf("Message.cs still lowers an enum/bitfield array through List<T> (%q):\n%s", bad, m)
+			t.Errorf("Message.cs still lowers an enum/bitfield array through global::System.Collections.Generic.List<T> (%q):\n%s", bad, m)
 		}
 	}
 }
@@ -1816,7 +1815,7 @@ func TestCsEnumBitfieldWidthElisions(t *testing.T) {
 		"      f: { id: 0, type: bitfield, bits: { "+strings.Join(bits, ", ")+" } }\n"+
 		"      e: { id: 1, type: enum, enum: { R: 0, G: 1, B: 2 }, default: 0 }\n"),
 		"elide.yaml", map[string]any{})
-	if !strings.Contains(m, "case (Root, 0): m.f = (WF)value; break;") {
+	if !strings.Contains(m, "case (Root, 0): m.f = (W_F)value; break;") {
 		t.Errorf("a bitfield implying the full u64 width must store unguarded:\n%s", m)
 	}
 	if strings.Contains(m, "0xffffffffffffffff") {
@@ -1824,7 +1823,7 @@ func TestCsEnumBitfieldWidthElisions(t *testing.T) {
 	}
 	// {R:0, G:1, B:2} implies i8, NOT the 0..2 hull of its constants: 5 is a
 	// valid wire value for this field and must decode.
-	if !strings.Contains(m, `case (Root, 1): if (value < -128 || value > 127) throw new SofabException(SofabError.InvalidMessage, "e: value outside declared enum width"); m.e = (WE)value; break;`) {
+	if !strings.Contains(m, `case (Root, 1): if (value < -128 || value > 127) throw new global::sofab.SofabException(global::sofab.SofabError.InvalidMessage, "e: value outside declared enum width"); m.e = (W_E)value; break;`) {
 		t.Errorf("a contiguous enum must take the implied i8 width, not its constant hull:\n%s", m)
 	}
 }
@@ -1843,13 +1842,13 @@ func TestCsBitfieldWidthLiterals(t *testing.T) {
 		"      g: { id: 0, type: bitfield, bits: { LOW: { pos: 0 }, HIGH: { pos: 63 } } }\n"+
 		"      h: { id: 1, type: bitfield, bits: { LOW: { pos: 0 }, TOP: { pos: 31 } } }\n"),
 		"bit63.yaml", map[string]any{})
-	if !strings.Contains(m, "case (Root, 0): m.g = (WG)value; break;") {
+	if !strings.Contains(m, "case (Root, 0): m.g = (W_G)value; break;") {
 		t.Errorf("a bitfield implying the full u64 width must store unguarded:\n%s", m)
 	}
 	if strings.Contains(m, "0x8000000000000001") {
 		t.Errorf("the withdrawn flag-mask guard was emitted:\n%s", m)
 	}
-	if !strings.Contains(m, `case (Root, 1): if (value > 4294967295) throw new SofabException(SofabError.InvalidMessage, "h: value outside declared bitfield width"); m.h = (WH)value; break;`) {
+	if !strings.Contains(m, `case (Root, 1): if (value > 4294967295) throw new global::sofab.SofabException(global::sofab.SofabError.InvalidMessage, "h: value outside declared bitfield width"); m.h = (W_H)value; break;`) {
 		t.Errorf("a pos-31 bitfield must take the u32 width bound:\n%s", m)
 	}
 }

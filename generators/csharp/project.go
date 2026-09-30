@@ -48,9 +48,15 @@ func (g *gen) harness(s *ir.Schema) []byte {
 	// The corelib's own namespace, for the SofabException the decode path catches
 	// to name the code a refusal was latched under (generator#541).
 	f.line("using sofab;")
-	f.line("using %s;", g.ns)
+	// The generated namespace is NOT imported: every generated type is written
+	// `global::<ns>.<T>`, so no schema type can shadow a name this file uses
+	// (Program, Console, Math, JsonSerializer, ...), and a message named like the
+	// namespace itself (`message` in `Message`) is still a type here (CS0118).
+	// The harness's own classes start with `_`, which no schema name does.
+	g.qual = "global::" + g.ns + "."
+	defer func() { g.qual = "" }()
 	f.blank()
-	f.line("sealed class ByteArrayConverter : JsonConverter<byte[]> {")
+	f.line("sealed class _ByteArrayConverter : JsonConverter<byte[]> {")
 	f.line("    public override byte[] Read(ref Utf8JsonReader r, Type t, JsonSerializerOptions o) {")
 	f.line("        var list = new List<byte>();")
 	f.line("        if (r.TokenType != JsonTokenType.StartArray) return Array.Empty<byte>();")
@@ -66,11 +72,11 @@ func (g *gen) harness(s *ir.Schema) []byte {
 	// member walk would print every accessor instead; each union type gets a
 	// converter writing and reading `{"<option>": value}` (the library itself
 	// stays JSON-free).
-	convs := []string{"new ByteArrayConverter()"}
+	convs := []string{"new _ByteArrayConverter()"}
 	for _, cn := range g.emitUnionConverters(f, s) {
 		convs = append(convs, "new "+cn+"()")
 	}
-	f.line("static class Program {")
+	f.line("static class _Program {")
 	f.line("    static readonly JsonSerializerOptions Opts = new() { IncludeFields = true, Converters = { %s } };", strings.Join(convs, ", "))
 	g.emitBenchBody(f, s)
 	f.line("    static int Main(string[] args) {")
@@ -87,7 +93,7 @@ func (g *gen) harness(s *ir.Schema) []byte {
 	f.line("        }")
 	f.line("        switch (name) {")
 	for _, m := range s.Messages {
-		mt := exported(m.Name)
+		mt := g.msgType(m.Name)
 		f.line("        case %q: {", m.Name)
 		f.line("            if (mode == \"encode\") {")
 		f.line("                var obj = JsonSerializer.Deserialize<%s>(input, Opts);", mt)
@@ -220,7 +226,7 @@ func (g *gen) emitBenchBody(f *cfile, s *ir.Schema) {
 	}
 	f.line("    static int BenchMain(string w, int reps, byte[] input) {")
 	for _, m := range s.Messages {
-		mt := exported(m.Name)
+		mt := g.msgType(m.Name)
 		low := strings.ToLower(m.Name)
 		f.line("        if (w == \"encode_%s\" || w == \"decode_%s\") {", low, low)
 		f.line("            var obj = JsonSerializer.Deserialize<%s>(input, Opts);", mt)
@@ -238,7 +244,7 @@ func (g *gen) emitBenchBody(f *cfile, s *ir.Schema) {
 	f.line("    }")
 	f.blank()
 	for _, m := range s.Messages {
-		mt := exported(m.Name)
+		mt := g.msgType(m.Name)
 		low := strings.ToLower(m.Name)
 		sink, sinkDeprecated := benchSinkField(m)
 		f.line("    static void BenchOp_%s(bool enc, %s obj, byte[] wire) {", low, mt)

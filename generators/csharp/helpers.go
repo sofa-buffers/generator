@@ -101,34 +101,17 @@ func (g *gen) csDefaultValue(f *ir.Field) string {
 	}
 }
 
-func exported(name string) string {
-	parts := strings.FieldsFunc(name, func(r rune) bool { return r == '_' })
-	var b strings.Builder
-	for _, p := range parts {
-		if p == "" {
-			continue
-		}
-		b.WriteString(strings.ToUpper(p[:1]))
-		b.WriteString(p[1:])
-	}
-	if b.Len() == 0 {
-		return "X"
-	}
-	return b.String()
-}
+// typeName is the C# type of the named type at key, fixed by nameTypes. In the
+// harness, which imports no generated namespace, it is qualified (g.qual).
+func (g *gen) typeName(key string) string { return g.qual + g.types[key] }
 
-func (g *gen) typeName(key string) string {
-	parts := strings.FieldsFunc(key, func(r rune) bool { return r == '/' || r == '_' })
-	var b strings.Builder
-	for _, p := range parts {
-		if p == "" {
-			continue
-		}
-		b.WriteString(strings.ToUpper(p[:1]))
-		b.WriteString(p[1:])
-	}
-	return b.String()
-}
+// msgType is the C# class of the message called name, qualified like typeName.
+func (g *gen) msgType(name string) string { return g.qual + g.msgTypes[name] }
+
+// visitorName is a message's private decode visitor, `_<T>__Visitor` with T its
+// unescaped type name: a private name, which no schema name spells
+// (ARCHITECTURE §8, "Naming").
+func (g *gen) visitorName(msg string) string { return "_" + g.msgBases[msg] + "__Visitor" }
 
 func (g *gen) csType(f *ir.Field) string {
 	switch f.Kind {
@@ -164,7 +147,7 @@ func (g *gen) csType(f *ir.Field) string {
 		if primArrayElem(f.Elem) {
 			return primArrayBase(f.Elem, f.ElemRef) + "[]"
 		}
-		return "List<" + g.csArrayElemType(f.Elem, f.ElemRef, f.ElemItems) + ">"
+		return "global::System.Collections.Generic.List<" + g.csArrayElemType(f.Elem, f.ElemRef, f.ElemItems) + ">"
 	}
 	return "object"
 }
@@ -183,7 +166,7 @@ func (g *gen) csArrayElemType(elem ir.Kind, ref *ir.TypeRef, items *ir.ArrayElem
 	case ir.KindEnum, ir.KindBitfield, ir.KindStruct, ir.KindUnion:
 		return g.typeName(ref.Key)
 	case ir.KindArray:
-		return "List<" + g.csArrayElemType(items.Elem, items.ElemRef, items.ElemItems) + ">"
+		return "global::System.Collections.Generic.List<" + g.csArrayElemType(items.Elem, items.ElemRef, items.ElemItems) + ">"
 	default:
 		return numCsType(elem)
 	}
@@ -235,7 +218,7 @@ func (g *gen) csInit(f *ir.Field) string {
 			if lit, ok := g.csPrimArrayLiteral(f); ok {
 				return " = " + lit
 			}
-			return " = Array.Empty<" + primArrayBase(f.Elem, f.ElemRef) + ">()"
+			return " = global::System.Array.Empty<" + primArrayBase(f.Elem, f.ElemRef) + ">()"
 		}
 		if lit, ok := g.csNativeArrayLiteral(f); ok {
 			return " = " + lit
@@ -266,7 +249,7 @@ func (g *gen) csInit(f *ir.Field) string {
 				return fmt.Sprintf(" = new byte[]{%s}", byteList(raw))
 			}
 		}
-		return " = Array.Empty<byte>()"
+		return " = global::System.Array.Empty<byte>()"
 	case ir.KindBool:
 		if b, ok := f.Default.(bool); ok && b {
 			return " = true"
@@ -348,7 +331,7 @@ func (g *gen) csNativeArrayLiteral(f *ir.Field) (string, bool) {
 	// (MESSAGE_SPEC §3), so the default stands exactly as written — and so does the
 	// value it is compared against, which is what keeps a length-N all-zero array
 	// distinct from the empty one.
-	return fmt.Sprintf("new List<%s>{%s}", elemType, strings.Join(parts, ", ")), true
+	return fmt.Sprintf("new global::System.Collections.Generic.List<%s>{%s}", elemType, strings.Join(parts, ", ")), true
 }
 
 // csPrimArrayLiteral renders a primitive (numeric/fp/enum/bitfield) array
@@ -521,7 +504,7 @@ func arrayKindGuard(k ir.Kind) string {
 	if wk == "" {
 		return ""
 	}
-	return "if (kind != ArrayKind." + wk + ") break; "
+	return "if (kind != global::sofab.ArrayKind." + wk + ") break; "
 }
 
 // nativeArrayElem reports whether an array element encodes as a native array

@@ -825,6 +825,27 @@ if bad:
 PY
 echo "==> reserved names OK"
 
+# The shared name-collision schema (ARCHITECTURE §8, "Naming"): path clashes,
+# role words, fixed and corelib names and BCL names as messages, $defs types and
+# inline paths. The generator exits 0 on code that does not build, so every
+# message must compile warning-free against the real corelib, under the default
+# namespace `Message` (a message `message` beside it), and message m must
+# round-trip names.json as data.
+echo "==> names: the shared name-collision schema builds and round-trips"
+printf 'generic: { emit: project }\n' > "$WORK/names-cfg.yaml"
+( cd "$ROOT" && go run ./cmd/sofabgen --config "$WORK/names-cfg.yaml" --lang csharp \
+    --in "$ROOT/tests/conformance/lib/names.yaml" --out "$WORK/names" )
+dbuild "$WORK/names"
+NH="dotnet $WORK/names/bin/Debug/net9.0/harness.dll"
+$NH encode m < "$ROOT/tests/conformance/lib/names.json" > "$WORK/names.bin" \
+    || { echo "FAIL: names.json did not encode"; exit 1; }
+$NH decode m < "$WORK/names.bin" > "$WORK/names.out" \
+    || { echo "FAIL: names.bin did not decode"; exit 1; }
+python3 "$ROOT/tests/conformance/lib/json_equal.py" \
+    "$(cat "$ROOT/tests/conformance/lib/names.json")" "$(cat "$WORK/names.out")" --label names \
+    || { echo "FAIL: message m of names.yaml did not round-trip"; exit 1; }
+echo "==> names OK ($(grep -c '^  [a-z0-9_]*:' "$ROOT/tests/conformance/lib/names.yaml") top-level names)"
+
 # Narrow shapes. A visitor is emitted per message, and each callback's dispatch
 # exists only when the message declares a field of that callback's kind -- so a
 # message that LACKS kinds is where an empty `switch ((cur, id)) { }` (CS1522) or

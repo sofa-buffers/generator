@@ -1,32 +1,55 @@
 package csharp
 
 import (
-	"fmt"
 	"strings"
 
 	"github.com/sofa-buffers/generator/internal/ir"
+	"github.com/sofa-buffers/generator/internal/naming"
 )
 
-// One reserved-name list for the C# backend (generator#239): every name a schema
-// field cannot take as a field of a generated class. A keyword has an escape,
-// the verbatim identifier `@name`, and it is used -- the field keeps the
-// schema's spelling. A name that clashes with another DECLARATION has none (the
-// verbatim identifier is still that name), so it takes a trailing `_`:
+// One reserved-name list for the C# backend (generator#239, #624), at two
+// levels.
+//
+// TYPE level (ARCHITECTURE §8, "Naming"). Every generated type is named after
+// naming.TypeIdent of its schema path, and Message.cs reaches every name outside
+// its own namespace fully qualified (`global::System.Array`,
+// `global::sofab.OStream`) and imports nothing, so no schema type can shadow a
+// corelib or BCL name: those names are unreachable, not listed. What a type
+// identifier can still meet is listed in csTypeReserved -- a name the generated
+// code uses UNQUALIFIED where it would be found before a namespace-level type --
+// and, per class, the class's own members (CS0542: a member may not be named
+// like its enclosing class). Either takes the escape, a trailing `_`
+// (typeIdent). The harness (Program.cs) lives in the global namespace, imports
+// no generated namespace and names every generated type `global::<ns>.<T>`, and
+// its own classes start with `_`, so it adds nothing to the list.
+//
+// MEMBER level: every name a schema field cannot take as a field of a generated
+// class. A keyword has an escape, the verbatim identifier `@name`, and it is
+// used -- the field keeps the schema's spelling. A name that clashes with
+// another DECLARATION has none (the verbatim identifier is still that name), so
+// it takes a trailing `_`:
 //
 //   - a member the class declares itself (csMembers): C# puts fields, methods,
 //     properties and nested types in ONE namespace (CS0102);
 //   - a member every class inherits from object (csObjectMembers): a field of
-//     that name hides it, a warning -warnaserror refuses;
-//   - a name the class body uses as the qualifier of an expression
-//     (`System.Array.Empty<T>()`, `DecodeStatus.Complete`): inside the class
-//     simple-name lookup finds the field first (csQualifiers).
+//     that name hides it, a warning -warnaserror refuses.
 //
-// A field named after its own class (CS0542) cannot be listed -- it depends on
-// the type -- so checkFieldNames rejects it. The wire is keyed by id and the
-// JSON key is a separate string literal, so neither changes. The struct path
-// (csIdent) and the union path (unionOptProp) read the list; a union adds only
-// its own members (unionFixed). TestCSharpNamesInScope keeps the lists equal to
-// what the generated classes declare and use.
+// A name a class body uses in front of a dot (`System.Array`, `DecodeStatus`)
+// needs no entry: the body writes it `global::`-qualified, which no field can
+// shadow. The wire is keyed by id and the JSON key is a separate string literal,
+// so neither changes. The struct path (csIdent) and the union path
+// (unionOptProp) read the list; a union adds only its own members (unionFixed).
+// TestCSharpNamesInScope keeps the lists equal to what the generated classes
+// declare and use.
+
+// csTypeReserved are the names a type identifier escapes with a trailing `_`,
+// each with the reason generated code reaches it unqualified.
+var csTypeReserved = map[string]string{
+	// Inside a message class the simple name Decoder finds the nested class
+	// before a namespace-level type, so a field of a type named Decoder would be
+	// declared with the nested class instead.
+	"Decoder": "the nested incremental decoder of every message class",
+}
 
 // csKeywords are C# reserved words; used as an identifier they need the
 // verbatim-identifier escape `@name`. System.Text.Json serialises `@int` under
@@ -65,28 +88,13 @@ var csObjectMembers = map[string]bool{
 	"MemberwiseClone": true, "Finalize": true, "ReferenceEquals": true,
 }
 
-// csQualifiers are the names a generated class body uses as the qualifier of an
-// expression.
-var csQualifiers = map[string]bool{"Array": true, "DecodeStatus": true, "System": true}
-
 // unionFixed are the members a union class declares on top of the above.
 var unionFixed = map[string]bool{"Which": true, "Clear": true}
 
-// unionFixedAll is every name a union option's derived members must avoid.
-func unionFixedAll() map[string]bool {
-	all := map[string]bool{}
-	for _, set := range []map[string]bool{csMembers, csObjectMembers, csQualifiers, unionFixed} {
-		for n := range set {
-			all[n] = true
-		}
-	}
-	return all
-}
-
 // csReserved reports whether n clashes with a declaration a generated class
-// carries or uses.
+// carries.
 func csReserved(n string) bool {
-	return csMembers[n] || csObjectMembers[n] || csQualifiers[n]
+	return csMembers[n] || csObjectMembers[n]
 }
 
 // csIdent is the field a schema field is reached through: `name_` where it
@@ -110,72 +118,85 @@ func locChild(loc, name string) string {
 	return loc + "_" + strings.ReplaceAll(name, "_", "__")
 }
 
-// checkFieldNames rejects a struct or message whose fields give one C# field
-// (`Encode` is mangled to `Encode_`, which a field `Encode_` already is), a
-// field named after its own class (CS0542: a message `m` is the class M, so a
-// field `M` cannot be its member), and two enum constants or bitfield flags
-// that give one PascalCase member (`a_b` and `aB` are both AB). Union options are checkUnionNames'.
-// Located: the error names the type and the fields.
-func (g *gen) checkFieldNames() error {
-	check := func(owner, typeName string, fields []*ir.Field) error {
-		seen := map[string]string{}
-		for _, f := range fields {
-			n := strings.TrimPrefix(csIdent(f.Name), "@")
-			if n == typeName {
-				return fmt.Errorf("csharp backend: %s: field %q is named like its own class %s (CS0542); rename the field", owner, f.Name, typeName)
-			}
-			if prev, ok := seen[n]; ok {
-				return fmt.Errorf("csharp backend: %s: fields %q and %q both generate the field %s; rename one", owner, prev, f.Name, n)
-			}
-			seen[n] = f.Name
-		}
-		return nil
-	}
-	// Enum constants and bitfield flags are PascalCase members of their class:
-	// `a_b` and `aB` are both AB.
-	consts := func(owner, what string, names []string) error {
-		seen := map[string]string{}
-		for _, n := range names {
-			id := exported(n)
-			if prev, ok := seen[id]; ok {
-				return fmt.Errorf("csharp backend: %s: %s %q and %q both generate %s; rename one", owner, what, prev, n, id)
-			}
-			seen[id] = n
-		}
-		return nil
-	}
-	for _, key := range g.schema.NamedOrder {
-		nt := g.schema.Named[key]
-		var err error
-		switch nt.Category {
-		case ir.CatStruct:
-			err = check("struct "+key, g.typeName(key), nt.Fields)
-		case ir.CatEnum:
-			names := make([]string, len(nt.Consts))
-			for i, c := range nt.Consts {
-				names[i] = c.Name
-			}
-			err = consts("enum "+key, "constants", names)
-		case ir.CatBitfield:
-			names := make([]string, len(nt.Flags))
-			for i, fl := range nt.Flags {
-				names[i] = fl.Name
-			}
-			err = consts("bitfield "+key, "flags", names)
-		}
-		if err != nil {
-			return err
-		}
-	}
-	for _, m := range g.schema.Messages {
-		if err := check("message "+m.Name, exported(m.Name), m.Fields); err != nil {
-			return err
-		}
-	}
-	return nil
-}
-
 // csRenamed reports whether a field's C# name differs from its schema name
 // other than by the `@` escape -- the fields that need their JSON name spelled
 // out.
 func csRenamed(name string) bool { return csReserved(name) }
+
+// typeIdent is the C# identifier of a type whose unescaped name is base, in a
+// class declaring members: base, with a trailing `_` while it is on
+// csTypeReserved or names one of those members (CS0542). A base never ends
+// with `_` (naming.TypeIdent, and the `__Default<Opt>` of a split variant), so
+// stripping the escape gives base back and two types stay two identifiers. The
+// loop runs a second time only where a member took the member escape itself: a
+// message `encode` (Encode, a member of its own) holding a field `Encode`
+// (Encode_) is the class Encode__.
+func typeIdent(base string, members map[string]bool) string {
+	t := base
+	for csTypeReserved[t] != "" || members[t] {
+		t += "_"
+	}
+	return t
+}
+
+// nameTypes fixes the identifier of every type the module declares before
+// anything is emitted: a named type's from its schema path (and, for a split
+// union, its variant), a message's from its name. The unescaped name is kept
+// too: the private per-type names derive from it (_<T>__Visitor).
+func (g *gen) nameTypes() {
+	g.types, g.bases = map[string]string{}, map[string]string{}
+	g.msgTypes, g.msgBases = map[string]string{}, map[string]string{}
+	for key, nt := range g.schema.Named {
+		base := naming.TypeIdent(nt.Path)
+		if nt.Variant != "" {
+			base += "__Default" + naming.Pascal(nt.Variant)
+		}
+		g.bases[key] = base
+		g.types[key] = typeIdent(base, classMembers(nt))
+	}
+	for _, m := range g.schema.Messages {
+		base := naming.TypeIdent([]string{m.Name})
+		g.msgBases[m.Name] = base
+		g.msgTypes[m.Name] = typeIdent(base, messageMembers(m.Fields))
+	}
+}
+
+// fieldMembers are the members a struct class declares: its fields and the two
+// every class has.
+func fieldMembers(fields []*ir.Field) map[string]bool {
+	ms := map[string]bool{"Serialize": true, "IsDefault": true}
+	for _, f := range fields {
+		ms[strings.TrimPrefix(csIdent(f.Name), "@")] = true
+	}
+	return ms
+}
+
+// messageMembers adds what a message class declares on top of a struct's.
+func messageMembers(fields []*ir.Field) map[string]bool {
+	ms := fieldMembers(fields)
+	for n := range csMembers {
+		ms[n] = true
+	}
+	return ms
+}
+
+// classMembers are the members a named type's class declares. An enum or a
+// bitfield contributes none: C# allows an enum constant named like its enum.
+func classMembers(nt *ir.NamedType) map[string]bool {
+	switch nt.Category {
+	case ir.CatStruct:
+		return fieldMembers(nt.Fields)
+	case ir.CatUnion:
+		ms := map[string]bool{"Serialize": true, "IsDefault": true}
+		for n := range unionFixed {
+			ms[n] = true
+		}
+		for _, f := range nt.Fields {
+			for _, n := range unionOptMembers(f) {
+				ms[n] = true
+			}
+		}
+		return ms
+	}
+	return nil
+}
