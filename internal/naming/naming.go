@@ -1,5 +1,5 @@
 // Package naming holds the identifier encodings every backend builds its
-// schema-derived names from (docs/ARCHITECTURE.md §8.9).
+// schema-derived names from (docs/ARCHITECTURE.md §8, "Naming").
 //
 // The encodings are injective on what the validator accepts, which is the
 // point of the three naming rules (internal/parser):

@@ -145,7 +145,7 @@ type NamedType struct {
 	// the inline struct element of an array field `a`, never both at once.
 	//
 	// Paths are unique, and each segment is unique in its scope even once case
-	// and underscores are dropped (the naming rules, ARCHITECTURE §8.9), so a
+	// and underscores are dropped (the naming rules, ARCHITECTURE §8, "Naming"), so a
 	// backend that encodes each segment injectively and joins them with a
 	// separator no segment can produce gets distinct identifiers by
 	// construction.
