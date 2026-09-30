@@ -124,10 +124,10 @@ func (g *gen) frames(m *ir.Message) []frame {
 		for _, fld := range fields {
 			switch {
 			case fld.Kind == ir.KindStruct || fld.Kind == ir.KindUnion:
-				cl := loc + "_" + fld.Name
+				cl := locChild(loc, fld.Name)
 				walkFields(cl, memberAcc(fr, fld), fld.Ref.Target.Fields, fld.Kind == ir.KindUnion)
 			case fld.Kind == ir.KindArray && isWrapperElem(fld.Elem):
-				addArray(loc+"_"+fld.Name, memberAcc(fr, fld), fld.Elem, fld.ElemRef, fld.ElemItems, fld.ElemMaxHas, fld.ElemMax, capOf(fld.HasCount, fld.Count))
+				addArray(locChild(loc, fld.Name), memberAcc(fr, fld), fld.Elem, fld.ElemRef, fld.ElemItems, fld.ElemMaxHas, fld.ElemMax, capOf(fld.HasCount, fld.Count))
 			}
 		}
 	}
@@ -1658,14 +1658,14 @@ func (g *gen) emitSequence(f *zfile, fs []frame, name string) {
 					// empty frame still holds it at its own default (§7.4.1). The
 					// select is <opt>Mut(): it keeps an option already held, so a
 					// re-opened frame continues its scope (§7.4) instead of restarting.
-					fa.arms = append(fa.arms, fmt.Sprintf("%d => blk: { _ = %s.%s(); break :blk .%s; },", fld.ID, fr.path, optMut(fld.Name), fr.loc+"_"+fld.Name))
+					fa.arms = append(fa.arms, fmt.Sprintf("%d => blk: { _ = %s.%s(); break :blk .%s; },", fld.ID, fr.path, optMut(fld.Name), locChild(fr.loc, fld.Name)))
 				case fld.Kind == ir.KindStruct || fld.Kind == ir.KindUnion:
-					fa.arms = append(fa.arms, fmt.Sprintf("%d => .%s,", fld.ID, fr.loc+"_"+fld.Name))
+					fa.arms = append(fa.arms, fmt.Sprintf("%d => .%s,", fld.ID, locChild(fr.loc, fld.Name)))
 				case fld.Kind == ir.KindArray && isWrapperElem(fld.Elem):
 					// A wrapper-array option is selected by the same accessor, then
 					// reset: the wrapper IS the value and a repeated one replaces it.
 					acc := memberAcc(fr, fld)
-					fa.arms = append(fa.arms, fmt.Sprintf("%d => blk: { %s = &.{}; break :blk .%s; },", fld.ID, acc, fr.loc+"_"+fld.Name))
+					fa.arms = append(fa.arms, fmt.Sprintf("%d => blk: { %s = &.{}; break :blk .%s; },", fld.ID, acc, locChild(fr.loc, fld.Name)))
 				}
 			}
 			if len(fa.arms) > 0 {

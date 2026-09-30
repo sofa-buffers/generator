@@ -15,49 +15,6 @@ func cfgString(cfg map[string]any, key, dflt string) string {
 	return dflt
 }
 
-// zigKeywords are reserved words that, used verbatim as a struct field name,
-// are a syntax error and must be written as a quoted identifier (@"name").
-// Primitive names (u8, bool, true, null, undefined, ...) are NOT keywords in
-// field position, and neither are the words Zig has retired (async, await,
-// usingnamespace): those stay unescaped, since `zig fmt` strips a quote that is
-// not needed and a quoted one would fail a user's `zig fmt --check`. Every use
-// of zigIdent is a member position (a field, `.name`, `self.name`).
-var zigKeywords = map[string]bool{
-	"addrspace": true, "align": true, "allowzero": true, "and": true,
-	"anyframe": true, "anytype": true, "asm": true, "break": true,
-	"callconv": true, "catch": true,
-	"comptime": true, "const": true, "continue": true, "defer": true,
-	"else": true, "enum": true, "errdefer": true, "error": true,
-	"export": true, "extern": true, "fn": true, "for": true, "if": true,
-	"inline": true, "linksection": true, "noalias": true, "noinline": true,
-	"nosuspend": true, "opaque": true, "or": true, "orelse": true,
-	"packed": true, "pub": true, "resume": true, "return": true,
-	"struct": true, "suspend": true, "switch": true, "test": true,
-	"threadlocal": true, "try": true, "union": true, "unreachable": true,
-	"var": true, "volatile": true, "while": true,
-}
-
-// zigDeclClash are field names that would collide with the declarations every
-// generated struct carries (Zig forbids a field and a decl sharing a name).
-// They are mangled with a trailing underscore; the wire (keyed by id) and the
-// JSON name (emitted from the schema name) are unaffected.
-var zigDeclClash = map[string]bool{
-	"marshal": true, "encode": true, "decode": true, "MAX_SIZE": true,
-	"isDefault": true,
-}
-
-// zigIdent renders a schema field name as a Zig identifier: @"name" for a
-// keyword, name_ for a decl-clashing name, else unchanged.
-func zigIdent(name string) string {
-	if zigDeclClash[name] {
-		return name + "_"
-	}
-	if zigKeywords[name] {
-		return `@"` + name + `"`
-	}
-	return name
-}
-
 func exported(name string) string {
 	parts := strings.FieldsFunc(name, func(r rune) bool { return r == '_' })
 	var b strings.Builder

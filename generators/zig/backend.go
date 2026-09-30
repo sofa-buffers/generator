@@ -30,6 +30,9 @@ func (*Backend) Lang() string { return "zig" }
 // Generate emits src/message.zig; project mode adds build.zig + build.zig.zon
 // and a JSON encode/decode harness (src/main.zig).
 func (*Backend) Generate(s *ir.Schema, cfg map[string]any) ([]generator.File, error) {
+	if err := checkFieldNames(s); err != nil {
+		return nil, err
+	}
 	if err := checkUnionNames(s); err != nil {
 		return nil, err
 	}

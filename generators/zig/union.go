@@ -29,14 +29,6 @@ import (
 // element, a nested option) goes through <opt>Mut(); a whole-value store (a
 // scalar, a completed string/blob) assigns the tagged union directly.
 
-// unionDecls are the declarations every union type carries besides its options'
-// own. An option whose field name would land on one takes the backend's trailing
-// underscore, exactly as a struct field on a struct's declarations does
-// (zigDeclClash).
-var unionDecls = map[string]bool{
-	"init": true, "which": true, "serialize": true, "isDefault": true,
-}
-
 // unionOpt is one option of a union type with every name the backend derives
 // from it.
 type unionOpt struct {
