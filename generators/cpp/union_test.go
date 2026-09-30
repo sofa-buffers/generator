@@ -110,22 +110,22 @@ var unionProfiles = []struct {
 // construction, and the public API is which()/has_/getter/set_/mutable_/reset().
 func TestCppUnionVariantShape(t *testing.T) {
 	h := unionFiles(t, unionShapeYAML, nil)["m.hpp"]
-	u := section(t, h, "MU")
+	u := section(t, h, "M_U")
 	for _, want := range []string{
 		"#include <variant>",
 		"enum class Which : sofab::id {\n        num = 0,\n        s = 1,\n        pt = 2,",
 		"Which which() const noexcept { return static_cast<Which>(_ids[_opts.index()]); }",
 		"static constexpr sofab::id _ids[] = {0, 1, 2, 3, 4, 5, 6, 7};",
-		"std::variant<std::uint16_t, std::string, MUPt, std::vector<std::uint16_t>, std::vector<std::string>, std::vector<std::uint8_t>, float, MUBox> _opts{std::in_place_index<2>};",
+		"std::variant<std::uint16_t, std::string, M_U_Pt, std::vector<std::uint16_t>, std::vector<std::string>, std::vector<std::uint8_t>, float, M_U_Box> _opts{std::in_place_index<2>};",
 		// a scalar option: by value, its declared default when not held
 		"std::uint16_t num() const noexcept { return has_num() ? (*std::get_if<0>(&_opts)) : 5; }",
-		"void set_num(std::uint16_t v) noexcept { mutable_num() = v; }",
+		"void set_num(std::uint16_t _v) noexcept { mutable_num() = _v; }",
 		// select-if-not-held, at the option's own default
 		"std::uint16_t &mutable_num() noexcept {\n        if (_opts.index() != 0) { _opts.emplace<0>(5); }",
 		"float &mutable_f() noexcept {\n        if (_opts.index() != 6) { _opts.emplace<6>(1.5f); }",
 		// a class option: by const reference, a default instance when not held
-		"const MUPt &pt() const noexcept {\n        if (has_pt()) { return (*std::get_if<2>(&_opts)); }\n        static const MUPt _d{};",
-		"MUPt &mutable_pt() noexcept {\n        if (_opts.index() != 2) { _opts.emplace<2>(); }",
+		"const M_U_Pt &pt() const noexcept {\n        if (has_pt()) { return (*std::get_if<2>(&_opts)); }\n        static const M_U_Pt _d{};",
+		"M_U_Pt &mutable_pt() noexcept {\n        if (_opts.index() != 2) { _opts.emplace<2>(); }",
 		"void reset() noexcept { mutable_pt().reset(); }",
 		"bool _isDefault() const noexcept { return _opts.index() == 2 && (*std::get_if<2>(&_opts))._isDefault(); }",
 	} {
@@ -134,9 +134,9 @@ func TestCppUnionVariantShape(t *testing.T) {
 		}
 	}
 	// No product type: no option is a plain member.
-	for _, bad := range []string{"std::uint16_t num = ", "MUPt pt = ", "std::string s = "} {
+	for _, bad := range []string{"std::uint16_t num = ", "M_U_Pt pt = ", "std::string s = "} {
 		if strings.Contains(u, bad) {
-			t.Errorf("union %q still holds option member %q:\n%s", "MU", bad, u)
+			t.Errorf("union %q still holds option member %q:\n%s", "M_U", bad, u)
 		}
 	}
 	if strings.Contains(h, "#include <new>") {
@@ -153,7 +153,7 @@ func TestCppUnionVariantShape(t *testing.T) {
 func TestCppUnionTaggedShapeCCpp(t *testing.T) {
 	for _, dyn := range []bool{false, true} {
 		h := unionFiles(t, unionShapeYAML, map[string]any{"corelib": "c-cpp", "allow_dynamic": dyn})["m.hpp"]
-		u := section(t, h, "MU")
+		u := section(t, h, "M_U")
 		if strings.Contains(h, "<variant>") || strings.Contains(u, "std::variant") {
 			t.Errorf("dyn=%v: c-cpp must not use std::variant:\n%s", dyn, u)
 		}
@@ -167,9 +167,9 @@ func TestCppUnionTaggedShapeCCpp(t *testing.T) {
 			// through its default member initializer, and both the union's and
 			// the class's default constructors are defaulted, never
 			// user-provided, so `T{}` still zero-initializes.
-			"MU() noexcept = default;",
-			"MU(const MU &o) noexcept : sofab::Message(o), _which(o._which), _u(nullptr) { _copy(o); }",
-			"case Which::s: ::new (&_u.s) " + str + "(o._u.s); break;",
+			"M_U() noexcept = default;",
+			"M_U(const M_U &_o) noexcept : sofab::Message(_o), _which(_o._which), _u(nullptr) { _copy(_o); }",
+			"case Which::s: ::new (&_u.s) " + str + "(_o._u.s); break;",
 			"Which which() const noexcept { return _which; }",
 			"bool has_arr() const noexcept { return _which == Which::arr; }",
 			"    Which _which = Which::pt;\n    union _Opts {\n        _Opts() noexcept = default;\n        struct _None { _None() noexcept {} };\n        explicit _Opts(std::nullptr_t) noexcept : _none() {}",
@@ -183,7 +183,7 @@ func TestCppUnionTaggedShapeCCpp(t *testing.T) {
 				t.Errorf("dyn=%v: header missing %q:\n%s", dyn, want, u)
 			}
 		}
-		hasDtor := strings.Contains(u, "~MU() { _clear(); }")
+		hasDtor := strings.Contains(u, "~M_U() { _clear(); }")
 		if hasDtor != dyn {
 			t.Errorf("dyn=%v: destructor emitted = %v, want %v:\n%s", dyn, hasDtor, dyn, u)
 		}
@@ -214,7 +214,7 @@ func TestCppUnionTaggedShapeCCpp(t *testing.T) {
 // sequenceEndKeep -- on every profile.
 func TestCppUnionSerializeArms(t *testing.T) {
 	for _, p := range unionProfiles {
-		u := section(t, unionFiles(t, unionShapeYAML, p.cfg)["m.hpp"], "MU")
+		u := section(t, unionFiles(t, unionShapeYAML, p.cfg)["m.hpp"], "M_U")
 		clib := p.cfg["corelib"] == "c-cpp"
 		st := func(i int, name string) string {
 			if clib {
@@ -223,14 +223,14 @@ func TestCppUnionSerializeArms(t *testing.T) {
 			return "(*std::get_if<" + strconv.Itoa(i) + ">(&_opts))"
 		}
 		for _, want := range []string{
-			"(void)os.writeLazy(2, " + st(2, "pt") + ");", // D: lazy, dropped at its default
-			"(void)os.write(7, " + st(7, "box") + ");",    // non-D struct: kept
-			"(void)os.write(0, " + st(0, "num") + ");",    // non-D scalar: no guard
-			"(void)os.write(6, " + st(6, "f") + ");",
-			"(void)os.write(1, " + st(1, "s") + ");",
-			"(void)os.write(3, " + st(3, "arr") + ");",
-			"(void)os.write(5, " + st(5, "bl") + ".data(), static_cast<std::int32_t>(" + st(5, "bl") + ".size()));",
-			"(void)os.sequenceBeginLazy(4);",
+			"(void)_os.writeLazy(2, " + st(2, "pt") + ");", // D: lazy, dropped at its default
+			"(void)_os.write(7, " + st(7, "box") + ");",    // non-D struct: kept
+			"(void)_os.write(0, " + st(0, "num") + ");",    // non-D scalar: no guard
+			"(void)_os.write(6, " + st(6, "f") + ");",
+			"(void)_os.write(1, " + st(1, "s") + ");",
+			"(void)_os.write(3, " + st(3, "arr") + ");",
+			"(void)_os.write(5, " + st(5, "bl") + ".data(), static_cast<std::int32_t>(" + st(5, "bl") + ".size()));",
+			"(void)_os.sequenceBeginLazy(4);",
 		} {
 			if !strings.Contains(u, want) {
 				t.Errorf("%s: serialize missing %q:\n%s", p.name, want, u)
@@ -238,8 +238,8 @@ func TestCppUnionSerializeArms(t *testing.T) {
 		}
 		// the wrapper option's frame is kept, never dropped: the first closer
 		// after its opener is the keeping one
-		rest := u[strings.Index(u, "(void)os.sequenceBeginLazy(4);"):]
-		if k := strings.Index(rest, "(void)os.sequenceEnd"); k < 0 || !strings.HasPrefix(rest[k:], "(void)os.sequenceEndKeep();") {
+		rest := u[strings.Index(u, "(void)_os.sequenceBeginLazy(4);"):]
+		if k := strings.Index(rest, "(void)_os.sequenceEnd"); k < 0 || !strings.HasPrefix(rest[k:], "(void)_os.sequenceEndKeep();") {
 			t.Errorf("%s: the wrapper option must close with sequenceEndKeep:\n%s", p.name, u)
 		}
 		// no non-D option carries a ≠-default guard
@@ -251,10 +251,10 @@ func TestCppUnionSerializeArms(t *testing.T) {
 	}
 	// A leaf default option keeps its guard.
 	src := strings.Replace(unionShapeYAML, "default_id: 2", "default_id: 0", 1)
-	u := section(t, unionFiles(t, src, nil)["m.hpp"], "MU")
+	u := section(t, unionFiles(t, src, nil)["m.hpp"], "M_U")
 	for _, want := range []string{
-		"if ((*std::get_if<0>(&_opts)) != 5) { (void)os.write(0, (*std::get_if<0>(&_opts))); }",
-		"(void)os.write(2, (*std::get_if<2>(&_opts)));", // pt is no longer D: kept
+		"if ((*std::get_if<0>(&_opts)) != 5) { (void)_os.write(0, (*std::get_if<0>(&_opts))); }",
+		"(void)_os.write(2, (*std::get_if<2>(&_opts)));", // pt is no longer D: kept
 	} {
 		if !strings.Contains(u, want) {
 			t.Errorf("default_id 0: serialize missing %q:\n%s", want, u)
@@ -271,15 +271,15 @@ func TestCppUnionSerializeArms(t *testing.T) {
 // option, and every non-scalar kind on corelib-cpp, spells the test in front of
 // the select (on c-cpp as one delivered() comparison).
 func TestCppUnionDecodeGateThenSelect(t *testing.T) {
-	u := section(t, unionFiles(t, unionShapeYAML, nil)["m.hpp"], "MU")
+	u := section(t, unionFiles(t, unionShapeYAML, nil)["m.hpp"], "M_U")
 	for _, want := range []string{
-		"{ std::uint64_t _v; if (is.read(_v)) { if (_v > 65535) { is.invalidate(); return; } mutable_num() = static_cast<std::uint16_t>(_v); } }",
-		"{ float _v{}; if (sofab::read(is, _v)) { mutable_f() = _v; } }",
-		"if (is.wire() != sofab::detail::Wire::Fixlen || is.fixType() != sofab::detail::Fix::String) break;\n            sofab::readString(is, mutable_s(), 8);",
-		"if (is.wire() != sofab::detail::Wire::Fixlen || is.fixType() != sofab::detail::Fix::Blob) break;\n            sofab::readBlob(is, mutable_bl(), 4);",
-		"if (is.wire() != sofab::detail::Wire::SequenceStart) break;\n            sofab::read(is, mutable_pt());",
-		"if (is.wire() != sofab::detail::Wire::ArrayUnsigned) break;\n            sofab::readArray(is, mutable_arr(), 4, sofab::ElemBound::of<std::uint16_t>());",
-		"if (is.wire() != sofab::detail::Wire::SequenceStart) break;\n            { sofab::StringSeq _r0{mutable_strs(), 3, 4, -1, -1}; sofab::read(is, _r0); }",
+		"{ std::uint64_t _v; if (_is.read(_v)) { if (_v > 65535) { _is.invalidate(); return; } mutable_num() = static_cast<std::uint16_t>(_v); } }",
+		"{ float _v{}; if (sofab::read(_is, _v)) { mutable_f() = _v; } }",
+		"if (_is.wire() != sofab::detail::Wire::Fixlen || _is.fixType() != sofab::detail::Fix::String) break;\n            sofab::readString(_is, mutable_s(), 8);",
+		"if (_is.wire() != sofab::detail::Wire::Fixlen || _is.fixType() != sofab::detail::Fix::Blob) break;\n            sofab::readBlob(_is, mutable_bl(), 4);",
+		"if (_is.wire() != sofab::detail::Wire::SequenceStart) break;\n            sofab::read(_is, mutable_pt());",
+		"if (_is.wire() != sofab::detail::Wire::ArrayUnsigned) break;\n            sofab::readArray(_is, mutable_arr(), 4, sofab::ElemBound::of<std::uint16_t>());",
+		"if (_is.wire() != sofab::detail::Wire::SequenceStart) break;\n            { sofab::StringSeq _r0{mutable_strs(), 3, 4, -1, -1}; sofab::read(_is, _r0); }",
 	} {
 		if !strings.Contains(u, want) {
 			t.Errorf("corelib-cpp decode missing %q:\n%s", want, u)
@@ -291,34 +291,34 @@ func TestCppUnionDecodeGateThenSelect(t *testing.T) {
 		t.Errorf("every emplace must sit behind a not-held test (%d emplace, %d tests):\n%s", n, m, u)
 	}
 
-	c := section(t, unionFiles(t, unionShapeYAML, map[string]any{"corelib": "c-cpp"})["m.hpp"], "MU")
+	c := section(t, unionFiles(t, unionShapeYAML, map[string]any{"corelib": "c-cpp"})["m.hpp"], "M_U")
 	for _, want := range []string{
 		// a scalar: the deferred read overwrites the whole value, so the select
 		// is the tag alone, set once the bind reported the match
-		"if (is.readMatch(_u.num)) { _which = Which::num; }",
-		"if (is.readMatch(_u.f)) { _which = Which::f; }",
+		"if (_is.readMatch(_u.num)) { _which = Which::num; }",
+		"if (_is.readMatch(_u.f)) { _which = Which::f; }",
 		// string/blob/array: the corelib selects behind its own test, once
-		"case 1:\n            is.readString([this]() -> auto & { return mutable_s(); }, _size, 8);",
-		"case 5:\n            is.readBlob([this]() -> auto & { return mutable_bl(); }, _size, 4);",
-		"case 3:\n            is.readArray([this]() -> auto & { return mutable_arr(); }, _count, 4);",
-		"is.readSequence(_r0, [this]() -> auto & { return mutable_strs(); }); }",
+		"case 1:\n            _is.readString([this]() -> auto & { return mutable_s(); }, _size, 8);",
+		"case 5:\n            _is.readBlob([this]() -> auto & { return mutable_bl(); }, _size, 4);",
+		"case 3:\n            _is.readArray([this]() -> auto & { return mutable_arr(); }, _count, 4);",
+		"_is.readSequence(_r0, [this]() -> auto & { return mutable_strs(); }); }",
 		// a struct: read(Message&) has no test of its own to select behind
-		"if (!is.delivered(sofab::Wire::SequenceStart)) break;\n            is.read(mutable_pt());",
+		"if (!_is.delivered(sofab::Wire::SequenceStart)) break;\n            _is.read(mutable_pt());",
 	} {
 		if !strings.Contains(c, want) {
 			t.Errorf("c-cpp decode missing %q:\n%s", want, c)
 		}
 	}
 	// The footprint leg spells no two-compare gate anywhere.
-	for _, bad := range []string{"is.wire()", "is.fixType()"} {
+	for _, bad := range []string{"_is.wire()", "_is.fixType()"} {
 		if strings.Contains(c, bad) {
 			t.Errorf("c-cpp decode spells %q; the test is delivered()/readMatch:\n%s", bad, c)
 		}
 	}
 	// allow_dynamic: the option left behind may own heap storage, so a scalar
 	// select ends it first -- and only when the option is not already held.
-	d := section(t, unionFiles(t, unionShapeYAML, map[string]any{"corelib": "c-cpp", "allow_dynamic": true})["m.hpp"], "MU")
-	want := "if (is.readMatch(_u.num) && _which != Which::num) { _clear(); _which = Which::num; }"
+	d := section(t, unionFiles(t, unionShapeYAML, map[string]any{"corelib": "c-cpp", "allow_dynamic": true})["m.hpp"], "M_U")
+	want := "if (_is.readMatch(_u.num) && _which != Which::num) { _clear(); _which = Which::num; }"
 	if !strings.Contains(d, want) {
 		t.Errorf("dynamic c-cpp decode missing %q:\n%s", want, d)
 	}
@@ -338,28 +338,28 @@ const unionArmShapesYAML = `      k: { id: 5, type: union, oneof: { f1: { id: 0,
 // keep an arm each, and corelib-cpp is unchanged.
 func TestCppUnionSameBindArmsShareOneCase(t *testing.T) {
 	src := unionShapeYAML + unionArmShapesYAML
-	c := section(t, unionFiles(t, src, map[string]any{"corelib": "c-cpp"})["m.hpp"], "MK")
+	c := section(t, unionFiles(t, src, map[string]any{"corelib": "c-cpp"})["m.hpp"], "M_K")
 	for _, want := range []string{
-		"case 0:\n        case 1:\n            if (is.readMatch(_u.f1)) { _which = static_cast<Which>(id); }",
+		"case 0:\n        case 1:\n            if (_is.readMatch(_u.f1)) { _which = static_cast<Which>(_id); }",
 		"case 6:\n        case 7:\n",
-		"if (is.readMatch(reinterpret_cast<std::int8_t &>(_u.e1))) { _which = static_cast<Which>(id); }",
+		"if (_is.readMatch(reinterpret_cast<std::int8_t &>(_u.e1))) { _which = static_cast<Which>(_id); }",
 	} {
 		if !strings.Contains(c, want) {
 			t.Errorf("c-cpp decode missing %q:\n%s", want, c)
 		}
 	}
-	d := section(t, unionFiles(t, src, map[string]any{"corelib": "c-cpp", "allow_dynamic": true})["m.hpp"], "MK")
-	want := "if (is.readMatch(_u.f1) && _which != static_cast<Which>(id)) { _clear(); _which = static_cast<Which>(id); }"
+	d := section(t, unionFiles(t, src, map[string]any{"corelib": "c-cpp", "allow_dynamic": true})["m.hpp"], "M_K")
+	want := "if (_is.readMatch(_u.f1) && _which != static_cast<Which>(_id)) { _clear(); _which = static_cast<Which>(_id); }"
 	if !strings.Contains(d, want) {
 		t.Errorf("dynamic c-cpp decode missing %q:\n%s", want, d)
 	}
-	// A lone scalar option names its own enumerator (the MU union).
-	u := section(t, unionFiles(t, src, map[string]any{"corelib": "c-cpp"})["m.hpp"], "MU")
-	if strings.Contains(u, "static_cast<Which>(id)") {
+	// A lone scalar option names its own enumerator (the M_U union).
+	u := section(t, unionFiles(t, src, map[string]any{"corelib": "c-cpp"})["m.hpp"], "M_U")
+	if strings.Contains(u, "static_cast<Which>(_id)") {
 		t.Errorf("an option with no same-type sibling must not take its tag from the id:\n%s", u)
 	}
-	p := section(t, unionFiles(t, src, nil)["m.hpp"], "MK")
-	if strings.Contains(p, "static_cast<Which>(id)") || strings.Contains(p, "case 0:\n        case 1:") {
+	p := section(t, unionFiles(t, src, nil)["m.hpp"], "M_K")
+	if strings.Contains(p, "static_cast<Which>(_id)") || strings.Contains(p, "case 0:\n        case 1:") {
 		t.Errorf("corelib-cpp arms must stay one per option:\n%s", p)
 	}
 }
@@ -371,10 +371,10 @@ func TestCppUnionSameBindArmsShareOneCase(t *testing.T) {
 func TestCppUnionGateKeptWhereNoSelectingRead(t *testing.T) {
 	src := unionShapeYAML + unionArmShapesYAML
 	for _, p := range []map[string]any{{"corelib": "c-cpp"}, {"corelib": "c-cpp", "allow_dynamic": true}} {
-		c := section(t, unionFiles(t, src, p)["m.hpp"], "MK")
+		c := section(t, unionFiles(t, src, p)["m.hpp"], "M_K")
 		for _, want := range []string{
-			"if (!is.delivered(sofab::Wire::ArraySigned)) break;",   // ea: enum array (RawArray view)
-			"if (!is.delivered(sofab::Wire::ArrayUnsigned)) break;", // ba: boolean array (RawArray view)
+			"if (!_is.delivered(sofab::Wire::ArraySigned)) break;",   // ea: enum array (RawArray view)
+			"if (!_is.delivered(sofab::Wire::ArrayUnsigned)) break;", // ba: boolean array (RawArray view)
 		} {
 			if !strings.Contains(c, want) {
 				t.Errorf("%v: decode missing %q:\n%s", p, want, c)
@@ -384,8 +384,8 @@ func TestCppUnionGateKeptWhereNoSelectingRead(t *testing.T) {
 			t.Errorf("%v: a view-bound array must not take a selector:\n%s", p, c)
 		}
 	}
-	d := section(t, unionFiles(t, src, map[string]any{"corelib": "c-cpp", "allow_dynamic": true})["m.hpp"], "MK")
-	if !strings.Contains(d, "if (!is.delivered(sofab::Wire::SequenceStart)) break;\n            { static sofab::MessageSeq<") {
+	d := section(t, unionFiles(t, src, map[string]any{"corelib": "c-cpp", "allow_dynamic": true})["m.hpp"], "M_K")
+	if !strings.Contains(d, "if (!_is.delivered(sofab::Wire::SequenceStart)) break;\n            { static sofab::MessageSeq<") {
 		t.Errorf("dynamic struct array option must keep the gate:\n%s", d)
 	}
 }
@@ -408,24 +408,24 @@ messages:
 `
 	for _, dyn := range []bool{false, true} {
 		h := unionFiles(t, src, map[string]any{"corelib": "c-cpp", "allow_dynamic": dyn})["m.hpp"]
-		s := section(t, h, "MS")
+		s := section(t, h, "M_S")
 		for _, want := range []string{"_Opts() noexcept = default;", "float analog{0.0f};", "Which _which = Which::analog;"} {
 			if !strings.Contains(s, want) {
 				t.Errorf("dyn=%v: scalar union does not start at analog = 0 (%q):\n%s", dyn, want, s)
 			}
 		}
-		for _, bad := range []string{"MS(", "operator=", "~MS()", "_copy", "_clear", "~_Opts()", "_Opts(std::nullptr_t)"} {
+		for _, bad := range []string{"M_S(", "operator=", "~M_S()", "_copy", "_clear", "~_Opts()", "_Opts(std::nullptr_t)"} {
 			if strings.Contains(s, bad) {
 				t.Errorf("dyn=%v: an all-scalar union must keep the implicit %q:\n%s", dyn, bad, s)
 			}
 		}
 		// FixedString / InlineVector options are trivially copyable too under
 		// static storage; std::string / std::vector ones are not.
-		tt := section(t, h, "MT")
-		if got := strings.Contains(tt, "MT(const MT &o)"); got != dyn {
+		tt := section(t, h, "M_T")
+		if got := strings.Contains(tt, "M_T(const M_T &_o)"); got != dyn {
 			t.Errorf("dyn=%v: string/array union user-provided copy = %v, want %v:\n%s", dyn, got, dyn, tt)
 		}
-		if got := strings.Contains(tt, "~MT() { _clear(); }"); got != dyn {
+		if got := strings.Contains(tt, "~M_T() { _clear(); }"); got != dyn {
 			t.Errorf("dyn=%v: string/array union destructor = %v, want %v:\n%s", dyn, got, dyn, tt)
 		}
 	}
@@ -450,28 +450,30 @@ messages:
 `
 	h := unionFiles(t, src, nil)["m.hpp"]
 	for _, want := range []string{
-		"struct UnionPickDefaultT : sofab::Message {",
-		"struct UnionPickDefaultN : sofab::Message {",
-		"UnionPickDefaultT a = {};",
-		"UnionPickDefaultN b = {};",
+		"struct Pick_default_T : sofab::Message {",
+		"struct Pick_default_N : sofab::Message {",
+		"Pick_default_T a = {};",
+		"Pick_default_N b = {};",
 	} {
 		if !strings.Contains(h, want) {
 			t.Errorf("header missing %q:\n%s", want, h)
 		}
 	}
-	tt := section(t, h, "UnionPickDefaultT")
-	nn := section(t, h, "UnionPickDefaultN")
-	if !strings.Contains(tt, "_opts{std::in_place_index<1>}") || !strings.Contains(tt, "(void)os.writeLazy(1, ") || !strings.Contains(tt, "(void)os.write(0, (*std::get_if<0>(&_opts)));") {
+	tt := section(t, h, "Pick_default_T")
+	nn := section(t, h, "Pick_default_N")
+	if !strings.Contains(tt, "_opts{std::in_place_index<1>}") || !strings.Contains(tt, "(void)_os.writeLazy(1, ") || !strings.Contains(tt, "(void)_os.write(0, (*std::get_if<0>(&_opts)));") {
 		t.Errorf("Pick_default_t must default to t and force n:\n%s", tt)
 	}
-	if !strings.Contains(nn, "_opts{std::in_place_index<0>, 6}") || !strings.Contains(nn, "if ((*std::get_if<0>(&_opts)) != 6)") || !strings.Contains(nn, "(void)os.write(1, (*std::get_if<1>(&_opts)));") {
+	if !strings.Contains(nn, "_opts{std::in_place_index<0>, 6}") || !strings.Contains(nn, "if ((*std::get_if<0>(&_opts)) != 6)") || !strings.Contains(nn, "(void)_os.write(1, (*std::get_if<1>(&_opts)));") {
 		t.Errorf("Pick_default_n must default to n = 6 and force t:\n%s", nn)
 	}
 }
 
 // TestCppUnionAccessorNames: an option named like a member the union declares
-// itself is mangled; two options deriving the same accessor are refused with
-// both names.
+// itself is mangled in its getter and Which enumerator, while its role
+// accessors are built from the plain name; an option named like another's role
+// accessor (`set_foo` beside `foo`) takes the escape in its getter, so the two
+// generate and spell every accessor once.
 func TestCppUnionAccessorNames(t *testing.T) {
 	src := `
 version: 1
@@ -480,13 +482,13 @@ messages:
     payload:
       u: { id: 0, type: union, oneof: { which: { id: 0, type: u8 }, reset: { id: 1, type: u8 }, delete: { id: 2, type: u8 } } }
 `
-	u := section(t, unionFiles(t, src, nil)["m.hpp"], "MU")
+	u := section(t, unionFiles(t, src, nil)["m.hpp"], "M_U")
 	for _, want := range []string{
 		"which_ = 0,", "reset_ = 1,", "delete_ = 2,",
 		"std::uint8_t which_() const noexcept",
-		"void set_reset_(std::uint8_t v) noexcept",
-		"bool has_delete_() const noexcept",
-		"void reset() noexcept { mutable_which_() = 0; }",
+		"void set_reset(std::uint8_t _v) noexcept",
+		"bool has_delete() const noexcept",
+		"void reset() noexcept { mutable_which() = 0; }",
 	} {
 		if !strings.Contains(u, want) {
 			t.Errorf("header missing %q:\n%s", want, u)
@@ -499,19 +501,25 @@ messages:
     payload:
       u: { id: 0, type: union, oneof: { foo: { id: 0, type: u8 }, set_foo: { id: 1, type: u8 } } }
 `
-	_, err := unionGenerate(t, clash, nil)
-	if err == nil || !strings.Contains(err.Error(), `"foo"`) || !strings.Contains(err.Error(), `"set_foo"`) {
-		t.Fatalf("want a located accessor clash naming both options, got %v", err)
+	c := section(t, unionFiles(t, clash, nil)["m.hpp"], "M_U")
+	for _, want := range []string{
+		"std::uint8_t foo() const noexcept", "void set_foo(std::uint8_t _v) noexcept",
+		"std::uint8_t set_foo_() const noexcept", "void set_set_foo(std::uint8_t _v) noexcept",
+		"foo = 0,", "set_foo_ = 1,",
+	} {
+		if !strings.Contains(c, want) {
+			t.Errorf("header missing %q:\n%s", want, c)
+		}
 	}
 }
 
 // TestCppUnionHarnessJSON: the harness prints exactly the held option and reads
 // one back by selecting the option its member names.
 func TestCppUnionHarnessJSON(t *testing.T) {
-	j := unionFiles(t, unionShapeYAML, nil)["harness/json.hpp"]
+	j := unionFiles(t, unionShapeYAML, nil)["harness/_json.hpp"]
 	for _, want := range []string{
-		"inline void to_json(const MU &o, std::ostream &out) {\n    out << '{';\n    switch (o.which()) {\n    case MU::Which::num:\n        out << \"\\\"num\\\":\";",
-		"    case MU::Which::pt:\n        out << \"\\\"pt\\\":\";\n    to_json(o.pt(), out);\n        break;",
+		"inline void to_json(const M_U &o, std::ostream &out) {\n    out << '{';\n    switch (o.which()) {\n    case M_U::Which::num:\n        out << \"\\\"num\\\":\";",
+		"    case M_U::Which::pt:\n        out << \"\\\"pt\\\":\";\n    to_json(o.pt(), out);\n        break;",
 		"    c = sofab_json_get(j, \"num\");\n    if (c) {\n        auto &_o = o.mutable_num();\n        _o = static_cast<std::uint16_t>(sofab_json_u64(c));",
 		"        auto &_o = o.mutable_pt();\n        from_json(c, _o);",
 	} {
@@ -611,13 +619,13 @@ int main() {
     { G g; g.k.set_f2(2.5f); G o = roundtrip(g); CHECK(o.k.has_f2() && o.k.f2() == 2.5f); }
     { G g; g.k.set_f1(4.0f); G o = roundtrip(g); CHECK(o.k.has_f1() && o.k.f1() == 4.0f); }
     { G g; g.k.set_i1(-5); G o = roundtrip(g); CHECK(o.k.has_i1() && o.k.i1() == -5); }
-    { G g; g.k.set_e1(GKE1::Q); G o = roundtrip(g); CHECK(o.k.has_e1() && o.k.e1() == GKE1::Q); }
+    { G g; g.k.set_e1(G_K_E1::Q); G o = roundtrip(g); CHECK(o.k.has_e1() && o.k.e1() == G_K_E1::Q); }
     { G o = frame([](sofab::OStream &os) { os.write(1, 2.0); });  CHECK(o.k.has_f1() && o.k.f1() == 0.0f); }
     { G o = frame([](sofab::OStream &os) { os.write(7, std::uint8_t{3}); }); CHECK(o.k.has_f1()); }
     { G o = frame([](sofab::OStream &os) { os.write(0, 1.0f); os.write(1, 2.0f); }); CHECK(o.k.has_f2() && o.k.f2() == 2.0f); }
     { G o = frame([](sofab::OStream &os) { os.write(1, 2.0f); os.write(0, 1.0f); }); CHECK(o.k.has_f1() && o.k.f1() == 1.0f); }
     { G o = frame([](sofab::OStream &os) { os.write(6, std::int8_t{1}); os.write(7, std::int8_t{-2}); }); CHECK(o.k.has_i1() && o.k.i1() == -2); }
-    { G o = frame([](sofab::OStream &os) { os.write(7, std::int8_t{-2}); os.write(6, std::int8_t{1}); }); CHECK(o.k.has_e1() && o.k.e1() == GKE1::Q); }
+    { G o = frame([](sofab::OStream &os) { os.write(7, std::int8_t{-2}); os.write(6, std::int8_t{1}); }); CHECK(o.k.has_e1() && o.k.e1() == G_K_E1::Q); }
     { G o = frame([](sofab::OStream &os) { os.write(2, std::string_view{"abcd"}); os.write(1, 6.0f); }); CHECK(o.k.has_f2() && o.k.f2() == 6.0f); }
     { G o = frame([](sofab::OStream &os) { os.write(1, 6.0f); os.write(2, std::string_view{"ab"}); });
       CHECK(o.k.has_s() && std::string_view(o.k.s().data(), o.k.s().size()) == "ab"); }
@@ -742,7 +750,7 @@ int main() {
 func TestCppUnionCopyStartsNoOption(t *testing.T) {
 	for _, dyn := range []bool{false, true} {
 		h := unionFiles(t, copyYAML, map[string]any{"corelib": "c-cpp", "allow_dynamic": dyn})["c.hpp"]
-		s := section(t, h, "CK")
+		s := section(t, h, "C_K")
 		for _, want := range []string{"explicit _Opts(std::nullptr_t) noexcept : _none() {}", "_None _none;"} {
 			if !strings.Contains(s, want) {
 				t.Errorf("dyn=%v: _Opts(nullptr) must start the do-nothing _none member (%q):\n%s", dyn, want, s)

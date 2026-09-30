@@ -307,6 +307,37 @@ YAML
         --label "cpp: round-trip fixture" || exit 1
     echo "==> round-trip fixture OK (no field sits on its schema default)"
 
+    # Conflict-free names (ARCHITECTURE §8, "Naming"): the shared collision
+    # schema -- every path clash, role word, fixed, corelib and builtin name as a
+    # message, a $defs type and an inline path -- must generate, and every message
+    # of it build warning-free against the real corelib (the harness includes all
+    # of them), and m must round-trip names.json. The generator exits 0 on broken
+    # output, so only building catches a clash.
+    echo "==> [$label] names.yaml: every message builds, m round-trips"
+    ( cd "$ROOT" && go run ./cmd/sofabgen --config "$WORK/cfg-$label.yaml" --lang cpp \
+        --in "$ROOT/tests/conformance/lib/names.yaml" --out "$WORK/names-$label" ) >/dev/null
+    make -C "$WORK/names-$label" "$@" >/dev/null
+    NAMES_IN=$(cat "$ROOT/tests/conformance/lib/names.json")
+    NAMES_OUT=$(printf '%s' "$NAMES_IN" | "$WORK/names-$label/harness/harness" encode m | "$WORK/names-$label/harness/harness" decode m)
+    python3 "$ROOT/tests/conformance/lib/json_equal.py" "$NAMES_IN" "$NAMES_OUT" \
+        --label "C++ [$label]: names.json round-trips through m" || exit 1
+
+    # The C++ collision schema (generators/cpp/reserved_test.go writes it from the
+    # reserved-name list): every member-level name as a field of a message and of
+    # a nested struct and as a union option -- keywords, generated members, the
+    # members the corelib probes for, every header macro, and the names the member
+    # functions' parameters used to have (a field `id` was silently decoded into
+    # the parameter) -- and every type-level name as a type. It must build, and m
+    # must round-trip reserved.json.
+    echo "==> [$label] reserved.yaml: every reserved name builds and round-trips"
+    ( cd "$ROOT" && go run ./cmd/sofabgen --config "$WORK/cfg-$label.yaml" --lang cpp \
+        --in "$ROOT/tests/conformance/cpp/reserved.yaml" --out "$WORK/reserved-$label" ) >/dev/null
+    make -C "$WORK/reserved-$label" "$@" >/dev/null
+    RES_IN=$(cat "$ROOT/tests/conformance/cpp/reserved.json")
+    RES_OUT=$(printf '%s' "$RES_IN" | "$WORK/reserved-$label/harness/harness" encode m | "$WORK/reserved-$label/harness/harness" decode m)
+    python3 "$ROOT/tests/conformance/lib/json_equal.py" "$RES_IN" "$RES_OUT" \
+        --label "C++ [$label]: reserved.json round-trips through m" || exit 1
+
     # Over-count scalar array (generator#100): someuintarray declares count: 4
     # (id 15 -> header 0x7b = 15<<3 | unsigned-array). 5 wire elements MUST be
     # INVALID per MESSAGE_SPEC 3+7 (pure cpp: the generated guard calls
@@ -1096,9 +1127,9 @@ YAML
 make -C "$WORK/lim420" SOFAB_CPP_DIR="$CPP" SOFAB_C_DIR="$CC" >/dev/null
 # No cap may be tested in generated code in front of a read; the whole point of
 # #420 is that the corelib gets handed the number instead.
-grep -q 'is.exceedLimit()' "$WORK/lim420/dyn.hpp" && {
+grep -q '_is.exceedLimit()' "$WORK/lim420/dyn.hpp" && {
     echo "FAIL: [cpp] a cap is checked in front of the read (§6.2.1, generator#420)"; exit 1; }
-grep -q 'sofab::readStringCapped(is, s, SOFAB_MAX_DYN_STRING_LEN);' "$WORK/lim420/dyn.hpp" || {
+grep -q 'sofab::readStringCapped(_is, s, SOFAB_MAX_DYN_STRING_LEN);' "$WORK/lim420/dyn.hpp" || {
     echo "FAIL: [cpp] the string cap must be an argument to readStringCapped"; exit 1; }
 # Header byte `id << 3 | wire`, wire 2 = Fixlen; then the length word
 # `len << 3 | subtype`, subtype 2 = String, 3 = Blob (MESSAGE_SPEC §4).
