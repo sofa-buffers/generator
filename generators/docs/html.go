@@ -109,7 +109,7 @@ func (g *gen) messageSection(m *ir.Message) *section {
 }
 
 func (g *gen) typeSection(nt *ir.NamedType) *section {
-	s := &section{Title: pascal(nt.Key), Anchor: anchor(nt.Key), Summary: strings.TrimSpace(nt.Summary)}
+	s := &section{Title: title(nt), Anchor: anchor(nt.Key), Summary: strings.TrimSpace(nt.Summary)}
 	switch nt.Category {
 	case ir.CatStruct:
 		s.Badge = "struct"
@@ -283,10 +283,10 @@ func (g *gen) arrayHTML(f *ir.Field) template.HTML {
 }
 
 // refHTML renders a composite type as its kind word plus a link to the named
-// type's section, e.g. `struct <a href="#type-struct-Point">Point</a>`.
+// type's section, e.g. `struct <a href="#type-struct-point">point</a>`.
 func refHTML(k ir.Kind, ref *ir.TypeRef) template.HTML {
 	return template.HTML(fmt.Sprintf(`%s <a href="#%s">%s</a>`,
-		html.EscapeString(k.String()), anchor(ref.Key), html.EscapeString(pascal(ref.Key))))
+		html.EscapeString(k.String()), anchor(ref.Key), html.EscapeString(title(ref.Target))))
 }
 
 // defaultText renders a field's default for the Default column. Values pass
@@ -349,23 +349,22 @@ func asInt64(v any) (int64, bool) {
 	return 0, false
 }
 
-// pascal turns a named-type graph key ("struct/Point", inline synthetic
-// "myfirstmessage_someenum") into the PascalCase display name the code
-// backends use for the same type, so docs and generated identifiers agree.
-func pascal(key string) string {
-	parts := strings.FieldsFunc(key, func(r rune) bool { return r == '/' || r == '_' })
-	var b strings.Builder
-	for _, p := range parts {
-		if p == "" {
-			continue
-		}
-		b.WriteString(strings.ToUpper(p[:1]))
-		b.WriteString(p[1:])
+// title is a named type's display name: its schema path, dotted — `point`
+// for a $defs type, `myfirstmessage.somestruct` for an inline one — and, for a
+// union split by default_id, the default it holds. The path is what the
+// schema author wrote and is unique across the page; the code backends spell
+// the same type each in their own way (ARCHITECTURE §8, "Naming").
+func title(nt *ir.NamedType) string {
+	t := strings.Join(nt.Path, ".")
+	if nt.Variant != "" {
+		t += " (default " + nt.Variant + ")"
 	}
-	return b.String()
+	return t
 }
 
-// anchor is the fragment id of a named type's section ("/" is not fragment-safe).
+// anchor is the fragment id of a named type's section ("/" is not
+// fragment-safe). Graph keys are unique, and "-" occurs in no name, so the
+// replacement keeps them apart.
 func anchor(key string) string {
 	return "type-" + strings.ReplaceAll(key, "/", "-")
 }
