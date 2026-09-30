@@ -13,6 +13,7 @@ import (
 
 	"github.com/sofa-buffers/generator/internal/generator"
 	"github.com/sofa-buffers/generator/internal/ir"
+	"github.com/sofa-buffers/generator/internal/naming"
 )
 
 func init() { generator.Register(&Backend{}) }
@@ -28,14 +29,14 @@ const corelibPkg = "@sofa-buffers/corelib"
 // package.json + tsconfig.
 func (*Backend) Generate(s *ir.Schema, cfg map[string]any) ([]generator.File, error) {
 	g := &gen{schema: s, banner: cfgString(cfg, "tool_banner", "sofabgen"), license: generator.LicenseID(cfg), i64rep: cfgInt64Mode(cfg), limits: resolveLimits(s, cfg), size: generator.NewSizePolicy(cfg)}
-	if err := checkFieldNames(s); err != nil {
-		return nil, err
+	g.fp32Raw = map[*ir.Field]string{}
+	for _, nt := range s.Named {
+		if nt.Category == ir.CatStruct {
+			fp32RawNames(nt.Fields, g.fp32Raw)
+		}
 	}
-	if err := checkConstNames(s); err != nil {
-		return nil, err
-	}
-	if err := g.checkUnions(s); err != nil {
-		return nil, err
+	for _, m := range s.Messages {
+		fp32RawNames(m.Fields, g.fp32Raw)
 	}
 	files := []generator.File{{Path: "message.ts", Content: g.module(s)}}
 	if cfgString(cfg, "emit", "sources") == "project" {
@@ -63,6 +64,9 @@ type gen struct {
 	// keyed by name and kept in first-use order (see factory).
 	mks    map[string]string
 	mkName []string
+	// fp32Raw is each struct/message fp32 field's raw-bytes companion member
+	// (fp32RawNames); a union's are on its unionOpt.
+	fp32Raw map[*ir.Field]string
 }
 
 // mkArr names the one factory every fresh-array gap takes: a wrapper row, a row
@@ -387,13 +391,13 @@ func (g *gen) moduleBody(f *tsfile, s *ir.Schema) {
 		// be a message any decoder could read on its own.
 		switch nt.Category {
 		case ir.CatStruct:
-			g.emitClass(f, g.typeName(key), nt.Summary, nt.Fields, false)
+			g.emitClass(f, g.typeName(key), g.typeRaw(key), nt.Summary, nt.Fields, false)
 		case ir.CatUnion:
 			g.emitUnionClass(f, key, nt)
 		}
 	}
 	for _, m := range s.Messages {
-		g.emitClass(f, exported(m.Name), m.Summary, m.Fields, true)
+		g.emitClass(f, msgName(m), msgRaw(m), m.Summary, m.Fields, true)
 	}
 
 	// The decode surface, after the classes it fills: one flat visitor per object
@@ -408,12 +412,12 @@ func (g *gen) moduleBody(f *tsfile, s *ir.Schema) {
 		for _, key := range s.NamedOrder {
 			nt := s.Named[key]
 			if nt.Category == ir.CatStruct || nt.Category == ir.CatUnion {
-				g.emitVisitor(vis, g.typeName(key), nt)
+				g.emitVisitor(vis, g.typeName(key), g.typeRaw(key), nt)
 			}
 		}
 		for _, m := range s.Messages {
-			g.emitVisitor(vis, exported(m.Name), &ir.NamedType{Category: ir.CatStruct, Fields: m.Fields})
-			g.emitDecoderClass(vis, exported(m.Name))
+			g.emitVisitor(vis, msgName(m), msgRaw(m), &ir.NamedType{Category: ir.CatStruct, Fields: m.Fields})
+			g.emitDecoderClass(vis, msgName(m), msgRaw(m))
 		}
 		if len(g.mkName) > 0 {
 			f.line("// Element factories: an array element's default, built fresh for each slot.")
@@ -503,7 +507,7 @@ func (g *gen) emitEnum(f *tsfile, nt *ir.NamedType) {
 	f.line("export enum %s {", name)
 	for _, c := range nt.Consts {
 		f.emitDoc("  ", c.Description)
-		f.line("  %s = %d,", exported(c.Name), c.Value)
+		f.line("  %s = %d,", naming.Pascal(c.Name), c.Value)
 	}
 	f.line("}")
 	f.blank()
@@ -518,7 +522,7 @@ func (g *gen) emitEnum(f *tsfile, nt *ir.NamedType) {
 	f.line(" * An array of {@link %s}: the exact-width storage its declaration implies,", name)
 	f.line(" * with the enum type kept on the elements.")
 	f.line(" */")
-	f.line("export type %s = %s & { [index: number]: %s };", enumArrayAlias(name), carrier, name)
+	f.line("export type %s = %s & { [index: number]: %s };", enumArrayAlias(g.typeRaw(nt.Key)), carrier, name)
 	f.blank()
 }
 
@@ -532,7 +536,7 @@ func (g *gen) emitBitfield(f *tsfile, nt *ir.NamedType) {
 		f.line("export const %s = {", g.typeName(nt.Key))
 		for _, fl := range nt.Flags {
 			f.emitDoc("  ", flagDoc(fl))
-			f.line("  %s: %dn,", exported(fl.Name), uint64(1)<<uint(fl.Pos))
+			f.line("  %s: %dn,", naming.Pascal(fl.Name), uint64(1)<<uint(fl.Pos))
 		}
 		f.line("} as const;")
 		f.blank()
@@ -541,7 +545,7 @@ func (g *gen) emitBitfield(f *tsfile, nt *ir.NamedType) {
 	f.line("export enum %s {", g.typeName(nt.Key))
 	for _, fl := range nt.Flags {
 		f.emitDoc("  ", flagDoc(fl))
-		f.line("  %s = %d,", exported(fl.Name), uint64(1)<<uint(fl.Pos))
+		f.line("  %s = %d,", naming.Pascal(fl.Name), uint64(1)<<uint(fl.Pos))
 	}
 	f.line("}")
 	f.blank()
@@ -553,7 +557,7 @@ func (g *gen) emitBitfield(f *tsfile, nt *ir.NamedType) {
 // resident bytes. Matches the Go, Rust and Python backends.
 const tsScratchSize = 512
 
-func (g *gen) emitClass(f *tsfile, name, summary string, fields []*ir.Field, isMessage bool) {
+func (g *gen) emitClass(f *tsfile, name, raw, summary string, fields []*ir.Field, isMessage bool) {
 	f.emitDoc("", summary)
 	f.line("export class %s {", name)
 	for _, fld := range fields {
@@ -571,7 +575,7 @@ func (g *gen) emitClass(f *tsfile, name, summary string, fields []*ir.Field, isM
 			// re-emits them verbatim for a value that is still that NaN; every other
 			// value renders from the number, which is exact for every non-NaN fp32.
 			f.emitDoc("  ", fp32RawDoc(fld))
-			f.line("  %s: Uint8Array | null = null;", fp32RawName(fld.Name))
+			f.line("  %s: Uint8Array | null = null;", g.fp32Raw[fld])
 		}
 	}
 	f.blank()
@@ -596,7 +600,7 @@ func (g *gen) emitClass(f *tsfile, name, summary string, fields []*ir.Field, isM
 
 	// decode: the class carries only the public decode(bytes) entry, which runs
 	// the corelib's one-shot decode against this type's flat visitor (visitor.go).
-	g.emitDecode(f, name)
+	g.emitDecode(f, name, raw)
 	f.line("}")
 	f.blank()
 }

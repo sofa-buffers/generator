@@ -573,7 +573,7 @@ ST=$( (cd "$WORK/lim" && "$TH" status dyn) < "$WORK/overlimit.bin" | head -n1 )
 # collector that owns the field's headers (generator#405).
 grep -q "_LIMITS" "$WORK/lim/message.ts" \
     && { echo "FAIL: a generated module must pass the corelib no DecodeLimits"; exit 1; }
-grep -q "_decode(bytes, new _DynVis(o, new PayloadAcc()));" "$WORK/lim/message.ts" \
+grep -q "_decode(bytes, new _Dyn__Visitor(o, new PayloadAcc()));" "$WORK/lim/message.ts" \
     || { echo "FAIL: decode() must take the bytes and the visitor, nothing else"; exit 1; }
 (cd "$WORK/lim" && "$TH" decode dyn) < "$WORK/atlimit.bin" >/dev/null || { echo "FAIL: count == limit (4) must decode"; exit 1; }
 (cd "$WORK/nolim" && "$TH" decode dyn) < "$WORK/overlimit.bin" >/dev/null || { echo "FAIL: default-cap project must accept count 5"; exit 1; }
@@ -824,7 +824,7 @@ done
 # BOTH decode surfaces, or the two paths can disagree again (generator#340).
 echo "==> int64: bigint — decoded 64-bit fields must really be bigint"
 cat > "$WORK/i64-bigint/typecheck64.ts" <<'TS'
-import { M64, M64Decoder } from "./message.js";
+import { M64, M64__Decoder } from "./message.js";
 import { readFileSync } from "node:fs";
 const wire = new Uint8Array(readFileSync(process.argv[2]!));
 const bad: string[] = [];
@@ -842,7 +842,7 @@ m.is.forEach((v, k) => want(`is[${k}]`, v));
 m.rows.forEach((r, j) => r.forEach((v, k) => want(`rows[${j}][${k}]`, v)));
 // Surface 2: the streaming decoder, fed as one chunk. Same bytes, same fields —
 // it must land on the same runtime type, not merely the same JSON.
-const d = new M64Decoder();
+const d = new M64__Decoder();
 d.feed(wire);
 const t = d.finish();
 want("stream u", t.u);
@@ -875,7 +875,7 @@ done
 echo "==> int64: long — decoded 64-bit fields must really be Long"
 cat > "$WORK/i64-long/typecheck64.ts" <<'TS'
 import { Long } from "@sofa-buffers/corelib";
-import { M64, M64Decoder } from "./message.js";
+import { M64, M64__Decoder } from "./message.js";
 import { readFileSync } from "node:fs";
 const wire = new Uint8Array(readFileSync(process.argv[2]!));
 const bad: string[] = [];
@@ -898,7 +898,7 @@ m.rows.forEach((r, j) => r.forEach((v, k) => want(`rows[${j}][${k}]`, v)));
 // Surface 2: the streaming decoder. Its visitor hooks are number-first, so the
 // generated arm converts through the field's setter — same field, same runtime
 // type, whichever decode API produced it (the invariant of generator#335).
-const d = new M64Decoder();
+const d = new M64__Decoder();
 d.feed(wire);
 const t = d.finish();
 want("stream u", t.u);
@@ -944,16 +944,16 @@ done
 # differential harness the other reject legs use.
 echo "==> int64: long — the Long channel must not mask an over-width value"
 mk_stream_check "$WORK/i64-long" \
-    'import { M64, M64Decoder } from "./message.js";' \
-    'checkReject("u8 <- 2^32 (high half only)", new Uint8Array([0x30, 0x80, 0x80, 0x80, 0x80, 0x10]), M64.decode, () => new M64Decoder());'
+    'import { M64, M64__Decoder } from "./message.js";' \
+    'checkReject("u8 <- 2^32 (high half only)", new Uint8Array([0x30, 0x80, 0x80, 0x80, 0x80, 0x10]), M64.decode, () => new M64__Decoder());'
 ( cd "$WORK/i64-long" && npx tsx stream_check.ts )
 mk_stream_check "$WORK/i64-long" \
-    'import { M64, M64Decoder } from "./message.js";' \
-    'checkReject("u8 <- 256", new Uint8Array([0x30, 0x80, 0x02]), M64.decode, () => new M64Decoder());'
+    'import { M64, M64__Decoder } from "./message.js";' \
+    'checkReject("u8 <- 256", new Uint8Array([0x30, 0x80, 0x02]), M64.decode, () => new M64__Decoder());'
 ( cd "$WORK/i64-long" && npx tsx stream_check.ts )
 mk_stream_check "$WORK/i64-long" \
-    'import { M64, M64Decoder } from "./message.js";' \
-    'checkReject("i8 <- -2^32 (sign extension only)", new Uint8Array([0x39, 0xff, 0xff, 0xff, 0xff, 0x1f]), M64.decode, () => new M64Decoder());'
+    'import { M64, M64__Decoder } from "./message.js";' \
+    'checkReject("i8 <- -2^32 (sign extension only)", new Uint8Array([0x39, 0xff, 0xff, 0xff, 0xff, 0x1f]), M64.decode, () => new M64__Decoder());'
 ( cd "$WORK/i64-long" && npx tsx stream_check.ts )
 # ...and the in-range control still decodes to the exact value, so the reject is
 # a bound and not a blanket.
@@ -981,8 +981,10 @@ echo "==> corpus typechecks ($(ls "$ROOT"/tests/matrix/corpus/defs/*.yaml | wc -
 
 # The reserved-name collision test (ARCHITECTURE §8): reserved.yaml uses every
 # name on generators/typescript/reserved.go's list as a message field, a nested
-# struct field and a union option (TestReservedSchemaFile keeps it in step with
-# the list). The generator exits 0 on a class that does not compile, so the
+# struct field and a union option, every type-level name on it (a corelib
+# import, a global the module uses, a MAX_DYN_* constant) as a message or a
+# path, and the derived members that must yield (TestReservedSchemaFile keeps it
+# in step with the list). The generator exits 0 on a class that does not compile, so the
 # project must typecheck, and every value of reserved.json must come back under
 # its schema name -- a field that replaced a method (encode, toJSON) would not.
 echo "==> reserved names: every listed name as a field typechecks and round-trips"
@@ -1002,6 +1004,23 @@ if bad:
     sys.exit(f"mismatch on {bad}: got {[got.get(k) for k in bad]}")
 PY
 echo "==> reserved names OK"
+
+# The shared name-collision schema (ARCHITECTURE §8, "Naming: conflict-free
+# identifiers"): path clashes (m_a beside m.a), role words and fixed, imported
+# and builtin names as messages, $defs types and inline paths. message.ts is one
+# flat module, so every one of them must still declare a distinct name -- and
+# only tsc says whether it does. Message m then round-trips names.json, compared
+# as data.
+echo "==> conflict-free names: names.yaml typechecks and round-trips"
+gen "$ROOT/tests/conformance/lib/names.yaml" "$WORK/names"
+ln -s "$WORK/ex/node_modules" "$WORK/names/node_modules"
+tsc_strict "$WORK/names"
+NAMES_OUT=$( (cd "$WORK/names" && "$TH" encode m) < "$ROOT/tests/conformance/lib/names.json" \
+    | (cd "$WORK/names" && "$TH" decode m) ) \
+    || { echo "FAIL: names.json did not round-trip through message m"; exit 1; }
+python3 "$ROOT/tests/conformance/lib/json_equal.py" "$(cat "$ROOT/tests/conformance/lib/names.json")" "$NAMES_OUT" \
+    --label "TypeScript: names.json round-trips through message m" || exit 1
+echo "==> conflict-free names OK"
 
 # ...and the same definitions again under `int64: long`, for every one that has a
 # 64-bit field. The loop above generates in the DEFAULT mode, so nothing here used
@@ -1056,13 +1075,13 @@ echo "==> nested wrapper rows OK"
 # wrapper-row collectors, depth 3).
 echo "==> streaming: decode() and feed() must agree, and a decoded message owns its bytes"
 mk_stream_check "$WORK/ex" \
-    'import { Myfirstmessage, MyfirstmessageDecoder } from "./message.js";' \
-    'const _m = Myfirstmessage.fromJSON(JSON.parse(process.argv[2])); check("example", _m, Myfirstmessage.decode, () => new MyfirstmessageDecoder());'
+    'import { Myfirstmessage, Myfirstmessage__Decoder } from "./message.js";' \
+    'const _m = Myfirstmessage.fromJSON(JSON.parse(process.argv[2])); check("example", _m, Myfirstmessage.decode, () => new Myfirstmessage__Decoder());'
 ( cd "$WORK/ex" && npx tsx stream_check.ts "$IN" )
 
 mk_stream_check "$WORK/corpus/nested_rows" \
-    'import { NestedRows, NestedRowsDecoder } from "./message.js";' \
-    'const _m = NestedRows.fromJSON(JSON.parse(process.argv[2])); check("nested_rows", _m, NestedRows.decode, () => new NestedRowsDecoder());'
+    'import { NestedRows, NestedRows__Decoder } from "./message.js";' \
+    'const _m = NestedRows.fromJSON(JSON.parse(process.argv[2])); check("nested_rows", _m, NestedRows.decode, () => new NestedRows__Decoder());'
 ( cd "$WORK/corpus/nested_rows" && npx tsx stream_check.ts "$NR" )
 
 # ...and a NESTED row's element width is a validity bound too (S7.1), on both
@@ -1076,8 +1095,8 @@ mk_stream_check "$WORK/corpus/nested_rows" \
 #   80 80 80 80 10  element 0 = 2^32 -- one past u32
 #   07              sequence end
 mk_stream_check "$WORK/corpus/nested_rows" \
-    'import { NestedRows, NestedRowsDecoder } from "./message.js";' \
-    'checkReject("nested row element over u32", new Uint8Array([0x26, 0x03, 0x01, 0x80, 0x80, 0x80, 0x80, 0x10, 0x07]), NestedRows.decode, () => new NestedRowsDecoder());'
+    'import { NestedRows, NestedRows__Decoder } from "./message.js";' \
+    'checkReject("nested row element over u32", new Uint8Array([0x26, 0x03, 0x01, 0x80, 0x80, 0x80, 0x80, 0x10, 0x07]), NestedRows.decode, () => new NestedRows__Decoder());'
 ( cd "$WORK/corpus/nested_rows" && npx tsx stream_check.ts )
 
 # The two paths must also REJECT alike. Values only cover messages that decode;
@@ -1090,8 +1109,8 @@ mk_stream_check "$WORK/corpus/nested_rows" \
 #   12  fixlen word: string subtype, length 2
 #   ff ff  two bytes that are not valid UTF-8
 mk_stream_check "$WORK/ex" \
-    'import { Myfirstmessage, MyfirstmessageDecoder } from "./message.js";' \
-    'checkReject("invalid utf-8", new Uint8Array([0x5a, 0x12, 0xff, 0xff]), Myfirstmessage.decode, () => new MyfirstmessageDecoder());'
+    'import { Myfirstmessage, Myfirstmessage__Decoder } from "./message.js";' \
+    'checkReject("invalid utf-8", new Uint8Array([0x5a, 0x12, 0xff, 0xff]), Myfirstmessage.decode, () => new Myfirstmessage__Decoder());'
 ( cd "$WORK/ex" && npx tsx stream_check.ts )
 
 # ...and the OTHER half of that same rule, on the same bytes (CORELIB_PLAN S6.4.5,
@@ -1113,8 +1132,8 @@ mk_stream_check "$WORK/ex" \
 #   00 2a  someu8 = 42, not its default 7: a skip that ate one byte too many or
 #          too few leaves somestring at "" either way, and cannot leave this at 42
 mk_stream_check "$WORK/ex" \
-    'import { Myfirstmessage, MyfirstmessageDecoder } from "./message.js";' \
-    'checkAccept("skipped invalid utf-8, undeclared id", new Uint8Array([0x9a, 0x06, 0x12, 0xff, 0xff, 0x00, 0x2a]), Myfirstmessage.decode, () => new MyfirstmessageDecoder(), { somestring: "", someu8: 42 }); checkAccept("skipped invalid utf-8, blob subtype at the string id", new Uint8Array([0x5a, 0x13, 0xff, 0xff, 0x00, 0x2a]), Myfirstmessage.decode, () => new MyfirstmessageDecoder(), { somestring: "", someu8: 42 });'
+    'import { Myfirstmessage, Myfirstmessage__Decoder } from "./message.js";' \
+    'checkAccept("skipped invalid utf-8, undeclared id", new Uint8Array([0x9a, 0x06, 0x12, 0xff, 0xff, 0x00, 0x2a]), Myfirstmessage.decode, () => new Myfirstmessage__Decoder(), { somestring: "", someu8: 42 }); checkAccept("skipped invalid utf-8, blob subtype at the string id", new Uint8Array([0x5a, 0x13, 0xff, 0xff, 0x00, 0x2a]), Myfirstmessage.decode, () => new Myfirstmessage__Decoder(), { somestring: "", someu8: 42 });'
 ( cd "$WORK/ex" && npx tsx stream_check.ts )
 
 # ...and on the same VERDICT, not just the same exception type. An array header
@@ -1127,8 +1146,8 @@ mk_stream_check "$WORK/ex" \
 #   7c  someuintarray (id 15, count 4) carrying the SIGNED-array wire type
 #   7f  count 127, then EOF -> a truncated skip -> INCOMPLETE on both paths
 mk_stream_check "$WORK/ex" \
-    'import { Myfirstmessage, MyfirstmessageDecoder } from "./message.js";' \
-    'checkReject("contradictory array kind", new Uint8Array([0x7c, 0x7f]), Myfirstmessage.decode, () => new MyfirstmessageDecoder());'
+    'import { Myfirstmessage, Myfirstmessage__Decoder } from "./message.js";' \
+    'checkReject("contradictory array kind", new Uint8Array([0x7c, 0x7f]), Myfirstmessage.decode, () => new Myfirstmessage__Decoder());'
 ( cd "$WORK/ex" && npx tsx stream_check.ts )
 
 # Declared integer width is a VALIDITY bound (MESSAGE_SPEC S7.1 + documentation#32,

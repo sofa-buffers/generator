@@ -145,10 +145,10 @@ func TestTSWireTypeGuard(t *testing.T) {
 		"  fixlenBegin(id: number, sub: FixlenSubtype, total: number): void {",
 		"    this._q2?.begin(id, sub, total);",
 		// A nested struct is a sequence: entering its scope is the whole guard.
-		"    case 4: { this._c = _L_M_e; return true; }",
+		"    case 4: { this._c = _M__Loc_e; return true; }",
 		// ...and its i32 field dispatches on the scope, not on the id alone: id 0
 		// means something different in every scope of the tree.
-		`      case _L_M_e: {`,
+		`      case _M__Loc_e: {`,
 		`        case 0: { const _v = v as number; if (_v < -2147483648 || _v > 2147483647) throw new SofabError(SofabErrorCode.InvalidMsg, "x: value outside declared width i32"); this.o.e.x = _v; break; }`,
 	} {
 		if !strings.Contains(mod, want) {
@@ -199,7 +199,7 @@ func TestTSOverIndexWrapperArray(t *testing.T) {
 		// (generator#247, CORELIB_PLAN §7.2 item 8, ARCHITECTURE §8). The schema
 		// reaches the collector as arguments: the capacity, the field name and,
 		// behind them, the receiver cap for an array the schema left open.
-		`this._q3 = new FramedSeq<MBpElem>(_t, _MK_MBpElem, 2, "bp", MAX_DYN_ARRAY_COUNT);`,
+		`this._q3 = new FramedSeq<M_Bp>(_t, _M_Bp__Make, 2, "bp", MAX_DYN_ARRAY_COUNT);`,
 		"        this._q3!.reserve(id);\n",
 		// A dynamic array has no schema capacity, so the receiver cap governs
 		// instead (§6.2.1) — never both.
@@ -226,7 +226,7 @@ func TestTSOverIndexWrapperArray(t *testing.T) {
 	// "the corelib's default" but no receiver bound at all. What must not happen
 	// is the cap governing: `bp` declares count 2, so 2 is what its collector
 	// judges by, and the cap sits behind it unread.
-	if strings.Contains(mod, `new FramedSeq<MBpElem>(_t, _MK_MBpElem, -1,`) {
+	if strings.Contains(mod, `new FramedSeq<M_Bp>(_t, _M_Bp__Make, -1,`) {
 		t.Error("a schema-bounded wrapper array must not hand its collector UNBOUNDED (§6.2.1)")
 	}
 }
@@ -321,7 +321,7 @@ func TestTSHeaderBoundReject(t *testing.T) {
 		`try { dec.finish(); fin = "RETURNED"; }`,
 		"`decode error: ${String(e)} [finish=${fin}]\\n`);",
 		`obj = dec.finish();`,
-		`"M": M.MDecoder,`,
+		`"M": M.M__Decoder,`,
 	} {
 		if !strings.Contains(harness, want) {
 			t.Errorf("harness.ts missing streamdecode-mode surface %q:\n%s", want, harness)
@@ -422,19 +422,19 @@ func TestTSStructural(t *testing.T) {
 		// It takes the bytes and nothing else: every receiver cap is a per-field
 		// guard in generated code or an argument to a collector, so the corelib is
 		// handed no DecodeLimits at all (generator#405).
-		"  static decode(bytes: Uint8Array): Myfirstmessage {\n    const o = new Myfirstmessage();\n    _decode(bytes, new _MyfirstmessageVis(o, new PayloadAcc()));\n    return o;\n  }",
+		"  static decode(bytes: Uint8Array): Myfirstmessage {\n    const o = new Myfirstmessage();\n    _decode(bytes, new _Myfirstmessage__Visitor(o, new PayloadAcc()));\n    return o;\n  }",
 		// Dispatch is keyed on (location, id): a field id is unique only WITHIN a
 		// scope, and corelib-ts's visitor is flat.
-		"const _L_Myfirstmessage = 0;",
-		"const _L_Myfirstmessage_somestruct_nestedstruct = 4;",
-		"class _MyfirstmessageVis implements Visitor {",
-		"  private _c = _L_Myfirstmessage;",
+		"const _Myfirstmessage__Loc = 0;",
+		"const _Myfirstmessage__Loc_somestruct_nestedstruct = 4;",
+		"class _Myfirstmessage__Visitor implements Visitor {",
+		"  private _c = _Myfirstmessage__Loc;",
 		// A nested struct/union enters its own scope and MERGES on re-open (§7.4):
 		// nothing is cleared, so a second opening continues what the first set.
-		"    case 20: { this._c = _L_Myfirstmessage_somestruct; return true; }",
+		"    case 20: { this._c = _Myfirstmessage__Loc_somestruct; return true; }",
 		// A wrapper array REPLACES on re-open (§7.4), so its destination is rebuilt
 		// and the corelib collector that owns the element rules is bound to it.
-		`    case 18: { const _t: string[] = []; this.o.somestringarray = _t; this._q1 = new StringSeq(_t, this.a, 5, 16, "somestringarray", MAX_DYN_ARRAY_COUNT, 262144); this._c = _L_Myfirstmessage_somestringarray; return true; }`,
+		`    case 18: { const _t: string[] = []; this.o.somestringarray = _t; this._q1 = new StringSeq(_t, this.a, 5, 16, "somestringarray", MAX_DYN_ARRAY_COUNT, 262144); this._c = _Myfirstmessage__Loc_somestringarray; return true; }`,
 		// u64 -> bigint, off the number-first value the hook already carries.
 		`    case 3: this.o.someu64 = typeof v === "bigint" ? v : BigInt(v); break;`,
 		// MESSAGE_SPEC §2: a struct/union FIELD opens lazily and closes with the
@@ -450,7 +450,7 @@ func TestTSStructural(t *testing.T) {
 		// A leaf string/blob wrapper array is a FIELD as well.
 		"    os.writeSequenceBeginLazy(18);\n",
 		"    os.writeSequenceBeginLazy(19);\n",
-		"export enum MyfirstmessageSomeenum {",
+		"export enum Myfirstmessage_Someenum {",
 	} {
 		if !strings.Contains(mod, want) {
 			t.Errorf("message.ts missing %q", want)
@@ -498,7 +498,7 @@ func TestTSStructural(t *testing.T) {
 	}
 	// The streaming surface is the same visitor, fed incrementally.
 	for _, want := range []string{
-		"export class MyfirstmessageDecoder {",
+		"export class Myfirstmessage__Decoder {",
 		// The wrapper remembers NOTHING (generator#541): feed forwards, and finish
 		// ASKS the stream with a zero-length feed. A refusal is terminal and the
 		// corelib latches it, re-throwing the code it was refused with before
@@ -512,7 +512,7 @@ func TestTSStructural(t *testing.T) {
 		// The scope graph is a tree, so the parent is static and sequenceEnd needs
 		// no stack to restore it.
 		"  sequenceEnd(): void {",
-		"    case _L_Myfirstmessage_somestruct_nestedstruct: this._c = _L_Myfirstmessage_somestruct; break;",
+		"    case _Myfirstmessage__Loc_somestruct_nestedstruct: this._c = _Myfirstmessage__Loc_somestruct; break;",
 		// Malformed UTF-8 leaves as SofabError, because the store site transcodes
 		// through the corelib's decodeUtf8 rather than a fatal TextDecoder of its
 		// own: that one raises a platform TypeError, which walks past a caller's
@@ -695,7 +695,7 @@ func genTSWith(t *testing.T, src string, cfg map[string]any) string {
 // It is a sweep over EMITTED TEXT rather than over the emitters, because that is
 // the property that matters: a helper comes back the moment some arm emits one,
 // whatever the emitter that produced it looks like. What the module may still
-// carry is a FACTORY (`_MK_*`), which is a single expression naming a generated
+// carry is a FACTORY (`_<T>__Make`), which is a single expression naming a generated
 // type -- ARCHITECTURE §8's own line between the two layers -- and the shared
 // empty typed arrays, which are values and not code.
 //
@@ -833,13 +833,13 @@ messages:
 	// constant is emitted and the configured cap goes in as a literal -- it is
 	// inert beside the declared capacity 2 either way (§6.2.1), but it is still
 	// STATED, because an omitted argument would be no receiver bound at all.
-	want := `case 0: { const _t: MObjsElem[] = []; this.o.objs = _t; ` +
-		`this._q1 = new FramedSeq<MObjsElem>(_t, _MK_MObjsElem, 2, "objs", 16384); ` +
-		`this._c = _L_M_objs; return true; }`
+	want := `case 0: { const _t: M_Objs[] = []; this.o.objs = _t; ` +
+		`this._q1 = new FramedSeq<M_Objs>(_t, _M_Objs__Make, 2, "objs", 16384); ` +
+		`this._c = _M__Loc_objs; return true; }`
 	if !strings.Contains(mod, want) {
 		t.Errorf("the collector must be bound to the fresh destination in the same arm:\n%s", mod)
 	}
-	if !strings.Contains(mod, "private _q1: FramedSeq<MObjsElem> | null = null;") {
+	if !strings.Contains(mod, "private _q1: FramedSeq<M_Objs> | null = null;") {
 		t.Errorf("the collector slot must be declared with its element type:\n%s", mod)
 	}
 }
@@ -913,7 +913,7 @@ func TestTSInt64Long(t *testing.T) {
 		// with no conversion at all and no flag to opt into, and a NARROW field in
 		// the same message no longer pays for that choice: the channel was read once
 		// from the root and covered every field alike (#344, #335).
-		"class _MVis implements Visitor {",
+		"class _M__Visitor implements Visitor {",
 		// Every integer field here is Long-backed, so nothing reads the number-first
 		// `v`: it keeps its place under the `_` name noUnusedParameters exempts.
 		"  unsigned(id: number, _v: number | bigint, lo: number, hi: number): void {",
@@ -1124,7 +1124,7 @@ func TestTSBenchStreamWorkload(t *testing.T) {
 	}
 	for _, want := range []string{
 		`if (w === "stream_m") {`,
-		"const _d = new M.MDecoder(); _d.feed(wire);",
+		"const _d = new M.M__Decoder(); _d.feed(wire);",
 	} {
 		if !strings.Contains(harness, want) {
 			t.Errorf("harness.ts missing %q", want)
@@ -1198,7 +1198,7 @@ messages:
 			// rejected it outright -- which is exactly why the raise had to exist.
 			`if (count > 100000) throw new SofabError(SofabErrorCode.InvalidMsg, "barr: array count above schema capacity 100000");`,
 			// No DecodeLimits: nothing here is beyond the visitor's reach.
-			"_decode(bytes, new _DynVis(o, new PayloadAcc()));",
+			"_decode(bytes, new _Dyn__Visitor(o, new PayloadAcc()));",
 		} {
 			if !strings.Contains(mod, want) {
 				t.Errorf("int64: %s message.ts missing %q", mode, want)
@@ -1219,7 +1219,7 @@ messages:
 	for _, want := range []string{
 		"export const MAX_DYN_ARRAY_COUNT = 16384;",
 		"export const MAX_DYN_STRING_LEN = 262144;",
-		"_decode(bytes, new _DynVis(o, new PayloadAcc()));",
+		"_decode(bytes, new _Dyn__Visitor(o, new PayloadAcc()));",
 	} {
 		if !strings.Contains(plain, want) {
 			t.Errorf("default limits missing %q", want)
@@ -1291,7 +1291,7 @@ func TestTSCompactArrayKeepsItsTail(t *testing.T) {
 		// so its header must be recognised as such -- classifying it as unsigned
 		// made arrayBegin skip every enum array as a §7.3 contradiction, losing the
 		// count bound and the §7.4 replace while the elements still arrived.
-		`case 8: { if (kind !== ArrayKind.Signed) break; if (count > 2) throw new SofabError(SofabErrorCode.InvalidMsg, "fenum: array count above schema capacity 2"); const _d = new Int8Array(count) as EnumModeArray; this.o.fenum = _d; this._a0Fenum = _d; break; }`,
+		`case 8: { if (kind !== ArrayKind.Signed) break; if (count > 2) throw new SofabError(SofabErrorCode.InvalidMsg, "fenum: array count above schema capacity 2"); const _d = new Int8Array(count) as Mode__Array; this.o.fenum = _d; this._a0Fenum = _d; break; }`,
 		// The declared-WIDTH verdict (§1, generator#516) travels whole: Mode's
 		// {0, 1} imply an i8, so the interval is -128..127, and the interval is the
 		// ENTIRE rule -- no arrayEnd re-check is emitted, because an undeclared
@@ -1368,7 +1368,7 @@ func TestTSCountIsACapacityNotADefaultLength(t *testing.T) {
 		// No schema default -> the empty array, whatever the count.
 		"none: Uint32Array = _E_Uint32Array;",
 		"ff: Float64Array = _E_Float64Array;",
-		"fe: EnumModeArray = _E_Int8Array;",
+		"fe: Mode__Array = _E_Int8Array;",
 		// A schema default stands exactly as written — not padded out to N.
 		"short: Uint32Array = new Uint32Array([1, 2]);",
 		"fb: Uint8Array = new Uint8Array([1]);",
@@ -1391,7 +1391,7 @@ func TestTSCountIsACapacityNotADefaultLength(t *testing.T) {
 		"short: number[] = [1, 2, 0",
 		"fb: boolean[] = [true, false",
 		"fu64: bigint[] = [1n, 0n",
-		"fe: EnumMode[] = [(0 as EnumMode)",
+		"fe: Mode[] = [(0 as Mode)",
 		`strs: string[] = [""`,
 		"if (!elementsEqual(this.none,",
 	} {
@@ -1639,8 +1639,8 @@ messages:
 		// Entering a nested struct/union scope CLEARS NOTHING: the fields decode
 		// into the member that is already there, so a re-opened scope continues
 		// what the first opening set.
-		"    case 0: { this._c = _L_M_s; return true; }",
-		"    case 1: { this._c = _L_M_u; return true; }",
+		"    case 0: { this._c = _M__Loc_s; return true; }",
+		"    case 1: { this._c = _M__Loc_u; return true; }",
 		"        case 0: { const _v = v as number; if (_v > 255) throw new SofabError(SofabErrorCode.InvalidMsg, \"a: value outside declared width u8\"); this.o.s.a = _v; break; }",
 		"        case 0: { const _v = v as number; if (_v > 255) throw new SofabError(SofabErrorCode.InvalidMsg, \"o1: value outside declared width u8\"); this.o.u.o1 = _v; break; }",
 	} {
@@ -1650,7 +1650,7 @@ messages:
 	}
 	// A nested member must never be replaced by a fresh object on re-open. Only a
 	// wrapper ARRAY replaces (§7.4), and that is the `_t = []` in its own arm.
-	for _, bad := range []string{"this.o.s = new MS()", "this.o.u = new MU()"} {
+	for _, bad := range []string{"this.o.s = new MS()", "this.o.u = new M_U()"} {
 		if strings.Contains(mod, bad) {
 			t.Errorf("message.ts must not replace a nested member (%q):\n%s", bad, mod)
 		}
@@ -1668,7 +1668,7 @@ messages:
 	}
 	// `place` would be the wrong verb here: it REPLACES, which is what a nested
 	// row needs and what a struct/union element must never get.
-	for _, bad := range []string{"this._q3!.place(id", "this._ix3 = id; _t[id] = new MEElem()"} {
+	for _, bad := range []string{"this._q3!.place(id", "this._ix3 = id; _t[id] = new M_E()"} {
 		if strings.Contains(mod, bad) {
 			t.Errorf("a re-opened element id must not be replaced by a fresh object (%q):\n%s", bad, mod)
 		}
@@ -1785,13 +1785,13 @@ messages:
 		// the index bound, then the gap-fill, in that order, so a rejected id
 		// extends nothing (§7.2 item 8). The schema reaches it as the capacity
 		// argument, 4.
-		`this._q1 = new FramedSeq<VecObjsElem>(_t, _MK_VecObjsElem, 4, "objs", MAX_DYN_ARRAY_COUNT);`,
+		`this._q1 = new FramedSeq<Vec_Objs>(_t, _Vec_Objs__Make, 4, "objs", MAX_DYN_ARRAY_COUNT);`,
 		"        this._q1!.reserve(id);\n",
 		// A count-less array has no schema capacity, so it hands over UNBOUNDED
 		// (-1) and the receiver cap behind it governs instead — a policy rejection,
 		// not INVALID (§6.2.1). Same class, same call: which verdict a breach gets
 		// is decided by the arguments, not by a second emitted shape.
-		`this._q3 = new FramedSeq<VecDynElem>(_t, _MK_VecDynElem, -1, "dyn", MAX_DYN_ARRAY_COUNT);`,
+		`this._q3 = new FramedSeq<Vec_Dyn>(_t, _Vec_Dyn__Make, -1, "dyn", MAX_DYN_ARRAY_COUNT);`,
 		"        this._q3!.reserve(id);\n",
 		// A leaf element's placement is the corelib collector's, which does the
 		// same thing with the same ordering.
@@ -1817,7 +1817,7 @@ messages:
 	// that answered them is not emitted at all any more — it is the collector's,
 	// which is why none of these spellings may occur.
 	for _, bad := range []string{
-		"_t.push(new VecObjsElem()); this._c", ".push(_r);", "_t.push(_e);",
+		"_t.push(new Vec_Objs()); this._c", ".push(_r);", "_t.push(_e);",
 		"while (_t.length <= id)",
 	} {
 		if strings.Contains(mod, bad) {
@@ -1870,12 +1870,12 @@ messages:
 		"strs: string[] = [];",
 		"nums: Uint32Array = _E_Uint32Array;",
 		"blobs: Uint8Array[] = [];",
-		"objs: VecObjsElem[] = [];",
+		"objs: Vec_Objs[] = [];",
 		"rows: Uint32Array[] = [];",
 		// The count-less controls, unchanged — the point being that both kinds now
 		// read identically.
 		"dstrs: string[] = [];",
-		"dobjs: VecDobjsElem[] = [];",
+		"dobjs: Vec_Dobjs[] = [];",
 		// A fresh message still encodes to nothing: every array field is default.
 		"if (!(this.nums.length === 0)) return false;",
 		"if (!(this.strs.length === 0)) return false;",
@@ -1889,7 +1889,7 @@ messages:
 		`strs: string[] = ["`,
 		"nums: number[] = [0",
 		"blobs: Uint8Array[] = [new Uint8Array()",
-		"objs: VecObjsElem[] = [new VecObjsElem()",
+		"objs: Vec_Objs[] = [new Vec_Objs()",
 		"rows: number[][] = [[]",
 	} {
 		if strings.Contains(mod, gone) {
@@ -2033,7 +2033,7 @@ messages:
 	for _, tc := range []struct{ member, row, slot string }{
 		{"string[][]", "string[]", "_q1"},
 		{"Uint8Array[][]", "Uint8Array[]", "_q3"},
-		{"StructPoint[][]", "StructPoint[]", "_q5"},
+		{"Point[][]", "Point[]", "_q5"},
 		{"string[][][]", "string[][]", "_q8"},
 	} {
 		if !strings.Contains(mod, "const _t: "+tc.member+" = [];") {
@@ -2064,8 +2064,8 @@ messages:
 	// collector of its own over the row the placement just built — and its
 	// elements MERGE on re-open, so that one reserves.
 	for _, want := range []string{
-		`this._q6 = new FramedSeq<StructPoint>(_e, _MK_StructPoint, 2, "structrows row", 16384);`,
-		"      case _L_NestedRows_structrows_r: {\n        this._q6!.reserve(id);",
+		`this._q6 = new FramedSeq<Point>(_e, _Point__Make, 2, "structrows row", 16384);`,
+		"      case _NestedRows__Loc_structrows_r: {\n        this._q6!.reserve(id);",
 	} {
 		if !strings.Contains(mod, want) {
 			t.Errorf("a struct row must open its own element scope: missing %q\n%s", want, mod)
@@ -2464,7 +2464,7 @@ func TestTSCallerOwnsTheEncodeBuffer(t *testing.T) {
 func TestTSStructsGetNoEncodeEntryPoint(t *testing.T) {
 	mod := genTSWith(t, "version: 1\nmessages:\n  M:\n    payload:\n"+
 		"      p: { id: 0, type: struct, fields: { x: { id: 0, type: i32 } } }\n", map[string]any{})
-	cls := mod[strings.Index(mod, "export class MP {"):strings.Index(mod, "export class M {")]
+	cls := mod[strings.Index(mod, "export class M_P {"):strings.Index(mod, "export class M {")]
 	if strings.Contains(cls, "encode(): Uint8Array") || strings.Contains(cls, "MAX_SIZE") {
 		t.Errorf("a struct must not carry a message encode entry point:\n%s", cls)
 	}
@@ -2597,8 +2597,8 @@ func TestTSClosedNameSet(t *testing.T) {
 		// The example schema HAS an unbounded string element inside a wrapper array
 		// (somestringarray), the one shape the visitor never sees a header for, so
 		// the residual DecodeLimits survives here (generator#388).
-		"  static decode(bytes: Uint8Array): Myfirstmessage {\n    const o = new Myfirstmessage();\n    _decode(bytes, new _MyfirstmessageVis(o, new PayloadAcc()));\n    return o;\n  }",
-		"class _MyfirstmessageVis implements Visitor {",
+		"  static decode(bytes: Uint8Array): Myfirstmessage {\n    const o = new Myfirstmessage();\n    _decode(bytes, new _Myfirstmessage__Visitor(o, new PayloadAcc()));\n    return o;\n  }",
+		"class _Myfirstmessage__Visitor implements Visitor {",
 	} {
 		if !strings.Contains(mod, want) {
 			t.Errorf("message.ts missing %q", want)
@@ -2748,10 +2748,10 @@ messages:
 			t.Errorf("the corelib must be handed no DecodeLimits (%q):\n%s", gone, mod)
 		}
 	}
-	if !strings.Contains(mod, "_decode(bytes, new _MVis(o, new PayloadAcc()));") {
+	if !strings.Contains(mod, "_decode(bytes, new _M__Visitor(o, new PayloadAcc()));") {
 		t.Errorf("decode() must pass the bytes and the visitor, nothing else:\n%s", mod)
 	}
-	if !strings.Contains(mod, "this.is = new IStream(new _MVis(this.out, new PayloadAcc()));") {
+	if !strings.Contains(mod, "this.is = new IStream(new _M__Visitor(this.out, new PayloadAcc()));") {
 		t.Errorf("the streaming decoder must pass the visitor, nothing else:\n%s", mod)
 	}
 }
@@ -2835,12 +2835,12 @@ func TestTSWideBitfieldIsBigint(t *testing.T) {
 	for _, want := range []string{
 		// A TS enum member can only be a number, so the wide masks become a
 		// literal-typed `const` object; the narrow ones stay an enum.
-		"export const BitfieldWide = {",
+		"export const Wide = {",
 		"  High: 9223372036854775808n,",
-		"export enum BitfieldNarrow {",
+		"export enum Narrow {",
 		"  B = 1073741824,",
 		// The boundary itself: a highest flag at 31 is bigint-carried too.
-		"export const BitfieldEdge = {",
+		"export const Edge = {",
 		"  A: 1073741824n,",
 		"  B: 2147483648n,",
 		"e: bigint = 0n;",
@@ -2883,10 +2883,10 @@ func TestTSWideBitfieldIsBigint(t *testing.T) {
 	for _, bad := range []string{
 		"w: number =",
 		"case 0: this.o.w = Number(v); break;",
-		"export enum BitfieldWide {",
+		"export enum Wide {",
 		// A mask with bit 31 set is not `|`-combinable as a number.
 		"e: number =",
-		"export enum BitfieldEdge {",
+		"export enum Edge {",
 		// The withdrawn flag-mask guards, including the bit-63 literal that only
 		// a mask bound could produce.
 		"0x8000000000000001n",
@@ -2972,7 +2972,7 @@ func TestTSEnumAndBitfieldWidthBoundAtEverySixPositions(t *testing.T) {
 	const bfRej = `const _v = v as number; if (_v > 255) throw new SofabError(SofabErrorCode.InvalidMsg, `
 	for _, want := range []string{
 		// 1. scalar, in the flat root visitor.
-		`case 0: { ` + enRej + `"en: value outside declared enum width"); this.o.en = _v as ClosedEn; break; }`,
+		`case 0: { ` + enRej + `"en: value outside declared enum width"); this.o.en = _v as Closed_En; break; }`,
 		`case 1: { ` + bfRej + `"bf: value outside declared bitfield width"); this.o.bf = _v; break; }`,
 		// 2. native array element. One interval and nothing else: an enum's {0,1,2,10}
 		// imply an i8, a bitfield's positions {0,1,3} a u8. The hand-off carries the
@@ -2983,16 +2983,16 @@ func TestTSEnumAndBitfieldWidthBoundAtEverySixPositions(t *testing.T) {
 		"const _t = this._tt; _t.typed = this._a0Ea;\n          _t.minLo = 4294967168; _t.minHi = 4294967295; _t.maxLo = 127; _t.maxHi = 0;",
 		"const _t = this._tt; _t.typed = this._a0Bfa;\n          _t.minLo = 0; _t.minHi = 0; _t.maxLo = 255; _t.maxHi = 0;",
 		// 3. struct member — both surfaces: the standalone class visitor...
-		`case 0: { ` + enRej + `"se: value outside declared enum width"); this.o.se = _v as ClosedStSe; break; }`,
+		`case 0: { ` + enRej + `"se: value outside declared enum width"); this.o.se = _v as Closed_St_Se; break; }`,
 		`case 1: { ` + bfRej + `"sbf: value outside declared bitfield width"); this.o.sbf = _v; break; }`,
 		// ...and the flat root visitor's frame for the same member.
-		`case 0: { ` + enRej + `"se: value outside declared enum width"); this.o.st.se = _v as ClosedStSe; break; }`,
+		`case 0: { ` + enRej + `"se: value outside declared enum width"); this.o.st.se = _v as Closed_St_Se; break; }`,
 		`case 1: { ` + bfRej + `"sbf: value outside declared bitfield width"); this.o.st.sbf = _v; break; }`,
 		// 4. struct-array element member.
-		`case 0: { ` + enRej + `"se: value outside declared enum width"); this.o.sa[this._ix2]!.se = _v as ClosedSaElemSe; break; }`,
+		`case 0: { ` + enRej + `"se: value outside declared enum width"); this.o.sa[this._ix2]!.se = _v as Closed_Sa_Se; break; }`,
 		`case 1: { ` + bfRej + `"sbf: value outside declared bitfield width"); this.o.sa[this._ix2]!.sbf = _v; break; }`,
 		// 5. union member.
-		`case 0: { ` + enRej + `"ue: value outside declared enum width"); this.o.un.ue = _v as ClosedUnUe; break; }`,
+		`case 0: { ` + enRej + `"ue: value outside declared enum width"); this.o.un.ue = _v as Closed_Un_Ue; break; }`,
 		`case 1: { ` + bfRej + `"ubf: value outside declared bitfield width"); this.o.un.ubf = _v; break; }`,
 		// 6. matrix row element — the row register, not a field id.
 		"const _t = this._tt; _t.typed = this._row5;\n        _t.minLo = 4294967168; _t.minHi = 4294967295; _t.maxLo = 127; _t.maxHi = 0;",
@@ -3010,7 +3010,7 @@ func TestTSEnumAndBitfieldWidthBoundAtEverySixPositions(t *testing.T) {
 		t.Errorf("a closed-kind array must still take the hand-off, or its elements are lost:\n%s", mod)
 	}
 	for _, bad := range []string{
-		"this.o.en = Number(v) as ClosedEn;",
+		"this.o.en = Number(v) as Closed_En;",
 		"this.o.bf = Number(v);",
 		"this._a0Bfa[i] = Number(v);",
 	} {
@@ -3056,7 +3056,7 @@ func TestTSEnumBitfieldWidthElisions(t *testing.T) {
 	}
 	// {R:0, G:1, B:2} implies i8, NOT the 0..2 hull of its constants: 5 is a valid
 	// wire value for this field and must decode.
-	if !strings.Contains(mod, `case 1: { const _v = Number(v); if (_v < -128 || _v > 127) throw new SofabError(SofabErrorCode.InvalidMsg, "e: value outside declared enum width"); this.o.e = _v as WE; break; }`) {
+	if !strings.Contains(mod, `case 1: { const _v = Number(v); if (_v < -128 || _v > 127) throw new SofabError(SofabErrorCode.InvalidMsg, "e: value outside declared enum width"); this.o.e = _v as W_E; break; }`) {
 		t.Errorf("a contiguous enum must take the implied i8 width, not its constant hull:\n%s", mod)
 	}
 	// The width is the SMALLEST type that holds the highest position, not one
@@ -3145,8 +3145,8 @@ messages:
 		// A declared default is a value of its own and stays a fresh array.
 		"dd: Uint16Array = new Uint16Array([1, 2]);",
 		// The visitor's registers, an enum's with its alias asserted on.
-		"private _a0E: MEElemArray = _E_Int8Array as MEElemArray;",
-		"e: MEElemArray = _E_Int8Array;",
+		"private _a0E: M_E__Array = _E_Int8Array as M_E__Array;",
+		"e: M_E__Array = _E_Int8Array;",
 		"private _a0F: Float32Array = _E_Float32Array;",
 		// A matrix row's register and its gap padding — the latter now the element
 		// default its collector fills a gap with (generator#587). Sharing one
@@ -3390,7 +3390,7 @@ messages:
 	}
 	// The nested types' own visitors bind `this.o.names` legitimately; the
 	// message's visitor never does.
-	i := strings.Index(m, "class _MVis ")
+	i := strings.Index(m, "class _M__Visitor ")
 	if i < 0 {
 		t.Fatalf("no message visitor:\n%s", m)
 	}

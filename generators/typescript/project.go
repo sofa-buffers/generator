@@ -77,7 +77,7 @@ func (g *gen) harness(s *ir.Schema) []byte {
 	// NaN's payload bits, say).
 	f.line("const MESSAGES: Record<string, { fromJSON(d: Record<string, unknown>): { encode(): Uint8Array; serialize(os: import(%q).OStream): void; toJSON(): Record<string, unknown> }; decode(b: Uint8Array): { encode(): Uint8Array; serialize(os: import(%q).OStream): void; toJSON(): Record<string, unknown> } }> = {", corelibPkg, corelibPkg)
 	for _, m := range s.Messages {
-		f.line("  %q: M.%s,", m.Name, exported(m.Name))
+		f.line("  %q: M.%s,", m.Name, msgName(m))
 	}
 	f.line("};")
 	f.blank()
@@ -89,7 +89,7 @@ func (g *gen) harness(s *ir.Schema) []byte {
 	// and `finish` asks it rather than reading a copy (generator#541).
 	f.line("const DECODERS: Record<string, { new (): { feed(chunk: Uint8Array): import(%q).DecodeStatus; finish(): { toJSON(): Record<string, unknown> } } }> = {", corelibPkg)
 	for _, m := range s.Messages {
-		f.line("  %q: M.%sDecoder,", m.Name, exported(m.Name))
+		f.line("  %q: M.%s,", m.Name, decoderName(msgRaw(m)))
 	}
 	f.line("};")
 	f.blank()
@@ -111,7 +111,7 @@ func (g *gen) harness(s *ir.Schema) []byte {
 		f.line("async function benchMain(w: string, _reps: number, _input: Buffer): Promise<number> {")
 	}
 	for _, m := range s.Messages {
-		mt := exported(m.Name)
+		mt := msgName(m)
 		low := strings.ToLower(m.Name)
 		f.line("  if (w === \"encode_%s\" || w === \"decode_%s\") {", low, low)
 		f.line("    const obj = M.%s.fromJSON(JSON.parse(input.toString(\"utf8\")));", mt)
@@ -151,7 +151,7 @@ func (g *gen) harness(s *ir.Schema) []byte {
 		f.line("    const obj = M.%s.fromJSON(JSON.parse(input.toString(\"utf8\")));", mt)
 		f.line("    const wire = obj.encode(); // setup: the decode input")
 		f.line("    let sink = 0;")
-		f.line("    const body = () => { const _d = new M.%sDecoder(); _d.feed(wire); sink ^= %s; };", mt, g.benchSinkOn("_d.finish()", m))
+		f.line("    const body = () => { const _d = new M.%s(); _d.feed(wire); sink ^= %s; };", decoderName(msgRaw(m)), g.benchSinkOn("_d.finish()", m))
 		f.line("    for (let i = 0; i < BENCH_WARMUP; i++) body();")
 		f.line("    for (let i = 0; i < reps; i++) body();")
 		f.line("    process.stderr.write(`sink=${sink} bytes=${wire.length}\\n`);")

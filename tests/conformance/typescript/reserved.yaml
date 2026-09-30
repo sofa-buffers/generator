@@ -39,5 +39,49 @@ messages:
       which: { id: 12, type: u8 }
       f:            { id: 13, type: fp32 }
       inner:        { id: 14, type: struct, fields: { $ref: '#/$defs/struct/Inner' } }
-      u:            { id: 15, type: union, oneof: { clear: { id: 0, type: u8 }, constructor: { id: 1, type: u8 }, encode: { id: 2, type: u8 }, hasOwnProperty: { id: 3, type: u8 }, isDefault: { id: 4, type: u8 }, isPrototypeOf: { id: 5, type: u8 }, propertyIsEnumerable: { id: 6, type: u8 }, serialize: { id: 7, type: u8 }, toJSON: { id: 8, type: u8 }, toLocaleString: { id: 9, type: u8 }, toString: { id: 10, type: u8 }, valueOf: { id: 11, type: u8 }, which: { id: 12, type: u8 } } }
+      u:            { id: 15, type: union, oneof: { clear: { id: 0, type: u8 }, constructor: { id: 1, type: u8 }, encode: { id: 2, type: u8 }, hasOwnProperty: { id: 3, type: u8 }, isDefault: { id: 4, type: u8 }, isPrototypeOf: { id: 5, type: u8 }, propertyIsEnumerable: { id: 6, type: u8 }, serialize: { id: 7, type: u8 }, toJSON: { id: 8, type: u8 }, toLocaleString: { id: 9, type: u8 }, toString: { id: 10, type: u8 }, valueOf: { id: 11, type: u8 }, which: { id: 12, type: u8 }, x: { id: 13, type: u8 }, hasX: { id: 14, type: u8 }, own_property: { id: 15, type: u8 }, g: { id: 16, type: fp32 }, gFp32Raw: { id: 17, type: u8 } } }
       inner_inner2: { id: 16, type: struct, fields: { $ref: '#/$defs/struct/Inner2' } }
+      fFp32Raw:     { id: 17, type: u8 }
+  MAX:
+    payload:
+      DYN:
+        id: 0
+        type: struct
+        fields:
+          ARRAY: { id: 0, type: struct, fields: { COUNT: { id: 0, type: struct, fields: { a: { id: 0, type: array, items: { type: u8 } } } } } }
+          STRING: { id: 1, type: struct, fields: { LEN: { id: 0, type: struct, fields: { s: { id: 0, type: string } } } } }
+          BLOB: { id: 2, type: struct, fields: { LEN: { id: 0, type: struct, fields: { b: { id: 0, type: blob } } } } }
+  Array: { payload: { x: { id: 0, type: u8 } } }
+  ArrayKind: { payload: { x: { id: 0, type: u8 } } }
+  ArrayTarget: { payload: { x: { id: 0, type: u8 } } }
+  BigInt: { payload: { x: { id: 0, type: u8 } } }
+  BigInt64Array: { payload: { x: { id: 0, type: u8 } } }
+  BigUint64Array: { payload: { x: { id: 0, type: u8 } } }
+  BlobSeq: { payload: { x: { id: 0, type: u8 } } }
+  BoolArrayTarget: { payload: { x: { id: 0, type: u8 } } }
+  Boolean: { payload: { x: { id: 0, type: u8 } } }
+  DecodeStatus: { payload: { x: { id: 0, type: u8 } } }
+  ElementSeq: { payload: { x: { id: 0, type: u8 } } }
+  FixlenSubtype: { payload: { x: { id: 0, type: u8 } } }
+  Float32Array: { payload: { x: { id: 0, type: u8 } } }
+  Float64Array: { payload: { x: { id: 0, type: u8 } } }
+  FloatArrayTarget: { payload: { x: { id: 0, type: u8 } } }
+  FramedSeq: { payload: { x: { id: 0, type: u8 } } }
+  IStream: { payload: { x: { id: 0, type: u8 } } }
+  Int16Array: { payload: { x: { id: 0, type: u8 } } }
+  Int32Array: { payload: { x: { id: 0, type: u8 } } }
+  Int8Array: { payload: { x: { id: 0, type: u8 } } }
+  IntegerArrayTarget: { payload: { x: { id: 0, type: u8 } } }
+  Long: { payload: { x: { id: 0, type: u8 } } }
+  Number: { payload: { x: { id: 0, type: u8 } } }
+  OStream: { payload: { x: { id: 0, type: u8 } } }
+  PayloadAcc: { payload: { x: { id: 0, type: u8 } } }
+  Record: { payload: { x: { id: 0, type: u8 } } }
+  SofabError: { payload: { x: { id: 0, type: u8 } } }
+  SofabErrorCode: { payload: { x: { id: 0, type: u8 } } }
+  StringSeq: { payload: { x: { id: 0, type: u8 } } }
+  Uint16Array: { payload: { x: { id: 0, type: u8 } } }
+  Uint32Array: { payload: { x: { id: 0, type: u8 } } }
+  Uint8Array: { payload: { x: { id: 0, type: u8 } } }
+  Visitor: { payload: { x: { id: 0, type: u8 } } }
+  WireType: { payload: { x: { id: 0, type: u8 } } }

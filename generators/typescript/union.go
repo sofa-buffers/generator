@@ -6,6 +6,7 @@ import (
 
 	"github.com/sofa-buffers/generator/internal/generator"
 	"github.com/sofa-buffers/generator/internal/ir"
+	"github.com/sofa-buffers/generator/internal/naming"
 )
 
 // A schema union is a TypeScript class that holds exactly ONE option (MESSAGE_SPEC
@@ -52,7 +53,9 @@ type unionOpt struct {
 	f       *ir.Field
 	orig    *ir.Field // the option as declared, for its documentation
 	prop    string    // the public getter/setter (mangled)
-	base    string    // <Opt>: has<Opt>, mutable<Opt>
+	base    string    // <Opt>, the Pascal option name
+	has     string    // has<Opt>(), yielding with `_` where a member has it
+	mutable string    // mutable<Opt>(), likewise ("" for a kind replaced whole)
 	slot    string    // the private slot: "_" + prop, so it never lands on `_which`
 	raw     string    // the public fp32 raw-bytes property ("" unless fp32)
 	rawSlot string    // its private slot
@@ -62,7 +65,8 @@ type unionOpt struct {
 
 // unionShape is one union type with its options.
 type unionShape struct {
-	typeName string
+	typeName string // declared (escaped) class name
+	raw      string // unescaped identifier, for the derived names
 	nt       *ir.NamedType
 	opts     []*unionOpt
 	d        *unionOpt
@@ -96,7 +100,21 @@ func unionMutable(fld *ir.Field) bool {
 }
 
 func (g *gen) unionShapeOf(key string, nt *ir.NamedType) *unionShape {
-	u := &unionShape{typeName: g.typeName(key), nt: nt, byField: map[*ir.Field]*unionOpt{}}
+	u := &unionShape{typeName: g.typeName(key), raw: g.typeRaw(key), nt: nt, byField: map[*ir.Field]*unionOpt{}}
+	// The members are assigned in three passes over ONE set, so no two can meet:
+	// the class's own members; then every option's property and slot, which are
+	// the schema's names (distinct by construction: the validator keeps option
+	// names fold-unique, and a mangled `which_` is no schema name); then what the
+	// backend DERIVES from an option -- the raw-bytes companion, has<Opt>,
+	// mutable<Opt> -- which yields with trailing underscores where a member
+	// already has the name (an option `hasX` beside an option `x`, an option
+	// `own_property` whose has<Opt> is Object's hasOwnProperty).
+	taken := map[string]bool{}
+	for _, set := range []map[string]bool{tsClassBody, tsMembers, tsObjectMembers, unionReserved} {
+		for n := range set {
+			taken[n] = true
+		}
+	}
 	for _, fld := range nt.Fields {
 		cp := *fld
 		switch fld.Kind {
@@ -105,87 +123,36 @@ func (g *gen) unionShapeOf(key string, nt *ir.NamedType) *unionShape {
 		}
 		prop := unionOptProp(fld.Name)
 		o := &unionOpt{
-			f:       &cp,
-			orig:    fld,
-			prop:    prop,
-			base:    exported(fld.Name),
-			slot:    "_" + prop,
+			f:    &cp,
+			orig: fld,
+			prop: prop,
+			base: naming.Pascal(fld.Name),
+			slot: "_" + prop,
+			// Upper-cased with its underscores kept, so it is as fold-unique as
+			// the option name, and the fixed `_ID` suffix meets no static.
 			idConst: strings.ToUpper(fld.Name) + "_ID",
 			isD:     nt.IsDefaultOption(fld),
 		}
-		if fp32RawCompanion(fld) {
-			o.raw = fp32RawName(prop)
-			o.rawSlot = "_" + o.raw
-		}
+		taken[o.prop], taken[o.slot] = true, true
 		u.opts = append(u.opts, o)
 		u.byField[fld] = o
 		if o.isD {
 			u.d = o
 		}
 	}
-	return u
-}
-
-// checkUnionNames rejects a union whose options derive the same member. The
-// getters, the has/mutable methods, the raw-bytes properties and the private
-// slots are checked as ONE set with the union's own members (`foo_bar` and
-// `fooBar` both give hasFooBar; an option `a_raw`… lands on nothing, but `f`'s
-// fFp32Raw lands on an option named `fFp32Raw`), and the id constants as a
-// second set with the class's statics. Located: the error names the union and
-// both options.
-func checkUnionNames(u *unionShape) error {
-	check := func(owner map[string]string, o *unionOpt, names []string) error {
-		for _, n := range names {
-			prev, ok := owner[n]
-			switch {
-			case ok && prev == "":
-				return fmt.Errorf("typescript backend: union %s: option %q generates the member %s, which the union type already has; rename the option", u.nt.Key, o.f.Name, n)
-			case ok && prev != o.f.Name:
-				return fmt.Errorf("typescript backend: union %s: options %q and %q both generate the member %s; rename one", u.nt.Key, prev, o.f.Name, n)
-			}
-			owner[n] = o.f.Name
+	for _, o := range u.opts {
+		if fp32RawCompanion(o.orig) {
+			o.raw = freeMember(taken, fp32RawName(o.orig.Name))
+			o.rawSlot = freeMember(taken, "_"+o.raw)
 		}
-		return nil
-	}
-	inst, stat := map[string]string{}, map[string]string{}
-	for _, set := range []map[string]bool{tsClassBody, tsMembers, tsObjectMembers, unionReserved} {
-		for m := range set {
-			inst[m] = ""
-		}
-	}
-	for m := range unionReservedStatic {
-		stat[m] = ""
 	}
 	for _, o := range u.opts {
-		names := []string{o.prop, o.slot, "has" + o.base}
+		o.has = freeMember(taken, "has"+o.base)
 		if unionMutable(o.f) {
-			names = append(names, "mutable"+o.base)
-		}
-		if o.raw != "" {
-			names = append(names, o.raw, o.rawSlot)
-		}
-		if err := check(inst, o, names); err != nil {
-			return err
-		}
-		if err := check(stat, o, []string{o.idConst}); err != nil {
-			return err
+			o.mutable = freeMember(taken, "mutable"+o.base)
 		}
 	}
-	return nil
-}
-
-// checkUnions runs checkUnionNames over every union type of the schema.
-func (g *gen) checkUnions(s *ir.Schema) error {
-	for _, key := range s.NamedOrder {
-		nt := s.Named[key]
-		if nt.Category != ir.CatUnion {
-			continue
-		}
-		if err := checkUnionNames(g.unionShapeOf(key, nt)); err != nil {
-			return err
-		}
-	}
-	return nil
+	return u
 }
 
 // unionIsRef reports whether an option's slot holds an OBJECT that is built on
@@ -363,7 +330,7 @@ func (g *gen) emitUnionClass(f *tsfile, key string, nt *ir.NamedType) {
 	f.line("    return o;")
 	f.line("  }")
 	f.blank()
-	g.emitDecode(f, u.typeName)
+	g.emitDecode(f, u.typeName, u.raw)
 	f.line("}")
 	f.blank()
 }
@@ -400,7 +367,7 @@ func (g *gen) emitUnionAccessors(f *tsfile, u *unionShape, o *unionOpt) {
 		f.line("    this.%s = null;", o.rawSlot)
 	}
 	f.line("  }")
-	f.line("  has%s(): boolean {", o.base)
+	f.line("  %s(): boolean {", o.has)
 	f.line("    return this._which === %d;", id)
 	f.line("  }")
 	if o.rawSlot != "" {
@@ -430,7 +397,7 @@ func (g *gen) emitUnionAccessors(f *tsfile, u *unionShape, o *unionOpt) {
 	// so a decode that reaches it again -- a repeated or re-opened occurrence, a
 	// resumed feed -- continues it (MESSAGE_SPEC §7.4) instead of wiping it. A
 	// real switch builds the option fresh at its default.
-	f.line("  mutable%s(): %s {", o.base, t)
+	f.line("  %s(): %s {", o.mutable, t)
 	f.line("    if (this._which !== %d) {", id)
 	if g.hasLeave(u) {
 		f.line("      this._leave();")

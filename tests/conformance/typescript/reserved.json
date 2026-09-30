@@ -3,6 +3,7 @@
   "constructor": 2,
   "encode": 3,
   "f": 1.5,
+  "fFp32Raw": 3,
   "hasOwnProperty": 4,
   "inner": {
     "clear": 2,

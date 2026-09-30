@@ -54,7 +54,7 @@ copy, no conversion and no per-element range check sits between it and the wire.
 | `u64` `i64` | per [`int64`](#int64): `BigUint64Array` / `BigInt64Array`, else `Long[]` |
 | `fp32` `fp64` | `Float32Array` `Float64Array` |
 | `boolean` | `Uint8Array` — `0` or `1`, the byte the wire carries |
-| `enum` | `<EnumName>Array`, see below |
+| `enum` | `<EnumName>__Array`, see below |
 | `bitfield` | the unsigned width its highest `pos` implies (`Uint8Array`..`BigUint64Array`) |
 | `string` `blob` | `string[]` `Uint8Array[]` |
 | struct, union | `<TypeName>[]` |
@@ -65,7 +65,7 @@ alias beside it:
 
 ```ts
 export enum Mode { Off = 0, Active = 1 }
-export type ModeArray = Int8Array & { [index: number]: Mode };
+export type Mode__Array = Int8Array & { [index: number]: Mode };
 ```
 
 so the storage is a plain `Int8Array` and `m.modes[0]` still reads as `Mode`.
@@ -128,12 +128,42 @@ underscore — the field `encode` is `encode_`. Those names are:
 
 The statics (`fromJSON`, `decode`, `MAX_SIZE`) are a namespace of their own, so
 a field may take their names. Only the member changes: the wire is keyed by the
-field id, and the JSON key stays the schema name. Two fields that end up with
-the same member — `encode` and `encode_`, or an `fp32` field `f` (whose raw-bytes
-companion is `fFp32Raw`) and a field `fFp32Raw` — fail generation, naming both;
-so do two constants of one enum or flags of one bitfield that give the same
-member (`a_b` and `aB` are both `AB`). The list lives in
+field id, and the JSON key stays the schema name. The list lives in
 `generators/typescript/reserved.go`.
+
+A member the generator derives from a field — the raw-bytes companion of an
+`fp32` field `f`, `fFp32Raw` — gets a trailing underscore instead when a
+sibling field already has that name: beside a field `fFp32Raw`, `f`'s companion
+is `fFp32Raw_`. The schema's own names always keep their spelling.
+
+## Type names
+
+`message.ts` is one flat module. Every message and named type is a class, enum
+or bitfield named after its schema path, each part in PascalCase and the parts
+joined with `_`:
+
+| schema | TypeScript |
+|---|---|
+| message `vehicle_telemetry` | `VehicleTelemetry` |
+| `$defs` type `point` | `Point` |
+| inline struct of field `pos` in message `m` | `M_Pos` |
+| inline struct element of an array field `rows` in message `m` | `M_Rows` |
+| inline struct of option `pt` of union field `u` in message `m` | `M_U_Pt` |
+| one `default_id` variant of a `$defs` union `shape` | `Shape__DefaultPt` |
+
+What the generator adds for a type follows `__`: the incremental decoder of a
+message `m` is `M__Decoder`, the array alias of an enum `mode` is
+`Mode__Array`. A schema name never contains `__`, so none of these can meet a
+type name.
+
+Enum constants and bitfield flags are the constant's name in PascalCase
+(`Mode.Active`, `Flags.On`).
+
+A type whose name would be one the module already uses — a name it imports from
+`corelib-ts` (`OStream`, `Long`, `Visitor`, ...), a JavaScript global it refers
+to (`Uint8Array`, `Number`, `Record`, ...), or one of the `MAX_DYN_*` limit
+constants — gets a trailing underscore: a message `long` is the class `Long_`,
+and its decoder is still `Long__Decoder`.
 
 ## Unions
 
@@ -154,7 +184,7 @@ shape:
 ```
 
 ```ts
-export class MShape {
+export class M_Shape {
   static readonly NUM_ID = 0;
   static readonly NAME_ID = 1;
   static readonly PT_ID = 2;
@@ -170,10 +200,10 @@ export class MShape {
   set name(v: string);
   hasName(): boolean;
 
-  get pt(): MShapePt;
-  set pt(v: MShapePt);
+  get pt(): M_Shape_Pt;
+  set pt(v: M_Shape_Pt);
   hasPt(): boolean;
-  mutablePt(): MShapePt;
+  mutablePt(): M_Shape_Pt;
 
   get tags(): string[];
   set tags(v: string[]);
@@ -187,7 +217,7 @@ export class MShape {
 | operation | TypeScript |
 |---|---|
 | which option is held | `x.which` → the option's id |
-| option ids | `MShape.PT_ID` (`<OPTION>_ID` constants) |
+| option ids | `M_Shape.PT_ID` (`<OPTION>_ID` constants) |
 | test | `x.hasPt()` |
 | read | `x.pt` |
 | select with a value | `x.num = 7` |
@@ -202,14 +232,14 @@ if (m.shape.hasPt()) {
   use(m.shape.pt.x);
 }
 switch (m.shape.which) {
-  case MShape.NUM_ID: use(m.shape.num); break;
-  case MShape.PT_ID:  use(m.shape.pt.y); break;
+  case M_Shape.NUM_ID: use(m.shape.num); break;
+  case M_Shape.PT_ID:  use(m.shape.pt.y); break;
 }
 m.shape.clear();            // pt at its default again
 ```
 
 Each option has a property of its own, typed as a field of that kind would be —
-`num` is a `number`, `pt` an `MShapePt` — so a numeric option is never held in a
+`num` is a `number`, `pt` an `M_Shape_Pt` — so a numeric option is never held in a
 property that also holds strings or objects.
 
 **Reading** an option that is not held returns that option's default — a new
@@ -248,14 +278,16 @@ longer held.
 upper-cased). An option whose name is reserved for a field (see
 [Field names](#field-names)) or is one of the union's own members (`which`,
 `clear`) gets a trailing underscore: an
-option `which` is `which_`, with `hasWhich()` and `WHICH_ID`. Two options that
-would produce the same member (`foo_bar` and `fooBar` both give `hasFooBar()`;
-`f`'s `fFp32Raw` and an option named `fFp32Raw`; `a_b` and `A_B` both give
-`A_B_ID`) fail generation, naming both.
+option `which` is `which_`, with `hasWhich()` and `WHICH_ID`. A derived member
+— `has<Option>()`, `mutable<Option>()`, `<option>Fp32Raw` — that would land on
+another member gets a trailing underscore instead, and the option keeps its
+name: beside an option `hasX`, the option `x` has `hasX_()`; an option
+`own_property` has `hasOwnProperty_()`, so Object's `hasOwnProperty` stays
+intact.
 
 **`$defs` unions** used with different `default_id`s are one class per
-`default_id`, named after `<Name>_default_<option>`: `UnionShapeDefaultPt` and
-`UnionShapeDefaultNum`.
+`default_id`, named `<Name>__Default<Option>`: `Shape__DefaultPt` and
+`Shape__DefaultNum`.
 
 **Defaults.** A new union holds the `default_id` option at that option's own
 default; an omitted `default_id` means the option with the lowest id. Each
