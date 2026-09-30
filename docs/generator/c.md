@@ -73,6 +73,28 @@ match another generated macro anywhere in the schema, generation fails and
 names both owners. The other macro can be a message's include guard
 (`..._H`), its `..._MAX_SIZE`/`..._MAX_SIZE_LIMIT`, or another flag.
 
+## Field names
+
+A field's struct member is the field's schema name. C has no way to escape a
+reserved name, so a field named after a C keyword gets a trailing underscore —
+the field `int` is the member `int_`. The keywords include those C23 added
+(`nullptr`, `typeof`, `constexpr`, …) and `bool`/`true`/`false`, which are
+macros before C23. The same goes for the macros of the standard headers the
+generated code includes — `NULL`, `EOF`, `UINT8_MAX` and the other `<stdint.h>`
+limits, `EXIT_SUCCESS`, … — which the preprocessor would otherwise replace,
+and `linux`/`unix`, which gcc predefines outside its ISO modes. Other
+platform-specific macros are not covered; building the generated sources in an
+ISO mode (`-std=c99`, `-std=c11`, `-std=c23`) avoids them.
+Only the member changes: the wire is keyed by the field id, and the JSON key
+stays the schema name.
+
+A sized blob and a native array carry their length in a sibling member,
+`<field>_len`. A field that ends up with the same member as another — a field
+`b_len` beside a blob `b`, or `int_` beside a mangled `int` — fails generation,
+naming both. So does a field named after a macro the generator defines itself
+(`MESSAGE_M_MAX_SIZE`, an include guard, an option id): rename the field or
+change `symbol_prefix`. The list lives in `generators/c/reserved.go`.
+
 ## Unions
 
 A `union` holds exactly one of its options. It is a tag, `which`, followed by a

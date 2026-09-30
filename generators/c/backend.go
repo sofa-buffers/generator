@@ -37,6 +37,9 @@ func (*Backend) Generate(s *ir.Schema, cfg map[string]any) ([]generator.File, er
 	if err := g.checkMacroNames(s); err != nil {
 		return nil, err
 	}
+	if err := g.checkMemberNames(s); err != nil {
+		return nil, err
+	}
 	project := cfgString(cfg, "emit", "sources") == "project"
 	srcDir := ""
 	if project {
@@ -66,6 +69,10 @@ type gen struct {
 	banner  string
 	license string               // SPDX id, "" to omit the header line
 	size    generator.SizePolicy // max_message_size ceiling for unbounded messages
+	// macros maps every macro the backend defines to its owner, as
+	// checkMacroNames claimed them; checkMemberNames refuses a member of the
+	// same name, which the preprocessor would replace.
+	macros map[string]string
 }
 
 // objectPlan is the fully-resolved emission plan for one C object (the message,
@@ -317,6 +324,7 @@ func (g *gen) checkMacroNames(s *ir.Schema) error {
 			}
 		}
 	}
+	g.macros = owners
 	return nil
 }
 
@@ -1530,34 +1538,4 @@ func cfgString(cfg map[string]any, key, dflt string) string {
 		return v
 	}
 	return dflt
-}
-
-// cKeywords are the names a C struct member cannot take: the C99/C11 reserved
-// words, the words C23 added (a user may build the generated code with
-// -std=c23), and the <stdbool.h> macros the corelib headers pull in -- before
-// C23 `bool`, `true` and `false` are macros, so a member `true` expands to `1`.
-// C has no identifier escape, so a field with such a name is mangled (trailing
-// underscore); the struct member and its descriptor entry use the mangled name,
-// while the JSON harness keys (emitted elsewhere as string literals) keep the
-// original name.
-var cKeywords = map[string]bool{
-	"auto": true, "break": true, "case": true, "char": true, "const": true,
-	"continue": true, "default": true, "do": true, "double": true, "else": true,
-	"enum": true, "extern": true, "float": true, "for": true, "goto": true,
-	"if": true, "inline": true, "int": true, "long": true, "register": true,
-	"restrict": true, "return": true, "short": true, "signed": true, "sizeof": true,
-	"static": true, "struct": true, "switch": true, "typedef": true, "union": true,
-	"unsigned": true, "void": true, "volatile": true, "while": true,
-	// C23 keywords; bool/true/false are <stdbool.h> macros before C23.
-	"alignas": true, "alignof": true, "bool": true, "constexpr": true, "false": true,
-	"nullptr": true, "static_assert": true, "thread_local": true, "true": true,
-	"typeof": true, "typeof_unqual": true,
-}
-
-// cIdent mangles a field name that is a C keyword (trailing underscore).
-func cIdent(name string) string {
-	if cKeywords[name] {
-		return name + "_"
-	}
-	return name
 }
