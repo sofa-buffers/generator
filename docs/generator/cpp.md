@@ -74,24 +74,56 @@ Two things worth knowing before switching it on under `corelib: cpp`:
 Wraps every generated type; the default is `message`. `generic.namespace` sets
 it for every target that has one, and this key overrides that for C++ alone.
 
-## Field names
+## Names
 
-A field's member is the field's schema name. C++ has no way to escape a reserved
-name, so a field whose name the generated class cannot take as a member gets a
-trailing underscore — the field `class` is the member `class_`, and `encode` is
-`encode_`. Those names are:
+Every name is derived from the schema, and every schema the validator accepts
+generates without a clash.
+
+**Types.** A message or `$defs` type is its name in PascalCase: message
+`vehicle_telemetry` is `VehicleTelemetry`, the `$defs` struct `point` is
+`Point`. A type declared inline takes the path to it, each step in PascalCase,
+joined with `_`: the struct of field `a` in message `m` is `M_A`, the element
+struct of an array field `pts` is `M_Pts`, and so is an enum or bitfield
+declared inline.
+
+**Enum constants** are PascalCase members of their `enum class`
+(`Color::Red`). **Bitfield flags** are enumerators at namespace level, named
+`<Type>_<Flag>`: flag `ready` of bitfield `StatusFlags` is `StatusFlags_Ready`.
+
+**Files.** Each message is one header, named after the message in lower case
+with underscores dropped: `vehicle_telemetry` is `vehicletelemetry.hpp`.
+
+**Field members.** A field's member is the field's schema name. C++ has no way
+to escape a reserved name, so a field whose name the generated class cannot
+take as a member gets a trailing underscore — the field `class` is the member
+`class_`, and `encode` is `encode_`. Those names are:
 
 - the C++ keywords;
 - the members every generated class declares itself: `serialize`,
   `deserialize`, `reset`, and on a message also `encode`, `encodeTo`, `decode`,
-  `try_decode`.
+  `try_decode`;
+- the members corelib-cpp looks for to recognise an array collector: `cap`,
+  `dynCap`, `elemDestCap`, `elemWire`, `elemFix`, `prepare`, and `MAX_SIZE`;
+- every macro of the headers the generated code includes (`NULL`, `EOF`,
+  `INT8_MAX`, `errno`, `stdin`, ...; in GNU mode also `linux` and `unix`), and
+  every name starting with `SOFAB_` or `SOFABGEN_`;
+- the name of any type or bitfield flag the schema generates, so that a field
+  named like its own message, or like a type its class uses, is `Point_`.
 
 Only the member changes: the wire is keyed by the field id, and the JSON key
-stays the schema name. Enum constants and bitfield flags are written in
-PascalCase, so two that give the same name (`a_b` and `aB` are both `AB`) fail
-generation, naming both. Bitfield flags are prefixed with their type and share
-the namespace, so a flag of one bitfield and one of another can clash too
-(`F.a_b` and `FA.b` are both `BitfieldFAB`). The list lives in `generators/cpp/reserved.go`.
+stays the schema name. An enum constant spelled like a macro takes the same
+underscore.
+
+**Reserved type names.** A type whose name is one a generated class already
+sees — `Which`, `Message`, `OStreamMessage`, `IStreamMessage`, `Context` --
+or a macro, or a component of the configured `namespace`, gets a trailing
+underscore: message `message` is `Message_`. The same holds for a bitfield flag
+spelled like a macro.
+
+**Parameters and locals** of the generated member functions all start with an
+underscore (`_os`, `_is`, `_id`, `_data`, `_len`, `_out`), so no field can
+collide with one. The lists live in `generators/cpp/reserved.go` and
+`generators/cpp/macros.go`.
 
 ## Unions
 
@@ -111,19 +143,19 @@ shape:
 ```
 
 ```cpp
-struct MShape : sofab::Message {
+struct M_Shape : sofab::Message {
     enum class Which : sofab::id { num = 0, name = 1, pt = 2 };
     Which which() const noexcept;
 
     bool has_num() const noexcept;
     std::uint16_t num() const noexcept;
-    void set_num(std::uint16_t v) noexcept;
+    void set_num(std::uint16_t _v) noexcept;
     std::uint16_t &mutable_num() noexcept;
 
     bool has_pt() const noexcept;
-    const MShapePt &pt() const noexcept;
-    void set_pt(const MShapePt &v);
-    MShapePt &mutable_pt() noexcept;
+    const M_Shape_Pt &pt() const noexcept;
+    void set_pt(const M_Shape_Pt &_v);
+    M_Shape_Pt &mutable_pt() noexcept;
     // ... likewise for name
 
     void reset() noexcept;
@@ -132,8 +164,8 @@ struct MShape : sofab::Message {
 
 | operation | C++ |
 |---|---|
-| which option is held | `x.which()` → `MShape::Which` |
-| option ids | `MShape::Which::pt`; the enumerator's value is the option id |
+| which option is held | `x.which()` → `M_Shape::Which` |
+| option ids | `M_Shape::Which::pt`; the enumerator's value is the option id |
 | test | `x.has_pt()` |
 | read | `x.num()` returns the value; `x.pt()` / `x.name()` return a `const` reference |
 | select with a value | `x.set_num(7)`, `x.set_pt(p)` |
@@ -141,14 +173,14 @@ struct MShape : sofab::Message {
 | back to the default | `x.reset()` |
 
 ```cpp
-MShape s;                      // holds pt at its default: {x = 7, y = 0}
+M_Shape s;                      // holds pt at its default: {x = 7, y = 0}
 s.set_num(7);                  // now num = 7; pt is gone
 s.mutable_pt().y = 2;          // pt again, from its default: {x = 7, y = 2}
 if (s.has_pt()) { use(s.pt().x); }
 switch (s.which()) {
-case MShape::Which::num:  use(s.num()); break;
-case MShape::Which::name: use(s.name()); break;
-case MShape::Which::pt:   use(s.pt()); break;
+case M_Shape::Which::num:  use(s.num()); break;
+case M_Shape::Which::name: use(s.name()); break;
+case M_Shape::Which::pt:   use(s.pt()); break;
 }
 s.reset();                     // pt at its default again
 ```
@@ -173,15 +205,18 @@ alternative per option in id order. With `corelib: c-cpp` — freestanding, no
 new option with placement `new`. The options' own types follow `allow_dynamic`
 as any member does. The API is the same on both.
 
-**Accessor names** are the option names. An option whose name is reserved for a
-field (see [Field names](#field-names)) or is one of the union's own members
-(`which`, `Which`) gets a trailing underscore: option `reset` is `reset_()`,
-`set_reset_()`, `has_reset_()`, `mutable_reset_()`. Two options whose accessors
-would coincide — `foo` and `set_foo` — fail generation, naming both.
+**Accessor names** are the option names. `has_`, `set_` and `mutable_` are
+prefixed to the option's schema name as it is: option `reset` is `has_reset()`,
+`set_reset()`, `mutable_reset()`. The getter and the `Which` enumerator follow
+the member rules of [Names](#names), and take a trailing underscore on top when
+the option is named like one of the union's own members (`which`, `Which`) or
+starts with `set_`, `has_` or `mutable_`: option `reset` is read with
+`reset_()`, and options `foo` and `set_foo` side by side have the getters
+`foo()` and `set_foo_()` and the setters `set_foo()` and `set_set_foo()`.
 
 **`$defs` unions** used with different `default_id`s are one class per
-`default_id`, named after `<Name>_default_<option>`: `UnionShapeDefaultPt` and
-`UnionShapeDefaultNum`.
+`default_id`, named `<Name>_default_<Option>`: `Shape_default_Pt` and
+`Shape_default_Num`.
 
 **Defaults.** A new union holds its `default_id` option at that option's own
 default; an omitted `default_id` means the option with the lowest id. Each

@@ -70,19 +70,11 @@ func (*Backend) Generate(s *ir.Schema, cfg map[string]any) ([]generator.File, er
 			return nil, err
 		}
 	}
-	if err := checkConstNames(s); err != nil {
-		return nil, err
-	}
-	if err := g.checkNamespaceNames(s); err != nil {
-		return nil, err
-	}
-	if err := g.checkUnionNames(s); err != nil {
-		return nil, err
-	}
+	g.assignNames(s)
 	g.resolveLimits(s, cfg)
 	var files []generator.File
 	for _, m := range s.Messages {
-		files = append(files, generator.File{Path: strings.ToLower(m.Name) + ".hpp", Content: g.header(m)})
+		files = append(files, generator.File{Path: headerFile(m), Content: g.header(m)})
 	}
 	if cfgString(cfg, "emit", "sources") == "project" {
 		files = append(files, g.projectFiles(s, cfg)...)
@@ -94,10 +86,18 @@ func (*Backend) Generate(s *ir.Schema, cfg map[string]any) ([]generator.File, er
 }
 
 type gen struct {
-	schema  *ir.Schema
-	ns      string
-	banner  string
-	license string // SPDX id, "" to omit the header line
+	schema *ir.Schema
+	ns     string
+	// The namespace-level identifiers (assignNames): the type of each named
+	// type key and of each message, and the flag enumerators of each bitfield
+	// key in flag order. nsNames is all of them, nsParts the components of ns.
+	types    map[string]string
+	msgTypes map[*ir.Message]string
+	flags    map[string][]string
+	nsNames  map[string]bool
+	nsParts  map[string]bool
+	banner   string
+	license  string // SPDX id, "" to omit the header line
 	// clib selects the corelib-c-cpp C++ wrapper (corelib: c-cpp) instead of the
 	// pure corelib-cpp. The wrapper's read(std::string&) fills the string's
 	// existing buffer rather than resizing it, so generated decode must pre-size
@@ -370,7 +370,7 @@ func (g *gen) header(m *ir.Message) []byte {
 			g.emitUnion(f, g.typeName(key), nt)
 		}
 	}
-	g.emitStruct(f, exported(m.Name), m.Summary, m.Fields, true)
+	g.emitStruct(f, g.msgType(m), m.Summary, m.Fields, true)
 	f.line("} // namespace %s", g.ns)
 	return f.bytes()
 }
@@ -536,9 +536,9 @@ func (g *gen) emitEnum(f *hfile, nt *ir.NamedType) {
 	f.line("enum class %s : %s {", g.typeName(nt.Key), enumBacking(nt))
 	for _, c := range nt.Consts {
 		if doc := oneLineDoc(c.Description); doc != "" {
-			f.line("    %s = %d,  ///< %s", exported(c.Name), c.Value, doc)
+			f.line("    %s = %d,  ///< %s", constIdent(c.Name), c.Value, doc)
 		} else {
-			f.line("    %s = %d,", exported(c.Name), c.Value)
+			f.line("    %s = %d,", constIdent(c.Name), c.Value)
 		}
 	}
 	f.line("};")
@@ -547,15 +547,15 @@ func (g *gen) emitEnum(f *hfile, nt *ir.NamedType) {
 
 func (g *gen) emitBitfield(f *hfile, nt *ir.NamedType) {
 	f.line("enum %s : %s {", g.typeName(nt.Key), bitfieldBacking(nt))
-	for _, fl := range nt.Flags {
+	for i, fl := range nt.Flags {
 		// cppMaskLit, not "%d": an unsuffixed decimal literal takes the first
 		// SIGNED type that holds it, so the mask for position 63 fits no type at
 		// all. It is the one renderer every mask in this header shares.
 		mask := cppMaskLit(uint64(1) << uint(fl.Pos))
 		if doc := flagDoc(fl); doc != "" {
-			f.line("    %s%s = %s,  ///< %s", g.typeName(nt.Key), exported(fl.Name), mask, doc)
+			f.line("    %s = %s,  ///< %s", g.flags[nt.Key][i], mask, doc)
 		} else {
-			f.line("    %s%s = %s,", g.typeName(nt.Key), exported(fl.Name), mask)
+			f.line("    %s = %s,", g.flags[nt.Key][i], mask)
 		}
 	}
 	f.line("};")
@@ -640,7 +640,7 @@ func (g *gen) emitReset(f *hfile, fields []*ir.Field, isMessage bool) {
 	f.line("     */")
 	f.line("    void reset() noexcept {")
 	for _, fld := range fields {
-		acc := cppIdent(fld.Name)
+		acc := g.member(fld.Name)
 		switch fld.Kind {
 		case ir.KindStruct, ir.KindUnion:
 			// Recurse: the nested default is that type's own declaration state, and
@@ -710,11 +710,11 @@ func (g *gen) emitStruct(f *hfile, name, summary string, fields []*ir.Field, isM
 				f.line("    /// %s", doc)
 			}
 			f.line("    /// %s", note)
-			f.line("    %s%s %s = %s;", attr, typ, cppIdent(fld.Name), g.cppDefault(fld))
+			f.line("    %s%s %s = %s;", attr, typ, g.member(fld.Name), g.cppDefault(fld))
 		case doc != "":
-			f.line("    %s%s %s = %s;  ///< %s", attr, typ, cppIdent(fld.Name), g.cppDefault(fld), doc)
+			f.line("    %s%s %s = %s;  ///< %s", attr, typ, g.member(fld.Name), g.cppDefault(fld), doc)
 		default:
-			f.line("    %s%s %s = %s;", attr, typ, cppIdent(fld.Name), g.cppDefault(fld))
+			f.line("    %s%s %s = %s;", attr, typ, g.member(fld.Name), g.cppDefault(fld))
 		}
 	}
 	if isMessage {
@@ -771,28 +771,28 @@ func (g *gen) emitStruct(f *hfile, name, summary string, fields []*ir.Field, isM
 		f.line("     */")
 		f.line("    std::vector<std::uint8_t> encode() const {")
 		if ms.Bounded {
-			f.line("        std::vector<std::uint8_t> out(_maxSize);")
-			f.line("        sofab::OStreamView os{out.data(), out.size()};")
-			f.line("        serialize(os);")
+			f.line("        std::vector<std::uint8_t> _out(_maxSize);")
+			f.line("        sofab::OStreamView _os{_out.data(), _out.size()};")
+			f.line("        serialize(_os);")
 			// The buffer is the schema's worst case, so a refusal here is an
 			// argument error (an id past ID_MAX, a value past FIXLEN_MAX), never a
 			// capacity one. Checked rather than assumed: returning what was written
 			// as if it were the message is what §5.1 forbids.
-			f.line("        if (!os.ok()) { return {}; }")
-			f.line("        out.resize(os.bytesUsed());")
-			f.line("        return out;")
+			f.line("        if (!_os.ok()) { return {}; }")
+			f.line("        _out.resize(_os.bytesUsed());")
+			f.line("        return _out;")
 		} else {
-			f.line("        std::vector<std::uint8_t> out;")
-			f.line("        std::uint8_t scratch[512];")
-			f.line("        sofab::OStreamView os{")
-			f.line("            [&out](std::span<const std::uint8_t> chunk) {")
-			f.line("                out.insert(out.end(), chunk.begin(), chunk.end());")
+			f.line("        std::vector<std::uint8_t> _out;")
+			f.line("        std::uint8_t _scratch[512];")
+			f.line("        sofab::OStreamView _os{")
+			f.line("            [&_out](std::span<const std::uint8_t> _chunk) {")
+			f.line("                _out.insert(_out.end(), _chunk.begin(), _chunk.end());")
 			f.line("            },")
-			f.line("            scratch, sizeof(scratch)};")
-			f.line("        serialize(os);")
-			f.line("        os.flush();")
-			f.line("        if (!os.ok()) { return {}; }")
-			f.line("        return out;")
+			f.line("            _scratch, sizeof(_scratch)};")
+			f.line("        serialize(_os);")
+			f.line("        _os.flush();")
+			f.line("        if (!_os.ok()) { return {}; }")
+			f.line("        return _out;")
 		}
 		f.line("    }")
 		// encodeTo(): the same, into storage the caller already has — no
@@ -800,16 +800,16 @@ func (g *gen) emitStruct(f *hfile, name, summary string, fields []*ir.Field, isM
 		// which case dst holds however much was written before that was found out.
 		f.line("    /**")
 		f.line("     * @brief Encode this message into caller-provided storage (no allocation).")
-		f.line("     * @param dst Destination buffer.")
-		f.line("     * @param cap Capacity of @p dst in bytes.")
-		f.line("     * @return Bytes written, or 0 if the message does not fit in @p cap;")
-		f.line("     *         in which case @p dst holds however much was written first.")
+		f.line("     * @param _dst Destination buffer.")
+		f.line("     * @param _cap Capacity of @p _dst in bytes.")
+		f.line("     * @return Bytes written, or 0 if the message does not fit in @p _cap;")
+		f.line("     *         in which case @p _dst holds however much was written first.")
 		f.line("     */")
-		f.line("    std::size_t encodeTo(std::uint8_t *dst, std::size_t cap) const noexcept {")
-		f.line("        sofab::OStreamView os{dst, cap};")
-		f.line("        serialize(os);")
-		f.line("        if (!os.ok()) { return 0; }")
-		f.line("        return os.bytesUsed();")
+		f.line("    std::size_t encodeTo(std::uint8_t *_dst, std::size_t _cap) const noexcept {")
+		f.line("        sofab::OStreamView _os{_dst, _cap};")
+		f.line("        serialize(_os);")
+		f.line("        if (!_os.ok()) { return 0; }")
+		f.line("        return _os.bytesUsed();")
 		f.line("    }")
 		// Infallible, best-effort decode: kept for back-compat. It discards feed's
 		// Result and always returns a value, so it can never reject malformed input
@@ -820,20 +820,20 @@ func (g *gen) emitStruct(f *hfile, name, summary string, fields []*ir.Field, isM
 		f.line("     * Never reports failure: malformed input yields whatever was decoded")
 		f.line("     * before the error. Use @ref try_decode when the verdict matters.")
 		f.line("     *")
-		f.line("     * @param data Encoded bytes.")
-		f.line("     * @param len  Number of bytes at @p data.")
+		f.line("     * @param _data Encoded bytes.")
+		f.line("     * @param _len  Number of bytes at @p _data.")
 		f.line("     * @return The decoded message.")
 		f.line("     */")
-		f.line("    static %s decode(const std::uint8_t *data, std::size_t len) {", name)
-		f.line("        sofab::IStreamObject<%s> in%s;", name, g.istreamLimits())
-		f.line("        in.feed(data, len);")
+		f.line("    static %s decode(const std::uint8_t *_data, std::size_t _len) {", name)
+		f.line("        sofab::IStreamObject<%s> _in%s;", name, g.istreamLimits())
+		f.line("        _in.feed(_data, _len);")
 		// Move, not copy: `in` is a local that dies on return, and NRVO cannot
 		// apply to *in (it names a member of that local, not the local itself).
 		// Returning *in copy-constructed every std::string/std::vector of the
 		// message -- a second allocation per container on every decode, on top of
 		// the one the decode made. On the fixed profile (inline FixedString /
 		// InlineVector storage) the move is the same memcpy the copy was.
-		f.line("        return std::move(*in);")
+		f.line("        return std::move(*_in);")
 		f.line("    }")
 		f.blank()
 		// Fallible decode: surfaces the corelib's accept/reject decision. feed()
@@ -872,44 +872,44 @@ func (g *gen) emitStruct(f *hfile, name, summary string, fields []*ir.Field, isM
 		if g.clib {
 			f.line("     * @brief Decode a message, reporting whether the input was acceptable.")
 			f.line("     *")
-			f.line("     * Decodes into a fresh instance and copies it over @p out on success,")
-			f.line("     * so @p out never carries anything over from an earlier message. To")
+			f.line("     * Decodes into a fresh instance and copies it over @p _out on success,")
+			f.line("     * so @p _out never carries anything over from an earlier message. To")
 			f.line("     * decode into a destination directly, drive the stream yourself and")
 			f.line("     * call @ref reset on it between messages.")
 			f.line("     *")
-			f.line("     * @param data Encoded bytes.")
-			f.line("     * @param len  Number of bytes at @p data.")
-			f.line("     * @param out  Receives the message on success; untouched otherwise.")
-			f.line("     * @return The decode result; check @c ok() before reading @p out.")
+			f.line("     * @param _data Encoded bytes.")
+			f.line("     * @param _len  Number of bytes at @p _data.")
+			f.line("     * @param _out  Receives the message on success; untouched otherwise.")
+			f.line("     * @return The decode result; check @c ok() before reading @p _out.")
 			f.line("     */")
-			f.line("    static sofab::IStreamImpl::Result try_decode(const std::uint8_t *data, std::size_t len, %s &out) {", name)
-			f.line("        sofab::IStreamObject<%s> in%s;", name, g.istreamLimits())
-			f.line("        sofab::IStreamImpl::Result r = in.feed(data, len);")
-			f.line("        if (r.ok()) { out = *in; }")
-			f.line("        return r;")
+			f.line("    static sofab::IStreamImpl::Result try_decode(const std::uint8_t *_data, std::size_t _len, %s &_out) {", name)
+			f.line("        sofab::IStreamObject<%s> _in%s;", name, g.istreamLimits())
+			f.line("        sofab::IStreamImpl::Result _r = _in.feed(_data, _len);")
+			f.line("        if (_r.ok()) { _out = *_in; }")
+			f.line("        return _r;")
 			f.line("    }")
 		} else {
-			f.line("     * @brief Decode a message into @p out, reporting whether the input was")
+			f.line("     * @brief Decode a message into @p _out, reporting whether the input was")
 			f.line("     *        acceptable.")
 			f.line("     *")
-			f.line("     * @p out is put back to its declared defaults first (@ref reset) and")
+			f.line("     * @p _out is put back to its declared defaults first (@ref reset) and")
 			f.line("     * then decoded into directly, so it may be reused across messages")
 			f.line("     * without carrying anything over and without giving its buffers back.")
 			f.line("     *")
-			f.line("     * @param data Encoded bytes.")
-			f.line("     * @param len  Number of bytes at @p data.")
-			f.line("     * @param out  Receives the message; on a rejected input it holds the")
+			f.line("     * @param _data Encoded bytes.")
+			f.line("     * @param _len  Number of bytes at @p _data.")
+			f.line("     * @param _out  Receives the message; on a rejected input it holds the")
 			f.line("     *             fields decoded before the error, never an older message's.")
-			f.line("     * @return The decode result; check @c ok() before reading @p out.")
+			f.line("     * @return The decode result; check @c ok() before reading @p _out.")
 			f.line("     */")
-			f.line("    static sofab::IStreamImpl::Result try_decode(const std::uint8_t *data, std::size_t len, %s &out) {", name)
-			f.line("        out.reset();")
+			f.line("    static sofab::IStreamImpl::Result try_decode(const std::uint8_t *_data, std::size_t _len, %s &_out) {", name)
+			f.line("        _out.reset();")
 			f.line("        sofab::IStreamInline *_isp = nullptr;")
-			f.line("        sofab::IStreamInline _is{[&out, &_isp](sofab::id _id, std::size_t _size, std::size_t _count) {")
-			f.line("            out.deserialize(*_isp, _id, _size, _count);")
+			f.line("        sofab::IStreamInline _is{[&_out, &_isp](sofab::id _id, std::size_t _size, std::size_t _count) {")
+			f.line("            _out.deserialize(*_isp, _id, _size, _count);")
 			f.line("        }%s};", g.istreamInlineLimits())
 			f.line("        _isp = &_is;")
-			f.line("        return _is.feed(data, len);")
+			f.line("        return _is.feed(_data, _len);")
 			f.line("    }")
 		}
 		f.blank()
@@ -925,16 +925,16 @@ func (g *gen) emitStruct(f *hfile, name, summary string, fields []*ir.Field, isM
 	f.line("     * Called by @ref encode / @ref encodeTo, and directly when writing into a")
 	f.line("     * stream you own. Fields equal to their default are omitted.")
 	f.line("     *")
-	f.line("     * @param os Stream to write to.")
+	f.line("     * @param _os Stream to write to.")
 	f.line("     * @return The result of the writes.")
 	f.line("     */")
-	f.line("    sofab::OStreamImpl::Result serialize(sofab::OStreamImpl &os) const noexcept override {")
+	f.line("    sofab::OStreamImpl::Result serialize(sofab::OStreamImpl &_os) const noexcept override {")
 	for _, fld := range fields {
 		g.emitSerialize(f, fld)
 	}
 	// No-op write purely to return a Result; bool is never feature-gated (avoid a
 	// 64-bit literal so the body compiles under SOFAB_DISABLE_INT64_SUPPORT).
-	f.line("        return os.writeIf(0, false, false);")
+	f.line("        return _os.writeIf(0, false, false);")
 	f.line("    }")
 	f.blank()
 
@@ -956,11 +956,11 @@ func (g *gen) emitStruct(f *hfile, name, summary string, fields []*ir.Field, isM
 	f.line("     * not know, or one whose wire type contradicts the member's, binds")
 	f.line("     * nothing and is skipped.")
 	f.line("     *")
-	f.line("     * @param is Stream delivering the field.")
-	f.line("     * @param id Field identifier.")
+	f.line("     * @param _is Stream delivering the field.")
+	f.line("     * @param _id Field identifier.")
 	f.line("     */")
-	f.line("    void deserialize(sofab::IStreamImpl &is, sofab::id id, %s, %s) noexcept override {", sizeParam, countParam)
-	f.line("        switch (id) {")
+	f.line("    void deserialize(sofab::IStreamImpl &_is, sofab::id _id, %s, %s) noexcept override {", sizeParam, countParam)
+	f.line("        switch (_id) {")
 	for _, fld := range fields {
 		f.line("        case %d:", fld.ID)
 		// Frame each field by its header wire type before reading (MESSAGE_SPEC
@@ -1149,7 +1149,7 @@ func (g *gen) emptyDefault(f *ir.Field) bool {
 // fieldIsDefaultExpr is the boolean expression "this field equals its default",
 // i.e. the negation of emitSerialize's write guard for the same field.
 func (g *gen) fieldIsDefaultExpr(fld *ir.Field) string {
-	return g.fieldIsDefaultExprAt(fld, cppIdent(fld.Name))
+	return g.fieldIsDefaultExprAt(fld, g.member(fld.Name))
 }
 
 // fieldIsDefaultExprAt is fieldIsDefaultExpr over the storage expression acc
@@ -1188,7 +1188,7 @@ func (g *gen) fieldIsDefaultExprAt(fld *ir.Field, acc string) string {
 }
 
 func (g *gen) emitSerialize(f *hfile, fld *ir.Field) {
-	g.emitSerializeAt(f, fld, cppIdent(fld.Name), "        ", false)
+	g.emitSerializeAt(f, fld, g.member(fld.Name), "        ", false)
 }
 
 // emitSerializeAt writes one field's encode over the storage expression acc at
@@ -1206,22 +1206,22 @@ func (g *gen) emitSerializeAt(f *hfile, fld *ir.Field, acc, ind string, forced b
 	// that have no u64/i64 field (a u64/i64 field still requires INT64, correctly).
 	case ir.KindU8, ir.KindU16, ir.KindU32, ir.KindU64,
 		ir.KindI8, ir.KindI16, ir.KindI32, ir.KindI64:
-		write = fmt.Sprintf("(void)os.write(%d, %s);", fld.ID, acc)
+		write = fmt.Sprintf("(void)_os.write(%d, %s);", fld.ID, acc)
 	case ir.KindBool:
-		write = fmt.Sprintf("(void)os.write(%d, %s);", fld.ID, acc)
+		write = fmt.Sprintf("(void)_os.write(%d, %s);", fld.ID, acc)
 	case ir.KindFP32, ir.KindFP64:
-		write = fmt.Sprintf("(void)os.write(%d, %s);", fld.ID, acc)
+		write = fmt.Sprintf("(void)_os.write(%d, %s);", fld.ID, acc)
 	case ir.KindString:
-		write = fmt.Sprintf("(void)os.write(%d, %s);", fld.ID, acc)
+		write = fmt.Sprintf("(void)_os.write(%d, %s);", fld.ID, acc)
 	case ir.KindEnum:
-		write = fmt.Sprintf("(void)os.write(%d, static_cast<%s>(%s));", fld.ID, enumBacking(fld.Ref.Target), acc)
+		write = fmt.Sprintf("(void)_os.write(%d, static_cast<%s>(%s));", fld.ID, enumBacking(fld.Ref.Target), acc)
 	case ir.KindBitfield:
-		write = fmt.Sprintf("(void)os.write(%d, %s);", fld.ID, acc)
+		write = fmt.Sprintf("(void)_os.write(%d, %s);", fld.ID, acc)
 	case ir.KindBlob:
 		// A blob is a leaf: sparse-canonical encoding (MESSAGE_SPEC S2) omits it
 		// when it equals its default (empty if none). The decoder reconstructs the
 		// omitted blob from the member's construction default.
-		blob := fmt.Sprintf("(void)os.write(%d, %s.data(), static_cast<std::int32_t>(%s.size()));", fld.ID, acc, acc)
+		blob := fmt.Sprintf("(void)_os.write(%d, %s.data(), static_cast<std::int32_t>(%s.size()));", fld.ID, acc, acc)
 		if forced {
 			f.line("%s%s", ind, blob)
 			return
@@ -1238,10 +1238,10 @@ func (g *gen) emitSerializeAt(f *hfile, fld *ir.Field, acc, ind string, forced b
 		if forced {
 			// The KEEP form: a held non-default option is present even when every
 			// child it has is at its default -- the frame is what selects it.
-			f.line("%s(void)os.write(%d, %s);", ind, fld.ID, acc)
+			f.line("%s(void)_os.write(%d, %s);", ind, fld.ID, acc)
 			return
 		}
-		f.line("%s(void)os.writeLazy(%d, %s);", ind, fld.ID, acc)
+		f.line("%s(void)_os.writeLazy(%d, %s);", ind, fld.ID, acc)
 		return
 	case ir.KindArray:
 		g.emitSerializeArrayAt(f, fld, acc, ind, forced)
@@ -1262,7 +1262,7 @@ func (g *gen) emitSerializeAt(f *hfile, fld *ir.Field, acc, ind string, forced b
 // plain expression route through here; struct/union and wrapper arrays carry
 // their own framing-based test.
 func (g *gen) fieldIsNotDefaultExpr(fld *ir.Field) string {
-	return g.fieldIsNotDefaultExprAt(fld, cppIdent(fld.Name))
+	return g.fieldIsNotDefaultExprAt(fld, g.member(fld.Name))
 }
 
 // fieldIsNotDefaultExprAt is fieldIsNotDefaultExpr over the storage expression acc.
@@ -1367,14 +1367,14 @@ const keepAlways = "true"
 //     schema cannot answer it.
 func emitSeqEnd(f *hfile, ind, keepIf string) {
 	if keepIf == "" {
-		f.line("%s(void)os.sequenceEnd();", ind)
+		f.line("%s(void)_os.sequenceEnd();", ind)
 		return
 	}
 	if keepIf == keepAlways {
-		f.line("%s(void)os.sequenceEndKeep();", ind)
+		f.line("%s(void)_os.sequenceEndKeep();", ind)
 		return
 	}
-	f.line("%sif (%s) { (void)os.sequenceEndKeep(); } else { (void)os.sequenceEnd(); }", ind, keepIf)
+	f.line("%sif (%s) { (void)_os.sequenceEndKeep(); } else { (void)_os.sequenceEnd(); }", ind, keepIf)
 }
 
 // serializeArray writes an array value as field idExpr, mirroring the Go/Python
@@ -1404,12 +1404,12 @@ func (g *gen) serializeArray(f *hfile, ind, idExpr, val string, elem ir.Kind, re
 		// corelib-cpp#138 / corelib-c-cpp#166: each converts per element as it
 		// encodes, deriving the wire type from the declared underlying type, so
 		// the bytes are the ones this arm already produced -- through a copy.
-		f.line("%s(void)os.write(%s, %s);", ind, idExpr, val)
+		f.line("%s(void)_os.write(%s, %s);", ind, idExpr, val)
 	case ir.KindBool:
 		// The element already IS the wire's std::uint8_t (see cppArrayElem), so
 		// there is nothing to convert: the member is written directly, exactly
 		// like a numeric array.
-		f.line("%s(void)os.write(%s, %s);", ind, idExpr, val)
+		f.line("%s(void)_os.write(%s, %s);", ind, idExpr, val)
 	case ir.KindBlob:
 		// A blob element is a leaf: in the array's INTERIOR it is omitted when it
 		// equals the element default (empty), leaving an id gap the decoder
@@ -1417,14 +1417,14 @@ func (g *gen) serializeArray(f *hfile, ind, idExpr, val string, elem ir.Kind, re
 		// MESSAGE_SPEC §2, applied to an element. The index still advances on an
 		// omitted element, so the surviving ids stay aligned. At the LAST index it
 		// is written whatever its value: see lastElemExpr.
-		f.line("%s(void)os.sequenceBeginLazy(%s);", ind, idExpr)
-		f.line("%s{ const std::size_t %s = %s.size(); for (std::size_t %s = 0; %s < %s; ++%s) { const auto &%s = %s[%s]; if (!%s.empty() || %s) { (void)os.write(static_cast<sofab::id>(%s), %s.data(), static_cast<std::int32_t>(%s.size())); } } }",
+		f.line("%s(void)_os.sequenceBeginLazy(%s);", ind, idExpr)
+		f.line("%s{ const std::size_t %s = %s.size(); for (std::size_t %s = 0; %s < %s; ++%s) { const auto &%s = %s[%s]; if (!%s.empty() || %s) { (void)_os.write(static_cast<sofab::id>(%s), %s.data(), static_cast<std::int32_t>(%s.size())); } } }",
 			ind, nv, val, iv, iv, nv, iv, ev, val, iv, ev, lastElemExpr(iv, nv), iv, ev, ev)
 		emitSeqEnd(f, ind, keepIf)
 	case ir.KindString:
 		// A string element is a leaf, exactly like the blob element above.
-		f.line("%s(void)os.sequenceBeginLazy(%s);", ind, idExpr)
-		f.line("%s{ const std::size_t %s = %s.size(); for (std::size_t %s = 0; %s < %s; ++%s) { const auto &%s = %s[%s]; if (!%s.empty() || %s) { (void)os.write(static_cast<sofab::id>(%s), %s); } } }",
+		f.line("%s(void)_os.sequenceBeginLazy(%s);", ind, idExpr)
+		f.line("%s{ const std::size_t %s = %s.size(); for (std::size_t %s = 0; %s < %s; ++%s) { const auto &%s = %s[%s]; if (!%s.empty() || %s) { (void)_os.write(static_cast<sofab::id>(%s), %s); } } }",
 			ind, nv, val, iv, iv, nv, iv, ev, val, iv, ev, lastElemExpr(iv, nv), iv, ev)
 		emitSeqEnd(f, ind, keepIf)
 	case ir.KindStruct, ir.KindUnion:
@@ -1437,12 +1437,12 @@ func (g *gen) serializeArray(f *hfile, ind, idExpr, val string, elem ir.Kind, re
 		// vanishes into an id gap; write is the keeping one, taken at the last
 		// index, where it survives as an empty frame because that presence is what
 		// fixes the array's length.
-		f.line("%s(void)os.sequenceBeginLazy(%s);", ind, idExpr)
-		f.line("%s{ const std::size_t %s = %s.size(); for (std::size_t %s = 0; %s < %s; ++%s) { if (%s) { (void)os.write(static_cast<sofab::id>(%s), %s[%s]); } else { (void)os.writeLazy(static_cast<sofab::id>(%s), %s[%s]); } } }",
+		f.line("%s(void)_os.sequenceBeginLazy(%s);", ind, idExpr)
+		f.line("%s{ const std::size_t %s = %s.size(); for (std::size_t %s = 0; %s < %s; ++%s) { if (%s) { (void)_os.write(static_cast<sofab::id>(%s), %s[%s]); } else { (void)_os.writeLazy(static_cast<sofab::id>(%s), %s[%s]); } } }",
 			ind, nv, val, iv, iv, nv, iv, lastElemExpr(iv, nv), iv, val, iv, iv, val, iv)
 		emitSeqEnd(f, ind, keepIf)
 	case ir.KindArray:
-		f.line("%s(void)os.sequenceBeginLazy(%s);", ind, idExpr)
+		f.line("%s(void)_os.sequenceBeginLazy(%s);", ind, idExpr)
 		f.line("%s{ const std::size_t %s = %s.size(); for (std::size_t %s = 0; %s < %s; ++%s) { const auto &%s = %s[%s];",
 			ind, nv, val, iv, iv, nv, iv, ev, val, iv)
 		if isNativeArrayElem(items.Elem) {
@@ -1469,7 +1469,7 @@ func (g *gen) serializeArray(f *hfile, ind, idExpr, val string, elem ir.Kind, re
 }
 
 func (g *gen) emitDeserialize(f *hfile, fld *ir.Field) {
-	g.emitDeserializeAt(f, fld, cppIdent(fld.Name))
+	g.emitDeserializeAt(f, fld, g.member(fld.Name))
 }
 
 // emitDeserializeAt is emitDeserialize binding the destination expression acc
@@ -1491,7 +1491,7 @@ func (g *gen) emitDeserializeAt(f *hfile, fld *ir.Field, acc string) {
 			// by the storage mode, which is why allow_dynamic needs no decode change
 			// there at all. No receiver cap travels on this leg: checkBounded refuses
 			// a schema-unbounded string here, so there is never one to cap.
-			f.line("            is.readString(%s, _size, %d);", acc, maxlenOr(fld.HasMaxlen, fld.Maxlen))
+			f.line("            _is.readString(%s, _size, %d);", acc, maxlenOr(fld.HasMaxlen, fld.Maxlen))
 		} else {
 			// BOTH receiver-side bounds ride INTO the read (CORELIB_PLAN §6.2.1,
 			// generator#420). readString declares the fixlen SUBTYPE, so it owns the
@@ -1509,7 +1509,7 @@ func (g *gen) emitDeserializeAt(f *hfile, fld *ir.Field, acc string) {
 			// corelib can do -- sofab::readString sizes a growable destination, and it
 			// consults the cap before it does (corelib-cpp#127's fitDest fix).
 			fn, args := cppLenCall("readString", fld.HasMaxlen, fld.Maxlen, g.limStrHas, "SOFAB_MAX_DYN_STRING_LEN")
-			f.line("            sofab::%s(is, %s%s);", fn, acc, args)
+			f.line("            sofab::%s(_is, %s%s);", fn, acc, args)
 		}
 	case ir.KindU8, ir.KindU16, ir.KindU32, ir.KindU64, ir.KindI8, ir.KindI16, ir.KindI32, ir.KindI64,
 		ir.KindBool, ir.KindFP32, ir.KindFP64, ir.KindStruct, ir.KindUnion:
@@ -1535,11 +1535,11 @@ func (g *gen) emitDeserializeAt(f *hfile, fld *ir.Field, acc string) {
 				tmp = "std::int64_t"
 				cond = fmt.Sprintf("_v < %d || _v > %d", lo, hi)
 			}
-			f.line("            { %s _v; if (is.read(_v)) { if (%s) { is.invalidate(); return; } %s = static_cast<%s>(_v); } }", tmp, cond, acc, g.cppType(fld))
+			f.line("            { %s _v; if (_is.read(_v)) { if (%s) { _is.invalidate(); return; } %s = static_cast<%s>(_v); } }", tmp, cond, acc, g.cppType(fld))
 		} else if g.clib {
-			f.line("            is.read(%s);", acc)
+			f.line("            _is.read(%s);", acc)
 		} else {
-			f.line("            sofab::read(is, %s);", acc)
+			f.line("            sofab::read(_is, %s);", acc)
 		}
 	case ir.KindBlob:
 		// corelib-c-cpp binds blobs with the BLOB tag via its read(void*, size_t)
@@ -1547,14 +1547,14 @@ func (g *gen) emitDeserializeAt(f *hfile, fld *ir.Field, acc string) {
 		// length-prefixed blob into a std::string.
 		if g.clib {
 			// As for the string arm above.
-			f.line("            is.readBlob(%s, _size, %d);", acc, maxlenOr(fld.HasMaxlen, fld.Maxlen))
+			f.line("            _is.readBlob(%s, _size, %d);", acc, maxlenOr(fld.HasMaxlen, fld.Maxlen))
 		} else {
 			// readBlob declares Fix::Blob and reads straight into the byte container
 			// (no std::string round-trip); it carries the schema maxlen and the
 			// §6.2.1 cap for the same reason, and in the same order, as the string
 			// arm above. `blob` and `string` are separate limits.
 			fn, args := cppLenCall("readBlob", fld.HasMaxlen, fld.Maxlen, g.limBlobHas, "SOFAB_MAX_DYN_BLOB_LEN")
-			f.line("            sofab::%s(is, %s%s);", fn, acc, args)
+			f.line("            sofab::%s(_is, %s%s);", fn, acc, args)
 		}
 	case ir.KindEnum, ir.KindBitfield:
 		// An `enum` and a `bitfield` are bound by the WIDTH their declaration
@@ -1589,10 +1589,10 @@ func (g *gen) emitDeserializeAt(f *hfile, fld *ir.Field, acc string) {
 				// here, silenced for this one statement.
 				f.line("#pragma GCC diagnostic push")
 				f.line(`#pragma GCC diagnostic ignored "-Wstrict-aliasing"`)
-				f.line("            is.read(reinterpret_cast<%s &>(%s));", enumBacking(fld.Ref.Target), acc)
+				f.line("            _is.read(reinterpret_cast<%s &>(%s));", enumBacking(fld.Ref.Target), acc)
 				f.line("#pragma GCC diagnostic pop")
 			} else {
-				f.line("            is.read(%s);", acc)
+				f.line("            _is.read(%s);", acc)
 			}
 			break
 		}
@@ -1604,12 +1604,12 @@ func (g *gen) emitDeserializeAt(f *hfile, fld *ir.Field, acc string) {
 		// and the arm must then store nothing. The unconditional store this
 		// replaced wrote the zero-initialized temporary into the member instead.
 		if cond := cppDeclaredWidthCond(fld.Kind, fld.Ref, "_v"); cond != "" {
-			f.line("            { %s _v; if (is.read(_v)) { if (%s) { is.invalidate(); return; } %s = static_cast<%s>(_v); } }", tmp, cond, acc, dst)
+			f.line("            { %s _v; if (_is.read(_v)) { if (%s) { _is.invalidate(); return; } %s = static_cast<%s>(_v); } }", tmp, cond, acc, dst)
 		} else {
 			// A bitfield whose highest declared `pos` is 32 or above implies a u64,
 			// which IS the accumulator the value arrives in, so nothing reachable
 			// can breach the bound and the comparison would be dead code.
-			f.line("            { %s _v; if (is.read(_v)) { %s = static_cast<%s>(_v); } }", tmp, acc, dst)
+			f.line("            { %s _v; if (_is.read(_v)) { %s = static_cast<%s>(_v); } }", tmp, acc, dst)
 		}
 	case ir.KindArray:
 		// A wire element count above the schema `count` capacity is INVALID per
@@ -1679,11 +1679,11 @@ func (g *gen) nativeArrayRead(f *hfile, ind, target string, elem ir.Kind, ref *i
 		// the wire count against the schema bound before any resize, and only
 		// then binds — so inline and dynamic storage emit the same call and the
 		// arm needs no guard and no reset of its own.
-		f.line("%sis.readArray(%s, _count, %d);", ind, target, cap)
+		f.line("%s_is.readArray(%s, _count, %d);", ind, target, cap)
 		return
 	}
 	if g.clib {
-		f.line("%sis.read(%s);", ind, target)
+		f.line("%s_is.read(%s);", ind, target)
 		return
 	}
 	// readArray carries the tag, the schema count, the configured policy cap
@@ -1698,7 +1698,7 @@ func (g *gen) nativeArrayRead(f *hfile, ind, target string, elem ir.Kind, ref *i
 	// states that bound whole, where the withdrawn set/mask bound needed a second
 	// pass over the destination to close the gap the hull left open.
 	fn, args := g.cppArrayCall(count, hasCount, g.cppElemBound(elem, ref))
-	f.line("%ssofab::%s(is, %s%s);", ind, fn, target, args)
+	f.line("%ssofab::%s(_is, %s%s);", ind, fn, target, args)
 }
 
 func (g *gen) deserializeArray(f *hfile, ind, target string, elem ir.Kind, ref *ir.TypeRef, items *ir.ArrayElem, count int64, hasCount, elemMaxHas bool, elemMax int64, depth int) {
@@ -1738,14 +1738,14 @@ func (g *gen) deserializeArray(f *hfile, ind, target string, elem ir.Kind, ref *
 		// of the tag/bound/reset order and the bytes land in the member's own
 		// storage.
 		if g.clib {
-			f.line("%s{ sofabgen::RawArray<%s, %s> %s{&%s}; is.readArray(%s, _count, %d); }",
+			f.line("%s{ sofabgen::RawArray<%s, %s> %s{&%s}; _is.readArray(%s, _count, %d); }",
 				ind, g.cppArrayContainer(elem, ref, items, count, elemMaxHas, elemMax), bk, tv, target, tv, cap)
 		} else {
 			// The implied-width interval rides in as the element bound and is the
 			// whole of the rule for this position, so nothing follows the read -- see
 			// nativeArrayRead, which says the same for the numeric and bitfield legs.
 			fn, args := g.cppArrayCall(count, hasCount, g.cppElemBound(elem, ref))
-			f.line("%s{ sofabgen::RawArray<%s, %s> %s{&%s}; sofab::%s(is, %s%s); }",
+			f.line("%s{ sofabgen::RawArray<%s, %s> %s{&%s}; sofab::%s(_is, %s%s); }",
 				ind, g.cppArrayContainer(elem, ref, items, count, elemMaxHas, elemMax), bk, tv, target, fn, tv, args)
 		}
 	case ir.KindBool:
@@ -1765,11 +1765,11 @@ func (g *gen) deserializeArray(f *hfile, ind, target string, elem ir.Kind, ref *
 		// is passed: a boolean has none.
 		cont := g.cppArrayContainer(elem, ref, items, count, elemMaxHas, elemMax)
 		if g.clib {
-			f.line("%s{ sofabgen::RawArray<%s, bool> %s{&%s}; is.readArray(%s, _count, %d); }",
+			f.line("%s{ sofabgen::RawArray<%s, bool> %s{&%s}; _is.readArray(%s, _count, %d); }",
 				ind, cont, tv, target, tv, cap)
 		} else {
 			fn, args := g.cppArrayCall(count, hasCount, "")
-			f.line("%s{ sofabgen::RawArray<%s, bool> %s{&%s}; sofab::%s(is, %s%s); }",
+			f.line("%s{ sofabgen::RawArray<%s, bool> %s{&%s}; sofab::%s(_is, %s%s); }",
 				ind, cont, tv, target, fn, tv, args)
 		}
 	case ir.KindString:
@@ -1787,19 +1787,19 @@ func (g *gen) deserializeArray(f *hfile, ind, target string, elem ir.Kind, ref *
 			// a template deduced from the destination, so the plain arm below serves
 			// std::vector<std::string> and InlineVector<FixedString<M>, N> alike.
 			g.emitSeqRead(f, ind, fmt.Sprintf("static sofab::FixedStringSeq<%s> %s;", cont, rv),
-				fmt.Sprintf("is.readSequence(%s, %s)", rv, target))
+				fmt.Sprintf("_is.readSequence(%s, %s)", rv, target))
 		} else if g.clib {
 			// Static for the same deferred-decoder reason as the fixed collectors:
 			// the C decoder dereferences it after this returns.
 			g.emitSeqRead(f, ind, fmt.Sprintf("static sofab::StringSeq %s; %s.cap = %d; %s.elemMax = %d;", rv, rv, cap, rv, elemMaxOr(elemMaxHas, elemMax)),
-				fmt.Sprintf("is.readSequence(%s, %s)", rv, target))
+				fmt.Sprintf("_is.readSequence(%s, %s)", rv, target))
 		} else {
 			// The two schema bounds are followed by the two §6.2.1 receiver caps
 			// (cppSeqCaps): the element INDEX cap, which is this shape's whole
 			// amplification defence -- the array's length is highest present id + 1
 			// and the collector grows to it -- and the element LENGTH cap beside it.
 			g.emitSeqRead(f, ind, fmt.Sprintf("sofab::StringSeq %s{%s, %d, %d%s};", rv, target, cap, elemMaxOr(elemMaxHas, elemMax), g.cppSeqCaps(cap, elemMaxHas, elem)),
-				fmt.Sprintf("sofab::read(is, %s)", rv))
+				fmt.Sprintf("sofab::read(_is, %s)", rv))
 		}
 	case ir.KindBlob:
 		cont := g.cppArrayContainer(elem, ref, items, count, elemMaxHas, elemMax)
@@ -1810,13 +1810,13 @@ func (g *gen) deserializeArray(f *hfile, ind, target string, elem ir.Kind, ref *
 			// after this returns. corelib-cpp uses the deduced sofab::BlobSeq below
 			// for either container.
 			g.emitSeqRead(f, ind, fmt.Sprintf("static sofab::FixedBlobSeq<%s> %s;", cont, rv),
-				fmt.Sprintf("is.readSequence(%s, %s)", rv, target))
+				fmt.Sprintf("_is.readSequence(%s, %s)", rv, target))
 		} else if g.clib {
 			g.emitSeqRead(f, ind, fmt.Sprintf("static sofab::BlobSeq %s; %s.cap = %d; %s.elemMax = %d;", rv, rv, cap, rv, elemMaxOr(elemMaxHas, elemMax)),
-				fmt.Sprintf("is.readSequence(%s, %s)", rv, target))
+				fmt.Sprintf("_is.readSequence(%s, %s)", rv, target))
 		} else {
 			g.emitSeqRead(f, ind, fmt.Sprintf("sofab::BlobSeq %s{%s, %d, %d%s};", rv, target, cap, elemMaxOr(elemMaxHas, elemMax), g.cppSeqCaps(cap, elemMaxHas, elem)),
-				fmt.Sprintf("sofab::read(is, %s)", rv))
+				fmt.Sprintf("sofab::read(_is, %s)", rv))
 		}
 	case ir.KindStruct, ir.KindUnion:
 		cont := g.cppArrayContainer(elem, ref, items, count, elemMaxHas, elemMax)
@@ -1928,11 +1928,11 @@ func (g *gen) deserializeRowSeq(f *hfile, ind, target string, items *ir.ArrayEle
 	if g.clib && items != nil && isNativeArrayElem(items.Elem) {
 		rowCountParam = "std::size_t _count"
 	}
-	f.line("%svoid deserialize(sofab::IStreamImpl &is, sofab::id _id, std::size_t, %s) noexcept override {", in3, rowCountParam)
+	f.line("%svoid deserialize(sofab::IStreamImpl &_is, sofab::id _id, std::size_t, %s) noexcept override {", in3, rowCountParam)
 	if inlineRows {
-		f.line("%sif (static_cast<std::size_t>(_id) >= out->capacity()) { is.invalidate(); return; }", in4)
+		f.line("%sif (static_cast<std::size_t>(_id) >= out->capacity()) { _is.invalidate(); return; }", in4)
 	} else {
-		f.line("%sif (cap >= 0 && static_cast<std::size_t>(_id) >= static_cast<std::size_t>(cap)) { is.invalidate(); return; }", in4)
+		f.line("%sif (cap >= 0 && static_cast<std::size_t>(_id) >= static_cast<std::size_t>(cap)) { _is.invalidate(); return; }", in4)
 		// The receiver index cap, where the schema declared no `count` — the same
 		// bound the corelib's own collectors take as `dynCap`, in the same place
 		// (before the grow below) and in the other category (§6.2.1: policy, never
@@ -1943,7 +1943,7 @@ func (g *gen) deserializeRowSeq(f *hfile, ind, target string, items *ir.ArrayEle
 		// — a wrapper array's length being highest present id + 1 (MESSAGE_SPEC
 		// §5.1), one over-index row is an arbitrarily large one.
 		if cap < 0 && g.limArrHas {
-			f.line("%sif (static_cast<std::size_t>(_id) >= static_cast<std::size_t>(SOFAB_MAX_DYN_ARRAY_COUNT)) { is.exceedLimit(); return; }", in4)
+			f.line("%sif (static_cast<std::size_t>(_id) >= static_cast<std::size_t>(SOFAB_MAX_DYN_ARRAY_COUNT)) { _is.exceedLimit(); return; }", in4)
 		}
 	}
 	f.line("%swhile (out->size() <= static_cast<std::size_t>(_id)) out->emplace_back();", in4)
@@ -1955,9 +1955,9 @@ func (g *gen) deserializeRowSeq(f *hfile, ind, target string, items *ir.ArrayEle
 		if count > 0 && !inlineRows {
 			f.line("%s%s.reserve(%d);", in2, target, count)
 		}
-		f.line("%sstatic %s %s; is.readSequence(%s, %s);", in2, sv, rv, rv, target)
+		f.line("%sstatic %s %s; _is.readSequence(%s, %s);", in2, sv, rv, rv, target)
 	} else {
-		f.line("%s%s %s; %s.out = &%s; sofab::read(is, %s);", in2, sv, rv, rv, target, rv)
+		f.line("%s%s %s; %s.out = &%s; sofab::read(_is, %s);", in2, sv, rv, rv, target, rv)
 	}
 	f.line("%s}", ind)
 }
@@ -2001,7 +2001,7 @@ func (g *gen) deserializeSeqInto(f *hfile, ind, target, elemType string, count, 
 			// The inline container's capacity IS the schema `count`, so the
 			// collector reads its own bound off it and takes no cap.
 			g.emitSeqRead(f, ind, fmt.Sprintf("static sofab::FixedMessageSeq<%s> %s;", container, rv),
-				fmt.Sprintf("is.readSequence(%s, %s)", rv, target))
+				fmt.Sprintf("_is.readSequence(%s, %s)", rv, target))
 			return
 		}
 		reserve := ""
@@ -2017,7 +2017,7 @@ func (g *gen) deserializeSeqInto(f *hfile, ind, target, elemType string, count, 
 			row = fmt.Sprintf(" %s.elemCount = %d;", rv, elemCount)
 		}
 		g.emitSeqRead(f, ind, fmt.Sprintf("static sofab::MessageSeq<%s> %s; %s.cap = %d;%s%s", container, rv, rv, cap, row, reserve),
-			fmt.Sprintf("is.readSequence(%s, %s)", rv, target))
+			fmt.Sprintf("_is.readSequence(%s, %s)", rv, target))
 		return
 	}
 	// The receiver index cap rides beside the schema `count`, on the same
@@ -2044,7 +2044,7 @@ func (g *gen) deserializeSeqInto(f *hfile, ind, target, elemType string, count, 
 	// inside the bound.
 	g.emitSeqRead(f, ind, fmt.Sprintf("sofab::MessageSeq<%s> %s; %s.out = &%s; %s.cap = %d;%s%s", container, rv, rv, target, rv, cap,
 		g.cppSeqIndexCap(rv, cap), g.cppSeqRowCaps(rv, elemType, elemCount, row != nil)),
-		fmt.Sprintf("sofab::read(is, %s)", rv))
+		fmt.Sprintf("sofab::read(_is, %s)", rv))
 }
 
 // emitSeqRead writes one wrapper-array read: the collector declaration and the
@@ -2118,7 +2118,7 @@ func (g *gen) checkBounded(s *ir.Schema) error {
 		return nil
 	}
 	for _, m := range s.Messages {
-		if err := walkFields(exported(m.Name), m.Fields); err != nil {
+		if err := walkFields(g.msgType(m), m.Fields); err != nil {
 			return err
 		}
 	}

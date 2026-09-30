@@ -39,11 +39,14 @@ import (
 // unionOpt is one option of a union type with every name the backend derives
 // from it.
 type unionOpt struct {
-	f     *ir.Field
-	idx   int    // position in id order: the variant alternative index
-	base  string // the getter, and the Which enumerator
-	typ   string // C++ type of the option's storage
-	store string // expression naming the held option's storage (valid only when held)
+	f    *ir.Field
+	idx  int    // position in id order: the variant alternative index
+	base string // the getter, and the Which enumerator
+	// The role accessors, has_<name>, set_<name> and mutable_<name>: built
+	// from the plain schema name, see unionRoles.
+	has, set, mut string
+	typ           string // C++ type of the option's storage
+	store         string // expression naming the held option's storage (valid only when held)
 	// c-cpp only, the same for every option of one union: clear is set when an
 	// option can own heap storage (allow_dynamic), so a switch and the
 	// destructor must end the held option's lifetime (_clear()); copy is set
@@ -54,13 +57,20 @@ type unionOpt struct {
 	clear, copy bool
 }
 
-// optBase is the accessor base name of a union option.
-func optBase(name string) string {
-	b := cppIdent(name)
-	if unionReserved[b] {
-		b += "_"
+// optBase is the getter (and Which enumerator) of a union option: the member
+// spelling of its name, with a trailing underscore where the name is one of the
+// union's own members or starts with a role prefix -- so a getter never has the
+// spelling of any option's role accessor, which never ends with "_".
+func (g *gen) optBase(name string) string {
+	for _, r := range unionRoles {
+		if strings.HasPrefix(name, r) {
+			return name + "_"
+		}
 	}
-	return b
+	if unionReserved[name] {
+		return name + "_"
+	}
+	return g.member(name)
 }
 
 // unionOptions lists nt's options in id order with their derived names.
@@ -69,7 +79,8 @@ func (g *gen) unionOptions(nt *ir.NamedType) []*unionOpt {
 	sort.SliceStable(fields, func(i, j int) bool { return fields[i].ID < fields[j].ID })
 	opts := make([]*unionOpt, len(fields))
 	for i, fld := range fields {
-		o := &unionOpt{f: fld, idx: i, base: optBase(fld.Name), typ: g.cppType(fld)}
+		o := &unionOpt{f: fld, idx: i, base: g.optBase(fld.Name), typ: g.cppType(fld),
+			has: "has_" + fld.Name, set: "set_" + fld.Name, mut: "mutable_" + fld.Name}
 		if g.clib {
 			o.store = "_u." + o.base
 		} else {
@@ -113,31 +124,6 @@ func (g *gen) triviallyCopyable(k ir.Kind, elem ir.Kind, items *ir.ArrayElem) bo
 		return g.triviallyCopyable(elem, ee, ei)
 	}
 	return true
-}
-
-// checkUnionNames refuses a union whose options derive the same accessor: the
-// getter of one and the set_/has_/mutable_ accessor of another (`foo` and
-// `set_foo`), which C++ would silently take as an overload set.
-func (g *gen) checkUnionNames(s *ir.Schema) error {
-	for _, key := range s.NamedOrder {
-		nt := s.Named[key]
-		if nt.Category != ir.CatUnion {
-			continue
-		}
-		owner := map[string]string{}
-		for r := range unionReserved {
-			owner[r] = ""
-		}
-		for _, o := range g.unionOptions(nt) {
-			for _, n := range []string{o.base, "set_" + o.base, "has_" + o.base, "mutable_" + o.base} {
-				if prev, ok := owner[n]; ok && prev != "" {
-					return fmt.Errorf("cpp: union %q: options %q and %q both generate the accessor %q; rename one", key, prev, o.f.Name, n)
-				}
-				owner[n] = o.f.Name
-			}
-		}
-	}
-	return nil
 }
 
 // optDefaultArgs renders the constructor arguments that put option o at its
@@ -226,9 +212,9 @@ func (g *gen) emitUnion(f *hfile, name string, nt *ir.NamedType) {
 	// reset(): back to default_id at its default, in place when it is held.
 	f.line("    /** @brief Back to the default: `%s` at its declared default, in place when held. */", d.Name)
 	if d.Kind == ir.KindStruct || d.Kind == ir.KindUnion {
-		f.line("    void reset() noexcept { mutable_%s().reset(); }", dopt.base)
+		f.line("    void reset() noexcept { %s().reset(); }", dopt.mut)
 	} else {
-		f.line("    void reset() noexcept { mutable_%s() = %s; }", dopt.base, g.cppDefault(d))
+		f.line("    void reset() noexcept { %s() = %s; }", dopt.mut, g.cppDefault(d))
 	}
 	f.blank()
 
@@ -245,7 +231,7 @@ func (g *gen) emitUnion(f *hfile, name string, nt *ir.NamedType) {
 	f.line("     * @brief Write the held option. A held option other than `%s` is written", d.Name)
 	f.line("     *        even at its own default; `%s` at its default writes nothing.", d.Name)
 	f.line("     */")
-	f.line("    sofab::OStreamImpl::Result serialize(sofab::OStreamImpl &os) const noexcept override {")
+	f.line("    sofab::OStreamImpl::Result serialize(sofab::OStreamImpl &_os) const noexcept override {")
 	if g.clib {
 		f.line("        switch (_which) {")
 	} else {
@@ -260,7 +246,7 @@ func (g *gen) emitUnion(f *hfile, name string, nt *ir.NamedType) {
 		f.line("        default: break;")
 	}
 	f.line("        }")
-	f.line("        return os.writeIf(0, false, false);")
+	f.line("        return _os.writeIf(0, false, false);")
 	f.line("    }")
 	f.blank()
 
@@ -374,23 +360,23 @@ func (g *gen) emitUnionAccessors(f *hfile, o *unionOpt) {
 		f.line("    /// %s", note)
 	}
 	f.line("    ///@{")
-	f.line("    %sbool has_%s() const noexcept { return %s; }", attr, o.base, g.unionHeld(o))
+	f.line("    %sbool %s() const noexcept { return %s; }", attr, o.has, g.unionHeld(o))
 	def := g.cppDefault(o.f)
 	if isScalarOpt(o.f.Kind) {
 		if o.f.Kind == ir.KindBitfield {
 			def = fmt.Sprintf("static_cast<%s>(%s)", o.typ, def)
 		}
-		f.line("    %s%s %s() const noexcept { return has_%s() ? %s : %s; }", attr, o.typ, o.base, o.base, o.store, def)
-		f.line("    %svoid set_%s(%s v) noexcept { mutable_%s() = v; }", attr, o.base, o.typ, o.base)
+		f.line("    %s%s %s() const noexcept { return %s() ? %s : %s; }", attr, o.typ, o.base, o.has, o.store, def)
+		f.line("    %svoid %s(%s _v) noexcept { %s() = _v; }", attr, o.set, o.typ, o.mut)
 	} else {
 		f.line("    %sconst %s &%s() const noexcept {", attr, o.typ, o.base)
-		f.line("        if (has_%s()) { return %s; }", o.base, o.store)
+		f.line("        if (%s()) { return %s; }", o.has, o.store)
 		f.line("        static const %s _d{};", o.typ)
 		f.line("        return _d;")
 		f.line("    }")
-		f.line("    %svoid set_%s(const %s &v) { mutable_%s() = v; }", attr, o.base, o.typ, o.base)
+		f.line("    %svoid %s(const %s &_v) { %s() = _v; }", attr, o.set, o.typ, o.mut)
 	}
-	f.line("    %s%s &mutable_%s() noexcept {", attr, o.typ, o.base)
+	f.line("    %s%s &%s() noexcept {", attr, o.typ, o.mut)
 	g.emitUnionSelect(f, o)
 	f.line("    }")
 	f.line("    ///@}")
@@ -421,15 +407,15 @@ func (g *gen) emitUnionSpecials(f *hfile, name string, opts []*unionOpt, dopt *u
 		// starts the union's do-nothing _none member, so no option is alive
 		// (default_id's default member initializer does not run); _copy then
 		// places the one o holds.
-		f.line("    %s(const %s &o) noexcept : sofab::Message(o), _which(o._which), _u(nullptr) { _copy(o); }", name, name)
-		f.line("    %s &operator=(const %s &o) noexcept {", name, name)
-		f.line("        if (this != &o) {")
-		f.line("            sofab::Message::operator=(o);")
+		f.line("    %s(const %s &_o) noexcept : sofab::Message(_o), _which(_o._which), _u(nullptr) { _copy(_o); }", name, name)
+		f.line("    %s &operator=(const %s &_o) noexcept {", name, name)
+		f.line("        if (this != &_o) {")
+		f.line("            sofab::Message::operator=(_o);")
 		if dopt.clear {
 			f.line("            _clear();")
 		}
-		f.line("            _which = o._which;")
-		f.line("            _copy(o);")
+		f.line("            _which = _o._which;")
+		f.line("            _copy(_o);")
 		f.line("        }")
 		f.line("        return *this;")
 		f.line("    }")
@@ -443,10 +429,10 @@ func (g *gen) emitUnionSpecials(f *hfile, name string, opts []*unionOpt, dopt *u
 	f.blank()
 	f.line("private:")
 	if dopt.copy {
-		f.line("    void _copy(const %s &o) noexcept {", name)
+		f.line("    void _copy(const %s &_o) noexcept {", name)
 		f.line("        switch (_which) {")
 		for _, o := range opts {
-			f.line("        case Which::%s: ::new (&_u.%s) %s(o._u.%s); break;", o.base, o.base, o.typ, o.base)
+			f.line("        case Which::%s: ::new (&_u.%s) %s(_o._u.%s); break;", o.base, o.base, o.typ, o.base)
 		}
 		f.line("        }")
 		f.line("    }")
@@ -488,9 +474,9 @@ func (g *gen) unionGate(fld *ir.Field) string {
 			sub = cppFixSubtype(fld.Elem)
 		}
 		if sub != "" {
-			return fmt.Sprintf("!is.delivered(%s, %s)", cppExpectedWire(fld), sub)
+			return fmt.Sprintf("!_is.delivered(%s, %s)", cppExpectedWire(fld), sub)
 		}
-		return fmt.Sprintf("!is.delivered(%s)", cppExpectedWire(fld))
+		return fmt.Sprintf("!_is.delivered(%s)", cppExpectedWire(fld))
 	}
 	c := cppWireGuard(fld)
 	c = strings.ReplaceAll(c, "sofab::Wire::", "sofab::detail::Wire::")
@@ -519,7 +505,7 @@ func selectingRead(arm, sel string) bool {
 	if strings.Count(arm, sel) != 1 {
 		return false
 	}
-	for _, fn := range []string{"is.readString(", "is.readBlob(", "is.readArray("} {
+	for _, fn := range []string{"_is.readString(", "_is.readBlob(", "_is.readArray("} {
 		if strings.Contains(arm, fn+sel+", ") {
 			return true
 		}
@@ -529,7 +515,7 @@ func selectingRead(arm, sel string) bool {
 
 // selectingSeq matches a wrapper-array read through a collector, whose
 // destination is the second argument.
-var selectingSeq = regexp.MustCompile(`is\.readSequence\(_r[0-9]+, \[this\]`)
+var selectingSeq = regexp.MustCompile(`_is\.readSequence\(_r[0-9]+, \[this\]`)
 
 // emitUnionDeserialize writes the decode arms. Each one selects its option
 // (MESSAGE_SPEC §7.4.1) only once the field has passed the §7.3 test for the
@@ -558,8 +544,8 @@ func (g *gen) emitUnionDeserialize(f *hfile, opts []*unionOpt) {
 	f.line("     * the held option continues it. A mistyped or unknown child is skipped")
 	f.line("     * and switches nothing.")
 	f.line("     */")
-	f.line("    void deserialize(sofab::IStreamImpl &is, sofab::id id, %s, %s) noexcept override {", sizeParam, countParam)
-	f.line("        switch (id) {")
+	f.line("    void deserialize(sofab::IStreamImpl &_is, sofab::id _id, %s, %s) noexcept override {", sizeParam, countParam)
+	f.line("        switch (_id) {")
 	// c-cpp: scalar options bound through the same C++ type share one arm.
 	// They sit at the same address in the storage union and readMatch binds
 	// them identically, so only the tag differs -- and the Which enumerators
@@ -579,7 +565,7 @@ func (g *gen) emitUnionDeserialize(f *hfile, opts []*unionOpt) {
 		if done[o] {
 			continue
 		}
-		mut := "mutable_" + o.base + "()"
+		mut := o.mut + "()"
 		fld := o.f
 		group := []*unionOpt{o}
 		if k := cppScalarBind(o); g.clib && k != "" {
@@ -595,7 +581,7 @@ func (g *gen) emitUnionDeserialize(f *hfile, opts []*unionOpt) {
 			// runs only once read() matched the tag and the width check passed.
 			g.emitDeserializeAt(f, fld, mut)
 		case !g.clib && isScalarOpt(fld.Kind):
-			f.line("            { %s _v{}; if (sofab::read(is, _v)) { %s = _v; } }", o.typ, mut)
+			f.line("            { %s _v{}; if (sofab::read(_is, _v)) { %s = _v; } }", o.typ, mut)
 		case isScalarOpt(fld.Kind):
 			// c-cpp scalar: the deferred read overwrites the whole value, so the
 			// select is the tag alone -- seeding the option's default first
@@ -610,7 +596,7 @@ func (g *gen) emitUnionDeserialize(f *hfile, opts []*unionOpt) {
 			// is written into the storage the two share.
 			tag := "Which::" + o.base
 			if len(group) > 1 {
-				tag = "static_cast<Which>(id)"
+				tag = "static_cast<Which>(_id)"
 			}
 			sel := fmt.Sprintf("_which = %s;", tag)
 			cond := ""
@@ -623,10 +609,10 @@ func (g *gen) emitUnionDeserialize(f *hfile, opts []*unionOpt) {
 				// bound by address only, so -Wstrict-aliasing is a false positive.
 				f.line("#pragma GCC diagnostic push")
 				f.line(`#pragma GCC diagnostic ignored "-Wstrict-aliasing"`)
-				f.line("            if (is.readMatch(reinterpret_cast<%s &>(%s))%s) { %s }", enumBacking(fld.Ref.Target), o.store, cond, sel)
+				f.line("            if (_is.readMatch(reinterpret_cast<%s &>(%s))%s) { %s }", enumBacking(fld.Ref.Target), o.store, cond, sel)
 				f.line("#pragma GCC diagnostic pop")
 			} else {
-				f.line("            if (is.readMatch(%s)%s) { %s }", o.store, cond, sel)
+				f.line("            if (_is.readMatch(%s)%s) { %s }", o.store, cond, sel)
 			}
 		default:
 			if g.clib {
