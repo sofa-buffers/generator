@@ -69,28 +69,15 @@ type unionShape struct {
 	byField  map[*ir.Field]*unionOpt
 }
 
-// unionFixed are the instance members every union class has of its own (and the
-// ones Object gives it): an option landing on one takes the trailing underscore.
-var unionFixed = []string{
-	"which", "clear", "serialize", "isDefault", "toJSON", "_which", "_leave", "constructor",
-	"toString", "toLocaleString", "valueOf", "hasOwnProperty", "isPrototypeOf",
-	"propertyIsEnumerable", "__proto__",
-}
-
-// unionFixedStatic are the class's own statics (and a Function's): an option
-// whose id constant lands on one is refused.
-var unionFixedStatic = []string{"fromJSON", "decode", "prototype", "name", "length", "caller", "arguments"}
-
 // unionOptProp is the getter/setter an option is reached through: the option's
-// name, as a struct member keeps it, with the trailing underscore where it lands
-// on one of the union's own members.
+// name, mangled as a struct member's is (tsIdent), with the trailing underscore
+// where it lands on one of the members only a union has (unionReserved).
 func unionOptProp(name string) string {
-	for _, m := range unionFixed {
-		if name == m {
-			return name + "_"
-		}
+	p := tsIdent(name)
+	if unionReserved[p] {
+		return p + "_"
 	}
-	return name
+	return p
 }
 
 // unionMutable reports whether an option gets a mutable<Opt>() accessor: the
@@ -161,10 +148,12 @@ func checkUnionNames(u *unionShape) error {
 		return nil
 	}
 	inst, stat := map[string]string{}, map[string]string{}
-	for _, m := range unionFixed {
-		inst[m] = ""
+	for _, set := range []map[string]bool{tsClassBody, tsMembers, tsObjectMembers, unionReserved} {
+		for m := range set {
+			inst[m] = ""
+		}
 	}
-	for _, m := range unionFixedStatic {
+	for m := range unionReservedStatic {
 		stat[m] = ""
 	}
 	for _, o := range u.opts {

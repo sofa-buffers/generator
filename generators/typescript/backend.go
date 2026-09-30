@@ -28,6 +28,9 @@ const corelibPkg = "@sofa-buffers/corelib"
 // package.json + tsconfig.
 func (*Backend) Generate(s *ir.Schema, cfg map[string]any) ([]generator.File, error) {
 	g := &gen{schema: s, banner: cfgString(cfg, "tool_banner", "sofabgen"), license: generator.LicenseID(cfg), i64rep: cfgInt64Mode(cfg), limits: resolveLimits(s, cfg), size: generator.NewSizePolicy(cfg)}
+	if err := checkFieldNames(s); err != nil {
+		return nil, err
+	}
 	if err := g.checkUnions(s); err != nil {
 		return nil, err
 	}

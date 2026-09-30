@@ -727,7 +727,12 @@ a reimplementation should emit code that honors all of them:
   guarded by a **collision test** that uses each listed name as a field (message,
   nested struct, union option) and compiles or imports the result against the
   real corelib, because the generator exits 0 on broken output. Done for C++,
-  Python and Go; the other backends still keep separate keyword and member tables.
+  Python, Go and TypeScript; the other backends still keep separate keyword and
+  member tables. Where the backend's Go tests cannot reach the toolchain (TS needs
+  an npm install), the collision schema is a checked-in file the conformance
+  suite builds (`tests/conformance/<lang>/reserved.yaml`), and a hermetic test
+  keeps that file equal to what the list generates — a name added to the list
+  fails that test until the file is regenerated with `-update`.
   A list names what the type carries, **inherited members included**: Go's lists
   the whole `sofab.Visitor` interface and what the embedded `sofab.StringCheck`
   promotes, not only the callbacks a type declares — a field that hides a

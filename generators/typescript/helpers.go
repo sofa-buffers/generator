@@ -91,27 +91,6 @@ func (g *gen) longBacked(f *ir.Field) bool {
 	return g.longArrays() && f.Kind == ir.KindArray && longElem(f.Elem, f.ElemItems)
 }
 
-// tsReserved are the names a schema field cannot take as a class member.
-// TypeScript accepts every keyword as a member name (`class`, `typeof`, `true`
-// are all valid fields), so the list is not the keyword table other backends
-// keep: it holds what the class body itself rejects. A field named
-// `constructor` is a SyntaxError ("Classes may not have a field named
-// 'constructor'"), and so is an accessor pair of that name. JavaScript has no
-// escape for it -- a quoted or computed key is refused too, or shadows the
-// prototype's `constructor` -- so it is mangled with a trailing `_`. The JSON
-// key keeps the schema name. Union options have their own, wider list
-// (unionFixed).
-var tsReserved = map[string]bool{"constructor": true}
-
-// tsIdent is the class member a schema field is reached through: the schema
-// name, with a trailing `_` where the class body would reject it.
-func tsIdent(name string) string {
-	if tsReserved[name] {
-		return name + "_"
-	}
-	return name
-}
-
 // storage returns the expression the hot paths (marshal/decode/toJSON) use to
 // reach a field's storage: the private backing field for a Long-backed array
 // (bypassing the accessor pair — no getter call or setter conversion in the hot

@@ -979,6 +979,30 @@ for def in "$ROOT"/tests/matrix/corpus/defs/*.yaml "$ROOT"/examples/messages/rea
 done
 echo "==> corpus typechecks ($(ls "$ROOT"/tests/matrix/corpus/defs/*.yaml | wc -l) definitions + $(ls "$ROOT"/examples/messages/realworld/*.yaml | wc -l) realworld)"
 
+# The reserved-name collision test (ARCHITECTURE §8): reserved.yaml uses every
+# name on generators/typescript/reserved.go's list as a message field, a nested
+# struct field and a union option (TestReservedSchemaFile keeps it in step with
+# the list). The generator exits 0 on a class that does not compile, so the
+# project must typecheck, and every value of reserved.json must come back under
+# its schema name -- a field that replaced a method (encode, toJSON) would not.
+echo "==> reserved names: every listed name as a field typechecks and round-trips"
+gen "$ROOT/tests/conformance/typescript/reserved.yaml" "$WORK/reserved"
+ln -s "$WORK/ex/node_modules" "$WORK/reserved/node_modules"
+tsc_strict "$WORK/reserved"
+( cd "$WORK/reserved" && "$TH" encode m ) < "$ROOT/tests/conformance/typescript/reserved.json" > "$WORK/reserved.bin" \
+    || { echo "FAIL: reserved.json did not encode"; exit 1; }
+( cd "$WORK/reserved" && "$TH" decode m ) < "$WORK/reserved.bin" > "$WORK/reserved.out" \
+    || { echo "FAIL: reserved.bin did not decode"; exit 1; }
+python3 - "$ROOT/tests/conformance/typescript/reserved.json" "$WORK/reserved.out" <<'PY' \
+    || { echo "FAIL: a reserved-name field did not round-trip under its schema name"; exit 1; }
+import json, sys
+want, got = (json.load(open(p)) for p in sys.argv[1:3])
+bad = [k for k in want if got.get(k) != want[k]]
+if bad:
+    sys.exit(f"mismatch on {bad}: got {[got.get(k) for k in bad]}")
+PY
+echo "==> reserved names OK"
+
 # ...and the same definitions again under `int64: long`, for every one that has a
 # 64-bit field. The loop above generates in the DEFAULT mode, so nothing here used
 # to typecheck the Long-backed shapes in a nested position — a struct or union
