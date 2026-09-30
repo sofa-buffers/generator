@@ -112,7 +112,7 @@ func TestGoOverIndexWrapperArray(t *testing.T) {
 		// dynamic string -> unbounded, no maxlen: here BOTH receiver caps govern,
 		// and they are the only bound this shape has.
 		"sofab.NewStringSeq(&m.Ds, sofab.Bounds{}, _caps)",
-		"sofab.NewMessageSeq[MDpElem, *MDpElem](&m.Dp, sofab.Bounds{}, _caps)",
+		"sofab.NewMessageSeq[M_Dp, *M_Dp](&m.Dp, sofab.Bounds{}, _caps)",
 	} {
 		if !strings.Contains(msg, want) {
 			t.Errorf("m.go missing %q:\n%s", want, msg)
@@ -465,8 +465,8 @@ func TestGoStructuralInvariants(t *testing.T) {
 		"sofab.VisitorBase", // struct embeds the corelib no-op base
 		"func (m *Myfirstmessage) Unsigned(id sofab.ID, v uint64) error", // visitor decode
 		"func (m *Myfirstmessage) BeginSequence(id sofab.ID) (sofab.Visitor, error)",
-		"func NewMyfirstmessage() *Myfirstmessage",
-		"func DecodeMyfirstmessage(",
+		"func Myfirstmessage__New() *Myfirstmessage",
+		"func Myfirstmessage__Decode(",
 		"sofab.AcceptBytes(data, m", // zero-copy cursor decode (limit options may follow)
 		"e.WriteSequenceBeginLazy(", // nested struct/union framing (MESSAGE_SPEC S2)
 		"e.WriteSequenceEndKeep()",  // ... and an array ELEMENT keeps its frame
@@ -503,8 +503,8 @@ func TestGoStructuralInvariants(t *testing.T) {
 	if !strings.Contains(msg, "sofab.VisitorBase") {
 		t.Errorf("the object must embed the corelib no-op base:\n%s", firstLines(msg, 20))
 	}
-	types := files["types.go"]
-	if !strings.Contains(types, "type MyfirstmessageSomeenum int8") {
+	types := files["sofab_types.go"]
+	if !strings.Contains(types, "type Myfirstmessage_Someenum int8") {
 		t.Errorf("enum backing type missing/incorrect:\n%s", firstLines(types, 12))
 	}
 }
@@ -582,20 +582,20 @@ messages:
             type: blob
 `)
 	files := genGo(t, s, map[string]any{"package": "messages"})
-	types := files["types.go"]
+	types := files["sofab_types.go"]
 	if !strings.Contains(types, "if len(m.BytesField) != 0 {") {
-		t.Errorf("expected nested blob marshal to omit via len() in types.go:\n%s", firstLines(types, 20))
+		t.Errorf("expected nested blob marshal to omit via len() in sofab_types.go:\n%s", firstLines(types, 20))
 	}
 	if strings.Contains(types, "bytes.Equal") {
 		t.Errorf("default-less blob should not use bytes.Equal:\n%s", firstLines(types, 20))
 	}
 	if strings.Contains(types, `"bytes"`) {
-		t.Errorf("types.go should not import bytes for a default-less blob:\n%s", firstLines(types, 20))
+		t.Errorf("sofab_types.go should not import bytes for a default-less blob:\n%s", firstLines(types, 20))
 	}
 }
 
 // A blob field with a schema default still compares against that default via
-// bytes.Equal, and lands in types.go (not the message file) when nested.
+// bytes.Equal, and lands in sofab_types.go (not the message file) when nested.
 // Regression for #84: any file that references bytes. must import "bytes"
 // itself rather than relying on the message file's own import. go/parser only
 // parses, so it never caught this — the failure is an undefined identifier at
@@ -617,9 +617,9 @@ messages:
             default: "AAEC"
 `)
 	files := genGo(t, s, map[string]any{"package": "messages"})
-	types := files["types.go"]
+	types := files["sofab_types.go"]
 	if !strings.Contains(types, "bytes.Equal") {
-		t.Fatalf("expected defaulted nested blob marshal to use bytes.Equal in types.go:\n%s", firstLines(types, 20))
+		t.Fatalf("expected defaulted nested blob marshal to use bytes.Equal in sofab_types.go:\n%s", firstLines(types, 20))
 	}
 	for path, src := range files {
 		if !strings.HasSuffix(path, ".go") {
@@ -658,7 +658,7 @@ messages:
       status:   { id: 3, type: bitfield, bits: { $ref: "#/$defs/bitfield/StatusFlags" }, description: "Health flags for this sample." }
 `
 	files := genGo(t, schemaFromYAMLString(t, src), map[string]any{"package": "messages"})
-	msg, types := files["telemetry.go"], files["types.go"]
+	msg, types := files["telemetry.go"], files["sofab_types.go"]
 
 	// Deprecated field: leading godoc block, description kept, Deprecated: line,
 	// and no trailing description comment on the field line itself.
@@ -676,21 +676,21 @@ messages:
 
 	// Enum constant descriptions (trailing, unchanged; gofmt aligns columns).
 	for _, want := range []*regexp.Regexp{
-		regexp.MustCompile(`EnumModeOff\s+EnumMode = 0 // Node is powered down\.`),
-		regexp.MustCompile(`EnumModeActive\s+EnumMode = 1 // Node is sampling and transmitting\.`),
+		regexp.MustCompile(`Mode_Off\s+Mode = 0 // Node is powered down\.`),
+		regexp.MustCompile(`Mode_Active\s+Mode = 1 // Node is sampling and transmitting\.`),
 	} {
 		if !want.MatchString(types) {
-			t.Errorf("types.go missing enum const doc %v", want)
+			t.Errorf("sofab_types.go missing enum const doc %v", want)
 		}
 	}
 
 	// Bitfield flag descriptions + default note.
 	for _, want := range []*regexp.Regexp{
-		regexp.MustCompile(`BitfieldStatusFlagsReady\s+BitfieldStatusFlags = 1 << 0 // Node has completed initialization\. \(default: true\)`),
-		regexp.MustCompile(`BitfieldStatusFlagsOverheated\s+BitfieldStatusFlags = 1 << 1 // Core temperature exceeded the safe threshold\.`),
+		regexp.MustCompile(`StatusFlags_Ready\s+StatusFlags = 1 << 0 // Node has completed initialization\. \(default: true\)`),
+		regexp.MustCompile(`StatusFlags_Overheated\s+StatusFlags = 1 << 1 // Core temperature exceeded the safe threshold\.`),
 	} {
 		if !want.MatchString(types) {
-			t.Errorf("types.go missing bitfield flag doc %v:\n%s", want, firstLines(types, 20))
+			t.Errorf("sofab_types.go missing bitfield flag doc %v:\n%s", want, firstLines(types, 20))
 		}
 	}
 	// A defaulted flag with no description would still carry the note.
@@ -702,7 +702,7 @@ messages:
 func TestGoDeterministic(t *testing.T) {
 	a := genGo(t, exampleSchema(t), map[string]any{"package": "messages"})
 	b := genGo(t, exampleSchema(t), map[string]any{"package": "messages"})
-	if a["myfirstmessage.go"] != b["myfirstmessage.go"] || a["types.go"] != b["types.go"] {
+	if a["myfirstmessage.go"] != b["myfirstmessage.go"] || a["sofab_types.go"] != b["sofab_types.go"] {
 		t.Fatal("Go generation is not deterministic")
 	}
 }
@@ -962,7 +962,7 @@ messages:
 	// bounded before (the inner `count:` was dropped on the floor here, and the
 	// codec cap that stood in for it is gone -- corelib-go#132/#133).
 	for _, want := range []string{
-		"sofab.NewMessageSeq[VecObjsElem, *VecObjsElem](&m.Objs, sofab.Bounds{Count: 4}, _caps)",
+		"sofab.NewMessageSeq[Vec_Objs, *Vec_Objs](&m.Objs, sofab.Bounds{Count: 4}, _caps)",
 		"sofab.NewUnsignedMatrixSeq[uint32](&m.Mat, sofab.Bounds{Count: 2}, sofab.Bounds{Count: 3}, _caps, 4294967295)",
 		"sofab.NewNestedSeq[string](&m.Rows, sofab.Bounds{Count: 2}, _caps,",
 		"sofab.NewStringSeq(p, sofab.Bounds{ElemLen: 4}, _caps)",
@@ -1110,7 +1110,7 @@ messages:
 `)
 	msg := genGo(t, s, map[string]any{})["vec.go"]
 
-	if !strings.Contains(msg, "func DecodeVecFrom(r io.Reader) (*Vec, error)") {
+	if !strings.Contains(msg, "func Vec__DecodeFrom(r io.Reader) (*Vec, error)") {
 		t.Error("missing the io.Reader-driven decode entry point")
 	}
 	if !strings.Contains(msg, "sofab.NewDecoder(m).FeedFrom(r, scratch)") {
@@ -1179,9 +1179,9 @@ messages:
       s: { id: 1, type: string, maxlen: 8 }
 `), map[string]any{})["b.go"]
 	for _, want := range []string{
-		"const BMaxSize = ",
-		"buf := make([]byte, BMaxSize)",
-		"e, err := sofab.NewEncoderBuffer(buf, 0, _BEncOpts...)",
+		"const B__MaxSize = ",
+		"buf := make([]byte, B__MaxSize)",
+		"e, err := sofab.NewEncoderBuffer(buf, 0, _B__EncOpts...)",
 		"return e.Bytes(), nil",
 	} {
 		if !strings.Contains(bounded, want) {
@@ -1190,7 +1190,7 @@ messages:
 	}
 	// A derived worst case is emitted as MAX_SIZE alone — a MAX_SIZE_LIMIT here
 	// would tell the reader the number is imposed when it is not.
-	if strings.Contains(bounded, "BMaxSizeLimit") {
+	if strings.Contains(bounded, "B__MaxSizeLimit") {
 		t.Error("a schema-derived worst case must not be spelled as a configured ceiling")
 	}
 
@@ -1202,8 +1202,8 @@ messages:
       s: { id: 0, type: string }
 `), map[string]any{})["u.go"]
 	for _, want := range []string{
-		"UMaxSizeLimit = 4096",
-		"UMaxSize      = UMaxSizeLimit",
+		"U__MaxSizeLimit = 4096",
+		"U__MaxSize      = U__MaxSizeLimit",
 		"var scratch [512]byte",
 		"e, err := sofab.NewEncoderSink(scratch[:], 0, func(_ *sofab.Encoder, b []byte) error {",
 		"out = append(out, b...)",
@@ -1214,7 +1214,7 @@ messages:
 	}
 	// The ceiling must never size the buffer: that is the truncation this arm
 	// exists to avoid.
-	if strings.Contains(unbounded, "make([]byte, UMaxSize)") {
+	if strings.Contains(unbounded, "make([]byte, U__MaxSize)") {
 		t.Error("the configured ceiling must not size an encode buffer")
 	}
 	// An explicitly configured ceiling a bounded schema cannot fit is a config
@@ -1330,15 +1330,15 @@ const (
 // "the arm is shared" is not worth trusting after the next refactor.
 func TestGoEnumAndBitfieldWidthBoundAtEverySixPositions(t *testing.T) {
 	files := genGo(t, schemaFromYAMLString(t, widthSixSrc), map[string]any{"package": "m"})
-	msg, types := files["closed.go"], files["types.go"]
+	msg, types := files["closed.go"], files["sofab_types.go"]
 
 	for _, want := range []string{
 		// 1. scalar
-		"case 0:\n\t\t" + widthEnumRej + "m.En = ClosedEn(v)",
-		"case 1:\n\t\t" + widthBitRej + "m.Bf = ClosedBf(v)",
+		"case 0:\n\t\t" + widthEnumRej + "m.En = Closed_En(v)",
+		"case 1:\n\t\t" + widthBitRej + "m.Bf = Closed_Bf(v)",
 		// 2. native array element
-		"case 2:\n\t\t" + widthEnumRej + "m.Ea = append(m.Ea, ClosedEaElem(v))",
-		"case 3:\n\t\t" + widthBitRej + "m.Bfa = append(m.Bfa, ClosedBfaElem(v))",
+		"case 2:\n\t\t" + widthEnumRej + "m.Ea = append(m.Ea, Closed_Ea(v))",
+		"case 3:\n\t\t" + widthBitRej + "m.Bfa = append(m.Bfa, Closed_Bfa(v))",
 	} {
 		if !strings.Contains(msg, want) {
 			t.Errorf("closed.go: a position stores without its §1 width bound, missing %q:\n%s", want, msg)
@@ -1347,17 +1347,17 @@ func TestGoEnumAndBitfieldWidthBoundAtEverySixPositions(t *testing.T) {
 	for _, want := range []string{
 		// 3. struct member, 4. struct-array element member, 5. union member:
 		// three id scopes, one emitter, so each gets its own object visitor.
-		"case 0:\n\t\t" + widthEnumRej + "m.Se = ClosedStSe(v)",
-		"case 1:\n\t\t" + widthBitRej + "m.Sbf = ClosedStSbf(v)",
-		"case 0:\n\t\t" + widthEnumRej + "m.Se = ClosedSaElemSe(v)",
-		"case 1:\n\t\t" + widthBitRej + "m.Sbf = ClosedSaElemSbf(v)",
+		"case 0:\n\t\t" + widthEnumRej + "m.Se = Closed_St_Se(v)",
+		"case 1:\n\t\t" + widthBitRej + "m.Sbf = Closed_St_Sbf(v)",
+		"case 0:\n\t\t" + widthEnumRej + "m.Se = Closed_Sa_Se(v)",
+		"case 1:\n\t\t" + widthBitRej + "m.Sbf = Closed_Sa_Sbf(v)",
 		// A union member is stored through its setter, which selects the option
 		// -- after the bound, so an over-width value never switches the union.
-		"case 0:\n\t\t" + widthEnumRej + "m.SetUe(ClosedUnUe(v))",
-		"case 1:\n\t\t" + widthBitRej + "m.SetUbf(ClosedUnUbf(v))",
+		"case 0:\n\t\t" + widthEnumRej + "m.SetUe(Closed_Un_Ue(v))",
+		"case 1:\n\t\t" + widthBitRej + "m.SetUbf(Closed_Un_Ubf(v))",
 	} {
 		if !strings.Contains(types, want) {
-			t.Errorf("types.go: a position stores without its §1 width bound, missing %q:\n%s", want, types)
+			t.Errorf("sofab_types.go: a position stores without its §1 width bound, missing %q:\n%s", want, types)
 		}
 	}
 	// 6. matrix row element. Its values never reach the generated visitor —
@@ -1366,8 +1366,8 @@ func TestGoEnumAndBitfieldWidthBoundAtEverySixPositions(t *testing.T) {
 	// armed by a sentinel. A width IS an interval, so it travels there like every
 	// other element width and the generated wrapper the mask needed is gone.
 	for _, want := range []string{
-		"sofab.NewSignedMatrixSeq[ClosedMatElemElem](&m.Mat, sofab.Bounds{Count: 2}, sofab.Bounds{Count: 3}, _caps, -128, 127)",
-		"sofab.NewUnsignedMatrixSeq[ClosedMbfElemElem](&m.Mbf, sofab.Bounds{Count: 2}, sofab.Bounds{Count: 3}, _caps, 255)",
+		"sofab.NewSignedMatrixSeq[Closed_Mat](&m.Mat, sofab.Bounds{Count: 2}, sofab.Bounds{Count: 3}, _caps, -128, 127)",
+		"sofab.NewUnsignedMatrixSeq[Closed_Mbf](&m.Mbf, sofab.Bounds{Count: 2}, sofab.Bounds{Count: 3}, _caps, 255)",
 	} {
 		if !strings.Contains(msg, want) {
 			t.Errorf("closed.go: a matrix row collector carries no element width, missing %q:\n%s", want, msg)
@@ -1379,18 +1379,18 @@ func TestGoEnumAndBitfieldWidthBoundAtEverySixPositions(t *testing.T) {
 	// Storage stays the smallest integer the declaration implies, which under the
 	// width rule is the bound itself — §1's fourth consequence only obliges a
 	// receiver that holds the field WIDER to add a check, and Go does not.
-	for _, want := range []string{"type ClosedEn int8", "type ClosedBf uint8"} {
+	for _, want := range []string{"type Closed_En int8", "type Closed_Bf uint8"} {
 		if !strings.Contains(types, want) {
-			t.Errorf("types.go: storage must follow the declared width, missing %q:\n%s", want, types)
+			t.Errorf("sofab_types.go: storage must follow the declared width, missing %q:\n%s", want, types)
 		}
 	}
 	// No unguarded store may remain: the exact pre-#516 shapes, spelled out so an
 	// arm that loses its guard again fails here and not only in conformance.
 	for _, bad := range []string{
-		"case 0:\n\t\tm.En = ClosedEn(v)",
-		"case 1:\n\t\tm.Bf = ClosedBf(v)",
-		"case 2:\n\t\tm.Ea = append(m.Ea, ClosedEaElem(v))",
-		"case 3:\n\t\tm.Bfa = append(m.Bfa, ClosedBfaElem(v))",
+		"case 0:\n\t\tm.En = Closed_En(v)",
+		"case 1:\n\t\tm.Bf = Closed_Bf(v)",
+		"case 2:\n\t\tm.Ea = append(m.Ea, Closed_Ea(v))",
+		"case 3:\n\t\tm.Bfa = append(m.Bfa, Closed_Bfa(v))",
 	} {
 		if strings.Contains(msg, bad) {
 			t.Errorf("closed.go still stores an enum/bitfield bare (%q):\n%s", bad, msg)
@@ -1422,15 +1422,15 @@ func TestGoEnumBitfieldWidthElisions(t *testing.T) {
 	msg := genGo(t, schemaFromYAMLString(t, src), map[string]any{"package": "m"})["w.go"]
 	// A contiguous enum takes the implied i8 width, NOT the 0..1 hull of its
 	// constants: −5 and 100 are valid wire values for this field and must decode.
-	if !strings.Contains(msg, "case 0:\n\t\t"+widthEnumRej+"m.E = WE(v)") {
+	if !strings.Contains(msg, "case 0:\n\t\t"+widthEnumRej+"m.E = W_E(v)") {
 		t.Errorf("a contiguous enum must take the implied i8 width, not its constant hull:\n%s", msg)
 	}
-	if !strings.Contains(msg, "case 1:\n\t\tm.F = WF(v)") {
+	if !strings.Contains(msg, "case 1:\n\t\tm.F = W_F(v)") {
 		t.Errorf("an all-bits-declared bitfield implies u64 and must store unguarded:\n%s", msg)
 	}
 	// A single position at 63 implies the same u64 as all 64 do — and retires the
 	// `0x8000000000000001` literal the withdrawn flag mask rendered (generator#470).
-	if !strings.Contains(msg, "case 2:\n\t\tm.G = WG(v)") {
+	if !strings.Contains(msg, "case 2:\n\t\tm.G = W_G(v)") {
 		t.Errorf("a bitfield whose highest position is 63 must store unguarded:\n%s", msg)
 	}
 	if strings.Contains(msg, "0x8000000000000001") || strings.Contains(msg, "0xffffffffffffffff") {
@@ -1452,7 +1452,7 @@ func TestGoEnumBitfieldWidthElisions(t *testing.T) {
 // Pinned on the emitted bound so a silent reversion is loud.
 func TestGoWidthAdmitsUndeclaredValues(t *testing.T) {
 	files := genGo(t, schemaFromYAMLString(t, widthSixSrc), map[string]any{"package": "m"})
-	all := files["closed.go"] + files["types.go"]
+	all := files["closed.go"] + files["sofab_types.go"]
 	// enum {0,1,2,10}: the guard must admit 5 — i.e. be the i8 interval, never a
 	// membership chain over the constants and never their 0..10 hull.
 	if strings.Contains(all, "v != 10") {
@@ -1535,12 +1535,12 @@ messages:
             r: { id: 0, type: string, maxlen: 4, default: "" }
 `)
 	files := genGo(t, s, map[string]any{"package": "messages"})
-	msg, types := files["m.go"], files["types.go"]
+	msg, types := files["m.go"], files["sofab_types.go"]
 	if msg == "" || types == "" {
-		t.Fatalf("expected m.go and types.go, got %d file(s)", len(files))
+		t.Fatalf("expected m.go and sofab_types.go, got %d file(s)", len(files))
 	}
 
-	ctor := between(msg, "func NewM() *M {", "\n}")
+	ctor := between(msg, "func M__New() *M {", "\n}")
 	if !strings.Contains(ctor, "m.S.setDefaults()") {
 		t.Errorf("NewM must seed the struct field's nested defaults:\n%s", ctor)
 	}
@@ -1549,9 +1549,9 @@ messages:
 	}
 
 	for typ, want := range map[string][]string{
-		"MS":       {"m.A = 5", `m.T = "hi"`, "m.Inner.setDefaults()"},
-		"MSInner":  {"m.B = -3"},
-		"MArrElem": {"m.C = 9"},
+		"M_S":       {"m.A = 5", `m.T = "hi"`, "m.Inner.setDefaults()"},
+		"M_S_Inner": {"m.B = -3"},
+		"M_Arr":     {"m.C = 9"},
 	} {
 		body := between(types, "func (m *"+typ+") setDefaults() {", "\n}")
 		if body == "" {
@@ -1564,18 +1564,18 @@ messages:
 			}
 		}
 	}
-	for _, typ := range []string{"MZ", "MZarrElem"} {
+	for _, typ := range []string{"M_Z", "M_Zarr"} {
 		if strings.Contains(types, "func (m *"+typ+") setDefaults()") {
 			t.Errorf("%s declares only zero defaults and must get no setDefaults", typ)
 		}
 	}
 
-	if !strings.Contains(msg, "sofab.NewMessageSeqInit[MArrElem, *MArrElem](") ||
-		!strings.Contains(msg, "(*MArrElem).setDefaults)") {
+	if !strings.Contains(msg, "sofab.NewMessageSeqInit[M_Arr, *M_Arr](") ||
+		!strings.Contains(msg, "(*M_Arr).setDefaults)") {
 		t.Errorf("a struct array whose element declares non-zero defaults must seed every created slot:\n%s",
 			firstLines(msg, 80))
 	}
-	if !strings.Contains(msg, "sofab.NewMessageSeq[MZarrElem, *MZarrElem](") {
+	if !strings.Contains(msg, "sofab.NewMessageSeq[M_Zarr, *M_Zarr](") {
 		t.Errorf("a struct array whose element defaults are all zero keeps the plain collector:\n%s",
 			firstLines(msg, 80))
 	}

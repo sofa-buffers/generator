@@ -18,7 +18,7 @@ type Backend struct{}
 
 func (*Backend) Lang() string { return "go" }
 
-// Generate emits a shared types.go (all named struct/union/enum/bitfield) plus
+// Generate emits a shared sofab_types.go (all named struct/union/enum/bitfield) plus
 // one file per message. When emit==project it also scaffolds a buildable module
 // with an encode/decode JSON harness.
 func (*Backend) Generate(s *ir.Schema, cfg map[string]any) ([]generator.File, error) {
@@ -30,16 +30,12 @@ func (*Backend) Generate(s *ir.Schema, cfg map[string]any) ([]generator.File, er
 		limits:   resolveLimits(s, cfg),
 		size:     generator.NewSizePolicy(cfg),
 		needsDef: map[string]bool{},
+		idConsts: map[string]bool{},
 	}
-	if err := g.checkPackageNames(); err != nil {
-		return nil, err
-	}
-	if err := g.checkFieldNames(); err != nil {
-		return nil, err
-	}
-	if err := checkConstNames(s); err != nil {
-		return nil, err
-	}
+	// No name check: every identifier below is built from the channels of
+	// ARCHITECTURE §8 ("Naming") -- type identifiers, roles, children, private
+	// names, the escape -- so two of them cannot collide for a schema the
+	// validator accepted, and no schema is refused for its names.
 	project := cfgString(cfg, "emit", "sources") == "project"
 	// In a project the package gets its own directory so the harness can import
 	// it; in sources mode the files are emitted flat for the caller to place.
@@ -47,15 +43,17 @@ func (*Backend) Generate(s *ir.Schema, cfg map[string]any) ([]generator.File, er
 	if project {
 		pkgDir = g.pkg + "/"
 	}
+	// The fixed files carry a "_" and a message file (msgFile) never does, so no
+	// message can take -- or overwrite -- one of them.
 	var files []generator.File
 	if tf := g.typesFile(); tf != nil {
-		files = append(files, generator.File{Path: pkgDir + "types.go", Content: tf})
+		files = append(files, generator.File{Path: pkgDir + typesFileName, Content: tf})
 	}
 	if g.hasObject() {
 		files = append(files, generator.File{Path: pkgDir + "sofab_visitor.go", Content: g.preludeFile()})
 	}
 	for _, m := range s.Messages {
-		files = append(files, generator.File{Path: pkgDir + strings.ToLower(m.Name) + ".go", Content: g.messageFile(m)})
+		files = append(files, generator.File{Path: pkgDir + msgFile(m), Content: g.messageFile(m)})
 	}
 	if project {
 		files = append(files, g.projectFiles(s, cfg)...)
@@ -83,7 +81,13 @@ type gen struct {
 	fmtErr error
 	// needsDef memoises needsDefaults per named struct/union key.
 	needsDef map[string]bool
+	// idConsts records the union paths whose option-id constants are emitted:
+	// the variants of a split union share them.
+	idConsts map[string]bool
 }
+
+// typesFileName is the shared file holding every named type.
+const typesFileName = "sofab_types.go"
 
 // render finishes a file through gofile.bytes. The emit path has no error
 // channel, so a file go/format rejects is recorded here, named, and returned by
@@ -317,7 +321,7 @@ type _isDefaulter interface{ isDefault() bool }`)
 	return g.render(f, "sofab_visitor.go")
 }
 
-// ---- types.go : all named types -----------------------------------------
+// ---- sofab_types.go : all named types -----------------------------------------
 
 func (g *gen) typesFile() []byte {
 	if len(g.schema.NamedOrder) == 0 {
@@ -340,11 +344,11 @@ func (g *gen) typesFile() []byte {
 			g.emitUnion(f, nt)
 		}
 	}
-	return g.render(f, "types.go")
+	return g.render(f, typesFileName)
 }
 
 func (g *gen) emitEnum(f *gofile, nt *ir.NamedType) {
-	tn := g.typeName(nt.Key)
+	tn, base := typeIdent(nt), typeBase(nt)
 	f.line("// %s is a generated enum (signed wire varint).", tn)
 	f.line("type %s %s", tn, enumGoType(nt))
 	f.line("const (")
@@ -353,14 +357,14 @@ func (g *gen) emitEnum(f *gofile, nt *ir.NamedType) {
 		if c.Description != "" {
 			doc = " // " + oneline(c.Description)
 		}
-		f.line("\t%s%s %s = %d%s", tn, exported(c.Name), tn, c.Value, doc)
+		f.line("\t%s_%s %s = %d%s", base, exported(c.Name), tn, c.Value, doc)
 	}
 	f.line(")")
 	f.blank()
 }
 
 func (g *gen) emitBitfield(f *gofile, nt *ir.NamedType) {
-	tn := g.typeName(nt.Key)
+	tn, base := typeIdent(nt), typeBase(nt)
 	f.line("// %s is a generated bitfield (unsigned wire varint).", tn)
 	f.line("type %s %s", tn, bitfieldGoType(nt))
 	f.line("const (")
@@ -379,7 +383,7 @@ func (g *gen) emitBitfield(f *gofile, nt *ir.NamedType) {
 		if doc != "" {
 			doc = " // " + doc
 		}
-		f.line("\t%s%s %s = 1 << %d%s", tn, exported(fl.Name), tn, fl.Pos, doc)
+		f.line("\t%s_%s %s = 1 << %d%s", base, exported(fl.Name), tn, fl.Pos, doc)
 	}
 	f.line(")")
 	f.blank()
@@ -389,8 +393,8 @@ func (g *gen) emitBitfield(f *gofile, nt *ir.NamedType) {
 // for an id scope. Decode is push/visitor: the struct embeds sofab.VisitorBase
 // (no-op defaults) and overrides the callbacks its fields need.
 //
-// One visitor, two entry points. DecodeX feeds the corelib's decoder a buffer
-// the caller already holds; DecodeXFrom feeds it whatever a reader delivers, so
+// One visitor, two entry points. X__Decode feeds the corelib's decoder a buffer
+// the caller already holds; X__DecodeFrom feeds it whatever a reader delivers, so
 // nothing larger than one fed chunk is ever resident (§5.6). Both are Feed, on
 // the same state machine, so what is emitted here serves both and neither can
 // tell which is driving it.
@@ -586,7 +590,7 @@ func (g *gen) emitMarshalFieldAt(f *gofile, fld *ir.Field, acc, ind string, forc
 		}
 		// blob is a leaf: omit when equal to its default. With a schema default,
 		// compare against its literal via bytes.Equal (importing "bytes" into
-		// whatever file holds this marshal, per-message or the shared types.go).
+		// whatever file holds this marshal, per-message or the shared sofab_types.go).
 		// With no default the default is the empty slice, so the idiomatic
 		// len()==0 test is exactly equivalent to bytes.Equal(x, nil) — matching
 		// the array/string/scalar omit-checks and leaving generated code free of
@@ -635,7 +639,7 @@ func (g *gen) emitMarshalFieldAt(f *gofile, fld *ir.Field, acc, ind string, forc
 }
 
 // defaultCompare is the RHS to compare a field against for omission: its schema
-// default if present, else the Go zero value (matching New<Msg>'s init).
+// default if present, else the Go zero value (matching <Msg>__New's init).
 func (g *gen) defaultCompare(fld *ir.Field) string {
 	if lit, ok := g.defaultLiteral(fld); ok {
 		return lit
@@ -654,7 +658,7 @@ func (g *gen) defaultCompare(fld *ir.Field) string {
 
 func (g *gen) emitMarshalArray(f *gofile, fld *ir.Field, acc, ind string, forced bool) {
 	// A native scalar array is a leaf field: omit it when equal to its default
-	// (materialized in New<Msg>), else when empty. A composite/dynamic-element
+	// (materialized in <Msg>__New), else when empty. A composite/dynamic-element
 	// array is a wrapper sequence, opened lazily and closed with the dropping end
 	// (MESSAGE_SPEC §2), so an empty one is omitted rather than framed empty.
 	//
@@ -681,7 +685,7 @@ func (g *gen) emitMarshalArray(f *gofile, fld *ir.Field, acc, ind string, forced
 	}
 	// The field-level wrapper frame is dropped when no element is written, and
 	// absence then reconstructs the field's default. That is correct because a
-	// wrapper array's declared `default` is not materialized today (New<Msg>
+	// wrapper array's declared `default` is not materialized today (<Msg>__New
 	// leaves it the empty collection), so absent and explicitly-empty denote the
 	// same value. If that gap is ever closed, this call needs a guard --
 	// `if !equal(value, default) { ... WriteSequenceEndKeep() }` -- so that a value
@@ -1392,7 +1396,7 @@ func isSignedNativeArray(k ir.Kind) bool {
 	return k == ir.KindI8 || k == ir.KindI16 || k == ir.KindI32 || k == ir.KindI64 || k == ir.KindEnum
 }
 
-// decodeChunkSize is the scratch buffer Decode<Msg>From drains a reader into.
+// decodeChunkSize is the scratch buffer <Msg>__DecodeFrom drains a reader into.
 // §6.6 leaves input storage to the caller, so the corelib sizes nothing from the
 // stream and this number is the generated layer's. It bounds nothing about the
 // message: a field larger than one chunk simply arrives in several, which is the
@@ -1408,15 +1412,19 @@ func (g *gen) messageFile(m *ir.Message) []byte {
 	f.imp(corelibImport)
 	f.imp("io")
 
-	typeName := exported(m.Name)
+	// The message's companions are roles on its unescaped identifier (M__New,
+	// M__Decode, M__MaxSize, ...); the private encode options are _M__EncOpts.
+	typeName, base := msgIdent(m), msgBase(m)
+	newFn, decFn, decFromFn := base+"__New", base+"__Decode", base+"__DecodeFrom"
+	maxSize, maxSizeLimit, maxDepth := base+"__MaxSize", base+"__MaxSizeLimit", base+"__MaxDepth"
 	if m.Summary != "" {
 		f.line("// %s - %s", typeName, oneline(m.Summary))
 	}
 	g.emitObject(f, typeName, m.Fields)
 
 	// constructor with schema defaults
-	f.line("// New%s returns a %s with schema defaults applied.", typeName, typeName)
-	f.line("func New%s() *%s {", typeName, typeName)
+	f.line("// %s returns a %s with schema defaults applied.", newFn, typeName)
+	f.line("func %s() *%s {", newFn, typeName)
 	f.line("\tm := &%s{}", typeName)
 	g.emitDefaults(f, m.Fields)
 	f.line("\treturn m")
@@ -1428,16 +1436,16 @@ func (g *gen) messageFile(m *ir.Message) []byte {
 	// §5.1), so the size has to come from the schema, here.
 	ms := g.messageSize(m.Name, m.Fields)
 	if ms.Bounded {
-		f.line("// %sMaxSize is this message's worst-case encoded size, derived from the", typeName)
+		f.line("// %s is this message's worst-case encoded size, derived from the", maxSize)
 		f.line("// schema: no value of it can encode to more.")
-		f.line("const %sMaxSize = %d", typeName, ms.Size)
+		f.line("const %s = %d", maxSize, ms.Size)
 	} else {
-		f.line("// %sMaxSizeLimit is the configured ceiling (max_message_size): an", typeName)
+		f.line("// %s is the configured ceiling (max_message_size): an", maxSizeLimit)
 		f.line("// unbounded field means this size is imposed, not derived from the schema,")
 		f.line("// so it is NOT a size this message cannot exceed.")
 		f.line("const (")
-		f.line("\t%sMaxSizeLimit = %d", typeName, ms.Size)
-		f.line("\t%sMaxSize      = %sMaxSizeLimit", typeName, typeName)
+		f.line("\t%s = %d", maxSizeLimit, ms.Size)
+		f.line("\t%s = %s", maxSize, maxSizeLimit)
 		f.line(")")
 	}
 	f.blank()
@@ -1448,22 +1456,22 @@ func (g *gen) messageFile(m *ir.Message) []byte {
 	// the Encoder, and a one-shot encode pays no separate allocation for it.
 	encOpts := ""
 	if depth, ok := seqDepth(m.Fields, map[string]bool{}); ok && depth <= wireMaxDepth {
-		optsVar := "_" + typeName + "EncOpts"
+		optsVar := "_" + base + "__EncOpts"
 		encOpts = ", " + optsVar + "..."
-		f.line("// %sMaxDepth is the deepest sequence nesting encoding this message opens,", typeName)
+		f.line("// %s is the deepest sequence nesting encoding this message opens,", maxDepth)
 		f.line("// derived from the schema: no value of it nests deeper.")
-		f.line("const %sMaxDepth = %d", typeName, depth)
+		f.line("const %s = %d", maxDepth, depth)
 		f.blank()
 		// WithMaxDepth(0) means "no bound" (MaxDepth), so a message that opens no
 		// sequence at all still passes 1: the bound is never reached either way.
-		arg := typeName + "MaxDepth"
+		arg := maxDepth
 		if depth == 0 {
 			arg = "1"
-			f.line("// %s bounds this message's encoders to one level: %sMaxDepth", optsVar, typeName)
+			f.line("// %s bounds this message's encoders to one level: %s", optsVar, maxDepth)
 			f.line("// is 0, and WithMaxDepth(0) would mean no bound. It is package-level so")
 			f.line("// passing it allocates nothing per call.")
 		} else {
-			f.line("// %s bounds this message's encoders to %sMaxDepth. It is", optsVar, typeName)
+			f.line("// %s bounds this message's encoders to %s. It is", optsVar, maxDepth)
 			f.line("// package-level so passing it allocates nothing per call.")
 		}
 		f.line("var %s = []sofab.Option{sofab.WithMaxDepth(%s)}", optsVar, arg)
@@ -1480,11 +1488,11 @@ func (g *gen) messageFile(m *ir.Message) []byte {
 		// never emitted short (§5.1: partial output is never returned as complete).
 		f.line("// Encode serializes the message into a buffer this call allocates and owns.")
 		f.line("//")
-		f.line("// The buffer is exactly %sMaxSize bytes -- the schema's worst case -- so a", typeName)
+		f.line("// The buffer is exactly %s bytes -- the schema's worst case -- so a", maxSize)
 		f.line("// conformant value always fits. A value filled past a declared count/maxlen")
 		f.line("// does not, and is reported rather than truncated.")
 		f.line("func (m *%s) Encode() ([]byte, error) {", typeName)
-		f.line("\tbuf := make([]byte, %sMaxSize)", typeName)
+		f.line("\tbuf := make([]byte, %s)", maxSize)
 		f.line("\te, err := sofab.NewEncoderBuffer(buf, 0%s)", encOpts)
 		f.line("\tif err != nil {")
 		f.line("\t\treturn nil, err")
@@ -1506,7 +1514,7 @@ func (g *gen) messageFile(m *ir.Message) []byte {
 		f.line("// A field of this message is unbounded, so there is no worst-case size to")
 		f.line("// hand the encoder. It writes into a fixed scratch buffer instead, which is")
 		f.line("// appended to the result each time it fills: the message may be any size,")
-		f.line("// and %sMaxSize never bounds it.", typeName)
+		f.line("// and %s never bounds it.", maxSize)
 		f.line("func (m *%s) Encode() ([]byte, error) {", typeName)
 		f.line("\tvar out []byte")
 		f.line("\tvar scratch [512]byte")
@@ -1548,7 +1556,7 @@ func (g *gen) messageFile(m *ir.Message) []byte {
 	f.line("\treturn e.Flush()")
 	f.line("}")
 	f.blank()
-	f.line("// Decode%s parses bytes into a new message (with defaults pre-applied).", typeName)
+	f.line("// %s parses bytes into a new message (with defaults pre-applied).", decFn)
 	f.line("// Decode feeds the buffer to the corelib's decoder in one go, dispatching")
 	f.line("// each field to the message's sofab.Visitor implementation.")
 	f.line("//")
@@ -1557,10 +1565,10 @@ func (g *gen) messageFile(m *ir.Message) []byte {
 	f.line("// and copies. The message therefore outlives data, and data may be reused")
 	f.line("// or mutated the moment this returns.")
 	f.line("//")
-	f.line("// Use this when the message is already in memory. Decode%sFrom is the", typeName)
+	f.line("// Use this when the message is already in memory. %s is the", decFromFn)
 	f.line("// streaming twin for a message that is not.")
-	f.line("func Decode%s(data []byte) (*%s, error) {", typeName, typeName)
-	f.line("\tm := New%s()", typeName)
+	f.line("func %s(data []byte) (*%s, error) {", decFn, typeName)
+	f.line("\tm := %s()", newFn)
 	f.line("\tif err := sofab.AcceptBytes(data, m); err != nil {")
 	f.line("\t\treturn nil, err")
 	f.line("\t}")
@@ -1579,11 +1587,11 @@ func (g *gen) messageFile(m *ir.Message) []byte {
 	//
 	// The scratch buffer is the CALLER's by contract (§6.6: the corelib sizes no
 	// buffer from a stream), so it is allocated here, once per call.
-	f.line("// Decode%sFrom parses a message straight out of r (with defaults pre-applied).", typeName)
+	f.line("// %s parses a message straight out of r (with defaults pre-applied).", decFromFn)
 	f.line("//")
 	f.line("// The wire image is never held whole in memory: r is drained in chunks and")
 	f.line("// each field is dispatched as its bytes arrive, so what bounds memory is")
-	f.line("// the chunk plus the largest single field, not the message. Decode%s is", typeName)
+	f.line("// the chunk plus the largest single field, not the message. %s is", decFn)
 	f.line("// the in-memory path for bytes you already hold; this is the one to reach")
 	f.line("// for over a network connection, a file, or any producer that outruns the")
 	f.line("// memory you want to spend.")
@@ -1593,8 +1601,8 @@ func (g *gen) messageFile(m *ir.Message) []byte {
 	f.line("// streamed, at every chunk boundary. A reader that ends inside a field is")
 	f.line("// INCOMPLETE, which is sofab.ErrIncomplete here: only the caller's framing")
 	f.line("// knows whether more could still have come (S5.2.4).")
-	f.line("func Decode%sFrom(r io.Reader) (*%s, error) {", typeName, typeName)
-	f.line("\tm := New%s()", typeName)
+	f.line("func %s(r io.Reader) (*%s, error) {", decFromFn, typeName)
+	f.line("\tm := %s()", newFn)
 	f.line("\tscratch := make([]byte, %d)", decodeChunkSize)
 	f.line("\tout, err := sofab.NewDecoder(m).FeedFrom(r, scratch)")
 	f.line("\tif err != nil {")
@@ -1605,7 +1613,7 @@ func (g *gen) messageFile(m *ir.Message) []byte {
 	f.line("\t}")
 	f.line("\treturn m, nil")
 	f.line("}")
-	return g.render(f, strings.ToLower(m.Name)+".go")
+	return g.render(f, msgFile(m))
 }
 
 // wireMaxDepth is the format's MAX_DEPTH (corelib-go sofab.MaxDepth, §4.9): the
@@ -1681,7 +1689,7 @@ func arrayDepth(elem ir.Kind, ref *ir.TypeRef, items *ir.ArrayElem, onPath map[s
 	return 1, true // string / blob
 }
 
-// emitDefaults applies the schema defaults New<Msg> starts from. An array field
+// emitDefaults applies the schema defaults <Msg>__New starts from. An array field
 // gets exactly its declared `default` and nothing else: a declared `count: N` is
 // a CAPACITY, not a length (MESSAGE_SPEC §3), so a fresh count:N array is the
 // EMPTY array -- not N element defaults -- and a `default` shorter than N stands
@@ -1707,7 +1715,7 @@ func (g *gen) emitDefaults(f *gofile, fields []*ir.Field) {
 // emitSetDefaults emits the seeding a struct/union type needs when any of its
 // members, at any depth, declares a default Go's zero value does not already
 // hold. A type that declares none gets no method: its zero value IS its default.
-// New<Msg> calls it for a struct/union field, and a struct/union array hands it
+// <Msg>__New calls it for a struct/union field, and a struct/union array hands it
 // to sofab.NewMessageSeqInit so every element the collector creates -- the gap
 // an omitted default element leaves included (MESSAGE_SPEC §5.1) -- starts at it.
 func (g *gen) emitSetDefaults(f *gofile, key, typeName string, fields []*ir.Field) {

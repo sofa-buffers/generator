@@ -68,7 +68,7 @@ python3 "$ROOT/tests/conformance/lib/check_nondefault.py" "$BASE" "$FULL" \
 echo "==> round-trip fixture OK (no field sits on its schema default)"
 
 # Streaming decode: the same bytes through the io.Reader-driven entry point
-# (CORELIB_PLAN S5.6, generator#312 / corelib-go#130). DecodeXFrom drives
+# (CORELIB_PLAN S5.6, generator#312 / corelib-go#130). X__DecodeFrom drives
 # corelib-go's Decoder.FeedFrom, which feeds the decoder whatever the reader
 # delivered and resumes on the next chunk, instead of requiring the whole wire
 # image resident the way AcceptBytes does by construction.
@@ -721,11 +721,11 @@ func verdict(err error) string {
 }
 
 func run(what string, wire []byte, want string) {
-	m := message.NewDyn()
+	m := message.Dyn__New()
 	_ = sofab.AcceptBytes(wire, m) // warm, so the measured decode counts wire-driven growth
 
 	var before, after runtime.MemStats
-	m = message.NewDyn()
+	m = message.Dyn__New()
 	runtime.GC()
 	runtime.ReadMemStats(&before)
 	err := sofab.AcceptBytes(wire, m)
@@ -799,7 +799,7 @@ func main() {
 	ok = varint(ok, (2<<3)|2)
 	ok = append(ok, 'h', 'i')
 	ok = hdr(ok, 0, 7)
-	good, err := message.DecodeDyn(ok)
+	good, err := message.Dyn__Decode(ok)
 	if err != nil || len(good.W) != 4 || good.W[3] != "hi" {
 		fmt.Printf("FAIL: an in-cap sparse wrapper array must decode intact: %v\n", err)
 		failures++
@@ -941,7 +941,7 @@ echo "==> bounded encode buffer is exactly MAX_SIZE (ARCHITECTURE §9.6)"
 sed -i "s#\${SOFAB_GO_CORELIB}#$CORELIB#" "$WORK/fill/go.mod"
 ( cd "$WORK/fill" && GOFLAGS=-mod=mod go mod tidy >/dev/null 2>&1 && go build -o harness_bin ./harness )
 check_maxsize_constant go "$WORK/fill/message/fill.go" \
-    "^const FillMaxSize = $SOFAB_MAXSIZE_FILL_BYTES\$"
+    "^const Fill__MaxSize = $SOFAB_MAXSIZE_FILL_BYTES\$"
 check_maxsize_fill go "$WORK/fill/harness_bin" encode fill
 
 # ...and the other side of owning the buffer: a value the caller filled PAST its
@@ -1033,7 +1033,7 @@ var chunkSizes = []int{1, 7, 16, 32, 64, 4096}
 // payload arm — plus the native arrays, which are here so the wire carries them,
 // not because they can alias.
 func sample() *message.Myfirstmessage {
-	m := message.NewMyfirstmessage()
+	m := message.Myfirstmessage__New()
 	m.Somestring = "héllo wörld payload"
 	m.Someblob = []byte{1, 2, 3, 4, 5}
 	m.Someuintarray = []uint32{9, 8, 7, 6}
@@ -1043,10 +1043,10 @@ func sample() *message.Myfirstmessage {
 	m.Somestruct.Nestedstring = "nested payload"
 	m.Someunion.SetOption2("union payload")
 	m.Somestructwitharray.Label = "struct label"
-	var row message.MyfirstmessageSomeunionarrayElem
+	var row message.Myfirstmessage_Someunionarray
 	row.SetAsstring("union row")
-	m.Someunionarray = []message.MyfirstmessageSomeunionarrayElem{row}
-	m.Somemap = []message.MyfirstmessageSomemapElem{
+	m.Someunionarray = []message.Myfirstmessage_Someunionarray{row}
+	m.Somemap = []message.Myfirstmessage_Somemap{
 		{Key: "first key", Value: 1},
 		{Key: "second key", Value: 2},
 	}
@@ -1123,7 +1123,7 @@ func main() {
 	// 1. One-shot, out of a MUTABLE copy. §6.7.1 gives this path no exemption:
 	// `data` may be reused the moment the call returns.
 	wire := append([]byte(nil), want...)
-	got, err := message.DecodeMyfirstmessage(wire)
+	got, err := message.Myfirstmessage__Decode(wire)
 	if err != nil {
 		fmt.Println("FAIL: one-shot decode:", err)
 		os.Exit(1)
@@ -1135,7 +1135,7 @@ func main() {
 	// scribbled the instant Feed returns (§6.0: the borrow ends there).
 	for _, size := range chunkSizes {
 		scratch := make([]byte, size)
-		out := message.NewMyfirstmessage()
+		out := message.Myfirstmessage__New()
 		dec := sofab.NewDecoder(out)
 		var last sofab.Outcome
 		for i := 0; i < len(want); i += size {
@@ -1162,7 +1162,7 @@ func main() {
 	// 3. The io.Reader wrapper the generated code ships, driven by a reader that
 	// overwrites the buffer it just handed over.
 	for _, size := range chunkSizes {
-		got3, err := message.DecodeMyfirstmessageFrom(&dripReader{src: want, chunk: size})
+		got3, err := message.Myfirstmessage__DecodeFrom(&dripReader{src: want, chunk: size})
 		if err != nil {
 			fmt.Printf("FAIL: DecodeFrom(chunk=%d): %v\n", size, err)
 			os.Exit(1)
@@ -1286,6 +1286,30 @@ sed -i "s#\${SOFAB_GO_CORELIB}#$CORELIB#" "$WORK/defaults/go.mod"
 python3 "$ROOT/tests/conformance/lib/check_defaults.py" "Go" \
     -- "$WORK/defaults-harness"
 
+# Conflict-free names (ARCHITECTURE §8, "Naming"; generator#624). The shared
+# collision schema spells, as messages, $defs types and inline paths, every
+# identifier that used to clash: paths that joined to one name (`m_a` beside
+# `m.a`), types spelled like the roles derived from another (`new_m`, `m_decoder`),
+# like a fixed file (`types`, `sofab_visitor`) or a build-constrained one
+# (`foo_test`, `x_windows`), like an import or a package-level name. The
+# generator exits 0 on broken output, so only building catches a clash: every
+# message must compile, and `m` -- which holds the path clashes, the split union
+# variants and the enum/bitfield children -- must round-trip names.json as data,
+# through both decode surfaces.
+echo "==> names: the shared collision schema builds and round-trips (generator#624)"
+( cd "$ROOT" && go run ./cmd/sofabgen --config "$WORK/cfg.yaml" --lang go --in "$ROOT/tests/conformance/lib/names.yaml" --out "$WORK/names" >/dev/null )
+sed -i "s#\${SOFAB_GO_CORELIB}#$CORELIB#" "$WORK/names/go.mod"
+( cd "$WORK/names" && GOFLAGS=-mod=mod go mod tidy >/dev/null 2>&1 && GOFLAGS=-mod=mod go build -o "$WORK/names-harness" ./harness )
+_nfiles=$(ls "$WORK/names/message" | wc -l)
+NAMES_IN=$(cat "$ROOT/tests/conformance/lib/names.json")
+"$WORK/names-harness" encode m < "$ROOT/tests/conformance/lib/names.json" > "$WORK/names.bin"
+for surface in decode streamdecode; do
+    NAMES_OUT=$("$WORK/names-harness" "$surface" m < "$WORK/names.bin")
+    python3 "$ROOT/tests/conformance/lib/json_equal.py" "$NAMES_IN" "$NAMES_OUT" \
+        --label "Go names.yaml: m round-trips ($surface)" || exit 1
+done
+echo "==> names OK ($_nfiles generated files, m round-trips on both decode surfaces)"
+
 # go vet over every module this run generated (ARCHITECTURE §12 gate 9). The
 # compiler already rejects an unused import or variable; vet is Go's warning
 # class, and a finding in generated code is one a user's CI would trip over.
@@ -1329,6 +1353,7 @@ format_gen go "$WORK/fmt/vecskip" --config "$WORK/cfg.yaml" --in "$WORK/vecskip.
 format_gen go "$WORK/fmt/growth" --config "$WORK/cfg-limits.yaml" --in "$WORK/growth.yaml"
 format_gen go "$WORK/fmt/repeated" --config "$WORK/cfg.yaml" --in "$WORK/repeated.yaml"
 format_gen go "$WORK/fmt/union" --config "$WORK/cfg.yaml" --in "$WORK/union.yaml"
+format_gen go "$WORK/fmt/names" --config "$WORK/cfg.yaml" --in "$ROOT/tests/conformance/lib/names.yaml"
 format_gen_corpus go "$WORK/fmt" --config "$WORK/cfg.yaml"
 check_format go "$WORK/fmt"
 

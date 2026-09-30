@@ -1,16 +1,16 @@
 package golang
 
 import (
-	"fmt"
 	"sort"
 
 	"github.com/sofa-buffers/generator/internal/ir"
+	"github.com/sofa-buffers/generator/internal/naming"
 )
 
 // A schema union is a Go struct that holds exactly ONE option (MESSAGE_SPEC
 // §4.2): an unexported tag plus one unexported, typed slot per option. Its API:
 //
-//	<Type><Opt>ID     the option's id, a package-level sofab.ID constant
+//	<Type>_<Opt>__ID  the option's id, a package-level sofab.ID constant
 //	Which()           the id of the option held
 //	Has<Opt>()        whether <opt> is held
 //	<Opt>()           <opt> when held, else a fresh copy of its default (stores nothing)
@@ -42,12 +42,12 @@ import (
 // from it.
 type unionOpt struct {
 	f       *ir.Field
-	getter  string // <Opt>, with a trailing underscore on a reserved name (reserved.go)
-	setter  string // Set<Opt>
-	has     string // Has<Opt>
+	getter  string // <Opt>, escaped by unionGetter (reserved.go)
+	setter  string // Set<Opt>, escaped by unionAccessor
+	has     string // Has<Opt>, escaped by unionAccessor
 	mut     string // Mut<Opt>; "" for an option that is not edited in place
 	slot    string // the unexported slot, opt<Opt>
-	idConst string // <Type><Opt>ID
+	idConst string // <Type>_<Opt>__ID, <Type> the union's path without its variant
 	isD     bool   // the union's default option (default_id)
 }
 
@@ -67,23 +67,24 @@ func hasMut(k ir.Kind) bool {
 }
 
 func (g *gen) unionShapeOf(nt *ir.NamedType) *unionShape {
-	u := &unionShape{typeName: g.typeName(nt.Key), nt: nt, byField: map[*ir.Field]*unionOpt{}}
+	u := &unionShape{typeName: typeIdent(nt), nt: nt, byField: map[*ir.Field]*unionOpt{}}
 	for _, f := range nt.Fields {
 		base := exported(f.Name)
 		o := &unionOpt{
-			f:       f,
-			getter:  base,
-			setter:  "Set" + base,
-			has:     "Has" + base,
-			slot:    "opt" + base,
-			idConst: u.typeName + base + "ID",
+			f:      f,
+			getter: unionGetter(base),
+			setter: unionAccessor("Set", base),
+			has:    unionAccessor("Has", base),
+			slot:   "opt" + base,
+			// A role on the option's own path: the union's path plus the option
+			// name, as a child type of that option would be spelled, plus "__ID".
+			// It leaves the variant out, so the variants of a split union share
+			// one set of id constants (emitted once, by the first variant).
+			idConst: naming.TypeIdent(append(append([]string(nil), nt.Path...), f.Name)) + "__ID",
 			isD:     nt.IsDefaultOption(f),
 		}
-		if goReserved(base) || unionReserved[base] {
-			o.getter = base + "_"
-		}
 		if hasMut(f.Kind) {
-			o.mut = "Mut" + base
+			o.mut = unionAccessor("Mut", base)
 		}
 		u.opts = append(u.opts, o)
 		u.byField[f] = o
@@ -104,105 +105,6 @@ func (u *unionShape) tag(o *unionOpt) string {
 		return o.idConst
 	}
 	return o.idConst + "^" + u.d.idConst
-}
-
-// checkUnionNames rejects a union whose options derive the same Go method, or a
-// method the union type already carries. Located: the error names the union and
-// both options.
-func checkUnionNames(u *unionShape) error {
-	owner := map[string]string{}
-	for _, set := range []map[string]bool{goVisitorMembers, goStringCheckMembers, goMembers, unionReserved} {
-		for n := range set {
-			owner[n] = ""
-		}
-	}
-	for _, o := range u.opts {
-		names := []string{o.getter, o.setter, o.has}
-		if o.mut != "" {
-			names = append(names, o.mut)
-		}
-		for _, n := range names {
-			prev, taken := owner[n]
-			switch {
-			case taken && prev == "":
-				return fmt.Errorf("go backend: union %s: option %q generates the method %s, which the union type already has; rename the option", u.nt.Key, o.f.Name, n)
-			case taken && prev != o.f.Name:
-				return fmt.Errorf("go backend: union %s: options %q and %q both generate the method %s; rename one", u.nt.Key, prev, o.f.Name, n)
-			}
-			owner[n] = o.f.Name
-		}
-	}
-	return nil
-}
-
-// checkPackageNames rejects two package-level identifiers the backend emits
-// with one name -- a type, an enum or bitfield constant, a message
-// declaration, an option-id constant. Such a constant is named after its
-// type and option (<Type><Opt>ID), so it can land on a type name, an enum or
-// bitfield constant, a message's generated constants and functions, or another
-// union's constant -- none of which the Core name check can see.
-func (g *gen) checkPackageNames() error {
-	seen := map[string]string{}
-	// Every package-level name is claimed once: a type, an enum or bitfield
-	// constant (<Type><Name>, so `E.a_b` and `EA.b` are both EnumEAB), a
-	// message's declarations. A second claim is a duplicate declaration.
-	var clash error
-	add := func(name, what string) {
-		if prev, ok := seen[name]; ok {
-			if clash == nil && prev != what {
-				clash = fmt.Errorf("go backend: %s and %s both generate the package-level name %s; rename one", prev, what, name)
-			}
-			return
-		}
-		seen[name] = what
-	}
-	for _, key := range g.schema.NamedOrder {
-		nt := g.schema.Named[key]
-		tn := g.typeName(key)
-		add(tn, "the type "+tn)
-		switch nt.Category {
-		case ir.CatEnum:
-			for _, c := range nt.Consts {
-				add(tn+exported(c.Name), fmt.Sprintf("constant %q of the enum %s", c.Name, tn))
-			}
-		case ir.CatBitfield:
-			for _, fl := range nt.Flags {
-				add(tn+exported(fl.Name), fmt.Sprintf("flag %q of the bitfield %s", fl.Name, tn))
-			}
-		}
-	}
-	for _, m := range g.schema.Messages {
-		tn := exported(m.Name)
-		add(tn, "the message type "+tn)
-		for _, n := range []string{"New" + tn, "Decode" + tn, "Decode" + tn + "From", tn + "MaxSize", tn + "MaxSizeLimit", tn + "MaxDepth", "_" + tn + "EncOpts"} {
-			add(n, "a declaration of the message "+tn)
-		}
-	}
-	for _, n := range []string{"MaxDynArrayCount", "MaxDynStringLen", "MaxDynBlobLen", "_caps", "_isDefaulter"} {
-		add(n, "a package declaration")
-	}
-	if clash != nil {
-		return clash
-	}
-	var keys []string
-	for _, key := range g.schema.NamedOrder {
-		if g.schema.Named[key].Category == ir.CatUnion {
-			keys = append(keys, key)
-		}
-	}
-	for _, key := range keys {
-		u := g.unionShapeOf(g.schema.Named[key])
-		if err := checkUnionNames(u); err != nil {
-			return err
-		}
-		for _, o := range u.opts {
-			if what, ok := seen[o.idConst]; ok {
-				return fmt.Errorf("go backend: union %s: option %q's id constant %s collides with %s; rename one", key, o.f.Name, o.idConst, what)
-			}
-			seen[o.idConst] = fmt.Sprintf("the id constant of option %q of union %s", o.f.Name, key)
-		}
-	}
-	return nil
 }
 
 // optDefaultExpr is the value a read of a leaf option that is not held returns:
@@ -267,13 +169,18 @@ func (g *gen) emitUnion(f *gofile, nt *ir.NamedType) {
 	f.line("}")
 	f.blank()
 
-	f.line("// The option ids of %s, as Which reports them.", tn)
-	f.line("const (")
-	for _, o := range u.opts {
-		f.line("\t%s sofab.ID = %d", o.idConst, o.f.ID)
+	// The variants of a split union share their option ids (the constants are
+	// named after the path, not the variant), so only the first emits them.
+	if idKey := naming.TypeIdent(nt.Path); !g.idConsts[idKey] {
+		g.idConsts[idKey] = true
+		f.line("// The option ids of %s, as Which reports them.", tn)
+		f.line("const (")
+		for _, o := range u.opts {
+			f.line("\t%s sofab.ID = %d", o.idConst, o.f.ID)
+		}
+		f.line(")")
+		f.blank()
 	}
-	f.line(")")
-	f.blank()
 
 	f.line("// Which returns the id of the option held.")
 	if u.d.f.ID == 0 {

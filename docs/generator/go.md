@@ -60,12 +60,33 @@ and `string` is `String_`. Those names are:
   `Encode`, `EncodeTo`.
 
 Only the Go field changes: the wire is keyed by the field id, and the `json` tag
-keeps the schema name. Two fields that end up with the same Go field — `a_b`
-and `aB` both give `AB`, `encode_` lands on the mangled `encode` — fail
-generation, naming both. So do two package-level names that come out the
-same: two constants of one enum (`a_b` and `aB` are both `AB`), or of two types
-(`E.a_b` and `EA.b` are both `EnumEAB`). The list
-lives in `generators/golang/reserved.go`.
+keeps the schema name. The list lives in `generators/golang/reserved.go`.
+
+## Type, function and file names
+
+Every schema the validator accepts generates, whatever its names; none is
+refused because two generated names would collide. All generated types share
+one package, so each name is built so that no other can spell it:
+
+| what | Go name | example |
+|---|---|---|
+| message, `$defs` type | the name in Go casing | message `vehicle_state` is `VehicleState`, `$defs` struct `point` is `Point` |
+| inline type | its path (the message, then each field or option leading to it) in Go casing, joined with `_` | struct field `pos` of message `m` is `M_Pos`; the element struct of an array field `pts` is `M_Pts` |
+| a message's functions and constants | the message type, `__`, the role | `M__New()`, `M__Decode(b)`, `M__DecodeFrom(r)`, `M__MaxSize`, `M__MaxSizeLimit`, `M__MaxDepth` |
+| enum constant, bitfield flag | the type, `_`, the name | `Color_Red`, `Flags_On` |
+| union option id | the option's path, `__ID` | `M_Shape_Pt__ID` |
+| `$defs` union used with several `default_id`s | the union, `__Default`, the option | `Shape__DefaultPt` |
+| message file | the message name in lower case, underscores dropped | message `vehicle_state` is `vehiclestate.go` |
+
+A type that would be spelled like one of the package's own exported constants
+(`MaxDynArrayCount`, `MaxDynStringLen`, `MaxDynBlobLen`) gets a trailing
+underscore: a message `max_dyn_string_len` is `MaxDynStringLen_`. The names
+derived from it keep the plain spelling (`MaxDynStringLen__New`).
+
+The named types live in `sofab_types.go` and the package-wide decode support in
+`sofab_visitor.go`. A message file never contains an underscore, so it can
+neither take one of those names nor end in `_test` or a `_<GOOS>`/`_<GOARCH>`
+suffix that would make the Go tool skip it.
 
 ## Unions
 
@@ -85,36 +106,36 @@ shape:
 ```
 
 ```go
-type MShape struct {
+type M_Shape struct {
 	// unexported: the option held, and one slot per option
 }
 
 const (
-	MShapeNumID  sofab.ID = 0
-	MShapeNameID sofab.ID = 1
-	MShapePtID   sofab.ID = 2
+	M_Shape_Num__ID  sofab.ID = 0
+	M_Shape_Name__ID sofab.ID = 1
+	M_Shape_Pt__ID   sofab.ID = 2
 )
 
-func (m *MShape) Which() sofab.ID
-func (m *MShape) HasNum() bool
-func (m *MShape) Num() uint16
-func (m *MShape) SetNum(v uint16)
-func (m *MShape) HasName() bool
-func (m *MShape) Name() string
-func (m *MShape) SetName(v string)
-func (m *MShape) HasPt() bool
-func (m *MShape) Pt() MShapePt
-func (m *MShape) SetPt(v MShapePt)
-func (m *MShape) MutPt() *MShapePt
-func (m *MShape) Clear()
-func (m MShape) MarshalJSON() ([]byte, error)
-func (m *MShape) UnmarshalJSON(b []byte) error
+func (m *M_Shape) Which() sofab.ID
+func (m *M_Shape) HasNum() bool
+func (m *M_Shape) Num() uint16
+func (m *M_Shape) SetNum(v uint16)
+func (m *M_Shape) HasName() bool
+func (m *M_Shape) Name() string
+func (m *M_Shape) SetName(v string)
+func (m *M_Shape) HasPt() bool
+func (m *M_Shape) Pt() M_Shape_Pt
+func (m *M_Shape) SetPt(v M_Shape_Pt)
+func (m *M_Shape) MutPt() *M_Shape_Pt
+func (m *M_Shape) Clear()
+func (m M_Shape) MarshalJSON() ([]byte, error)
+func (m *M_Shape) UnmarshalJSON(b []byte) error
 ```
 
 | operation | Go |
 |---|---|
 | which option is held | `x.Which()` → the option's id |
-| option ids | `MShapePtID` (package-level `<Type><Option>ID` constants) |
+| option ids | `M_Shape_Pt__ID` (package-level constants: the option's path, then `__ID`) |
 | test | `x.HasPt()` |
 | read | `x.Pt()` |
 | select with a value | `x.SetNum(7)` |
@@ -122,16 +143,16 @@ func (m *MShape) UnmarshalJSON(b []byte) error
 | back to the default | `x.Clear()` |
 
 ```go
-m := message.NewM()      // m.Shape holds pt at its default: {X: 7, Y: 0}
+m := message.M__New()    // m.Shape holds pt at its default: {X: 7, Y: 0}
 m.Shape.SetNum(7)        // now num = 7; pt is gone
 m.Shape.MutPt().Y = 2    // pt again, from its default: {X: 7, Y: 2}
 if m.Shape.HasPt() {
 	useIt(m.Shape.Pt().X)
 }
 switch m.Shape.Which() {
-case message.MShapeNumID:
+case message.M_Shape_Num__ID:
 	useIt(m.Shape.Num())
-case message.MShapePtID:
+case message.M_Shape_Pt__ID:
 	useIt(m.Shape.Pt().Y)
 }
 m.Shape.Clear()          // pt at its default again
@@ -157,23 +178,26 @@ this one is selected again, the slot it points at starts from its default.
 
 **Zero value.** The zero value of a union holds its `default_id` option. Where
 that option declares a default other than Go's zero value (here `pt.x = 7`), a
-`var s MShape` holds it at the zero value instead; `s.Clear()` puts it at the
-declared default. A union in a message from `New<Message>`, in a decoded
+`var s M_Shape` holds it at the zero value instead; `s.Clear()` puts it at the
+declared default. A union in a message from `<Message>__New`, in a decoded
 message, and every element of a decoded array of unions is already there.
 
 **Names.** The accessors are the option name in Go casing: `<Option>`,
 `Set<Option>`, `Has<Option>`, `Mut<Option>`. A getter whose name is reserved for
-a field (see [Field names](#field-names)) or is one of the union's own methods —
-`Which`, `Clear`, `MarshalJSON`, `UnmarshalJSON` — gets a trailing underscore:
+a field (see [Field names](#field-names)) or is one of the union's own methods
+(`Which`, `Clear`, `MarshalJSON`, `UnmarshalJSON`) gets a trailing underscore:
 an option named `string` reads as `String_()` and keeps
-`SetString`/`HasString`. Two options that would produce the same method (`foo`
-and `set_foo` both give `SetFoo`), an option whose `Set…` would shadow a
-promoted method (`string_check` → `SetStringCheck`), and an id constant that
-lands on another package-level name fail generation, naming both.
+`SetString`/`HasString`. So does a getter that reads like another option's
+accessor, `Set`, `Has` or `Mut` followed by an upper-case letter: beside an
+option `foo`, the option `set_foo` reads as `SetFoo_()` and is set with
+`SetSetFoo`. An accessor that would hide a method the union already has gets an
+underscore after its prefix: the setter of an option `string_check` is
+`Set_StringCheck`, since `SetStringCheck` carries the decode's UTF-8 policy.
 
 **`$defs` unions** used with different `default_id`s are one type per
-`default_id`, named after `<Name>_default_<option>`: `UnionShapeDefaultPt` and
-`UnionShapeDefaultNum`.
+`default_id`, named `<Name>__Default<Option>`: `Shape__DefaultPt` and
+`Shape__DefaultNum`. They share one set of option id constants, `Shape_Pt__ID`
+and `Shape_Num__ID`.
 
 **Defaults.** A fresh union holds the `default_id` option at that option's own
 default; an omitted `default_id` means the option with the lowest id. Each
