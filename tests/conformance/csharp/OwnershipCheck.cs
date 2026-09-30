@@ -101,12 +101,12 @@ internal static class OwnershipCheck {
         m.somestruct.nestedstring = "nested payload";
         m.someunion.Option2 = "union payload";
         m.somestructwitharray.label = "struct label";
-        m.someunionarray = new List<MyfirstmessageSomeunionarrayElem>{
-            new MyfirstmessageSomeunionarrayElem{ Asstring = "union row" },
+        m.someunionarray = new List<Myfirstmessage_Someunionarray>{
+            new Myfirstmessage_Someunionarray{ Asstring = "union row" },
         };
-        m.somemap = new List<MyfirstmessageSomemapElem>{
-            new MyfirstmessageSomemapElem{ key = "first key", value = 1 },
-            new MyfirstmessageSomemapElem{ key = "second key", value = 2 },
+        m.somemap = new List<Myfirstmessage_Somemap>{
+            new Myfirstmessage_Somemap{ key = "first key", value = 1 },
+            new Myfirstmessage_Somemap{ key = "second key", value = 2 },
         };
         return m;
     }
