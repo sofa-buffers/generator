@@ -33,6 +33,9 @@ func (*Backend) Generate(s *ir.Schema, cfg map[string]any) ([]generator.File, er
 		size:    generator.NewSizePolicy(cfg),
 	}
 	g.resolveReassembly(s)
+	if err := checkConstNames(s); err != nil {
+		return nil, err
+	}
 	if err := g.checkUnions(s); err != nil {
 		return nil, err
 	}

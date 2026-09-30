@@ -70,6 +70,12 @@ func (*Backend) Generate(s *ir.Schema, cfg map[string]any) ([]generator.File, er
 			return nil, err
 		}
 	}
+	if err := checkConstNames(s); err != nil {
+		return nil, err
+	}
+	if err := g.checkNamespaceNames(s); err != nil {
+		return nil, err
+	}
 	if err := g.checkUnionNames(s); err != nil {
 		return nil, err
 	}

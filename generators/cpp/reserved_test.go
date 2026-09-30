@@ -99,3 +99,31 @@ func TestReservedNamesCompile(t *testing.T) {
 		}
 	}
 }
+
+// TestConstNameCollision: two enum constants or bitfield flags that give one
+// generated name (`a_b` and `aB` are both AB) are a generation error naming both.
+func TestConstNameCollision(t *testing.T) {
+	for _, src := range []string{
+		"version: 1\nmessages:\n  m:\n    payload:\n      e: { id: 0, type: enum, enum: { a_b: 0, aB: 1 } }\n",
+		"version: 1\n$defs:\n  bitfield:\n    F: { x_y: { pos: 0 }, xY: { pos: 1 } }\nmessages:\n  m:\n    payload:\n      f: { id: 0, type: bitfield, bits: { $ref: '#/$defs/bitfield/F' } }\n",
+	} {
+		_, err := unionGenerate(t, src, nil)
+		if err == nil || !strings.Contains(err.Error(), "both generate") {
+			t.Errorf("want a collision error for:\n%s\ngot %v", src, err)
+		}
+	}
+}
+
+// TestCrossTypeConstNameCollision: bitfield flags are prefixed with their type and
+// live namespace-wide, so a constant of one type and one of another can spell one
+// name (`E.a_b` and `EA.b`, `F.a_b` and `FA.b`) -- a generation error.
+func TestCrossTypeConstNameCollision(t *testing.T) {
+	for _, src := range []string{
+		"version: 1\n$defs:\n  bitfield:\n    F: { a_b: { pos: 0 } }\n    FA: { b: { pos: 0 } }\nmessages:\n  m:\n    payload:\n      f: { id: 0, type: bitfield, bits: { $ref: '#/$defs/bitfield/F' } }\n      g: { id: 1, type: bitfield, bits: { $ref: '#/$defs/bitfield/FA' } }\n",
+	} {
+		_, err := unionGenerate(t, src, nil)
+		if err == nil || !strings.Contains(err.Error(), "both generate") {
+			t.Errorf("want a collision error for:\n%s\ngot %v", src, err)
+		}
+	}
+}

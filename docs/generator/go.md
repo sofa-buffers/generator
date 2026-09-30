@@ -62,7 +62,10 @@ and `string` is `String_`. Those names are:
 Only the Go field changes: the wire is keyed by the field id, and the `json` tag
 keeps the schema name. Two fields that end up with the same Go field — `a_b`
 and `aB` both give `AB`, `encode_` lands on the mangled `encode` — fail
-generation, naming both. The list lives in `generators/golang/reserved.go`.
+generation, naming both. So do two package-level names that come out the
+same: two constants of one enum (`a_b` and `aB` are both `AB`), or of two types
+(`E.a_b` and `EA.b` are both `EnumEAB`). The list
+lives in `generators/golang/reserved.go`.
 
 ## Unions
 

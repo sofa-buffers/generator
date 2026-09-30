@@ -46,14 +46,18 @@ func reservedYAML(names []string) string {
 	fmt.Fprintf(&b, `version: 1
 $defs:
   struct:
+    Inner2:
+      x: { id: 0, type: u8 }
     Inner:
-%smessages:
+%s      inner2: { id: %d, type: struct, fields: { $ref: '#/$defs/struct/Inner2' } }
+messages:
   m:
     payload:
-%s      f:     { id: %d, type: fp32 }
-      inner: { id: %d, type: struct, fields: { $ref: '#/$defs/struct/Inner' } }
-      u:     { id: %d, type: union, oneof: { %s } }
-`, fields.String(), fields.String(), k, k+1, k+2, strings.Join(opts, ", "))
+%s      f:            { id: %d, type: fp32 }
+      inner:        { id: %d, type: struct, fields: { $ref: '#/$defs/struct/Inner' } }
+      u:            { id: %d, type: union, oneof: { %s } }
+      inner_inner2: { id: %d, type: struct, fields: { $ref: '#/$defs/struct/Inner2' } }
+`, fields.String(), k, fields.String(), k, k+1, k+2, strings.Join(opts, ", "), k+3)
 	return b.String()
 }
 
@@ -61,12 +65,13 @@ $defs:
 // the last union option at a non-default value, each under its schema name.
 func reservedJSON(names []string) string {
 	top := map[string]any{"f": 1.5}
-	inner := map[string]any{}
+	inner := map[string]any{"inner2": map[string]any{"x": 5}}
 	for i, n := range names {
 		top[n] = i + 1
 		inner[n] = i + 2
 	}
 	top["inner"] = inner
+	top["inner_inner2"] = map[string]any{"x": 6}
 	top["u"] = map[string]any{names[len(names)-1]: 9}
 	b, _ := json.MarshalIndent(top, "", "  ")
 	return string(b) + "\n"
@@ -127,6 +132,38 @@ func TestFieldNameCollision(t *testing.T) {
 		_, err := (&Backend{}).Generate(schema(t, src), map[string]any{})
 		if err == nil || !strings.Contains(err.Error(), "both generate the member") {
 			t.Errorf("%s / %s: want a collision error, got %v", c.a, c.b, err)
+		}
+	}
+}
+
+// TestScopeConstantsAreDistinct: the decoder's scope constants spell the schema
+// path joined with `_`, so the path a.b and a field a_b must not declare one
+// constant twice ("Cannot redeclare block-scoped variable").
+func TestScopeConstantsAreDistinct(t *testing.T) {
+	src := "version: 1\n$defs:\n  struct:\n    B: { x: { id: 0, type: u8 } }\n    A: { b: { id: 0, type: struct, fields: { $ref: '#/$defs/struct/B' } } }\n" +
+		"messages:\n  m:\n    payload:\n      a: { id: 0, type: struct, fields: { $ref: '#/$defs/struct/A' } }\n      a_b: { id: 1, type: struct, fields: { $ref: '#/$defs/struct/B' } }\n"
+	out := genTSWith(t, src, map[string]any{})
+	seen := map[string]bool{}
+	for _, m := range regexp.MustCompile(`(?m)^const (_L_\w+) = `).FindAllStringSubmatch(out, -1) {
+		if seen[m[1]] {
+			t.Errorf("scope constant %s is declared twice", m[1])
+		}
+		seen[m[1]] = true
+	}
+	if !seen["_L_M_a_b"] || !seen["_L_M_a__b"] {
+		t.Errorf("want _L_M_a_b and _L_M_a__b, got %v", seen)
+	}
+}
+
+// TestConstNameCollision: two enum constants or bitfield flags that give one
+// member (`a_b` and `aB` are both AB) are a generation error naming both.
+func TestConstNameCollision(t *testing.T) {
+	for _, src := range []string{
+		"version: 1\nmessages:\n  m:\n    payload:\n      e: { id: 0, type: enum, enum: { a_b: 0, aB: 1 } }\n",
+		"version: 1\n$defs:\n  bitfield:\n    F: { x_y: { pos: 0 }, xY: { pos: 1 } }\nmessages:\n  m:\n    payload:\n      f: { id: 0, type: bitfield, bits: { $ref: '#/$defs/bitfield/F' } }\n",
+	} {
+		if _, err := (&Backend{}).Generate(schema(t, src), map[string]any{}); err == nil || !strings.Contains(err.Error(), "both generate") {
+			t.Errorf("want a collision error for:\n%s\ngot %v", src, err)
 		}
 	}
 }

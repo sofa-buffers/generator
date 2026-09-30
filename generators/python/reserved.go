@@ -1,5 +1,12 @@
 package python
 
+import (
+	"fmt"
+	"strings"
+
+	"github.com/sofa-buffers/generator/internal/ir"
+)
+
 // One reserved-name list for the Python backend (generator#239): every name a
 // schema field cannot take as an attribute of a generated class, whatever the
 // reason -- a keyword, a member the class already declares, or a builtin the
@@ -65,4 +72,45 @@ func pyIdent(name string) string {
 		return name + "_"
 	}
 	return name
+}
+
+// checkConstNames rejects two constants of one enum or two flags of one
+// bitfield that give one generated name: the backend spells them through
+// strings.ToUpper, so `c` and `C` are both C. The enum class would fail at
+// import, far from the schema. Located: the error names the type and both
+// names.
+func checkConstNames(s *ir.Schema) error {
+	dup := func(owner, what string, names []string) error {
+		seen := map[string]string{}
+		for _, n := range names {
+			id := strings.ToUpper(n)
+			if prev, ok := seen[id]; ok {
+				return fmt.Errorf("python backend: %s: %s %q and %q both generate %s; rename one", owner, what, prev, n, id)
+			}
+			seen[id] = n
+		}
+		return nil
+	}
+	for _, key := range s.NamedOrder {
+		nt := s.Named[key]
+		switch nt.Category {
+		case ir.CatEnum:
+			names := make([]string, len(nt.Consts))
+			for i, c := range nt.Consts {
+				names[i] = c.Name
+			}
+			if err := dup("enum "+key, "constants", names); err != nil {
+				return err
+			}
+		case ir.CatBitfield:
+			names := make([]string, len(nt.Flags))
+			for i, fl := range nt.Flags {
+				names[i] = fl.Name
+			}
+			if err := dup("bitfield "+key, "flags", names); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
 }

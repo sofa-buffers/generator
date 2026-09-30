@@ -9,6 +9,9 @@
     "constructor": 3,
     "encode": 4,
     "hasOwnProperty": 5,
+    "inner2": {
+      "x": 5
+    },
     "isDefault": 6,
     "isPrototypeOf": 7,
     "propertyIsEnumerable": 8,
@@ -18,6 +21,9 @@
     "toString": 12,
     "valueOf": 13,
     "which": 14
+  },
+  "inner_inner2": {
+    "x": 6
   },
   "isDefault": 5,
   "isPrototypeOf": 6,
