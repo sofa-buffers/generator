@@ -21,6 +21,32 @@ choose.
 that for C# alone. Left unset, this target's own default (`Message`) applies
 rather than a generic one — each language keeps its own idiomatic capitalisation.
 
+## Field names
+
+A field's C# field is the field's schema name. A field named like a C# keyword
+is a verbatim identifier — the field `class` is `@class` — so it keeps its
+name. In C# a class's fields, methods, properties and nested types share one
+namespace, so a field whose name the generated class already uses gets a
+trailing underscore instead — the field `Encode` is `Encode_`. Those names are:
+
+- the members every generated class declares: `Serialize`, `IsDefault`, and on
+  a message also `Reset`, `Encode`, `EncodeTo`, `Decode`, `TryDecode`, the
+  nested `Decoder` class, `MaxSize` and `MaxSizeLimit`;
+- the members every class inherits from `object`: `Equals`, `GetHashCode`,
+  `GetType`, `ToString`, `MemberwiseClone`, `Finalize`, `ReferenceEquals`;
+- the names the class body uses in front of a dot — `Array`, `DecodeStatus`,
+  `System`. Inside the class a field of such a name would be found first, and a
+  call like `System.Array.Empty<byte>()` would no longer compile.
+
+Only the field changes: the wire is keyed by the field id, and a renamed field
+carries `[JsonPropertyName]` with the schema name, so its JSON key does not
+change either. Two fields that end up with the same field — `Encode` and
+`Encode_` — fail generation, naming both, and so does a field named like its
+own class (a field `M` in the message `m`), which C# does not allow. Enum
+constants and bitfield flags are PascalCase members too: two that give the same
+one (`a_b` and `aB` are both `AB`) fail generation as well. The list
+lives in `generators/csharp/reserved.go`.
+
 ## Unions
 
 A `union` holds exactly one of its options. It is a class of its own whose
@@ -116,13 +142,13 @@ longer held.
 
 **Names.** The members are the option name in PascalCase: the property
 `<Option>`, `Has<Option>`, `Mutable<Option>()` and the constant `<Option>Id`. An
-option whose name would land on one of the union's own members (`Which`,
-`Clear`, `Serialize`, `IsDefault`, the members every class inherits from
-`object`, such as `ToString`) or on the union type's own name gets a trailing
-underscore: an option `which` is `Which_`, with `HasWhich_` and `Which_Id`. Two
-options that would produce the same member (`foo_bar` and `fooBar` both give
-`FooBar`; `a`'s `AId` and an option named `a_id`; `x`'s `HasX` and an option
-named `has_x`) fail generation, naming both.
+option whose name would land on a name reserved for a field (see [Field
+names](#field-names)), on one of the union's own members (`Which`, `Clear`) or
+on the union type's own name gets a trailing underscore: an option `which` is
+`Which_`, with `HasWhich_` and `Which_Id`. Two options that would produce the
+same member (`foo_bar` and `fooBar` both give `FooBar`; `a`'s `AId` and an
+option named `a_id`; `x`'s `HasX` and an option named `has_x`) fail generation,
+naming both.
 
 **`$defs` unions** used with different `default_id`s are one class per
 `default_id`, named after `<Name>_default_<option>`: `UnionShapeDefaultPt` and

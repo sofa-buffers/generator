@@ -96,9 +96,9 @@ func (g *gen) frames(m *ir.Message) []frame {
 		for _, fld := range fields {
 			switch {
 			case fld.Kind == ir.KindStruct || fld.Kind == ir.KindUnion:
-				walkObj(loc+"_"+fld.Name, memberPath(path, fld, utype), fld.Ref.Target.Fields, g.unionTypeOf(fld.Kind, fld.Ref))
+				walkObj(locChild(loc, fld.Name), memberPath(path, fld, utype), fld.Ref.Target.Fields, g.unionTypeOf(fld.Kind, fld.Ref))
 			case fld.Kind == ir.KindArray && seqArrayElem(fld.Elem):
-				walkArr(loc+"_"+fld.Name, memberPath(path, fld, utype), fld.Elem, fld.ElemRef, fld.ElemItems, capOf(fld.HasCount, fld.Count), boundOf(fld.ElemMaxHas, fld.ElemMax))
+				walkArr(locChild(loc, fld.Name), memberPath(path, fld, utype), fld.Elem, fld.ElemRef, fld.ElemItems, capOf(fld.HasCount, fld.Count), boundOf(fld.ElemMaxHas, fld.ElemMax))
 			}
 		}
 	}
@@ -1113,11 +1113,11 @@ func (g *gen) emitVisitor(f *cfile, name string, fields []*ir.Field) {
 				if fr.utype != "" {
 					sel = memberPath(fr.path, fld, fr.utype) + "; "
 				}
-				f.line("            case (%s, %d): %scur = %s; break;", fr.loc, fld.ID, sel, fr.loc+"_"+fld.Name)
+				f.line("            case (%s, %d): %scur = %s; break;", fr.loc, fld.ID, sel, locChild(fr.loc, fld.Name))
 			case fld.Kind == ir.KindArray && seqArrayElem(fld.Elem):
 				// A wrapper array IS its field's value, so a later occurrence replaces
 				// it (§7.4); in a union the mutable accessor selects the option first.
-				f.line("            case (%s, %d): %s.Clear(); cur = %s; break;", fr.loc, fld.ID, memberPath(fr.path, fld, fr.utype), fr.loc+"_"+fld.Name)
+				f.line("            case (%s, %d): %s.Clear(); cur = %s; break;", fr.loc, fld.ID, memberPath(fr.path, fld, fr.utype), locChild(fr.loc, fld.Name))
 			}
 		}
 	}
