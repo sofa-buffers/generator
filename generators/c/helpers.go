@@ -64,7 +64,7 @@ func (g *gen) cDefaultInit(f *ir.Field) (string, bool) {
 // blobDefaultRawLen returns the decoded byte length of a blob field's schema
 // default and whether it is worth materializing. It mirrors cDefaultInit's blob
 // case (same base64 decode, same all-zero => absent-default convention) so the
-// companion _len init and the default image stay in lockstep.
+// companion __len init and the default image stay in lockstep.
 func blobDefaultRawLen(f *ir.Field) (int64, bool) {
 	if f.Kind != ir.KindBlob {
 		return 0, false

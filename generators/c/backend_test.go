@@ -75,7 +75,7 @@ func genExample(t *testing.T) map[string]string {
 
 func TestGeneratesHeaderAndSource(t *testing.T) {
 	files := genExample(t)
-	for _, want := range []string{"myfirstmessage.h", "myfirstmessage.c"} {
+	for _, want := range []string{"myfirstmessage_sofab.h", "myfirstmessage_sofab.c"} {
 		if _, ok := files[want]; !ok {
 			t.Fatalf("missing generated file %q (got %v)", want, keys(files))
 		}
@@ -83,20 +83,20 @@ func TestGeneratesHeaderAndSource(t *testing.T) {
 }
 
 func TestStructuralInvariants(t *testing.T) {
-	h := genExample(t)["myfirstmessage.h"]
+	h := genExample(t)["myfirstmessage_sofab.h"]
 	for _, want := range []string{
-		"#ifndef MESSAGE_MYFIRSTMESSAGE_H", // include guard from the symbol_prefix (default message_)
+		"#ifndef MESSAGE_MYFIRSTMESSAGE__H", // include guard from the symbol_prefix (default message_)
 		"#include \"sofab/object.h\"",
 		"#if SOFAB_API_VERSION != 1",                  // API-version guard (corelib macro)
 		"#if defined(SOFAB_DISABLE_FIXLEN_SUPPORT)",   // capability guards (corelib macros)
 		"#if defined(SOFAB_DISABLE_SEQUENCE_SUPPORT)", // struct/union/array-of-string
 		"#if defined(SOFAB_DISABLE_INT64_SUPPORT)",    // someu64 / somei64
-		"#define MESSAGE_MYFIRSTMESSAGE_MAX_SIZE",     // §5.5
+		"#define MESSAGE_MYFIRSTMESSAGE__MAX_SIZE",    // §5.5
 		"message_myfirstmessage_t;",
 		"int8_t someenum;",      // enum -> smallest signed backing
 		"uint8_t somebitfield;", // bitfield -> unsigned backing
-		"message_myfirstmessage_encode(",
-		"message_myfirstmessage_decode(",
+		"message_myfirstmessage__encode(",
+		"message_myfirstmessage__decode(",
 	} {
 		if !strings.Contains(h, want) {
 			t.Errorf("header missing %q", want)
@@ -113,8 +113,8 @@ func TestStructuralInvariants(t *testing.T) {
 }
 
 func TestDeterministic(t *testing.T) {
-	a := genExample(t)["myfirstmessage.c"]
-	b := genExample(t)["myfirstmessage.c"]
+	a := genExample(t)["myfirstmessage_sofab.c"]
+	b := genExample(t)["myfirstmessage_sofab.c"]
 	if a != b {
 		t.Fatal("generation is not deterministic")
 	}
@@ -149,7 +149,7 @@ func TestCompilesAgainstCorelib(t *testing.T) {
 	}
 	inc := filepath.Join(corelib, "src", "include")
 	args := append([]string{"-std=c99"}, strictWarnings...)
-	args = append(args, "-I"+inc, "-I"+dir, "-c", filepath.Join(dir, "myfirstmessage.c"),
+	args = append(args, "-I"+inc, "-I"+dir, "-c", filepath.Join(dir, "myfirstmessage_sofab.c"),
 		"-o", filepath.Join(dir, "msg.o"))
 	if out, err := exec.Command(gcc, args...).CombinedOutput(); err != nil {
 		t.Fatalf("generated C failed to compile against corelib:\n%s", out)
@@ -294,11 +294,11 @@ messages:
       b:    { id: 1, type: blob, maxlen: 4 }
       arr:  { id: 2, type: array, items: { type: string, count: 3, maxlen: 8 } }
 `)
-	h := files["m.h"]
+	h := files["m_sofab.h"]
 	for _, want := range []string{
-		"char s[5];",                   // string: maxlen 4 + 1 for the NUL
-		"uint8_t b_len; uint8_t b[4];", // blob: companion used-length + exactly maxlen buffer (issue #128)
-		"char items[3][9];",            // string element of a holder array: maxlen 8 + 1
+		"char s[5];",                    // string: maxlen 4 + 1 for the NUL
+		"uint8_t b__len; uint8_t b[4];", // blob: companion used-length + exactly maxlen buffer (issue #128)
+		"char items[3][9];",             // string element of a holder array: maxlen 8 + 1
 	} {
 		if !strings.Contains(h, want) {
 			t.Errorf("m.h missing %q:\n%s", want, h)
@@ -310,7 +310,7 @@ messages:
 // used-length member adjacent to (and immediately before) the buffer, plus the
 // SOFAB_OBJECT_FIELD_BLOB_SIZED descriptor — so a sub-maxlen blob keeps its exact
 // length on the wire instead of being zero-padded to maxlen or dropped when empty
-// (issue #128). _init must zero the struct first (the _len companion is not a
+// (issue #128). _init must zero the struct first (the __len companion is not a
 // descriptor field, so sofab_object_init leaves it untouched), and a non-empty
 // blob default must materialize its used-length there.
 func TestBlobSized(t *testing.T) {
@@ -323,21 +323,21 @@ messages:
       big:   { id: 1, type: blob, maxlen: 300 }
       dflt:  { id: 2, type: blob, maxlen: 8, default: "SGVsbG8=" }
 `)
-	h, c := files["m.h"], files["m.c"]
+	h, c := files["m_sofab.h"], files["m_sofab.c"]
 	for _, want := range []string{
-		"uint8_t plain_len; uint8_t plain[4];", // narrow length (maxlen<=255 -> uint8_t), adjacent, before the buffer
-		"uint16_t big_len; uint8_t big[300];",  // wider length when maxlen exceeds a uint8_t
-		"uint8_t dflt_len; uint8_t dflt[8];",
+		"uint8_t plain__len; uint8_t plain[4];", // narrow length (maxlen<=255 -> uint8_t), adjacent, before the buffer
+		"uint16_t big__len; uint8_t big[300];",  // wider length when maxlen exceeds a uint8_t
+		"uint8_t dflt__len; uint8_t dflt[8];",
 	} {
 		if !strings.Contains(h, want) {
 			t.Errorf("m.h missing %q:\n%s", want, h)
 		}
 	}
 	for _, want := range []string{
-		"SOFAB_OBJECT_FIELD_BLOB_SIZED(0, message_m_t, plain, plain_len),",
-		"SOFAB_OBJECT_FIELD_BLOB_SIZED(1, message_m_t, big, big_len),",
-		"memset(msg, 0, sizeof(*msg));", // zero first so the non-descriptor _len members are deterministic
-		"msg->dflt_len = 5;",            // "Hello" default materializes its used-length
+		"SOFAB_OBJECT_FIELD_BLOB_SIZED(0, message_m_t, plain, plain__len),",
+		"SOFAB_OBJECT_FIELD_BLOB_SIZED(1, message_m_t, big, big__len),",
+		"memset(msg, 0, sizeof(*msg));", // zero first so the non-descriptor __len members are deterministic
+		"msg->dflt__len = 5;",           // "Hello" default materializes its used-length
 	} {
 		if !strings.Contains(c, want) {
 			t.Errorf("m.c missing %q:\n%s", want, c)
@@ -364,7 +364,7 @@ messages:
       ba: { id: 0, type: array, items: { type: blob, count: 3, maxlen: 4 } }
       sa: { id: 1, type: array, items: { type: string, count: 2, maxlen: 8 } }
 `)
-	h, c := files["m.h"], files["m.c"]
+	h, c := files["m_sofab.h"], files["m_sofab.c"]
 	if !strings.Contains(h, "struct { uint8_t len; uint8_t buf[4]; } items[3];") {
 		t.Errorf("m.h missing sized blob-array holder:\n%s", h)
 	}
@@ -372,7 +372,7 @@ messages:
 		t.Errorf("m.h string-array element storage changed unexpectedly:\n%s", h)
 	}
 	for i := 0; i < 3; i++ {
-		want := fmt.Sprintf("BLOB_SIZED(%d, message_m_ba_elems_t, items[%d].buf, items[%d].len),", i, i, i)
+		want := fmt.Sprintf("BLOB_SIZED(%d, message_m___ba__elems_t, items[%d].buf, items[%d].len),", i, i, i)
 		if !strings.Contains(c, want) {
 			t.Errorf("m.c missing per-element sized descriptor %q:\n%s", want, c)
 		}
@@ -399,11 +399,11 @@ messages:
       ba: { id: 1, type: array, items: { type: blob,   count: 3, maxlen: 8 } }
       pa: { id: 2, type: array, items: { type: struct, count: 2, fields: { x: { id: 0, type: i32 } } } }
 `)
-	c := files["m.c"]
+	c := files["m_sofab.c"]
 	for _, want := range []string{
-		"_sa_elems = SOFAB_OBJECT_DESCR_SEQ_SIZED(", // string holder
-		"_ba_elems = SOFAB_OBJECT_DESCR_SEQ_SIZED(", // blob holder
-		"_pa_elems = SOFAB_OBJECT_DESCR_SEQ_SIZED(", // struct holder
+		"_sa__elems__descr = SOFAB_OBJECT_DESCR_SEQ_SIZED(", // string holder
+		"_ba__elems__descr = SOFAB_OBJECT_DESCR_SEQ_SIZED(", // blob holder
+		"_pa__elems__descr = SOFAB_OBJECT_DESCR_SEQ_SIZED(", // struct holder
 	} {
 		if !strings.Contains(c, want) {
 			t.Errorf("m.c holder descriptor not marked fixed-seq: missing %q:\n%s", want, c)
@@ -412,15 +412,15 @@ messages:
 	// The message object and the struct element's own descriptor stay plain: an
 	// unknown id there is a valid forward-compat skip, not an over-index reject.
 	for _, want := range []string{
-		"_message_m = SOFAB_OBJECT_DESCR(", // the message itself
-		"_pa_elem = SOFAB_OBJECT_DESCR(",   // struct element type descriptor
+		"message_m__descr = SOFAB_OBJECT_DESCR(",      // the message itself
+		"message_m___pa__descr = SOFAB_OBJECT_DESCR(", // struct element type descriptor
 	} {
 		if !strings.Contains(c, want) {
 			t.Errorf("m.c non-holder object must use plain SOFAB_OBJECT_DESCR: missing %q:\n%s", want, c)
 		}
 	}
 	// A holder must never be the SEQ *and* skip form at once.
-	if strings.Contains(c, "_elems = SOFAB_OBJECT_DESCR(") {
+	if strings.Contains(c, "__elems__descr = SOFAB_OBJECT_DESCR(") {
 		t.Errorf("m.c holder emitted as a plain (skip) descriptor:\n%s", c)
 	}
 }
@@ -440,7 +440,7 @@ messages:
       keep:   { id: 0, type: u16, description: "Current identifier." }
       legacy: { id: 1, type: u32, description: "Old identifier kept for compatibility.", deprecated: true, default: 7 }
 `)
-	h := files["m.h"]
+	h := files["m_sofab.h"]
 	// (a) native marker + @deprecated doc note on the deprecated member, and the
 	// description text is preserved alongside the note.
 	for _, want := range []string{
@@ -456,7 +456,7 @@ messages:
 		t.Errorf("non-deprecated member wrongly marked deprecated:\n%s", h)
 	}
 
-	c := files["m.c"]
+	c := files["m_sofab.c"]
 	// (b) the descriptor emission that references the deprecated member by name is
 	// guarded so the generated .c compiles clean under -Wdeprecated-declarations.
 	for _, want := range []string{
@@ -489,11 +489,11 @@ messages:
     payload:
       a: { id: 0, type: u16, default: 3 }
 `)
-	if strings.Contains(files["m.c"], "#pragma GCC diagnostic") {
-		t.Errorf("no deprecated field, but m.c emitted a diagnostic pragma:\n%s", files["m.c"])
+	if strings.Contains(files["m_sofab.c"], "#pragma GCC diagnostic") {
+		t.Errorf("no deprecated field, but m.c emitted a diagnostic pragma:\n%s", files["m_sofab.c"])
 	}
-	if strings.Contains(files["m.h"], "__attribute__((deprecated))") {
-		t.Errorf("no deprecated field, but m.h emitted a deprecated attribute:\n%s", files["m.h"])
+	if strings.Contains(files["m_sofab.h"], "__attribute__((deprecated))") {
+		t.Errorf("no deprecated field, but m.h emitted a deprecated attribute:\n%s", files["m_sofab.h"])
 	}
 }
 
@@ -515,23 +515,23 @@ messages:
       f64s: { id: 2, type: array, items: { type: fp64, count: 3 } }
       wide: { id: 3, type: array, items: { type: u16,  count: 400 } }
 `)
-	h, c := files["m.h"], files["m.c"]
+	h, c := files["m_sofab.h"], files["m_sofab.c"]
 	// The length must be at least as wide as one element: it sits immediately
 	// before the buffer, and the corelib reads it at <offset − width>, so a
 	// narrower one would be padded away (and fail SOFAB_OBJECT_ASSERT_LEN_ADJACENT).
 	for _, want := range []string{
-		"uint8_t u8s_len; uint8_t u8s[4];",       // byte elements: capacity fits a byte
-		"uint32_t u32s_len; uint32_t u32s[4];",   // 4-byte elements force a 4-byte length
-		"uint64_t f64s_len; double f64s[3];",     // 8-byte elements force an 8-byte length
-		"uint16_t wide_len; uint16_t wide[400];", // capacity 400 needs 2 bytes anyway
+		"uint8_t u8s__len; uint8_t u8s[4];",       // byte elements: capacity fits a byte
+		"uint32_t u32s__len; uint32_t u32s[4];",   // 4-byte elements force a 4-byte length
+		"uint64_t f64s__len; double f64s[3];",     // 8-byte elements force an 8-byte length
+		"uint16_t wide__len; uint16_t wide[400];", // capacity 400 needs 2 bytes anyway
 	} {
 		if !strings.Contains(h, want) {
 			t.Errorf("m.h missing %q:\n%s", want, h)
 		}
 	}
 	for _, want := range []string{
-		"SOFAB_OBJECT_FIELD_ARRAY_SIZED(0, message_m_t, u8s, u8s_len, SOFAB_OBJECT_FIELDTYPE_ARRAY_UNSIGNED),",
-		"SOFAB_OBJECT_FIELD_ARRAY_SIZED(2, message_m_t, f64s, f64s_len, SOFAB_OBJECT_FIELDTYPE_ARRAY_FP64),",
+		"SOFAB_OBJECT_FIELD_ARRAY_SIZED(0, message_m_t, u8s, u8s__len, SOFAB_OBJECT_FIELDTYPE_ARRAY_UNSIGNED),",
+		"SOFAB_OBJECT_FIELD_ARRAY_SIZED(2, message_m_t, f64s, f64s__len, SOFAB_OBJECT_FIELDTYPE_ARRAY_FP64),",
 	} {
 		if !strings.Contains(c, want) {
 			t.Errorf("m.c missing %q:\n%s", want, c)
@@ -566,23 +566,23 @@ messages:
       wa: { id: 2, type: array, items: { type: struct, count: 3, fields: { x: { id: 0, type: u64 } } } }
       na: { id: 3, type: array, items: { type: array,  count: 2, items: { type: string, count: 2, maxlen: 4 } } }
 `)
-	h, c := files["m.h"], files["m.c"]
+	h, c := files["m_sofab.h"], files["m_sofab.c"]
 	for _, want := range []string{
-		"uint8_t len; char items[3][9];",                    // string slots are byte-aligned: any width works
-		"uint32_t len; message_m_pa_elem_t items[3];",       // i32 element struct -> 4-byte alignment
-		"uint64_t len; message_m_wa_elem_t items[3];",       // u64 element struct -> 8-byte alignment
-		"uint8_t len; message_m_na_elems_inner_t items[2];", // holder of holders: inner leads with a uint8_t
+		"uint8_t len; char items[3][9];",                       // string slots are byte-aligned: any width works
+		"uint32_t len; message_m___pa_t items[3];",             // i32 element struct -> 4-byte alignment
+		"uint64_t len; message_m___wa_t items[3];",             // u64 element struct -> 8-byte alignment
+		"uint8_t len; message_m___na__elems_inner_t items[2];", // holder of holders: inner leads with a uint8_t
 	} {
 		if !strings.Contains(h, want) {
 			t.Errorf("m.h missing %q:\n%s", want, h)
 		}
 	}
 	for _, want := range []string{
-		"_sa_elems = SOFAB_OBJECT_DESCR_SEQ_SIZED(_message_fields_message_m_sa_elems, 3, NULL, 0, message_m_sa_elems_t, len);",
-		"_pa_elems = SOFAB_OBJECT_DESCR_SEQ_SIZED(",
-		"_wa_elems = SOFAB_OBJECT_DESCR_SEQ_SIZED(",
-		"_na_elems = SOFAB_OBJECT_DESCR_SEQ_SIZED(",
-		"_na_elems_inner = SOFAB_OBJECT_DESCR_SEQ_SIZED(",
+		"_sa__elems__descr = SOFAB_OBJECT_DESCR_SEQ_SIZED(_message_m___sa__elems__fields, 3, NULL, 0, message_m___sa__elems_t, len);",
+		"_pa__elems__descr = SOFAB_OBJECT_DESCR_SEQ_SIZED(",
+		"_wa__elems__descr = SOFAB_OBJECT_DESCR_SEQ_SIZED(",
+		"_na__elems__descr = SOFAB_OBJECT_DESCR_SEQ_SIZED(",
+		"_na__elems_inner__descr = SOFAB_OBJECT_DESCR_SEQ_SIZED(",
 	} {
 		if !strings.Contains(c, want) {
 			t.Errorf("m.c missing %q:\n%s", want, c)
@@ -590,7 +590,7 @@ messages:
 	}
 	// No holder here may keep the length-less form: each would then be stuck at
 	// the two lengths 0 and N.
-	if strings.Contains(c, "_elems = SOFAB_OBJECT_DESCR_SEQ(") {
+	if strings.Contains(c, "__elems__descr = SOFAB_OBJECT_DESCR_SEQ(") {
 		t.Errorf("m.c left a wrapper holder without its element count (§5.1):\n%s", c)
 	}
 	// The macro names no element slot: anchoring the count at the holder's start is
@@ -616,7 +616,7 @@ messages:
       ba:   { id: 0, type: array, items: { type: blob,  count: 3, maxlen: 4 } }
       rows: { id: 1, type: array, items: { type: array, count: 2, items: { type: u16, count: 3 } } }
 `)
-	h, c := files["m.h"], files["m.c"]
+	h, c := files["m_sofab.h"], files["m_sofab.c"]
 	for _, want := range []string{
 		// The holder count comes FIRST; the per-slot length stays inside the slot.
 		"uint8_t len; struct { uint8_t len; uint8_t buf[4]; } items[3];",
@@ -627,17 +627,17 @@ messages:
 		}
 	}
 	for _, want := range []string{
-		"_ba_elems = SOFAB_OBJECT_DESCR_SEQ_SIZED(",
-		"_rows_elems = SOFAB_OBJECT_DESCR_SEQ_SIZED(",
-		"SOFAB_OBJECT_FIELD_BLOB_SIZED(0, message_m_ba_elems_t, items[0].buf, items[0].len),",
-		"SOFAB_OBJECT_FIELD_ARRAY_SIZED(0, message_m_rows_elems_t, items[0].vals, items[0].len, SOFAB_OBJECT_FIELDTYPE_ARRAY_UNSIGNED),",
-		"SOFAB_OBJECT_FIELD_ARRAY_SIZED(1, message_m_rows_elems_t, items[1].vals, items[1].len, SOFAB_OBJECT_FIELDTYPE_ARRAY_UNSIGNED),",
+		"_ba__elems__descr = SOFAB_OBJECT_DESCR_SEQ_SIZED(",
+		"_rows__elems__descr = SOFAB_OBJECT_DESCR_SEQ_SIZED(",
+		"SOFAB_OBJECT_FIELD_BLOB_SIZED(0, message_m___ba__elems_t, items[0].buf, items[0].len),",
+		"SOFAB_OBJECT_FIELD_ARRAY_SIZED(0, message_m___rows__elems_t, items[0].vals, items[0].len, SOFAB_OBJECT_FIELDTYPE_ARRAY_UNSIGNED),",
+		"SOFAB_OBJECT_FIELD_ARRAY_SIZED(1, message_m___rows__elems_t, items[1].vals, items[1].len, SOFAB_OBJECT_FIELDTYPE_ARRAY_UNSIGNED),",
 	} {
 		if !strings.Contains(c, want) {
 			t.Errorf("m.c missing %q:\n%s", want, c)
 		}
 	}
-	if strings.Contains(c, "_elems = SOFAB_OBJECT_DESCR_SEQ(") {
+	if strings.Contains(c, "__elems__descr = SOFAB_OBJECT_DESCR_SEQ(") {
 		t.Errorf("m.c left a self-sized-slot holder without its element count (§5.1):\n%s", c)
 	}
 }
@@ -659,11 +659,11 @@ messages:
       zeros: { id: 1, type: array, items: { type: u32, count: 5 }, default: [0, 0, 0] }
       none:  { id: 2, type: array, items: { type: u32, count: 5 } }
 `)
-	c := files["m.c"]
+	c := files["m_sofab.c"]
 	for _, want := range []string{
-		".few_len = 3,",
+		".few__len = 3,",
 		".few = { 1, 2, 3 },",
-		".zeros_len = 3,", // the length is the value even when every element is zero
+		".zeros__len = 3,", // the length is the value even when every element is zero
 	} {
 		if !strings.Contains(c, want) {
 			t.Errorf("m.c missing %q:\n%s", want, c)
@@ -671,7 +671,7 @@ messages:
 	}
 	// No declared default -> the empty array -> length 0, which the memset already
 	// leaves; nothing may be written into the image for it.
-	if strings.Contains(c, ".none_len") || strings.Contains(c, ".none =") {
+	if strings.Contains(c, ".none__len") || strings.Contains(c, ".none =") {
 		t.Errorf("m.c invented a default for an array that declares none:\n%s", c)
 	}
 	// The superseded reading padded the declared default out to the capacity.
@@ -696,10 +696,10 @@ messages:
 `)
 	hs := files["harness/main.c"]
 	for _, want := range []string{
-		"_i0 < (int)(o->a_len)",  // compact array renders its length
+		"_i0 < (int)(o->a__len)", // compact array renders its length
 		"_i0 < (int)(o->sa.len)", // string holder renders its element count
 		"_i0 < (int)(o->ba.len)", // blob holder does too, now that it has one
-		"o->a_len = (uint32_t)_n0;",
+		"o->a__len = (uint32_t)_n0;",
 		"o->sa.len = (uint8_t)_n0;",
 		"o->ba.len = (uint8_t)_n0;",
 	} {
@@ -848,7 +848,7 @@ func TestCBitfieldDefaultAtBit63IsUnsignedConstant(t *testing.T) {
 		"    payload:\n" +
 		"      flags: { id: 0, type: bitfield, bits: { low: { pos: 0 }, high: { pos: 63, default: true } } }\n"
 	files := genCFromYAML(t, src)
-	all := strings.Join([]string{files["bf.h"], files["bf.c"]}, "\n")
+	all := strings.Join([]string{files["bf_sofab.h"], files["bf_sofab.c"]}, "\n")
 
 	lits := constantsSpelling(all, 1<<63)
 	if len(lits) != 1 {
@@ -876,7 +876,7 @@ func TestCBitfieldArrayDefaultAtBit63IsUnsignedConstant(t *testing.T) {
 		"    payload:\n" +
 		"      masks: { id: 0, type: array, items: { type: bitfield, count: 2, bits: { low: { pos: 0 }, high: { pos: 63 } } }, default: [1, 9223372036854775808] }\n"
 	files := genCFromYAML(t, src)
-	all := strings.Join([]string{files["bf3.h"], files["bf3.c"]}, "\n")
+	all := strings.Join([]string{files["bf3_sofab.h"], files["bf3_sofab.c"]}, "\n")
 
 	lits := constantsSpelling(all, 1<<63)
 	if len(lits) != 1 {
@@ -913,7 +913,7 @@ messages:
       a: { id: 1, type: u32 }
       b: { id: 536870912, type: u32 }
 `)
-	h := files["m.h"]
+	h := files["m_sofab.h"]
 	if !strings.Contains(h, "#if 536870912 > SOFAB_ID_MAX") {
 		t.Errorf("m.h missing the value-width id guard:\n%s", h)
 	}
@@ -971,7 +971,7 @@ messages:
 			compile := func(profile string) (string, error) {
 				out, err := exec.Command(gcc, "-std=c99", "-DSOFAB_OBJECT_DESCR_PROFILE="+profile,
 					"-I"+filepath.Join(corelib, "src", "include"), "-I"+dir,
-					"-c", filepath.Join(dir, "m.c"), "-o", filepath.Join(dir, "m.o")).CombinedOutput()
+					"-c", filepath.Join(dir, "m_sofab.c"), "-o", filepath.Join(dir, "m.o")).CombinedOutput()
 				return string(out), err
 			}
 			if out, err := compile("SOFAB_OBJECT_DESCR_MEDIUM"); err != nil {
@@ -1002,7 +1002,7 @@ messages:
         fields:
           deep: { id: 536870912, type: u32 }
 `)
-	h := files["m.h"]
+	h := files["m_sofab.h"]
 	if !strings.Contains(h, "#if 536870912 > SOFAB_ID_MAX") {
 		t.Errorf("m.h: the guard must take the max over nested objects too:\n%s", h)
 	}
@@ -1033,7 +1033,7 @@ messages:
 `, pos)
 	}
 
-	h := genCFromYAML(t, bf(40))["m.h"]
+	h := genCFromYAML(t, bf(40))["m_sofab.h"]
 	if !strings.Contains(h, "uint64_t flags;") {
 		t.Fatalf("a bit at 40 must be backed by uint64_t:\n%s", h)
 	}
@@ -1043,7 +1043,7 @@ messages:
 
 	// Control: one bit lower fits uint32_t, which the narrow corelib reads fine —
 	// the guard is a property of the storage width, not of "is a bitfield".
-	ctl := genCFromYAML(t, bf(31))["m.h"]
+	ctl := genCFromYAML(t, bf(31))["m_sofab.h"]
 	if !strings.Contains(ctl, "uint32_t flags;") {
 		t.Fatalf("a bit at 31 must fit uint32_t:\n%s", ctl)
 	}
@@ -1074,7 +1074,7 @@ messages:
           door_open_too_long: { pos: 0, default: false, description: "A door has been open past the timeout" }
           temp_high: { pos: 1, description: "A zone is above its warning threshold" }
 `)
-	h := files["fridge.h"]
+	h := files["fridge_sofab.h"]
 
 	// The field itself is unchanged: still a raw, permissive integer.
 	if !strings.Contains(h, "uint8_t alarms;") {
@@ -1082,8 +1082,8 @@ messages:
 	}
 
 	for _, want := range []string{
-		"#define MESSAGE_FRIDGE_ALARMS_DOOR_OPEN_TOO_LONG ((uint32_t)1 << 0)",
-		"#define MESSAGE_FRIDGE_ALARMS_TEMP_HIGH ((uint32_t)1 << 1)",
+		"#define MESSAGE_FRIDGE___ALARMS___DOOR_OPEN_TOO_LONG ((uint32_t)1 << 0)",
+		"#define MESSAGE_FRIDGE___ALARMS___TEMP_HIGH ((uint32_t)1 << 1)",
 		"/*! A door has been open past the timeout (default: false) */",
 	} {
 		if !strings.Contains(h, want) {
@@ -1114,8 +1114,8 @@ messages:
       first: { id: 0, type: bitfield, bits: { $ref: "#/$defs/bitfield/Shared" } }
       second: { id: 1, type: bitfield, bits: { $ref: "#/$defs/bitfield/Shared" } }
 `)
-	h := files["m.h"]
-	if n := strings.Count(h, "#define MESSAGE_BITFIELD_SHARED_A ((uint32_t)1 << 0)"); n != 1 {
+	h := files["m_sofab.h"]
+	if n := strings.Count(h, "#define MESSAGE_SHARED___A ((uint32_t)1 << 0)"); n != 1 {
 		t.Errorf("expected the shared bitfield's #define exactly once, got %d:\n%s", n, h)
 	}
 }
@@ -1134,8 +1134,8 @@ messages:
         type: array
         items: { type: bitfield, count: 3, bits: { ready: { pos: 0 } } }
 `)
-	h := files["m.h"]
-	if !strings.Contains(h, "#define MESSAGE_M_FLAGS_ELEM_READY ((uint32_t)1 << 0)") {
+	h := files["m_sofab.h"]
+	if !strings.Contains(h, "#define MESSAGE_M___FLAGS___READY ((uint32_t)1 << 0)") {
 		t.Errorf("array-of-bitfield element flags must still be named:\n%s", h)
 	}
 }
@@ -1158,13 +1158,13 @@ messages:
           low: { pos: 1 }
           high: { pos: 40 }
 `)
-	h := files["m.h"]
+	h := files["m_sofab.h"]
 	if !strings.Contains(h, "uint64_t wide;") {
 		t.Fatalf("a pos-40 flag must widen the field to uint64_t:\n%s", h)
 	}
 	for _, want := range []string{
-		"#define MESSAGE_M_WIDE_LOW ((uint64_t)1 << 1)",
-		"#define MESSAGE_M_WIDE_HIGH ((uint64_t)1 << 40)",
+		"#define MESSAGE_M___WIDE___LOW ((uint64_t)1 << 1)",
+		"#define MESSAGE_M___WIDE___HIGH ((uint64_t)1 << 40)",
 	} {
 		if !strings.Contains(h, want) {
 			t.Errorf("missing %q:\n%s", want, h)
@@ -1172,66 +1172,22 @@ messages:
 	}
 }
 
-// TestCBitfieldFlagConstantsCollideWithSizeMacro: a field/flag name pair that
-// joins to the same identifier as the message's own MAX_SIZE macro must be a
-// generate-time error, not a silently redefined #define (one of the two
-// symbols would otherwise quietly take the wrong value).
-func TestCBitfieldFlagConstantsCollideWithSizeMacro(t *testing.T) {
-	err := genCErr(t, `
+// TestCBitfieldFlagMacrosNeverCollide: C has one flat macro namespace across
+// every header a translation unit includes. A flag macro extends its bitfield's
+// PATH ("___"), while the message's own macros are ROLES ("__"), so the pairs
+// that used to join to one identifier -- a field `max` with a flag `size` and
+// the message's MAX_SIZE, field `a_b` flag `c` and field `a` flag `b_c`, message
+// `a`'s field `b` flag `h` and the include guard of a message `a_b` -- stay
+// apart and generate.
+func TestCBitfieldFlagMacrosNeverCollide(t *testing.T) {
+	files := genCFromYAML(t, `
 version: 1
 messages:
   m:
     payload:
-      max:
-        id: 0
-        type: bitfield
-        bits:
-          size: { pos: 0 }
-`)
-	if err == nil {
-		t.Fatal("expected a generate-time error for a flag macro colliding with MAX_SIZE")
-	}
-	if !strings.Contains(err.Error(), "MESSAGE_M_MAX_SIZE") {
-		t.Errorf("error %q should name the colliding macro", err)
-	}
-}
-
-// TestCBitfieldFlagConstantsCollideAcrossFields: two differently-split
-// field/flag names can join to the identical macro identifier (field "a_b"
-// flag "c" vs. field "a" flag "b_c") — same collision, same required error.
-func TestCBitfieldFlagConstantsCollideAcrossFields(t *testing.T) {
-	err := genCErr(t, `
-version: 1
-messages:
-  m:
-    payload:
-      a_b:
-        id: 0
-        type: bitfield
-        bits:
-          c: { pos: 0 }
-      a:
-        id: 1
-        type: bitfield
-        bits:
-          b_c: { pos: 0 }
-`)
-	if err == nil {
-		t.Fatal("expected a generate-time error for two flags joining to the same macro name")
-	}
-	if !strings.Contains(err.Error(), "MESSAGE_M_A_B_C") {
-		t.Errorf("error %q should name the colliding macro", err)
-	}
-}
-
-// TestCBitfieldFlagConstantsCollideWithSiblingGuard: C's macro namespace spans
-// every header a translation unit includes, so the collision check spans the
-// schema. Message "a"'s field "b" with flag "h" is MESSAGE_A_B_H, the include
-// guard of message "a_b": including a.h first would silently skip a_b.h.
-func TestCBitfieldFlagConstantsCollideWithSiblingGuard(t *testing.T) {
-	err := genCErr(t, `
-version: 1
-messages:
+      max: { id: 0, type: bitfield, bits: { size: { pos: 0 } } }
+      a_b: { id: 1, type: bitfield, bits: { c: { pos: 0 } } }
+      a:   { id: 2, type: bitfield, bits: { b_c: { pos: 1 } } }
   a:
     payload:
       b: { id: 0, type: bitfield, bits: { h: { pos: 0 } } }
@@ -1239,11 +1195,21 @@ messages:
     payload:
       x: { id: 0, type: u8 }
 `)
-	if err == nil {
-		t.Fatal("expected a generate-time error for a flag macro equal to another message's include guard")
-	}
-	if !strings.Contains(err.Error(), "MESSAGE_A_B_H") {
-		t.Errorf("error %q should name the colliding macro", err)
+	for file, wants := range map[string][]string{
+		"m_sofab.h": {
+			"#define MESSAGE_M___MAX___SIZE ((uint32_t)1 << 0)",
+			"#define MESSAGE_M__MAX_SIZE ",
+			"#define MESSAGE_M___A_B___C ((uint32_t)1 << 0)",
+			"#define MESSAGE_M___A___B_C ((uint32_t)1 << 1)",
+		},
+		"a_sofab.h":   {"#define MESSAGE_A___B___H ((uint32_t)1 << 0)", "#define MESSAGE_A__H\n"},
+		"a_b_sofab.h": {"#define MESSAGE_A_B__H\n"},
+	} {
+		for _, want := range wants {
+			if !strings.Contains(files[file], want) {
+				t.Errorf("%s missing %q:\n%s", file, want, files[file])
+			}
+		}
 	}
 }
 
@@ -1265,8 +1231,8 @@ messages:
     payload:
       f: { id: 0, type: bitfield, bits: { $ref: "#/$defs/bitfield/Shared" } }
 `)
-	for _, name := range []string{"m.h", "n.h"} {
-		if !strings.Contains(files[name], "#define MESSAGE_BITFIELD_SHARED_A ((uint32_t)1 << 0)") {
+	for _, name := range []string{"m_sofab.h", "n_sofab.h"} {
+		if !strings.Contains(files[name], "#define MESSAGE_SHARED___A ((uint32_t)1 << 0)") {
 			t.Errorf("%s must carry the shared flag macro:\n%s", name, files[name])
 		}
 	}
@@ -1282,7 +1248,7 @@ messages:
   m:
     payload:
       d: { id: 1, type: fp64 }
-`)["m.h"]
+`)["m_sofab.h"]
 	if !strings.Contains(h, "#if defined(SOFAB_DISABLE_FP64_SUPPORT)") {
 		t.Errorf("m.h must still guard FP64:\n%s", h)
 	}
@@ -1308,10 +1274,10 @@ messages:
       flags: { id: 1, type: array, items: { type: boolean, count: 5 } }
       rows:  { id: 2, type: array, items: { type: array, count: 2, items: { type: boolean, count: 3 } } }
 `)
-	h, c := files["m.h"], files["m.c"]
+	h, c := files["m_sofab.h"], files["m_sofab.c"]
 	for _, want := range []string{
 		"uint8_t flag;",
-		"uint8_t flags_len; uint8_t flags[5];",
+		"uint8_t flags__len; uint8_t flags[5];",
 		"struct { uint8_t len; uint8_t vals[3]; } items[2];",
 	} {
 		if !strings.Contains(h, want) {
@@ -1320,9 +1286,9 @@ messages:
 	}
 	for _, want := range []string{
 		"SOFAB_OBJECT_FIELD(0, message_m_t, flag, SOFAB_OBJECT_FIELDTYPE_BOOLEAN),",
-		"SOFAB_OBJECT_FIELD_ARRAY_SIZED(1, message_m_t, flags, flags_len, SOFAB_OBJECT_FIELDTYPE_ARRAY_BOOLEAN),",
-		"SOFAB_OBJECT_FIELD_ARRAY_SIZED(0, message_m_rows_elems_t, items[0].vals, items[0].len, SOFAB_OBJECT_FIELDTYPE_ARRAY_BOOLEAN),",
-		"SOFAB_OBJECT_FIELD_ARRAY_SIZED(1, message_m_rows_elems_t, items[1].vals, items[1].len, SOFAB_OBJECT_FIELDTYPE_ARRAY_BOOLEAN),",
+		"SOFAB_OBJECT_FIELD_ARRAY_SIZED(1, message_m_t, flags, flags__len, SOFAB_OBJECT_FIELDTYPE_ARRAY_BOOLEAN),",
+		"SOFAB_OBJECT_FIELD_ARRAY_SIZED(0, message_m___rows__elems_t, items[0].vals, items[0].len, SOFAB_OBJECT_FIELDTYPE_ARRAY_BOOLEAN),",
+		"SOFAB_OBJECT_FIELD_ARRAY_SIZED(1, message_m___rows__elems_t, items[1].vals, items[1].len, SOFAB_OBJECT_FIELDTYPE_ARRAY_BOOLEAN),",
 	} {
 		if !strings.Contains(c, want) {
 			t.Errorf("m.c missing %q:\n%s", want, c)

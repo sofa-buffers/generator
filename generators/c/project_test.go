@@ -73,7 +73,7 @@ messages:
       constexpr:     { id: 4, type: u32 }
 `
 	files := genCFromYAMLCfg(t, src, map[string]any{})
-	h, ok := files["kw.h"]
+	h, ok := files["kw_sofab.h"]
 	if !ok {
 		t.Fatal("no kw.h")
 	}
@@ -106,8 +106,8 @@ func TestProjectScaffolding(t *testing.T) {
 		"harness/main.c",
 		"README.md",
 		"run.sh",
-		"generated/myfirstmessage.h", // sources moved under generated/
-		"generated/myfirstmessage.c",
+		"generated/myfirstmessage_sofab.h", // sources moved under generated/
+		"generated/myfirstmessage_sofab.c",
 	} {
 		if _, ok := files[want]; !ok {
 			t.Errorf("project missing %q", want)

@@ -24,7 +24,7 @@
  * SPDX-License-Identifier: MIT
  */
 
-#include "fill.h"
+#include "fill_sofab.h"
 
 #include <stdio.h>
 #include <string.h>
@@ -32,7 +32,7 @@
 int main(void)
 {
     message_fill_t m;
-    message_fill_init(&m);
+    message_fill__init(&m);
 
     /* Every varint at its widest encoding: an unsigned field at its type's
      * maximum, a signed one at its most negative value (ZigZag maps INT_MIN to
@@ -50,7 +50,7 @@ int main(void)
     m.f_fp64 = 1.0;
 
     memcpy(m.f_str, "123456789", 9);   /* maxlen 9, no NUL on the wire */
-    m.f_blob_len = 7;
+    m.f_blob__len = 7;
     memset(m.f_blob, 0xAB, 7);
 
     /* An array's LENGTH is what reaches the wire (MESSAGE_SPEC §3/§5.1) and
@@ -58,10 +58,10 @@ int main(void)
      * companion length member of a compact array, and the element count of a
      * length-carrying wrapper holder, are both set to the capacity. Leaving them
      * at 0 encodes the empty array and makes this "full" message short. */
-    m.f_arr_u32_len  = 5;
-    m.f_arr_u64_len  = 3;
-    m.f_arr_fp32_len = 4;
-    m.f_arr_fp64_len = 2;
+    m.f_arr_u32__len  = 5;
+    m.f_arr_u64__len  = 3;
+    m.f_arr_fp32__len = 4;
+    m.f_arr_fp64__len = 2;
     m.f_arr_str.len  = 3;
     /* A blob holder carries an element count too, distinct from each element's own
      * used-length: the count leads the holder, the element length leads its slot. */
@@ -101,40 +101,40 @@ int main(void)
     /* A union writes the one option it holds, so a full union holds its LARGEST
      * option at its bound: here the struct, selected at its default (tag, then
      * the option's descriptor) and then filled. */
-    m.f_union.which = MESSAGE_FILL_F_UNION_U_PT_ID;
-    sofab_object_init(&_message_descr_named_fill_f_union_u_pt, &m.f_union.u.u_pt);
+    m.f_union.which = MESSAGE_FILL___F_UNION___U_PT__ID;
+    sofab_object_init(&message_fill___f_union___u_pt__descr, &m.f_union.u.u_pt);
     m.f_union.u.u_pt.p_u32 = UINT32_MAX;
     m.f_union.u.u_pt.p_i64 = INT64_MIN;
 
     /* ...and each element of an array of unions the same way, here the string. */
     m.f_arr_union.len = 2;
-    m.f_arr_union.items[0].which = MESSAGE_FILL_F_ARR_UNION_ELEM_A_STR_ID;
+    m.f_arr_union.items[0].which = MESSAGE_FILL___F_ARR_UNION___A_STR__ID;
     memcpy(m.f_arr_union.items[0].u.a_str, "ghij", 5); /* with the NUL: the option shares storage */
-    m.f_arr_union.items[1].which = MESSAGE_FILL_F_ARR_UNION_ELEM_A_STR_ID;
+    m.f_arr_union.items[1].which = MESSAGE_FILL___F_ARR_UNION___A_STR__ID;
     memcpy(m.f_arr_union.items[1].u.a_str, "klmn", 5);
 
     /* Deliberately oversized so an encode that overruns MAX_SIZE still succeeds
      * and can be measured, instead of failing with BUFFER_FULL and hiding by how
      * much the bound was wrong. */
-    uint8_t buf[MESSAGE_FILL_MAX_SIZE * 4];
+    uint8_t buf[MESSAGE_FILL__MAX_SIZE * 4];
     size_t used = 0;
-    sofab_ret_t ret = message_fill_encode(&m, buf, sizeof buf, &used);
+    sofab_ret_t ret = message_fill__encode(&m, buf, sizeof buf, &used);
 
     if (ret != SOFAB_RET_OK) {
         printf("FAIL: encode returned %d\n", (int)ret);
         return 1;
     }
-    printf("MESSAGE_FILL_MAX_SIZE = %d, encoded = %zu\n", MESSAGE_FILL_MAX_SIZE, (size_t)used);
+    printf("MESSAGE_FILL__MAX_SIZE = %d, encoded = %zu\n", MESSAGE_FILL__MAX_SIZE, (size_t)used);
 
-    if (used > (size_t)MESSAGE_FILL_MAX_SIZE) {
+    if (used > (size_t)MESSAGE_FILL__MAX_SIZE) {
         printf("FAIL: a fully filled message OVERRUNS its own MAX_SIZE by %zu bytes\n",
-               used - (size_t)MESSAGE_FILL_MAX_SIZE);
+               used - (size_t)MESSAGE_FILL__MAX_SIZE);
         return 1;
     }
-    if (used < (size_t)MESSAGE_FILL_MAX_SIZE) {
+    if (used < (size_t)MESSAGE_FILL__MAX_SIZE) {
         printf("FAIL: MAX_SIZE overshoots by %zu bytes - every fixed-buffer target\n"
                "      pays that in wasted RAM, so the bound must be exact\n",
-               (size_t)MESSAGE_FILL_MAX_SIZE - used);
+               (size_t)MESSAGE_FILL__MAX_SIZE - used);
         return 1;
     }
     printf("OK: the worst case is reached exactly and not exceeded\n");

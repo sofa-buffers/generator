@@ -21,7 +21,7 @@
  * SPDX-License-Identifier: MIT
  */
 
-#include "boolchk.h"
+#include "boolchk_sofab.h"
 
 #include <stdio.h>
 #include <string.h>
@@ -81,15 +81,15 @@ static int holds(const uint8_t *v, size_t len, const uint8_t *want, size_t wantl
 
 static int decode(message_boolchk_t *m, const uint8_t *wire, size_t len, int drip)
 {
-    message_boolchk_init(m);
+    message_boolchk__init(m);
     if (!drip) {
-        return message_boolchk_decode(m, wire, len) == SOFAB_RET_OK;
+        return message_boolchk__decode(m, wire, len) == SOFAB_RET_OK;
     }
-    message_boolchk_decoder_t d;
-    message_boolchk_decoder_init(&d, m);
+    message_boolchk__decoder_t d;
+    message_boolchk__decoder_init(&d, m);
     sofab_ret_t r = SOFAB_RET_OK;
     for (size_t i = 0; i < len; i++) {
-        r = message_boolchk_decoder_feed(&d, wire + i, 1);
+        r = message_boolchk__decoder_feed(&d, wire + i, 1);
         if (r != SOFAB_RET_OK && r != SOFAB_RET_INCOMPLETE) {
             return 0;
         }
@@ -99,10 +99,10 @@ static int decode(message_boolchk_t *m, const uint8_t *wire, size_t len, int dri
 
 static int same_wire(const message_boolchk_t *a, const message_boolchk_t *b)
 {
-    uint8_t wa[MESSAGE_BOOLCHK_MAX_SIZE], wb[MESSAGE_BOOLCHK_MAX_SIZE];
+    uint8_t wa[MESSAGE_BOOLCHK__MAX_SIZE], wb[MESSAGE_BOOLCHK__MAX_SIZE];
     size_t na = 0, nb = 0;
-    if (message_boolchk_encode(a, wa, sizeof wa, &na) != SOFAB_RET_OK) return 0;
-    if (message_boolchk_encode(b, wb, sizeof wb, &nb) != SOFAB_RET_OK) return 0;
+    if (message_boolchk__encode(a, wa, sizeof wa, &na) != SOFAB_RET_OK) return 0;
+    if (message_boolchk__encode(b, wb, sizeof wb, &nb) != SOFAB_RET_OK) return 0;
     return na == nb && memcmp(wa, wb, na) == 0;
 }
 
@@ -116,23 +116,23 @@ int main(void)
     static const uint8_t row0[] = {1, 1}, row1[] = {1, 0, 1}, inner[] = {0, 1, 1};
     static const uint8_t bits[] = {1, 0, 1}, cube00[] = {1, 1}, cube01[] = {0}, cube10[] = {1};
 
-    message_boolchk_init(&want_small);
+    message_boolchk__init(&want_small);
     want_small.flag = 1;
-    want_small.flags_len = 3;
+    want_small.flags__len = 3;
     memcpy(want_small.flags, small_flags, 3);
 
-    message_boolchk_init(&want_wide);
+    message_boolchk__init(&want_wide);
     want_wide.flag = 1;
-    want_wide.flags_len = 5;
+    want_wide.flags__len = 5;
     memcpy(want_wide.flags, wide_flags, 5);
     want_wide.rows.len = 2;
     want_wide.rows.items[0].len = 2;
     memcpy(want_wide.rows.items[0].vals, row0, 2);
     want_wide.rows.items[1].len = 3;
     memcpy(want_wide.rows.items[1].vals, row1, 3);
-    want_wide.nested.inner_len = 3;
+    want_wide.nested.inner__len = 3;
     memcpy(want_wide.nested.inner, inner, 3);
-    want_wide.choice.which = MESSAGE_BOOLCHK_CHOICE_BITS_ID;  /* the default option, held */
+    want_wide.choice.which = MESSAGE_BOOLCHK___CHOICE___BITS__ID;  /* the default option, held */
     want_wide.choice.u.bits.len = 3;
     memcpy(want_wide.choice.u.bits.items, bits, 3);
     want_wide.cube.len = 2;
@@ -153,7 +153,7 @@ int main(void)
             fail(surface, "flag = 2, flags [2, 0, 5] must decode");
         } else {
             if (m.flag != 1) fail(surface, "a scalar boolean of 2 must be stored as 1");
-            if (!holds(m.flags, m.flags_len, small_flags, 3))
+            if (!holds(m.flags, m.flags__len, small_flags, 3))
                 fail(surface, "flags [2, 0, 5] must be stored as [1, 0, 1]");
             if (!same_wire(&m, &want_small))
                 fail(surface, "flag = 2, flags [2, 0, 5] must re-encode as 1 / [1, 0, 1]");
@@ -164,15 +164,15 @@ int main(void)
             continue;
         }
         if (m.flag != 1) fail(surface, "a scalar boolean of 2^64-1 must be stored as 1");
-        if (!holds(m.flags, m.flags_len, wide_flags, 5))
+        if (!holds(m.flags, m.flags__len, wide_flags, 5))
             fail(surface, "flags [2, 1, 0, 256, max] must be stored as [1, 1, 0, 1, 1]");
         if (m.rows.len != 2 ||
             !holds(m.rows.items[0].vals, m.rows.items[0].len, row0, 2) ||
             !holds(m.rows.items[1].vals, m.rows.items[1].len, row1, 3))
             fail(surface, "rows [[2, 256], [max, 0, 5]] must be stored as [[1, 1], [1, 0, 1]]");
-        if (!holds(m.nested.inner, m.nested.inner_len, inner, 3))
+        if (!holds(m.nested.inner, m.nested.inner__len, inner, 3))
             fail(surface, "nested.inner [0, 256, 5] must be stored as [0, 1, 1]");
-        if (m.choice.which != MESSAGE_BOOLCHK_CHOICE_BITS_ID
+        if (m.choice.which != MESSAGE_BOOLCHK___CHOICE___BITS__ID
             || !holds(m.choice.u.bits.items, m.choice.u.bits.len, bits, 3))
             fail(surface, "choice.bits [256, 0, 2] must be stored as [1, 0, 1]");
         if (m.cube.len != 2 || m.cube.items[0].len != 2 || m.cube.items[1].len != 1 ||

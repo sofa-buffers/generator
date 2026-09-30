@@ -31,7 +31,7 @@ messages:
 
 func TestUnionTypeIsTagPlusOverlay(t *testing.T) {
 	files := genCFromYAML(t, unionShapeYAML)
-	h, c := files["m.h"], files["m.c"]
+	h, c := files["m_sofab.h"], files["m_sofab.c"]
 
 	// The tag leads (SOFAB_OBJECT_DESCR_UNION asserts offset 0), the options
 	// overlay each other in a C union `u`, in schema order.
@@ -39,31 +39,31 @@ func TestUnionTypeIsTagPlusOverlay(t *testing.T) {
 		"typedef struct {\n    sofab_object_descr_id_t which;",
 		"    union {\n        uint16_t num;",
 		"        char s[9];",
-		"        message_m_u_pt_t pt;",
+		"        message_m___u___pt_t pt;",
 		// sized options keep their length INSIDE the option: a sibling length
 		// member would overlay the other options too
 		"        struct { uint16_t len; uint16_t items[4]; } arr;",
-		"        message_m_u_strs_elems_t strs;",
+		"        message_m___u___strs__elems_t strs;",
 		"        struct { uint8_t len; uint8_t data[4]; } bl;",
-		"    } u;\n} message_m_u_t;",
+		"    } u;\n} message_m___u_t;",
 	} {
 		if !strings.Contains(h, want) {
 			t.Errorf("header missing %q:\n%s", want, h)
 		}
 	}
 	// No product type: no option is a member of its own beside the others.
-	if strings.Contains(h, "arr_len") || strings.Contains(h, "bl_len") {
+	if strings.Contains(h, "arr__len") || strings.Contains(h, "bl__len") {
 		t.Errorf("a union option must not carry a sibling length member:\n%s", h)
 	}
 
 	for _, want := range []string{
-		"SOFAB_OBJECT_FIELD(0, message_m_u_t, u.num, SOFAB_OBJECT_FIELDTYPE_UNSIGNED),",
-		"SOFAB_OBJECT_FIELD(1, message_m_u_t, u.s, SOFAB_OBJECT_FIELDTYPE_STRING),",
-		"SOFAB_OBJECT_FIELD_SEQUENCE(2, message_m_u_t, u.pt, SOFAB_OBJECT_FIELDTYPE_SEQUENCE, 0),",
-		"SOFAB_OBJECT_FIELD_ARRAY_SIZED(3, message_m_u_t, u.arr.items, u.arr.len, SOFAB_OBJECT_FIELDTYPE_ARRAY_UNSIGNED),",
-		"SOFAB_OBJECT_FIELD_SEQUENCE(4, message_m_u_t, u.strs, SOFAB_OBJECT_FIELDTYPE_SEQUENCE, 1),",
-		"SOFAB_OBJECT_FIELD_BLOB_SIZED(5, message_m_u_t, u.bl.data, u.bl.len),",
-		"= SOFAB_OBJECT_DESCR_UNION(_message_fields_named_m_u, 6, _message_nested_named_m_u, 2, &_message_defaults_named_m_u, message_m_u_t, which);",
+		"SOFAB_OBJECT_FIELD(0, message_m___u_t, u.num, SOFAB_OBJECT_FIELDTYPE_UNSIGNED),",
+		"SOFAB_OBJECT_FIELD(1, message_m___u_t, u.s, SOFAB_OBJECT_FIELDTYPE_STRING),",
+		"SOFAB_OBJECT_FIELD_SEQUENCE(2, message_m___u_t, u.pt, SOFAB_OBJECT_FIELDTYPE_SEQUENCE, 0),",
+		"SOFAB_OBJECT_FIELD_ARRAY_SIZED(3, message_m___u_t, u.arr.items, u.arr.len, SOFAB_OBJECT_FIELDTYPE_ARRAY_UNSIGNED),",
+		"SOFAB_OBJECT_FIELD_SEQUENCE(4, message_m___u_t, u.strs, SOFAB_OBJECT_FIELDTYPE_SEQUENCE, 1),",
+		"SOFAB_OBJECT_FIELD_BLOB_SIZED(5, message_m___u_t, u.bl.data, u.bl.len),",
+		"= SOFAB_OBJECT_DESCR_UNION(_message_m___u__fields, 6, _message_m___u__nested, 2, &_message_m___u__defaults, message_m___u_t, which);",
 	} {
 		if !strings.Contains(c, want) {
 			t.Errorf("source missing %q:\n%s", want, c)
@@ -79,14 +79,14 @@ func TestUnionTypeIsTagPlusOverlay(t *testing.T) {
 
 func TestUnionOptionIDMacros(t *testing.T) {
 	files := genCFromYAML(t, unionShapeYAML)
-	h := files["m.h"]
+	h := files["m_sofab.h"]
 	for _, want := range []string{
-		"#define MESSAGE_M_U_NUM_ID 0",
-		"#define MESSAGE_M_U_S_ID 1",
-		"#define MESSAGE_M_U_PT_ID 2",
-		"#define MESSAGE_M_U_ARR_ID 3",
-		"#define MESSAGE_M_U_STRS_ID 4",
-		"#define MESSAGE_M_U_BL_ID 5",
+		"#define MESSAGE_M___U___NUM__ID 0",
+		"#define MESSAGE_M___U___S__ID 1",
+		"#define MESSAGE_M___U___PT__ID 2",
+		"#define MESSAGE_M___U___ARR__ID 3",
+		"#define MESSAGE_M___U___STRS__ID 4",
+		"#define MESSAGE_M___U___BL__ID 5",
 		"a fresh value holds pt.",
 	} {
 		if !strings.Contains(h, want) {
@@ -99,16 +99,16 @@ func TestUnionOptionIDMacros(t *testing.T) {
 // option at its default is `sofab_object_init(&<descr>, &x.u.<opt>)`, so the
 // header must declare exactly those option descriptors -- and no leaf's.
 func TestUnionSequenceOptionDescriptorsDeclared(t *testing.T) {
-	h := genCFromYAML(t, unionShapeYAML)["m.h"]
+	h := genCFromYAML(t, unionShapeYAML)["m_sofab.h"]
 	for _, want := range []string{
-		"extern const sofab_object_descr_t _message_descr_named_m_u_pt;",
-		"extern const sofab_object_descr_t _message_descr_named_m_u_strs_elems;",
+		"extern const sofab_object_descr_t message_m___u___pt__descr;",
+		"extern const sofab_object_descr_t message_m___u___strs__elems__descr;",
 	} {
 		if !strings.Contains(h, want) {
 			t.Errorf("header missing %q:\n%s", want, h)
 		}
 	}
-	if n := strings.Count(h, "extern const sofab_object_descr_t _message_descr_named_"); n != 2 {
+	if n := strings.Count(h, "extern const sofab_object_descr_t message_m___u___"); n != 2 {
 		t.Errorf("want exactly the 2 sequence-option descriptors declared, got %d:\n%s", n, h)
 	}
 }
@@ -128,16 +128,16 @@ messages:
   m:
     payload:
       u: { id: 0, type: union, default_id: 0, oneof: { p: { id: 0, type: struct, fields: { x: { id: 0, type: u8, default: 9 } } }, n: { id: 1, type: u8, default: 3 } } }
-`, []string{"SOFAB_OBJECT_DESCR_UNION(_message_fields_named_m_u, 2, _message_nested_named_m_u, 1, NULL, message_m_u_t, which);"},
-			[]string{"_message_defaults_named_m_u ", "defimg_named_m_u"}},
+`, []string{"SOFAB_OBJECT_DESCR_UNION(_message_m___u__fields, 2, _message_m___u__nested, 1, NULL, message_m___u_t, which);"},
+			[]string{"_message_m___u__defaults ", "defimg_named_m_u"}},
 		{"id 0, all-zero leaf D -> NULL", `
 version: 1
 messages:
   m:
     payload:
       u: { id: 0, type: union, oneof: { n: { id: 0, type: u8 }, s: { id: 1, type: string, maxlen: 4 } } }
-`, []string{"SOFAB_OBJECT_DESCR_UNION(_message_fields_named_m_u, 2, NULL, 0, NULL, message_m_u_t, which);"},
-			[]string{"_message_defaults_named_m_u ", "defimg_named_m_u"}},
+`, []string{"SOFAB_OBJECT_DESCR_UNION(_message_m___u__fields, 2, NULL, 0, NULL, message_m___u_t, which);"},
+			[]string{"_message_m___u__defaults ", "defimg_named_m_u"}},
 		{"id != 0, sequence D -> tag-only image", `
 version: 1
 messages:
@@ -145,8 +145,8 @@ messages:
     payload:
       u: { id: 0, type: union, default_id: 1, oneof: { n: { id: 0, type: u8 }, p: { id: 1, type: struct, fields: { x: { id: 0, type: u8 } } } } }
 `, []string{
-			"static const struct { sofab_object_descr_id_t which; } _message_defaults_named_m_u = { 1 };",
-			", &_message_defaults_named_m_u, message_m_u_t, which);",
+			"static const struct { sofab_object_descr_id_t which; } _message_m___u__defaults = { 1 };",
+			", &_message_m___u__defaults, message_m___u_t, which);",
 		}, []string{"defimg_named_m_u"}},
 		{"id 0, leaf D at a non-zero default -> tag + D prefix", `
 version: 1
@@ -155,9 +155,9 @@ messages:
     payload:
       u: { id: 0, type: union, default_id: 0, oneof: { n: { id: 0, type: u16, default: 5 }, big: { id: 1, type: string, maxlen: 64 } } }
 `, []string{
-			"typedef struct { sofab_object_descr_id_t which; union { uint16_t n; uint16_t _align; } u; } _message_defimg_named_m_u_t;",
-			"typedef char _message_defimg_named_m_u_at_u[(offsetof(_message_defimg_named_m_u_t, u) == offsetof(message_m_u_t, u)) ? 1 : -1];",
-			"static const _message_defimg_named_m_u_t _message_defaults_named_m_u = { .which = 0, .u.n = 5 };",
+			"typedef struct { sofab_object_descr_id_t which; union { uint16_t n; uint16_t _align; } u; } _message_m___u__defimg_t;",
+			"typedef char _message_m___u__defimg_at_u[(offsetof(_message_m___u__defimg_t, u) == offsetof(message_m___u_t, u)) ? 1 : -1];",
+			"static const _message_m___u__defimg_t _message_m___u__defaults = { .which = 0, .u.n = 5 };",
 		}, []string{"char big[65]; uint"}},
 		{"id != 0, leaf D (zero default) -> tag + D prefix aligned like T's union", `
 version: 1
@@ -166,13 +166,13 @@ messages:
     payload:
       u: { id: 0, type: union, default_id: 1, oneof: { big: { id: 0, type: u64 }, sig: { id: 1, type: i64 } } }
 `, []string{
-			"typedef struct { sofab_object_descr_id_t which; union { int64_t sig; uint64_t _align; } u; } _message_defimg_named_m_u_t;",
-			"static const _message_defimg_named_m_u_t _message_defaults_named_m_u = { .which = 1 };",
+			"typedef struct { sofab_object_descr_id_t which; union { int64_t sig; uint64_t _align; } u; } _message_m___u__defimg_t;",
+			"static const _message_m___u__defimg_t _message_m___u__defaults = { .which = 1 };",
 		}, nil},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			c := genCFromYAML(t, tc.yaml)["m.c"]
+			c := genCFromYAML(t, tc.yaml)["m_sofab.c"]
 			for _, w := range tc.want {
 				if !strings.Contains(c, w) {
 					t.Errorf("missing %q:\n%s", w, c)
@@ -184,8 +184,8 @@ messages:
 				}
 			}
 			// never a full image of the union type
-			if strings.Contains(c, "static const message_m_u_t ") {
-				t.Errorf("a union's image is a prefix, never a full message_m_u_t:\n%s", c)
+			if strings.Contains(c, "static const message_m___u_t ") {
+				t.Errorf("a union's image is a prefix, never a full message_m___u_t:\n%s", c)
 			}
 		})
 	}
@@ -208,22 +208,22 @@ messages:
       a: { id: 0, type: union, default_id: 1, oneof: { $ref: "#/$defs/union/Pick" } }
       b: { id: 1, type: union, oneof: { $ref: "#/$defs/union/Pick" } }
 `)
-	h, c := files["m.h"], files["m.c"]
+	h, c := files["m_sofab.h"], files["m_sofab.c"]
 	for _, want := range []string{
-		"} message_union_Pick_default_t_t;",
-		"} message_union_Pick_default_n_t;",
-		"#define MESSAGE_UNION_PICK_DEFAULT_T_N_ID 0",
-		"#define MESSAGE_UNION_PICK_DEFAULT_N_T_ID 1",
+		"} message_Pick__default_t_t;",
+		"} message_Pick__default_n_t;",
+		"#define MESSAGE_PICK___N__ID 0",
+		"#define MESSAGE_PICK___T__ID 1",
 	} {
 		if !strings.Contains(h, want) {
 			t.Errorf("header missing %q:\n%s", want, h)
 		}
 	}
 	for _, want := range []string{
-		"static const struct { sofab_object_descr_id_t which; } _message_defaults_named_union_Pick_default_t = { 1 };",
-		"static const _message_defimg_named_union_Pick_default_n_t _message_defaults_named_union_Pick_default_n = { .which = 0, .u.n = 6 };",
-		"const sofab_object_descr_t _message_descr_named_union_Pick_default_t = SOFAB_OBJECT_DESCR_UNION(",
-		"const sofab_object_descr_t _message_descr_named_union_Pick_default_n = SOFAB_OBJECT_DESCR_UNION(",
+		"static const struct { sofab_object_descr_id_t which; } _message_Pick__default_t__defaults = { 1 };",
+		"static const _message_Pick__default_n__defimg_t _message_Pick__default_n__defaults = { .which = 0, .u.n = 6 };",
+		"const sofab_object_descr_t message_Pick__default_t__descr = SOFAB_OBJECT_DESCR_UNION(",
+		"const sofab_object_descr_t message_Pick__default_n__descr = SOFAB_OBJECT_DESCR_UNION(",
 	} {
 		if !strings.Contains(c, want) {
 			t.Errorf("source missing %q:\n%s", want, c)
@@ -231,34 +231,30 @@ messages:
 	}
 }
 
-// TestUnionOptionMacroCollisions: the option ids join the one flat macro
-// namespace, so checkMacroNames must see them -- against a bitfield flag of an
-// option, and against another union's option.
-func TestUnionOptionMacroCollisions(t *testing.T) {
-	cases := []struct{ name, yaml, want string }{
-		{"option id vs a flag of a bitfield option", `
+// TestUnionOptionMacrosNeverCollide: the option ids join the one flat macro
+// namespace. An option id is a role ("__ID") of the option's path, a flag of a
+// bitfield option extends that path ("___"), and two unions' paths differ in a
+// segment, so the pairs that used to join to one identifier -- an option `fl`
+// with a flag `id` against the id of option `fl`, and option `a_b` of union `u`
+// against option `b` of union `u_a` -- stay apart.
+func TestUnionOptionMacrosNeverCollide(t *testing.T) {
+	h := genCFromYAML(t, `
 version: 1
 messages:
   m:
     payload:
-      u: { id: 0, type: union, oneof: { fl: { id: 0, type: bitfield, bits: { id: { pos: 0 } } }, x: { id: 1, type: u8 } } }
-`, "MESSAGE_M_U_FL_ID"},
-		{"option ids of two unions", `
-version: 1
-messages:
-  m:
-    payload:
-      u:   { id: 0, type: union, oneof: { a_b: { id: 0, type: u8 } } }
+      u:   { id: 0, type: union, oneof: { fl: { id: 0, type: bitfield, bits: { id: { pos: 0 } } }, a_b: { id: 1, type: u8 } } }
       u_a: { id: 1, type: union, oneof: { b: { id: 0, type: u8 } } }
-`, "MESSAGE_M_U_A_B_ID"},
-	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			err := genCErr(t, tc.yaml)
-			if err == nil || !strings.Contains(err.Error(), tc.want) {
-				t.Fatalf("want a macro collision naming %s, got %v", tc.want, err)
-			}
-		})
+`)["m_sofab.h"]
+	for _, want := range []string{
+		"#define MESSAGE_M___U___FL__ID 0",
+		"#define MESSAGE_M___U___FL___ID ((uint32_t)1 << 0)",
+		"#define MESSAGE_M___U___A_B__ID 1",
+		"#define MESSAGE_M___U_A___B__ID 0",
+	} {
+		if !strings.Contains(h, want) {
+			t.Errorf("header missing %q:\n%s", want, h)
+		}
 	}
 }
 
@@ -268,7 +264,7 @@ messages:
 // its own, so there is none to refuse.
 func TestUnionCapabilityGuard(t *testing.T) {
 	guard := "#if defined(SOFAB_DISABLE_SEQUENCE_SUPPORT)"
-	h := genCFromYAML(t, unionShapeYAML)["m.h"]
+	h := genCFromYAML(t, unionShapeYAML)["m_sofab.h"]
 	if !strings.Contains(h, guard) {
 		t.Errorf("a message with a union must refuse SOFAB_DISABLE_SEQUENCE_SUPPORT:\n%s", h)
 	}
@@ -279,7 +275,7 @@ messages:
   m:
     payload:
       v: { id: 0, type: array, items: { type: union, count: 2, oneof: { a: { id: 0, type: u8 } } } }
-`)["m.h"]
+`)["m_sofab.h"]
 	if !strings.Contains(elem, guard) {
 		t.Errorf("an array of unions must refuse SOFAB_DISABLE_SEQUENCE_SUPPORT:\n%s", elem)
 	}
@@ -296,10 +292,10 @@ messages:
 func TestUnionHarnessJSONHoldsOneOption(t *testing.T) {
 	main := genCProject(t, unionShapeYAML)["harness/main.c"]
 	for _, want := range []string{
-		"    switch (o->which) {\n    case MESSAGE_M_U_NUM_ID:\n        fprintf(out, \"\\\"num\\\":\");",
+		"    switch (o->which) {\n    case MESSAGE_M___U___NUM__ID:\n        fprintf(out, \"\\\"num\\\":\");",
 		"        json_bytes(out, o->u.bl.data, o->u.bl.len);",
-		"        o->which = MESSAGE_M_U_PT_ID;\n        sofab_object_init(&_message_descr_named_m_u_pt, &o->u.pt);",
-		"        o->which = MESSAGE_M_U_STRS_ID;\n        sofab_object_init(&_message_descr_named_m_u_strs_elems, &o->u.strs);",
+		"        o->which = MESSAGE_M___U___PT__ID;\n        sofab_object_init(&message_m___u___pt__descr, &o->u.pt);",
+		"        o->which = MESSAGE_M___U___STRS__ID;\n        sofab_object_init(&message_m___u___strs__elems__descr, &o->u.strs);",
 		"        o->u.bl.len = (uint8_t)json_to_bytes(c, o->u.bl.data, sizeof(o->u.bl.data));",
 		"        o->u.arr.len = (uint16_t)_n0;",
 	} {
@@ -339,7 +335,7 @@ func TestUnionCompilesOnEveryProfile(t *testing.T) {
 	for _, prof := range []string{"1", "2", "3"} {
 		args := append([]string{"-std=c99", "-pedantic"}, strictWarnings...)
 		args = append(args, "-DSOFAB_OBJECT_DESCR_PROFILE="+prof, "-I"+filepath.Join(corelib, "src", "include"), "-I"+dir,
-			"-c", filepath.Join(dir, "m.c"), "-o", filepath.Join(dir, "m.o"))
+			"-c", filepath.Join(dir, "m_sofab.c"), "-o", filepath.Join(dir, "m.o"))
 		if out, err := exec.Command(gcc, args...).CombinedOutput(); err != nil {
 			t.Fatalf("profile %s: generated union C failed to compile:\n%s", prof, out)
 		}
@@ -361,11 +357,11 @@ messages:
 // build half stands in for an old corelib by dropping the macro after object.h.
 func TestUnionCorelibCapabilityGuard(t *testing.T) {
 	guard := "#if !defined(SOFAB_OBJECT_DESCR_UNION)"
-	h := genCFromYAML(t, unionShapeYAML)["m.h"]
+	h := genCFromYAML(t, unionShapeYAML)["m_sofab.h"]
 	if !strings.Contains(h, guard) || !strings.Contains(h, "which this corelib-c-cpp predates") {
 		t.Errorf("a message with a union must refuse a corelib without SOFAB_OBJECT_DESCR_UNION:\n%s", h)
 	}
-	if plain := genCFromYAML(t, plainYAML)["m.h"]; strings.Contains(plain, guard) {
+	if plain := genCFromYAML(t, plainYAML)["m_sofab.h"]; strings.Contains(plain, guard) {
 		t.Errorf("a message without a union must not ask for SOFAB_OBJECT_DESCR_UNION:\n%s", plain)
 	}
 
@@ -378,10 +374,10 @@ func TestUnionCorelibCapabilityGuard(t *testing.T) {
 		t.Skip("gcc not found")
 	}
 	dir := t.TempDir()
-	if err := os.WriteFile(filepath.Join(dir, "m.h"), []byte(h), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(dir, "m_sofab.h"), []byte(h), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	tu := "#include \"sofab/object.h\"\n#undef SOFAB_OBJECT_DESCR_UNION\n#include \"m.h\"\n"
+	tu := "#include \"sofab/object.h\"\n#undef SOFAB_OBJECT_DESCR_UNION\n#include \"m_sofab.h\"\n"
 	if err := os.WriteFile(filepath.Join(dir, "old.c"), []byte(tu), 0o644); err != nil {
 		t.Fatal(err)
 	}
@@ -462,10 +458,10 @@ messages:
 // the corelib's asserts ON and decodes one union frame that holds a long string
 // and then switches to a one-byte blob: the assert, or the residue, would show.
 func TestUnionBlobOptionIsSized(t *testing.T) {
-	c := genCFromYAML(t, unionBlobYAML)["m.c"]
+	c := genCFromYAML(t, unionBlobYAML)["m_sofab.c"]
 	for _, want := range []string{
-		"SOFAB_OBJECT_FIELD_BLOB_SIZED(1, message_m_u_t, u.bl.data, u.bl.len),",
-		"SOFAB_OBJECT_FIELD_BLOB_SIZED(1, message_m_u_pt_t, raw, raw_len),",
+		"SOFAB_OBJECT_FIELD_BLOB_SIZED(1, message_m___u_t, u.bl.data, u.bl.len),",
+		"SOFAB_OBJECT_FIELD_BLOB_SIZED(1, message_m___u___pt_t, raw, raw__len),",
 		", u.b.data, u.b.len),",
 	} {
 		if !strings.Contains(c, want) {
