@@ -117,7 +117,7 @@ func TestJavaUnionAccessors(t *testing.T) {
 	mustContain(t, "MU", u,
 		"public long getNum() { return which == NUM_ID ? num : 5L; }",
 		"public boolean hasNum() { return which == NUM_ID; }",
-		"public void setNum(long v) { which = NUM_ID; num = v; }",
+		"public void setNum(long v) { which = NUM_ID; this.num = v; }",
 		`public String getS() { return which == S_ID ? s : ""; }`,
 		"public MUPt getPt() { return which == PT_ID ? pt : new MUPt(); }",
 		"public short[] getArr() { return which == ARR_ID ? arr : Seq.EMPTY_SHORTS; }",
@@ -275,7 +275,7 @@ messages:
 `, map[string]any{})
 	mustContain(t, "NU", out[unionDir+"NU.java"],
 		"public long getClass_() { return which == CLASS_ID ? class_ : 0L; }",
-		"public void setClass_(long v) { which = CLASS_ID; class_ = v; }",
+		"public void setClass_(long v) { which = CLASS_ID; this.class_ = v; }",
 		"private String which_;",
 		"public String getWhich() { return which == WHICH_ID ? which_ : \"\"; }")
 	for _, c := range []struct{ src, want string }{

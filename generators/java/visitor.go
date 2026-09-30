@@ -87,9 +87,9 @@ func (g *gen) frames(m *ir.Message) []frame {
 		for _, fld := range fields {
 			switch {
 			case fld.Kind == ir.KindStruct || fld.Kind == ir.KindUnion:
-				walk(loc+"_"+fld.Name, memberPath(path, fld, uni), fld.Ref.Target.Fields, fld.Kind == ir.KindUnion)
+				walk(locChild(loc, fld.Name), memberPath(path, fld, uni), fld.Ref.Target.Fields, fld.Kind == ir.KindUnion)
 			case fld.Kind == ir.KindArray && seqArrayElem(fld.Elem):
-				addArray(loc+"_"+fld.Name, memberPath(path, fld, uni), fld.Elem, fld.ElemRef, fld.ElemItems, fld.ElemMaxHas, fld.ElemMax, capOf(fld.HasCount, fld.Count))
+				addArray(locChild(loc, fld.Name), memberPath(path, fld, uni), fld.Elem, fld.ElemRef, fld.ElemItems, fld.ElemMaxHas, fld.ElemMax, capOf(fld.HasCount, fld.Count))
 			}
 		}
 	}
@@ -1466,12 +1466,12 @@ func (g *gen) emitVisitor(f *jfile, name string, fields []*ir.Field) {
 					if fr.uni {
 						sel = memberPath(fr.path, fld, true) + "; "
 					}
-					arms = append(arms, jcase(fld.ID, sel+"cur = "+itoa(locIndex(fs, fr.loc+"_"+fld.Name))))
+					arms = append(arms, jcase(fld.ID, sel+"cur = "+itoa(locIndex(fs, locChild(fr.loc, fld.Name)))))
 				case fld.Kind == ir.KindArray && seqArrayElem(fld.Elem):
 					// A wrapper array IS its field's value, so a later occurrence
 					// replaces it (§7.4); in a union the mutable accessor selects the
 					// option first.
-					arms = append(arms, jcase(fld.ID, memberPath(fr.path, fld, fr.uni)+".clear(); cur = "+itoa(locIndex(fs, fr.loc+"_"+fld.Name))))
+					arms = append(arms, jcase(fld.ID, memberPath(fr.path, fld, fr.uni)+".clear(); cur = "+itoa(locIndex(fs, locChild(fr.loc, fld.Name)))))
 				}
 			}
 			// A skipping default even when this scope declares no sequence at all:

@@ -30,6 +30,27 @@ This holds in both `emit` modes — `sources` emits the same tree without the
 build files. Changing the package changes the paths, so point `output_dir` at
 the root of a source tree, not at the package directory itself.
 
+## Field names
+
+A field's Java field is the field's schema name. Java keeps fields and methods
+apart, so a field `encode` sits beside the method `encode()` unchanged. Java has
+no way to escape a reserved name, so a field whose name the generated class
+cannot take gets a trailing underscore — the field `class` is `class_`. Those
+names are:
+
+- the Java keywords;
+- the static fields every generated message declares: `MAX_SIZE`,
+  `MAX_SIZE_LIMIT`;
+- the names the class body uses in front of a dot — `Arrays`, `DecodeStatus`,
+  `List`, `OStream`, `Seq`, `System`, and the package root `java`. Inside the
+  class a field of such a name would hide the type or package, and a call like
+  `Seq.reset(...)` would no longer compile.
+
+Only the field changes: the wire is keyed by the field id, and the JSON key
+stays the schema name. Two fields that end up with the same field — `int` and
+`int_` — fail generation, naming both. The list lives in
+`generators/java/reserved.go`.
+
 ## Unions
 
 A `union` holds exactly one of its options. It is a class of its own whose
@@ -136,9 +157,11 @@ unions in place.
 `set<Option>`, `has<Option>`, `mutable<Option>`; the id constant is the option
 name in upper case plus `_ID`. An option named `class` gets a trailing
 underscore (`getClass_()`, `setClass_()`), because `getClass()` belongs to
-`Object`. Two options that would produce the same accessor (`foo_bar` and
-`fooBar` both give `getFooBar`) or the same constant (`a`'s `A_ID` and an option
-named `A_ID`) fail generation, naming both.
+`Object`. An option is held in a private field of its own name, mangled as a
+field is (see [Field names](#field-names)), and `which` for the union's own tag
+takes a trailing underscore. Two options that would produce the same accessor
+(`foo_bar` and `fooBar` both give `getFooBar`) or the same constant (`a`'s
+`A_ID` and an option named `A_ID`) fail generation, naming both.
 
 **`$defs` unions** used with different `default_id`s are one class per
 `default_id`, named after `<Name>_default_<option>`: `UnionShapeDefaultPt` and
