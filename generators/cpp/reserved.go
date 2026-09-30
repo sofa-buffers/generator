@@ -1,20 +1,35 @@
 package cpp
 
 import (
-	"fmt"
+	"strings"
 
 	"github.com/sofa-buffers/generator/internal/ir"
+	"github.com/sofa-buffers/generator/internal/naming"
 )
 
-// One reserved-name list for the C++ backend (generator#239): every name a
-// schema field cannot take as a member of a generated type, whatever the reason
-// -- a keyword, or a member the generated class already declares. The struct
-// and message path (cppIdent) and the union path (optBase) both read it; a union
-// adds only the members of its own on top (unionReserved).
+// One reserved-name list for the C++ backend (generator#239, generator#624):
+// every spelling a generated identifier cannot take, whatever the reason, in
+// two scopes.
 //
-// C++ has no identifier escape, so a name on the list is mangled with a
-// trailing underscore. The wire is keyed by id and the JSON keys are emitted as
-// string literals, so neither changes; only the member identifier does.
+//   - Members (fields, union accessors): a keyword, a member the generated
+//     class already declares, a macro of the headers the code reaches
+//     (macros.go), or a namespace-level name the class body refers to -- every
+//     type identifier and bitfield flag of the schema, so a field named like the
+//     class it sits in, or like a type that class uses, neither redeclares nor
+//     "changes the meaning of" it. member() reads it; a union adds the members
+//     of its own on top (unionReserved, optBase).
+//   - Types (docs/ARCHITECTURE.md §8, "Naming"): a type identifier equal to a
+//     name a generated class body sees unqualified (cppTypeReserved), a macro,
+//     or a component of the configured namespace. typeEscape reads it.
+//
+// C++ has no identifier escape, so a name on the list takes a trailing
+// underscore, which no schema name and no type identifier ends with. The wire
+// is keyed by id and the JSON keys are emitted as string literals, so neither
+// changes; only the identifier does.
+//
+// Parameters and locals of the generated member functions all start with "_"
+// (_os, _is, _id, _data, ...): a schema name never does, so no field can shadow
+// one -- C++ reserves only "_" + an upper-case letter, and "__".
 
 // cppKeywords are the C++ reserved words (a superset of C's).
 var cppKeywords = map[string]bool{
@@ -52,11 +67,23 @@ var cppKeywords = map[string]bool{
 // message, and the list stays one per language. The underscored members
 // (_maxSize, _isDefault, _opts, ...) need no entry: a schema name starts with
 // a letter. The private members of the corelib base classes (decoder_,
-// context_, ...) need none either: a derived member hides them, which is legal
-// and leaves the base's own uses alone.
+// context_, field_callback_, ...) need none either: a member ends with "_" only
+// when it is escaped, and none of them is the escape of a name on this list.
 var cppMembers = map[string]bool{
 	"serialize": true, "deserialize": true, "reset": true,
 	"encode": true, "encodeTo": true, "decode": true, "try_decode": true,
+}
+
+// corelibProbes are the members corelib-cpp looks for on the object a
+// sequence decodes into, to tell a wrapper-array collector from a message:
+// `cap` + `dynCap` (the element index bounds), the static `elemDestCap`,
+// `elemWire`, `elemFix`, and `prepare()` (the §7.4 reset); corelib-c-cpp's
+// OStreamObject reads a static `MAX_SIZE`. A member of one of these names turns
+// a message into a collector -- its field values become index bounds, a
+// non-static one fails to compile -- so none is a member spelling.
+var corelibProbes = map[string]bool{
+	"cap": true, "dynCap": true, "elemDestCap": true, "elemWire": true, "elemFix": true,
+	"prepare": true, "MAX_SIZE": true,
 }
 
 // unionReserved are the members a union type declares on top of cppMembers.
@@ -64,91 +91,122 @@ var unionReserved = map[string]bool{
 	"which": true, "Which": true,
 }
 
-// cppIdent is the member a schema field is reached through: the schema name,
-// with a trailing underscore where it is a keyword or a generated member.
-func cppIdent(name string) string {
-	if cppKeywords[name] || cppMembers[name] {
+// unionRoles are the prefixes of the accessors a union derives from each
+// option name n: set_n(), has_n(), mutable_n(). They are built from the plain
+// schema name, and the getter of an option whose own name starts with one of
+// them takes a trailing underscore (optBase), so an option `set_a` beside an
+// option `a` gives the getter set_a_() and the setter set_a() -- no two
+// accessors share a spelling.
+var unionRoles = []string{"set_", "has_", "mutable_"}
+
+// cppTypeReserved are the names every generated class body sees unqualified
+// before it sees the namespace's own types, so a type identifier spelled like
+// one would be found as the wrong entity.
+var cppTypeReserved = map[string]bool{
+	// Every union declares a nested `enum class Which` and names its option
+	// types in the same body.
+	"Which": true,
+	// Every generated type derives from sofab::Message, whose name -- and the
+	// names of its two bases -- are injected into the derived class's scope.
+	"Message": true, "OStreamMessage": true, "IStreamMessage": true,
+	// corelib-c-cpp's IStreamMessage declares a private nested struct Context,
+	// which lookup in a derived class finds first (and then refuses as private).
+	"Context": true,
+}
+
+// sofabPrefixed reports whether an identifier falls in the macro namespace the
+// corelibs and this backend claim: SOFAB_* (corelib, and the receiver caps this
+// backend defines) and SOFABGEN_* (the RawArray include guard). Escaped by
+// prefix rather than listed, so a macro a later corelib adds is covered too.
+func sofabPrefixed(name string) bool {
+	return strings.HasPrefix(name, "SOFAB_") || strings.HasPrefix(name, "SOFABGEN_")
+}
+
+// isMacro is the part of the list both scopes share: a name the preprocessor
+// replaces.
+func isMacro(name string) bool {
+	return cppHeaderMacros[name] || sofabPrefixed(name)
+}
+
+// member is the identifier a schema name takes as a member of a generated
+// type: the name itself, or the name with a trailing underscore where it is on
+// the list. Distinct names of one scope stay distinct: a schema name never ends
+// with "_".
+func (g *gen) member(name string) string {
+	if cppKeywords[name] || cppMembers[name] || corelibProbes[name] || isMacro(name) || g.nsNames[name] {
 		return name + "_"
 	}
 	return name
 }
 
-// checkConstNames rejects two constants of one enum or two flags of one
-// bitfield that give one generated name: the backend spells them through
-// exported(), so `a_b` and `aB` are both AB. The compiler would reject the
-// duplicate far from the schema. Located: the error names the type and both
-// names.
-func checkConstNames(s *ir.Schema) error {
-	dup := func(owner, what string, names []string) error {
-		seen := map[string]string{}
-		for _, n := range names {
-			id := exported(n)
-			if prev, ok := seen[id]; ok {
-				return fmt.Errorf("cpp: %s: %s %q and %q both generate %s; rename one", owner, what, prev, n, id)
-			}
-			seen[id] = n
-		}
-		return nil
+// constIdent is the enumerator of an enum constant inside its `enum class`:
+// Pascal(name), escaped where a macro would replace it. Pascal keeps the
+// constants of one enum apart (their folds differ) and never yields a keyword;
+// the enumerators are scoped, so they meet no other name.
+func constIdent(name string) string {
+	id := naming.Pascal(name)
+	if isMacro(id) {
+		return id + "_"
 	}
-	for _, key := range s.NamedOrder {
-		nt := s.Named[key]
-		switch nt.Category {
-		case ir.CatEnum:
-			names := make([]string, len(nt.Consts))
-			for i, c := range nt.Consts {
-				names[i] = c.Name
-			}
-			if err := dup("enum "+key, "constants", names); err != nil {
-				return err
-			}
-		case ir.CatBitfield:
-			names := make([]string, len(nt.Flags))
-			for i, fl := range nt.Flags {
-				names[i] = fl.Name
-			}
-			if err := dup("bitfield "+key, "flags", names); err != nil {
-				return err
-			}
-		}
-	}
-	return nil
+	return id
 }
 
-// checkNamespaceNames rejects two namespace-level names the backend emits with
-// one spelling. A bitfield's flags are enumerators of an unscoped enum,
-// spelled <Type><Flag>, so they share the namespace with every type: `F.a_b`
-// and `FA.b` are both BitfieldFAB, and so is a bitfield type `FAB`. (An
-// enum's constants are members of an enum class, scoped to it, and
-// checkConstNames covers them.) Located: the error names both owners.
-func (g *gen) checkNamespaceNames(s *ir.Schema) error {
-	seen := map[string]string{}
-	claim := func(name, what string) error {
-		if prev, ok := seen[name]; ok && prev != what {
-			return fmt.Errorf("cpp: %s and %s both generate the name %s; rename one", prev, what, name)
-		}
-		seen[name] = what
-		return nil
+// typeEscape is the escape channel for a namespace-level identifier: a
+// trailing underscore where it is a name the generated code sees unqualified,
+// a macro, or a component of the configured namespace. A type identifier (or a
+// bitfield flag) never ends with "_", so the escaped spelling is no other
+// name's.
+func (g *gen) typeEscape(id string) string {
+	if cppTypeReserved[id] || isMacro(id) || g.nsParts[id] {
+		return id + "_"
 	}
-	for _, m := range s.Messages {
-		if err := claim(exported(m.Name), "message "+m.Name); err != nil {
-			return err
-		}
+	return id
+}
+
+// assignNames fills the namespace-level identifiers from the schema paths
+// (docs/ARCHITECTURE.md §8, "Naming"):
+//
+//   - a message, $defs, inline or array-element type: naming.TypeIdent(path);
+//   - a split union variant: TypeIdent(path) + "_default_" + Pascal(variant).
+//     C++ reserves every identifier containing "__", so the role is "_" and a
+//     lower-case role word, which no Pascal segment starts with;
+//   - a bitfield flag -- an enumerator of an unscoped enum, and so a
+//     namespace-level name: TypeIdent(path) + "_" + Pascal(flag), the child of
+//     a leaf type, which has no child paths.
+//
+// Each then passes typeEscape; the derived names are built from the unescaped
+// identifier. nsNames collects every namespace-level identifier, which member()
+// keeps the members away from.
+func (g *gen) assignNames(s *ir.Schema) {
+	g.nsParts = map[string]bool{}
+	for _, p := range strings.Split(g.ns, "::") {
+		g.nsParts[p] = true
 	}
-	for _, key := range s.NamedOrder {
-		if err := claim(g.typeName(key), key); err != nil {
-			return err
-		}
-	}
+	g.types = map[string]string{}
+	g.msgTypes = map[*ir.Message]string{}
+	g.flags = map[string][]string{}
+	g.nsNames = map[string]bool{}
 	for _, key := range s.NamedOrder {
 		nt := s.Named[key]
-		if nt.Category != ir.CatBitfield {
-			continue
+		t := naming.TypeIdent(nt.Path)
+		id := g.typeEscape(t)
+		if nt.Variant != "" {
+			id = t + "_default_" + naming.Pascal(nt.Variant)
 		}
-		for _, fl := range nt.Flags {
-			if err := claim(g.typeName(key)+exported(fl.Name), fmt.Sprintf("flag %q of %s", fl.Name, key)); err != nil {
-				return err
+		g.types[key] = id
+		g.nsNames[id] = true
+		if nt.Category == ir.CatBitfield {
+			names := make([]string, len(nt.Flags))
+			for i, fl := range nt.Flags {
+				names[i] = g.typeEscape(t + "_" + naming.Pascal(fl.Name))
+				g.nsNames[names[i]] = true
 			}
+			g.flags[key] = names
 		}
 	}
-	return nil
+	for _, m := range s.Messages {
+		id := g.typeEscape(naming.TypeIdent([]string{m.Name}))
+		g.msgTypes[m] = id
+		g.nsNames[id] = true
+	}
 }

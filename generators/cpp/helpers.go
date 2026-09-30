@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	"github.com/sofa-buffers/generator/internal/ir"
+	"github.com/sofa-buffers/generator/internal/naming"
 )
 
 func cfgString(cfg map[string]any, key, dflt string) string {
@@ -23,33 +24,32 @@ func cfgBool(cfg map[string]any, key string, dflt bool) bool {
 	return dflt
 }
 
-func exported(name string) string {
-	parts := strings.FieldsFunc(name, func(r rune) bool { return r == '_' })
-	var b strings.Builder
-	for _, p := range parts {
-		if p == "" {
-			continue
-		}
-		b.WriteString(strings.ToUpper(p[:1]))
-		b.WriteString(p[1:])
-	}
-	if b.Len() == 0 {
-		return "X"
-	}
-	return b.String()
+// typeName is the C++ identifier of the named type under a graph key
+// (assignNames).
+func (g *gen) typeName(key string) string {
+	return g.types[key]
 }
 
-func (g *gen) typeName(key string) string {
-	parts := strings.FieldsFunc(key, func(r rune) bool { return r == '/' || r == '_' })
-	var b strings.Builder
-	for _, p := range parts {
-		if p == "" {
-			continue
-		}
-		b.WriteString(strings.ToUpper(p[:1]))
-		b.WriteString(p[1:])
-	}
-	return b.String()
+// msgType is the C++ identifier of a message's struct (assignNames).
+func (g *gen) msgType(m *ir.Message) string {
+	return g.msgTypes[m]
+}
+
+// qualified is a message's struct as the project harness names it, from the
+// global namespace: fully qualified, so neither a global name of the C library
+// (a message `FILE`) nor the namespace itself can make it ambiguous.
+func (g *gen) qualified(m *ir.Message) string {
+	return "::" + g.ns + "::" + g.msgType(m)
+}
+
+// headerFile is the header a message's types land in: the message name
+// lower-cased and folded (naming.Lower). Messages share one scope whose folds
+// differ, so no two headers share a path, on any filesystem; and the name
+// always ends in ".hpp" in the output root, where no header the build includes
+// lives (the corelibs include theirs as "sofab/...", the harness's own is
+// harness/_json.hpp).
+func headerFile(m *ir.Message) string {
+	return naming.Lower([]string{m.Name}) + ".hpp"
 }
 
 func (g *gen) cppType(f *ir.Field) string {
@@ -180,13 +180,13 @@ func cppNeedsWireGuard(_ *ir.Field, _ bool) bool {
 // is ambiguous (fp32/fp64/string/blob and the fp32/fp64 native arrays, which
 // share Wire::Fixlen / Wire::ArrayFixlen). Returns "" when no guard is needed.
 func cppWireGuard(fld *ir.Field) string {
-	cond := "is.wire() != " + cppExpectedWire(fld)
+	cond := "_is.wire() != " + cppExpectedWire(fld)
 	sub := cppFixSubtype(fld.Kind)
 	if fld.Kind == ir.KindArray && isNativeArrayElem(fld.Elem) {
 		sub = cppFixSubtype(fld.Elem)
 	}
 	if sub != "" {
-		cond += " || is.fixType() != " + sub
+		cond += " || _is.fixType() != " + sub
 	}
 	return cond
 }
@@ -519,7 +519,7 @@ func (g *gen) enumMember(nt *ir.NamedType, def any) (string, bool) {
 	}
 	for _, c := range nt.Consts {
 		if c.Value == v {
-			return exported(c.Name), true
+			return constIdent(c.Name), true
 		}
 	}
 	return "", false

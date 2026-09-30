@@ -113,25 +113,25 @@ struct Scalars : sofab::Message {
      *         the two need telling apart.
      */
     std::vector<std::uint8_t> encode() const {
-        std::vector<std::uint8_t> out(_maxSize);
-        sofab::OStreamView os{out.data(), out.size()};
-        serialize(os);
-        if (!os.ok()) { return {}; }
-        out.resize(os.bytesUsed());
-        return out;
+        std::vector<std::uint8_t> _out(_maxSize);
+        sofab::OStreamView _os{_out.data(), _out.size()};
+        serialize(_os);
+        if (!_os.ok()) { return {}; }
+        _out.resize(_os.bytesUsed());
+        return _out;
     }
     /**
      * @brief Encode this message into caller-provided storage (no allocation).
-     * @param dst Destination buffer.
-     * @param cap Capacity of @p dst in bytes.
-     * @return Bytes written, or 0 if the message does not fit in @p cap;
-     *         in which case @p dst holds however much was written first.
+     * @param _dst Destination buffer.
+     * @param _cap Capacity of @p _dst in bytes.
+     * @return Bytes written, or 0 if the message does not fit in @p _cap;
+     *         in which case @p _dst holds however much was written first.
      */
-    std::size_t encodeTo(std::uint8_t *dst, std::size_t cap) const noexcept {
-        sofab::OStreamView os{dst, cap};
-        serialize(os);
-        if (!os.ok()) { return 0; }
-        return os.bytesUsed();
+    std::size_t encodeTo(std::uint8_t *_dst, std::size_t _cap) const noexcept {
+        sofab::OStreamView _os{_dst, _cap};
+        serialize(_os);
+        if (!_os.ok()) { return 0; }
+        return _os.bytesUsed();
     }
     /**
      * @brief Decode a message, best effort.
@@ -139,38 +139,38 @@ struct Scalars : sofab::Message {
      * Never reports failure: malformed input yields whatever was decoded
      * before the error. Use @ref try_decode when the verdict matters.
      *
-     * @param data Encoded bytes.
-     * @param len  Number of bytes at @p data.
+     * @param _data Encoded bytes.
+     * @param _len  Number of bytes at @p _data.
      * @return The decoded message.
      */
-    static Scalars decode(const std::uint8_t *data, std::size_t len) {
-        sofab::IStreamObject<Scalars> in{sofab::Limits{SIZE_MAX}};
-        in.feed(data, len);
-        return std::move(*in);
+    static Scalars decode(const std::uint8_t *_data, std::size_t _len) {
+        sofab::IStreamObject<Scalars> _in{sofab::Limits{SIZE_MAX}};
+        _in.feed(_data, _len);
+        return std::move(*_in);
     }
 
     /**
-     * @brief Decode a message into @p out, reporting whether the input was
+     * @brief Decode a message into @p _out, reporting whether the input was
      *        acceptable.
      *
-     * @p out is put back to its declared defaults first (@ref reset) and
+     * @p _out is put back to its declared defaults first (@ref reset) and
      * then decoded into directly, so it may be reused across messages
      * without carrying anything over and without giving its buffers back.
      *
-     * @param data Encoded bytes.
-     * @param len  Number of bytes at @p data.
-     * @param out  Receives the message; on a rejected input it holds the
+     * @param _data Encoded bytes.
+     * @param _len  Number of bytes at @p _data.
+     * @param _out  Receives the message; on a rejected input it holds the
      *             fields decoded before the error, never an older message's.
-     * @return The decode result; check @c ok() before reading @p out.
+     * @return The decode result; check @c ok() before reading @p _out.
      */
-    static sofab::IStreamImpl::Result try_decode(const std::uint8_t *data, std::size_t len, Scalars &out) {
-        out.reset();
+    static sofab::IStreamImpl::Result try_decode(const std::uint8_t *_data, std::size_t _len, Scalars &_out) {
+        _out.reset();
         sofab::IStreamInline *_isp = nullptr;
-        sofab::IStreamInline _is{[&out, &_isp](sofab::id _id, std::size_t _size, std::size_t _count) {
-            out.deserialize(*_isp, _id, _size, _count);
+        sofab::IStreamInline _is{[&_out, &_isp](sofab::id _id, std::size_t _size, std::size_t _count) {
+            _out.deserialize(*_isp, _id, _size, _count);
         }, sofab::Limits{SIZE_MAX}};
         _isp = &_is;
-        return _is.feed(data, len);
+        return _is.feed(_data, _len);
     }
 
     /**
@@ -200,22 +200,22 @@ struct Scalars : sofab::Message {
      * Called by @ref encode / @ref encodeTo, and directly when writing into a
      * stream you own. Fields equal to their default are omitted.
      *
-     * @param os Stream to write to.
+     * @param _os Stream to write to.
      * @return The result of the writes.
      */
-    sofab::OStreamImpl::Result serialize(sofab::OStreamImpl &os) const noexcept override {
-        if (u8min != 0) { (void)os.write(0, u8min); }
-        if (u8max != 255) { (void)os.write(1, u8max); }
-        if (u64max != 18446744073709551615ULL) { (void)os.write(2, u64max); }
-        if (i8min != -128) { (void)os.write(3, i8min); }
-        if (i64min != (-9223372036854775807LL - 1)) { (void)os.write(4, i64min); }
-        if (f32 != 3.14f) { (void)os.write(5, f32); }
-        if (f64 != -2.5) { (void)os.write(6, f64); }
-        if (flag != true) { (void)os.write(7, flag); }
+    sofab::OStreamImpl::Result serialize(sofab::OStreamImpl &_os) const noexcept override {
+        if (u8min != 0) { (void)_os.write(0, u8min); }
+        if (u8max != 255) { (void)_os.write(1, u8max); }
+        if (u64max != 18446744073709551615ULL) { (void)_os.write(2, u64max); }
+        if (i8min != -128) { (void)_os.write(3, i8min); }
+        if (i64min != (-9223372036854775807LL - 1)) { (void)_os.write(4, i64min); }
+        if (f32 != 3.14f) { (void)_os.write(5, f32); }
+        if (f64 != -2.5) { (void)_os.write(6, f64); }
+        if (flag != true) { (void)_os.write(7, flag); }
         if (!flags.empty()) {
-            (void)os.write(8, flags);
+            (void)_os.write(8, flags);
         }
-        return os.writeIf(0, false, false);
+        return _os.writeIf(0, false, false);
     }
 
     /**
@@ -225,37 +225,37 @@ struct Scalars : sofab::Message {
      * not know, or one whose wire type contradicts the member's, binds
      * nothing and is skipped.
      *
-     * @param is Stream delivering the field.
-     * @param id Field identifier.
+     * @param _is Stream delivering the field.
+     * @param _id Field identifier.
      */
-    void deserialize(sofab::IStreamImpl &is, sofab::id id, std::size_t, std::size_t) noexcept override {
-        switch (id) {
+    void deserialize(sofab::IStreamImpl &_is, sofab::id _id, std::size_t, std::size_t) noexcept override {
+        switch (_id) {
         case 0:
-            { std::uint64_t _v; if (is.read(_v)) { if (_v > 255) { is.invalidate(); return; } u8min = static_cast<std::uint8_t>(_v); } }
+            { std::uint64_t _v; if (_is.read(_v)) { if (_v > 255) { _is.invalidate(); return; } u8min = static_cast<std::uint8_t>(_v); } }
             break;
         case 1:
-            { std::uint64_t _v; if (is.read(_v)) { if (_v > 255) { is.invalidate(); return; } u8max = static_cast<std::uint8_t>(_v); } }
+            { std::uint64_t _v; if (_is.read(_v)) { if (_v > 255) { _is.invalidate(); return; } u8max = static_cast<std::uint8_t>(_v); } }
             break;
         case 2:
-            sofab::read(is, u64max);
+            sofab::read(_is, u64max);
             break;
         case 3:
-            { std::int64_t _v; if (is.read(_v)) { if (_v < -128 || _v > 127) { is.invalidate(); return; } i8min = static_cast<std::int8_t>(_v); } }
+            { std::int64_t _v; if (_is.read(_v)) { if (_v < -128 || _v > 127) { _is.invalidate(); return; } i8min = static_cast<std::int8_t>(_v); } }
             break;
         case 4:
-            sofab::read(is, i64min);
+            sofab::read(_is, i64min);
             break;
         case 5:
-            sofab::read(is, f32);
+            sofab::read(_is, f32);
             break;
         case 6:
-            sofab::read(is, f64);
+            sofab::read(_is, f64);
             break;
         case 7:
-            sofab::read(is, flag);
+            sofab::read(_is, flag);
             break;
         case 8:
-            { sofabgen::RawArray<std::vector<std::uint8_t>, bool> _t0{&flags}; sofab::readArray(is, _t0, 4); }
+            { sofabgen::RawArray<std::vector<std::uint8_t>, bool> _t0{&flags}; sofab::readArray(_is, _t0, 4); }
             break;
         default: break;
         }
