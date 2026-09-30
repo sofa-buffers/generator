@@ -714,32 +714,71 @@ a reimplementation should emit code that honors all of them:
   (`encode`, `reset`, …) is *mangled*, because an escape answers the grammar and
   not another declaration.
 - **One reserved-name list per language.** A keyword is only one way a name can
-  be taken. A field must equally not take a member the generated class declares
-  (C++ `encode()` — a redeclaration; Python `encode` — the attribute silently
-  shadows the method), nor a name the class body *evaluates* while the class is
-  being defined (Python `classmethod`, `field`, `list`: a field bound earlier in
-  the one class scope rebinds it, and the module fails at import or a later
-  default silently changes). Each backend keeps all three kinds in **one list of
-  its own**, `generators/<lang>/reserved.go`, read by the struct path and the
-  union path alike; a union adds only the members it alone has. The list is per
-  language and never shared: a shared list would be the union over every
-  backend and rename, say, Python's `field` in all of them. Every such list is
-  guarded by a **collision test** that uses each listed name as a field (message,
-  nested struct, union option) and compiles or imports the result against the
-  real corelib, because the generator exits 0 on broken output. Done for C++,
-  Python, Go and TypeScript; the other backends still keep separate keyword and
-  member tables. Where the backend's Go tests cannot reach the toolchain (TS needs
-  an npm install), the collision schema is a checked-in file the conformance
-  suite builds (`tests/conformance/<lang>/reserved.yaml`), and a hermetic test
-  keeps that file equal to what the list generates — a name added to the list
-  fails that test until the file is regenerated with `-update`.
-  A list names what the type carries, **inherited members included**: Go's lists
-  the whole `sofab.Visitor` interface and what the embedded `sofab.StringCheck`
-  promotes, not only the callbacks a type declares — a field that hides a
-  promoted method compiles, but the type stops satisfying the interface, or (a
-  field `SetStringCheck`) silently stops receiving the decode's UTF-8 policy.
-  Where a backend folds schema names (Go camel-cases `a_b` and `aB` to one `AB`),
-  two fields landing on one member are a generation error naming both.
+  be taken. A field must equally not take anything the generated class body
+  already means by that spelling:
+  - a member the class declares (C++ `encode()` — a redeclaration; Python
+    `encode` — the attribute silently shadows the method);
+  - a member it **inherits** (Go: the whole `sofab.Visitor` interface and what the
+    embedded `sofab.StringCheck` promotes — a field hiding `SetStringCheck`
+    compiles but silently drops the decode's UTF-8 policy; C#/TS/Dart: the
+    `object`/`Object` members);
+  - a name the class body **evaluates** at definition time (Python
+    `classmethod`, `field`, `list`: a field bound earlier in the one class scope
+    rebinds it);
+  - an **outer name the body uses**, which a member of that spelling hides: a
+    qualifier in an expression (Java/Kotlin/C# `Seq.x()`, `java.util.…`,
+    `Long.MIN_VALUE` — JLS 6.4.2 obscuring and its Kotlin/C# equivalents), and in
+    Dart every outer name at all, type annotations and the `sofab` import prefix
+    included (a class member shadows it throughout the body); C: the object-like
+    macros of the headers the code includes (`NULL`, `EOF`, `UINT8_MAX`, the C23
+    `*_WIDTH` family, gnu17's `linux`/`unix`).
+
+  Each backend keeps these in **one list of its own**, `generators/<lang>/reserved.go`,
+  read by the struct path and the union path alike; a union adds only the members
+  it alone has. The list is per language and never shared: a shared list would be
+  the union over every backend and rename, say, Python's `field` in all of them.
+  Where the language has its own escape for a reserved word it is always used
+  (Rust `r#`, C# `@`, Kotlin backticks, Zig `@"…"`); a clash with another
+  *declaration* has no escape and takes a trailing `_`. A renamed member keeps the
+  schema name as its JSON key (Rust `serde(rename)`, C# `[JsonPropertyName]`, the
+  others spell JSON keys from the schema name anyway).
+
+  What a list cannot hold is rejected at generation time, naming both sides:
+  two fields that derive one member (`int` + `int_`, Go's folded `a_b` + `aB`,
+  C's `b_len` beside a sized `b`, TS/Dart fp32 companions, Kotlin's JVM
+  accessors — `foo`/`Foo`, `isOpen`/`open`); enum constants or bitfield flags
+  folded to one name (`a_b`/`aB`, Python's upper-cased `c`/`C`), within a type
+  and — where the backend prefixes them with the type and puts them package- or
+  namespace-wide (Go, C++ flags) — across types; a field spelled like its own
+  class (C#, CS0542) or like any generated class (Dart); a member spelled like a
+  macro the C backend defines.
+
+  **Names the decoder builds from schema paths** (Rust/Zig `_Loc` variants,
+  Java/Kotlin frame names, C# location constants, TS scope constants) join the
+  path with `_`, so each backend's `locChild` doubles an underscore *inside* a
+  name: the path `a.b` is `Root_a_b`, a field `a_b` is `Root_a__b`. Without it the
+  two were one name — a duplicate declaration in Rust/Zig/C#/TS, and in Java and
+  Kotlin a **silent** misroute of `a_b`'s data into `a.b`.
+
+  Every list is guarded twice. A **collision test** uses each listed name as a
+  message field, a nested struct field and a union option, plus the path clash,
+  and builds and round-trips the result against the real corelib — the generator
+  exits 0 on broken output, so only building catches it. Where the backend's Go
+  tests cannot reach the toolchain (npm, gradle, mvn, dotnet, dart, cargo, zig),
+  the collision schema is a checked-in file the conformance suite builds
+  (`tests/conformance/<lang>/reserved.{yaml,json}`), and `TestReservedSchemaFile`
+  keeps it equal to what the list generates (`-update` regenerates it). For the
+  languages whose class body resolves outer names (Java, Kotlin, C#, Dart), a
+  **drift test** (`Test<Lang>NamesInScope`) generates the corpus, realworld set
+  and example, reads the public class bodies, and requires every generated
+  member and every outer name used there to be on the list — a backend that
+  starts writing `Math.max(...)` fails it until the name is reserved.
+
+  Known gaps, generated **type** names rather than field names: a message `m_a`
+  and an inline struct `a` in `m` derive one type name in every backend, and a
+  generated class can hide a corelib or harness type of the same name (Java: a
+  message `seq` is the class `Seq`; Zig: a message `decode_error` is refused, the
+  other backends do not check).
 - **Emit pure ASCII *that the generator authors*.** Every byte a backend writes
   on its own — banners, separators, Makefiles, READMEs, scaffolding — must be ASCII
   (`< 0x80`): use ASCII punctuation (`-`, not the em-dash `—`). `TestGeneratedOutputIsASCII`
