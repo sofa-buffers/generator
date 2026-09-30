@@ -2,7 +2,7 @@ version: 1
 $defs:
   union:
     # One $defs union at three sites with two effective default_ids: analysis
-    # splits it into Shape_default_pt and Shape_default_num (an omitted
+    # splits it into one type per default, pt and num (an omitted
     # default_id means the lowest option id, 0 -> num).
     Shape:
       num:   { id: 0, type: u16, default: 5 }
@@ -26,9 +26,9 @@ messages:
           y: { id: 1, type: string, maxlen: 16 }
   UnRef:
     payload:
-      first:  { id: 0, type: union, default_id: 2, oneof: { $ref: "#/$defs/union/Shape" } }  # -> Shape_default_pt
-      second: { id: 1, type: union, default_id: 0, oneof: { $ref: "#/$defs/union/Shape" } }  # -> Shape_default_num
-      third:  { id: 2, type: union, oneof: { $ref: "#/$defs/union/Shape" } }                 # omitted = lowest id 0 -> Shape_default_num
+      first:  { id: 0, type: union, default_id: 2, oneof: { $ref: "#/$defs/union/Shape" } }  # -> the variant defaulting to pt
+      second: { id: 1, type: union, default_id: 0, oneof: { $ref: "#/$defs/union/Shape" } }  # -> the variant defaulting to num
+      third:  { id: 2, type: union, oneof: { $ref: "#/$defs/union/Shape" } }                 # omitted = lowest id 0 -> the num variant
       nested:                                                                               # union of union
         id: 3
         type: union

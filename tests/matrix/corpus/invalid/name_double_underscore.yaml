@@ -1,0 +1,7 @@
+# A name has no "__" (and no trailing "_"): targets use them as separators
+# and escapes (ARCHITECTURE §8, "Naming").
+version: 1
+messages:
+  M:
+    payload:
+      a__b: { id: 0, type: u8 }

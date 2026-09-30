@@ -22,9 +22,12 @@ Corner-case SofaBuffers definitions, exercised hermetically by `tests/matrix`
   (`unions.yaml`: `default_id` on a non-first and on a struct option, an omitted
   `default_id` meaning the lowest option id, a `$defs` union used with two
   different `default_id`s — which analysis splits into one generated type per
-  `default_id`, `Shape_default_pt` / `Shape_default_num` — a union of unions, an
+  `default_id` — a union of unions, an
   array of unions and a union element two array levels down, non-contiguous
-  option ids, and the explicit empty `""` / `[]` option defaults that stay legal),
+  option ids, and the explicit empty `""` / `[]` option defaults that stay legal;
+  `union_split_names.yaml` adds unions spelled like the variant names the
+  generator used to derive, which every target must now build — the wider
+  name-collision schema is `tests/conformance/lib/names.yaml`),
   large/non-contiguous field ids, metadata
   (`deprecated`/`unit`/`description`), and `$ref` reuse.
 - **`invalid/`** — definitions that **must be rejected** by the hard gate
@@ -46,8 +49,10 @@ Corner-case SofaBuffers definitions, exercised hermetically by `tests/matrix`
   `struct`, `union` or a nested `array`, the five kinds no backend emits an
   initializer for — an empty union `oneof`, a non-empty `default` on a
   `string`/`blob`/`array` union option (field, element and `$defs` union), a
-  split `$defs` union whose generated name clashes with an existing type raw or
-  once case and separators are folded away, recursive `$ref`, a
+  name breaking one of the three naming rules — `__` in a name
+  (`name_double_underscore.yaml`), sibling names that differ only in case or
+  underscores (`name_case_twins.yaml`), a message and a `$defs` type sharing a
+  fold (`name_top_level_scope.yaml`) — recursive `$ref`, a
   cross-file `$ref` to a missing definition, …).
 - **`shared/`** — definitions referenced from `defs/` via **cross-file `$ref`**
   (e.g. `common.yaml`); not validated standalone.

@@ -1,0 +1,24 @@
+# Shape is used with default_id 0 and 2, so it splits into one type per
+# default. Both other unions are spelled like the variant names the generator
+# used to derive (<Name>_default_<option>): Shape_default_pt directly, and
+# ShapeDefault's inline option pt once case and separators are dropped. The
+# generator refused this schema then; the naming contract (ARCHITECTURE §8,
+# "Naming") names a variant in a channel no schema name reaches, so every
+# target must now build it.
+version: 1
+$defs:
+  union:
+    Shape:
+      a:  { id: 0, type: u8 }
+      pt: { id: 2, type: u8 }
+    Shape_default_pt:
+      z: { id: 0, type: u8 }
+    ShapeDefault:
+      pt: { id: 0, type: struct, fields: { x: { id: 0, type: u8 } } }
+messages:
+  M:
+    payload:
+      x: { id: 0, type: union, default_id: 0, oneof: { $ref: "#/$defs/union/Shape" } }
+      y: { id: 1, type: union, default_id: 2, oneof: { $ref: "#/$defs/union/Shape" } }
+      z: { id: 2, type: union, oneof: { $ref: "#/$defs/union/Shape_default_pt" } }
+      w: { id: 3, type: union, oneof: { $ref: "#/$defs/union/ShapeDefault" } }
