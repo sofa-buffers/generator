@@ -166,7 +166,7 @@ switch, so an array carries `Field.Unit` / `Field.Decimals` exactly like a scala
 and every backend's generic `(unit: …)` rendering applies unchanged. All identifiers match
 `^[A-Za-z][A-Za-z0-9]*(_[A-Za-z0-9]+)*$` (no `__`, no trailing `_`), names in one
 scope differ in more than case and underscores, and messages share one scope with
-every `$defs` category — the three naming rules of §8.9, which make every target's
+every `$defs` category — the three naming rules of §8, "Naming", which make every target's
 identifiers distinct by construction; objects are **closed** (unknown keys are rejected).
 
 **Field types and their declaration keys:**
@@ -863,6 +863,77 @@ a reimplementation should emit code that honors all of them:
   its enum-constant, flag, and native-annotation rendering (the `docs` target
   renders the same metadata as HTML-escaped page *content* instead, with `unit` and
   `deprecated` as their own column/badge; there only UTF-8 fidelity is checked).
+
+### Naming: conflict-free identifiers
+
+**Every schema the validator accepts generates in every target without a name
+clash.** A backend never refuses a schema because two of its names collide, and
+never emits two declarations of one name; the guarantee is structural, not a list
+of checks. It rests on three pieces.
+
+**1. Three naming rules** (`internal/parser`, the validator — so they bind every
+target alike):
+
+- a name matches `^[A-Za-z][A-Za-z0-9]*(_[A-Za-z0-9]+)*$` — no `__`, no trailing `_`;
+- names in one scope (a payload, a struct, a union's options, an enum's constants,
+  a bitfield's flags) have distinct **folds** (lowercased, `_` dropped): `foo_bar`
+  and `fooBar`, or `x` and `X`, cannot be siblings;
+- messages and every `$defs` category are **one** scope.
+
+They exist because idiomatic identifiers are not injective: `foo_bar` and `fooBar`
+are both `FooBar`, so no encoding can be idiomatic for both *and* keep them apart.
+Tying the rule to the fold covers every case convention a target uses (Pascal,
+camel, UPPER, lower) and case-insensitive filesystems. The same name in different
+scopes stays legal — a field `a` in two messages, a message `m_a` beside a message
+`m` with a field `a`. Measured against the 91 schemas (1890 names) in this repo,
+only the reserved-name tests, which probe case twins on purpose, break a rule.
+
+**2. Schema paths in the IR.** Every `NamedType` carries its `Path` — its
+top-level name (a `$defs` name, or the message that declares it inline), then the
+field and option names down to the declaring site — and a split union its
+`Variant` (§6). An array field's inline element type takes the field's own path:
+a field declares at most one inline type, so no `_elem` is needed. Graph keys join
+with `.` and `~`, which no name contains, so they are distinct by construction.
+
+**3. Channels.** Every identifier a backend emits is built from these, and each
+channel's spellings are ones no other channel produces. `internal/naming` holds
+the shared encodings; `TestEncodingsAreInjective` checks them over random
+rule-abiding schemas.
+
+| Channel | Spelling | Why nothing else produces it |
+|---|---|---|
+| **type** | `naming.TypeIdent(path)`: each segment `Pascal`, joined with `_` — `M_A` for the inline struct of field `a` in message `m`, `MA` for a message `m_a`, `Point` for a `$defs` struct `point` (no category prefix: rule 3) | `Pascal` never yields `_`, so the split at `_` recovers the segments, and each segment is unique in its scope |
+| **child of a leaf** | enum constant, bitfield flag at namespace level: `T_` + `Pascal(name)` (Go `Color_Red`) | an enum or bitfield path has no child paths |
+| **role** | a generated companion of type `T`: `T__` + a Pascal role word (`M__Decoder`, Go `M__New`, `M__MaxSize`); a split union variant: `T__Default` + `Pascal(Variant)` | a type identifier never contains `__` |
+| **private** | a name only generated code uses: `_` first (`_M__Visitor`, `_StreamDecoder`) — `_` + a type identifier + `__` + a role when it is per type | no schema name starts with `_` |
+| **escape** | a type identifier equal to a name the module declares or uses unqualified (its fixed names, imports, language builtins and keywords): `T_` | a type identifier never ends with `_` |
+| **member** | fields, methods, union accessors: the per-language lists and escapes of *One reserved-name list per language* above | one class scope; rule 2 removes the case twins those lists could not |
+| **file** | per message or type: the type identifier (Java, Kotlin) or the lowercased name/path (`naming.Lower`), never a name the toolchain treats specially (Go `_test`, `_<GOOS>`), a fixed generated file, or a header the build includes | the fold is unique per scope, so even a case-insensitive filesystem keeps them apart |
+
+Two targets deviate where the language forbids a spelling:
+
+- **C** keeps names verbatim (so segments contain `_`): a path is
+  `naming.CPath` (segments joined with `___`), a role follows `__`, macros upper-case
+  both — `message_m_t`, `message_m___a_t`, `message_m__init`, `message_m__decoder_t`,
+  `MESSAGE_M__MAX_SIZE`, a flag `MESSAGE_M___FLAGS___ON`. A name has no `__`, so the
+  run length of underscores tells a path (3) from a role (2) from a name (1).
+- **C++** reserves identifiers containing `__`, so a namespace-level role there is
+  `_` + a lower-case role word (`Shape_default_Pt`): a Pascal segment never starts
+  with a lower-case letter. Everything else C++ generates per type is a member.
+
+Parameters and locals that share a scope with schema-derived members (C++
+methods, Zig functions) are `_`-prefixed for the same reason.
+
+**Tests.** `internal/naming` proves the encodings injective. Every backend's
+collision schema (`tests/conformance/<lang>/reserved.{yaml,json}`, generated by
+`TestReservedSchemaFile`) and the shared `tests/conformance/lib/names.yaml` add the
+type-level cases — every role word, fixed name and imported or builtin name as a
+message, a `$defs` type and an inline path, plus the path clashes (`m_a` beside
+`m.a`, `a.b_c` beside `a_b.c`, a `$defs` type beside `struct_<name>`) — and each
+conformance suite builds and round-trips them against the real corelib, because
+the generator exits 0 on broken output and only building catches it.
+`TestGeneratedFilesAreDistinct` generates the names schema for every target and
+fails when two output files share a case-folded path.
 
 **Adding a language is purely additive** — a new `generators/<lang>/` package + a
 blank import + per-target schema keys + a `tests/conformance/<lang>/run.sh` + a CI job. No

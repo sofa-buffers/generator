@@ -227,7 +227,7 @@ func (a *analyzer) splitUnion(nt *ir.NamedType, ss []unionSite, ids []int64) {
 		id := d
 		// "~" appears in no name and no other key, and Variant tells the
 		// backends which default this is; they name it in a channel no path
-		// segment can produce (ARCHITECTURE §8.9), so no variant can meet
+		// segment can produce (ARCHITECTURE §8, "Naming"), so no variant can meet
 		// another type.
 		v.Key = nt.Key + "~" + opt.Name
 		v.Variant = opt.Name
