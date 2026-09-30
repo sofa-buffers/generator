@@ -193,10 +193,10 @@ messages:
 		ref       *ir.TypeRef
 		want      int64
 	}{
-		{"first", "union/Shape_default_pt", fs[0].Ref, 2},
-		{"second", "union/Shape_default_num", fs[1].Ref, 0},
-		{"third (omitted)", "union/Shape_default_num", fs[2].Ref, 0},
-		{"list element", "union/Shape_default_pt", fs[3].ElemRef, 2},
+		{"first", "union/Shape~pt", fs[0].Ref, 2},
+		{"second", "union/Shape~num", fs[1].Ref, 0},
+		{"third (omitted)", "union/Shape~num", fs[2].Ref, 0},
+		{"list element", "union/Shape~pt", fs[3].ElemRef, 2},
 	} {
 		if c.ref.Key != c.key || c.ref.Target == nil || c.ref.Target.Key != c.key || s.Named[c.key] != c.ref.Target {
 			t.Errorf("%s: repointed to %q (target %v), want %q", c.what, c.ref.Key, c.ref.Target, c.key)
@@ -208,13 +208,13 @@ messages:
 	if fs[1].Ref.Target != fs[2].Ref.Target {
 		t.Error("an omitted default_id and an explicit one naming the same option must share one type")
 	}
-	if n := s.Named["union/Shape_default_pt"].Name; n != "Shape_default_pt" {
-		t.Errorf("variant Name = %q, want Shape_default_pt", n)
+	if v := s.Named["union/Shape~pt"]; v.Name != "Shape" || v.Variant != "pt" || strings.Join(v.Path, ".") != "Shape" {
+		t.Errorf("variant Name/Variant/Path = %q/%q/%v, want Shape/pt/[Shape]", v.Name, v.Variant, v.Path)
 	}
 	if _, ok := s.Named["union/Shape"]; ok {
 		t.Error("the split original must be removed from Named")
 	}
-	want := []string{"struct/A", "union/Shape_default_num", "union/Shape_default_pt", "union/Shape_pt", "enum/Z"}
+	want := []string{"struct/A", "union/Shape~num", "union/Shape~pt", "union/Shape.pt", "enum/Z"}
 	if strings.Join(s.NamedOrder, ",") != strings.Join(want, ",") {
 		t.Errorf("NamedOrder = %v, want %v", s.NamedOrder, want)
 	}
@@ -243,44 +243,37 @@ messages:
 	}
 }
 
-func TestUnionSplitCollision(t *testing.T) {
-	src := `version: 1
+// A split variant can meet no other type: its key carries "~", which no name
+// or other key contains, and backends name it through Variant, in a channel
+// no path segment can produce. These schemas used to be refused because the
+// variant was named <Name>_default_<option>, which a $defs union spelled that
+// way, or the inline option `pt` of a union `ShapeDefault`, derived as well.
+func TestUnionSplitMeetsNoOtherType(t *testing.T) {
+	for _, other := range []string{
+		"Shape_default_pt: { z: {id: 0, type: u8} }",
+		"ShapeDefault: { pt: {id: 0, type: struct, fields: { x: {id: 0, type: u8} }} }",
+	} {
+		src := `version: 1
 $defs:
   union:
     Shape: { num: {id: 0, type: u8}, pt: {id: 2, type: u8} }
-    Shape_default_pt: { z: {id: 0, type: u8} }
+    ` + other + `
 messages:
   M:
     payload:
       a: {id: 0, type: union, default_id: 0, oneof: {$ref: '#/$defs/union/Shape'}}
       b: {id: 1, type: union, default_id: 2, oneof: {$ref: '#/$defs/union/Shape'}}
-      c: {id: 2, type: union, oneof: {$ref: '#/$defs/union/Shape_default_pt'}}
 `
-	err := Analyze(buildSchema(t, src))
-	if err == nil || !strings.Contains(err.Error(), `collides with the existing type "union/Shape_default_pt"`) ||
-		!strings.Contains(err.Error(), "messages/M/b") {
-		t.Fatalf("want a located split-name collision at the default_id 2 site, got: %v", err)
-	}
-}
-
-// The collision test is folded: the variant union/Shape_default_pt and the
-// inline option type union/ShapeDefault_pt of a $defs union ShapeDefault differ
-// raw but derive the same identifier (Go UnionShapeDefaultPt).
-func TestUnionSplitFoldedCollision(t *testing.T) {
-	src := `version: 1
-$defs:
-  union:
-    Shape: { num: {id: 0, type: u8}, pt: {id: 2, type: u8} }
-    ShapeDefault: { pt: {id: 0, type: struct, fields: { x: {id: 0, type: u8} }} }
-messages:
-  M:
-    payload:
-      a: {id: 0, type: union, default_id: 0, oneof: {$ref: '#/$defs/union/Shape'}}
-      b: {id: 1, type: union, default_id: 2, oneof: {$ref: '#/$defs/union/Shape'}}
-      c: {id: 2, type: union, oneof: {$ref: '#/$defs/union/ShapeDefault'}}
-`
-	err := Analyze(buildSchema(t, src))
-	if err == nil || !strings.Contains(err.Error(), `collides with the existing type "union/ShapeDefault_pt"`) {
-		t.Fatalf("want a folded split-name collision, got: %v", err)
+		s := buildSchema(t, src)
+		if err := Analyze(s); err != nil {
+			t.Fatalf("%s: analyze: %v", other, err)
+		}
+		fs := s.Messages[0].Fields
+		if fs[0].Ref.Key != "union/Shape~num" || fs[1].Ref.Key != "union/Shape~pt" {
+			t.Errorf("%s: sites point at %q and %q, want the two variants", other, fs[0].Ref.Key, fs[1].Ref.Key)
+		}
+		if len(s.Named) != len(s.NamedOrder) {
+			t.Errorf("%s: Named has %d types, NamedOrder %d", other, len(s.Named), len(s.NamedOrder))
+		}
 	}
 }

@@ -39,7 +39,21 @@ messages:             # each key = a message name
         # ...type-specific constraints + metadata...
 ```
 
-All names match `^[A-Za-z][A-Za-z0-9_]*$`. Objects are **closed**
+All names match `^[A-Za-z][A-Za-z0-9]*(_[A-Za-z0-9]+)*$`: letters and digits,
+starting with a letter, with single underscores between them (no `__`, no
+trailing `_`). Two more rules keep every generated identifier distinct; they
+cannot be written as JSON Schema, so only `sofabgen` checks them:
+
+- Names in one scope (a payload, a struct, a union's options, an enum's
+  constants, a bitfield's flags) must differ in more than case and
+  underscores: `foo_bar` and `fooBar`, or `x` and `X`, cannot be siblings.
+- Messages and all `$defs` categories share one scope, so a message `Point`
+  and a struct `point`, or a struct `P` and an enum `P`, cannot coexist.
+
+The same name in different scopes is fine: a field `a` in two messages, or a
+message `m_a` next to a message `m` with a field `a`.
+
+Objects are **closed**
 (`additionalProperties: false`) almost everywhere, so typos and stray keys are
 rejected rather than ignored.
 

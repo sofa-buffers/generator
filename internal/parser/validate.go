@@ -42,7 +42,10 @@ func (es Errors) Error() string {
 	return b.String()
 }
 
-var nameRe = regexp.MustCompile(`^[A-Za-z][A-Za-z0-9_]*$`)
+// nameRe is the spelling of every user-chosen name. It keeps "__" and a
+// trailing "_" out of names so that targets can use them as separators and
+// escapes no name can produce (docs/ARCHITECTURE.md §8, "Naming").
+var nameRe = regexp.MustCompile(`^[A-Za-z][A-Za-z0-9]*(_[A-Za-z0-9]+)*$`)
 
 // numericTypes are the scalar wire primitives usable as array elements too.
 var scalarRanges = map[string][2]int64{
@@ -108,6 +111,26 @@ func (v *validator) validateRoot(root map[string]any) {
 	if hasMsgs {
 		v.validateMessages(root["messages"], "#/messages")
 	}
+	v.checkTopLevelNames(root)
+}
+
+// checkTopLevelNames enforces one namespace for messages and every $defs
+// category: each of them becomes a type at the top level of every target, so
+// a message `Point` and a struct `point`, or a struct `P` and an enum `P`,
+// would share one identifier.
+func (v *validator) checkTopLevelNames(root map[string]any) {
+	var names []namedAt
+	if msgs, ok := root["messages"].(map[string]any); ok {
+		names = append(names, namesAt(msgs, "#/messages")...)
+	}
+	if defs, ok := root["$defs"].(map[string]any); ok {
+		for cat, group := range defs {
+			if g, ok := group.(map[string]any); ok {
+				names = append(names, namesAt(g, "#/$defs/"+cat)...)
+			}
+		}
+	}
+	v.checkDistinct(names, "messages and $defs, which share one namespace")
 }
 
 func (v *validator) validateDefs(node any, loc string) {
@@ -191,6 +214,7 @@ func (v *validator) validateIDScope(node any, loc string) {
 		v.add(loc, "must be a mapping of field definitions")
 		return
 	}
+	v.checkDistinct(namesAt(m, loc), "one payload, struct or union")
 	ids := map[int64]string{}
 	for name, val := range m {
 		floc := loc + "/" + name
@@ -617,6 +641,7 @@ func (v *validator) validateEnumDef(node any, loc string) []int64 {
 		v.add(loc, "enum must be a mapping of NAME -> value")
 		return nil
 	}
+	v.checkDistinct(namesAt(m, loc), "one enum")
 	var values []int64
 	for name, val := range m {
 		eloc := loc + "/" + name
@@ -704,6 +729,7 @@ func (v *validator) validateBitfieldDef(node any, loc string) uint64 {
 		v.add(loc, "bitfield must be a mapping of FLAG -> {pos, default?}")
 		return mask
 	}
+	v.checkDistinct(namesAt(m, loc), "one bitfield")
 	positions := map[int64]string{}
 	for name, val := range m {
 		floc := loc + "/" + name
@@ -1244,7 +1270,55 @@ func nonEmptyDefault(typ string, d any) bool {
 
 func (v *validator) checkName(name, loc string) {
 	if !nameRe.MatchString(name) {
-		v.add(loc, "name %q must match ^[A-Za-z][A-Za-z0-9_]*$", name)
+		v.add(loc, "name %q must match %s: letters and digits, starting with a letter, "+
+			"with single underscores between them (no \"__\", no trailing \"_\")", name, nameRe)
+	}
+}
+
+// foldName is what a name keeps once case and underscores are dropped. Every
+// target derives its identifiers from a name by changing case and adding or
+// removing underscores (`foo_bar` and `fooBar` are both FooBar, FOO_BAR and
+// FOOBAR tell `a` from `A` only by chance), so two names are told apart in
+// every target exactly when their folds differ.
+func foldName(name string) string {
+	var b strings.Builder
+	for _, r := range name {
+		switch {
+		case r >= 'A' && r <= 'Z':
+			b.WriteRune(r + 'a' - 'A')
+		case r != '_':
+			b.WriteRune(r)
+		}
+	}
+	return b.String()
+}
+
+// namedAt is a name and the location of the element it names.
+type namedAt struct{ name, loc string }
+
+// namesAt lists the keys of a mapping located under loc.
+func namesAt(m map[string]any, loc string) []namedAt {
+	out := make([]namedAt, 0, len(m))
+	for name := range m {
+		out = append(out, namedAt{name, loc + "/" + name})
+	}
+	return out
+}
+
+// checkDistinct rejects two names of one scope whose folds coincide. Every
+// name but the first of a folded group, in location order, is reported and
+// names the first.
+func (v *validator) checkDistinct(names []namedAt, scope string) {
+	sort.Slice(names, func(i, j int) bool { return names[i].loc < names[j].loc })
+	first := map[string]namedAt{}
+	for _, n := range names {
+		f := foldName(n.name)
+		if prev, dup := first[f]; dup {
+			v.add(n.loc, "%q and %q (at %s) differ only in case or underscores; names in %s must differ in more than that",
+				n.name, prev.name, prev.loc, scope)
+			continue
+		}
+		first[f] = n
 	}
 }
 

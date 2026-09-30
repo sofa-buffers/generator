@@ -91,14 +91,14 @@
           "name": "someenum",
           "id": 13,
           "kind": "enum",
-          "ref": "myfirstmessage_someenum",
+          "ref": "myfirstmessage.someenum",
           "has_default": true
         },
         {
           "name": "somebitfield",
           "id": 14,
           "kind": "bitfield",
-          "ref": "myfirstmessage_somebitfield"
+          "ref": "myfirstmessage.somebitfield"
         },
         {
           "name": "someuintarray",
@@ -144,20 +144,20 @@
           "name": "somestruct",
           "id": 20,
           "kind": "struct",
-          "ref": "myfirstmessage_somestruct"
+          "ref": "myfirstmessage.somestruct"
         },
         {
           "name": "someunion",
           "id": 21,
           "kind": "union",
-          "ref": "myfirstmessage_someunion",
+          "ref": "myfirstmessage.someunion",
           "has_default": true
         },
         {
           "name": "somestructwitharray",
           "id": 22,
           "kind": "struct",
-          "ref": "myfirstmessage_somestructwitharray"
+          "ref": "myfirstmessage.somestructwitharray"
         },
         {
           "name": "somestructarray",
@@ -165,7 +165,7 @@
           "kind": "array",
           "elem": "struct",
           "count": 3,
-          "elem_ref": "myfirstmessage_somestructarray_elem"
+          "elem_ref": "myfirstmessage.somestructarray"
         },
         {
           "name": "somematrix",
@@ -184,7 +184,7 @@
           "kind": "array",
           "elem": "union",
           "count": 2,
-          "elem_ref": "myfirstmessage_someunionarray_elem"
+          "elem_ref": "myfirstmessage.someunionarray"
         },
         {
           "name": "someenumarray",
@@ -192,7 +192,7 @@
           "kind": "array",
           "elem": "enum",
           "count": 4,
-          "elem_ref": "myfirstmessage_someenumarray_elem",
+          "elem_ref": "myfirstmessage.someenumarray",
           "has_default": true
         },
         {
@@ -209,14 +209,14 @@
           "kind": "array",
           "elem": "bitfield",
           "count": 3,
-          "elem_ref": "myfirstmessage_somebitfieldarray_elem"
+          "elem_ref": "myfirstmessage.somebitfieldarray"
         },
         {
           "name": "somemap",
           "id": 29,
           "kind": "array",
           "elem": "struct",
-          "elem_ref": "myfirstmessage_somemap_elem"
+          "elem_ref": "myfirstmessage.somemap"
         }
       ]
     }
@@ -224,7 +224,11 @@
   "named": [
     {
       "category": "bitfield",
-      "key": "myfirstmessage_somebitfield",
+      "key": "myfirstmessage.somebitfield",
+      "path": [
+        "myfirstmessage",
+        "somebitfield"
+      ],
       "inline": true,
       "flags": [
         {
@@ -239,7 +243,11 @@
     },
     {
       "category": "bitfield",
-      "key": "myfirstmessage_somebitfieldarray_elem",
+      "key": "myfirstmessage.somebitfieldarray",
+      "path": [
+        "myfirstmessage",
+        "somebitfieldarray"
+      ],
       "inline": true,
       "flags": [
         {
@@ -254,7 +262,11 @@
     },
     {
       "category": "enum",
-      "key": "myfirstmessage_someenum",
+      "key": "myfirstmessage.someenum",
+      "path": [
+        "myfirstmessage",
+        "someenum"
+      ],
       "inline": true,
       "consts": [
         {
@@ -277,7 +289,11 @@
     },
     {
       "category": "enum",
-      "key": "myfirstmessage_someenumarray_elem",
+      "key": "myfirstmessage.someenumarray",
+      "path": [
+        "myfirstmessage",
+        "someenumarray"
+      ],
       "inline": true,
       "consts": [
         {
@@ -296,7 +312,11 @@
     },
     {
       "category": "struct",
-      "key": "myfirstmessage_somemap_elem",
+      "key": "myfirstmessage.somemap",
+      "path": [
+        "myfirstmessage",
+        "somemap"
+      ],
       "inline": true,
       "fields": [
         {
@@ -314,7 +334,11 @@
     },
     {
       "category": "struct",
-      "key": "myfirstmessage_somestruct",
+      "key": "myfirstmessage.somestruct",
+      "path": [
+        "myfirstmessage",
+        "somestruct"
+      ],
       "inline": true,
       "fields": [
         {
@@ -334,13 +358,18 @@
           "name": "nestedstruct",
           "id": 2,
           "kind": "struct",
-          "ref": "myfirstmessage_somestruct_nestedstruct"
+          "ref": "myfirstmessage.somestruct.nestedstruct"
         }
       ]
     },
     {
       "category": "struct",
-      "key": "myfirstmessage_somestruct_nestedstruct",
+      "key": "myfirstmessage.somestruct.nestedstruct",
+      "path": [
+        "myfirstmessage",
+        "somestruct",
+        "nestedstruct"
+      ],
       "inline": true,
       "fields": [
         {
@@ -353,7 +382,11 @@
     },
     {
       "category": "struct",
-      "key": "myfirstmessage_somestructarray_elem",
+      "key": "myfirstmessage.somestructarray",
+      "path": [
+        "myfirstmessage",
+        "somestructarray"
+      ],
       "inline": true,
       "fields": [
         {
@@ -372,7 +405,11 @@
     },
     {
       "category": "struct",
-      "key": "myfirstmessage_somestructwitharray",
+      "key": "myfirstmessage.somestructwitharray",
+      "path": [
+        "myfirstmessage",
+        "somestructwitharray"
+      ],
       "inline": true,
       "fields": [
         {
@@ -394,7 +431,11 @@
     },
     {
       "category": "union",
-      "key": "myfirstmessage_someunion",
+      "key": "myfirstmessage.someunion",
+      "path": [
+        "myfirstmessage",
+        "someunion"
+      ],
       "inline": true,
       "default_id": 0,
       "fields": [
@@ -414,13 +455,18 @@
           "name": "option3",
           "id": 2,
           "kind": "struct",
-          "ref": "myfirstmessage_someunion_option3"
+          "ref": "myfirstmessage.someunion.option3"
         }
       ]
     },
     {
       "category": "struct",
-      "key": "myfirstmessage_someunion_option3",
+      "key": "myfirstmessage.someunion.option3",
+      "path": [
+        "myfirstmessage",
+        "someunion",
+        "option3"
+      ],
       "inline": true,
       "fields": [
         {
@@ -437,7 +483,11 @@
     },
     {
       "category": "union",
-      "key": "myfirstmessage_someunionarray_elem",
+      "key": "myfirstmessage.someunionarray",
+      "path": [
+        "myfirstmessage",
+        "someunionarray"
+      ],
       "inline": true,
       "default_id": 0,
       "fields": [

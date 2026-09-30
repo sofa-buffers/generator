@@ -132,10 +132,29 @@ const (
 // Flags.
 type NamedType struct {
 	Category Category
-	Name     string // canonical, e.g. "Point" (unqualified)
+	Name     string // canonical, e.g. "Point" (unqualified); an inline type's dotted Path, e.g. "m.a"
 	Key      string // graph key, e.g. "struct/Point" or an inline synthetic key
 	Summary  string
 	Inline   bool // true if it originated inline (not from $defs)
+
+	// Path is what every backend names the type after: its top-level name (a
+	// $defs name, or the message that declares it inline) followed by the
+	// field and option names leading to the declaring site. An array field's
+	// inline element type takes the field's own path — the field declares no
+	// other inline type — so `m.a` names both an inline struct field `a` and
+	// the inline struct element of an array field `a`, never both at once.
+	//
+	// Paths are unique, and each segment is unique in its scope even once case
+	// and underscores are dropped (the naming rules, ARCHITECTURE §8.9), so a
+	// backend that encodes each segment injectively and joins them with a
+	// separator no segment can produce gets distinct identifiers by
+	// construction.
+	Path []string
+	// Variant is, for a $defs union split by default_id (one type per default,
+	// see DefaultID), the name of the option this variant defaults to; "" for
+	// every other type. Variants share Path, so a backend adds Variant to the
+	// identifier in a channel no path segment can produce.
+	Variant string
 
 	Fields []*Field        // struct/union
 	Consts []*EnumConst    // enum

@@ -37,6 +37,8 @@ type dumpElem struct {
 type dumpNamed struct {
 	Category  string      `json:"category"`
 	Key       string      `json:"key"`
+	Path      []string    `json:"path"`
+	Variant   string      `json:"variant,omitempty"` // split union: the option this variant defaults to
 	Inline    bool        `json:"inline,omitempty"`
 	DefaultID *int64      `json:"default_id,omitempty"` // union: the option a fresh value holds
 	Fields    []dumpField `json:"fields,omitempty"`
@@ -130,7 +132,8 @@ func (s *Schema) Dump() []byte {
 	}
 	for _, key := range s.NamedOrder {
 		nt := s.Named[key]
-		dn := dumpNamed{Category: categoryName(nt.Category), Key: nt.Key, Inline: nt.Inline, DefaultID: nt.DefaultID}
+		dn := dumpNamed{Category: categoryName(nt.Category), Key: nt.Key, Path: nt.Path, Variant: nt.Variant,
+			Inline: nt.Inline, DefaultID: nt.DefaultID}
 		switch nt.Category {
 		case CatStruct, CatUnion:
 			dn.Fields = projectFields(nt.Fields)
