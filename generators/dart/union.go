@@ -6,6 +6,7 @@ import (
 
 	"github.com/sofa-buffers/generator/internal/generator"
 	"github.com/sofa-buffers/generator/internal/ir"
+	"github.com/sofa-buffers/generator/internal/naming"
 )
 
 // A schema union is a Dart class that holds exactly ONE option (MESSAGE_SPEC
@@ -50,9 +51,10 @@ type unionOpt struct {
 	// field-shaped helper treats it as "no declared default".
 	f       *ir.Field
 	orig    *ir.Field // the option as declared, for its documentation
-	prop    string    // the public getter/setter (mangled)
-	base    string    // <Opt>: has<Opt>, mutable<Opt>
-	slot    string    // the private slot: "_" + prop, so it never lands on `_which`
+	prop    string    // the public getter/setter: the option's name
+	has     string    // has<Opt>
+	mutable string    // mutable<Opt> ("" unless unionMutable)
+	slot    string    // the private slot: "_" + prop
 	bits    string    // the public fp32 raw-bits property ("" unless fp32)
 	bitSlot string    // its private slot
 	idConst string    // <opt>Id
@@ -66,23 +68,6 @@ type unionShape struct {
 	opts     []*unionOpt
 	d        *unionOpt
 	byField  map[*ir.Field]*unionOpt
-}
-
-// unionOptProp is the getter/setter an option is reached through: the option's
-// name, mangled like a struct member's, and -- where it lands on one of the
-// union's own members or on the class name (a member cannot share it) -- with
-// the trailing underscore.
-func unionOptProp(name, typeName string) string {
-	p := dartIdent(name)
-	if p == typeName {
-		return p + "_"
-	}
-	for m := range unionFixed {
-		if p == m {
-			return p + "_"
-		}
-	}
-	return p
 }
 
 // unionMutable reports whether an option gets a mutable<Opt>() accessor: every
@@ -102,87 +87,56 @@ func unionMutable(fld *ir.Field) bool {
 // in place through mutable<Opt>().
 func unionHasSetter(fld *ir.Field) bool { return !isDest(fld) }
 
-func (g *gen) unionShapeOf(key string, nt *ir.NamedType) *unionShape {
+// unionShapeOf is the union type at graph key `key`, with every member name
+// its class declares (built once, with the rest of the module's members).
+func (g *gen) unionShapeOf(key string, _ *ir.NamedType) *unionShape {
+	return g.members().unions[key]
+}
+
+// buildUnionShape names the members of one union class. A class's static and
+// instance members share one namespace, so the getters, has/mutable members, id
+// constants, raw-bits properties and private slots are handed out by ONE
+// memberAlloc, beside the union's own `which` / `_which` / serialize / reset:
+// the options' own names first -- so an option keeps its name -- and every
+// derived member after them, each taking a trailing `_` where it lands on a
+// name already given (`a`'s aId beside an option `aId`, `x`'s hasX beside an
+// option `hasX`). Nothing is left to refuse.
+func (g *gen) buildUnionShape(key string, nt *ir.NamedType, blocked func(string) bool) *unionShape {
 	u := &unionShape{typeName: g.typeName(key), nt: nt, byField: map[*ir.Field]*unionOpt{}}
+	a := newMemberAlloc(func(n string) bool { return blocked(n) || unionFixed[n] }, "_which")
 	for _, fld := range nt.Fields {
 		cp := *fld
 		switch fld.Kind {
 		case ir.KindString, ir.KindBlob, ir.KindArray:
 			cp.Default = nil
 		}
-		prop := unionOptProp(fld.Name, u.typeName)
-		o := &unionOpt{
-			f:       &cp,
-			orig:    fld,
-			prop:    prop,
-			base:    exported(fld.Name),
-			slot:    "_" + prop,
-			idConst: fld.Name + "Id",
-			isD:     nt.IsDefaultOption(fld),
-		}
-		if fld.Kind == ir.KindFP32 {
-			o.bits = prop + "Fp32Bits"
-			o.bitSlot = "_" + prop + "Fp32Bits"
-		}
+		o := &unionOpt{f: &cp, orig: fld, prop: a.take(fld.Name), isD: nt.IsDefaultOption(fld)}
 		u.opts = append(u.opts, o)
 		u.byField[fld] = o
 		if o.isD {
 			u.d = o
 		}
 	}
-	return u
-}
-
-// checkUnionNames rejects a union whose options derive the same Dart member. A
-// class's static and instance members share one namespace, so the getters, the
-// has/mutable members, the id constants, the raw-bits properties and the
-// private slots are checked as ONE set, together with the union's own members:
-// `foo_bar` and `fooBar` both give hasFooBar, `a`'s aId lands on an option named
-// `aId`. Located: the error names the union and both options.
-func checkUnionNames(u *unionShape, types map[string]string) error {
-	owner := map[string]string{"_which": "", u.typeName: ""}
-	for m := range unionFixed {
-		owner[m] = ""
-	}
 	for _, o := range u.opts {
-		names := []string{o.prop, o.slot, o.idConst, "has" + o.base}
+		pascal := naming.Pascal(o.orig.Name)
+		o.idConst = a.take(o.orig.Name + "Id")
+		o.has = a.take("has" + pascal)
 		if unionMutable(o.f) {
-			names = append(names, "mutable"+o.base)
+			o.mutable = a.take("mutable" + pascal)
 		}
-		if o.bits != "" {
-			names = append(names, o.bits, o.bitSlot)
-		}
-		for _, n := range names {
-			// A member spelled like a generated class hides that class in the
-			// whole union body, which names its options' types.
-			if what, ok := types[n]; ok {
-				return fmt.Errorf("dart backend: union %s: option %q generates the member %s, which is also %s; rename the option", u.nt.Key, o.f.Name, n, what)
-			}
-			prev, ok := owner[n]
-			switch {
-			case ok && prev == "":
-				return fmt.Errorf("dart backend: union %s: option %q generates the member %s, which the union type already has; rename the option", u.nt.Key, o.f.Name, n)
-			case ok && prev != o.f.Name:
-				return fmt.Errorf("dart backend: union %s: options %q and %q both generate the member %s; rename one", u.nt.Key, prev, o.f.Name, n)
-			}
-			owner[n] = o.f.Name
+		if o.f.Kind == ir.KindFP32 {
+			o.bits = a.take(o.prop + "Fp32Bits")
 		}
 	}
-	return nil
-}
-
-// checkUnions runs checkUnionNames over every union type of the schema.
-func (g *gen) checkUnions(s *ir.Schema) error {
-	for _, key := range s.NamedOrder {
-		nt := s.Named[key]
-		if nt.Category != ir.CatUnion {
-			continue
-		}
-		if err := checkUnionNames(g.unionShapeOf(key, nt), g.dartTypeNames(s)); err != nil {
-			return err
+	// The private slots last: `_` + a name no option has, so they meet only
+	// each other and the library's private helpers.
+	for _, o := range u.opts {
+		o.slot = a.take("_" + o.prop)
+		if o.f.Kind == ir.KindFP32 {
+			o.bitSlot = a.take("_" + o.prop + "Fp32Bits")
 		}
 	}
-	return nil
+	return u
 }
 
 // unionIsRef reports whether an option's slot holds an object (nullable, created
@@ -270,7 +224,7 @@ func (g *gen) emitUnionClass(f *dfile, key string, nt *ir.NamedType, withVisitor
 	f.blank()
 
 	if withVisitor {
-		g.emitVisitor(f, u.typeName, nt.Fields, u)
+		g.emitVisitor(f, u.typeName, g.rawTypeName(key), nt.Fields, u)
 	}
 }
 
@@ -338,7 +292,7 @@ func (g *gen) emitUnionAccessors(f *dfile, o *unionOpt) {
 		}
 	}
 	dep()
-	f.line("  bool get has%s => _which == %s;", o.base, o.idConst)
+	f.line("  bool get %s => _which == %s;", o.has, o.idConst)
 	if o.bitSlot != "" {
 		// The raw 32 wire bits of a NaN value, exactly as a struct's fp32 member
 		// keeps them: PUBLIC, so a bit-exact consumer can read a signaling NaN and
@@ -362,7 +316,7 @@ func (g *gen) emitUnionAccessors(f *dfile, o *unionOpt) {
 	// so a decode that reaches it again -- a repeated or re-opened occurrence, a
 	// resumed feed -- continues it (MESSAGE_SPEC §7.4) instead of wiping it.
 	dep()
-	f.line("  %s mutable%s() {", t, o.base)
+	f.line("  %s %s() {", t, o.mutable)
 	f.line("    var s = %s;", o.slot)
 	f.line("    if (s == null) {")
 	f.line("      s = %s;", g.unionNew(o))
@@ -384,14 +338,14 @@ func (g *gen) emitUnionAccessors(f *dfile, o *unionOpt) {
 
 // ---- JSON harness -----------------------------------------------------------
 
-// emitUnionJSONCodec emits the harness's `_toJson<T>` / `_fromJson<T>` for a
+// emitUnionJSONCodec emits the harness's `_<T>__ToJson` / `_<T>__FromJson` for a
 // union type: exactly ONE member, the held option, `{"<option>": value}` --
-// printed even when that is the default option at its default. `_fromJson`
+// printed even when that is the default option at its default. `_<T>__FromJson`
 // selects each member it reads through the option's setter or mutable accessor,
 // so the last member read wins, as the last option on the wire does.
 func (g *gen) emitUnionJSONCodec(f *dfile, key string, nt *ir.NamedType) {
 	u := g.unionShapeOf(key, nt)
-	f.line("Map<String, dynamic> _toJson%s(%s m) {", u.typeName, u.typeName)
+	f.line("Map<String, dynamic> %s(%s m) {", toJSONName(g.rawTypeName(key)), u.typeName)
 	f.line("  switch (m.which) {")
 	for _, o := range u.opts {
 		f.line("    case %s.%s:", u.typeName, o.idConst)
@@ -401,14 +355,14 @@ func (g *gen) emitUnionJSONCodec(f *dfile, key string, nt *ir.NamedType) {
 	f.line("  throw StateError('%s holds no option');", u.typeName)
 	f.line("}")
 	f.blank()
-	f.line("%s _fromJson%s(Map<String, dynamic> j) {", u.typeName, u.typeName)
+	f.line("%s %s(Map<String, dynamic> j) {", u.typeName, fromJSONName(g.rawTypeName(key)))
 	f.line("  final m = %s();", u.typeName)
 	f.line("  for (final kv in j.entries) {")
 	f.line("    switch (kv.key) {")
 	for _, o := range u.opts {
 		acc := "m." + o.prop
 		if isDest(o.f) {
-			acc = "m.mutable" + o.base + "()"
+			acc = "m." + o.mutable + "()"
 		}
 		f.line("      case %s:", dartStringLit(o.f.Name))
 		f.line("        %s", g.jsonFromStmt(o.f, acc, "kv.value"))

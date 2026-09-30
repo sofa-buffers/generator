@@ -59,13 +59,13 @@ func (g *gen) harness(s *ir.Schema) []byte {
 		}
 		switch nt.Category {
 		case ir.CatStruct:
-			g.emitJSONCodec(codecs, g.typeName(key), nt.Fields)
+			g.emitJSONCodec(codecs, g.typeName(key), g.rawTypeName(key), nt.Fields)
 		case ir.CatUnion:
 			g.emitUnionJSONCodec(codecs, key, nt)
 		}
 	}
 	for _, m := range s.Messages {
-		g.emitJSONCodec(codecs, exported(m.Name), m.Fields)
+		g.emitJSONCodec(codecs, messageClass(m.Name), messageRaw(m.Name), m.Fields)
 	}
 
 	if strings.Contains(codecs.b.String(), "_exact64(") {
@@ -76,34 +76,34 @@ func (g *gen) harness(s *ir.Schema) []byte {
 	g.emitBench(f, s)
 
 	// Dart ignores an int returned from main; the process exit code is set only
-	// via exit()/exitCode, which the conformance harness relies on to distinguish
+	// via io.exit()/exitCode, which the conformance harness relies on to distinguish
 	// a rejected (INVALID/INCOMPLETE/limitExceeded) decode from a clean one.
 	f.line("void main(List<String> args) {")
 	f.line("  if (args.isEmpty) {")
-	f.line("    stderr.writeln('usage: harness <encode|decode|streamdecode|trydecode|recode|bench> [Message|workload]');")
-	f.line("    exit(2);")
+	f.line("    io.stderr.writeln('usage: harness <encode|decode|streamdecode|trydecode|recode|bench> [Message|workload]');")
+	f.line("    io.exit(2);")
 	f.line("  }")
 	f.line("  final mode = args[0];")
 	f.line("  final name = args.length > 1 ? args[1] : %s;", dartStringLit(defaultMessage(s)))
 	f.line("  final input = _readStdin();")
 	f.line("  if (mode == 'bench') {")
-	f.line("    exit(_benchMain(name, args.length > 2 ? int.parse(args[2]) : 1000, input));")
+	f.line("    io.exit(_benchMain(name, args.length > 2 ? int.parse(args[2]) : 1000, input));")
 	f.line("  }")
 	f.line("  switch (name) {")
 	for _, m := range s.Messages {
-		mt := exported(m.Name)
+		mt, raw := messageClass(m.Name), messageRaw(m.Name)
 		f.line("    case %s:", dartStringLit(m.Name))
 		f.line("      if (mode == 'encode') {")
-		f.line("        final obj = _fromJson%s(jsonDecode(utf8.decode(input)) as Map<String, dynamic>);", mt)
-		f.line("        stdout.add(obj.encode());")
+		f.line("        final obj = %s(convert.jsonDecode(convert.utf8.decode(input)) as Map<String, dynamic>);", fromJSONName(raw))
+		f.line("        io.stdout.add(obj.encode());")
 		f.line("      } else if (mode == 'decode') {")
 		f.line("        final obj = %s();", mt)
 		f.line("        final st = %s.tryDecode(input, obj);", mt)
 		f.line("        if (st != sofab.DecodeStatus.complete) {")
-		f.line("          stderr.writeln('decode failed: ${st.name}');")
-		f.line("          exit(1);")
+		f.line("          io.stderr.writeln('decode failed: ${st.name}');")
+		f.line("          io.exit(1);")
 		f.line("        }")
-		f.line("        stdout.writeln(jsonEncode(_toJson%s(obj)));", mt)
+		f.line("        io.stdout.writeln(convert.jsonEncode(%s(obj)));", toJSONName(raw))
 		// The same bytes through the incremental decoder (PLAN §5.6), fed ONE BYTE
 		// per feed. A whole-buffer feed would exercise the decoder's signature
 		// without ever making it suspend and resume, which is the half that can
@@ -139,50 +139,50 @@ func (g *gen) harness(s *ir.Schema) []byte {
 		// tests/conformance/dart/run.sh reads both.
 		f.line("            final re = dec.feed(const <int>[]);")
 		f.line("            final fin = dec.finish() == null ? 'null' : 'RETURNED';")
-		f.line("            stderr.writeln(")
+		f.line("            io.stderr.writeln(")
 		f.line("                'decode failed: ${st.name} [refeed=${re.name}] [finish=$fin]');")
-		f.line("            exit(1);")
+		f.line("            io.exit(1);")
 		f.line("          }")
 		f.line("        }")
 		f.line("        final obj = dec.finish();")
 		f.line("        if (obj == null) {")
-		f.line("          stderr.writeln('decode failed: ${dec.feed(const <int>[]).name}');")
-		f.line("          exit(1);")
+		f.line("          io.stderr.writeln('decode failed: ${dec.feed(const <int>[]).name}');")
+		f.line("          io.exit(1);")
 		f.line("        }")
-		f.line("        stdout.writeln(jsonEncode(_toJson%s(obj)));", mt)
+		f.line("        io.stdout.writeln(convert.jsonEncode(%s(obj)));", toJSONName(raw))
 		f.line("      } else if (mode == 'trydecode') {")
 		f.line("        final obj = %s();", mt)
 		f.line("        final st = %s.tryDecode(input, obj);", mt)
-		f.line("        stdout.writeln(st.name.toUpperCase());")
-		f.line("        stdout.writeln(jsonEncode(_toJson%s(obj)));", mt)
+		f.line("        io.stdout.writeln(st.name.toUpperCase());")
+		f.line("        io.stdout.writeln(convert.jsonEncode(%s(obj)));", toJSONName(raw))
 		f.line("      } else if (mode == 'recode') {")
 		// Wire -> object -> wire, no JSON in the loop: the byte-exact re-encode path
 		// that must preserve an fp32 signaling NaN's raw bits (issue #226).
 		f.line("        final obj = %s();", mt)
 		f.line("        final st = %s.tryDecode(input, obj);", mt)
 		f.line("        if (st != sofab.DecodeStatus.complete) {")
-		f.line("          stderr.writeln('decode failed: ${st.name}');")
-		f.line("          exit(1);")
+		f.line("          io.stderr.writeln('decode failed: ${st.name}');")
+		f.line("          io.exit(1);")
 		f.line("        }")
-		f.line("        stdout.add(obj.encode());")
+		f.line("        io.stdout.add(obj.encode());")
 		f.line("      } else {")
-		f.line("        stderr.writeln('unknown mode');")
-		f.line("        exit(2);")
+		f.line("        io.stderr.writeln('unknown mode');")
+		f.line("        io.exit(2);")
 		f.line("      }")
 		f.line("      return;")
 	}
 	f.line("    default:")
-	f.line("      stderr.writeln('unknown message');")
-	f.line("      exit(2);")
+	f.line("      io.stderr.writeln('unknown message');")
+	f.line("      io.exit(2);")
 	f.line("  }")
 	f.line("}")
 	f.blank()
-	f.line("Uint8List _readStdin() {")
-	f.line("  final b = BytesBuilder(copy: true);")
-	f.line("  var byte = stdin.readByteSync();")
+	f.line("typed.Uint8List _readStdin() {")
+	f.line("  final b = typed.BytesBuilder(copy: true);")
+	f.line("  var byte = io.stdin.readByteSync();")
 	f.line("  while (byte != -1) {")
 	f.line("    b.addByte(byte);")
-	f.line("    byte = stdin.readByteSync();")
+	f.line("    byte = io.stdin.readByteSync();")
 	f.line("  }")
 	f.line("  return b.toBytes();")
 	f.line("}")
@@ -193,13 +193,17 @@ func (g *gen) harness(s *ir.Schema) []byte {
 	if anyDeprecated(s) {
 		h.line("%s", deprecatedIgnore)
 	}
-	if strings.Contains(body, "jsonDecode(") || strings.Contains(body, "jsonEncode(") ||
-		strings.Contains(body, "utf8.") || strings.Contains(body, "base64") {
-		h.line("import 'dart:convert';")
+	// dart:io, dart:convert and dart:typed_data are imported under a prefix: the
+	// harness names every generated class unqualified, and a class sharing a
+	// name with any of theirs would be an ambiguous import (ARCHITECTURE §8,
+	// "Naming"). Only dart:core stays unprefixed, and typeEscape keeps the
+	// generated classes off the dart:core names used here.
+	if strings.Contains(body, "convert.") {
+		h.line("import 'dart:convert' as convert;")
 	}
-	h.line("import 'dart:io';")
-	h.line("import 'dart:typed_data';")
-	if len(s.Messages) > 0 || strings.Contains(codecs.b.String(), "_toJson") {
+	h.line("import 'dart:io' as io;")
+	h.line("import 'dart:typed_data' as typed;")
+	if len(s.Messages) > 0 || strings.Contains(codecs.b.String(), "__ToJson(") {
 		h.line("import 'package:harness/message.dart';")
 	}
 	if strings.Contains(body, "sofab.") {
@@ -210,26 +214,32 @@ func (g *gen) harness(s *ir.Schema) []byte {
 	return h.bytes()
 }
 
-// emitJSONCodec emits `_toJson<T>` / `_fromJson<T>` for one object type. JSON
-// field keys use the ORIGINAL schema name (wire/JSON name is unaffected by
+// The harness's per-type privates: `_` + the unescaped type identifier + `__`
+// + a role, so no two types -- and no fixed harness name -- share one.
+func toJSONName(raw string) string   { return "_" + raw + "__ToJson" }
+func fromJSONName(raw string) string { return "_" + raw + "__FromJson" }
+func benchOpName(raw string) string  { return "_" + raw + "__BenchOp" }
+
+// emitJSONCodec emits `_<T>__ToJson` / `_<T>__FromJson` for one object type.
+// JSON field keys use the ORIGINAL schema name (wire/JSON name is unaffected by
 // identifier mangling); member access uses the mangled Dart identifier. 64-bit
 // unsigned values are carried as JSON strings — Dart's `int` is signed 64-bit
 // and jsonDecode reads a large number as a lossy double (verified), so a u64
 // above 2^63 must round-trip as a decimal string.
-func (g *gen) emitJSONCodec(f *dfile, typeName string, fields []*ir.Field) {
-	f.line("Map<String, dynamic> _toJson%s(%s m) {", typeName, typeName)
+func (g *gen) emitJSONCodec(f *dfile, typeName, raw string, fields []*ir.Field) {
+	f.line("Map<String, dynamic> %s(%s m) {", toJSONName(raw), typeName)
 	f.line("  return <String, dynamic>{")
 	for _, fld := range fields {
-		f.line("    %s: %s,", dartStringLit(fld.Name), g.jsonTo(fld, "m."+dartIdent(fld.Name)))
+		f.line("    %s: %s,", dartStringLit(fld.Name), g.jsonTo(fld, "m."+g.member(fld)))
 	}
 	f.line("  };")
 	f.line("}")
 	f.blank()
-	f.line("%s _fromJson%s(Map<String, dynamic> j) {", typeName, typeName)
+	f.line("%s %s(Map<String, dynamic> j) {", typeName, fromJSONName(raw))
 	f.line("  final m = %s();", typeName)
 	for _, fld := range fields {
 		key := dartStringLit(fld.Name)
-		f.line("  if (j.containsKey(%s)) { %s }", key, g.jsonFromStmt(fld, "m."+dartIdent(fld.Name), "j["+key+"]"))
+		f.line("  if (j.containsKey(%s)) { %s }", key, g.jsonFromStmt(fld, "m."+g.member(fld), "j["+key+"]"))
 	}
 	f.line("  return m;")
 	f.line("}")
@@ -271,7 +281,7 @@ func (g *gen) jsonTo(fld *ir.Field, acc string) string {
 	case ir.KindString, ir.KindBlob:
 		return destToJSON(fld.Kind, fld.Kind, nil, acc)
 	case ir.KindStruct, ir.KindUnion:
-		return fmt.Sprintf("_toJson%s(%s)", g.typeName(fld.Ref.Key), acc)
+		return fmt.Sprintf("%s(%s)", toJSONName(g.rawTypeName(fld.Ref.Key)), acc)
 	case ir.KindArray:
 		if nativeArrayElem(fld.Elem) {
 			return destToJSON(ir.KindArray, fld.Elem, fld.ElemRef, acc)
@@ -303,7 +313,7 @@ func (g *gen) arrayElemToJSON(elem ir.Kind, ref *ir.TypeRef, items *ir.ArrayElem
 	case ir.KindString, ir.KindBlob:
 		return fmt.Sprintf("[for (final _x in %s) %s]", acc, destToJSON(elem, elem, nil, "_x"))
 	case ir.KindStruct, ir.KindUnion:
-		return fmt.Sprintf("[for (final _x in %s) _toJson%s(_x)]", acc, g.typeName(ref.Key))
+		return fmt.Sprintf("[for (final _x in %s) %s(_x)]", acc, toJSONName(g.rawTypeName(ref.Key)))
 	case ir.KindArray:
 		if nativeArrayElem(items.Elem) {
 			return fmt.Sprintf("[for (final _x in %s) %s]", acc, destToJSON(ir.KindArray, items.Elem, items.ElemRef, "_x"))
@@ -362,7 +372,7 @@ func (g *gen) jsonFrom(fld *ir.Field, jx string) string {
 	case ir.KindBool:
 		return fmt.Sprintf("%s as bool", jx)
 	case ir.KindStruct, ir.KindUnion:
-		return fmt.Sprintf("_fromJson%s(%s as Map<String, dynamic>)", g.typeName(fld.Ref.Key), jx)
+		return fmt.Sprintf("%s(%s as Map<String, dynamic>)", fromJSONName(g.rawTypeName(fld.Ref.Key)), jx)
 	case ir.KindArray:
 		et := g.dartArrayElemType(fld.Elem, fld.ElemRef, fld.ElemItems)
 		return fmt.Sprintf("<%s>[for (final _x in (%s as List)) %s]", et, jx, g.arrayElemFromJSON(fld.Elem, fld.ElemRef, fld.ElemItems, "_x"))
@@ -378,7 +388,7 @@ func (g *gen) arrayElemFromJSON(elem ir.Kind, ref *ir.TypeRef, items *ir.ArrayEl
 	case ir.KindBlob:
 		return fmt.Sprintf("sofab.InlineBytes.of(%s)", destElemsFromJSON(ir.KindBlob, elem, jx))
 	case ir.KindStruct, ir.KindUnion:
-		return fmt.Sprintf("_fromJson%s(%s as Map<String, dynamic>)", g.typeName(ref.Key), jx)
+		return fmt.Sprintf("%s(%s as Map<String, dynamic>)", fromJSONName(g.rawTypeName(ref.Key)), jx)
 	case ir.KindArray:
 		if nativeArrayElem(items.Elem) {
 			return fmt.Sprintf("%s.of(%s)", inlineArrayType(items.Elem), destElemsFromJSON(ir.KindArray, items.Elem, jx))
@@ -448,31 +458,31 @@ func (g *gen) emitBench(f *dfile, s *ir.Schema) {
 		f.line("int _benchSink = 0;")
 		f.blank()
 	}
-	f.line("int _benchMain(String w, int reps, Uint8List input) {")
+	f.line("int _benchMain(String w, int reps, typed.Uint8List input) {")
 	if hasMsg {
-		f.line("  final warmup = int.tryParse(Platform.environment['SOFAB_BENCH_WARMUP'] ?? '') ?? 5000;")
+		f.line("  final warmup = int.tryParse(io.Platform.environment['SOFAB_BENCH_WARMUP'] ?? '') ?? 5000;")
 	}
 	for _, m := range s.Messages {
-		mt := exported(m.Name)
+		raw := messageRaw(m.Name)
 		low := strings.ToLower(m.Name)
 		f.line("  if (w == 'encode_%s' || w == 'decode_%s') {", low, low)
-		f.line("    final obj = _fromJson%s(jsonDecode(utf8.decode(input)) as Map<String, dynamic>);", mt)
+		f.line("    final obj = %s(convert.jsonDecode(convert.utf8.decode(input)) as Map<String, dynamic>);", fromJSONName(raw))
 		f.line("    final wire = obj.encode();")
 		f.line("    final enc = w == 'encode_%s';", low)
-		f.line("    for (var i = 0; i < warmup; i++) { _benchOp%s(enc, obj, wire); }", mt)
-		f.line("    for (var i = 0; i < reps; i++) { _benchOp%s(enc, obj, wire); }", mt)
-		f.line("    stderr.writeln('sink=$_benchSink bytes=${wire.length}');")
+		f.line("    for (var i = 0; i < warmup; i++) { %s(enc, obj, wire); }", benchOpName(raw))
+		f.line("    for (var i = 0; i < reps; i++) { %s(enc, obj, wire); }", benchOpName(raw))
+		f.line("    io.stderr.writeln('sink=$_benchSink bytes=${wire.length}');")
 		f.line("    return 0;")
 		f.line("  }")
 	}
-	f.line("  stderr.writeln('unknown workload: $w');")
+	f.line("  io.stderr.writeln('unknown workload: $w');")
 	f.line("  return 2;")
 	f.line("}")
 	f.blank()
 	for _, m := range s.Messages {
-		mt := exported(m.Name)
-		sink := benchSinkField(m)
-		f.line("void _benchOp%s(bool enc, %s obj, Uint8List wire) {", mt, mt)
+		mt, raw := messageClass(m.Name), messageRaw(m.Name)
+		sink := g.benchSinkField(m)
+		f.line("void %s(bool enc, %s obj, typed.Uint8List wire) {", benchOpName(raw), mt)
 		f.line("  if (enc) {")
 		f.line("    _benchSink ^= obj.encode().length;")
 		f.line("  } else {")
@@ -489,12 +499,12 @@ func (g *gen) emitBench(f *dfile, s *ir.Schema) {
 
 // benchSinkField names one cheap integer scalar folded into the bench loop so the
 // decode cannot be elided.
-func benchSinkField(m *ir.Message) string {
+func (g *gen) benchSinkField(m *ir.Message) string {
 	for _, fld := range m.Fields {
 		switch fld.Kind {
 		case ir.KindU8, ir.KindU16, ir.KindU32,
 			ir.KindI8, ir.KindI16, ir.KindI32, ir.KindI64:
-			return dartIdent(fld.Name)
+			return g.member(fld)
 		}
 	}
 	return ""

@@ -117,7 +117,7 @@ class Scalars {
   /// Decodes into a destination the caller guarantees is already at its
   /// defaults, so [decode]'s fresh instance skips the redundant reset.
   static sofab.DecodeStatus _decodeInto(Uint8List data, Scalars out) {
-    return sofab.Decoder.decode(data, _ScalarsVisitor(out));
+    return sofab.Decoder.decode(data, _Scalars__Visitor(out));
   }
 
   /// Best-effort one-shot decode (the 90 % case): returns the message with
@@ -135,9 +135,9 @@ class Scalars {
   /// [out] is [reset] first, for the reason [tryDecode] resets: an absent
   /// field fires no callback, so a value left over from an earlier decode
   /// would survive.
-  static ScalarsDecoder decoder(Scalars out) {
+  static Scalars__Decoder decoder(Scalars out) {
     out.reset();
-    return ScalarsDecoder._(out);
+    return Scalars__Decoder._(out);
   }
 }
 
@@ -156,9 +156,9 @@ class Scalars {
 /// chunk may be reused as soon as [feed] returns. A destination is complete
 /// once a feed reports `complete`; after `incomplete` or a refusal its
 /// contents are unspecified.
-class ScalarsDecoder {
-  ScalarsDecoder._(this._out) {
-    _d = sofab.Decoder(_ScalarsVisitor(_out));
+class Scalars__Decoder {
+  Scalars__Decoder._(this._out) {
+    _d = sofab.Decoder(_Scalars__Visitor(_out));
   }
 
   final Scalars _out;
@@ -181,8 +181,8 @@ class ScalarsDecoder {
       _d.feed(const <int>[]) == sofab.DecodeStatus.complete ? _out : null;
 }
 
-class _ScalarsVisitor extends sofab.MessageVisitor {
-  _ScalarsVisitor(this.o);
+class _Scalars__Visitor extends sofab.MessageVisitor {
+  _Scalars__Visitor(this.o);
   final Scalars o;
   @override
   void onUnsigned(int id, int value) {

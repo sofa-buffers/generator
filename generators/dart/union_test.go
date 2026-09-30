@@ -89,19 +89,19 @@ func mustNotContain(t *testing.T, what, src string, bads ...string) {
 // hold. The tag starts at default_id, which is NOT the first option here.
 func TestDartUnionStorage(t *testing.T) {
 	lib, _ := genUnion(t)
-	u := classBody(t, lib, "MU")
-	mustContain(t, "MU storage", u,
+	u := classBody(t, lib, "M_U")
+	mustContain(t, "M_U storage", u,
 		"  static const int numId = 0;",
 		"  static const int ptId = 2;",
 		"  static const int whichId = 10;",
 		"  int _which = ptId;",
 		"  int _num_ = 5;",
 		"  sofab.InlineString? _s;",
-		"  MUPt? _pt = MUPt();",
+		"  M_U_Pt? _pt = M_U_Pt();",
 		"  sofab.InlineInt64Array? _arr;",
 		"  List<sofab.InlineString>? _strs;",
 		"  sofab.InlineBytes? _bl;",
-		"  MUInner? _inner;",
+		"  M_U_Inner? _inner;",
 		"  double _f = 1.5;",
 		"  int? _fFp32Bits;",
 		// The option named like the tag gets a slot of its own: "_" + its mangled
@@ -110,15 +110,15 @@ func TestDartUnionStorage(t *testing.T) {
 		"  int get which => _which;",
 	)
 	// Only default_id's reference slot is constructed.
-	for _, bad := range []string{"_s = sofab.InlineString(8);\n  ", "MUInner? _inner = ", "_arr = sofab.InlineInt64Array(4", "_strs = <"} {
+	for _, bad := range []string{"_s = sofab.InlineString(8);\n  ", "M_U_Inner? _inner = ", "_arr = sofab.InlineInt64Array(4", "_strs = <"} {
 		if strings.Contains(u[:strings.Index(u, "int get which")], bad) {
-			t.Errorf("MU constructs an option it does not hold (%q)", bad)
+			t.Errorf("M_U constructs an option it does not hold (%q)", bad)
 		}
 	}
 	// No product type any more: no member holds every option side by side.
-	mustNotContain(t, "MU storage", u, "final sofab.InlineString s ", "MUPt pt = MUPt();")
+	mustNotContain(t, "M_U storage", u, "final sofab.InlineString s ", "M_U_Pt pt = M_U_Pt();")
 	// default_id is per TYPE: the scalar-default union starts at a.
-	mustContain(t, "MZ storage", classBody(t, lib, "MZ"), "  int _which = aId;")
+	mustContain(t, "M_Z storage", classBody(t, lib, "M_Z"), "  int _which = aId;")
 }
 
 // The accessors: the getter answers the option's default while another option is
@@ -130,17 +130,17 @@ func TestDartUnionStorage(t *testing.T) {
 // touches a held one.
 func TestDartUnionAccessors(t *testing.T) {
 	lib, _ := genUnion(t)
-	u := classBody(t, lib, "MU")
-	mustContain(t, "MU accessors", u,
+	u := classBody(t, lib, "M_U")
+	mustContain(t, "M_U accessors", u,
 		"  int get num_ => _which == numId ? _num_ : 5;",
 		"  set num_(int v) {\n    _which = numId;\n    _num_ = v;\n  }",
 		"  bool get hasNum => _which == numId;",
-		"  MUPt get pt => _which == ptId ? _pt! : MUPt();",
-		"  set pt(MUPt v) {\n    _which = ptId;\n    _pt = v;\n  }",
+		"  M_U_Pt get pt => _which == ptId ? _pt! : M_U_Pt();",
+		"  set pt(M_U_Pt v) {\n    _which = ptId;\n    _pt = v;\n  }",
 		"  sofab.InlineString get s => _which == sId ? _s! : sofab.InlineString(0);",
 		"  sofab.InlineInt64Array get arr => _which == arrId ? _arr! : sofab.InlineInt64Array(0, range: const sofab.ElemRange(0, 65535));",
 		// select-if-not-held, one per kind edited in place
-		"  MUPt mutablePt() {\n    var s = _pt;\n    if (s == null) {\n      s = MUPt();\n      _pt = s;\n    } else if (_which != ptId) {\n      s.reset();\n    }\n    _which = ptId;\n    return s;\n  }",
+		"  M_U_Pt mutablePt() {\n    var s = _pt;\n    if (s == null) {\n      s = M_U_Pt();\n      _pt = s;\n    } else if (_which != ptId) {\n      s.reset();\n    }\n    _which = ptId;\n    return s;\n  }",
 		"  sofab.InlineString mutableS() {\n    var s = _s;\n    if (s == null) {\n      s = sofab.InlineString(8);\n      _s = s;\n    } else if (_which != sId) {\n      s.length = 0;\n    }\n    _which = sId;\n    return s;\n  }",
 		// The destination is created WITH the declared element width the codec
 		// checks every decoded element against.
@@ -158,17 +158,17 @@ func TestDartUnionAccessors(t *testing.T) {
 		// An option named like a union member takes the trailing underscore.
 		"  int get which_ => _which == whichId ? _which_ : 0;",
 		// reset(): default_id at its default, in place.
-		"  void reset() {\n    _which = ptId;\n    final s = _pt;\n    if (s == null) {\n      _pt = MUPt();\n    } else {\n      s.reset();\n    }\n  }",
+		"  void reset() {\n    _which = ptId;\n    final s = _pt;\n    if (s == null) {\n      _pt = M_U_Pt();\n    } else {\n      s.reset();\n    }\n  }",
 	)
 	// A destination option has no setter: its storage (and the element width it
 	// carries) is only ever the one mutable<Opt>() created.
-	mustNotContain(t, "MU accessors", u,
+	mustNotContain(t, "M_U accessors", u,
 		"set s(", "set arr(", "set bl(", "set flags(", "set big(",
 		// never an unconditional reset of a held option
 		"    s.reset();\n    _which = ptId;",
 	)
 	// A scalar option has no mutable accessor.
-	mustNotContain(t, "MU accessors", u, "mutableNum(", "mutableF(")
+	mustNotContain(t, "M_U accessors", u, "mutableNum(", "mutableF(")
 }
 
 // Encode: one `switch` arm per option. default_id is written like an ordinary
@@ -178,8 +178,8 @@ func TestDartUnionAccessors(t *testing.T) {
 // because its presence IS the selection (MESSAGE_SPEC §4.2).
 func TestDartUnionEncodeArms(t *testing.T) {
 	lib, _ := genUnion(t)
-	u := classBody(t, lib, "MU")
-	mustContain(t, "MU.serialize", u,
+	u := classBody(t, lib, "M_U")
+	mustContain(t, "M_U.serialize", u,
 		"    switch (_which) {",
 		"      case numId:\n        e.writeUnsigned(0, _num_);",
 		"      case sId:\n        final v = _s!;\n        e.writeStringUtf8(1, v.storage, v.length);",
@@ -194,12 +194,12 @@ func TestDartUnionEncodeArms(t *testing.T) {
 	// The wrapper-array option: framed, interior elements sparse, kept.
 	strs := u[strings.Index(u, "      case strsId:"):]
 	strs = strs[:strings.Index(strs, "      case blId:")]
-	mustContain(t, "MU strs arm", strs, "e.beginSequenceLazy(4);", "        e.endSequenceKeep();")
-	mustNotContain(t, "MU strs arm", strs, "e.endSequence();", "if (v.length")
+	mustContain(t, "M_U strs arm", strs, "e.beginSequenceLazy(4);", "        e.endSequenceKeep();")
+	mustNotContain(t, "M_U strs arm", strs, "e.endSequence();", "if (v.length")
 	// No guard anywhere but default_id's arm (which is a struct here, so none).
-	mustNotContain(t, "MU.serialize", u, "if (_num_ != 5)", "if (v.length != 0) { e.writeStringUtf8(1", "if (_f != 1.5)")
+	mustNotContain(t, "M_U.serialize", u, "if (_num_ != 5)", "if (v.length != 0) { e.writeStringUtf8(1", "if (_f != 1.5)")
 	// A scalar default_id keeps its guard.
-	mustContain(t, "MZ.serialize", classBody(t, lib, "MZ"),
+	mustContain(t, "M_Z.serialize", classBody(t, lib, "M_Z"),
 		"      case aId:\n        if (_a != 0) { e.writeUnsigned(0, _a); }",
 		"      case bId:\n        e.writeUnsigned(1, _b);",
 	)
@@ -217,25 +217,25 @@ func TestDartUnionEncodeArms(t *testing.T) {
 // mutable<Opt>() returns (§7.4 replace).
 func TestDartUnionDecodeSwitch(t *testing.T) {
 	lib, _ := genUnion(t)
-	v := classBody(t, lib, "_MUVisitor extends sofab.MessageVisitor")
-	mustContain(t, "_MUVisitor", v,
+	v := classBody(t, lib, "_M_U__Visitor extends sofab.MessageVisitor")
+	mustContain(t, "_M_U__Visitor", v,
 		"      case 0:\n        if (value < 0 || value > 65535) { invalidate(); return; }\n        o.num_ = value;\n        return;",
 		"      case 7:\n        o.f = value;\n        return;",
 		"      case 7:\n        o.f = _f32FromBits(bits);\n        o.fFp32Bits = bits;\n        return;",
 		"      case 1:\n        if (length > 8) invalidate();\n        return o.mutableS();",
 		"      case 9:\n        if (length > 5000) invalidate();\n        final d = o.mutableBig();\n        if (d.capacity < length) d.storage = Uint8List(length);\n        return d;",
 		"      case 3:\n        if (count > 4) invalidate();\n        return o.mutableArr();",
-		"      case 2:\n        return _MUPtVisitor(o.mutablePt());",
-		"      case 6:\n        return _MUInnerVisitor(o.mutableInner());",
+		"      case 2:\n        return _M_U_Pt__Visitor(o.mutablePt());",
+		"      case 6:\n        return _M_U_Inner__Visitor(o.mutableInner());",
 		"      case 4:\n        final l = o.mutableStrs();\n        l.clear();\n        return sofab.StringSeq(l, 3, 4,",
 	)
 	// Never a store around the API, never a switch before the bound.
-	mustNotContain(t, "_MUVisitor", v, "o._", "return o.mutableS();\n        if (length")
+	mustNotContain(t, "_M_U__Visitor", v, "o._", "return o.mutableS();\n        if (length")
 	// The string arm lives in onString only: a blob or anything else at id 1 lands
 	// in a different call with no arm for it and switches nothing (D20-D22).
 	blob := v[strings.Index(v, "onBlob("):]
 	blob = blob[:strings.Index(blob, "\n  }\n")]
-	mustNotContain(t, "_MUVisitor.onBlob", blob, "case 1:", "mutableS(")
+	mustNotContain(t, "_M_U__Visitor.onBlob", blob, "case 1:", "mutableS(")
 }
 
 // An array of unions fills its gaps through the corelib's MessageSeq with the
@@ -244,13 +244,13 @@ func TestDartUnionDecodeSwitch(t *testing.T) {
 func TestDartUnionGapFillPerType(t *testing.T) {
 	lib, _ := genUnion(t)
 	mustContain(t, "gap fill", lib,
-		"sofab.MessageSeq<MVElem>(o.v, 3, () => MVElem(), (x) => _MVElemVisitor(x), rcap: 16384)",
-		"sofab.MessageSeq<UnionPickDefaultN>(o.pe, 3, () => UnionPickDefaultN(), (x) => _UnionPickDefaultNVisitor(x), rcap: 16384)",
-		"  UnionPickDefaultT pf = UnionPickDefaultT();",
+		"sofab.MessageSeq<M_V>(o.v, 3, () => M_V(), (x) => _M_V__Visitor(x), rcap: 16384)",
+		"sofab.MessageSeq<Pick__DefaultN>(o.pe, 3, () => Pick__DefaultN(), (x) => _Pick__DefaultN__Visitor(x), rcap: 16384)",
+		"  Pick__DefaultT pf = Pick__DefaultT();",
 	)
-	mustContain(t, "MVElem", classBody(t, lib, "MVElem"), "  int _which = pId;", "  MVElemP? _p = MVElemP();")
-	mustContain(t, "Pick_default_n", classBody(t, lib, "UnionPickDefaultN"), "  int _which = nId;")
-	mustContain(t, "Pick_default_t", classBody(t, lib, "UnionPickDefaultT"), "  int _which = tId;")
+	mustContain(t, "M_V", classBody(t, lib, "M_V"), "  int _which = pId;", "  M_V_P? _p = M_V_P();")
+	mustContain(t, "Pick_default_n", classBody(t, lib, "Pick__DefaultN"), "  int _which = nId;")
+	mustContain(t, "Pick_default_t", classBody(t, lib, "Pick__DefaultT"), "  int _which = tId;")
 }
 
 // The harness renders a union as exactly ONE member, the held option, and reads
@@ -259,19 +259,19 @@ func TestDartUnionGapFillPerType(t *testing.T) {
 func TestDartUnionJSONHarness(t *testing.T) {
 	lib, h := genUnion(t)
 	mustContain(t, "harness", h,
-		"Map<String, dynamic> _toJsonMU(MU m) {\n  switch (m.which) {",
-		"    case MU.numId:\n      return <String, dynamic>{'num': m.num_};",
-		"    case MU.sId:\n      return <String, dynamic>{'s': m.s.toString()};",
-		"    case MU.ptId:\n      return <String, dynamic>{'pt': _toJsonMUPt(m.pt)};",
-		"  throw StateError('MU holds no option');",
+		"Map<String, dynamic> _M_U__ToJson(M_U m) {\n  switch (m.which) {",
+		"    case M_U.numId:\n      return <String, dynamic>{'num': m.num_};",
+		"    case M_U.sId:\n      return <String, dynamic>{'s': m.s.toString()};",
+		"    case M_U.ptId:\n      return <String, dynamic>{'pt': _M_U_Pt__ToJson(m.pt)};",
+		"  throw StateError('M_U holds no option');",
 		"  for (final kv in j.entries) {\n    switch (kv.key) {",
 		"      case 's':\n        m.mutableS().assignString(kv.value as String);",
-		"      case 'pt':\n        m.pt = _fromJsonMUPt(kv.value as Map<String, dynamic>);",
+		"      case 'pt':\n        m.pt = _M_U_Pt__FromJson(kv.value as Map<String, dynamic>);",
 		"      case 'arr':\n        m.mutableArr().assign(",
 		"      case 'strs':\n        m.strs = <sofab.InlineString>[",
 	)
 	mustNotContain(t, "harness", h, "'num': m.num_,\n")
-	mustNotContain(t, "library", lib, "jsonEncode", "_toJson")
+	mustNotContain(t, "library", lib, "jsonEncode", "__ToJson")
 }
 
 // The harness reads a 64-bit SIGNED scalar in either JSON spelling -- a bare
@@ -294,26 +294,22 @@ func TestDartI64JSONReadsAString(t *testing.T) {
 	)
 }
 
-// Two options that derive the same member are a located generation error naming
-// both; an option that derives a member the union already has (other than the
-// getter, which is mangled) is one too.
-func TestDartUnionNameErrors(t *testing.T) {
-	for _, tc := range []struct{ name, oneof, want string }{
-		{"has clash", "{ foo_bar: { id: 0, type: u8 }, fooBar: { id: 1, type: u8 } }", `options "foo_bar" and "fooBar" both generate the member hasFooBar`},
-		{"id clash", "{ a: { id: 0, type: u8 }, aId: { id: 1, type: u8 } }", `options "a" and "aId" both generate the member aId`},
-		{"getter on has", "{ x: { id: 0, type: u8 }, hasX: { id: 1, type: u8 } }", `both generate the member hasX`},
+// Two options whose derived members would meet are not an error: the option
+// keeps its own name and the derived member takes the trailing `_` -- `a`'s
+// id constant beside an option `aId`, `x`'s has<X> beside an option `hasX`.
+// The union's own members and Object's are escaped the same way.
+func TestDartUnionNamesEscaped(t *testing.T) {
+	for _, tc := range []struct {
+		oneof string
+		want  []string
+	}{
+		{"{ a: { id: 0, type: u8 }, aId: { id: 1, type: u8 } }", []string{"  static const int aId_ = 0;", "  static const int aIdId = 1;", "  int get aId => "}},
+		{"{ x: { id: 0, type: u8 }, hasX: { id: 1, type: u8 } }", []string{"  bool get hasX_ => _which == xId;", "  int get hasX => _which == hasXId"}},
+		{"{ reset: { id: 0, type: u8 }, toString: { id: 1, type: u8 } }", []string{"  int get reset_ => ", "  int get toString_ => "}},
 	} {
-		t.Run(tc.name, func(t *testing.T) {
-			src := "version: 1\nmessages:\n  M:\n    payload:\n      u: { id: 0, type: union, oneof: " + tc.oneof + " }\n"
-			_, err := (&Backend{}).Generate(schemaFor(t, writeDef(t, src)), map[string]any{})
-			if err == nil || !strings.Contains(err.Error(), tc.want) || !strings.Contains(err.Error(), "union M_u") {
-				t.Fatalf("want a located error containing %q, got %v", tc.want, err)
-			}
-		})
+		lib := dartFiles(t, "version: 1\nmessages:\n  M:\n    payload:\n      u: { id: 0, type: union, oneof: "+tc.oneof+" }\n", map[string]any{})["message.dart"]
+		mustContain(t, tc.oneof, lib, tc.want...)
 	}
-	// The union's own members and Object's are mangled, not refused.
-	lib := dartFiles(t, "version: 1\nmessages:\n  M:\n    payload:\n      u: { id: 0, type: union, oneof: { reset: { id: 0, type: u8 }, toString: { id: 1, type: u8 } } }\n", map[string]any{})["message.dart"]
-	mustContain(t, "mangled", lib, "  int get reset_ => ", "  int get toString_ => ")
 }
 
 // TestDartUnionRuntime runs the generated API against a real corelib-dart: the
@@ -342,19 +338,19 @@ String hex(Uint8List b) =>
 void main() {
   final m = M();
   // Fresh: default_id (pt) at its own default; nothing written.
-  check(m.u.which == MU.ptId && m.u.hasPt && m.u.pt.x == 7, 'fresh union holds pt at its default');
+  check(m.u.which == M_U.ptId && m.u.hasPt && m.u.pt.x == 7, 'fresh union holds pt at its default');
   check(m.encode().isEmpty, 'a fresh message encodes to zero bytes');
 
   // A getter of an option not held answers its default and stores nothing.
-  check(m.u.num_ == 5 && m.u.which == MU.ptId, 'getter of a non-held option');
+  check(m.u.num_ == 5 && m.u.which == M_U.ptId, 'getter of a non-held option');
   m.u.s.assignString('lost');
-  check(m.u.which == MU.ptId && !m.u.hasS, 'writing into a detached default selects nothing');
+  check(m.u.which == M_U.ptId && !m.u.hasS, 'writing into a detached default selects nothing');
 
   // mutable: select at default; a held option is continued, not reset.
   m.u.mutablePt().x = 1;
   final pt = m.u.pt;
   m.u.mutableS().assignString('ab');
-  check(m.u.which == MU.sId && m.u.s.toString() == 'ab', 'mutableS selects s');
+  check(m.u.which == M_U.sId && m.u.s.toString() == 'ab', 'mutableS selects s');
   final dest = m.u.mutableS();
   check(dest.toString() == 'ab', 'mutableS of a held option keeps its value');
 
@@ -372,13 +368,13 @@ void main() {
 
   // reset(): default_id at its default, storage kept.
   m.u.reset();
-  check(m.u.which == MU.ptId && m.u.pt.x == 7 && m.u.pt.y == 0 && identical(m.u.pt, pt), 'reset restores pt in place');
+  check(m.u.which == M_U.ptId && m.u.pt.x == 7 && m.u.pt.y == 0 && identical(m.u.pt, pt), 'reset restores pt in place');
   check(m.encode().isEmpty, 'a reset message encodes to zero bytes');
 
   // Decode: the last option wins; the other one's state does not survive.
   final w = Uint8List.fromList([0x06, 0x00, 0x05, 0x0a, 0x0a, 0x78, 0x07]);
   final d = M.decode(w);
-  check(d.u.which == MU.sId && d.u.s.toString() == 'x', 'decode: last option wins');
+  check(d.u.which == M_U.sId && d.u.s.toString() == 'x', 'decode: last option wins');
   final r = M();
   r.u.mutablePt().x = 9;
   check(M.tryDecode(w, r).name == 'complete' && r.u.hasS && r.u.pt.x == 7, 'decode into a reused message');

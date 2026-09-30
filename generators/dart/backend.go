@@ -64,12 +64,6 @@ func (*Backend) Generate(s *ir.Schema, cfg map[string]any) ([]generator.File, er
 		limits:  resolveLimits(s, cfg),
 		size:    generator.NewSizePolicy(cfg),
 	}
-	if err := g.checkFieldNames(s); err != nil {
-		return nil, err
-	}
-	if err := g.checkUnions(s); err != nil {
-		return nil, err
-	}
 	project := cfgString(cfg, "emit", "sources") == "project"
 	prefix := ""
 	if project {
@@ -94,6 +88,9 @@ type gen struct {
 	// the emit path, which has no error channel of its own.
 	size    generator.SizePolicy
 	sizeErr error
+	// mem is every member name the module derives from the schema, built once
+	// on first use (members).
+	mem *memberTable
 }
 
 // messageSize resolves a message's worst-case encoded size via the shared walk
@@ -223,13 +220,13 @@ func (g *gen) module(s *ir.Schema) []byte {
 		nt := s.Named[key]
 		switch nt.Category {
 		case ir.CatStruct:
-			g.emitClass(body, g.typeName(key), nt.Summary, nt.Fields, false, decoded[key])
+			g.emitClass(body, g.typeName(key), g.rawTypeName(key), nt.Summary, nt.Fields, false, decoded[key])
 		case ir.CatUnion:
 			g.emitUnionClass(body, key, nt, decoded[key])
 		}
 	}
 	for _, m := range s.Messages {
-		g.emitClass(body, exported(m.Name), m.Summary, m.Fields, true, true)
+		g.emitClass(body, messageClass(m.Name), messageRaw(m.Name), m.Summary, m.Fields, true, true)
 	}
 
 	g.emitLimits(f)
@@ -411,7 +408,7 @@ func (g *gen) emitEnum(f *dfile, nt *ir.NamedType) {
 	f.line("  %s._();", g.typeName(nt.Key))
 	for _, c := range nt.Consts {
 		emitDoc(f, "  ", c.Description)
-		f.line("  static const int %s = %d;", dartIdent(c.Name), c.Value)
+		f.line("  static const int %s = %d;", g.members().consts[c], c.Value)
 	}
 	f.line("}")
 	f.blank()
@@ -423,7 +420,7 @@ func (g *gen) emitBitfield(f *dfile, nt *ir.NamedType) {
 	f.line("  %s._();", g.typeName(nt.Key))
 	for _, fl := range nt.Flags {
 		emitDoc(f, "  ", flagDoc(fl))
-		f.line("  static const int %s = 1 << %d;", dartIdent(fl.Name), fl.Pos)
+		f.line("  static const int %s = 1 << %d;", g.members().flags[fl], fl.Pos)
 	}
 	f.line("}")
 	f.blank()
@@ -431,7 +428,7 @@ func (g *gen) emitBitfield(f *dfile, nt *ir.NamedType) {
 
 // ---- object class ---------------------------------------------------------
 
-func (g *gen) emitClass(f *dfile, name, summary string, fields []*ir.Field, isMessage, withVisitor bool) {
+func (g *gen) emitClass(f *dfile, name, raw, summary string, fields []*ir.Field, isMessage, withVisitor bool) {
 	emitDoc(f, "", summary)
 	f.line("class %s {", name)
 	for _, fld := range fields {
@@ -445,7 +442,7 @@ func (g *gen) emitClass(f *dfile, name, summary string, fields []*ir.Field, isMe
 		if isDest(fld) {
 			final = "final "
 		}
-		f.line("  %s%s %s%s;", final, g.dartType(fld), dartIdent(fld.Name), g.dartInit(fld))
+		f.line("  %s%s %s%s;", final, g.dartType(fld), g.member(fld), g.dartInit(fld))
 		if hasDestDefault(fld) {
 			f.line("  %s", g.defaultDecl(fld))
 		}
@@ -454,7 +451,7 @@ func (g *gen) emitClass(f *dfile, name, summary string, fields []*ir.Field, isMe
 			// payload/signaling bits (§4.6), so when decode delivers a NaN we keep the
 			// exact 32 wire bits here and re-emit them via writeFp32Bits. null == "no
 			// captured bits; derive the wire image from the double".
-			f.line("  int? %s;", fp32BitsField(fld.Name))
+			f.line("  int? %s;", g.fp32BitsField(fld))
 		}
 	}
 	f.blank()
@@ -591,7 +588,7 @@ func (g *gen) emitClass(f *dfile, name, summary string, fields []*ir.Field, isMe
 		f.line("  /// Decodes into a destination the caller guarantees is already at its")
 		f.line("  /// defaults, so [decode]'s fresh instance skips the redundant reset.")
 		f.line("  static sofab.DecodeStatus _decodeInto(Uint8List data, %s out) {", name)
-		f.line("    return sofab.Decoder.decode(data, %s(out));", visitorName(name))
+		f.line("    return sofab.Decoder.decode(data, %s(out));", visitorName(raw))
 		f.line("  }")
 		f.blank()
 		f.line("  /// Best-effort one-shot decode (the 90 %% case): returns the message with")
@@ -613,19 +610,19 @@ func (g *gen) emitClass(f *dfile, name, summary string, fields []*ir.Field, isMe
 		f.line("  /// [out] is [reset] first, for the reason [tryDecode] resets: an absent")
 		f.line("  /// field fires no callback, so a value left over from an earlier decode")
 		f.line("  /// would survive.")
-		f.line("  static %sDecoder decoder(%s out) {", name, name)
+		f.line("  static %s decoder(%s out) {", decoderName(raw), name)
 		f.line("    out.reset();")
-		f.line("    return %sDecoder._(out);", name)
+		f.line("    return %s._(out);", decoderName(raw))
 		f.line("  }")
 	}
 	f.line("}")
 	f.blank()
 	if isMessage {
-		g.emitStreamDecoder(f, name)
+		g.emitStreamDecoder(f, name, raw)
 	}
 
 	if withVisitor {
-		g.emitVisitor(f, name, fields, nil)
+		g.emitVisitor(f, name, raw, fields, nil)
 	}
 }
 
@@ -634,8 +631,6 @@ func (g *gen) emitClass(f *dfile, name, summary string, fields []*ir.Field, isMe
 // caller's storage every time it fills, so it only trades sink calls against
 // resident bytes. Matches the Rust, Go, Python and TypeScript backends.
 const dartScratchSize = 512
-
-func visitorName(typeName string) string { return "_" + typeName + "Visitor" }
 
 // ---- reset ----------------------------------------------------------------
 
@@ -676,7 +671,7 @@ func (g *gen) emitReset(f *dfile, fields []*ir.Field) {
 }
 
 func (g *gen) emitResetField(f *dfile, fld *ir.Field) {
-	acc := dartIdent(fld.Name)
+	acc := g.member(fld)
 	switch {
 	case fld.Kind == ir.KindStruct || fld.Kind == ir.KindUnion:
 		// The member object survives; its own reset clears it recursively.
@@ -687,7 +682,7 @@ func (g *gen) emitResetField(f *dfile, fld *ir.Field) {
 		// CAPACITY, never a length (MESSAGE_SPEC §3), so a fresh count:N array
 		// holds no elements at all -- which is exactly what an absent field
 		// decodes back to.
-		if def, ok := defaultRef(fld); ok {
+		if def, ok := g.defaultRef(fld); ok {
 			f.line("    %s.assign(%s);", acc, def)
 			return
 		}
@@ -698,7 +693,7 @@ func (g *gen) emitResetField(f *dfile, fld *ir.Field) {
 	case fld.Kind == ir.KindFP32:
 		// Drop any captured NaN wire bits with the value they belonged to (§4.6).
 		f.line("    %s = %s;", acc, g.dartDefaultValue(fld))
-		f.line("    %s = null;", fp32BitsField(fld.Name))
+		f.line("    %s = null;", g.fp32BitsField(fld))
 	default:
 		// Scalars are values: assignment IS the in-place reset.
 		f.line("    %s = %s;", acc, g.dartDefaultValue(fld))
@@ -720,7 +715,7 @@ func (g *gen) destDefaultTest(fld *ir.Field, acc string, differs bool) string {
 	if differs {
 		not, cmp = "!", "!="
 	}
-	def, ok := defaultRef(fld)
+	def, ok := g.defaultRef(fld)
 	if !ok {
 		return fmt.Sprintf("%s.length %s 0", acc, cmp)
 	}
@@ -733,7 +728,7 @@ func (g *gen) destDefaultTest(fld *ir.Field, acc string, differs bool) string {
 // ---- serialize --------------------------------------------------------------
 
 func (g *gen) emitMarshal(f *dfile, fld *ir.Field) {
-	g.emitMarshalAt(f, "    ", fld, dartIdent(fld.Name), fp32BitsField(fld.Name), false)
+	g.emitMarshalAt(f, "    ", fld, g.member(fld), g.fp32BitsField(fld), false)
 }
 
 // emitMarshalAt writes field fld, held in acc (its fp32 raw-bits companion in
@@ -1082,7 +1077,7 @@ func (g *gen) emitDestElemLoop(f *dfile, ind, iv, val string, kind, elem ir.Kind
 // Top-level rather than nested, because Dart has no nested classes; the private
 // `._()` constructor keeps `decoder(out)` the only way to build one, so the
 // destination is always reset first.
-func (g *gen) emitStreamDecoder(f *dfile, name string) {
+func (g *gen) emitStreamDecoder(f *dfile, name, raw string) {
 	f.line("/// Incremental decoder for [%s]: hold one and feed the message as", name)
 	f.line("/// bytes arrive, instead of buffering it whole first.")
 	f.line("///")
@@ -1098,9 +1093,9 @@ func (g *gen) emitStreamDecoder(f *dfile, name string) {
 	f.line("/// chunk may be reused as soon as [feed] returns. A destination is complete")
 	f.line("/// once a feed reports `complete`; after `incomplete` or a refusal its")
 	f.line("/// contents are unspecified.")
-	f.line("class %sDecoder {", name)
-	f.line("  %sDecoder._(this._out) {", name)
-	f.line("    _d = sofab.Decoder(%s(_out));", visitorName(name))
+	f.line("class %s {", decoderName(raw))
+	f.line("  %s._(this._out) {", decoderName(raw))
+	f.line("    _d = sofab.Decoder(%s(_out));", visitorName(raw))
 	f.line("  }")
 	f.blank()
 	f.line("  final %s _out;", name)
