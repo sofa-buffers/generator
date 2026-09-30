@@ -68,10 +68,6 @@ type unionShape struct {
 	byField  map[*ir.Field]*unionOpt
 }
 
-// unionFixed are the members every union class has of its own (and those
-// Object gives it): an option landing on one takes the trailing underscore.
-var unionFixed = []string{"which", "reset", "serialize", "hashCode", "runtimeType", "toString", "noSuchMethod"}
-
 // unionOptProp is the getter/setter an option is reached through: the option's
 // name, mangled like a struct member's, and -- where it lands on one of the
 // union's own members or on the class name (a member cannot share it) -- with
@@ -81,7 +77,7 @@ func unionOptProp(name, typeName string) string {
 	if p == typeName {
 		return p + "_"
 	}
-	for _, m := range unionFixed {
+	for m := range unionFixed {
 		if p == m {
 			return p + "_"
 		}
@@ -143,9 +139,9 @@ func (g *gen) unionShapeOf(key string, nt *ir.NamedType) *unionShape {
 // private slots are checked as ONE set, together with the union's own members:
 // `foo_bar` and `fooBar` both give hasFooBar, `a`'s aId lands on an option named
 // `aId`. Located: the error names the union and both options.
-func checkUnionNames(u *unionShape) error {
+func checkUnionNames(u *unionShape, types map[string]string) error {
 	owner := map[string]string{"_which": "", u.typeName: ""}
-	for _, m := range unionFixed {
+	for m := range unionFixed {
 		owner[m] = ""
 	}
 	for _, o := range u.opts {
@@ -157,6 +153,11 @@ func checkUnionNames(u *unionShape) error {
 			names = append(names, o.bits, o.bitSlot)
 		}
 		for _, n := range names {
+			// A member spelled like a generated class hides that class in the
+			// whole union body, which names its options' types.
+			if what, ok := types[n]; ok {
+				return fmt.Errorf("dart backend: union %s: option %q generates the member %s, which is also %s; rename the option", u.nt.Key, o.f.Name, n, what)
+			}
 			prev, ok := owner[n]
 			switch {
 			case ok && prev == "":
@@ -177,7 +178,7 @@ func (g *gen) checkUnions(s *ir.Schema) error {
 		if nt.Category != ir.CatUnion {
 			continue
 		}
-		if err := checkUnionNames(g.unionShapeOf(key, nt)); err != nil {
+		if err := checkUnionNames(g.unionShapeOf(key, nt), g.dartTypeNames(s)); err != nil {
 			return err
 		}
 	}

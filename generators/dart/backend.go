@@ -64,6 +64,9 @@ func (*Backend) Generate(s *ir.Schema, cfg map[string]any) ([]generator.File, er
 		limits:  resolveLimits(s, cfg),
 		size:    generator.NewSizePolicy(cfg),
 	}
+	if err := g.checkFieldNames(s); err != nil {
+		return nil, err
+	}
 	if err := g.checkUnions(s); err != nil {
 		return nil, err
 	}

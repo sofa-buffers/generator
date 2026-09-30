@@ -75,6 +75,35 @@ Things worth knowing:
 - **A destination is complete when the decode reports `complete`.** After
   `incomplete` or a refusal its contents are unspecified.
 
+## Field names
+
+A field's member is the field's schema name. In Dart a class member is in scope
+throughout the class body and hides every outer name of the same spelling — a
+type, a constant, an import prefix — so a field whose name the generated class
+uses gets a trailing underscore; Dart has no way to escape a name. The field
+`num` is `num_`. Those names are:
+
+- the Dart keywords and built-in identifiers, and the core types the generated
+  code names (`int`, `double`, `String`, `List`, `Uint8List`, …);
+- the members every generated class declares: `serialize`, `reset`, and on a
+  message also `encode`, `encodeTo`, `decode`, `tryDecode`, `decoder`,
+  `maxSize`, `maxSizeLimit`, `maxDepth`;
+- the members every class inherits from `Object`: `hashCode`, `runtimeType`,
+  `toString`, `noSuchMethod`;
+- the other outer names the class body uses: the `sofab` import prefix,
+  `BytesBuilder`, `Deprecated`, `Float32List`, `Float64List`, `Int64List`, and
+  the limit constants `maxDynArrayCount`, `maxDynBlobLen`, `maxDynStringLen`.
+
+Only the member changes: the wire is keyed by the field id, and the JSON key
+stays the schema name. Two fields that end up with the same member — `encode`
+and `encode_`, or an `fp32` field `f` (whose bits companion is `fFp32Bits`) and
+a field `fFp32Bits` — fail generation, naming both; so does a field spelled like
+a generated class (`M` or `MDecoder` for the message `m`, `StructPoint` for a
+struct `Point`), which would hide that class. The same holds for a union
+option. Enum constants and bitfield flags are named the same way: two that end
+up with the same name (`class` and `class_`), or one spelled like its own class,
+fail generation too. The list lives in `generators/dart/reserved.go`.
+
 ## Unions
 
 A `union` holds exactly one of its options. It is a class of its own whose
@@ -186,10 +215,10 @@ fp32 member: assigning the value clears them; to write a signaling NaN, assign
 
 **Names.** The getter and setter are the option name, `has<Option>` and
 `mutable<Option>()` use it in PascalCase, and the constant is `<option>Id`. An
-option whose name is a Dart keyword or core type gets a trailing underscore, as
-a field does (`num` → `num_`); so does one landing on the union's own members
-(`which`, `reset`, `serialize`, `hashCode`, `runtimeType`, `toString`,
-`noSuchMethod`) or on the union's class name: an option `which` is `which_`,
+option whose name is reserved for a field (see [Field names](#field-names))
+gets a trailing underscore, as a field does (`num` → `num_`); so does one
+landing on the union's own `which` or on the union's class name: an option
+`which` is `which_`,
 with `hasWhich` and `whichId`. Two options that would produce the same member
 (`foo_bar` and `fooBar` both give `hasFooBar`; `a`'s `aId` and an option named
 `aId`; `x`'s `hasX` and an option named `hasX`) fail generation, naming both.
