@@ -101,13 +101,13 @@ public final class OwnershipCheck {
         m.somestruct.nestedstring = "nested payload";
         m.someunion.setOption2("union payload");
         m.somestructwitharray.label = "struct label";
-        MyfirstmessageSomeunionarrayElem row = new MyfirstmessageSomeunionarrayElem();
+        Myfirstmessage_Someunionarray row = new Myfirstmessage_Someunionarray();
         row.setAsstring("union row");
         m.someunionarray = new ArrayList<>(List.of(row));
-        MyfirstmessageSomemapElem first = new MyfirstmessageSomemapElem();
+        Myfirstmessage_Somemap first = new Myfirstmessage_Somemap();
         first.key = "first key";
         first.value = 1L;
-        MyfirstmessageSomemapElem second = new MyfirstmessageSomemapElem();
+        Myfirstmessage_Somemap second = new Myfirstmessage_Somemap();
         second.key = "second key";
         second.value = 2L;
         m.somemap = new ArrayList<>(List.of(first, second));
