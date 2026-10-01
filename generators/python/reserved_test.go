@@ -249,14 +249,42 @@ var (
 // TestTypeReservedCoversImports: the type-level list is complete -- every
 // upper-case name a generated module imports or states as a module constant is
 // on it, so no type can be spelled like one and rebind it. Swept over the
-// example, the shared names schema and the reserved schema, which between them
-// reach every import module() can write.
+// example, the shared names schema, the reserved schema and a schema with an
+// unbounded string, blob and wrapper array (the three MAX_DYN_* constants are
+// emitted only for an unbounded field of their kind). The `from sofab import`
+// line is also checked through sofabImports on a decode text that takes every
+// branch, so a name no schema reaches today (SofaLimitError) is held too.
 func TestTypeReservedCoversImports(t *testing.T) {
 	for _, s := range []string{"../../examples/messages/example.yaml", "../../tests/conformance/lib/names.yaml"} {
 		checkTypeReservedCovers(t, s, string(genPy(t, schemaFile(t, s), map[string]any{})["message.py"]))
 	}
 	checkTypeReservedCovers(t, "reserved", string(genPy(t, schema(t, reservedYAML(reservedNames())), map[string]any{})["message.py"]))
+	unbounded := string(genPy(t, schema(t, unboundedYAML), map[string]any{})["message.py"])
+	for _, c := range []string{"MAX_DYN_ARRAY_COUNT = ", "MAX_DYN_STRING_LEN = ", "MAX_DYN_BLOB_LEN = "} {
+		if !strings.Contains(unbounded, "\n"+c) {
+			t.Errorf("unbounded schema: no %q line -- the sweep no longer reaches it", c)
+		}
+	}
+	checkTypeReservedCovers(t, "unbounded", unbounded)
+
+	every := sofabImports("raise SofaLimitError(x)\nreserve_elem(a, b, UNBOUNDED, c)\nreserve_leaf(\nreserve_row(\n" +
+		"t = (Binding(closed=True),)\ndef on_field(self, fld: Field):\nWireType.FIXLEN, FixlenSubtype.FP32\n")
+	if want := []string{"Binding", "Decoder", "Encoder", "Field", "FixlenSubtype", "SofaDecodeError", "SofaIncompleteError",
+		"SofaLimitError", "Status", "UNBOUNDED", "Visitor", "WireType", "reserve_elem", "reserve_leaf", "reserve_row"}; strings.Join(every, " ") != strings.Join(want, " ") {
+		t.Errorf("sofabImports on every trigger = %v, want %v (extend the trigger text with the new branch)", every, want)
+	}
+	checkTypeReservedCovers(t, "every sofab import", "from sofab import "+strings.Join(every, ", ")+"\n")
 }
+
+// unboundedYAML has one unbounded field of each receiver-capped kind.
+const unboundedYAML = `version: 1
+messages:
+  m:
+    payload:
+      s: { id: 0, type: string }
+      b: { id: 1, type: blob }
+      arr: { id: 2, type: array, items: { type: string } }
+`
 
 func checkTypeReservedCovers(t *testing.T, label, mod string) {
 	t.Helper()
