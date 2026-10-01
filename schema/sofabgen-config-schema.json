@@ -101,7 +101,7 @@
         },
         "input_dir": {
           "type": "string",
-          "description": "Directory of message definitions to generate from. The CLI --in flag overrides it."
+          "description": "Directory of message definitions to generate from; all its definition files form one schema. The CLI --in flag overrides it."
         },
         "output_dir": {
           "type": "string",

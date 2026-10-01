@@ -10,7 +10,9 @@
 package pipeline
 
 import (
+	"errors"
 	"fmt"
+	"os"
 
 	"github.com/sofa-buffers/generator/internal/analysis"
 	"github.com/sofa-buffers/generator/internal/config"
@@ -22,7 +24,7 @@ import (
 
 // Options controls one pipeline run.
 type Options struct {
-	DefPath string         // path to a definition file (YAML/JSON)
+	DefPath string         // a definition file (YAML/JSON), or a directory of them (one schema)
 	Lang    string         // target language, or "" to stop at the IR
 	Config  *config.Config // resolved config (may be config.Empty())
 	OutDir  string         // output directory (when a backend runs)
@@ -34,12 +36,20 @@ type Result struct {
 	Files  []generator.File // empty when no backend ran
 }
 
-// Run executes the pipeline for a single definition file. It fails closed: any
-// validation or analysis error aborts with no output written (PLAN §1).
+// Run executes the pipeline for one schema: a definition file, or a directory
+// whose definition files are one schema (parser.LoadDir) — one IR, and each
+// backend runs once over it. It fails closed: any validation or analysis error
+// aborts with no output written (PLAN §1).
 func Run(opts Options) (*Result, error) {
 	// [1] Parser: load + hard-gate validation over the resolved document.
-	doc, err := parser.Load(opts.DefPath)
-	if err != nil {
+	var doc *parser.Document
+	if info, err := os.Stat(opts.DefPath); err == nil && info.IsDir() {
+		// Every file was validated on its own (and its errors located in it);
+		// what is left to check is the merged whole.
+		if doc, err = parser.LoadDir(opts.DefPath); err != nil {
+			return nil, err
+		}
+	} else if doc, err = parser.Load(opts.DefPath); err != nil {
 		return nil, err
 	}
 	resolved, err := doc.Resolve()
@@ -47,13 +57,20 @@ func Run(opts Options) (*Result, error) {
 		return nil, fmt.Errorf("%s: %w", opts.DefPath, err)
 	}
 	if errs := parser.Validate(resolved); errs != nil {
-		return nil, fmt.Errorf("%s: %w", opts.DefPath, errs)
+		return nil, fmt.Errorf("%s: %w", opts.DefPath, doc.LocateErrors(errs))
 	}
 
 	// [2] Model: lower the validated, unresolved document into the IR
 	// (composite fields carry unresolved TypeRefs).
 	schema, err := model.Build(doc)
 	if err != nil {
+		var merrs model.Errors
+		if errors.As(err, &merrs) {
+			for i := range merrs {
+				merrs[i].Loc = doc.Locate(merrs[i].Loc)
+			}
+			err = merrs
+		}
 		return nil, fmt.Errorf("%s: %w", opts.DefPath, err)
 	}
 

@@ -119,7 +119,10 @@ done
 sofabgen --lang docs --in examples/messages/example.yaml --out out/docs
 
 # Scaffold a full buildable project + encode/decode harness:
-#   sofabgen --config myconfig.yaml --lang rust --in examples --out out
+#   sofabgen --config myconfig.yaml --lang rust --in examples/messages/example.yaml --out out
+
+# A folder is one schema: all its definition files, generated together.
+sofabgen --lang python --in examples/messages/realworld --out out/python
 ```
 
 Examples:
@@ -184,14 +187,14 @@ The CLI is deliberately tiny — everything configurable lives in a config file:
 
 ```sh
 sofabgen --config <file> --lang <c|cpp|rust|go|python|java|kotlin|csharp|typescript|zig|dart|docs> \
-        [--in <dir>] [--out <dir>] [--format off|auto|require]
+        [--in <file|dir>] [--out <dir>] [--format off|auto|require]
 ```
 
 | Argument | Required | Purpose |
 |---|---|---|
 | `--config <file>` | yes | YAML/JSON config carrying all other options |
 | `--lang <target>` | yes | Which backend to generate |
-| `--in <dir>` | no | Override the config's input definition folder |
+| `--in <file\|dir>` | no | Override the config's input: one definition file, or a folder whose definition files (`.yaml`/`.yml`/`.json`) are generated together as **one schema** — every message and type once; two different definitions sharing a name across its files are an error naming both |
 | `--out <dir>` | no | Override the config's output folder |
 | `--format <mode>` | no | Override the config's `generic.run_formatter`: `off` (default) runs no external formatter, `auto` runs the target's one when installed, `require` fails without it |
 

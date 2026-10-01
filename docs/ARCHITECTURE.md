@@ -101,7 +101,7 @@ never code-generated. All problems are reported at once.
 |---|---|
 | `--config <file>` | Config file (carries all options; §7). |
 | `--lang <target>` | Target backend (`c`, `cpp`, `rust`, `go`, `python`, `java`, `kotlin`, `csharp`, `typescript`, `zig`, `dart`, `docs`). |
-| `--in <file\|dir>` | Definition input (overrides `generic.input_dir`). |
+| `--in <file\|dir>` | Definition input (overrides `generic.input_dir`). A directory is **one schema**: its definition files (`.yaml`/`.yml`/`.json`, not its subdirectories) are merged into one document, one IR is built, and each backend runs once (§3, "One input, one schema"). |
 | `--out <dir>` | Output folder (overrides `generic.output_dir`). |
 | `--print-defaults` | Print the effective resolved config for `--lang` and exit. |
 | `--dump-ir` | Print the built IR as JSON and exit (no codegen) — the IR contract is observable/golden-tested. |
@@ -132,6 +132,35 @@ config (resolved: defaults → generic → per-target; --in/--out override paths
 | 4 | **IR** | — | the frozen Composite tree backends consume |
 | 5 | **Backend** | frozen IR + effective config | `[]File` (path + bytes) |
 | 6 | **Formatter** | builder output | deterministic source |
+
+**One input, one schema.** A run builds exactly one IR and runs the backend
+once, whether `--in` names a file or a directory — a backend's output is a
+function of the whole schema (single-module targets write every message into
+one `message.py` / `message.ts` / `Message.cs` / `src/message.rs` …, Go writes
+one shared types file), so generating each file of a directory on its own into
+one output would keep only the last. For a directory, stage [1] is
+`parser.LoadDir`: every definition file is loaded (its cross-file refs inlined)
+and validated **on its own**, so its errors are located in it exactly as in a
+single-file run; then `parser.Merge` joins their messages and `$defs` into one
+document under one namespace — naming rule 3 (§8) applied across files:
+
+- the same definition reached from two files (a library file in the directory
+  that a message file also imports) is one type — a definition's identity is its
+  file and JSON pointer (`parser.Source`);
+- two structurally identical definitions under one name and kind (deep-equal
+  bodies, `$ref`s compared by pointer) are one type: generating it once loses
+  nothing;
+- two *different* definitions whose names fold to one — two `m` messages, a
+  struct `P` and an enum `p`, a library's `P` and another file's imported `P` —
+  are a located error naming both files and pointers. The directory is
+  ambiguous: keeping either would silently give the other's users its layout.
+
+Every `$defs` entry of every file enters the merged document, used by a message
+or not — exactly what a single file's own unused `$defs` entry does (a backend
+that emits only reachable types still does so). The merged document records
+each element's file (`Document.Origins`), and the pipeline maps later
+validation and model errors through `Document.Locate`, so they name the file
+the user has to edit. A single-file input is unchanged, byte for byte.
 
 **The language-independent core ends at stage [4].** A backend is selected only
 after the IR is frozen, at the **Language Selection Point** — a registry lookup
@@ -212,6 +241,30 @@ definition from `$defs` so it becomes **one shared generated type** (inline
 definitions duplicate). Cross-file refs `file.yaml#/$defs/...` are inlined at
 load time and flattened transitively; **recursive refs are rejected** (a
 recursive value member has no finite size).
+
+An imported definition keeps its name and joins the importing document's one
+namespace (§8, naming rule 3), and is identified by its file and pointer
+(`internal/parser/external.go`). The same definition reached twice — directly
+and through another file's definition — is imported once. A *different*
+definition whose name folds to one already taken (a local message or `$defs`
+entry, or a definition imported from another file) is a located error at the
+importing `$ref`, naming the definition that holds the name and, if that one
+was imported, the `$ref` it was imported for:
+
+```
+#/messages/m/payload/b/fields: $ref b.yaml#/$defs/struct/point: "point" is already
+defined by a.yaml#/$defs/struct/point (imported for #/messages/m/payload/a/fields);
+one schema has one namespace for messages and $defs — rename one
+```
+
+Two definitions from different files that are structurally identical (same
+category and name, deep-equal bodies with `$ref`s compared by pointer) are one
+type; a dependency that differs under one name is refused on its own import, so
+"identical" covers the whole graph below. A local `$ref` inside an imported
+definition names that definition's own file, and is followed there. An error
+found later inside an imported definition (validation, model) is located in its
+file (`lib/a.yaml#/$defs/struct/P/x`), not at a `#/$defs` pointer the user's
+file does not have.
 
 **How definition types lower onto the wire** (the generator must route these to
 the corelib correctly — see §9): `struct`/`union` and *arrays of composite or
@@ -974,11 +1027,15 @@ requires each namespace-level declaration exactly once, and
 `TestGeneratedFilesAreDistinct` fails when a target refuses the names schema,
 writes two files that share a case-folded path, or names a file after a device.
 
-**Known gaps, tracked separately.** Two pre-existing defects still break the
-"never two declarations" promise and are deliberately out of this contract's
-scope: a cross-file `$ref` that imports a `$defs` name a second file (or the
-local file) also defines is merged silently into one type
-(`internal/parser/external.go`), and the C and C++ backends define a `$defs`
+**Rule 3 across files.** A cross-file `$ref` (§4, "Shared types") and a
+directory input (§3, "One input, one schema") both join definitions from
+several files into one namespace; both refuse two different definitions under
+one fold with a located error naming both files, and keep one type for the same
+or a structurally identical definition.
+
+**Known gaps, tracked separately.** One pre-existing defect still breaks the
+"never two declarations" promise and is deliberately out of this contract's
+scope: the C and C++ backends define a `$defs`
 type used by two messages in both messages' headers. `names.yaml` keeps every
 `$defs` type to one message so the conformance suites stay meaningful for the
 naming contract itself.

@@ -48,7 +48,7 @@ Key flags:
 
 - `--lang <target>` — one of `c`, `cpp`, `csharp`, `dart`, `docs`, `go`, `java`,
   `kotlin`, `python`, `rust`, `typescript`, `zig`.
-- `--in <path>` — a message-definition file, or a directory of them.
+- `--in <path>` — a message-definition file, or a directory of them (generated together as one schema).
 - `--out <dir>` — where the generated code is written.
 - `--config <file>` — the YAML/JSON config carrying all options.
 - `--version` prints the version; `--help` lists every flag.
