@@ -1698,4 +1698,35 @@ g++ -std=c++20 $WARNFLAGS $BIG -I"$CC/src/include" -I"$WORK/wideid" \
 }
 echo "==> [c-cpp] value-width id guard fired as expected (both controls built)"
 
+# Header macros on newlib. The escape list of macros a schema name cannot take
+# as an identifier is measured on glibc AND newlib; newlib defines names glibc
+# does not (EFTYPE, fast_putc, fropen, ...), so a list taken on the host alone
+# builds here and breaks on the embedded target the c-cpp profile ships to.
+# Where the ARM toolchain is installed: re-measure the list against these
+# corelibs (the Go test fails on any macro missing from it), and syntax-check
+# the collision schema's headers with it, on all four profiles.
+if command -v arm-none-eabi-g++ >/dev/null 2>&1; then
+    echo "==> header macros: re-measured on glibc and newlib"
+    ( cd "$ROOT" && SOFAB_CPP_DIR="$CPP" SOFAB_C_DIR="$CC" \
+        go test ./generators/cpp -run '^TestHeaderMacrosAreListed$' -count=1 ) || {
+        echo "FAIL: a header macro is missing from the C++ escape list"; exit 1; }
+    for prof in "cpp:" "cpp-static:allow_dynamic: false" \
+                "c-cpp-dynamic:corelib: c-cpp, allow_dynamic: true" "c-cpp-static:corelib: c-cpp"; do
+        label=${prof%%:*}; opts=${prof#*:}
+        printf 'targets: { cpp: { namespace: sofabuffers%s } }\n' "${opts:+, $opts}" > "$WORK/cfg-newlib-$label.yaml"
+        rm -rf "$WORK/newlib-$label"
+        ( cd "$ROOT" && go run ./cmd/sofabgen --config "$WORK/cfg-newlib-$label.yaml" --lang cpp \
+            --in "$ROOT/tests/conformance/cpp/reserved.yaml" --out "$WORK/newlib-$label" ) >/dev/null
+        for h in "$WORK/newlib-$label"/*.hpp; do printf '#include "%s"\n' "$h"; done > "$WORK/newlib-$label.cpp"
+        case "$label" in c-cpp*) inc="$CC/src/include" ;; *) inc="$CPP/include" ;; esac
+        for std in c++20 gnu++20; do
+            arm-none-eabi-g++ -std=$std $WARNFLAGS -I"$inc" -fsyntax-only "$WORK/newlib-$label.cpp" || {
+                echo "FAIL: [$label] reserved.yaml does not build on newlib (-std=$std)"; exit 1; }
+        done
+    done
+    echo "==> reserved.yaml builds on newlib on all four profiles"
+else
+    echo "==> SKIP header macros on newlib: arm-none-eabi-g++ not on PATH"
+fi
+
 echo "PASS"

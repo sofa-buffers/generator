@@ -109,7 +109,10 @@ take as a member gets a trailing underscore — the field `class` is the member
   `dynCap`, `elemDestCap`, `elemWire`, `elemFix`, `prepare`, and `MAX_SIZE`;
 - every macro of the headers the generated code includes (`NULL`, `EOF`,
   `INT8_MAX`, `errno`, `stdin`, ...; in GNU mode also `linux` and `unix`), and
-  every name starting with `SOFAB_` or `SOFABGEN_`;
+  every name starting with `SOFAB_` or `SOFABGEN_`. The macro set covers
+  glibc and newlib (each with libstdc++), including the names only one of them
+  defines (`SYS_read` on glibc, `EFTYPE` on newlib); on another C library a
+  macro of its own that neither defines is not escaped;
 - the name of any type or bitfield flag the schema generates, so that a field
   named like its own message, or like a type its class uses, is `Point_`.
 
@@ -125,8 +128,7 @@ spelled like a macro.
 
 **Parameters and locals** of the generated member functions all start with an
 underscore (`_os`, `_is`, `_id`, `_data`, `_len`, `_out`), so no field can
-collide with one. The lists live in `generators/cpp/reserved.go` and
-`generators/cpp/macros.go`.
+collide with one.
 
 ## Unions
 
