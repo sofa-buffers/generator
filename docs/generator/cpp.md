@@ -90,8 +90,11 @@ declared inline.
 (`Color::Red`). **Bitfield flags** are enumerators at namespace level, named
 `<Type>_<Flag>`: flag `ready` of bitfield `StatusFlags` is `StatusFlags_Ready`.
 
-**Files.** Each message is one header, named after the message in lower case
-with underscores dropped: `vehicle_telemetry` is `vehicletelemetry.hpp`.
+**Files.** Each message is one header, named after the message in lower case:
+`VehicleTelemetry` is `vehicletelemetry.hpp`, `vehicle_telemetry` is
+`vehicle_telemetry.hpp`. A name Windows reserves for a device (`con`, `prn`,
+`aux`, `nul`, `com0`–`com9`, `lpt0`–`lpt9`, in any case) gets a trailing
+underscore, so message `con` is `con_.hpp`.
 
 **Field members.** A field's member is the field's schema name. C++ has no way
 to escape a reserved name, so a field whose name the generated class cannot

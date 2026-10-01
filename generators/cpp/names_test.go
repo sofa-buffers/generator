@@ -74,3 +74,32 @@ func TestNamesSchemaDeclaresEachNameOnce(t *testing.T) {
 		}
 	}
 }
+
+// TestHeaderFileNames: a message's header is its name lower-cased, underscores
+// kept -- vehicle_telemetry and vehicleTelemetry cannot both exist (their folds
+// match), so lower-casing alone keeps the headers apart -- and a stem Windows
+// reserves as a device name takes a trailing underscore, which no other
+// message's stem can end with. The harness includes each header by that name.
+func TestHeaderFileNames(t *testing.T) {
+	src := "version: 1\nmessages:\n" +
+		"  vehicle_telemetry:\n    payload:\n      a: { id: 0, type: u8 }\n" +
+		"  Com_1:\n    payload:\n      a: { id: 0, type: u8 }\n" +
+		"  CON:\n    payload:\n      a: { id: 0, type: u8 }\n" +
+		"  lpt9:\n    payload:\n      a: { id: 0, type: u8 }\n" +
+		"  console:\n    payload:\n      a: { id: 0, type: u8 }\n"
+	files := unionFiles(t, src, nil)
+	harness := files["harness/_json.hpp"]
+	for _, want := range []string{"vehicle_telemetry.hpp", "com_1.hpp", "con_.hpp", "lpt9_.hpp", "console.hpp"} {
+		if _, ok := files[want]; !ok {
+			t.Errorf("no header %s", want)
+		}
+		if !strings.Contains(harness, `#include "`+want+`"`) {
+			t.Errorf("the harness does not include %s", want)
+		}
+	}
+	for _, bad := range []string{"vehicletelemetry.hpp", "com1.hpp", "con.hpp", "lpt9.hpp"} {
+		if _, ok := files[bad]; ok {
+			t.Errorf("unexpected header %s", bad)
+		}
+	}
+}
