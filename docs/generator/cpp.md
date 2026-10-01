@@ -102,7 +102,15 @@ declared inline.
 `VehicleTelemetry` is `vehicletelemetry.hpp`, `vehicle_telemetry` is
 `vehicle_telemetry.hpp`. A name Windows reserves for a device (`con`, `prn`,
 `aux`, `nul`, `com0`–`com9`, `lpt0`–`lpt9`, in any case) gets a trailing
-underscore, so message `con` is `con_.hpp`.
+underscore, so message `con` is `con_.hpp`. A message header holds the message
+and the types it declares inline.
+
+The `$defs` types the messages use — and the types declared inside them — are
+defined once, in the shared header `sofab-defs.hpp`, however many messages use
+them. A message header that uses one includes it, so including the message
+header is still all a caller needs. A schema whose messages use no `$defs` type
+gets no shared header. Its name is fixed, so generate each schema into its own
+directory.
 
 **Field members.** A field's member is the field's schema name. C++ has no way
 to escape a reserved name, so a field whose name the generated class cannot

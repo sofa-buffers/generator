@@ -100,7 +100,8 @@ bench_size() {
     local cc="${cxx/g++/gcc}"
     local build="$work/cpp-fp" hdr
     rm -rf "$build" && mkdir -p "$build" || return 1
-    hdr="$(basename "$(find "$gen" -name '*.hpp' | head -1)")"
+    # The message's header, not the shared $defs one (sofab-defs.hpp) it includes.
+    hdr="$(basename "$(find "$gen" -name '*.hpp' ! -name 'sofab-defs.hpp' | head -1)")"
 
     cat > "$build/driver.cpp" <<EOF
 #include "$hdr"

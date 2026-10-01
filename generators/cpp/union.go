@@ -149,9 +149,9 @@ func isScalarOpt(k ir.Kind) bool {
 	return true
 }
 
-// unionHas reports whether any type this header emits is a union.
-func (g *gen) unionHas(m *ir.Message) bool {
-	for _, key := range g.reachable(m) {
+// unionHas reports whether any of the named types reach is a union.
+func (g *gen) unionHas(reach []string) bool {
+	for _, key := range reach {
 		if g.schema.Named[key].Category == ir.CatUnion {
 			return true
 		}

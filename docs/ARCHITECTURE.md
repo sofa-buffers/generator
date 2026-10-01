@@ -983,7 +983,7 @@ rule-abiding schemas.
 | **private** | a name only generated code uses: `_` first (`_M__Visitor`, `_StreamDecoder`) — `_` + a type identifier + `__` + a role when it is per type | no schema name starts with `_` |
 | **escape** | a type identifier equal to a name the module declares or uses unqualified (its fixed names, imports, language builtins and keywords): `T_` | a type identifier never ends with `_` |
 | **member** | fields, methods, union accessors: the per-language lists and escapes of *One reserved-name list per language* above | one class scope; rule 2 removes the case twins those lists could not |
-| **file** | per message or type: the type identifier (Java, Kotlin), the lowercased name (C, C++), or its fold (`naming.Lower`, Go — whose toolchain gives `_test` and `_<GOOS>` meaning); never a fixed generated file, a header the build includes, or a Windows device name (`naming.IsDeviceStem`: CON, PRN, AUX, NUL, COM0-9, LPT0-9 in any case and with any extension), which takes a spelling no other file of that backend can have (a trailing `_`: Go `con_.go`, C++ `con_.hpp`; Java/Kotlin escape the class, `Con_`) | equal lowercase implies equal fold, which rule 2/3 forbid within a scope, so even a case-insensitive filesystem keeps them apart |
+| **file** | per message or type: the type identifier (Java, Kotlin), the lowercased name (C, C++), or its fold (`naming.Lower`, Go — whose toolchain gives `_test` and `_<GOOS>` meaning); never a fixed generated file, a header the build includes, or a Windows device name (`naming.IsDeviceStem`: CON, PRN, AUX, NUL, COM0-9, LPT0-9 in any case and with any extension), which takes a spelling no other file of that backend can have (a trailing `_`: Go `con_.go`, C++ `con_.hpp`; Java/Kotlin escape the class, `Con_`). C and C++ add one fixed file for the `$defs` types, `sofab-defs.{h,c}` / `sofab-defs.hpp`: no schema name contains `-` | equal lowercase implies equal fold, which rule 2/3 forbid within a scope, so even a case-insensitive filesystem keeps them apart |
 
 Two targets deviate where the language forbids a spelling:
 
@@ -992,7 +992,9 @@ Two targets deviate where the language forbids a spelling:
   both — `message_m_t`, `message_m___a_t`, `message_m__init`, `message_m__decoder_t`,
   `MESSAGE_M__MAX_SIZE`, a flag `MESSAGE_M___FLAGS___ON`, a split variant
   `message_shape__default_pt_t`, a length companion `<member>__len`, files
-  `<name>_sofab.{h,c}` (no header the build includes can be shadowed). A name
+  `<name>_sofab.{h,c}` (no header the build includes can be shadowed), the
+  shared `$defs` files `sofab-defs.{h,c}` with the guard `MESSAGE__DEFS__H`
+  (the prefix + `_defs`, which no name can follow the prefix with). A name
   has no `__`, so the run length of underscores tells a path (3) from a role (2)
   from a name (1). The guarantee assumes `symbol_prefix` starts with a letter.
 - **C++** reserves identifiers containing `__`, so a namespace-level role there is
@@ -1033,12 +1035,32 @@ several files into one namespace; both refuse two different definitions under
 one fold with a located error naming both files, and keep one type for the same
 or a structurally identical definition.
 
-**Known gaps, tracked separately.** One pre-existing defect still breaks the
-"never two declarations" promise and is deliberately out of this contract's
-scope: the C and C++ backends define a `$defs`
-type used by two messages in both messages' headers. `names.yaml` keeps every
-`$defs` type to one message so the conformance suites stay meaningful for the
-naming contract itself.
+**One definition site per type (C, C++).** These two targets write a file per
+message, and a header can only define what it holds. A `$defs` type — and
+everything only it declares: its inline types, the element holders of its
+array fields — is therefore defined in one shared file per run, never in the
+message files: C `sofab-defs.h` + `sofab-defs.c` (typedefs, flag and option-id
+macros, descriptors, each descriptor declared `extern` in the header for the
+message descriptors that nest it), C++ `sofab-defs.hpp`. A message header holds
+what the message declares inline and includes the shared header when its tree
+reaches a `$defs` type. The split is by the first path segment (messages and
+`$defs` are one scope), so it needs no usage count, and the files a schema
+produces do not change when a second message starts using a type. The shared
+header is self-contained (a `$defs` type never uses a message's inline type)
+and in dependency order (post-order per message, merged in message order); it
+carries its own capability, API-version and id-width guards, over its own
+objects. Footprint: the objects move between translation units and nothing is
+added — no descriptor, function or table is duplicated or new. Measured
+(`tests/bench/run.sh --rows c,cpp-c-cpp,cpp-c-cpp-dyn,cpp-cpp,cpp-cpp-static`,
+same corelibs, before and after): `.text`/`.data`/`.bss` identical on every
+arch of the three footprint rows (the bench schema reaches six `$defs` types);
+Ir/op identical except `c` encode, 26068 → 26076 (+8, +0.03 %), from the
+descriptors now sitting in another translation unit. A per-type file
+(Java's layout) was the alternative: it needs no fixed name, but turns a C
+build of a schema with N `$defs` structs into N more sources to list. The
+`emit: project` harness includes every message header, so
+`tests/matrix/corpus/defs/shared_defs.yaml` and `names.yaml` (every `$defs`
+type in two messages) build the one-definition rule in every suite. The shared file has a fixed name, so one output directory holds one schema: several definition files belong in one run (`--in <dir>`, §3), not in several runs into the same directory.
 
 **Adding a language is purely additive** — a new `generators/<lang>/` package + a
 blank import + per-target schema keys + a `tests/conformance/<lang>/run.sh` + a CI job. No
@@ -6688,8 +6710,8 @@ A reimplementation is **conformant** when it reproduces these gates:
    `examples/messages/realworld/`, the two `$defs`-only ones (`common.yaml`,
    `diagnostics.yaml`) included: a schema with no message is where a harness
    has least to do, so it is where an unused import, variable or bench sink
-   shows up. The C, C++, Java and Kotlin targets emit their types per message
-   and so emit no source for such a file; their suites build it as
+   shows up. The C, C++, Java and Kotlin targets emit only the types a message
+   reaches and so emit no source for such a file; their suites build it as
    `emit: project` instead, so the harness is held to the policy too.
 
    **The C and C++ suites build the whole corpus that way, not only the

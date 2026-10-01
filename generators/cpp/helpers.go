@@ -51,6 +51,13 @@ func (g *gen) qualified(m *ir.Message) string {
 // ".hpp" in the output root, where no header the build includes lives (the
 // corelibs include theirs as "sofab/...", the harness's own is
 // harness/_json.hpp).
+// defsHeaderFile is the shared $defs header: every $defs type the messages use
+// is defined there once, whichever messages use it. A message's header is its
+// lower-cased name (or a device stem + "_"), and a schema name holds no "-", so
+// no message header can be spelled like it; no header the build includes is,
+// and its stem is not a Windows device name.
+const defsHeaderFile = "sofab-defs.hpp"
+
 func headerFile(m *ir.Message) string {
 	stem := strings.ToLower(m.Name)
 	if naming.IsDeviceStem(stem) {

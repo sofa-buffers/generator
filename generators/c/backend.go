@@ -59,15 +59,40 @@ func (*Backend) Generate(s *ir.Schema, cfg map[string]any) ([]generator.File, er
 	if project {
 		srcDir = "generated/"
 	}
-	var files []generator.File
+	// Plan every message first: the $defs objects any of them reaches are
+	// collected once, into g.defs, and defined once, in the shared $defs files
+	// -- a $defs type used by two messages would otherwise be defined in both
+	// headers, which no translation unit including both can compile, and its
+	// descriptor in both sources, which no program can link.
+	g.msgNames = map[string]bool{}
 	for _, m := range s.Messages {
-		h, c, err := g.message(m)
+		g.msgNames[m.Name] = true
+	}
+	g.defs = newPlanSet()
+	sets := make([]*planSet, len(s.Messages))
+	for i, m := range s.Messages {
+		ps, err := g.messagePlans(m)
+		if err != nil {
+			return nil, err
+		}
+		sets[i] = ps
+	}
+	var files []generator.File
+	for i, m := range s.Messages {
+		h, c, err := g.message(m, sets[i])
 		if err != nil {
 			return nil, err
 		}
 		files = append(files,
 			generator.File{Path: srcDir + headerFile(m), Content: h},
 			generator.File{Path: srcDir + sourceFile(m), Content: c},
+		)
+	}
+	if len(g.defs.order) > 0 || len(g.defs.bitfieldOrder) > 0 {
+		h, c := g.defsFiles()
+		files = append(files,
+			generator.File{Path: srcDir + defsHeaderFile, Content: h},
+			generator.File{Path: srcDir + defsSourceFile, Content: c},
 		)
 	}
 	if project {
@@ -85,6 +110,12 @@ type gen struct {
 	// harnessNames are the harness's per-message names a typedef could be
 	// spelled like (typeName escapes it).
 	harnessNames map[string]bool
+	// msgNames are the schema's message names: a path that starts with one
+	// belongs to that message's files, any other to the shared $defs files.
+	msgNames map[string]bool
+	// cur is the plan set of the message being collected, defs the one the
+	// $defs objects of every message are collected into (setFor).
+	cur, defs *planSet
 }
 
 // objectPlan is the fully-resolved emission plan for one C object (the message,
@@ -226,12 +257,13 @@ type bitfieldPlan struct {
 // once per unique key. A field passes its own f.Ref (a scalar bitfield) or
 // f.ElemRef (a native array of bitfield) — nil for anything else, in which
 // case this is a no-op so call sites don't need their own kind guard.
-func (g *gen) registerBitfield(ref *ir.TypeRef, bitfields map[string]*bitfieldPlan, order *[]string) {
+func (g *gen) registerBitfield(ref *ir.TypeRef) {
 	if ref == nil || ref.Target == nil {
 		return
 	}
+	ps := g.setFor(ref.Target.Path)
 	key := g.ntBase(ref.Target)
-	if _, ok := bitfields[key]; ok {
+	if _, ok := ps.bitfields[key]; ok {
 		return
 	}
 	// The literal takes the FIELD's width, never less than 32 bits. A bare `1u`
@@ -244,13 +276,13 @@ func (g *gen) registerBitfield(ref *ir.TypeRef, bitfields map[string]*bitfieldPl
 	if bitfieldC(ref) == "uint64_t" {
 		one = "(uint64_t)1"
 	}
-	bitfields[key] = &bitfieldPlan{
+	ps.bitfields[key] = &bitfieldPlan{
 		key:    key,
 		prefix: strings.ToUpper(key),
 		one:    one,
 		flags:  ref.Target.Flags,
 	}
-	*order = append(*order, key)
+	ps.bitfieldOrder = append(ps.bitfieldOrder, key)
 }
 
 // macro is the #define name of one declared flag: a bitfield has no child
@@ -259,77 +291,71 @@ func (bp *bitfieldPlan) macro(fl *ir.BitfieldFlag) string {
 	return bp.prefix + "___" + strings.ToUpper(fl.Name)
 }
 
-// messagePlans collects m's object plans in post-order (nested before
-// parents) and the bitfield named types referenced anywhere in its tree, both
-// deduped: one #define block per unique bitfield, however many fields share it.
-func (g *gen) messagePlans(m *ir.Message) (plans map[string]*objectPlan, order []string, bitfields map[string]*bitfieldPlan, bitfieldOrder []string, err error) {
-	plans = map[string]*objectPlan{}
-	bitfields = map[string]*bitfieldPlan{}
-	err = g.collect(g.msgBase(m), []string{m.Name}, m.Fields, nil, plans, &order, bitfields, &bitfieldOrder)
-	return plans, order, bitfields, bitfieldOrder, err
+// planSet is the object plans and bitfield blocks of one header + source
+// pair, each in emission order: post-order for the objects (nested before
+// parents), first use for the bitfields, both deduped -- one definition per
+// object and one #define block per bitfield, however many fields share them.
+type planSet struct {
+	plans         map[string]*objectPlan
+	order         []string
+	bitfields     map[string]*bitfieldPlan
+	bitfieldOrder []string
+	// scopes are the field lists of the set's struct/union/message objects
+	// (not of the holders, which their owner's fields describe), for the
+	// capability guards of the header that defines them.
+	scopes [][]*ir.Field
+	// usesDefs is set on a message's set when its tree reaches a $defs type,
+	// whose definition its header then includes (defsHeaderFile).
+	usesDefs bool
+}
+
+func newPlanSet() *planSet {
+	return &planSet{plans: map[string]*objectPlan{}, bitfields: map[string]*bitfieldPlan{}}
+}
+
+// setFor is the set an object at schema path belongs to. Everything under a
+// $defs type -- the type, its inline types, the holders of its array fields --
+// is defined once, in the shared $defs files, whichever messages use it; only
+// what a message declares inline (its path starts with the message's name;
+// messages and $defs are one scope) stays in the message's own files.
+func (g *gen) setFor(path []string) *planSet {
+	if g.msgNames[path[0]] {
+		return g.cur
+	}
+	g.cur.usesDefs = true
+	return g.defs
+}
+
+// messagePlans collects m's object plans into a fresh set of its own, adding
+// the $defs objects its tree reaches to g.defs.
+func (g *gen) messagePlans(m *ir.Message) (*planSet, error) {
+	g.cur = newPlanSet()
+	err := g.collect(g.msgBase(m), []string{m.Name}, m.Fields, nil)
+	return g.cur, err
 }
 
 // ---- message emission ---------------------------------------------------
 
-func (g *gen) message(m *ir.Message) (hdr, src []byte, err error) {
-	plans, order, bitfields, bitfieldOrder, err := g.messagePlans(m)
-	if err != nil {
-		return nil, nil, err
-	}
-	msgKey := g.msgBase(m)
-
-	caps := g.capabilities(m)
-	guardName := macro(msgKey, "H")
-	msgType := g.typeName(msgKey)
-	// Both id-width guards bound EVERY id this header puts on the wire, not just
-	// the top object's: a nested object has a descriptor of its own, and its
-	// fields ride the same (id<<3)|type header, accumulated in the same
-	// sofab_unsigned_t. Taking only plans[msgKey] left a nested id unguarded on
-	// both bounds.
-	maxField := int64(0)
-	for _, k := range order {
-		if plans[k].maxField > maxField {
-			maxField = plans[k].maxField
-		}
-	}
-
-	// Every macro is a role (or a path) of a base, so no two headers and no
-	// member can spell one alike (names.go).
-	sizeMacro := macro(msgKey, "MAX_SIZE")
-	sizeLimitMacro := macro(msgKey, "MAX_SIZE_LIMIT")
-
-	h := &cfile{}
-	h.banner(g.banner, g.license, headerFile(m), m.Name)
-	h.line("#ifndef %s", guardName)
-	h.line("#define %s", guardName)
-	h.blank()
-	h.line("#include <stdint.h>")
-	h.line("#include <stddef.h>")
-	h.line(`#include "sofab/sofab.h"`)
-	h.line(`#include "sofab/object.h"`)
-	h.blank()
-	g.emitGuards(h, m, caps, maxField, msgType)
-	h.blank()
-	if m.Summary != "" {
-		h.doc("%s", m.Summary)
-	}
+// emitTypes writes a set's typedefs, bitfield flags, union option ids and the
+// declarations of the union options' sequence descriptors into its header.
+func (g *gen) emitTypes(h *cfile, ps *planSet) {
 	// struct typedefs (post-order so nested types precede their users)
-	for _, k := range order {
-		g.emitStruct(h, plans[k])
+	for _, k := range ps.order {
+		g.emitStruct(h, ps.plans[k])
 	}
 	// bitfield flag constants: the field itself stays a raw integer (§1 — any
 	// value inside the declared width is valid, named or not), but the KNOWN
 	// bit positions get names, same as every other backend.
-	for _, k := range bitfieldOrder {
-		g.emitBitfieldConsts(h, bitfields[k])
+	for _, k := range ps.bitfieldOrder {
+		g.emitBitfieldConsts(h, ps.bitfields[k])
 	}
 	// union option ids, and the descriptors of the sequence options: selecting
 	// such an option at its default is `sofab_object_init(&<descr>, &x.u.<opt>)`.
 	var seqDescrs []string
 	seenDescr := map[string]bool{}
 	seenOption := map[string]bool{}
-	for _, k := range order {
-		if p := plans[k]; p.union != nil {
+	for _, k := range ps.order {
+		if p := ps.plans[k]; p.union != nil {
 			g.emitUnionConsts(h, p, seenOption)
 			for _, d := range p.seqOptDescrs {
 				if !seenDescr[d] {
@@ -348,6 +374,82 @@ func (g *gen) message(m *ir.Message) (hdr, src []byte, err error) {
 		}
 		h.blank()
 	}
+	if ps != g.defs {
+		return
+	}
+	// A message's descriptor lists the descriptors of the $defs types it nests,
+	// which the shared source defines: declare them all here, once.
+	var typeDescrs []string
+	for _, k := range ps.order {
+		if p := ps.plans[k]; !p.fixedSeq && !seenDescr[p.descr] {
+			typeDescrs = append(typeDescrs, p.descr)
+		}
+	}
+	if len(typeDescrs) > 0 {
+		h.doc("Descriptors of the shared types, for the sofab_object_* API.")
+		for _, d := range typeDescrs {
+			h.line("extern const sofab_object_descr_t %s;", d)
+		}
+		h.blank()
+	}
+}
+
+// maxField is the largest field id any object of the set puts on the wire.
+// Both id-width guards bound EVERY id a header puts on the wire, not just the
+// top object's: a nested object has a descriptor of its own, and its fields
+// ride the same (id<<3)|type header, accumulated in the same sofab_unsigned_t.
+func (ps *planSet) maxField() int64 {
+	maxField := int64(0)
+	for _, k := range ps.order {
+		if ps.plans[k].maxField > maxField {
+			maxField = ps.plans[k].maxField
+		}
+	}
+	return maxField
+}
+
+// headerPrelude opens a header: the include guard, the includes, and the
+// guards over what its descriptors use. what names the header's content in the
+// guards' messages.
+func (g *gen) headerPrelude(h *cfile, guardName, what, owner string, caps capset, maxField int64, includes []string) {
+	h.line("#ifndef %s", guardName)
+	h.line("#define %s", guardName)
+	h.blank()
+	h.line("#include <stdint.h>")
+	h.line("#include <stddef.h>")
+	h.line(`#include "sofab/sofab.h"`)
+	h.line(`#include "sofab/object.h"`)
+	for _, inc := range includes {
+		h.line(`#include "%s"`, inc)
+	}
+	h.blank()
+	g.emitGuards(h, what, owner, caps, maxField)
+	h.blank()
+}
+
+func (g *gen) message(m *ir.Message, ps *planSet) (hdr, src []byte, err error) {
+	msgKey := g.msgBase(m)
+
+	caps := g.capabilities(m.Fields)
+	guardName := macro(msgKey, "H")
+	msgType := g.typeName(msgKey)
+
+	// Every macro is a role (or a path) of a base, so no two headers and no
+	// member can spell one alike (names.go).
+	sizeMacro := macro(msgKey, "MAX_SIZE")
+	sizeLimitMacro := macro(msgKey, "MAX_SIZE_LIMIT")
+
+	var includes []string
+	if ps.usesDefs {
+		includes = append(includes, defsHeaderFile)
+	}
+	h := &cfile{}
+	h.banner(g.banner, g.license, headerFile(m), m.Name)
+	g.headerPrelude(h, guardName, "message "+m.Name, m.Name, caps, ps.maxField(), includes)
+	if m.Summary != "" {
+		h.doc("%s", m.Summary)
+	}
+	g.emitTypes(h, ps)
 	// max serialized size (ir.MaxWireSize — one walk shared by every backend)
 	ms, err := g.size.Resolve(m.Name, m.Fields)
 	if err != nil {
@@ -366,7 +468,7 @@ func (g *gen) message(m *ir.Message) (hdr, src []byte, err error) {
 	}
 	h.blank()
 	// public API prototypes
-	g.emitProtos(h, m, msgType, plans[msgKey])
+	g.emitProtos(h, m, msgType, ps.plans[msgKey])
 	h.blank()
 	h.line("#endif /* %s */", guardName)
 
@@ -376,12 +478,48 @@ func (g *gen) message(m *ir.Message) (hdr, src []byte, err error) {
 	c.blank()
 	c.line("#include <string.h>")
 	c.blank()
-	for _, k := range order {
-		g.emitDescriptor(c, plans[k])
+	for _, k := range ps.order {
+		g.emitDescriptor(c, ps.plans[k])
 	}
-	g.emitFuncs(c, m, msgType, plans[msgKey])
+	g.emitFuncs(c, m, msgType, ps.plans[msgKey])
 
 	return h.bytes(), c.bytes(), nil
+}
+
+// defsFiles emits the shared $defs header + source pair: the typedefs, flags
+// and option ids of every $defs type a message reaches (and of what only they
+// declare), and their descriptors -- one definition each, in the one header
+// every message header that uses one of them includes.
+func (g *gen) defsFiles() (hdr, src []byte) {
+	ps := g.defs
+	guardName := macro(g.prefix+"_defs", "H")
+	h := &cfile{}
+	h.banner(g.banner, g.license, defsHeaderFile, "$defs")
+	var scopes []*ir.Field
+	for _, fs := range ps.scopes {
+		scopes = append(scopes, fs...)
+	}
+	caps := g.capabilities(scopes)
+	// The walk sees a union through the field that holds one; here the union
+	// may be a top-level object of the set, whose descriptor is defined below.
+	for _, k := range ps.order {
+		if ps.plans[k].union != nil {
+			caps.union, caps.sequence = true, true
+		}
+	}
+	what := "the shared types file " + defsHeaderFile
+	g.headerPrelude(h, guardName, what, what, caps, ps.maxField(), nil)
+	g.emitTypes(h, ps)
+	h.line("#endif /* %s */", guardName)
+
+	c := &cfile{}
+	c.banner(g.banner, g.license, defsSourceFile, "$defs")
+	c.line(`#include "%s"`, defsHeaderFile)
+	c.blank()
+	for _, k := range ps.order {
+		g.emitDescriptor(c, ps.plans[k])
+	}
+	return h.bytes(), c.bytes()
 }
 
 // unionOf returns ref's target when it is a union named type, else nil.
@@ -396,10 +534,12 @@ func unionOf(ref *ir.TypeRef) *ir.NamedType {
 // object's base, path its schema path (a split union variant shares its path
 // with its siblings, and so its options' holders). un is the union named type
 // when the scope is a union's options, nil otherwise.
-func (g *gen) collect(key string, path []string, fields []*ir.Field, un *ir.NamedType, plans map[string]*objectPlan, order *[]string, bitfields map[string]*bitfieldPlan, bitfieldOrder *[]string) error {
-	if _, done := plans[key]; done {
+func (g *gen) collect(key string, path []string, fields []*ir.Field, un *ir.NamedType) error {
+	ps := g.setFor(path)
+	if _, done := ps.plans[key]; done {
 		return nil
 	}
+	ps.scopes = append(ps.scopes, fields)
 	p := &objectPlan{key: key, cType: g.typeName(key), descr: descrSym(key), union: un}
 	if un != nil {
 		p.optDecl = map[int64]string{}
@@ -426,10 +566,10 @@ func (g *gen) collect(key string, path []string, fields []*ir.Field, un *ir.Name
 		// Fields instead of Flags — registering those here would track them
 		// under an empty flags list rather than skip them.
 		if f.Kind == ir.KindBitfield {
-			g.registerBitfield(f.Ref, bitfields, bitfieldOrder)
+			g.registerBitfield(f.Ref)
 		}
 		if f.Kind == ir.KindArray && f.Elem == ir.KindBitfield {
-			g.registerBitfield(f.ElemRef, bitfields, bitfieldOrder)
+			g.registerBitfield(f.ElemRef)
 		}
 		note := memberNote(f)
 		if un != nil {
@@ -438,14 +578,14 @@ func (g *gen) collect(key string, path []string, fields []*ir.Field, un *ir.Name
 		switch {
 		case f.Kind == ir.KindStruct || f.Kind == ir.KindUnion:
 			ck := g.ntBase(f.Ref.Target)
-			if err := g.collect(ck, f.Ref.Target.Path, f.Ref.Target.Fields, unionOf(f.Ref), plans, order, bitfields, bitfieldOrder); err != nil {
+			if err := g.collect(ck, f.Ref.Target.Path, f.Ref.Target.Fields, unionOf(f.Ref)); err != nil {
 				return err
 			}
 			if _, ok := nestedIdx[ck]; !ok {
 				nestedIdx[ck] = len(p.nested)
 				p.nested = append(p.nested, ck)
 			}
-			decl := fmt.Sprintf("%s %s;", plans[ck].cType, cIdent(f.Name))
+			decl := fmt.Sprintf("%s %s;", g.typeName(ck), cIdent(f.Name))
 			p.members = append(p.members, member{decl: decl, align: ir.AlignRank(f), doc: memberDoc(f), note: note, deprecated: f.Deprecated})
 			p.fields = append(p.fields, fieldEntry{macro: fmt.Sprintf(
 				"    SOFAB_OBJECT_FIELD_SEQUENCE(%d, %s, %s, SOFAB_OBJECT_FIELDTYPE_SEQUENCE, %d),",
@@ -459,7 +599,7 @@ func (g *gen) collect(key string, path []string, fields []*ir.Field, un *ir.Name
 			// sequence: a synthetic holder object with one field per element,
 			// named as a role of the field's path.
 			ck := g.holderBase(fieldPath(path, f.Name))
-			ep := g.buildHolder(ck, specOfField(f), plans, order, bitfields, bitfieldOrder)
+			ep := g.buildHolder(ps, ck, specOfField(f))
 			if _, ok := nestedIdx[ck]; !ok {
 				nestedIdx[ck] = len(p.nested)
 				p.nested = append(p.nested, ck)
@@ -518,8 +658,8 @@ func (g *gen) collect(key string, path []string, fields []*ir.Field, un *ir.Name
 	if un == nil {
 		sort.SliceStable(p.members, func(i, j int) bool { return p.members[i].align > p.members[j].align })
 	}
-	plans[key] = p
-	*order = append(*order, key)
+	ps.plans[key] = p
+	ps.order = append(ps.order, key)
 	return nil
 }
 
@@ -562,8 +702,8 @@ func isHolderElem(k ir.Kind) bool {
 // for a nested array's inner holder that base + "_inner". The split variants of
 // a $defs union share their options' paths and so their holders, which are
 // identical: the second call returns the first plan.
-func (g *gen) buildHolder(key string, spec arraySpec, plans map[string]*objectPlan, order *[]string, bitfields map[string]*bitfieldPlan, bitfieldOrder *[]string) *objectPlan {
-	if p, done := plans[key]; done {
+func (g *gen) buildHolder(ps *planSet, key string, spec arraySpec) *objectPlan {
+	if p, done := ps.plans[key]; done {
 		return p
 	}
 	// A holder's fields are the fixed element slots 0..N-1, so an over-index element
@@ -619,10 +759,10 @@ func (g *gen) buildHolder(key string, spec arraySpec, plans map[string]*objectPl
 		// is emitted as a normal named object, and every holder slot is a sequence
 		// referencing that one descriptor (nested_idx 0).
 		ek := g.ntBase(spec.ref.Target)
-		if err := g.collect(ek, spec.ref.Target.Path, spec.ref.Target.Fields, unionOf(spec.ref), plans, order, bitfields, bitfieldOrder); err == nil {
+		if err := g.collect(ek, spec.ref.Target.Path, spec.ref.Target.Fields, unionOf(spec.ref)); err == nil {
 			p.nested = append(p.nested, ek)
 		}
-		p.members = append(p.members, member{decl: fmt.Sprintf("%s%s items[%d];", lead, plans[ek].cType, cap)})
+		p.members = append(p.members, member{decl: fmt.Sprintf("%s%s items[%d];", lead, g.typeName(ek), cap)})
 		for i := int64(0); i < cap; i++ {
 			p.fields = append(p.fields, fieldEntry{macro: fmt.Sprintf(
 				"    SOFAB_OBJECT_FIELD_SEQUENCE(%d, %s, items[%d], SOFAB_OBJECT_FIELDTYPE_SEQUENCE, 0),", i, p.cType, i)})
@@ -632,7 +772,7 @@ func (g *gen) buildHolder(key string, spec arraySpec, plans map[string]*objectPl
 		if isHolderElem(inner.elem) {
 			// Inner element is itself a holder: each slot is a sequence to it.
 			ik := key + "_inner"
-			ip := g.buildHolder(ik, inner, plans, order, bitfields, bitfieldOrder)
+			ip := g.buildHolder(ps, ik, inner)
 			p.nested = append(p.nested, ik)
 			p.members = append(p.members, member{decl: fmt.Sprintf("%s%s items[%d];", lead, ip.cType, cap)})
 			for i := int64(0); i < cap; i++ {
@@ -648,7 +788,7 @@ func (g *gen) buildHolder(key string, spec arraySpec, plans map[string]*objectPl
 			// could not carry a holder count until the anchor moved to offset 0;
 			// `lead` is that count, and at offset 0 the two never meet.
 			if inner.elem == ir.KindBitfield {
-				g.registerBitfield(inner.ref, bitfields, bitfieldOrder)
+				g.registerBitfield(inner.ref)
 			}
 			icap := inner.count
 			et := g.arrayElemCType(inner.elem, inner.ref)
@@ -665,8 +805,8 @@ func (g *gen) buildHolder(key string, spec arraySpec, plans map[string]*objectPl
 			p.maxField = i
 		}
 	}
-	plans[key] = p
-	*order = append(*order, key)
+	ps.plans[key] = p
+	ps.order = append(ps.order, key)
 	return p
 }
 
@@ -1136,7 +1276,10 @@ func (g *gen) emitFuncs(c *cfile, m *ir.Message, msgType string, root *objectPla
 // emitGuards writes the §5.4 capability guards + the API-version guard + the
 // value-width id guard (the width the wire header is accumulated in). The
 // descriptor-storage width is the corelib's own check, per field.
-func (g *gen) emitGuards(h *cfile, m *ir.Message, caps capset, maxField int64, msgType string) {
+//
+// what names the header's content in the messages ("message M", "the shared
+// $defs types"), owner the same without the article ("M").
+func (g *gen) emitGuards(h *cfile, what, owner string, caps capset, maxField int64) {
 	h.line("/* --- API-version guard: this code was generated against C API v1 --- */")
 	h.line("#if SOFAB_API_VERSION != 1")
 	h.line(`# error "SofaBuffers: generated against C API v1, but the linked corelib reports a different SOFAB_API_VERSION. Regenerate or update the corelib."`)
@@ -1159,7 +1302,7 @@ func (g *gen) emitGuards(h *cfile, m *ir.Message, caps capset, maxField int64, m
 			continue
 		}
 		h.line("#if defined(%s)", c.macro)
-		h.line(`# error "SofaBuffers: message %s %s."`, m.Name, c.msg)
+		h.line(`# error "SofaBuffers: %s %s."`, what, c.msg)
 		h.line("#endif")
 	}
 	if caps.union {
@@ -1170,7 +1313,7 @@ func (g *gen) emitGuards(h *cfile, m *ir.Message, caps capset, maxField int64, m
 		// SOFAB_API_VERSION only on a break), and the macro is exactly what the
 		// generated descriptors use.
 		h.line("#if !defined(SOFAB_OBJECT_DESCR_UNION)")
-		h.line(`# error "SofaBuffers: message %s uses unions (SOFAB_OBJECT_DESCR_UNION), which this corelib-c-cpp predates. Update the corelib."`, m.Name)
+		h.line(`# error "SofaBuffers: %s uses unions (SOFAB_OBJECT_DESCR_UNION), which this corelib-c-cpp predates. Update the corelib."`, what)
 		h.line("#endif")
 	}
 	h.blank()
@@ -1191,7 +1334,7 @@ func (g *gen) emitGuards(h *cfile, m *ir.Message, caps capset, maxField int64, m
 	// (generator#529).
 	h.line("/* --- value-width guard: field ids must fit the corelib's id ceiling --- */")
 	h.line("#if %d > SOFAB_ID_MAX", maxField)
-	h.line(`# error "SofaBuffers: field ids in %s exceed SOFAB_ID_MAX for this value width (see SOFAB_DISABLE_INT64_SUPPORT)."`, m.Name)
+	h.line(`# error "SofaBuffers: field ids in %s exceed SOFAB_ID_MAX for this value width (see SOFAB_DISABLE_INT64_SUPPORT)."`, owner)
 	h.line("#endif")
 }
 
@@ -1201,7 +1344,9 @@ type capset struct {
 	fixlen, fp64, array, sequence, value64, union bool
 }
 
-func (g *gen) capabilities(m *ir.Message) capset {
+// capabilities are the corelib features the objects described by fields --
+// and everything they nest -- need.
+func (g *gen) capabilities(fields []*ir.Field) capset {
 	var caps capset
 	seen := map[string]bool{}
 	var walk func(fields []*ir.Field)
@@ -1275,7 +1420,7 @@ func (g *gen) capabilities(m *ir.Message) capset {
 			}
 		}
 	}
-	walk(m.Fields)
+	walk(fields)
 	return caps
 }
 

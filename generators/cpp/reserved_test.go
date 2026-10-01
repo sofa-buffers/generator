@@ -184,7 +184,7 @@ func TestReservedSchemaFile(t *testing.T) {
 // and the type-level names take the escape.
 func TestReservedNamesAreMangled(t *testing.T) {
 	files := unionFiles(t, reservedYAML(), nil)
-	h := files["m.hpp"]
+	h := files["m.hpp"] + files["sofab-defs.hpp"]
 	for _, n := range memberNames() {
 		want := n + "_"
 		for _, p := range append(append([]string{"which"}, paramNames...), roleNames...) {
@@ -283,7 +283,7 @@ func TestUnionRoleAccessorsAreDistinct(t *testing.T) {
 // spelling -- are F_AB and FA_B.
 func TestBitfieldFlagsAcrossTypesAreDistinct(t *testing.T) {
 	src := "version: 1\n$defs:\n  bitfield:\n    F: { a_b: { pos: 0 } }\n    FA: { b: { pos: 0 } }\nmessages:\n  m:\n    payload:\n      f: { id: 0, type: bitfield, bits: { $ref: '#/$defs/bitfield/F' } }\n      g: { id: 1, type: bitfield, bits: { $ref: '#/$defs/bitfield/FA' } }\n"
-	h := unionFiles(t, src, nil)["m.hpp"]
+	h := unionFiles(t, src, nil)["sofab-defs.hpp"]
 	for _, want := range []string{"    F_AB = 1ULL,", "    FA_B = 1ULL,"} {
 		if !strings.Contains(h, want) {
 			t.Errorf("missing %q in:\n%s", want, h)

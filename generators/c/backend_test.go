@@ -1114,7 +1114,7 @@ messages:
       first: { id: 0, type: bitfield, bits: { $ref: "#/$defs/bitfield/Shared" } }
       second: { id: 1, type: bitfield, bits: { $ref: "#/$defs/bitfield/Shared" } }
 `)
-	h := files["m_sofab.h"]
+	h := files["m_sofab.h"] + files["sofab-defs.h"]
 	if n := strings.Count(h, "#define MESSAGE_SHARED___A ((uint32_t)1 << 0)"); n != 1 {
 		t.Errorf("expected the shared bitfield's #define exactly once, got %d:\n%s", n, h)
 	}
@@ -1214,8 +1214,8 @@ messages:
 }
 
 // TestCBitfieldFlagConstantsSharedAcrossMessages: a $ref-shared bitfield used
-// by two messages emits the same #define in both headers. That is an identical
-// redefinition, which C admits, so it must not trip the collision check.
+// by two messages emits its #define once, in the shared $defs header, which
+// both message headers include.
 func TestCBitfieldFlagConstantsSharedAcrossMessages(t *testing.T) {
 	files := genCFromYAML(t, `
 version: 1
@@ -1231,9 +1231,16 @@ messages:
     payload:
       f: { id: 0, type: bitfield, bits: { $ref: "#/$defs/bitfield/Shared" } }
 `)
+	const want = "#define MESSAGE_SHARED___A ((uint32_t)1 << 0)"
+	if n := strings.Count(files["sofab-defs.h"], want); n != 1 {
+		t.Errorf("sofab-defs.h must carry the shared flag macro once, got %d:\n%s", n, files["sofab-defs.h"])
+	}
 	for _, name := range []string{"m_sofab.h", "n_sofab.h"} {
-		if !strings.Contains(files[name], "#define MESSAGE_SHARED___A ((uint32_t)1 << 0)") {
-			t.Errorf("%s must carry the shared flag macro:\n%s", name, files[name])
+		if strings.Contains(files[name], want) {
+			t.Errorf("%s must not define the shared flag macro again:\n%s", name, files[name])
+		}
+		if !strings.Contains(files[name], `#include "sofab-defs.h"`) {
+			t.Errorf("%s must include the shared $defs header:\n%s", name, files[name])
 		}
 	}
 }

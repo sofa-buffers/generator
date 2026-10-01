@@ -839,7 +839,8 @@ func TestCppMetadataDocs(t *testing.T) {
 		"      legacyId: { id: 1, type: u32, description: \"Old identifier retained for backward compatibility.\", deprecated: true }\n" +
 		"      mode:     { id: 2, type: enum, enum: { $ref: \"#/$defs/enum/Mode\" }, description: \"Current operating mode.\" }\n" +
 		"      status:   { id: 3, type: bitfield, bits: { $ref: \"#/$defs/bitfield/StatusFlags\" }, description: \"Health flags for this sample.\" }\n"
-	h := headerFromYAML(t, src, "telemetry.hpp")
+	// The enum and the bitfield are $defs types: the shared header defines them.
+	h := headerFromYAML(t, src, "telemetry.hpp") + headerFromYAML(t, src, "sofab-defs.hpp")
 	for _, want := range []string{
 		// enum-constant descriptions
 		"Off = 0,  ///< Node is powered down.",

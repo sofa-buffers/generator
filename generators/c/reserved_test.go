@@ -66,7 +66,8 @@ $defs:
 // trailing underscore, in the message and in the nested struct.
 func TestReservedNamesAreMangled(t *testing.T) {
 	names := reservedNames()
-	h := genCFromYAMLCfg(t, reservedYAML(names), map[string]any{})["m_sofab.h"]
+	files := genCFromYAMLCfg(t, reservedYAML(names), map[string]any{})
+	h := files["m_sofab.h"] + files["sofab-defs.h"]
 	for _, n := range names {
 		// Anchored on the 4-space indent: the union's options sit at 8.
 		if got := strings.Count(h, "\n    uint8_t "+n+"_;\n"); got != 2 {
@@ -201,10 +202,13 @@ func TestReservedNamesBuild(t *testing.T) {
 	// macros; gnu17 (gcc's default) predefines `linux`/`unix` and lets glibc
 	// add its own. The project's Makefile builds as C99, which has neither.
 	for _, std := range []string{"c2x", "gnu17"} {
-		cc := exec.Command("gcc", "-std="+std, "-fsyntax-only", "-Wall", "-Wextra", "-Werror",
-			"-I"+filepath.Join(corelib, "src", "include"), "-I"+filepath.Join(dir, "generated"), filepath.Join(dir, "generated", "m_sofab.c"))
-		if out, err := cc.CombinedOutput(); err != nil {
-			t.Fatalf("every reserved name as a field does not compile as -std=%s:\n%s", std, out)
+		// The nested struct is a $defs type: its descriptor is in the shared source.
+		for _, src := range []string{"m_sofab.c", "sofab-defs.c"} {
+			cc := exec.Command("gcc", "-std="+std, "-fsyntax-only", "-Wall", "-Wextra", "-Werror",
+				"-I"+filepath.Join(corelib, "src", "include"), "-I"+filepath.Join(dir, "generated"), filepath.Join(dir, "generated", src))
+			if out, err := cc.CombinedOutput(); err != nil {
+				t.Fatalf("every reserved name as a field does not compile as -std=%s (%s):\n%s", std, src, out)
+			}
 		}
 	}
 
