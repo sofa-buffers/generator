@@ -1416,6 +1416,23 @@ route by `(scope, id)` and are forward-compatible (skip unknown ids).
      `sofabgen::RawArray`, which reinterprets the **elements** — never the
      container — and forwards `resize()`/`size()`, so `readArray` keeps ownership
      of the tag check, the bound check and the reset, in that order.
+   - a **row that the corelib collector cannot read**, i.e. a wrapper-sequence row
+     (`array<array<string|blob|struct>>`, and deeper) or an enum or boolean row,
+     goes through a *generated* row collector (`deserializeRowSeq`, generator#250).
+     That collector must keep the corelib collectors' order itself: first the §7.3
+     tag test (the same `unionGate` a union arm runs: `_is.wire()` on corelib-cpp,
+     one `_is.delivered()` on corelib-c-cpp), then the §7.1 index bound, then the
+     placement. A mistyped element is not an element of the array at all. Put the
+     bound first and a mistyped element past `count` is rejected as INVALID; put the
+     placement first and one inside it leaves an empty row behind (generator#627).
+     `tests/conformance/lib/check_skip_before_bound.py` pins both on all four
+     profiles. Cost of the gate, measured on that driver's schema (5 nested fields,
+     about 12 gated rows per message): decode +38 / +46 Ir per message on corelib-cpp
+     (default / static storage, +0.5% / +0.9%), and +60 to +72 B `.text` on
+     corelib-c-cpp for ARMv6-m / ARMv7-m, with `.data`/`.bss` unchanged. The bench
+     schemas have no such row, and their generated code is byte-identical with or
+     without the gate. The collector is a generated static helper. Moving it into
+     both corelibs is generator#629.
 5. **Descriptor-table callback** (C `corelib-c-cpp`). A static descriptor table
    (id → offset → wire type, generated per object) drives
    `sofab_object_encode`/`decode`; a field callback fills members by id. Member

@@ -1958,7 +1958,14 @@ func (g *gen) deserializeArray(f *hfile, ind, target string, elem ir.Kind, ref *
 // path already uses (sofab::StringSeq/BlobSeq/MessageSeq, or their Fixed*
 // counterparts on the c-cpp leg).
 //
-// The collector carries the same two spec rules as the corelib ones:
+// The collector carries the same three spec rules as the corelib ones, in the
+// same order:
+//   - §7.3 first: an element whose wire type contradicts the row's is not an
+//     element of this array at all. It is skipped like an unknown id, before the
+//     index bound below -- the subtype is decided first and the schema bound
+//     applied only to an element that survives it -- and before the placement,
+//     so the destination is left exactly as it was (generator#627). The test is
+//     unionGate's, one comparison per row on either corelib.
 //   - §5.1 an element id IS its index, so a row is PLACED at that index (gaps are
 //     legal and stay at the element default), and an id at or past the schema
 //     `count` is INVALID -- the fixed profile reads that bound off the inline
@@ -2010,6 +2017,10 @@ func (g *gen) deserializeRowSeq(f *hfile, ind, target string, items *ir.ArrayEle
 		rowCountParam = "std::size_t _count"
 	}
 	f.line("%svoid deserialize(sofab::IStreamImpl &_is, sofab::id _id, std::size_t, %s) noexcept override {", in3, rowCountParam)
+	// §7.3 before the bound: a row is an array field one level down, so its
+	// expected tag is the one a field of that element kind would carry.
+	row := &ir.Field{Kind: ir.KindArray, Elem: items.Elem, ElemRef: items.ElemRef, ElemItems: items.ElemItems}
+	f.line("%sif (%s) return;", in4, g.unionGate(row))
 	if inlineRows {
 		f.line("%sif (static_cast<std::size_t>(_id) >= out->capacity()) { _is.invalidate(); return; }", in4)
 	} else {

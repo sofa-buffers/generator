@@ -1024,6 +1024,23 @@ YAML
     python3 "$ROOT/tests/conformance/lib/check_union.py" "C++ [$label]" \
         -- "$WORK/union-$label/harness/harness"
 
+    # MESSAGE_SPEC §7.3 before §7.1 (generator#627): a mistyped array element past
+    # the schema `count` is skipped, a correctly typed one is INVALID. The corelib
+    # collectors order the two tests themselves; a row of an array of arrays goes
+    # through a GENERATED collector on this target, which has to order them too.
+    # Every profile -- the collector's bound is cap on the growable ones and the
+    # inline capacity on the static ones. The INVALID category is pinned where the
+    # harness can name it (corelib-cpp's `status` verb).
+    echo "==> [$label] §7.3 before §7.1: a mistyped element past the bound is skipped (generator#627)"
+    python3 "$ROOT/tests/conformance/lib/check_skip_before_bound.py" --emit-schema > "$WORK/sbb.yaml"
+    ( cd "$ROOT" && go run ./cmd/sofabgen --config "$WORK/cfg-$label.yaml" --lang cpp \
+        --in "$WORK/sbb.yaml" --out "$WORK/sbb-$label" )
+    make -C "$WORK/sbb-$label" "$@" >/dev/null
+    SBB_CAT=""
+    if [ -z "$corelib" ]; then SBB_CAT="--status-verb status"; fi
+    python3 "$ROOT/tests/conformance/lib/check_skip_before_bound.py" "C++ [$label]" $SBB_CAT \
+        -- "$WORK/sbb-$label/harness/harness"
+
     # Nested defaults (generator#609): absence reads as the schema's defaults at
     # every depth and inside a struct array's element, on every profile --
     # asserted against the driver's own schema, never this harness's baseline.
