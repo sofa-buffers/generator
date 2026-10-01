@@ -1,8 +1,14 @@
 package typescript
 
 import (
+	"fmt"
+	"reflect"
+	"regexp"
+	"sort"
 	"strings"
 	"testing"
+
+	"github.com/sofa-buffers/generator/internal/ir"
 )
 
 // unionSrc has a union whose default option is a struct at a non-zero default
@@ -93,7 +99,7 @@ func TestTSUnionStorage(t *testing.T) {
 		"  static readonly NUM_ID = 0;",
 		"  static readonly PT_ID = 2;",
 		"  static readonly WHICH_ID = 10;",
-		"  private _which: number = 2;",
+		"  private __which: number = 2;",
 		"  private _num: number = 5;",
 		`  private _s: string = "";`,
 		"  private _pt: M_U_Pt | null = new M_U_Pt();", // default_id: built
@@ -106,17 +112,17 @@ func TestTSUnionStorage(t *testing.T) {
 		"  private _fa: Float32Array = _E_Float32Array;",
 		"  private _bo: boolean = true;",
 		// The option named after the tag takes the underscore; its slot never
-		// lands on `_which`.
+		// lands on `__which`.
 		"  private _which_: number = 0;",
 		"  get which_(): number {",
-		"  get which(): number {\n    return this._which;\n  }",
+		"  get which(): number {\n    return this.__which;\n  }",
 	)
 	// No product-type member survives: an option is reached through its accessor.
 	mustNotContain(t, "M_U storage", u, "  num: number", "  pt: M_U_Pt =", "  s: string =")
 	// A union whose default option is a scalar builds nothing at all.
 	z := tsClass(t, genUnionMode(t, "bigint"), "M_Z")
-	mustContain(t, "M_Z storage", z, "  private _which: number = 0;", "  private _a: number = 0;", "  private _b: number = 3;")
-	mustNotContain(t, "M_Z storage", z, "_leave", "| null = new ")
+	mustContain(t, "M_Z storage", z, "  private __which: number = 0;", "  private _a: number = 0;", "  private _b: number = 3;")
+	mustNotContain(t, "M_Z storage", z, "__leave", "| null = new ")
 }
 
 // TestTSUnionAccessors pins the API and the select-if-not-held rule: a getter of
@@ -126,31 +132,31 @@ func TestTSUnionStorage(t *testing.T) {
 func TestTSUnionAccessors(t *testing.T) {
 	u := tsClass(t, genUnionMode(t, "bigint"), "M_U")
 	mustContain(t, "M_U accessors", u,
-		"  get num(): number {\n    return this._which === 0 ? this._num : 5;\n  }",
-		"  set num(v: number) {\n    if (this._which !== 0) {\n      this._leave();\n      this._which = 0;\n    }\n    this._num = v;\n  }",
-		"  hasNum(): boolean {\n    return this._which === 0;\n  }",
+		"  get num(): number {\n    return this.__which === 0 ? this._num : 5;\n  }",
+		"  set num(v: number) {\n    if (this.__which !== 0) {\n      this.__leave();\n      this.__which = 0;\n    }\n    this._num = v;\n  }",
+		"  hasNum(): boolean {\n    return this.__which === 0;\n  }",
 		// A getter of an object option not held builds a fresh default and keeps it
 		// off the union.
-		"  get pt(): M_U_Pt {\n    return this._which === 2 ? this._pt! : new M_U_Pt();\n  }",
+		"  get pt(): M_U_Pt {\n    return this.__which === 2 ? this._pt! : new M_U_Pt();\n  }",
 		// Select if not held.
-		"  mutablePt(): M_U_Pt {\n    if (this._which !== 2) {\n      this._leave();\n      this._which = 2;\n      this._pt = new M_U_Pt();\n    }\n    return this._pt!;\n  }",
-		"  mutableStrs(): string[] {\n    if (this._which !== 4) {",
+		"  mutablePt(): M_U_Pt {\n    if (this.__which !== 2) {\n      this.__leave();\n      this.__which = 2;\n      this._pt = new M_U_Pt();\n    }\n    return this._pt!;\n  }",
+		"  mutableStrs(): string[] {\n    if (this.__which !== 4) {",
 		"  mutableInner(): M_U_Inner {",
 		// fp32: a new value drops the NaN bytes; the bytes select at the default.
-		"  set f(v: number) {\n    if (this._which !== 7) {\n      this._leave();\n      this._which = 7;\n    }\n    this._f = v;\n    this._fFp32Raw = null;\n  }",
-		"  get fFp32Raw(): Uint8Array | null {\n    return this._which === 7 ? this._fFp32Raw : null;\n  }",
-		"  set fFp32Raw(b: Uint8Array | null) {\n    if (this._which !== 7) {\n      this._leave();\n      this._which = 7;\n      this._f = 1.5;\n    }\n    this._fFp32Raw = b;\n  }",
+		"  set f(v: number) {\n    if (this.__which !== 7) {\n      this.__leave();\n      this.__which = 7;\n    }\n    this._f = v;\n    this._fFp32Raw = null;\n  }",
+		"  get fFp32Raw(): Uint8Array | null {\n    return this.__which === 7 ? this._fFp32Raw : null;\n  }",
+		"  set fFp32Raw(b: Uint8Array | null) {\n    if (this.__which !== 7) {\n      this.__leave();\n      this.__which = 7;\n      this._f = 1.5;\n    }\n    this._fFp32Raw = b;\n  }",
 		// The release on a real switch: object slots to null, a string to "", a
 		// typed array to the shared empty one; numbers and booleans hold nothing.
-		"  private _leave(): void {\n    switch (this._which) {\n      case 1:\n        this._s = \"\";\n        break;\n      case 2:\n        this._pt = null;\n        break;\n      case 3:\n        this._arr = _E_Uint16Array;\n        break;",
-		"  clear(): void {\n    this._leave();\n    this._which = 2;\n    this._pt = new M_U_Pt();\n  }",
+		"  private __leave(): void {\n    switch (this.__which) {\n      case 1:\n        this._s = \"\";\n        break;\n      case 2:\n        this._pt = null;\n        break;\n      case 3:\n        this._arr = _E_Uint16Array;\n        break;",
+		"  clear(): void {\n    this.__leave();\n    this.__which = 2;\n    this._pt = new M_U_Pt();\n  }",
 	)
 	// A replaced-whole kind (scalar, string, blob, native array) has no mutable
 	// accessor: nothing about it is edited in place.
 	mustNotContain(t, "M_U accessors", u, "mutableNum(", "mutableS(", "mutableBl(", "mutableArr(", "mutableFa(")
 	// A union with no option that holds anything selects with a bare tag store.
 	z := tsClass(t, genUnionMode(t, "bigint"), "M_Z")
-	mustContain(t, "M_Z accessors", z, "  set b(v: number) {\n    this._which = 1;\n    this._b = v;\n  }")
+	mustContain(t, "M_Z accessors", z, "  set b(v: number) {\n    this.__which = 1;\n    this._b = v;\n  }")
 }
 
 // TestTSUnionEncodeArms pins MESSAGE_SPEC §4.2's encode rule: serialize is one
@@ -161,7 +167,7 @@ func TestTSUnionAccessors(t *testing.T) {
 func TestTSUnionEncodeArms(t *testing.T) {
 	u := tsClass(t, genUnionMode(t, "bigint"), "M_U")
 	mustContain(t, "M_U serialize", u,
-		"  serialize(os: OStream): void {\n    switch (this._which) {",
+		"  serialize(os: OStream): void {\n    switch (this.__which) {",
 		// default_id: guarded, dropping end.
 		"      case 2: {\n        os.writeSequenceBeginLazy(2);\n        this._pt!.serialize(os);\n        os.writeSequenceEnd();\n        break;\n      }",
 		// forced scalar, string, array, blob.
@@ -177,7 +183,7 @@ func TestTSUnionEncodeArms(t *testing.T) {
 		"        os.writeSequenceBeginLazy(6);\n        this._inner!.serialize(os);\n        os.writeSequenceEndKeep();",
 		"        os.writeSequenceEndKeep();\n        break;\n      }\n      case 5: {", // strs wrapper
 		// isDefault agrees: default_id held AND at its own default.
-		"  isDefault(): boolean {\n    return this._which === 2 && this._pt!.isDefault();\n  }",
+		"  isDefault(): boolean {\n    return this.__which === 2 && this._pt!.isDefault();\n  }",
 	)
 	mustNotContain(t, "M_U serialize", u,
 		"if (this._num !== 5)", `if (this._s !== "")`, "if (this._arr.length !== 0)",
@@ -203,10 +209,10 @@ func TestTSUnionLongModes(t *testing.T) {
 	q := tsClass(t, long, "M_Q")
 	mustContain(t, "M_Q long", q,
 		"  private _big: Long = Long.ZERO;",
-		"  set sig(v: Long | bigint | number) {\n    this._which = 1;\n    this._sig = Long.fromValue(v);\n  }",
+		"  set sig(v: Long | bigint | number) {\n    this.__which = 1;\n    this._sig = Long.fromValue(v);\n  }",
 		"      case 0: {\n        os.writeUnsignedLong(0, this._big);\n        break;\n      }",
 		"        if (!(this._sig.low === 0 && this._sig.high === 0)) {\n          os.writeSignedLong(1, this._sig);",
-		"    return this._which === 1 && this._sig.low === 0 && this._sig.high === 0;",
+		"    return this.__which === 1 && this._sig.low === 0 && this._sig.high === 0;",
 		`        return { "big": this._big.toString(false) };`,
 	)
 	la := tsClass(t, long, "M_La")
@@ -265,7 +271,7 @@ func TestTSUnionDecodeSwitch(t *testing.T) {
 	// fixlenBegin only bounds: no store and no select there.
 	fb := mod[strings.Index(mod, "fixlenBegin(id: number"):]
 	fb = fb[:strings.Index(fb, "\n  }\n")]
-	mustNotContain(t, "fixlenBegin", fb, "this.o.u.s =", "this.o.u.bl =", "_which")
+	mustNotContain(t, "fixlenBegin", fb, "this.o.u.s =", "this.o.u.bl =", "__which")
 	// The visitor never reaches past the union's API.
 	mustNotContain(t, "decode", mod, `this.o.u["_`, "this.o.u._")
 }
@@ -280,10 +286,10 @@ func TestTSUnionGapFillPerType(t *testing.T) {
 		"new FramedSeq<Pick__DefaultN>(_t, _Pick__DefaultN__Make, 3,",
 		"const _M_V__Make = () => new M_V();",
 		"export class Pick__DefaultT {",
-		"  private _which: number = 1;\n  private _n: number = 6;\n  private _t: Pick_T | null = new Pick_T();",
+		"  private __which: number = 1;\n  private _n: number = 6;\n  private _t: Pick_T | null = new Pick_T();",
 	)
 	n := tsClass(t, mod, "Pick__DefaultN")
-	mustContain(t, "Pick__DefaultN", n, "  private _which: number = 0;", "  private _t: Pick_T | null = null;")
+	mustContain(t, "Pick__DefaultN", n, "  private __which: number = 0;", "  private _t: Pick_T | null = null;")
 }
 
 // TestTSUnionJSON: exactly ONE member, the held option -- printed even for
@@ -291,13 +297,13 @@ func TestTSUnionGapFillPerType(t *testing.T) {
 func TestTSUnionJSON(t *testing.T) {
 	u := tsClass(t, genUnionMode(t, "bigint"), "M_U")
 	mustContain(t, "M_U JSON", u,
-		"  toJSON(): Record<string, unknown> {\n    switch (this._which) {\n      case 0:\n        return { \"num\": this._num };",
+		"  toJSON(): Record<string, unknown> {\n    switch (this.__which) {\n      case 0:\n        return { \"num\": this._num };",
 		`        return { "arr": Array.from(this._arr) };`,
 		`        return { "inner": this._inner!.toJSON() };`,
 		"    }\n    return { \"pt\": this._pt!.toJSON() };\n  }",
-		`    if ("num" in d) o.num = d["num"] as number;`,
-		`    if ("pt" in d) o.pt = M_U_Pt.fromJSON(d["pt"] as Record<string, unknown>);`,
-		`    if ("which" in d) o.which_ = d["which"] as number;`,
+		`    if (Object.prototype.hasOwnProperty.call(d, "num")) o.num = d["num"] as number;`,
+		`    if (Object.prototype.hasOwnProperty.call(d, "pt")) o.pt = M_U_Pt.fromJSON(d["pt"] as Record<string, unknown>);`,
+		`    if (Object.prototype.hasOwnProperty.call(d, "which")) o.which_ = d["which"] as number;`,
 	)
 }
 
@@ -315,37 +321,188 @@ func TestTSLazySequenceFramingUnion(t *testing.T) {
 	}
 }
 
-// TestTSUnionDerivedMembersYield: no union is refused for its option names. An
-// option's property keeps the schema name (mangled only where the reserved list
-// says so); a member the backend DERIVES from an option -- has<Opt>,
-// mutable<Opt>, the fp32 raw-bytes companion -- takes a trailing `_` where a
-// sibling option or a fixed member already has that name.
-func TestTSUnionDerivedMembersYield(t *testing.T) {
-	src := "version: 1\nmessages:\n  M:\n    payload:\n" +
-		"      u: { id: 0, type: union, default_id: 0, oneof: { x: { id: 0, type: u8 }, hasX: { id: 1, type: u8 }," +
-		" p: { id: 2, type: struct, fields: { v: { id: 0, type: u8 } } }, mutableP: { id: 3, type: u8 }," +
-		" f: { id: 4, type: fp32 }, fFp32Raw: { id: 5, type: u8 }, own_property: { id: 6, type: u8 }, which: { id: 7, type: u8 } } }\n"
-	u := tsClass(t, genTSWith(t, src, map[string]any{}), "M_U")
-	for _, want := range []string{
-		"  get hasX(): number {", // the option keeps its name...
-		"  hasX_(): boolean {",   // ...and x's has<Opt> yields
-		"  hasHasX(): boolean {",
-		"  get mutableP(): number {",
-		"  mutableP_(): M_U_P {",
-		"  get fFp32Raw(): number {",
-		"  get fFp32Raw_(): Uint8Array | null {",
-		"  hasOwnProperty_(): boolean {", // never replaces Object's
-		"  get which_(): number {",       // the reserved-list mangle stands
-	} {
-		if !strings.Contains(u, want) {
-			t.Errorf("union M_U lacks %q", want)
+// memberDecl matches one member declaration in a class body: a field, a method
+// or one half of an accessor pair, with its modifiers.
+var memberDecl = regexp.MustCompile(`(?m)^  (?:private |static |readonly )*(get |set )?([A-Za-z_$][\w$]*)\s*[(:=]`)
+
+// duplicateMembers returns every name the class body declares twice: two fields
+// or methods of one name, or a field/method beside an accessor of that name
+// (TS2300 / TS2717 in tsc). A get/set pair is one member.
+func duplicateMembers(cls string) []string {
+	plain, acc := map[string]int{}, map[string]map[string]int{}
+	for _, m := range memberDecl.FindAllStringSubmatch(cls, -1) {
+		if m[1] != "" {
+			if acc[m[2]] == nil {
+				acc[m[2]] = map[string]int{}
+			}
+			acc[m[2]][m[1]]++
+			continue
+		}
+		plain[m[2]]++
+	}
+	var dup []string
+	for n, c := range plain {
+		if c > 1 || acc[n] != nil {
+			dup = append(dup, n)
 		}
 	}
-	// Landing on a fixed member renames with the trailing underscore.
-	for _, name := range []string{"which", "clear", "serialize", "isDefault", "toJSON", "_which", "_leave", "constructor"} {
-		if got := unionOptProp(name); got != name+"_" {
-			t.Errorf("unionOptProp(%q) = %q, want %q", name, got, name+"_")
+	for n, k := range acc {
+		for _, c := range k {
+			if c > 1 {
+				dup = append(dup, n)
+			}
 		}
+	}
+	sort.Strings(dup)
+	return dup
+}
+
+// TestTSUnionPrivateMembersUnreachable: a union's private tag and release
+// method are spelled `__which`/`__leave`, which no option slot (`_` + a member
+// that starts with a letter) can be. An option `leave` beside a string option --
+// so the release method is emitted -- declared `_leave` twice before.
+func TestTSUnionPrivateMembersUnreachable(t *testing.T) {
+	src := "version: 1\nmessages:\n  m:\n    payload:\n" +
+		"      u: { id: 0, type: union, oneof: { leave: { id: 0, type: u8 }, which: { id: 1, type: u8 }," +
+		" s: { id: 2, type: string, maxlen: 4 } } }\n"
+	u := tsClass(t, genTSWith(t, src, map[string]any{}), "M_U")
+	mustContain(t, "M_U", u,
+		"  private __which: number = 0;",
+		"  private _leave: number = 0;",
+		"  private _which_: number = 0;",
+		"  private __leave(): void {")
+	if dup := duplicateMembers(u); len(dup) != 0 {
+		t.Errorf("M_U declares %v twice:\n%s", dup, u)
+	}
+}
+
+// shapeNames are option names that spell, or are spelled by, a member derived
+// from another option: has<Opt>, mutable<Opt>, <opt>Fp32Raw, the bare prefixes
+// (raw(`has`) is has(`fp32_raw`) unless `has` is escaped), digits after the
+// prefix, Object's hasOwnProperty (has<Opt> of `own_property`), the union's own
+// members and its private ones' stems. Their folds are distinct, as the
+// validator requires of sibling options.
+var shapeNames = []string{
+	"x", "hasX", "mutableX", "xFp32Raw", "has", "mutable", "fp32_raw", "hasFp32Raw",
+	"mutableFp32Raw", "has9", "mutable1", "has_y", "hash", "mutablez", "own_property",
+	"hasOwnProperty", "which", "clear", "leave", "constructor", "toString", "g_fp32_raw",
+}
+
+// unionSpellings generates a union of the given options, all of one kind, and
+// returns every option's member spellings, keyed by option name.
+func unionSpellings(t *testing.T, names []string, kind string) (map[string][]string, string) {
+	t.Helper()
+	var opts []string
+	for i, n := range names {
+		opts = append(opts, fmt.Sprintf("%s: { id: %d, %s }", n, i, kind))
+	}
+	src := "version: 1\nmessages:\n  m:\n    payload:\n      u: { id: 0, type: union, oneof: { " + strings.Join(opts, ", ") + " } }\n"
+	s := schema(t, src)
+	g := &gen{schema: s}
+	for key, nt := range s.Named {
+		if nt.Category != ir.CatUnion {
+			continue
+		}
+		got := map[string][]string{}
+		for _, o := range g.unionShapeOf(key, nt).opts {
+			got[o.orig.Name] = []string{o.prop, o.slot, o.has, o.mutable, o.raw, o.rawSlot}
+		}
+		return got, genTSWith(t, src, map[string]any{})
+	}
+	t.Fatal("no union in the schema")
+	return nil, ""
+}
+
+// TestTSUnionMembersAreShapeBased: every member an option derives -- has<Opt>,
+// mutable<Opt>, the fp32 raw-bytes pair -- depends on the option's own name
+// alone. With every shape-colliding name present at once the spellings are
+// pairwise distinct (and distinct from the class's fixed members), and each
+// option alone gets exactly the spellings it gets among all the others: adding
+// an option `hasX` never renames option `x`'s hasX().
+func TestTSUnionMembersAreShapeBased(t *testing.T) {
+	fixed := map[string]bool{"__which": true, "__leave": true}
+	for _, set := range []map[string]bool{tsClassBody, tsMembers, tsObjectMembers, unionReserved} {
+		for n := range set {
+			fixed[n] = true
+		}
+	}
+	for _, kind := range []string{
+		"type: fp32", // prop, has, raw pair
+		"type: struct, fields: { v: { id: 0, type: u8 } }", // prop, has, mutable
+	} {
+		all, out := unionSpellings(t, shapeNames, kind)
+		seen := map[string]string{}
+		for _, n := range shapeNames {
+			for _, sp := range all[n] {
+				if sp == "" {
+					continue
+				}
+				if fixed[sp] {
+					t.Errorf("%s: option %s derives the fixed member %s", kind, n, sp)
+				}
+				if prev, ok := seen[sp]; ok {
+					t.Errorf("%s: options %s and %s both derive %s", kind, prev, n, sp)
+				}
+				seen[sp] = n
+			}
+			alone, _ := unionSpellings(t, []string{n}, kind)
+			if !reflect.DeepEqual(alone[n], all[n]) {
+				t.Errorf("%s: option %s alone is %v, among the others %v", kind, n, alone[n], all[n])
+			}
+		}
+		if dup := duplicateMembers(tsClass(t, out, "M_U")); len(dup) != 0 {
+			t.Errorf("%s: M_U declares %v twice", kind, dup)
+		}
+	}
+	// The plain spellings, pinned: a derived member is never escaped by a
+	// sibling; the option with a derived member's shape is.
+	fp, _ := unionSpellings(t, shapeNames, "type: fp32")
+	st, _ := unionSpellings(t, shapeNames, "type: struct, fields: { v: { id: 0, type: u8 } }")
+	for _, c := range []struct{ got, want string }{
+		{fp["x"][2], "hasX"}, {st["x"][3], "mutableX"}, {fp["x"][4], "xFp32Raw"}, {fp["x"][5], "_xFp32Raw"},
+		{fp["hasX"][0], "hasX_"}, {fp["mutableX"][0], "mutableX_"}, {fp["xFp32Raw"][0], "xFp32Raw_"},
+		{fp["has"][0], "has_"}, {fp["has"][4], "has_Fp32Raw"}, {fp["fp32_raw"][2], "hasFp32Raw"},
+		{fp["hash"][0], "hash"}, {fp["mutablez"][0], "mutablez"}, {fp["has_y"][0], "has_y"},
+		{fp["has9"][0], "has9_"}, {fp["own_property"][2], "hasOwnProperty__"},
+		{fp["hasOwnProperty"][0], "hasOwnProperty_"}, {fp["which"][1], "_which_"}, {fp["leave"][1], "_leave"},
+		{fp["toString"][4], "toString_Fp32Raw"},
+	} {
+		if c.got != c.want {
+			t.Errorf("spelling %q, want %q", c.got, c.want)
+		}
+	}
+}
+
+// TestTSStructFp32CompanionIsShapeBased: a struct field's raw-bytes companion is
+// its member plus "Fp32Raw", and a field that ENDS with "Fp32Raw" is escaped
+// whether or not the field it would shadow exists, so neither renames the other.
+func TestTSStructFp32CompanionIsShapeBased(t *testing.T) {
+	both := genTSWith(t, "version: 1\nmessages:\n  m:\n    payload:\n"+
+		"      f: { id: 0, type: fp32 }\n      fFp32Raw: { id: 1, type: u8 }\n      toString: { id: 2, type: fp32 }\n", map[string]any{})
+	alone := genTSWith(t, "version: 1\nmessages:\n  m:\n    payload:\n"+
+		"      fFp32Raw: { id: 1, type: u8 }\n", map[string]any{})
+	mustContain(t, "f + fFp32Raw", both,
+		"  fFp32Raw_: number = 0;",
+		"  fFp32Raw: Uint8Array | null = null;",
+		"this.o.fFp32Raw = Number.isNaN(v)",
+		"  toString_Fp32Raw: Uint8Array | null = null;")
+	mustContain(t, "fFp32Raw alone", alone, "  fFp32Raw_: number = 0;")
+	if dup := duplicateMembers(tsClass(t, both, "M")); len(dup) != 0 {
+		t.Errorf("M declares %v twice", dup)
+	}
+}
+
+// TestTSFromJSONIgnoresInheritedKeys: fromJSON tests a key with an own-property
+// check, so a field or option named after an Object.prototype member is not
+// "present" in every JSON object.
+func TestTSFromJSONIgnoresInheritedKeys(t *testing.T) {
+	out := genTSWith(t, "version: 1\nmessages:\n  m:\n    payload:\n"+
+		"      constructor: { id: 0, type: u8 }\n      u: { id: 1, type: union, oneof: { valueOf: { id: 0, type: u8 } } }\n", map[string]any{})
+	mustContain(t, "fromJSON", out,
+		`if (Object.prototype.hasOwnProperty.call(d, "constructor")) o.constructor_ = `,
+		`if (Object.prototype.hasOwnProperty.call(d, "valueOf")) o.valueOf_ = `)
+	if strings.Contains(out, " in d)") {
+		t.Errorf("fromJSON still tests a key with `in`, which sees Object.prototype")
 	}
 }
 

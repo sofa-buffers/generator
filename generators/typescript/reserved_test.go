@@ -12,17 +12,14 @@ import (
 	"testing"
 )
 
-var update = flag.Bool("update", false, "rewrite tests/conformance/typescript/reserved.{yaml,json} from the reserved-name list")
+var update = flag.Bool("update", false, "rewrite tests/conformance/typescript/reserved{.yaml,.json,_absent.json} from the reserved-name list")
 
-// reservedNames is every name on the list a schema field can spell, sorted.
-// The union's underscored members bound derived slots, not field names.
+// reservedNames is every name on the list, sorted.
 func reservedNames() []string {
 	var names []string
 	for _, set := range []map[string]bool{tsClassBody, tsMembers, tsObjectMembers, unionReserved} {
 		for n := range set {
-			if !strings.HasPrefix(n, "_") {
-				names = append(names, n)
-			}
+			names = append(names, n)
 		}
 	}
 	sort.Strings(names)
@@ -65,10 +62,18 @@ func reservedYAML(names []string) string {
 		opts[i] = fmt.Sprintf("%s: { id: %d, type: u8 }", n, i)
 	}
 	k := len(names)
-	opts = append(opts,
-		fmt.Sprintf("x: { id: %d, type: u8 }", k), fmt.Sprintf("hasX: { id: %d, type: u8 }", k+1),
-		fmt.Sprintf("own_property: { id: %d, type: u8 }", k+2), fmt.Sprintf("g: { id: %d, type: fp32 }", k+3),
-		fmt.Sprintf("gFp32Raw: { id: %d, type: u8 }", k+4))
+	// Options with a derived member's shape beside the options whose members
+	// they would spell (TestTSUnionMembersAreShapeBased), and a string option, so
+	// the union declares its private release method beside an option `leave`.
+	for i, o := range []string{
+		"x: { id: %d, type: struct, fields: { $ref: '#/$defs/struct/Inner2' } }",
+		"hasX: { id: %d, type: u8 }", "mutableX: { id: %d, type: u8 }", "xFp32Raw: { id: %d, type: u8 }",
+		"own_property: { id: %d, type: u8 }", "g: { id: %d, type: fp32 }", "gFp32Raw: { id: %d, type: u8 }",
+		"has: { id: %d, type: fp32 }", "fp32_raw: { id: %d, type: struct, fields: { $ref: '#/$defs/struct/Inner2' } }",
+		"leave: { id: %d, type: u8 }", "s: { id: %d, type: string, maxlen: 4 }",
+	} {
+		opts = append(opts, fmt.Sprintf(o, k+i))
+	}
 	fmt.Fprintf(&b, `version: 1
 $defs:
   struct:
@@ -116,6 +121,19 @@ func reservedJSON(names []string) string {
 	return string(b) + "\n"
 }
 
+// reservedAbsentJSON is the harness input for m with every reserved key ABSENT:
+// a key Object.prototype has (constructor, toString, ...) must not read as
+// present. Only the union, at its first option, and a nested struct carry a
+// value, so their fromJSON runs over an object without those keys too.
+func reservedAbsentJSON(names []string) string {
+	top := map[string]any{
+		"u":     map[string]any{names[0]: 7},
+		"inner": map[string]any{"inner2": map[string]any{"x": 1}},
+	}
+	b, _ := json.MarshalIndent(top, "", "  ")
+	return string(b) + "\n"
+}
+
 // TestReservedSchemaFile keeps the checked-in collision schema and its input in
 // step with the list: the conformance suite typechecks and round-trips that file
 // (tests/conformance/typescript/run.sh), so a name added to reserved.go is
@@ -123,8 +141,9 @@ func reservedJSON(names []string) string {
 func TestReservedSchemaFile(t *testing.T) {
 	names := reservedNames()
 	for path, want := range map[string]string{
-		"../../tests/conformance/typescript/reserved.yaml": reservedYAML(names),
-		"../../tests/conformance/typescript/reserved.json": reservedJSON(names),
+		"../../tests/conformance/typescript/reserved.yaml":        reservedYAML(names),
+		"../../tests/conformance/typescript/reserved.json":        reservedJSON(names),
+		"../../tests/conformance/typescript/reserved_absent.json": reservedAbsentJSON(names),
 	} {
 		if *update {
 			if err := os.WriteFile(path, []byte(want), 0o644); err != nil {
@@ -155,23 +174,6 @@ func TestReservedNamesAreMangled(t *testing.T) {
 		}
 		if !strings.Contains(out, fmt.Sprintf("%q: ", n)) {
 			t.Errorf("JSON key %q is gone", n)
-		}
-	}
-}
-
-// TestFp32CompanionYields: an fp32 field's raw-bytes companion is DERIVED, so
-// where a sibling field is already spelled like it the companion takes a
-// trailing `_` and the schema's field keeps its name. No schema is refused.
-func TestFp32CompanionYields(t *testing.T) {
-	out := genTSWith(t, "version: 1\nmessages:\n  m:\n    payload:\n"+
-		"      f: { id: 0, type: fp32 }\n      fFp32Raw: { id: 1, type: u8 }\n", map[string]any{})
-	for _, want := range []string{
-		"  fFp32Raw: number = 0;",
-		"  fFp32Raw_: Uint8Array | null = null;",
-		"this.o.fFp32Raw_ = Number.isNaN(v)",
-	} {
-		if !strings.Contains(out, want) {
-			t.Errorf("missing %q in:\n%s", want, out)
 		}
 	}
 }
@@ -233,9 +235,9 @@ func TestNamesSchemaDeclaresEachNameOnce(t *testing.T) {
 				"Shape__DefaultNum", "Shape__DefaultPt", "Shape_Pt", "ShapeDefault_Pt", "ShapeDefaultPt",
 				"Color", "Color__Array", "ColorRed", "Flags", "FlagsOn",
 				// escaped: a corelib import, a global, one of both
-				"OStream_", "Visitor_", "Long_", "Uint8Array_", "Record_", "Number_", "String",
+				"OStream_", "Visitor_", "Long_", "Uint8Array_", "Record_", "Number_", "Object_", "String",
 				// not escaped: nothing in the module reaches these unqualified
-				"Math", "Object", "Seq", "Decoder",
+				"Math", "Seq", "Decoder",
 				// privates
 				"_M__Visitor", "_M__Loc", "_M__Loc_a", "_M_Arr__Make",
 			} {

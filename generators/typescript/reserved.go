@@ -18,16 +18,54 @@ import (
 // with a trailing `_`. The wire is keyed by id and the JSON key is a separate
 // string literal, so neither changes; only the member does. The struct path
 // (tsIdent) and the union path (unionOptProp) both read the list; a union adds
-// only the members it alone has (unionReserved). Schema names start with a
-// letter, so the underscored members (_which, the private Long backings) cannot
-// be reached by a field.
+// only the members it alone has (unionReserved).
 //
-// Nothing here is refused at generation time. Two fields never derive one member
-// (a schema name never ends with `_`), and a member the backend DERIVES from a
-// field -- an fp32 raw-bytes companion, a union's has<Opt>/mutable<Opt> -- that
-// lands on another member takes trailing underscores until it is free
-// (freeMember): the schema's own names keep their spelling, the derived one
-// yields.
+// Nothing here is refused at generation time, and no spelling depends on which
+// sibling names exist: every member is a function of its OWN schema name, so
+// adding a field or an option never renames another one's members.
+//
+// The members of one class, and why no two meet. A schema name n matches
+// naming.NameRe -- it starts with a letter, has no `__`, never ends with `_` --
+// and sibling names have distinct folds. The spellings derived from it:
+//
+//	prop(n)    the field / option member: n, or n+"_" where n is on a list
+//	           above or has a derived member's shape (shaped)
+//	raw(n)     an fp32 field's raw-bytes companion: prop(n)+"Fp32Raw"
+//	has(n)     a union option's "has"+Pascal(n), with "__" appended where that
+//	           is a fixed member (derivedMember: only Object's hasOwnProperty,
+//	           reached by an option spelled `own_property`)
+//	mutable(n) a union option's "mutable"+Pascal(n), the same way
+//	slot(n)    a union option's private slot: "_"+prop(n)
+//	rawSlot(n) its fp32 raw-bytes slot: "_"+raw(n)
+//	_<n>       a struct's private Long backing
+//	fixed      the class's own members (the lists below) and a union's private
+//	           tag and release method, `__which` and `__leave`
+//
+// The shapes (shaped): ends with "Fp32Raw"; in a union also starts with "has"
+// or "mutable" followed by nothing, an upper-case letter or a digit.
+//
+//   - prop is injective: two names differ, and n is never m+"_" (no name ends
+//     with `_`). raw, slot and rawSlot are prop plus a fixed affix, so they are
+//     injective too.
+//   - prop vs a derived member: an unescaped prop is not shaped, but every raw
+//     ends with "Fp32Raw" and every has/mutable is "has"/"mutable" + an
+//     upper-case letter (Pascal(n) starts with one). An escaped prop ends with
+//     exactly one `_`, which no derived member does (Pascal has no `_`, raw ends
+//     with "Raw", the derivedMember escape with two).
+//   - has vs mutable: they differ in their first letter. Each is injective,
+//     since Pascal(n) lower-cased is fold(n).
+//   - raw vs has (and mutable): raw(m) = prop(m)+"Fp32Raw" starting with "has"
+//     + an upper-case letter means prop(m) is "has" or starts with "has" + an
+//     upper-case letter or digit; then m is shaped, prop(m) = m+"_", and raw(m)
+//     holds a `_` that has(n) cannot. (That is why a bare `has` / `mutable` is
+//     shaped: raw(`has`) would otherwise be has(`fp32_raw`).)
+//   - private vs public: private members start with `_`, public ones with a
+//     letter. slot vs rawSlot follows from prop vs raw; a slot is `_` + a
+//     letter, so `__which`/`__leave` are out of its reach; a struct's only
+//     private members are the backings `_<n>`, injective in n.
+//   - fixed vs schema-derived: tsIdent/unionOptProp escape every listed name;
+//     no fixed member ends with "Fp32Raw" or starts with "mutable", and the one
+//     spelled "has" + an upper-case letter is escaped by derivedMember.
 
 // tsClassBody are the names the class body itself rejects. A field named
 // `constructor` is a SyntaxError ("Classes may not have a field named
@@ -51,60 +89,78 @@ var tsObjectMembers = map[string]bool{
 	"isPrototypeOf": true, "propertyIsEnumerable": true,
 }
 
-// unionReserved are the instance members a union class declares on top of the
-// above. The underscored ones cannot be an option's name, but an option's
-// private slot is `_<option>`, so they bound what an option derives.
+// unionReserved are the public instance members a union class declares on top
+// of the above. Its private tag and release method are spelled with a leading
+// `__` (`__which`, `__leave`), which no `_`+prop slot can be.
 //
 // A union's statics need no list: an option's id constant is `<OPTION>_ID`, and
 // no static of the class or of Function (fromJSON, decode, prototype, name,
 // length) is spelled that way.
-var unionReserved = map[string]bool{
-	"which": true, "clear": true, "_which": true, "_leave": true,
+var unionReserved = map[string]bool{"which": true, "clear": true}
+
+// fp32RawSuffix ends every fp32 raw-bytes companion member.
+const fp32RawSuffix = "Fp32Raw"
+
+// fixedMember reports whether n is a member every generated class declares or
+// inherits -- and, with union, one every union class declares.
+func fixedMember(n string, union bool) bool {
+	return tsClassBody[n] || tsMembers[n] || tsObjectMembers[n] || (union && unionReserved[n])
 }
 
-// tsIdent is the class member a schema field is reached through: the schema
-// name, with a trailing `_` where it is on the list.
+// derivedPrefix reports whether n starts with p followed by nothing, an
+// upper-case letter or a digit: the shape of a member spelled p+Pascal(...).
+func derivedPrefix(n, p string) bool {
+	if !strings.HasPrefix(n, p) {
+		return false
+	}
+	if len(n) == len(p) {
+		return true
+	}
+	c := n[len(p)]
+	return c >= 'A' && c <= 'Z' || c >= '0' && c <= '9'
+}
+
+// shaped reports whether a schema name has the shape of a member the backend
+// derives from a name: an fp32 raw-bytes companion in every class, and in a
+// union has<Opt>/mutable<Opt> too. Such a name takes the escape, so every
+// derived member keeps its plain spelling whatever the siblings are.
+func shaped(n string, union bool) bool {
+	if strings.HasSuffix(n, fp32RawSuffix) {
+		return true
+	}
+	return union && (derivedPrefix(n, "has") || derivedPrefix(n, "mutable"))
+}
+
+// tsIdent is the struct/message member a schema field is reached through: the
+// schema name, with a trailing `_` where it is on the list or shaped.
 func tsIdent(name string) string {
-	if tsClassBody[name] || tsMembers[name] || tsObjectMembers[name] {
+	if fixedMember(name, false) || shaped(name, false) {
 		return name + "_"
 	}
 	return name
 }
 
-// fp32RawNames assigns every fp32 field of one class its raw-bytes companion
-// member (fp32RawCompanion): `<name>Fp32Raw`, with a trailing `_` added until it
-// is free where the class already has that member -- a SIBLING field spelled
-// `fFp32Raw` beside an fp32 field `f`. The schema's own fields keep their names
-// and the derived member yields: the member channel's rule for a clash with
-// another declaration (ARCHITECTURE §8). The fields themselves need no check:
-// tsIdent is injective over what the validator accepts, since a mangled `encode_`
-// cannot be a schema name (none ends with `_`).
-func fp32RawNames(fields []*ir.Field, into map[*ir.Field]string) {
-	taken := map[string]bool{}
-	for _, set := range []map[string]bool{tsClassBody, tsMembers, tsObjectMembers} {
-		for n := range set {
-			taken[n] = true
-		}
+// fp32RawName is the raw-bytes companion of the member prop.
+func fp32RawName(prop string) string { return prop + fp32RawSuffix }
+
+// derivedMember is the spelling of a union member derived as d: d itself, or d
+// with `__` where d is a fixed member -- has<Opt> of an option `own_property` is
+// Object's hasOwnProperty. No prop ends with `__`.
+func derivedMember(d string) string {
+	if fixedMember(d, true) {
+		return d + "__"
 	}
-	for _, f := range fields {
-		taken[tsIdent(f.Name)] = true
-	}
-	for _, f := range fields {
-		if fp32RawCompanion(f) {
-			into[f] = freeMember(taken, fp32RawName(f.Name))
-		}
-	}
+	return d
 }
 
-// freeMember returns n, or n with trailing underscores until no member of the
-// class has it yet, and marks the result taken. Distinct inputs stay distinct:
-// every result is recorded, so a later one never lands on an earlier one.
-func freeMember(taken map[string]bool, n string) string {
-	for taken[n] {
-		n += "_"
+// fp32RawNames assigns every fp32 field of one class its raw-bytes companion
+// member (fp32RawCompanion): the field's own member plus "Fp32Raw".
+func fp32RawNames(fields []*ir.Field, into map[*ir.Field]string) {
+	for _, f := range fields {
+		if fp32RawCompanion(f) {
+			into[f] = fp32RawName(tsIdent(f.Name))
+		}
 	}
-	taken[n] = true
-	return n
 }
 
 // --- type-level names (ARCHITECTURE §8, "Naming: conflict-free identifiers") --
@@ -138,7 +194,7 @@ var tsModuleNames = map[string]bool{
 // upper-case); TestTSGlobalsListed fails when the emitted code starts using one
 // that is missing.
 var tsGlobals = map[string]bool{
-	"Array": true, "BigInt": true, "Boolean": true, "Number": true, "Record": true,
+	"Array": true, "BigInt": true, "Boolean": true, "Number": true, "Object": true, "Record": true,
 	"Uint8Array": true, "Int8Array": true, "Uint16Array": true, "Int16Array": true,
 	"Uint32Array": true, "Int32Array": true, "BigUint64Array": true, "BigInt64Array": true,
 	"Float32Array": true, "Float64Array": true,

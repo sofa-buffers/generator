@@ -119,11 +119,6 @@ func fp32RawCompanion(f *ir.Field) bool {
 	return f.Kind == ir.KindFP32
 }
 
-// fp32RawName is the property name of a field's fp32 raw-bits companion. The
-// `Fp32Raw` suffix (rather than a bare `Raw`) keeps it clear what the slot holds
-// and makes a collision with a sibling field's name vanishingly unlikely.
-func fp32RawName(name string) string { return name + "Fp32Raw" }
-
 // fp32RawDoc is the TSDoc on that companion slot. It says what a consumer needs
 // to know and nothing more: where the bytes come from, that they are not the
 // value, and that they cannot silently outvote the value.
@@ -613,7 +608,7 @@ func (g *gen) emitJSON(f *tsfile, name string, fields []*ir.Field) {
 	f.line("  static fromJSON(d: Record<string, unknown>): %s {", name)
 	f.line("    const o = new %s();", name)
 	for _, fld := range fields {
-		f.line("    if (%q in d) %s;", fld.Name, g.fromJSONStmt(fld))
+		f.line("    if (Object.prototype.hasOwnProperty.call(d, %q)) %s;", fld.Name, g.fromJSONStmt(fld))
 	}
 	f.line("    return o;")
 	f.line("  }")

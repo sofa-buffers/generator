@@ -116,15 +116,15 @@ export class Scalars {
 
   static fromJSON(d: Record<string, unknown>): Scalars {
     const o = new Scalars();
-    if ("u8min" in d) o.u8min = d["u8min"] as number;
-    if ("u8max" in d) o.u8max = d["u8max"] as number;
-    if ("u64max" in d) o.u64max = BigInt(d["u64max"] as string | number);
-    if ("i8min" in d) o.i8min = d["i8min"] as number;
-    if ("i64min" in d) o.i64min = BigInt(d["i64min"] as string | number);
-    if ("f32" in d) o.f32 = d["f32"] as number;
-    if ("f64" in d) o.f64 = d["f64"] as number;
-    if ("flag" in d) o.flag = d["flag"] as boolean;
-    if ("flags" in d) o.flags = Uint8Array.from(d["flags"] as boolean[], (_x0) => (_x0 ? 1 : 0));
+    if (Object.prototype.hasOwnProperty.call(d, "u8min")) o.u8min = d["u8min"] as number;
+    if (Object.prototype.hasOwnProperty.call(d, "u8max")) o.u8max = d["u8max"] as number;
+    if (Object.prototype.hasOwnProperty.call(d, "u64max")) o.u64max = BigInt(d["u64max"] as string | number);
+    if (Object.prototype.hasOwnProperty.call(d, "i8min")) o.i8min = d["i8min"] as number;
+    if (Object.prototype.hasOwnProperty.call(d, "i64min")) o.i64min = BigInt(d["i64min"] as string | number);
+    if (Object.prototype.hasOwnProperty.call(d, "f32")) o.f32 = d["f32"] as number;
+    if (Object.prototype.hasOwnProperty.call(d, "f64")) o.f64 = d["f64"] as number;
+    if (Object.prototype.hasOwnProperty.call(d, "flag")) o.flag = d["flag"] as boolean;
+    if (Object.prototype.hasOwnProperty.call(d, "flags")) o.flags = Uint8Array.from(d["flags"] as boolean[], (_x0) => (_x0 ? 1 : 0));
     return o;
   }
 

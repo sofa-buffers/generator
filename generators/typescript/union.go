@@ -10,7 +10,7 @@ import (
 )
 
 // A schema union is a TypeScript class that holds exactly ONE option (MESSAGE_SPEC
-// §4.2): a private tag `_which` plus one private, typed slot per option. Its API:
+// §4.2): a private tag `__which` plus one private, typed slot per option. Its API:
 //
 //	static readonly <OPT>_ID   the option's id
 //	which                      the id of the option held (getter)
@@ -34,7 +34,7 @@ import (
 // array slot at the option's default (a typed array's is the module's shared
 // empty instance), an object slot at `null` -- only default_id's is built.
 //
-// A real switch releases what the option left behind held (`_leave`, emitted
+// A real switch releases what the option left behind held (`__leave`, emitted
 // only where some option holds anything): an object slot goes back to `null`, a
 // string to "", a typed array to the shared empty one, so a union does not keep a
 // discarded payload alive. An option selected again is built fresh; an object
@@ -54,10 +54,10 @@ type unionOpt struct {
 	orig    *ir.Field // the option as declared, for its documentation
 	prop    string    // the public getter/setter (mangled)
 	base    string    // <Opt>, the Pascal option name
-	has     string    // has<Opt>(), yielding with `_` where a member has it
-	mutable string    // mutable<Opt>(), likewise ("" for a kind replaced whole)
-	slot    string    // the private slot: "_" + prop, so it never lands on `_which`
-	raw     string    // the public fp32 raw-bytes property ("" unless fp32)
+	has     string    // has<Opt>() (derivedMember)
+	mutable string    // mutable<Opt>() ("" for a kind replaced whole)
+	slot    string    // the private slot: "_" + prop, never `__which`/`__leave`
+	raw     string    // the public fp32 raw-bytes property: prop + "Fp32Raw" ("" unless fp32)
 	rawSlot string    // its private slot
 	idConst string    // <OPT>_ID
 	isD     bool      // the union's default option (default_id)
@@ -74,14 +74,14 @@ type unionShape struct {
 }
 
 // unionOptProp is the getter/setter an option is reached through: the option's
-// name, mangled as a struct member's is (tsIdent), with the trailing underscore
-// where it lands on one of the members only a union has (unionReserved).
+// name, with a trailing underscore where it is a member of every union class
+// (fixedMember) or has the shape of a member derived from an option -- an fp32
+// raw-bytes companion, has<Opt>, mutable<Opt> (shaped).
 func unionOptProp(name string) string {
-	p := tsIdent(name)
-	if unionReserved[p] {
-		return p + "_"
+	if fixedMember(name, true) || shaped(name, true) {
+		return name + "_"
 	}
-	return p
+	return name
 }
 
 // unionMutable reports whether an option gets a mutable<Opt>() accessor: the
@@ -101,20 +101,8 @@ func unionMutable(fld *ir.Field) bool {
 
 func (g *gen) unionShapeOf(key string, nt *ir.NamedType) *unionShape {
 	u := &unionShape{typeName: g.typeName(key), raw: g.typeRaw(key), nt: nt, byField: map[*ir.Field]*unionOpt{}}
-	// The members are assigned in three passes over ONE set, so no two can meet:
-	// the class's own members; then every option's property and slot, which are
-	// the schema's names (distinct by construction: the validator keeps option
-	// names fold-unique, and a mangled `which_` is no schema name); then what the
-	// backend DERIVES from an option -- the raw-bytes companion, has<Opt>,
-	// mutable<Opt> -- which yields with trailing underscores where a member
-	// already has the name (an option `hasX` beside an option `x`, an option
-	// `own_property` whose has<Opt> is Object's hasOwnProperty).
-	taken := map[string]bool{}
-	for _, set := range []map[string]bool{tsClassBody, tsMembers, tsObjectMembers, unionReserved} {
-		for n := range set {
-			taken[n] = true
-		}
-	}
+	// Every member is a function of the option's own name alone, so an option
+	// added beside it never renames it; reserved.go proves that no two meet.
 	for _, fld := range nt.Fields {
 		cp := *fld
 		switch fld.Kind {
@@ -133,23 +121,18 @@ func (g *gen) unionShapeOf(key string, nt *ir.NamedType) *unionShape {
 			idConst: strings.ToUpper(fld.Name) + "_ID",
 			isD:     nt.IsDefaultOption(fld),
 		}
-		taken[o.prop], taken[o.slot] = true, true
+		o.has = derivedMember("has" + o.base)
+		if unionMutable(o.f) {
+			o.mutable = derivedMember("mutable" + o.base)
+		}
+		if fp32RawCompanion(o.orig) {
+			o.raw = fp32RawName(prop)
+			o.rawSlot = "_" + o.raw
+		}
 		u.opts = append(u.opts, o)
 		u.byField[fld] = o
 		if o.isD {
 			u.d = o
-		}
-	}
-	for _, o := range u.opts {
-		if fp32RawCompanion(o.orig) {
-			o.raw = freeMember(taken, fp32RawName(o.orig.Name))
-			o.rawSlot = freeMember(taken, "_"+o.raw)
-		}
-	}
-	for _, o := range u.opts {
-		o.has = freeMember(taken, "has"+o.base)
-		if unionMutable(o.f) {
-			o.mutable = freeMember(taken, "mutable"+o.base)
 		}
 	}
 	return u
@@ -186,7 +169,7 @@ func (g *gen) unionLeave(o *unionOpt) string {
 }
 
 // hasLeave reports whether any option of u leaves something to release, i.e.
-// whether the union needs `_leave` at all.
+// whether the union needs `__leave` at all.
 func (g *gen) hasLeave(u *unionShape) bool {
 	for _, o := range u.opts {
 		if g.unionLeave(o) != "" {
@@ -196,18 +179,18 @@ func (g *gen) hasLeave(u *unionShape) bool {
 	return false
 }
 
-// selectStmt renders "o becomes the held option" at ind. With `_leave`, a real
+// selectStmt renders "o becomes the held option" at ind. With `__leave`, a real
 // switch releases the option left behind first; the test keeps a store into the
 // held option from releasing its own slot.
 func (g *gen) selectStmt(f *tsfile, ind string, u *unionShape, o *unionOpt) {
 	if g.hasLeave(u) {
-		f.line("%sif (this._which !== %d) {", ind, o.f.ID)
-		f.line("%s  this._leave();", ind)
-		f.line("%s  this._which = %d;", ind, o.f.ID)
+		f.line("%sif (this.__which !== %d) {", ind, o.f.ID)
+		f.line("%s  this.__leave();", ind)
+		f.line("%s  this.__which = %d;", ind, o.f.ID)
 		f.line("%s}", ind)
 		return
 	}
-	f.line("%sthis._which = %d;", ind, o.f.ID)
+	f.line("%sthis.__which = %d;", ind, o.f.ID)
 }
 
 // unionHeld is the expression reading an option's slot while it is held.
@@ -228,7 +211,7 @@ func (g *gen) emitUnionClass(f *tsfile, key string, nt *ir.NamedType) {
 		f.line("  static readonly %s = %d;", o.idConst, o.f.ID)
 	}
 	f.blank()
-	f.line("  private _which: number = %d;", u.d.f.ID)
+	f.line("  private __which: number = %d;", u.d.f.ID)
 	for _, o := range u.opts {
 		t := g.tsType(o.f)
 		switch {
@@ -246,7 +229,7 @@ func (g *gen) emitUnionClass(f *tsfile, key string, nt *ir.NamedType) {
 	f.blank()
 	f.line("  /** The id of the option this union holds: one of the `..._ID` constants. */")
 	f.line("  get which(): number {")
-	f.line("    return this._which;")
+	f.line("    return this.__which;")
 	f.line("  }")
 	for _, o := range u.opts {
 		g.emitUnionAccessors(f, u, o)
@@ -254,8 +237,8 @@ func (g *gen) emitUnionClass(f *tsfile, key string, nt *ir.NamedType) {
 	if g.hasLeave(u) {
 		f.blank()
 		f.line("  // Releases what the held option holds, before another one is selected.")
-		f.line("  private _leave(): void {")
-		f.line("    switch (this._which) {")
+		f.line("  private __leave(): void {")
+		f.line("    switch (this.__which) {")
 		for _, o := range u.opts {
 			if s := g.unionLeave(o); s != "" {
 				f.line("      case %d:", o.f.ID)
@@ -270,9 +253,9 @@ func (g *gen) emitUnionClass(f *tsfile, key string, nt *ir.NamedType) {
 	f.line("  /** Back to the default: `%s`, at its own default. */", u.d.f.Name)
 	f.line("  clear(): void {")
 	if g.hasLeave(u) {
-		f.line("    this._leave();")
+		f.line("    this.__leave();")
 	}
-	f.line("    this._which = %d;", u.d.f.ID)
+	f.line("    this.__which = %d;", u.d.f.ID)
 	f.line("    this.%s = %s;", u.d.slot, g.tsDefault(u.d.f))
 	if u.d.rawSlot != "" {
 		f.line("    this.%s = null;", u.d.rawSlot)
@@ -285,7 +268,7 @@ func (g *gen) emitUnionClass(f *tsfile, key string, nt *ir.NamedType) {
 	// -- a scalar at its default, an empty string/blob/array, and a
 	// struct/union/wrapper option as a present frame closed with the keeping end.
 	f.line("  serialize(os: OStream): void {")
-	f.line("    switch (this._which) {")
+	f.line("    switch (this.__which) {")
 	for _, o := range u.opts {
 		f.line("      case %d: {", o.f.ID)
 		raw := ""
@@ -302,7 +285,7 @@ func (g *gen) emitUnionClass(f *tsfile, key string, nt *ir.NamedType) {
 
 	f.line("  // True iff serialize writes nothing: default_id held, at its own default.")
 	f.line("  isDefault(): boolean {")
-	f.line("    return this._which === %d && %s;", u.d.f.ID, g.fieldIsDefaultExprAt(u.d.f, g.unionHeld(u.d)))
+	f.line("    return this.__which === %d && %s;", u.d.f.ID, g.fieldIsDefaultExprAt(u.d.f, g.unionHeld(u.d)))
 	f.line("  }")
 	f.blank()
 
@@ -310,7 +293,7 @@ func (g *gen) emitUnionClass(f *tsfile, key string, nt *ir.NamedType) {
 	// default option at its default. fromJSON selects each member it reads, so a
 	// member read later wins.
 	f.line("  toJSON(): Record<string, unknown> {")
-	f.line("    switch (this._which) {")
+	f.line("    switch (this.__which) {")
 	for _, o := range u.opts {
 		if o.isD {
 			continue
@@ -325,7 +308,7 @@ func (g *gen) emitUnionClass(f *tsfile, key string, nt *ir.NamedType) {
 	f.line("  static fromJSON(d: Record<string, unknown>): %s {", u.typeName)
 	f.line("    const o = new %s();", u.typeName)
 	for _, o := range u.opts {
-		f.line("    if (%q in d) %s;", o.f.Name, g.fromJSONStmtAt(o.f, "o."+o.prop))
+		f.line("    if (Object.prototype.hasOwnProperty.call(d, %q)) %s;", o.f.Name, g.fromJSONStmtAt(o.f, "o."+o.prop))
 	}
 	f.line("    return o;")
 	f.line("  }")
@@ -346,7 +329,7 @@ func (g *gen) emitUnionAccessors(f *tsfile, u *unionShape, o *unionOpt) {
 	// answers the option's default -- a fresh object for an object kind, so
 	// nothing a caller does to it reaches the union -- and stores nothing.
 	f.line("  get %s(): %s {", o.prop, t)
-	f.line("    return this._which === %d ? %s : %s;", id, g.unionHeld(o), g.tsDefault(o.f))
+	f.line("    return this.__which === %d ? %s : %s;", id, g.unionHeld(o), g.tsDefault(o.f))
 	f.line("  }")
 	// The setter selects the option and stores the value -- the reference, for an
 	// object, exactly as assigning a struct member does. A Long-backed option
@@ -368,7 +351,7 @@ func (g *gen) emitUnionAccessors(f *tsfile, u *unionShape, o *unionOpt) {
 	}
 	f.line("  }")
 	f.line("  %s(): boolean {", o.has)
-	f.line("    return this._which === %d;", id)
+	f.line("    return this.__which === %d;", id)
 	f.line("  }")
 	if o.rawSlot != "" {
 		f.line("  /**")
@@ -377,14 +360,14 @@ func (g *gen) emitUnionAccessors(f *tsfile, u *unionShape, o *unionOpt) {
 		f.line("   * option is held. Setting them selects `%s` (at its default unless held).", o.prop)
 		f.line("   */")
 		f.line("  get %s(): Uint8Array | null {", o.raw)
-		f.line("    return this._which === %d ? this.%s : null;", id, o.rawSlot)
+		f.line("    return this.__which === %d ? this.%s : null;", id, o.rawSlot)
 		f.line("  }")
 		f.line("  set %s(b: Uint8Array | null) {", o.raw)
-		f.line("    if (this._which !== %d) {", id)
+		f.line("    if (this.__which !== %d) {", id)
 		if g.hasLeave(u) {
-			f.line("      this._leave();")
+			f.line("      this.__leave();")
 		}
-		f.line("      this._which = %d;", id)
+		f.line("      this.__which = %d;", id)
 		f.line("      this.%s = %s;", o.slot, g.tsDefault(o.f))
 		f.line("    }")
 		f.line("    this.%s = b;", o.rawSlot)
@@ -398,11 +381,11 @@ func (g *gen) emitUnionAccessors(f *tsfile, u *unionShape, o *unionOpt) {
 	// resumed feed -- continues it (MESSAGE_SPEC §7.4) instead of wiping it. A
 	// real switch builds the option fresh at its default.
 	f.line("  %s(): %s {", o.mutable, t)
-	f.line("    if (this._which !== %d) {", id)
+	f.line("    if (this.__which !== %d) {", id)
 	if g.hasLeave(u) {
-		f.line("      this._leave();")
+		f.line("      this.__leave();")
 	}
-	f.line("      this._which = %d;", id)
+	f.line("      this.__which = %d;", id)
 	f.line("      this.%s = %s;", o.slot, g.tsDefault(o.f))
 	f.line("    }")
 	f.line("    return this.%s!;", o.slot)

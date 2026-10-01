@@ -39,7 +39,7 @@ messages:
       which: { id: 12, type: u8 }
       f:            { id: 13, type: fp32 }
       inner:        { id: 14, type: struct, fields: { $ref: '#/$defs/struct/Inner' } }
-      u:            { id: 15, type: union, oneof: { clear: { id: 0, type: u8 }, constructor: { id: 1, type: u8 }, encode: { id: 2, type: u8 }, hasOwnProperty: { id: 3, type: u8 }, isDefault: { id: 4, type: u8 }, isPrototypeOf: { id: 5, type: u8 }, propertyIsEnumerable: { id: 6, type: u8 }, serialize: { id: 7, type: u8 }, toJSON: { id: 8, type: u8 }, toLocaleString: { id: 9, type: u8 }, toString: { id: 10, type: u8 }, valueOf: { id: 11, type: u8 }, which: { id: 12, type: u8 }, x: { id: 13, type: u8 }, hasX: { id: 14, type: u8 }, own_property: { id: 15, type: u8 }, g: { id: 16, type: fp32 }, gFp32Raw: { id: 17, type: u8 } } }
+      u:            { id: 15, type: union, oneof: { clear: { id: 0, type: u8 }, constructor: { id: 1, type: u8 }, encode: { id: 2, type: u8 }, hasOwnProperty: { id: 3, type: u8 }, isDefault: { id: 4, type: u8 }, isPrototypeOf: { id: 5, type: u8 }, propertyIsEnumerable: { id: 6, type: u8 }, serialize: { id: 7, type: u8 }, toJSON: { id: 8, type: u8 }, toLocaleString: { id: 9, type: u8 }, toString: { id: 10, type: u8 }, valueOf: { id: 11, type: u8 }, which: { id: 12, type: u8 }, x: { id: 13, type: struct, fields: { $ref: '#/$defs/struct/Inner2' } }, hasX: { id: 14, type: u8 }, mutableX: { id: 15, type: u8 }, xFp32Raw: { id: 16, type: u8 }, own_property: { id: 17, type: u8 }, g: { id: 18, type: fp32 }, gFp32Raw: { id: 19, type: u8 }, has: { id: 20, type: fp32 }, fp32_raw: { id: 21, type: struct, fields: { $ref: '#/$defs/struct/Inner2' } }, leave: { id: 22, type: u8 }, s: { id: 23, type: string, maxlen: 4 } } }
       inner_inner2: { id: 16, type: struct, fields: { $ref: '#/$defs/struct/Inner2' } }
       fFp32Raw:     { id: 17, type: u8 }
   MAX:
@@ -75,6 +75,7 @@ messages:
   Long: { payload: { x: { id: 0, type: u8 } } }
   Number: { payload: { x: { id: 0, type: u8 } } }
   OStream: { payload: { x: { id: 0, type: u8 } } }
+  Object: { payload: { x: { id: 0, type: u8 } } }
   PayloadAcc: { payload: { x: { id: 0, type: u8 } } }
   Record: { payload: { x: { id: 0, type: u8 } } }
   SofabError: { payload: { x: { id: 0, type: u8 } } }
