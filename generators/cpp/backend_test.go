@@ -3248,3 +3248,75 @@ messages:
 		}
 	}
 }
+
+// TestCppRowSkipPrecedesIndexBound: a generated row collector applies the
+// MESSAGE_SPEC §7.3 wire-type test BEFORE the schema's element-index bound, on
+// every profile (generator#627). A mistyped element past the outer `count` is not
+// an element of the array at all and must be skipped; with the bound first it
+// was rejected INVALID. One-level arrays get this from the corelib collectors;
+// the generated _S collector has to say it itself, and before the placement.
+func TestCppRowSkipPrecedesIndexBound(t *testing.T) {
+	src := "version: 1\nmessages:\n  M:\n    payload:\n" +
+		"      srows: { id: 0, type: array, items: { type: array, count: 2, items: { type: string, count: 3, maxlen: 8 } } }\n" +
+		"      erows: { id: 1, type: array, items: { type: array, count: 2, items: { type: enum, count: 3, enum: { A: 0, B: 1 } } } }\n" +
+		"      brows: { id: 2, type: array, items: { type: array, count: 2, items: { type: boolean, count: 3 } } }\n"
+	for _, tc := range []struct {
+		name  string
+		cfg   map[string]any
+		fixed bool
+		gates []string
+	}{
+		{"cpp", map[string]any{}, false, []string{
+			"if (_is.wire() != sofab::detail::Wire::SequenceStart) return;",
+			"if (_is.wire() != sofab::detail::Wire::ArraySigned) return;",
+			"if (_is.wire() != sofab::detail::Wire::ArrayUnsigned) return;",
+		}},
+		{"cpp allow_dynamic=false", map[string]any{"allow_dynamic": false}, false, []string{
+			"if (_is.wire() != sofab::detail::Wire::SequenceStart) return;",
+		}},
+		{"c-cpp", nil, true, []string{
+			"if (!_is.delivered(sofab::Wire::SequenceStart)) return;",
+			"if (!_is.delivered(sofab::Wire::ArraySigned)) return;",
+			"if (!_is.delivered(sofab::Wire::ArrayUnsigned)) return;",
+		}},
+		{"c-cpp allow_dynamic=true", map[string]any{"corelib": "c-cpp", "allow_dynamic": true}, false, []string{
+			"if (!_is.delivered(sofab::Wire::SequenceStart)) return;",
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var h string
+			var err error
+			if tc.fixed {
+				h, err = fixedHeader(t, src, "m.hpp", tc.cfg)
+			} else {
+				h, err = genHeader(t, src, "m.hpp", tc.cfg)
+			}
+			if err != nil {
+				t.Fatalf("generate: %v", err)
+			}
+			for _, g := range tc.gates {
+				if !strings.Contains(h, g) {
+					t.Errorf("row collector lacks the §7.3 gate %q:\n%s", g, h)
+				}
+			}
+			// In every collector the gate is the first statement and the index
+			// bound the second -- nothing may touch the id or the destination
+			// before the element's wire type has been decided.
+			n := 0
+			for _, b := range strings.Split(h, "noexcept override {\n")[1:] {
+				lines := strings.SplitN(b, "\n", 3)
+				if len(lines) < 2 || !strings.Contains(lines[1], "static_cast<std::size_t>(_id) >= ") {
+					continue
+				}
+				n++
+				first := strings.TrimSpace(lines[0])
+				if !strings.HasPrefix(first, "if (_is.wire() != ") && !strings.HasPrefix(first, "if (!_is.delivered(") {
+					t.Errorf("row collector applies its index bound before the §7.3 gate (got %q first)", first)
+				}
+			}
+			if n == 0 {
+				t.Errorf("no row collector with the index bound found:\n%s", h)
+			}
+		})
+	}
+}
