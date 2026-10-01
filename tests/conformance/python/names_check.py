@@ -9,7 +9,8 @@ generated module already has -- sofab's imports (`status`, `visitor`,
 those breaks the module at IMPORT or at the first decode, while the generator
 exits 0, so every message here is built, encoded, decoded one-shot and
 streamed back. Message `m` carries the paths and is checked against
-names.json by run.sh; every other message has the one field `x`.
+names.json by run.sh; every other message not in FIXTURES has the one field
+`x`.
 """
 
 import sys
@@ -25,6 +26,16 @@ FIXTURES = {
     "a": {"b_c": {"x": 7}},
     "a_b": {"c": {"y": 7}},
     "struct_point": {"p": {"x": 7, "y": -3}},
+    # every $defs type a second time, each away from its default
+    "m_a": {
+        "x": 7,
+        "pa": [{"x": 1, "y": -2}],
+        "s1": {"pt": {"x": 3}},
+        "s2": {"num": 4},
+        "sd": {"other": 5},
+        "col": 2,
+        "fl": 3,
+    },
 }
 
 checked = 0
