@@ -10,6 +10,8 @@ import (
 	"sort"
 	"strings"
 	"testing"
+
+	"github.com/sofa-buffers/generator/internal/ir"
 )
 
 // namesYAML is the shared name-collision schema (ARCHITECTURE §8, "Naming").
@@ -122,6 +124,34 @@ func TestNamesSchemaFilesAreBuilt(t *testing.T) {
 		if strings.Join(got, " ") != strings.Join(want, " ") {
 			t.Errorf("%s/%s builds %d of %d files; left out: %v %v",
 				target[0], target[1], len(got), len(want), p.IgnoredGoFiles, p.TestGoFiles)
+		}
+	}
+}
+
+// TestMessageFileAvoidsWindowsDevices pins the message-file rule for a message
+// named like a Windows device: such a file cannot exist on Windows and is
+// refused by the Go module zip, so the fold takes a trailing "_" -- a suffix no
+// other message file can have, since a fold carries no "_". Names that merely
+// look like a device keep their plain file.
+func TestMessageFileAvoidsWindowsDevices(t *testing.T) {
+	for name, want := range map[string]string{
+		"con": "con_.go", "CON": "con_.go", "aux": "aux_.go", "nul": "nul_.go", "prn": "prn_.go",
+		"com1": "com1_.go", "com_1": "com1_.go", "lpt_1": "lpt1_.go", "Lpt9": "lpt9_.go",
+		"cons": "cons.go", "com10": "com10.go", "lpt": "lpt.go", "conX": "conx.go",
+	} {
+		if got := msgFile(&ir.Message{Name: name}); got != want {
+			t.Errorf("message %q: file %q, want %q", name, got, want)
+		}
+	}
+	files := genGo(t, schemaFromYAMLFile(t, namesYAML), map[string]any{"emit": "sources"})
+	for _, f := range []string{"con_.go", "nul_.go", "com1_.go"} {
+		if _, ok := files[f]; !ok {
+			t.Errorf("names.yaml: %s not generated", f)
+		}
+	}
+	for _, f := range []string{"con.go", "nul.go", "com1.go"} {
+		if _, ok := files[f]; ok {
+			t.Errorf("names.yaml: %s generated", f)
 		}
 	}
 }

@@ -43,8 +43,9 @@ func (*Backend) Generate(s *ir.Schema, cfg map[string]any) ([]generator.File, er
 	if project {
 		pkgDir = g.pkg + "/"
 	}
-	// The fixed files carry a "_" and a message file (msgFile) never does, so no
-	// message can take -- or overwrite -- one of them.
+	// The fixed files start with "sofab_"; a message file (msgFile) has no "_"
+	// but the trailing one of a device name, so no message can take -- or
+	// overwrite -- one of them.
 	var files []generator.File
 	if tf := g.typesFile(); tf != nil {
 		files = append(files, generator.File{Path: pkgDir + typesFileName, Content: tf})
