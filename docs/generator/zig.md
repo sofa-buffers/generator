@@ -38,8 +38,7 @@ A type whose name the generated file already uses for something else gets a
 trailing underscore: a message `decoder` is the type `Decoder_`, since every
 message declares its own `Decoder`. Those names are `DecodeError`, `Decoder`,
 `MAX_SIZE` and `MAX_SIZE_LIMIT`. Everything derived from the type keeps the
-unescaped name (`_Decoder__Visitor`). The list lives in
-`generators/zig/reserved.go`.
+unescaped name (`_Decoder__Visitor`).
 
 ## Field names
 
@@ -141,11 +140,13 @@ allocated to hold it.
 `ptMut()`), and the id constants `<option>_id`. An option named like a Zig
 keyword is a quoted identifier (`@"error"`, with `errorMut()` and `error_id`).
 An option whose name is one of the declarations listed under
-[Field names](#field-names), one of the union's own — `init`, `which` — or the
-accessor or id constant of another option gets a trailing underscore on its
-field: option `which` is the field `which_`, with `whichMut()` and `which_id`;
-beside an option `x`, an option `x_id` is the field `x_id_` and an option
-`xMut` the field `xMut_`.
+[Field names](#field-names), one of the union's own — `init`, `which` — or
+that ends in `_id` or `Mut`, the shape of an id constant or an accessor, gets
+a trailing underscore on its field: option `which` is the field `which_`, with
+`whichMut()` and `which_id`; an option `x_id` is the field `x_id_` and an
+option `xMut` the field `xMut_`, whether or not the union also has an option
+`x`. An option's field depends only on its own name, so adding an option never
+renames another.
 
 **`$defs` unions** used with different `default_id`s are one type per
 `default_id`, named `<Type>__Default<Option>`: `Shape__DefaultPt` and
