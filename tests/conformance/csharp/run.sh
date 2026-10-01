@@ -800,6 +800,32 @@ for def in "$ROOT"/tests/matrix/corpus/defs/*.yaml "$ROOT"/examples/messages/rea
 done
 echo "==> corpus builds ($(ls "$ROOT"/tests/matrix/corpus/defs/*.yaml | wc -l) definitions + $(ls "$ROOT"/examples/messages/realworld/*.yaml | wc -l) realworld files)"
 
+# A consumer that turns on every .NET code-quality analyzer and nullable
+# reference types, with warnings as errors, must still build Message.cs: the
+# generated spellings (`Has_<Opt>`, snake_case fields) break CA1707 and
+# friends, so the file has to carry the generated-code marker the analyzers
+# skip. The project sets the switches itself, so they reach Message.cs and not
+# the referenced corelib.
+echo "==> consumer analyzers: Message.cs builds under AnalysisMode=All + Nullable + warnings as errors"
+mkdir -p "$WORK/analyzers"
+cat > "$WORK/analyzers/analyzers.csproj" <<EOF
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>net9.0</TargetFramework>
+    <ImplicitUsings>disable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <AnalysisMode>All</AnalysisMode>
+    <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
+  </PropertyGroup>
+  <ItemGroup>
+    <Compile Include="$WORK/ex/Message.cs" />
+    <ProjectReference Include="\$(SOFAB_CS_CORELIB)/src/SofaBuffers/SofaBuffers.csproj" />
+  </ItemGroup>
+</Project>
+EOF
+dbuild "$WORK/analyzers"
+echo "==> consumer analyzers OK"
+
 # The reserved-name collision test (ARCHITECTURE §8): reserved.yaml uses every
 # name on generators/csharp/reserved.go's list as a message field, a nested
 # struct field and a union option, plus the one path clash a visitor location
