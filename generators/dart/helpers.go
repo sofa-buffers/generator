@@ -43,9 +43,9 @@ func cfgString(cfg map[string]any, key, dflt string) string {
 // that also keeps the ENCODE side reachable: a caller who wants to emit a
 // signaling NaN has no other way to say so, since the double cannot carry it.
 //
-// Its name is `<member>Fp32Bits`, allocated after every field of the class
-// (memberAlloc), so a sibling field spelled like it keeps its name and the
-// companion takes the trailing `_`.
+// Its name is `<field>Fp32Bits`, the field name's first letter lower-cased; a
+// field whose own name ends in `Fp32Bits` is the one escaped (fieldMembers),
+// so no sibling can rename a companion.
 func (g *gen) fp32BitsField(f *ir.Field) string { return g.field(f).bits }
 
 // ---- type names (ARCHITECTURE §8, "Naming") --------------------------------

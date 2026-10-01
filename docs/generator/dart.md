@@ -94,19 +94,29 @@ uses gets a trailing underscore; Dart has no way to escape a name. The field
   `BytesBuilder`, `Deprecated`, `Float32List`, `Float64List`, `Int64List`, and
   the limit constants `maxDynArrayCount`, `maxDynBlobLen`, `maxDynStringLen`.
 
-A field spelled like a class the file declares (see [Type names](#type-names))
-gets the trailing underscore too, since it would hide that class: the field `M`
-of the message `m` is `M_`. Where the underscore lands on another class name,
-another one is added (`String` is `String__` in a schema that also has a
-message `string`, whose class is `String_`).
+A field whose name starts with an upper-case letter gets the trailing
+underscore too: every generated class starts with one (see
+[Type names](#type-names)), and a class body names its own class and the class
+of every struct, union or list element it holds. The field `M` is `M_`, whether
+or not a class `M` exists. A name whose type class would itself carry the
+underscore takes two: `String` is `String__`, since a type `string` is the
+class `String_`.
 
-Only the member changes: the wire is keyed by the field id, and the JSON key
-stays the schema name. A field always keeps its own name when a member the
-generator derives would take it: an `fp32` field `f` has its bits companion in
-`fFp32Bits`, but beside a field named `fFp32Bits` the companion is
-`fFp32Bits_`. Enum constants and bitfield flags are named the same way: `class`
-is `class_`, and a constant spelled like its own class takes the underscore. The
-lists live in `generators/dart/reserved.go`.
+A field's member depends on the field's own name only: adding, removing or
+renaming another field, option or type never renames it. Only the member
+changes: the wire is keyed by the field id, and the JSON key stays the schema
+name.
+
+An `fp32` field `f` has its raw-bits companion in `fFp32Bits` (the name with
+its first letter lower-cased, plus `Fp32Bits`: the field `Speed` has
+`speedFp32Bits`). A field whose own name ends in `Fp32Bits` is the one that
+takes the underscore, so the companion keeps its spelling: the field
+`fFp32Bits` is `fFp32Bits_`.
+
+Enum constants and bitfield flags take the underscore when they are one of the
+names listed above (`class` is `class_`; `LOW` keeps its name), and one more when the result is spelled like
+their own class: the constant `E` of the enum `e` is `E_`. A constant spelled
+like any other class keeps its name.
 
 ## Type names
 
@@ -240,16 +250,18 @@ storage of its `default_id` option only.
 fp32 member: assigning the value clears them; to write a signaling NaN, assign
 `double.nan` and then the bits.
 
-**Names.** The getter and setter are the option name, `has<Option>` and
-`mutable<Option>()` use it in PascalCase, and the constant is `<option>Id`. An
-option whose name is reserved for a field (see [Field names](#field-names))
-gets a trailing underscore, as a field does (`num` → `num_`); so does one
-landing on the union's own `which` or on a class name: an option
-`which` is `which_`,
-with `hasWhich` and `whichId`. An option keeps its own name when a member
-derived from another option would take it, and the derived member takes the
-underscore: beside an option `aId`, the option `a`'s constant is `aId_`; beside
-an option `hasX`, the option `x`'s test is `hasX_`.
+**Names.** The getter and setter are the option name; `has<Option>` and
+`mutable<Option>()` use it in PascalCase; the constant is `<option>Id` and an
+fp32 option's bits are `<option>Fp32Bits`, both with the name's first letter
+lower-cased (the option `Pt` has `ptId`). An option takes a trailing underscore
+where a field does (see [Field names](#field-names)) — `num` is `num_`, `Pt`
+is `Pt_` — and also when it is `which`, or is spelled like one of these derived
+members: when its name ends in `Id` or `Fp32Bits`, or is `has` or `mutable`
+alone or followed by an upper-case letter. Its own constant and bits then carry
+the underscore as well: the option `aId` is `aId_` with the constant
+`aId_Id`, and `hasX` is `hasX_` with `hasX_Id` and `hasHasX`. So the option
+`a` always has the constant `aId`, and `x` the test `hasX`, whatever other
+options the union has; an option's names depend on its own name only.
 
 **`$defs` unions** used with different `default_id`s are one class per
 `default_id`, named after the union and the default option:
