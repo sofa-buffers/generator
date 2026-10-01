@@ -1426,7 +1426,9 @@ route by `(scope, id)` and are forward-compatible (skip unknown ids).
      bound first and a mistyped element past `count` is rejected as INVALID; put the
      placement first and one inside it leaves an empty row behind (generator#627).
      `tests/conformance/lib/check_skip_before_bound.py` pins both on all four
-     profiles. Cost of the gate, measured on that driver's schema (5 nested fields,
+     profiles. Every other suite runs the same driver too, on each of its profiles,
+     engines and int64 modes, so no backend's row path can drift from this order.
+     Cost of the gate, measured on that driver's schema (5 nested fields,
      about 12 gated rows per message): decode +38 / +46 Ir per message on corelib-cpp
      (default / static storage, +0.5% / +0.9%), and +60 to +72 B `.text` on
      corelib-c-cpp for ARMv6-m / ARMv7-m, with `.data`/`.bss` unchanged. The bench

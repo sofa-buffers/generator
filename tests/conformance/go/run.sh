@@ -1271,6 +1271,20 @@ sed -i "s#\${SOFAB_GO_CORELIB}#$CORELIB#" "$WORK/union/go.mod"
 python3 "$ROOT/tests/conformance/lib/check_union.py" "Go" --sizes 1 \
     -- "$WORK/union-harness"
 
+# MESSAGE_SPEC §7.3 before §7.1 (generator#627): a mistyped array element past
+# the schema `count` is SKIPPED and a correctly typed one is INVALID, at a
+# one-level array and at a row of an array of arrays (wrapper, enum, boolean,
+# depth 3). The corelib collectors order the two tests themselves; the driver
+# keeps every backend's row path to the same order. It prints its own schema.
+# `--sizes 1`: this harness's streamdecode feeds ONE byte per call.
+echo "==> §7.3 before §7.1: a mistyped element past the bound is skipped (generator#627)"
+python3 "$ROOT/tests/conformance/lib/check_skip_before_bound.py" --emit-schema > "$WORK/sbb.yaml"
+( cd "$ROOT" && go run ./cmd/sofabgen --config "$WORK/cfg.yaml" --lang go --in "$WORK/sbb.yaml" --out "$WORK/sbb" )
+sed -i "s#\${SOFAB_GO_CORELIB}#$CORELIB#" "$WORK/sbb/go.mod"
+( cd "$WORK/sbb" && GOFLAGS=-mod=mod go build -o "$WORK/sbb-harness" ./harness )
+python3 "$ROOT/tests/conformance/lib/check_skip_before_bound.py" "Go" --sizes 1 \
+    -- "$WORK/sbb-harness"
+
 # Nested defaults (generator#609): a default declared inside a struct, at any
 # depth and inside a struct array's element, is what absence means. This backend
 # left them at Go's zero value while its encoder compared against them, and the

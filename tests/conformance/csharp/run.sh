@@ -1066,6 +1066,17 @@ build "$WORK/union.yaml" "$WORK/union"
 python3 "$ROOT/tests/conformance/lib/check_union.py" "C#" \
     -- dotnet "$WORK/union/bin/Debug/net9.0/harness.dll"
 
+# MESSAGE_SPEC §7.3 before §7.1 (generator#627): a mistyped array element past
+# the schema `count` is SKIPPED and a correctly typed one is INVALID, at a
+# one-level array and at a row of an array of arrays (wrapper, enum, boolean,
+# depth 3). The corelib collectors order the two tests themselves; the driver
+# keeps every backend's row path to the same order. It prints its own schema.
+echo "==> §7.3 before §7.1: a mistyped element past the bound is skipped (generator#627)"
+python3 "$ROOT/tests/conformance/lib/check_skip_before_bound.py" --emit-schema > "$WORK/sbb.yaml"
+build "$WORK/sbb.yaml" "$WORK/sbb"
+python3 "$ROOT/tests/conformance/lib/check_skip_before_bound.py" "C#" \
+    -- dotnet "$WORK/sbb/bin/Debug/net9.0/harness.dll"
+
 # Nested defaults (generator#609): absence reads as the schema's defaults at every
 # depth and inside a struct array's element -- asserted against the driver's own
 # schema, never this harness's baseline.
