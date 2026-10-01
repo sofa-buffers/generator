@@ -211,14 +211,14 @@ func TestReservedNamesAreMangled(t *testing.T) {
 		}
 	}
 	for file, want := range map[string]string{
-		"which.hpp":          "struct Which_ : sofab::Message {",
-		"message.hpp":        "struct Message_ : sofab::Message {",
-		"ostreammessage.hpp": "struct OStreamMessage_ : sofab::Message {",
-		"istreammessage.hpp": "struct IStreamMessage_ : sofab::Message {",
-		"null.hpp":           "struct NULL_ : sofab::Message {",
-		"size.hpp":           "struct SIZE_MAX_ : sofab::Message {",
-		"sofab.hpp":          "struct SOFAB_HPP_ : sofab::Message {",
-		"file.hpp":           "struct FILE : sofab::Message {",
+		"which.hpp":            "struct Which_ : sofab::Message {",
+		"message.hpp":          "struct Message_ : sofab::Message {",
+		"o_stream_message.hpp": "struct OStreamMessage_ : sofab::Message {",
+		"i_stream_message.hpp": "struct IStreamMessage_ : sofab::Message {",
+		"null.hpp":             "struct NULL_ : sofab::Message {",
+		"size.hpp":             "struct SIZE_MAX_ : sofab::Message {",
+		"sofab.hpp":            "struct SOFAB_HPP_ : sofab::Message {",
+		"file.hpp":             "struct FILE : sofab::Message {",
 	} {
 		if !strings.Contains(files[file], want) {
 			t.Errorf("%s: missing %q", file, want)

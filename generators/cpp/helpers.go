@@ -43,13 +43,20 @@ func (g *gen) qualified(m *ir.Message) string {
 }
 
 // headerFile is the header a message's types land in: the message name
-// lower-cased and folded (naming.Lower). Messages share one scope whose folds
-// differ, so no two headers share a path, on any filesystem; and the name
-// always ends in ".hpp" in the output root, where no header the build includes
-// lives (the corelibs include theirs as "sofab/...", the harness's own is
+// lower-cased, underscores kept. Messages share one scope whose folds differ,
+// so no two names share a lower-case spelling, and no two headers share a path
+// on any filesystem. A stem Windows reserves as a device name (con, nul, com1,
+// ...) takes a trailing underscore -- con_.hpp -- which no other message's
+// header can have: a schema name never ends with "_". The name always ends in
+// ".hpp" in the output root, where no header the build includes lives (the
+// corelibs include theirs as "sofab/...", the harness's own is
 // harness/_json.hpp).
 func headerFile(m *ir.Message) string {
-	return naming.Lower([]string{m.Name}) + ".hpp"
+	stem := strings.ToLower(m.Name)
+	if naming.IsDeviceStem(stem) {
+		stem += "_"
+	}
+	return stem + ".hpp"
 }
 
 func (g *gen) cppType(f *ir.Field) string {
