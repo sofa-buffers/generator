@@ -228,8 +228,16 @@ jobs:
       - uses: actions/setup-go@v7
         with:
           go-version: "1.27"
+      # arm-none-eabi-g++ with newlib is not optional here: the macro escape list
+      # is measured on glibc AND newlib (the footprint profile ships to newlib),
+      # TestHeaderMacrosAreListed re-measures it, and a lang job runs every gated
+      # test instead of skipping it.
       - name: Toolchain
-        run: g++ --version | head -1
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq gcc-arm-none-eabi libnewlib-arm-none-eabi libstdc++-arm-none-eabi-newlib
+          g++ --version | head -1
+          arm-none-eabi-g++ --version | head -1
       - uses: ./.github/actions/corelib-refs
       - name: C++ backend — generate, build, round-trip, conformance
         run: ./tests/conformance/cpp/run.sh
