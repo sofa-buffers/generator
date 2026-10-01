@@ -983,8 +983,8 @@ echo "==> corpus typechecks ($(ls "$ROOT"/tests/matrix/corpus/defs/*.yaml | wc -
 # name on generators/typescript/reserved.go's list as a message field, a nested
 # struct field and a union option, every type-level name on it (a corelib
 # import, a global the module uses, a MAX_DYN_* constant) as a message or a
-# path, and the derived members that must yield (TestReservedSchemaFile keeps it
-# in step with the list). The generator exits 0 on a class that does not compile, so the
+# path, and option names spelled like a member derived from another option
+# (TestReservedSchemaFile keeps it in step with the list). The generator exits 0 on a class that does not compile, so the
 # project must typecheck, and every value of reserved.json must come back under
 # its schema name -- a field that replaced a method (encode, toJSON) would not.
 echo "==> reserved names: every listed name as a field typechecks and round-trips"
@@ -1002,6 +1002,27 @@ want, got = (json.load(open(p)) for p in sys.argv[1:3])
 bad = [k for k in want if got.get(k) != want[k]]
 if bad:
     sys.exit(f"mismatch on {bad}: got {[got.get(k) for k in bad]}")
+PY
+# reserved.json supplies every key, which would hide a presence test that also
+# sees Object.prototype: `"constructor" in {}` is true. reserved_absent.json
+# leaves every reserved key out, so each must come back at its default and the
+# union at the one option the input selects.
+( cd "$WORK/reserved" && "$TH" encode m ) < "$ROOT/tests/conformance/typescript/reserved_absent.json" > "$WORK/reserved_absent.bin" \
+    || { echo "FAIL: reserved_absent.json did not encode"; exit 1; }
+( cd "$WORK/reserved" && "$TH" decode m ) < "$WORK/reserved_absent.bin" > "$WORK/reserved_absent.out" \
+    || { echo "FAIL: reserved_absent.bin did not decode"; exit 1; }
+python3 - "$ROOT/tests/conformance/typescript/reserved.json" "$ROOT/tests/conformance/typescript/reserved_absent.json" "$WORK/reserved_absent.out" <<'PY' \
+    || { echo "FAIL: an absent key that Object.prototype has read as present"; exit 1; }
+import json, sys
+full, given, got = (json.load(open(p)) for p in sys.argv[1:4])
+bad = [k for k in full if k not in ("u", "inner", "inner_inner2") and got.get(k) != 0]
+bad += ["inner." + k for k in full["inner"] if k != "inner2" and got["inner"].get(k) != 0]
+if got["u"] != given["u"]:
+    bad.append(f"u = {got['u']}")
+if got["inner"]["inner2"] != given["inner"]["inner2"]:
+    bad.append("inner.inner2")
+if bad:
+    sys.exit(f"absent keys came back set: {bad}")
 PY
 echo "==> reserved names OK"
 

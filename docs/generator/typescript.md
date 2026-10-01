@@ -128,13 +128,14 @@ underscore — the field `encode` is `encode_`. Those names are:
 
 The statics (`fromJSON`, `decode`, `MAX_SIZE`) are a namespace of their own, so
 a field may take their names. Only the member changes: the wire is keyed by the
-field id, and the JSON key stays the schema name. The list lives in
-`generators/typescript/reserved.go`.
+field id, and the JSON key stays the schema name.
 
-A member the generator derives from a field — the raw-bytes companion of an
-`fp32` field `f`, `fFp32Raw` — gets a trailing underscore instead when a
-sibling field already has that name: beside a field `fFp32Raw`, `f`'s companion
-is `fFp32Raw_`. The schema's own names always keep their spelling.
+An `fp32` field also has a raw-bytes companion: its member followed by
+`Fp32Raw` — `fFp32Raw` for a field `f`, `encode_Fp32Raw` for a field `encode`.
+So that no field can take a companion's name, a field whose own name ends with
+`Fp32Raw` gets a trailing underscore: a field `fFp32Raw` is `fFp32Raw_`, whether
+or not the message has a field `f`. A member's name depends only on its own
+field's name, never on which other fields exist.
 
 ## Type names
 
@@ -262,7 +263,8 @@ a `Long` or a `number`. Under `long` and `number` a 64-bit option accepts
 converts once, on assignment, as a message's own 64-bit field does.
 
 **fp32 options** keep the wire bytes of a decoded NaN beside the value, as an
-fp32 field does: `x.<option>Fp32Raw` (`null` while another option is held).
+fp32 field does: `x.<option>Fp32Raw` (`null` while another option is held;
+see **Names** below for the spelling).
 Assigning the value drops them; assigning the bytes selects the option.
 
 **Ownership.** Assigning an option keeps the object it is given, as assigning a
@@ -278,12 +280,19 @@ longer held.
 upper-cased). An option whose name is reserved for a field (see
 [Field names](#field-names)) or is one of the union's own members (`which`,
 `clear`) gets a trailing underscore: an
-option `which` is `which_`, with `hasWhich()` and `WHICH_ID`. A derived member
-— `has<Option>()`, `mutable<Option>()`, `<option>Fp32Raw` — that would land on
-another member gets a trailing underscore instead, and the option keeps its
-name: beside an option `hasX`, the option `x` has `hasX_()`; an option
-`own_property` has `hasOwnProperty_()`, so Object's `hasOwnProperty` stays
-intact.
+option `which` is `which_`, with `hasWhich()` and `WHICH_ID`. The raw-bytes
+companion of an fp32 option is the option's member followed by `Fp32Raw`.
+
+So that no option can take the name of a member derived from another one, an
+option whose own name is spelled like such a member gets a trailing underscore
+too: a name that starts with `has` or `mutable` followed by nothing, an
+upper-case letter or a digit (`has`, `hasX`, `mutable2`), or that ends with
+`Fp32Raw`. The option `hasX` is `hasX_`, and the option `x` keeps `hasX()`
+whether or not `hasX` exists — a member's name depends only on its own option's
+name, so adding an option never renames another one's members. `hash` or
+`has_x` stay as they are. One derived member would land on a member every object
+has: an option `own_property` has `hasOwnProperty__()`, so Object's
+`hasOwnProperty` stays intact.
 
 **`$defs` unions** used with different `default_id`s are one class per
 `default_id`, named `<Name>__Default<Option>`: `Shape__DefaultPt` and

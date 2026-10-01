@@ -664,7 +664,7 @@ messages:
 				t.Errorf("int64=%s: unmangled member %q:\n%s", mode, out[loc[0]:loc[1]], out)
 			}
 		}
-		for _, want := range []string{"constructor_", `"constructor":`, `"constructor" in d`} {
+		for _, want := range []string{"constructor_", `"constructor":`, `Object.prototype.hasOwnProperty.call(d, "constructor")`} {
 			if !strings.Contains(out, want) {
 				t.Errorf("int64=%s: missing %q:\n%s", mode, want, out)
 			}
@@ -887,7 +887,7 @@ func TestTSInt64Long(t *testing.T) {
 		`"us": this._us.map((_x0) => _x0.toString(false)),`,
 		`"is": this._is.map((_x0) => _x0.toString(true)),`,
 		// fromJSON keeps the bigint parse and lets the setter convert once.
-		`if ("us" in d) o.us = (d["us"] as (string | number)[]).map((_x0) => BigInt(_x0));`,
+		`if (Object.prototype.hasOwnProperty.call(d, "us")) o.us = (d["us"] as (string | number)[]).map((_x0) => BigInt(_x0));`,
 		// Scalars are Long-backed too (generator#339, corelib-ts#143): the same
 		// private-field-plus-accessor shape as the arrays, one level down. The
 		// zero default is the shared immutable Long.ZERO, never Long.fromValue(0n).
@@ -923,7 +923,7 @@ func TestTSInt64Long(t *testing.T) {
 		// JSON keeps the decimal-string form, with the schema's signedness.
 		`"u": this._u.toString(false),`,
 		`"i": this._i.toString(true),`,
-		`if ("u" in d) o.u = Long.fromValue(BigInt(d["u"] as string | number));`,
+		`if (Object.prototype.hasOwnProperty.call(d, "u")) o.u = Long.fromValue(BigInt(d["u"] as string | number));`,
 	} {
 		if !strings.Contains(mod, want) {
 			t.Errorf("int64: long message.ts missing %q", want)
@@ -1146,7 +1146,7 @@ func TestTSInt64Number(t *testing.T) {
 		"os.writeUnsigned(4, this.u);",
 		"case 4: this.o.u = Number(v); break;",
 		"case 5: this.o.i = Number(v); break;",
-		`if ("u" in d) o.u = Number(d["u"] as string | number);`,
+		`if (Object.prototype.hasOwnProperty.call(d, "u")) o.u = Number(d["u"] as string | number);`,
 		// toJSON stays a string (number.toString()) for cross-mode JSON parity.
 		`"u": this.u.toString(),`,
 	} {
@@ -1606,7 +1606,7 @@ func TestTSInt64Default(t *testing.T) {
 			"_t.minLo = 0; _t.minHi = 0; _t.maxLo = 4294967295; _t.maxHi = 4294967295;",
 			// JSON is the one place a bigint still has to be built, because that is
 			// what the JSON text carries.
-			`if ("us" in d) o.us = new BigUint64Array((d["us"] as (string | number)[]).map((_x0) => BigInt(_x0)));`,
+			`if (Object.prototype.hasOwnProperty.call(d, "us")) o.us = new BigUint64Array((d["us"] as (string | number)[]).map((_x0) => BigInt(_x0)));`,
 			"u: bigint = 0n;",
 		} {
 			if !strings.Contains(mod, want) {
@@ -2206,7 +2206,7 @@ func TestTSFp32RawDoesNotMoveTheOmissionTest(t *testing.T) {
 	}
 	// The companion is wire state, not value state: it stays out of the JSON
 	// surface, so a JSON round-trip (and the generated harness) is unchanged.
-	for _, gone := range []string{`"f32Fp32Raw":`, `"faFp32Raw":`, `"f32Fp32Raw" in d`} {
+	for _, gone := range []string{`"f32Fp32Raw":`, `"faFp32Raw":`, `hasOwnProperty.call(d, "f32Fp32Raw")`} {
 		if strings.Contains(mod, gone) {
 			t.Errorf("the raw companion must stay out of the JSON surface (%q):\n%s", gone, mod)
 		}
@@ -2618,7 +2618,7 @@ func TestTSClosedNameSet(t *testing.T) {
 	optID := regexp.MustCompile(`^[A-Z0-9_]+_ID$`)
 	statics, ids := 0, 0
 	for _, cls := range strings.Split(mod, "\nexport class ")[1:] {
-		isUnion := strings.Contains(cls, "\n  private _which: number = ")
+		isUnion := strings.Contains(cls, "\n  private __which: number = ")
 		for _, m := range regexp.MustCompile(`(?m)^  static (?:readonly )?(\w+)`).FindAllStringSubmatch(cls, -1) {
 			statics++
 			switch {
@@ -2862,10 +2862,10 @@ func TestTSWideBitfieldIsBigint(t *testing.T) {
 		// reads back through BigInt() -- exactly what u64 does.
 		`"w": this.w.toString(),`,
 		`"n": this.n,`,
-		`if ("w" in d) o.w = BigInt(d["w"] as string | number);`,
-		`if ("n" in d) o.n = d["n"] as number;`,
-		`if ("wa" in d) o.wa = new BigUint64Array((d["wa"] as (string | number)[]).map((_x0) => BigInt(_x0)));`,
-		`if ("na" in d) o.na = new Uint32Array(d["na"] as number[]);`,
+		`if (Object.prototype.hasOwnProperty.call(d, "w")) o.w = BigInt(d["w"] as string | number);`,
+		`if (Object.prototype.hasOwnProperty.call(d, "n")) o.n = d["n"] as number;`,
+		`if (Object.prototype.hasOwnProperty.call(d, "wa")) o.wa = new BigUint64Array((d["wa"] as (string | number)[]).map((_x0) => BigInt(_x0)));`,
+		`if (Object.prototype.hasOwnProperty.call(d, "na")) o.na = new Uint32Array(d["na"] as number[]);`,
 		// Decode: the unsigned callback delivers a number below 2^53 and a bigint
 		// above, so the wide store normalises instead of rounding through Number().
 		// `w` declares bit 63, which implies the full u64 -- the accumulator's own
