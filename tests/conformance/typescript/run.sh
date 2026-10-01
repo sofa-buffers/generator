@@ -1340,6 +1340,23 @@ for mode in bigint long number; do
         || { echo "FAIL: union API (int64: $mode)"; exit 1; }
 done
 
+# MESSAGE_SPEC §7.3 before §7.1 (generator#627): a mistyped array element past
+# the schema `count` is SKIPPED and a correctly typed one is INVALID, at a
+# one-level array and at a row of an array of arrays (wrapper, enum, boolean,
+# depth 3). The corelib collectors order the two tests themselves; the driver
+# keeps every backend's row path to the same order. It prints its own schema.
+# Every int64 mode, since each generates its own module. `--sizes 1`: this
+# harness's streamdecode feeds ONE byte per call.
+echo "==> §7.3 before §7.1: a mistyped element past the bound is skipped (generator#627)"
+python3 "$ROOT/tests/conformance/lib/check_skip_before_bound.py" --emit-schema > "$WORK/sbb.yaml"
+for mode in bigint long number; do
+    gen "$WORK/sbb.yaml" "$WORK/sbb-$mode" "$WORK/cfg_$mode.yaml"
+    ln -s "$WORK/ex/node_modules" "$WORK/sbb-$mode/node_modules"
+    tsc_strict "$WORK/sbb-$mode"
+    python3 "$ROOT/tests/conformance/lib/check_skip_before_bound.py" "TypeScript int64: $mode" --sizes 1 \
+        --cwd "$WORK/sbb-$mode" -- "$TH"
+done
+
 # Nested defaults (generator#609): absence reads as the schema's defaults at every
 # depth and inside a struct array's element -- asserted against the driver's own
 # schema, never this harness's baseline.

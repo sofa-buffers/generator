@@ -893,6 +893,19 @@ make -C "$WORK/union" SOFAB_C_CORELIB="$CORELIB" >/dev/null
 python3 "$ROOT/tests/conformance/lib/check_union.py" "C" \
     -- "$WORK/union/harness/harness"
 
+# MESSAGE_SPEC §7.3 before §7.1 (generator#627): a mistyped array element past
+# the schema `count` is SKIPPED and a correctly typed one is INVALID, at a
+# one-level array and at a row of an array of arrays (wrapper, enum, boolean,
+# depth 3). The corelib collectors order the two tests themselves; the driver
+# keeps every backend's row path to the same order. It prints its own schema.
+echo "==> §7.3 before §7.1: a mistyped element past the bound is skipped (generator#627)"
+python3 "$ROOT/tests/conformance/lib/check_skip_before_bound.py" --emit-schema > "$WORK/sbb.yaml"
+( cd "$ROOT" && go run ./cmd/sofabgen --config "$WORK/proj.yaml" --lang c \
+    --in "$WORK/sbb.yaml" --out "$WORK/sbb" )
+make -C "$WORK/sbb" SOFAB_C_CORELIB="$CORELIB" >/dev/null
+python3 "$ROOT/tests/conformance/lib/check_skip_before_bound.py" "C" \
+    -- "$WORK/sbb/harness/harness"
+
 # Nested defaults (generator#609): a default declared inside a struct, at any
 # depth and inside a struct array's element, is what absence means -- asserted
 # against the driver's own schema, never against this harness's own baseline.

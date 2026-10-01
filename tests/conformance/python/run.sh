@@ -1215,6 +1215,24 @@ done
 unset SOFAB_PUREPYTHON || true
 if [ "$NATIVE" = yes ]; then require_engine native; else require_engine python; fi
 
+# MESSAGE_SPEC §7.3 before §7.1 (generator#627): a mistyped array element past
+# the schema `count` is SKIPPED and a correctly typed one is INVALID, at a
+# one-level array and at a row of an array of arrays (wrapper, enum, boolean,
+# depth 3). The corelib collectors order the two tests themselves; the driver
+# keeps every backend's row path to the same order. It prints its own schema.
+# Both engines: the native one reimplements the visitor dispatch.
+echo "==> §7.3 before §7.1: a mistyped element past the bound is skipped (generator#627)"
+python3 "$ROOT/tests/conformance/lib/check_skip_before_bound.py" --emit-schema > "$WORK/sbb.yaml"
+( cd "$ROOT" && go run ./cmd/sofabgen --format=off --config "$WORK/cfg.yaml" --lang python --in "$WORK/sbb.yaml" --out "$WORK/sbb" >/dev/null )
+for ENGINE in $ENGINES; do
+    if [ "$ENGINE" = python ]; then export SOFAB_PUREPYTHON=1; else unset SOFAB_PUREPYTHON || true; fi
+    require_engine "$ENGINE"
+    python3 "$ROOT/tests/conformance/lib/check_skip_before_bound.py" "python/$ENGINE" \
+        --cwd "$WORK/sbb" -- python3 harness.py
+done
+unset SOFAB_PUREPYTHON || true
+if [ "$NATIVE" = yes ]; then require_engine native; else require_engine python; fi
+
 # Nested defaults (generator#609): absence reads as the schema's defaults at every
 # depth and inside a struct array's element -- asserted against the driver's own
 # schema, never this harness's baseline. Both engines: the native one decodes
