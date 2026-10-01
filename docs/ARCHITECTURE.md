@@ -612,7 +612,7 @@ a reimplementation should emit code that honors all of them:
   there: one whose code has the **same shape for every schema**, with its schema
   dependence carried entirely by arguments and type parameters. A `count`,
   `maxlen`, element width or capacity is then a runtime value like any other.
-  `sofab::StringSeq` / `sofab::MessageSeq`, `sofab.arrays.*`, corelib-ts's
+  `sofab::StringSeq` / `sofab::MessageSeq` / `sofab::RowSeq`, `sofab.arrays.*`, corelib-ts's
   `PayloadAcc` / `StringSeq` / `BlobSeq` / `decodeUtf8` / `elementsEqual` and
   the `Seq.placeElem` / `reserveElem` / `checkIndex` / `reserveRow*` of
   corelib-java and corelib-kotlin-mp (`Seq.PlaceElem` / `ReserveElem` /
@@ -1407,34 +1407,63 @@ route by `(scope, id)` and are forward-compatible (skip unknown ids).
      corelib-cpp#143) performs the §4.4 mapping and stores each element as a byte
      (the C store as a one-byte integer, corelib-cpp through an `unsigned char`
      lvalue), so the byte-backed member is a well-defined destination. A boolean
-     **row** (`array<array<boolean>>`) takes the generated row collector for the
-     same reason, since the corelib collector would hand the `std::uint8_t` row to
-     `is.read()` as a `u8` array. Encode writes the member as a `u8` array, so an
+     **row** (`array<array<boolean>>`) takes the reader-based row collector
+     (`sofab::RowSeq`, below) for the same reason, since `MessageSeq` would hand
+     the `std::uint8_t` row to `is.read()` as a `u8` array. Encode writes the member as a `u8` array, so an
      element holding `0`/`1` is already the canonical form;
    - an **enum array**'s member keeps its scoped enum element (the generated API
      and the JSON harness stay value-typed) and binds through
      `sofabgen::RawArray`, which reinterprets the **elements** — never the
      container — and forwards `resize()`/`size()`, so `readArray` keeps ownership
      of the tag check, the bound check and the reset, in that order.
-   - a **row that the corelib collector cannot read**, i.e. a wrapper-sequence row
+   - a **row that `MessageSeq` cannot read**, i.e. a wrapper-sequence row
      (`array<array<string|blob|struct>>`, and deeper) or an enum or boolean row,
-     goes through a *generated* row collector (`deserializeRowSeq`, generator#250).
-     That collector must keep the corelib collectors' order itself: first the §7.3
-     tag test (the same `unionGate` a union arm runs: `_is.wire()` on corelib-cpp,
-     one `_is.delivered()` on corelib-c-cpp), then the §7.1 index bound, then the
-     placement. A mistyped element is not an element of the array at all. Put the
-     bound first and a mistyped element past `count` is rejected as INVALID; put the
-     placement first and one inside it leaves an empty row behind (generator#627).
-     `tests/conformance/lib/check_skip_before_bound.py` pins both on all four
+     goes through the corelib's **reader-based row collector**: `sofab::RowSeq` on
+     both corelibs, `sofab::FixedRowSeq` for the heap-free c-cpp profile
+     (generator#629; corelib-cpp `sofab.hpp`, corelib-c-cpp `seq.hpp`). The
+     collector is a static helper (§8): its shape is the same for every schema. In
+     order it applies the §7.3 tag test, the §5.1 index bound in §6.3's
+     categories, the gap fill and placement, and the §7.4 replace-whole. A
+     mistyped element is not an element of the array at all. Put the bound first
+     and a mistyped element past `count` is rejected as INVALID; put the placement
+     first and one inside it leaves an empty row behind (generator#627, when this
+     collector was still generated and got the order wrong where the corelib
+     suites could not see it). What stays generated is the part that differs per
+     schema, a local **reader** type next to the field:
+     `static constexpr … wire()` names the row's §7.3 tag (`SequenceStart` for a
+     wrapper row, the backing integer's array wire type for an enum or boolean
+     row), and `operator()` is the same array emission one level down, so depth 3
+     nests a depth-2 reader. `wire()` is a function because a local class may not
+     have static data members. On corelib-cpp the collector publishes that tag as
+     `elemWire`, so the stream itself runs §7.3 ahead of the bound at the element
+     header, and it takes the schema `count` and the receiver index cap as
+     constructor arguments, as `StringSeq` does. On corelib-c-cpp the reader also
+     takes the row's announced element count (`readArray` needs it), and the
+     growable `RowSeq` takes the schema `count` as a **template argument**: the
+     footprint profile requires a `count` on every array level (`checkBounded`),
+     so a receiver cap can never apply there, and a runtime `cap`/`dynCap` pair
+     would be dead storage and a dead branch on every row. The runtime pair is
+     still there for `Count = -1`, for hand-written callers.
+     `tests/conformance/lib/check_skip_before_bound.py` pins the order on all four
      profiles. Every other suite runs the same driver too, on each of its profiles,
      engines and int64 modes, so no backend's row path can drift from this order.
-     Cost of the gate, measured on that driver's schema (5 nested fields,
-     about 12 gated rows per message): decode +38 / +46 Ir per message on corelib-cpp
-     (default / static storage, +0.5% / +0.9%), and +60 to +72 B `.text` on
-     corelib-c-cpp for ARMv6-m / ARMv7-m, with `.data`/`.bss` unchanged. The bench
-     schemas have no such row, and their generated code is byte-identical with or
-     without the gate. The collector is a generated static helper. Moving it into
-     both corelibs is generator#629.
+     Measured on that driver's schema (5 nested row fields), against
+     the generated collector it replaces:
+     - **corelib-c-cpp, bench recipe** (`bench_size`, `-Os`):
+       - static storage: `.text` −10 / −12 B (ARMv6-m / ARMv7-m), `.data`/`.bss`
+         unchanged;
+       - `allow_dynamic`: `.text` −180 / −168 B, `.bss` −40 B.
+     - **corelib-cpp, Ir per decode** (`-O3`):
+       - static storage: +11 (+0.2%);
+       - default storage: +488 (+4.6%). The row collectors themselves got
+         cheaper (−133 Ir at `-O2`). The cost is GCC no longer inlining the
+         stream's `dispatchLevel<read<RowSeq<…>>>` into the message's
+         `deserialize`, and at `-O3` also moving `std::string::resize` and
+         `utf8Valid` out of `StringSeq`. Both are budget decisions for the
+         function as a whole: a message with **one** such field measures +15 Ir
+         (+0.4%).
+     The bench schemas have no such row, and their generated code is
+     byte-identical before and after.
 5. **Descriptor-table callback** (C `corelib-c-cpp`). A static descriptor table
    (id → offset → wire type, generated per object) drives
    `sofab_object_encode`/`decode`; a field callback fills members by id. Member
@@ -2525,7 +2554,7 @@ beside the `count`, wrapper-element-id and `maxlen` guards already there.
     re-scan of the destination is not the fix and is not emitted, because it could
     only re-test values the cast has already put back inside the bound. The ENUM
     row beside it has no such gap: an enum row leaves the native fast path for the
-    generated row collector and binds through
+    reader-based row collector (`sofab::RowSeq`) and binds through
     `sofabgen::RawArray<Container, Backing>`, which hands `readArray` the
     `ElemBound` like any flat enum array (generator#531). `corelib-c-cpp` has
     neither gap — its row destination carries its own size into the read.
@@ -4122,7 +4151,7 @@ never a number the corelib knows:
 
 | target | compared in the corelib, on this existing call | compared in generated code |
 |---|---|---|
-| **C++** (`corelib: cpp`) | all three kinds, on the `…Capped` twin of the call that carries the schema bound — `readStringCapped`/`readBlobCapped`/`readArrayCapped` — plus `indexCap`/`elemLenCap` on the `StringSeq`/`BlobSeq` collectors and `dynCap` (element id) / `rowDynCap` (a native row's element count) on `MessageSeq` | one shape only: the element index of an array of wrapper **rows**, which a *generated* placer gathers (above) |
+| **C++** (`corelib: cpp`) | all three kinds, on the `…Capped` twin of the call that carries the schema bound — `readStringCapped`/`readBlobCapped`/`readArrayCapped` — plus `indexCap`/`elemLenCap` on the `StringSeq`/`BlobSeq` collectors, `dynCap` (element id) / `rowDynCap` (a native row's element count) on `MessageSeq`, and `indexCap` on `RowSeq` for an array of wrapper **rows** (generator#629) | none |
 | **Zig** | array counts and wrapper element indices: `arrays.allocCounted` / `reserveElem` / `reserveRow` / `placeElem`, each taking the bound as a `comptime arrays.Bound` that also names the verdict; and string and blob lengths, in `PayloadAcc.takeCapped` — the bind the payload passes through, compared at the announced length before a byte is copied or appended (generator#432) | string and blob lengths a second time, but only as the length-word *verdict* in the generated `fixlenBegin` — what keeps a truncated over-cap header LimitExceeded rather than INCOMPLETE (#438); no generated arithmetic is left in the payload arm |
 | **Go**, **Dart** | wrapper arrays — the element index, the element length and a matrix **row**'s own element count — as the collector's receiver-cap constructor arguments (`sofab.Caps`; `rcap`/`relemMax`/`rowCap`), beside the `sofab.Bounds` carrying the schema's | scalar string/blob lengths and native array counts: Go in the generated `FixlenBegin`/`ArrayBegin` — the accumulator is one callback too late, above; Dart in the one header call that also returns the field's destination (`onString`/`onBlob`/`on…Array`), before it is sized |
 | **Java** | string and blob lengths, in `PayloadAcc` — `checkStringLength`/`checkBlobLength` from the generated `fixlenBegin`, and the same routine again inside the `acc.string`/`acc.blob` the payload passes through; plus **every** wrapper array's element index, on the `Seq` call that grows the list — `placeElem` for a string/blob element, `reserveElem` for a struct/union/nested-row element, `reserveRow*` for a matrix row, and `Seq.checkIndex` at the sites with no such call, the length word and a native row's header — each handed one `Bound`: `Bound.schema(count)` or `Bound.receiver(MAX_DYN_ARRAY_COUNT)`, so the schema verdict is compared there too (§9.5.3) | native array counts and a matrix row's own element count, neither of which has a corelib call at its header to ride |
@@ -6275,7 +6304,8 @@ A reimplementation is **conformant** when it reproduces these gates:
    `sofab::MessageSeq` reads the row with an unbounded cast. No target skips a
    position any more. `--skip-positions matrix:enum` used to stand on all four
    `cpp` legs, for a shape that did not compile; generator#531 routed an enum row
-   through the generated row collector and `sofabgen::RawArray`, and the cell was
+   through a row collector of its own and `sofabgen::RawArray` (since generator#629
+   the corelib's `sofab::RowSeq` with a generated reader), and the cell was
    re-measured on each leg — it builds and enforces the bound everywhere — so the
    skip is gone and all four legs now cover 12/12 cells: 108 rows on the two
    `c-cpp` legs, 106 on the two pure ones, the two missing rows being the masked

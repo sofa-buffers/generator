@@ -28,13 +28,15 @@ fails a row.
 ## Why it covers rows
 
 Every corelib applies this order inside its own collectors, so a one-level
-wrapper array gets it for free. An array of arrays is different wherever the
-backend generates the row collector itself, as the C++ backend does for a row
-that is a wrapper sequence or a bound-checked native row: that collector saw the
+wrapper array gets it for free. An array of arrays is different wherever a row
+needs a collector of its own. The C++ backend used to generate one for a row that
+is a wrapper sequence or a bound-checked native row, and that collector saw the
 element header first and applied the bound before anything decided the wire type
-(generator#627, Crucible G-0045). So beside the one-level `list` control the
-schema carries a wrapper row (`grid`), a row one level deeper (`deep`) and the
-two native rows the C++ backend routes the same way (`erows`, `brows`).
+(generator#627, Crucible G-0045). Since generator#629 it is the corelib's
+`sofab::RowSeq` with a generated reader, and this driver is what shows the move
+kept the order. So beside the one-level `list` control the schema carries a
+wrapper row (`grid`), a row one level deeper (`deep`) and the two native rows the
+C++ backend routes the same way (`erows`, `brows`).
 
 ## The table
 

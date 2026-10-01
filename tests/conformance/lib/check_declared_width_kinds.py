@@ -74,7 +74,8 @@ a decision on the record, never a silence.
     left out of `--emit-schema` too, since a target that cannot build a harness
     for the shape cannot declare it either. No suite uses it at the moment: the
     C++ one did, for `matrix:enum`, until generator#531 gave an enum matrix row a
-    generated collector that compiles and carries the bound.
+    collector of its own that compiles and carries the bound (since generator#629
+    the corelib's sofab::RowSeq with a generated reader).
   * `--storage-masked` -- the corelib narrows the element to the receiver's
     storage BEFORE generated code can see it, so a value past that storage has
     already become a declared one by the time anything may test it (corelib-cpp's
