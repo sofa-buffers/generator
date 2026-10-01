@@ -1,6 +1,10 @@
 package java
 
-import "strings"
+import (
+	"strings"
+
+	"github.com/sofa-buffers/generator/internal/naming"
+)
 
 // One reserved-name list for the Java backend (generator#239): every name a
 // schema field cannot take as a field of a generated class. Java keeps fields
@@ -43,8 +47,9 @@ var javaKeywords = map[string]bool{
 }
 
 // javaStatics are the static fields every generated message class declares.
-// (The option-id constants of a union are checkUnionNames'; the _arrdef_*
-// constants start with `_`, which no schema name does.)
+// (A union's option-id constants `<OPT>_ID` all end in `_ID`, which neither
+// entry does (unionIDConst); the _arrdef_* constants start with `_`, which no
+// schema name does.)
 var javaStatics = map[string]bool{"MAX_SIZE": true, "MAX_SIZE_LIMIT": true}
 
 // javaQualifiers are the names a generated class body uses as the qualifier of
@@ -125,10 +130,13 @@ var javaTypeNames = map[string]string{
 
 // escapeType is a type identifier as the class it names: with a trailing
 // underscore where the generated code already means something by it
-// (javaTypeNames). Roles and private names are built from the unescaped
+// (javaTypeNames), or where the class file it names cannot exist on Windows
+// (naming.IsDeviceStem: a message `con` is class Con_ in Con_.java, not
+// Con.java). A type identifier never ends with `_`, so the escaped spelling is
+// no other type's. Roles and private names are built from the unescaped
 // identifier.
 func escapeType(t string) string {
-	if _, ok := javaTypeNames[t]; ok {
+	if _, ok := javaTypeNames[t]; ok || naming.IsDeviceStem(t) {
 		return t + "_"
 	}
 	return t

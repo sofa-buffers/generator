@@ -340,7 +340,7 @@ func (g *gen) mainHarness(s *ir.Schema) []byte {
 // The canonical-JSON harness
 // ---------------------------------------------------------------------------
 
-// jsonHelper emits Json.kt: to/from canonical JSON for every generated object,
+// jsonHelper emits _Json.kt: to/from canonical JSON for every generated object,
 // plus a tiny hand-written JSON reader.
 //
 // The reader exists so the project depends on nothing but the corelib, and so a

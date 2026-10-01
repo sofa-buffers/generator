@@ -2,6 +2,8 @@ package kotlin
 
 import (
 	"strings"
+
+	"github.com/sofa-buffers/generator/internal/naming"
 )
 
 // The Kotlin backend's reserved names, in two lists (ARCHITECTURE §8).
@@ -122,12 +124,14 @@ var ktOuterNames = map[string]string{
 	"UShortArray":               "kotlin: u16 arrays",
 }
 
-// ktTypeIdent escapes a type identifier that ktOuterNames holds with a trailing
-// `_` -- the escape channel: a TypeIdent never ends with `_`, so the escaped
-// spelling is no other type's. Names a backend derives from a type (a variant,
-// the private visitor) are built from the UNESCAPED identifier.
+// ktTypeIdent escapes a type identifier that ktOuterNames holds, or whose file
+// cannot exist on Windows (naming.IsDeviceStem: a message `con` is class Con_
+// in Con_.kt, not Con.kt), with a trailing `_` -- the escape channel: a
+// TypeIdent never ends with `_`, so the escaped spelling is no other type's.
+// Names a backend derives from a type (a variant, the private visitor) are
+// built from the UNESCAPED identifier.
 func ktTypeIdent(t string) string {
-	if _, ok := ktOuterNames[t]; ok {
+	if _, ok := ktOuterNames[t]; ok || naming.IsDeviceStem(t) {
 		return t + "_"
 	}
 	return t
