@@ -445,6 +445,43 @@ func TestCppFixedUnbounded(t *testing.T) {
 	}
 }
 
+// TestCppFixedUnboundedAnywhere: the embedded profile refuses an unbounded
+// field wherever it sits -- in a struct nested in the only message, and in a
+// message after the first -- and the error names the type that owns it. Every
+// owner is keyed by its type identifier, so the walk must run once the names
+// are assigned: before, every owner was "", the first one walked marked all
+// of them seen, and std::string/std::vector reached the no-heap profile.
+func TestCppFixedUnboundedAnywhere(t *testing.T) {
+	for _, tc := range []struct{ name, src, file, owner, field string }{
+		{"nested struct", "version: 1\nmessages:\n  M:\n    payload:\n" +
+			"      x: { id: 0, type: u8 }\n" +
+			"      inner: { id: 1, type: struct, fields: { s: { id: 0, type: string } } }\n",
+			"m.hpp", "M_Inner", "s"},
+		{"second message", "version: 1\nmessages:\n  A:\n    payload:\n" +
+			"      x: { id: 0, type: u8 }\n" +
+			"  B:\n    payload:\n" +
+			"      s: { id: 0, type: string }\n",
+			"a.hpp", "B", "s"},
+		{"struct in second message", "version: 1\nmessages:\n  A:\n    payload:\n" +
+			"      x: { id: 0, type: u8 }\n" +
+			"  B:\n    payload:\n" +
+			"      inner: { id: 0, type: struct, fields: { a: { id: 0, type: array, items: { type: u16 } } } }\n",
+			"a.hpp", "B_Inner", "a"},
+	} {
+		for _, dyn := range []bool{false, true} {
+			_, err := fixedHeader(t, tc.src, tc.file, map[string]any{"allow_dynamic": dyn})
+			if err == nil {
+				t.Errorf("%s, allow_dynamic=%v: the unbounded field was not refused", tc.name, dyn)
+				continue
+			}
+			want := fmt.Sprintf("field %q in %q", tc.field, tc.owner)
+			if !strings.Contains(err.Error(), want) {
+				t.Errorf("%s, allow_dynamic=%v: error does not name %s: %v", tc.name, dyn, want, err)
+			}
+		}
+	}
+}
+
 // TestCppFixedUnboundedNativeArray: a count-less NATIVE scalar array was the gap
 // in checkBounded — its walkArray switch only covered string/blob/struct/union/
 // nested-array elements, so a native scalar array slipped through and silently
