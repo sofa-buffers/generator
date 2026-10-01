@@ -1941,40 +1941,29 @@ func (g *gen) deserializeArray(f *hfile, ind, target string, elem ir.Kind, ref *
 	}
 }
 
-// deserializeRowSeq reads an array of wrapper ROWS -- array<array<string>>,
-// array<array<blob>>, array<array<struct|union>> and deeper -- into target.
+// deserializeRowSeq reads an array of ROWS the corelib's MessageSeq cannot read
+// on its own -- array<array<string>>, array<array<blob>>,
+// array<array<struct|union>> and deeper, plus enum and boolean rows -- into
+// target.
 //
-// The corelib's MessageSeq/FixedMessageSeq is the collector for a sequence whose
-// ELEMENTS the stream can read on its own: a struct/union element (an
-// IStreamMessage) or a native-scalar row (a span of trivially-copyable values).
-// A row that is itself a wrapper sequence is neither, so it needs a collector of
-// its own, and the corelib cannot ship one: what a row costs to read is the
-// schema's business (element bounds, element type), not the wire format's.
+// MessageSeq/FixedMessageSeq hand each element to the stream's own read, which
+// reads a message or a span of native scalars and nothing else. A row that is
+// itself a wrapper sequence is neither, and an enum or boolean row has to bind
+// through sofabgen::RawArray (see viewedElem). So the collector is the corelib's
+// row collector -- sofab::RowSeq on either leg, sofab::FixedRowSeq for the
+// heap-free c-cpp profile -- and the generator emits only what differs per
+// schema: the row read, as a local reader type. Its wire() is the row's §7.3
+// tag; its operator() is the SAME array emission one level down, which is what
+// makes this recursive rather than three special cases: depth 3 wraps a depth-2
+// reader, and a struct/blob/string row lands on the corelib collector the
+// first-level path already uses.
 //
-// So the row collector is generated, right where it is used, and the row read it
-// wraps is the SAME array emission one level down -- which is what makes this
-// recursive rather than three special cases: depth 3 wraps a depth-2 collector,
-// and a struct/blob/string row lands on the corelib collector the first-level
-// path already uses (sofab::StringSeq/BlobSeq/MessageSeq, or their Fixed*
-// counterparts on the c-cpp leg).
-//
-// The collector carries the same three spec rules as the corelib ones, in the
-// same order:
-//   - §7.3 first: an element whose wire type contradicts the row's is not an
-//     element of this array at all. It is skipped like an unknown id, before the
-//     index bound below -- the subtype is decided first and the schema bound
-//     applied only to an element that survives it -- and before the placement,
-//     so the destination is left exactly as it was (generator#627). The test is
-//     unionGate's, one comparison per row on either corelib.
-//   - §5.1 an element id IS its index, so a row is PLACED at that index (gaps are
-//     legal and stay at the element default), and an id at or past the schema
-//     `count` is INVALID -- the fixed profile reads that bound off the inline
-//     container's capacity, which also stops an over-index emplace_back that
-//     InlineVector would otherwise no-op forever on (#126).
-//   - §7.4 a repeated field id replaces the array whole, via prepare() on the
-//     pure path (read() calls it once the SequenceStart tag matched, so a §7.3
-//     skip cannot wipe an earlier value) and via readSequence() on the c-cpp leg,
-//     which clears the destination itself.
+// The collector owns the rest, in the order the corelib's other collectors
+// apply it: §7.3 before the §5.1 index bound and before the placement, the
+// bound in §6.3's categories, the gap fill, and the §7.4 replace-whole (prepare()
+// on the pure path, readSequence() on the c-cpp leg). On corelib-cpp it also
+// publishes the row's wire type, so the stream itself runs §7.3 ahead of the
+// bound at the element header.
 //
 // Storage follows deserializeSeqInto: the c-cpp decoder is deferred and uses the
 // collector after this call returns, so it gets static storage (one instance per
@@ -1982,74 +1971,62 @@ func (g *gen) deserializeArray(f *hfile, ind, target string, elem ir.Kind, ref *
 // and a heap row vector is reserved up front so placing a later row never moves
 // a still-bound earlier one.
 func (g *gen) deserializeRowSeq(f *hfile, ind, target string, items *ir.ArrayElem, count, cap int64, rv, container string, depth int) {
-	sv := fmt.Sprintf("_S%d", depth)
+	rd := fmt.Sprintf("_R%d", depth)
 	ev := fmt.Sprintf("_e%d", depth)
 	inlineRows := strings.HasPrefix(container, "sofab::InlineVector")
+	rowType := g.cppArrayContainer(items.Elem, items.ElemRef, items.ElemItems, items.Count, items.ElemMaxHas, items.ElemMax)
+	// A row is an array field one level down, so its §7.3 tag is the one a field
+	// of that element kind would carry. Every row that reaches here has a tag
+	// that settles it alone: a wrapper row is a sequence, and an enum/boolean row
+	// is an integer array. A fixlen row (fp32/fp64) is native and never does.
+	row := &ir.Field{Kind: ir.KindArray, Elem: items.Elem, ElemRef: items.ElemRef, ElemItems: items.ElemItems}
+	if isNativeArrayElem(items.Elem) && cppFixSubtype(items.Elem) != "" {
+		panic("cpp: a fixlen row has no reader-based collector: " + rowType)
+	}
+	wire, wireType := cppExpectedWire(row), "sofab::Wire"
+	if !g.clib {
+		wire = strings.ReplaceAll(wire, "sofab::Wire::", "sofab::detail::Wire::")
+		wireType = "sofab::detail::Wire"
+	}
 	in2 := ind + "    "
 	in3 := in2 + "    "
 	in4 := in3 + "    "
 	f.line("%s{", ind)
-	f.line("%sstruct %s : sofab::IStreamMessage {", in2, sv)
-	f.line("%s%s *out = nullptr;", in3, container)
-	if !inlineRows {
-		f.line("%slong cap = %d;", in3, cap)
-		// The receiver index cap beside the schema `count`, named as corelib-cpp's
-		// own collectors name it. It is stated even where it is -1: corelib-cpp
-		// static_asserts that a collector publishing `cap` publishes `dynCap` too,
-		// because a duck-typed collector carrying only the first left the second
-		// silently at "no cap" and nothing diagnosed it (§6.2.1 -- the stream has no
-		// limit of its own to lend). The COMPARISON is still this placer's, below:
-		// the stream bounds an element index only for a collector that also
-		// publishes its element wire type, which a row cannot.
-		f.line("%slong dynCap = %s;", in3, g.rowIndexCap(cap))
-	}
-	if !g.clib {
-		// Declaring prepare() is how a collector asks read() for the §7.4
-		// replace-whole reset; readSequence() on the c-cpp leg clears for us.
-		f.line("%svoid prepare() noexcept { if (out) out->clear(); }", in3)
-	}
-	// The c-cpp leg's readArray takes the field's announced element count, so a
-	// row whose read is a native array emission -- an enum or boolean row, which binds
-	// through sofabgen::RawArray -- needs that parameter NAMED here, exactly as
-	// the message-level deserialize names it.
-	rowCountParam := "std::size_t"
-	if g.clib && items != nil && isNativeArrayElem(items.Elem) {
-		rowCountParam = "std::size_t _count"
-	}
-	f.line("%svoid deserialize(sofab::IStreamImpl &_is, sofab::id _id, std::size_t, %s) noexcept override {", in3, rowCountParam)
-	// §7.3 before the bound: a row is an array field one level down, so its
-	// expected tag is the one a field of that element kind would carry.
-	row := &ir.Field{Kind: ir.KindArray, Elem: items.Elem, ElemRef: items.ElemRef, ElemItems: items.ElemItems}
-	f.line("%sif (%s) return;", in4, g.unionGate(row))
-	if inlineRows {
-		f.line("%sif (static_cast<std::size_t>(_id) >= out->capacity()) { _is.invalidate(); return; }", in4)
-	} else {
-		f.line("%sif (cap >= 0 && static_cast<std::size_t>(_id) >= static_cast<std::size_t>(cap)) { _is.invalidate(); return; }", in4)
-		// The receiver index cap, where the schema declared no `count` — the same
-		// bound the corelib's own collectors take as `dynCap`, in the same place
-		// (before the grow below) and in the other category (§6.2.1: policy, never
-		// INVALID). A generated collector cannot hand this one to the stream: the
-		// stream applies an element bound only for a collector that also publishes
-		// its element wire type, and a row's is the schema's business rather than
-		// the format's. Unstated, the grow below is an allocation the wire dictates
-		// — a wrapper array's length being highest present id + 1 (MESSAGE_SPEC
-		// §5.1), one over-index row is an arbitrarily large one.
-		if cap < 0 && g.limArrHas {
-			f.line("%sif (static_cast<std::size_t>(_id) >= static_cast<std::size_t>(SOFAB_MAX_DYN_ARRAY_COUNT)) { _is.exceedLimit(); return; }", in4)
+	f.line("%sstruct %s {", in2, rd)
+	f.line("%sstatic constexpr %s wire() noexcept { return %s; }", in3, wireType, wire)
+	if g.clib {
+		// The c-cpp leg's readArray takes the row's announced element count, so a
+		// row whose read is a native array emission -- an enum or boolean row --
+		// names it, exactly as the message-level deserialize names it.
+		countParam := "std::size_t"
+		if isNativeArrayElem(items.Elem) {
+			countParam = "std::size_t _count"
 		}
+		f.line("%svoid operator()(sofab::IStreamImpl &_is, %s &%s, %s) const noexcept {", in3, rowType, ev, countParam)
+	} else {
+		f.line("%svoid operator()(sofab::IStreamImpl &_is, %s &%s) const noexcept {", in3, rowType, ev)
 	}
-	f.line("%swhile (out->size() <= static_cast<std::size_t>(_id)) out->emplace_back();", in4)
-	f.line("%sauto &%s = (*out)[_id];", in4, ev)
 	g.deserializeArray(f, in4, ev, items.Elem, items.ElemRef, items.ElemItems, items.Count, items.HasCount, items.ElemMaxHas, items.ElemMax, depth+1)
 	f.line("%s}", in3)
 	f.line("%s};", in2)
-	if g.clib {
-		if count > 0 && !inlineRows {
-			f.line("%s%s.reserve(%d);", in2, target, count)
+	switch {
+	case g.clib && inlineRows:
+		// The inline container's capacity IS the schema `count`.
+		f.line("%sstatic sofab::FixedRowSeq<%s, %s> %s; _is.readSequence(%s, %s);", in2, container, rd, rv, rv, target)
+	case g.clib:
+		reserve := ""
+		if count > 0 {
+			reserve = fmt.Sprintf(" %s.reserve(%d);", target, count)
 		}
-		f.line("%sstatic %s %s; _is.readSequence(%s, %s);", in2, sv, rv, rv, target)
-	} else {
-		f.line("%s%s %s; %s.out = &%s; sofab::read(_is, %s);", in2, sv, rv, rv, target, rv)
+		// The schema `count` as a template argument: the footprint profile bounds
+		// every array level (checkBounded), so the collector's receiver-cap
+		// storage and branch would be dead code on every row it reads.
+		f.line("%sstatic sofab::RowSeq<%s, %s, %d> %s;%s _is.readSequence(%s, %s);", in2, container, rd, cap, rv, reserve, rv, target)
+	default:
+		// The receiver index cap beside the schema `count`, in the same
+		// exclusivity as every other collector here (§6.2.1): stated only where
+		// the schema left the index unbounded, -1 otherwise.
+		f.line("%ssofab::RowSeq %s{%s, %d, %s, %s{}}; sofab::read(_is, %s);", in2, rv, target, cap, g.rowIndexCap(cap), rd, rv)
 	}
 	f.line("%s}", ind)
 }

@@ -269,7 +269,7 @@ func TestCppWrapperArrayReceiverCaps(t *testing.T) {
 		"      c: { id: 2, type: array, items: { type: string, count: 4 } }\n" + // count: index cap out
 		"      d: { id: 3, type: array, items: { type: string, maxlen: 8 } }\n" + // maxlen: length cap out
 		"      e: { id: 4, type: array, items: { type: struct, fields: { x: { id: 0, type: i32 } } } }\n" + // object elements: index only
-		"      f: { id: 5, type: array, items: { type: array, items: { type: string } } }\n" // generated row collector
+		"      f: { id: 5, type: array, items: { type: array, items: { type: string } } }\n" // corelib row collector
 	h, err := genHeader(t, src, "m.hpp", map[string]any{})
 	if err != nil {
 		t.Fatalf("generate: %v", err)
@@ -281,11 +281,10 @@ func TestCppWrapperArrayReceiverCaps(t *testing.T) {
 		"{ sofab::StringSeq _r0{c, 4, -1, -1, SOFAB_MAX_DYN_STRING_LEN}; sofab::read(_is, _r0); }",
 		"{ sofab::StringSeq _r0{d, -1, 8, SOFAB_MAX_DYN_ARRAY_COUNT, -1}; sofab::read(_is, _r0); }",
 		"_r0.cap = -1; _r0.dynCap = SOFAB_MAX_DYN_ARRAY_COUNT;",
-		// A row that is itself a wrapper sequence is collected by a GENERATED
-		// placer, which the stream cannot bound for it (it publishes no element
-		// wire type), so the same cap is compared there, in the same place —
-		// before the grow — and in the policy category.
-		"if (static_cast<std::size_t>(_id) >= static_cast<std::size_t>(SOFAB_MAX_DYN_ARRAY_COUNT)) { _is.exceedLimit(); return; }",
+		// A row that is itself a wrapper sequence is collected by sofab::RowSeq,
+		// which takes the same cap the same way StringSeq does: as a constructor
+		// argument beside the schema `count`.
+		"sofab::RowSeq _r0{f, -1, SOFAB_MAX_DYN_ARRAY_COUNT, _R0{}}; sofab::read(_is, _r0);",
 	} {
 		if !strings.Contains(h, want) {
 			t.Errorf("wrapper-array receiver cap missing %q:\n%s", want, h)
@@ -1541,35 +1540,33 @@ const nestedWrapperRowsSrc = "version: 1\nmessages:\n  M:\n    payload:\n" +
 // SEQUENCE — neither a span of scalars nor an IStreamMessage — so handing the
 // ROW CONTAINER to sofab::MessageSeq<T> makes its sofab::read(is, row) fail the
 // corelib's "Unsupported span element type in IStream::read()" static_assert and
-// the whole header stops compiling (generator#250). Such a row gets a generated
-// collector that places the row at its element id and reads it with the SAME
-// emission the first level uses (StringSeq / BlobSeq / MessageSeq over the
-// ELEMENT type). A row of native scalars is unaffected: the corelib collector
-// reads it directly.
+// the whole header stops compiling (generator#250). Such a row goes to the
+// corelib's sofab::RowSeq, which places the row at its element id and calls a
+// generated reader for it; the reader is the SAME emission the first level uses
+// (StringSeq / BlobSeq / MessageSeq over the ELEMENT type). A row of native
+// scalars is unaffected: MessageSeq reads it directly.
 func TestCppNestedWrapperRowsHeap(t *testing.T) {
 	h, err := genHeader(t, nestedWrapperRowsSrc, "m.hpp", map[string]any{"namespace": "sofabuffers"})
 	if err != nil {
 		t.Fatalf("generate: %v", err)
 	}
 	for _, want := range []string{
-		// string rows: outer collector with the schema count as its cap, inner read
-		// through the corelib's string collector over the ROW.
-		"struct _S0 : sofab::IStreamMessage {",
-		"std::vector<std::vector<std::string>> *out = nullptr;",
-		"long cap = 2;",
+		// string rows: the corelib row collector with the schema count as its cap,
+		// and a reader that reads the ROW through the corelib's string collector.
+		"struct _R0 {",
+		"static constexpr sofab::detail::Wire wire() noexcept { return sofab::detail::Wire::SequenceStart; }",
+		"void operator()(sofab::IStreamImpl &_is, std::vector<std::string> &_e0) const noexcept {",
 		"{ sofab::StringSeq _r1{_e0, 3, 8, -1, -1}; sofab::read(_is, _r1); }",
-		"_S0 _r0; _r0.out = &strrows; sofab::read(_is, _r0);",
+		"sofab::RowSeq _r0{strrows, 2, -1, _R0{}}; sofab::read(_is, _r0);",
 		// blob rows
 		"{ sofab::BlobSeq _r1{_e0, 3, 8, -1, -1}; sofab::read(_is, _r1); }",
 		// struct rows: the corelib collector over the ROW's container, one level in
 		"{ sofab::MessageSeq<std::vector<M_Structrows>> _r1; _r1.out = &_e0; _r1.cap = 3; sofab::read(_is, _r1); }",
-		// depth 3: the row collector nests, one level further
-		"struct _S1 : sofab::IStreamMessage {",
+		// depth 3: the reader nests a row collector of its own, one level further
+		"struct _R1 {",
+		"void operator()(sofab::IStreamImpl &_is, std::vector<std::string> &_e1) const noexcept {",
+		"sofab::RowSeq _r1{_e0, 2, -1, _R1{}}; sofab::read(_is, _r1);",
 		"{ sofab::StringSeq _r2{_e1, 3, 8, -1, -1}; sofab::read(_is, _r2); }",
-		// §5.1 placement + over-index reject, §7.4 replace-whole
-		"if (cap >= 0 && static_cast<std::size_t>(_id) >= static_cast<std::size_t>(cap)) { _is.invalidate(); return; }",
-		"while (out->size() <= static_cast<std::size_t>(_id)) out->emplace_back();",
-		"void prepare() noexcept { if (out) out->clear(); }",
 		// native rows keep the corelib collector -- and carry BOTH axes of the
 		// matrix: `cap` is the OUTER array's `count: 2` (the row id, §5.1) and
 		// `rowCap` is the ROW's own `count: 3`. The row used to state nothing at
@@ -1666,27 +1663,28 @@ func TestCppNativeRowBothAxes(t *testing.T) {
 }
 
 // TestCppNestedWrapperRowsFixed: the same shape on the footprint leg
-// (corelib: c-cpp). The collector is static — the C decoder dereferences it
-// after the callback returns — reads through readSequence (which clears the
-// destination for §7.4), and takes its §5.1 over-index bound from the inline
-// container's capacity, which also stops InlineVector's saturating
-// emplace_back() from spinning on an over-index id (issue #126).
+// (corelib: c-cpp). The collector is sofab::FixedRowSeq, static — the C decoder
+// dereferences it after the callback returns — read through readSequence (which
+// clears the destination for §7.4); it takes its §5.1 over-index bound from the
+// inline container's capacity, which also stops InlineVector's saturating
+// emplace_back() from spinning on an over-index id (issue #126). The reader takes
+// the announced element count as its third parameter, unnamed where the row read
+// does not need it.
 func TestCppNestedWrapperRowsFixed(t *testing.T) {
 	h, err := fixedHeader(t, nestedWrapperRowsSrc, "m.hpp", nil)
 	if err != nil {
 		t.Fatalf("generate: %v", err)
 	}
 	for _, want := range []string{
-		"struct _S0 : sofab::IStreamMessage {",
-		"sofab::InlineVector<sofab::InlineVector<sofab::FixedString<8>, 3>, 2> *out = nullptr;",
-		"if (static_cast<std::size_t>(_id) >= out->capacity()) { _is.invalidate(); return; }",
-		"static sofab::FixedStringSeq<sofab::InlineVector<sofab::FixedString<8>, 3>> _r1;",
+		"struct _R0 {",
+		"static constexpr sofab::Wire wire() noexcept { return sofab::Wire::SequenceStart; }",
+		"void operator()(sofab::IStreamImpl &_is, sofab::InlineVector<sofab::FixedString<8>, 3> &_e0, std::size_t) const noexcept {",
 		"static sofab::FixedStringSeq<sofab::InlineVector<sofab::FixedString<8>, 3>> _r1; _is.readSequence(_r1, _e0); }",
-		"static _S0 _r0; _is.readSequence(_r0, strrows);",
+		"static sofab::FixedRowSeq<sofab::InlineVector<sofab::InlineVector<sofab::FixedString<8>, 3>, 2>, _R0> _r0; _is.readSequence(_r0, strrows);",
 		"static sofab::FixedBlobSeq<sofab::InlineVector<sofab::FixedBytes<8>, 3>> _r1;",
 		"static sofab::FixedMessageSeq<sofab::InlineVector<M_Structrows, 3>> _r1;",
-		"struct _S1 : sofab::IStreamMessage {",
-		"static sofab::FixedStringSeq<sofab::InlineVector<sofab::FixedString<8>, 3>> _r2;",
+		"struct _R1 {",
+		"static sofab::FixedRowSeq<sofab::InlineVector<sofab::InlineVector<sofab::FixedString<8>, 3>, 2>, _R1> _r1; _is.readSequence(_r1, _e0);",
 		"static sofab::FixedStringSeq<sofab::InlineVector<sofab::FixedString<8>, 3>> _r2; _is.readSequence(_r2, _e1); }",
 		// native rows keep the corelib collector
 		"static sofab::FixedMessageSeq<sofab::InlineVector<sofab::InlineVector<std::uint32_t, 3>, 2>> _r0;",
@@ -1705,17 +1703,14 @@ func TestCppNestedWrapperRowsFixed(t *testing.T) {
 		}
 	}
 	// The heap storage mode of the same leg: the bound is no longer a container
-	// capacity, so it rides in as `cap`, and the row vector is reserved so
-	// placing a later row never moves a still-bound earlier one.
+	// capacity, so it rides in as sofab::RowSeq's Count argument, and the row vector is
+	// reserved so placing a later row never moves a still-bound earlier one.
 	d, err := fixedHeader(t, nestedWrapperRowsSrc, "m.hpp", map[string]any{"allow_dynamic": true})
 	if err != nil {
 		t.Fatalf("generate dynamic: %v", err)
 	}
 	for _, want := range []string{
-		"long cap = 2;",
-		"if (cap >= 0 && static_cast<std::size_t>(_id) >= static_cast<std::size_t>(cap)) { _is.invalidate(); return; }",
-		"strrows.reserve(2);",
-		"static _S0 _r0; _is.readSequence(_r0, strrows);",
+		"static sofab::RowSeq<std::vector<std::vector<std::string>>, _R0, 2> _r0; strrows.reserve(2); _is.readSequence(_r0, strrows);",
 		"static sofab::StringSeq _r1; _r1.cap = 3; _r1.elemMax = 8;",
 	} {
 		if !strings.Contains(d, want) {
@@ -2113,9 +2108,9 @@ func TestCppEnumBoolArrayNeverCastsTheContainer(t *testing.T) {
 // TestCppBoolRowReadsThroughTheBoolView pins generator#581 one level down: an
 // array<array<boolean>> row must reach the corelib as bool elements, or the row
 // is read as a u8 array (2 kept; 256 INVALID on c-cpp, a silent false on
-// corelib-cpp). The corelib's own row collector would hand the std::uint8_t row
-// to is.read(), so a boolean row takes the generated collector, whose row read
-// is the flat boolean arm -- the enum row's path -- on both legs.
+// corelib-cpp). MessageSeq would hand the std::uint8_t row to is.read(), so a
+// boolean row takes sofab::RowSeq / FixedRowSeq, whose generated reader is the
+// flat boolean arm -- the enum row's path -- on both legs.
 func TestCppBoolRowReadsThroughTheBoolView(t *testing.T) {
 	src := "version: 1\nmessages:\n  M:\n    payload:\n" +
 		"      rows: { id: 0, type: array, items: { type: array, count: 2, items: { type: boolean, count: 3 } } }\n"
@@ -2125,7 +2120,7 @@ func TestCppBoolRowReadsThroughTheBoolView(t *testing.T) {
 			t.Fatalf("generate (allow_dynamic=%v): %v", dyn, err)
 		}
 		for _, want := range []string{
-			"void deserialize(sofab::IStreamImpl &_is, sofab::id _id, std::size_t, std::size_t _count) noexcept override {",
+			"&_e0, std::size_t _count) const noexcept {",
 			", bool> _t1{&_e0}; _is.readArray(_t1, _count, 3); }",
 			"#define SOFABGEN_RAW_ARRAY_HELPER",
 		} {
@@ -2551,7 +2546,7 @@ func TestCppEncodeRespectsTheCeilingDistinction(t *testing.T) {
 //
 // The matrix below is the routing one, kept from the gate this replaces: a
 // string or blob element goes to sofab::StringSeq / sofab::BlobSeq, a row that is
-// itself a wrapper sequence gets a local collector from deserializeRowSeq, and
+// itself a wrapper sequence goes to sofab::RowSeq with a generated reader, and
 // only a struct/union element or a native-scalar row reaches the object
 // collector. Whichever arm runs, no header may name the generated one.
 func TestCppObjectArraysCollectInTheCorelib(t *testing.T) {
@@ -2570,7 +2565,7 @@ func TestCppObjectArraysCollectInTheCorelib(t *testing.T) {
 			"a: { id: 0, type: array, items: { type: struct, count: 2, fields: { x: { id: 0, type: i32 } } } }", true},
 		{"a matrix row is placed by sofab::MessageSeq",
 			"a: { id: 0, type: array, items: { type: array, count: 2, items: { type: u32, count: 3 } } }", true},
-		{"a row of strings gets its own local collector",
+		{"a row of strings goes to sofab::RowSeq",
 			"a: { id: 0, type: array, items: { type: array, count: 2, items: { type: string, count: 2, maxlen: 4 } } }", false},
 		{"but a row of structs reaches sofab::MessageSeq one level down",
 			"a: { id: 0, type: array, items: { type: array, count: 2, items: { type: struct, count: 2, fields: { x: { id: 0, type: i32 } } } } }", true},
@@ -3249,39 +3244,40 @@ messages:
 	}
 }
 
-// TestCppRowSkipPrecedesIndexBound: a generated row collector applies the
-// MESSAGE_SPEC §7.3 wire-type test BEFORE the schema's element-index bound, on
-// every profile (generator#627). A mistyped element past the outer `count` is not
-// an element of the array at all and must be skipped; with the bound first it
-// was rejected INVALID. One-level arrays get this from the corelib collectors;
-// the generated _S collector has to say it itself, and before the placement.
-func TestCppRowSkipPrecedesIndexBound(t *testing.T) {
+// TestCppRowReaderNamesTheRowWire: a row collector applies the MESSAGE_SPEC
+// §7.3 wire-type test BEFORE the element-index bound (generator#627), and since
+// generator#629 that collector is the corelib's -- sofab::RowSeq, or
+// sofab::FixedRowSeq on the heap-free c-cpp leg -- whose own suites pin the
+// order. What the generated code still decides is WHICH wire type a row of this
+// schema carries, through its reader's wire(); a wrong one would skip every row.
+// So that is pinned here, on every profile, together with the absence of the
+// placement the generator used to emit itself.
+func TestCppRowReaderNamesTheRowWire(t *testing.T) {
 	src := "version: 1\nmessages:\n  M:\n    payload:\n" +
 		"      srows: { id: 0, type: array, items: { type: array, count: 2, items: { type: string, count: 3, maxlen: 8 } } }\n" +
 		"      erows: { id: 1, type: array, items: { type: array, count: 2, items: { type: enum, count: 3, enum: { A: 0, B: 1 } } } }\n" +
 		"      brows: { id: 2, type: array, items: { type: array, count: 2, items: { type: boolean, count: 3 } } }\n"
+	pure := []string{
+		"static constexpr sofab::detail::Wire wire() noexcept { return sofab::detail::Wire::SequenceStart; }",
+		"static constexpr sofab::detail::Wire wire() noexcept { return sofab::detail::Wire::ArraySigned; }",
+		"static constexpr sofab::detail::Wire wire() noexcept { return sofab::detail::Wire::ArrayUnsigned; }",
+	}
+	clib := []string{
+		"static constexpr sofab::Wire wire() noexcept { return sofab::Wire::SequenceStart; }",
+		"static constexpr sofab::Wire wire() noexcept { return sofab::Wire::ArraySigned; }",
+		"static constexpr sofab::Wire wire() noexcept { return sofab::Wire::ArrayUnsigned; }",
+	}
 	for _, tc := range []struct {
-		name  string
-		cfg   map[string]any
-		fixed bool
-		gates []string
+		name      string
+		cfg       map[string]any
+		fixed     bool
+		wires     []string
+		collector string
 	}{
-		{"cpp", map[string]any{}, false, []string{
-			"if (_is.wire() != sofab::detail::Wire::SequenceStart) return;",
-			"if (_is.wire() != sofab::detail::Wire::ArraySigned) return;",
-			"if (_is.wire() != sofab::detail::Wire::ArrayUnsigned) return;",
-		}},
-		{"cpp allow_dynamic=false", map[string]any{"allow_dynamic": false}, false, []string{
-			"if (_is.wire() != sofab::detail::Wire::SequenceStart) return;",
-		}},
-		{"c-cpp", nil, true, []string{
-			"if (!_is.delivered(sofab::Wire::SequenceStart)) return;",
-			"if (!_is.delivered(sofab::Wire::ArraySigned)) return;",
-			"if (!_is.delivered(sofab::Wire::ArrayUnsigned)) return;",
-		}},
-		{"c-cpp allow_dynamic=true", map[string]any{"corelib": "c-cpp", "allow_dynamic": true}, false, []string{
-			"if (!_is.delivered(sofab::Wire::SequenceStart)) return;",
-		}},
+		{"cpp", map[string]any{}, false, pure, "sofab::RowSeq _r0{srows, 2, -1, _R0{}}; sofab::read(_is, _r0);"},
+		{"cpp allow_dynamic=false", map[string]any{"allow_dynamic": false}, false, pure, "sofab::RowSeq _r0{srows, 2, -1, _R0{}}; sofab::read(_is, _r0);"},
+		{"c-cpp", nil, true, clib, "static sofab::FixedRowSeq<sofab::InlineVector<sofab::InlineVector<sofab::FixedString<8>, 3>, 2>, _R0> _r0; _is.readSequence(_r0, srows);"},
+		{"c-cpp allow_dynamic=true", map[string]any{"corelib": "c-cpp", "allow_dynamic": true}, false, clib, "static sofab::RowSeq<std::vector<std::vector<std::string>>, _R0, 2> _r0; srows.reserve(2); _is.readSequence(_r0, srows);"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			var h string
@@ -3294,28 +3290,21 @@ func TestCppRowSkipPrecedesIndexBound(t *testing.T) {
 			if err != nil {
 				t.Fatalf("generate: %v", err)
 			}
-			for _, g := range tc.gates {
-				if !strings.Contains(h, g) {
-					t.Errorf("row collector lacks the §7.3 gate %q:\n%s", g, h)
+			for _, w := range append(tc.wires, tc.collector) {
+				if !strings.Contains(h, w) {
+					t.Errorf("row read missing %q:\n%s", w, h)
 				}
 			}
-			// In every collector the gate is the first statement and the index
-			// bound the second -- nothing may touch the id or the destination
-			// before the element's wire type has been decided.
-			n := 0
-			for _, b := range strings.Split(h, "noexcept override {\n")[1:] {
-				lines := strings.SplitN(b, "\n", 3)
-				if len(lines) < 2 || !strings.Contains(lines[1], "static_cast<std::size_t>(_id) >= ") {
-					continue
+			// The rule itself is the corelib's: no generated collector, no
+			// generated index bound, no generated gap fill.
+			for _, notWant := range []string{
+				"struct _S0",
+				"static_cast<std::size_t>(_id) >= ",
+				"out->emplace_back()",
+			} {
+				if strings.Contains(h, notWant) {
+					t.Errorf("the row collector must come from the corelib, found %q:\n%s", notWant, h)
 				}
-				n++
-				first := strings.TrimSpace(lines[0])
-				if !strings.HasPrefix(first, "if (_is.wire() != ") && !strings.HasPrefix(first, "if (!_is.delivered(") {
-					t.Errorf("row collector applies its index bound before the §7.3 gate (got %q first)", first)
-				}
-			}
-			if n == 0 {
-				t.Errorf("no row collector with the index bound found:\n%s", h)
 			}
 		})
 	}
