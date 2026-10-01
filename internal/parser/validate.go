@@ -9,6 +9,8 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+
+	"github.com/sofa-buffers/generator/internal/naming"
 )
 
 // Error is a single, located validation failure (PLAN §1: "a clear, located
@@ -41,11 +43,6 @@ func (es Errors) Error() string {
 	}
 	return b.String()
 }
-
-// nameRe is the spelling of every user-chosen name. It keeps "__" and a
-// trailing "_" out of names so that targets can use them as separators and
-// escapes no name can produce (docs/ARCHITECTURE.md §8, "Naming").
-var nameRe = regexp.MustCompile(`^[A-Za-z][A-Za-z0-9]*(_[A-Za-z0-9]+)*$`)
 
 // numericTypes are the scalar wire primitives usable as array elements too.
 var scalarRanges = map[string][2]int64{
@@ -130,7 +127,7 @@ func (v *validator) checkTopLevelNames(root map[string]any) {
 			}
 		}
 	}
-	v.checkDistinct(names, "messages and $defs, which share one namespace")
+	v.checkDistinct(names, "messages and $defs (one shared namespace)")
 }
 
 func (v *validator) validateDefs(node any, loc string) {
@@ -1269,28 +1266,10 @@ func nonEmptyDefault(typ string, d any) bool {
 // ---- generic helpers ----------------------------------------------------
 
 func (v *validator) checkName(name, loc string) {
-	if !nameRe.MatchString(name) {
+	if !naming.NameRe.MatchString(name) {
 		v.add(loc, "name %q must match %s: letters and digits, starting with a letter, "+
-			"with single underscores between them (no \"__\", no trailing \"_\")", name, nameRe)
+			"with single underscores between them (no \"__\", no trailing \"_\")", name, naming.NameRe)
 	}
-}
-
-// foldName is what a name keeps once case and underscores are dropped. Every
-// target derives its identifiers from a name by changing case and adding or
-// removing underscores (`foo_bar` and `fooBar` are both FooBar, FOO_BAR and
-// FOOBAR tell `a` from `A` only by chance), so two names are told apart in
-// every target exactly when their folds differ.
-func foldName(name string) string {
-	var b strings.Builder
-	for _, r := range name {
-		switch {
-		case r >= 'A' && r <= 'Z':
-			b.WriteRune(r + 'a' - 'A')
-		case r != '_':
-			b.WriteRune(r)
-		}
-	}
-	return b.String()
 }
 
 // namedAt is a name and the location of the element it names.
@@ -1312,7 +1291,7 @@ func (v *validator) checkDistinct(names []namedAt, scope string) {
 	sort.Slice(names, func(i, j int) bool { return names[i].loc < names[j].loc })
 	first := map[string]namedAt{}
 	for _, n := range names {
-		f := foldName(n.name)
+		f := naming.Fold(n.name)
 		if prev, dup := first[f]; dup {
 			v.add(n.loc, "%q and %q (at %s) differ only in case or underscores; names in %s must differ in more than that",
 				n.name, prev.name, prev.loc, scope)

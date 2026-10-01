@@ -2,12 +2,22 @@ package naming
 
 import (
 	"math/rand"
-	"regexp"
 	"strings"
 	"testing"
 )
 
-var nameRe = regexp.MustCompile(`^[A-Za-z][A-Za-z0-9]*(_[A-Za-z0-9]+)*$`)
+func TestIsDeviceStem(t *testing.T) {
+	for _, s := range []string{"con", "CON", "Prn", "aux", "nul", "com0", "COM9", "lpt1", "Lpt5"} {
+		if !IsDeviceStem(s) {
+			t.Errorf("IsDeviceStem(%q) = false, want true", s)
+		}
+	}
+	for _, s := range []string{"conn", "co", "com", "com10", "lpt", "com_1", "nul_", "aux1", "console", "m"} {
+		if IsDeviceStem(s) {
+			t.Errorf("IsDeviceStem(%q) = true, want false", s)
+		}
+	}
+}
 
 func TestPascal(t *testing.T) {
 	for in, want := range map[string]string{
@@ -80,7 +90,7 @@ func randomScope(r *rand.Rand, n int) []string {
 	var out []string
 	for i := 0; i < n*3 && len(out) < n; i++ {
 		name := randomName(r)
-		if !nameRe.MatchString(name) || seen[Fold(name)] {
+		if !NameRe.MatchString(name) || seen[Fold(name)] {
 			continue
 		}
 		seen[Fold(name)] = true
@@ -150,7 +160,7 @@ func TestPascalStaysInItsChannel(t *testing.T) {
 	r := rand.New(rand.NewSource(1))
 	for i := 0; i < 20000; i++ {
 		name := randomName(r)
-		if !nameRe.MatchString(name) {
+		if !NameRe.MatchString(name) {
 			continue
 		}
 		p := Pascal(name)

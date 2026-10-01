@@ -24,7 +24,30 @@
 // distinct identifiers by construction.
 package naming
 
-import "strings"
+import (
+	"regexp"
+	"strings"
+)
+
+// NameRe is the spelling of every user-chosen name (the validator's first
+// naming rule): letters and digits, starting with a letter, with single
+// underscores between them — no "__", no trailing "_".
+var NameRe = regexp.MustCompile(`^[A-Za-z][A-Za-z0-9]*(_[A-Za-z0-9]+)*$`)
+
+// IsDeviceStem reports whether a file whose name starts with stem (up to its
+// first ".") cannot exist on Windows: CON, PRN, AUX, NUL, COM0-9 and LPT0-9
+// are reserved device names there whatever the extension and the case. A
+// backend that names a file after a schema name escapes such a stem in its
+// file channel.
+func IsDeviceStem(stem string) bool {
+	s := strings.ToLower(stem)
+	switch s {
+	case "con", "prn", "aux", "nul":
+		return true
+	}
+	return len(s) == 4 && (strings.HasPrefix(s, "com") || strings.HasPrefix(s, "lpt")) &&
+		s[3] >= '0' && s[3] <= '9'
+}
 
 // Fold is what a name keeps once case and underscores are dropped. Two names
 // of one scope never share a fold (the validator's second naming rule).
