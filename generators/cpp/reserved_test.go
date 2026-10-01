@@ -229,6 +229,34 @@ func TestReservedNamesAreMangled(t *testing.T) {
 	}
 }
 
+// TestNamespaceConfig: a configured namespace the generated code cannot live
+// in is a configuration error, raised before any schema name is looked at. A
+// component sofab puts the types into the corelib's namespace (a message
+// `OStream` redefines sofab::OStream); sofabgen meets the RawArray helper's;
+// std, or either of them further down, makes the qualified `std::` /
+// `sofab::` references find the configured namespace. Any other namespace is
+// accepted.
+func TestNamespaceConfig(t *testing.T) {
+	src := "version: 1\nmessages:\n  OStream:\n    payload:\n" +
+		"      e: { id: 0, type: array, items: { type: enum, count: 2, enum: { a: 0, b: 1 } } }\n"
+	for _, ns := range []string{
+		"sofab", "sofabgen", "std", "a::sofab", "sofab::a", "a::std", "a::sofabgen",
+		"class", "NULL", "SOFAB_X", "a.b", "a::", "::a", "1a", "a__b", "_X",
+	} {
+		_, err := genHeader(t, src, "ostream.hpp", map[string]any{"namespace": ns})
+		if err == nil {
+			t.Errorf("namespace %q: accepted", ns)
+		} else if !strings.Contains(err.Error(), fmt.Sprintf("config namespace %q", ns)) {
+			t.Errorf("namespace %q: the error does not name the config: %v", ns, err)
+		}
+	}
+	for _, ns := range []string{"message", "sofabuffers", "myproj::msg", "Message", "Sofab", "sofab_x", "a::OStream"} {
+		if _, err := genHeader(t, src, "ostream.hpp", map[string]any{"namespace": ns}); err != nil {
+			t.Errorf("namespace %q: refused: %v", ns, err)
+		}
+	}
+}
+
 // TestUnionRoleAccessorsAreDistinct: options `a` and `set_a` (and has_a,
 // mutable_a) derive six accessors each; the getter of a role-prefixed option
 // takes the escape, so every accessor is spelled once.

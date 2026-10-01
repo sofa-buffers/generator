@@ -65,6 +65,9 @@ func (*Backend) Generate(s *ir.Schema, cfg map[string]any) ([]generator.File, er
 	allowDynamic := cfgBool(cfg, "allow_dynamic", !clib)
 	fixed := !allowDynamic
 	g := &gen{schema: s, ns: cfgString(cfg, "namespace", "message"), banner: cfgString(cfg, "tool_banner", "sofabgen"), license: generator.LicenseID(cfg), clib: clib, fixed: fixed, allowDynamic: allowDynamic, size: generator.NewSizePolicy(cfg)}
+	if err := checkNamespace(g.ns); err != nil {
+		return nil, err
+	}
 	// Names first: checkBounded keys every owner by its type identifier, and
 	// names that owner in its error.
 	g.assignNames(s)
