@@ -30,7 +30,10 @@ sofabgen --lang go --in examples/messages/realworld/vehicle_telemetry.yaml --out
   itself `$ref`s `GeoPoint` and `Timestamp` from `common.yaml`; using
   `DiagnosticCode` from the message flattens the whole chain automatically.
 - **A library file with no messages** — `common.yaml`/`diagnostics.yaml` contain
-  only `$defs`; they are never generated on their own, only merged where used.
+  only `$defs`; generating `vehicle_telemetry.yaml` imports what it uses.
+  Generating the whole folder (`--in examples/messages/realworld`) treats its
+  three files as one schema and writes the same output: every definition the
+  message imports is the library's own, so each is one type.
 - **Realistic field design** — nested structs, an enum with a `default`, a
   `[Flags]`-style bitfield, a fixed array (`tire_kpa[4]`), `unit` annotations,
   a `default` (`battery_pct = 100`), and a `deprecated` field that older readers

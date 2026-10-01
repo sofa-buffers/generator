@@ -4,8 +4,34 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
+
+// An error inside a definition imported by cross-file $ref names the file it
+// is written in, not a #/$defs pointer the user's file does not have.
+func TestRunImportedErrorNamesItsFile(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(dir, "lib"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	files := map[string]string{
+		"main.yaml":  "version: 1\nmessages:\n  m:\n    payload:\n      a: { id: 0, type: struct, fields: { $ref: 'lib/a.yaml#/$defs/struct/P' } }\n",
+		"lib/a.yaml": "version: 1\n$defs:\n  struct:\n    P: { x: { id: 0, type: u8, default: 999 } }\n",
+	}
+	for name, content := range files {
+		if err := os.WriteFile(filepath.Join(dir, name), []byte(content), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	_, err := Run(Options{DefPath: filepath.Join(dir, "main.yaml")})
+	if err == nil {
+		t.Fatal("want a validation error")
+	}
+	if !strings.Contains(err.Error(), "lib/a.yaml#/$defs/struct/P/x") || strings.Contains(err.Error(), "- #/$defs/struct/P") {
+		t.Fatalf("error is not located in lib/a.yaml:\n%v", err)
+	}
+}
 
 func TestRunExampleBuildsIR(t *testing.T) {
 	def := filepath.Join("..", "..", "examples", "messages", "example.yaml")

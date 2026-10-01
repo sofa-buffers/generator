@@ -26,7 +26,42 @@ import (
 // nodes are preserved so the generator can emit a shared-type graph (§3.4).
 type Document struct {
 	Root any
-	Path string // source file path, for error messages
+	Path string // source file path (or directory, for a merged one), for error messages
+
+	// Origins maps the pointer of a top-level element that is NOT written in
+	// Path itself ("#/$defs/<cat>/<name>" imported by a cross-file $ref, or
+	// any element of a document merged from a directory) to where it is
+	// written. Locate uses it to place an error in the user's real file.
+	Origins map[string]Source
+
+	base string // directory Origins' files are displayed relative to
+	self string // absolute path of the document's own file ("" when merged)
+}
+
+// Locate maps a location in this document ("#/$defs/struct/p/x") to the file
+// and pointer it is written at ("common.yaml#/$defs/struct/p/x"). A location
+// in the document's own file comes back unchanged: the caller prefixes Path.
+func (d *Document) Locate(loc string) string {
+	best := ""
+	for p := range d.Origins {
+		if (loc == p || strings.HasPrefix(loc, p+"/")) && len(p) > len(best) {
+			best = p
+		}
+	}
+	if best == "" {
+		return loc
+	}
+	src := d.Origins[best]
+	return displayFile(d.base, d.self, src.File) + src.Ptr + strings.TrimPrefix(loc, best)
+}
+
+// LocateErrors rewrites every location of errs with Locate.
+func (d *Document) LocateErrors(errs Errors) Errors {
+	out := make(Errors, len(errs))
+	for i, e := range errs {
+		out[i] = Error{Loc: d.Locate(e.Loc), Msg: e.Msg}
+	}
+	return out
 }
 
 // Load reads and decodes a YAML or JSON definition file. YAML is a superset of

@@ -4,7 +4,7 @@
 // vary between machines, and whether this run may spawn the target's
 // formatter). No per-option flags.
 //
-//	sofabgen --config <file> --lang <target> [--in <dir>] [--out <dir>]
+//	sofabgen --config <file> --lang <target> [--in <file|dir>] [--out <dir>]
 //	         [--format off|auto|require]
 //
 // In M0 no language backend is wired yet, so a run validates the definition(s),
@@ -21,12 +21,12 @@ import (
 	"os"
 	"path/filepath"
 	"runtime/debug"
-	"sort"
 	"strings"
 
 	"github.com/sofa-buffers/generator/internal/config"
 	"github.com/sofa-buffers/generator/internal/generator"
 	"github.com/sofa-buffers/generator/internal/ir"
+	"github.com/sofa-buffers/generator/internal/parser"
 	"github.com/sofa-buffers/generator/internal/pipeline"
 
 	// Language backends self-register via init(). The core never imports these;
@@ -77,16 +77,16 @@ func run(args []string, stdout, stderr *os.File) int {
 	var (
 		cfgPath      = fs.String("config", "", "path to the YAML/JSON config (§7); carries all options")
 		lang         = fs.String("lang", "", "target backend: "+strings.Join(config.KnownTargets(), "|"))
-		inDir        = fs.String("in", "", "input definition file or folder (overrides generic.input_dir)")
+		inDir        = fs.String("in", "", "input definition file, or folder of them generated as one schema (overrides generic.input_dir)")
 		outDir       = fs.String("out", "", "output folder (overrides generic.output_dir)")
 		printDefault = fs.Bool("print-defaults", false, "print the effective resolved config for --lang and exit")
-		dumpIR       = fs.Bool("dump-ir", false, "print the built IR as JSON for each input and exit (no codegen)")
+		dumpIR       = fs.Bool("dump-ir", false, "print the built IR as JSON and exit (no codegen)")
 		formatFlag   = fs.String("format", "", "run the target's canonical formatter over the generated files: off|auto|require (default off, or generic.run_formatter)")
 		showVersion  = fs.Bool("version", false, "print version and exit")
 	)
 	fs.Usage = func() {
 		fmt.Fprintf(stderr, "sofabgen %s — SofaBuffers code generator\n\n", ver)
-		fmt.Fprintf(stderr, "usage: sofabgen --config <file> --lang <target> [--in <dir>] [--out <dir>] [--format off|auto|require]\n\n")
+		fmt.Fprintf(stderr, "usage: sofabgen --config <file> --lang <target> [--in <file|dir>] [--out <dir>] [--format off|auto|require]\n\n")
 		fs.PrintDefaults()
 	}
 	if err := fs.Parse(args); err != nil {
@@ -146,13 +146,8 @@ func run(args []string, stdout, stderr *os.File) int {
 		fmt.Fprintln(stderr, "error: no input given (set --in or generic.input_dir)")
 		return 1
 	}
-	defs, err := collectDefs(input)
-	if err != nil {
+	if err := checkInput(input); err != nil {
 		fmt.Fprintf(stderr, "error: %v\n", err)
-		return 1
-	}
-	if len(defs) == 0 {
-		fmt.Fprintf(stderr, "error: no definition files found under %q\n", input)
 		return 1
 	}
 
@@ -164,50 +159,46 @@ func run(args []string, stdout, stderr *os.File) int {
 		}
 	}
 
-	exit := 0
-	// A backend whose canonical formatter is an external program says so once
-	// per run, not once per definition file.
-	formatNoted := false
-	for _, def := range defs {
-		// --dump-ir stops after the IR (stages [1]-[4]); no backend selected.
-		runLang := *lang
-		if *dumpIR {
-			runLang = ""
-		}
-		res, err := pipeline.Run(pipeline.Options{DefPath: def, Lang: runLang, Config: cfg, OutDir: out})
-		if err != nil {
-			var nb *pipeline.NoBackendError
-			if errors.As(err, &nb) {
-				// IR built fine; just no emitter wired (M0).
-				printSummary(stdout, def, res.Schema)
-				fmt.Fprintf(stdout, "  (validated + IR built; %v)\n", nb)
-				continue
-			}
-			fmt.Fprintf(stderr, "error: %v\n", err)
-			exit = 1
-			continue
-		}
-		if *dumpIR {
-			stdout.Write(res.Schema.Dump())
-			continue
-		}
-		printSummary(stdout, def, res.Schema)
-		if len(res.Files) > 0 {
-			files, err := formatFiles(mode, *lang, out, res.Files, stderr, &formatNoted)
-			if err != nil {
-				fmt.Fprintf(stderr, "error: %v\n", err)
-				exit = 1
-				continue
-			}
-			if err := writeFiles(out, files); err != nil {
-				fmt.Fprintf(stderr, "error: %v\n", err)
-				exit = 1
-				continue
-			}
-			fmt.Fprintf(stdout, "  wrote %d file(s) to %s\n", len(files), out)
-		}
+	// One input is one schema: a file, or a directory whose definition files
+	// are merged into one (pipeline.Run), so every backend runs exactly once
+	// and no file of one definition overwrites another's.
+	// --dump-ir stops after the IR (stages [1]-[4]); no backend selected.
+	runLang := *lang
+	if *dumpIR {
+		runLang = ""
 	}
-	return exit
+	res, err := pipeline.Run(pipeline.Options{DefPath: input, Lang: runLang, Config: cfg, OutDir: out})
+	if err != nil {
+		var nb *pipeline.NoBackendError
+		if errors.As(err, &nb) {
+			// IR built fine; just no emitter wired (M0).
+			printSummary(stdout, input, res.Schema)
+			fmt.Fprintf(stdout, "  (validated + IR built; %v)\n", nb)
+			return 0
+		}
+		fmt.Fprintf(stderr, "error: %v\n", err)
+		return 1
+	}
+	if *dumpIR {
+		stdout.Write(res.Schema.Dump())
+		return 0
+	}
+	printSummary(stdout, input, res.Schema)
+	if len(res.Files) > 0 {
+		// A backend whose canonical formatter is an external program says so once.
+		formatNoted := false
+		files, err := formatFiles(mode, *lang, out, res.Files, stderr, &formatNoted)
+		if err != nil {
+			fmt.Fprintf(stderr, "error: %v\n", err)
+			return 1
+		}
+		if err := writeFiles(out, files); err != nil {
+			fmt.Fprintf(stderr, "error: %v\n", err)
+			return 1
+		}
+		fmt.Fprintf(stdout, "  wrote %d file(s) to %s\n", len(files), out)
+	}
+	return 0
 }
 
 func knownTarget(lang string) bool {
@@ -219,31 +210,24 @@ func knownTarget(lang string) bool {
 	return false
 }
 
-// collectDefs returns the definition files for a file-or-directory input.
-func collectDefs(input string) ([]string, error) {
+// checkInput reports an input that is neither a file nor a directory holding
+// at least one definition file.
+func checkInput(input string) error {
 	info, err := os.Stat(input)
 	if err != nil {
-		return nil, err
+		return err
 	}
 	if !info.IsDir() {
-		return []string{input}, nil
+		return nil
 	}
-	var defs []string
-	entries, err := os.ReadDir(input)
+	defs, err := parser.DefinitionFiles(input)
 	if err != nil {
-		return nil, err
+		return err
 	}
-	for _, e := range entries {
-		if e.IsDir() {
-			continue
-		}
-		switch strings.ToLower(filepath.Ext(e.Name())) {
-		case ".yaml", ".yml", ".json":
-			defs = append(defs, filepath.Join(input, e.Name()))
-		}
+	if len(defs) == 0 {
+		return fmt.Errorf("no definition files found under %q", input)
 	}
-	sort.Strings(defs)
-	return defs, nil
+	return nil
 }
 
 // formatMode is the value of the --format switch (and of the
