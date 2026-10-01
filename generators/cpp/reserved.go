@@ -1,6 +1,8 @@
 package cpp
 
 import (
+	"fmt"
+	"regexp"
 	"strings"
 
 	"github.com/sofa-buffers/generator/internal/ir"
@@ -161,6 +163,45 @@ func (g *gen) typeEscape(id string) string {
 		return id + "_"
 	}
 	return id
+}
+
+// qualifierNamespaces are the namespaces the generated code names with a
+// qualifier -- std::, the corelib's sofab:: and the backend's own sofabgen::
+// (RawArray). A configured namespace with one of them as a component either
+// puts the generated types into the corelib's namespace, where a message
+// `OStream` redefines sofab::OStream, or makes `sofab::...` / `std::...` find
+// the configured namespace instead.
+var qualifierNamespaces = map[string]bool{"std": true, "sofab": true, "sofabgen": true}
+
+// cppIdent is the spelling of a C++ identifier.
+var cppIdent = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
+
+// checkNamespace refuses a configured namespace the generated code cannot be
+// wrapped in. It is a configuration error, never a schema one: every schema
+// generates under the default namespace and under any namespace this accepts.
+// Each "::"-separated component must be a C++ identifier that is not reserved
+// to the implementation ("__", "_" + upper case), not a keyword, not a macro
+// of the headers the code includes, and not one of qualifierNamespaces.
+func checkNamespace(ns string) error {
+	for _, p := range strings.Split(ns, "::") {
+		var why string
+		switch {
+		case !cppIdent.MatchString(p):
+			why = "is not a C++ identifier"
+		case strings.Contains(p, "__") || (len(p) > 1 && p[0] == '_' && p[1] >= 'A' && p[1] <= 'Z'):
+			why = "is reserved to the C++ implementation"
+		case cppKeywords[p]:
+			why = "is a C++ keyword"
+		case isMacro(p):
+			why = "is a macro of the headers the generated code includes"
+		case qualifierNamespaces[p]:
+			why = "is a namespace the generated code refers to (std, sofab, sofabgen)"
+		}
+		if why != "" {
+			return fmt.Errorf("cpp: config namespace %q: component %q %s; choose another namespace", ns, p, why)
+		}
+	}
+	return nil
 }
 
 // assignNames fills the namespace-level identifiers from the schema paths

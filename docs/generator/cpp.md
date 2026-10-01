@@ -73,6 +73,14 @@ Two things worth knowing before switching it on under `corelib: cpp`:
 
 Wraps every generated type; the default is `message`. `generic.namespace` sets
 it for every target that has one, and this key overrides that for C++ alone.
+Nested namespaces are written with `::` (`myproj::msg`).
+
+Each `::`-separated component must be a C++ identifier that is not a keyword,
+not reserved to the implementation (containing `__`, or `_` followed by an
+upper-case letter), not a macro of the included headers, and not `std`,
+`sofab` or `sofabgen` — the namespaces the generated code refers to by name.
+Any other namespace is refused with a configuration error before generation
+starts; every valid schema generates under every namespace that is accepted.
 
 ## Names
 
