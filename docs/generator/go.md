@@ -60,7 +60,7 @@ and `string` is `String_`. Those names are:
   `Encode`, `EncodeTo`.
 
 Only the Go field changes: the wire is keyed by the field id, and the `json` tag
-keeps the schema name. The list lives in `generators/golang/reserved.go`.
+keeps the schema name.
 
 ## Type, function and file names
 
@@ -76,7 +76,7 @@ one package, so each name is built so that no other can spell it:
 | enum constant, bitfield flag | the type, `_`, the name | `Color_Red`, `Flags_On` |
 | union option id | the option's path, `__ID` | `M_Shape_Pt__ID` |
 | `$defs` union used with several `default_id`s | the union, `__Default`, the option | `Shape__DefaultPt` |
-| message file | the message name in lower case, underscores dropped | message `vehicle_state` is `vehiclestate.go` |
+| message file | the message name in lower case, underscores dropped; a Windows device name (`con`, `prn`, `aux`, `nul`, `com0`–`com9`, `lpt0`–`lpt9`) gets a trailing `_` | message `vehicle_state` is `vehiclestate.go`, message `com_1` is `com1_.go` |
 
 A type that would be spelled like one of the package's own exported constants
 (`MaxDynArrayCount`, `MaxDynStringLen`, `MaxDynBlobLen`) gets a trailing
@@ -84,9 +84,9 @@ underscore: a message `max_dyn_string_len` is `MaxDynStringLen_`. The names
 derived from it keep the plain spelling (`MaxDynStringLen__New`).
 
 The named types live in `sofab_types.go` and the package-wide decode support in
-`sofab_visitor.go`. A message file never contains an underscore, so it can
-neither take one of those names nor end in `_test` or a `_<GOOS>`/`_<GOARCH>`
-suffix that would make the Go tool skip it.
+`sofab_visitor.go`. A message file contains no underscore except the trailing
+one of a device name, so it can neither take one of those names nor end in
+`_test` or a `_<GOOS>`/`_<GOARCH>` suffix that would make the Go tool skip it.
 
 ## Unions
 

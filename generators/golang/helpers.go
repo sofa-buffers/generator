@@ -59,7 +59,19 @@ func msgIdent(m *ir.Message) string { return escapeType(msgBase(m)) }
 // "_". So it can end neither in `_test` nor in a `_<GOOS>`/`_<GOARCH>` build
 // constraint, and it never meets the package's fixed files, which all carry one
 // (sofab_types.go, sofab_visitor.go).
-func msgFile(m *ir.Message) string { return naming.Lower([]string{m.Name}) + ".go" }
+//
+// A fold that is a Windows device name (con, nul, com1, …) cannot be a file on
+// Windows and is refused by the Go module zip, so it takes a trailing "_":
+// con_.go. No other message file has a "_", so the suffix is free; the fixed
+// files start with "sofab_", which no device name does; and a trailing "_"
+// leaves an empty last segment, which is neither `test` nor a GOOS/GOARCH.
+func msgFile(m *ir.Message) string {
+	stem := naming.Lower([]string{m.Name})
+	if naming.IsDeviceStem(stem) {
+		stem += "_"
+	}
+	return stem + ".go"
+}
 
 // goType is the Go field type for a field.
 func (g *gen) goType(f *ir.Field) string {
