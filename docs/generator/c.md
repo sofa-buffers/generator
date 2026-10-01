@@ -53,11 +53,26 @@ colliding:
 | element holder of the array field `arr` (strings, blobs, structs, unions, rows) | `message_m___arr__elems_t` |
 | include guard, size | `MESSAGE_M__H`, `MESSAGE_M__MAX_SIZE` |
 | files | `m_sofab.h`, `m_sofab.c` |
+| shared `$defs` types | `sofab-defs.h`, `sofab-defs.c` (guard `MESSAGE__DEFS__H`) |
 
 The file name is the message name in lower case plus `_sofab`, so a message
 named like a header the build includes (`stdint`, `string`) cannot shadow it.
 Names that start with `_` (`_message_m__fields`, …) are the generator's own and
 are not meant to be used.
+
+## Files
+
+Each message gets a header and a source, `<message>_sofab.h` and
+`<message>_sofab.c`, holding the message and the types it declares inline.
+
+The `$defs` types the messages use — and the types declared inside them — are
+defined once, in `sofab-defs.h` and `sofab-defs.c`, however many messages use
+them. A message header that uses one includes `sofab-defs.h`, so including the
+message header is still all a caller needs. Add `sofab-defs.c` to the build
+beside the message sources: it holds the descriptors of the shared types. A
+schema whose messages use no `$defs` type gets neither file.
+
+The two file names are fixed, so generate each schema into its own directory.
 
 A type name that the prefix makes equal to a typedef of the C library or the
 corelib gets a trailing underscore: with `symbol_prefix: sofab_`, a message

@@ -1,0 +1,44 @@
+# $defs types shared by several messages: each must be defined once, however
+# many messages use it -- a target that writes a file per message must not
+# define it in each. Covers a plain struct and enum field in two messages, a
+# $defs union split by default_id with both variants in both messages, a
+# bitfield, a $defs struct that uses another $defs struct, and a $defs struct
+# as a plain field in one message and an array element in another.
+version: 1
+$defs:
+  struct:
+    point:
+      x: { id: 0, type: i32 }
+      c: { id: 1, type: enum, enum: { $ref: '#/$defs/enum/color' } }
+    line:
+      a:    { id: 0, type: struct, fields: { $ref: '#/$defs/struct/point' } }
+      tags: { id: 1, type: array, items: { type: string, maxlen: 4, count: 2 } }
+  enum:
+    color: { red: 0, green: 1 }
+  bitfield:
+    flags: { on: { pos: 0 }, off: { pos: 1 } }
+  union:
+    shape:
+      num: { id: 0, type: u8 }
+      pt:  { id: 1, type: struct, fields: { $ref: '#/$defs/struct/point' } }
+messages:
+  first:
+    payload:
+      p:  { id: 0, type: struct, fields: { $ref: '#/$defs/struct/point' } }
+      c:  { id: 1, type: enum, enum: { $ref: '#/$defs/enum/color' } }
+      l:  { id: 2, type: struct, fields: { $ref: '#/$defs/struct/line' } }
+      s:  { id: 3, type: union, default_id: 0, oneof: { $ref: '#/$defs/union/shape' } }
+      s2: { id: 4, type: union, default_id: 1, oneof: { $ref: '#/$defs/union/shape' } }
+      f:  { id: 5, type: bitfield, bits: { $ref: '#/$defs/bitfield/flags' } }
+  second:
+    payload:
+      ps:  { id: 0, type: array, items: { type: struct, count: 3, fields: { $ref: '#/$defs/struct/point' } } }
+      c:   { id: 1, type: enum, enum: { $ref: '#/$defs/enum/color' } }
+      l:   { id: 2, type: struct, fields: { $ref: '#/$defs/struct/line' } }
+      s:   { id: 3, type: union, default_id: 1, oneof: { $ref: '#/$defs/union/shape' } }
+      s2:  { id: 4, type: union, default_id: 0, oneof: { $ref: '#/$defs/union/shape' } }
+      f:   { id: 5, type: bitfield, bits: { $ref: '#/$defs/bitfield/flags' } }
+      own: { id: 6, type: struct, fields: { z: { id: 0, type: u8 } } }
+  third:
+    payload:
+      x: { id: 0, type: u8 }

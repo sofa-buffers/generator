@@ -29,7 +29,10 @@ Corner-case SofaBuffers definitions, exercised hermetically by `tests/matrix`
   generator used to derive, which every target must now build — the wider
   name-collision schema is `tests/conformance/lib/names.yaml`),
   large/non-contiguous field ids, metadata
-  (`deprecated`/`unit`/`description`), and `$ref` reuse.
+  (`deprecated`/`unit`/`description`), and `$ref` reuse — within one message
+  (`multi_ref.yaml`) and across messages (`shared_defs.yaml`: every `$defs`
+  kind used by two messages, which a target writing a file per message must
+  still define once).
 - **`invalid/`** — definitions that **must be rejected** by the hard gate
   (duplicate ids, out-of-range defaults, enum/union default mismatch, bitfield
   pos collision, blob/string default over `maxlen`, oversize/negative u64,

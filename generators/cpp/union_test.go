@@ -448,7 +448,8 @@ messages:
       a: { id: 0, type: union, default_id: 1, oneof: { $ref: "#/$defs/union/Pick" } }
       b: { id: 1, type: union, oneof: { $ref: "#/$defs/union/Pick" } }
 `
-	h := unionFiles(t, src, nil)["m.hpp"]
+	files := unionFiles(t, src, nil)
+	h := files["sofab-defs.hpp"] + files["m.hpp"]
 	for _, want := range []string{
 		"struct Pick_default_T : sofab::Message {",
 		"struct Pick_default_N : sofab::Message {",

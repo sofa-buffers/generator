@@ -208,7 +208,7 @@ messages:
       a: { id: 0, type: union, default_id: 1, oneof: { $ref: "#/$defs/union/Pick" } }
       b: { id: 1, type: union, oneof: { $ref: "#/$defs/union/Pick" } }
 `)
-	h, c := files["m_sofab.h"], files["m_sofab.c"]
+	h, c := files["sofab-defs.h"], files["sofab-defs.c"]
 	for _, want := range []string{
 		"} message_Pick__default_t_t;",
 		"} message_Pick__default_n_t;",

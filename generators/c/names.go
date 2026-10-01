@@ -103,3 +103,14 @@ func defaultsSym(base string) string { return private(base, "defaults") }
 // device, `con_sofab.h` is a file).
 func headerFile(m *ir.Message) string { return strings.ToLower(m.Name) + "_sofab.h" }
 func sourceFile(m *ir.Message) string { return strings.ToLower(m.Name) + "_sofab.c" }
+
+// defsHeaderFile and defsSourceFile are the shared $defs files: every $defs
+// type the messages use is defined there once, whichever messages use it. A
+// message's files always end in "_sofab.h"/"_sofab.c" and a schema name holds
+// no "-", so no message's file can be spelled like them; no header the build
+// includes by name is (the corelib's live under sofab/, the harness's is
+// sofab_test_json.h), and neither stem is a Windows device name.
+const (
+	defsHeaderFile = "sofab-defs.h"
+	defsSourceFile = "sofab-defs.c"
+)

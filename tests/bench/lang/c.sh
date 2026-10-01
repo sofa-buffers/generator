@@ -101,7 +101,9 @@ bench_size() {
     local cc="$1" size_tool="$2" flags="$3" gen="$4" corelib="$5" work="$6"
     local build="$work/c-fp" hdr
     rm -rf "$build" && mkdir -p "$build" || return 1
-    hdr="$(basename "$(find "$gen" -name '*.h' | head -1)")"
+    # The message's header, not the shared $defs one (sofab-defs.h) beside it;
+    # the loop below compiles every generated source, sofab-defs.c included.
+    hdr="$(basename "$(find "$gen" -name '*.h' ! -name 'sofab-defs.h' | head -1)")"
 
     cat > "$build/footprint_root.c" <<EOF
 #include "$hdr"
