@@ -38,22 +38,29 @@ type unionOpt struct {
 	isD     bool   // the union's default option (default_id)
 }
 
-// optIdent renders the option `name` of a union with the options `opts` as its
-// tagged-union field. A Zig container's fields and declarations share one
-// namespace, and the union declares, besides its fixed members (unionDecls and
-// the struct list zigIdent reads), two members per option: `<opt>_id` and
-// `<opt>Mut`. An option spelled like any of them -- `init`, or `a_id` beside an
-// option `a`, or `aMut` beside it -- takes the trailing `_` of a declaration
-// clash. Options are distinct, no option ends with `_` and no derived member
-// does either, so every field and member of the union stays distinct.
-func optIdent(opts []*ir.Field, name string) string {
-	if unionDecls[name] {
+// optIdent renders the option `name` of a union as its tagged-union field. A
+// Zig container's fields and declarations share one namespace, and the union
+// declares, besides its fixed members (unionDecls), two members per option:
+// `<opt>_id` and `<opt>Mut`. The escape is decided by the option's own spelling
+// alone, never by which other options exist: an option that has the SHAPE of a
+// union member -- it ends in `_id`, ends in `Mut`, or is a fixed declaration --
+// takes the trailing `_` unconditionally; any other option is zigIdent's (its
+// spelling, `@"kw"` for a keyword, `<name>_` for a struct declaration name).
+//
+// Injective by construction. Options are distinct and match naming.NameRe, so
+// none ends with `_`:
+//   - field vs field: an escaped field is `<name>_`, which is injective and
+//     ends with `_`; a plain field never does; a quoted keyword is its own name.
+//   - field vs member: every member ends in `_id` or `Mut` or is a fixed
+//     declaration, none of which ends with `_`. A plain or quoted field has
+//     none of those shapes (that is the condition, and no keyword or zigDecls
+//     name has them), and an escaped one ends with `_`.
+//   - member vs member: `<a>_id` and `<b>Mut` differ in their suffix, two
+//     options never share a fold so their accessors differ, and no fixed
+//     declaration ends in `_id` or `Mut`.
+func optIdent(name string) string {
+	if unionDecls[name] || strings.HasSuffix(name, "_id") || strings.HasSuffix(name, "Mut") {
 		return name + "_"
-	}
-	for _, o := range opts {
-		if name == optConst(o.Name) || name == optMut(o.Name) {
-			return name + "_"
-		}
 	}
 	return zigIdent(name)
 }
@@ -77,7 +84,7 @@ func unionOptions(nt *ir.NamedType) []*unionOpt {
 	for _, f := range nt.Fields {
 		out = append(out, &unionOpt{
 			f:       f,
-			ident:   optIdent(nt.Fields, f.Name),
+			ident:   optIdent(f.Name),
 			mut:     optMut(f.Name),
 			idConst: optConst(f.Name),
 			isD:     nt.IsDefaultOption(f),

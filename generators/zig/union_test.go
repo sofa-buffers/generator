@@ -258,6 +258,39 @@ func TestZigUnionJSON(t *testing.T) {
 		`o.arrMut().*.set(t0[0..n0]);`)
 }
 
+// An option's field depends on its own spelling only: adding options never
+// renames another one. `a_id` and `bMut` have the shape of a derived member and
+// take the trailing `_` whether or not options `a` and `b` exist.
+func TestZigUnionOptionSpellingIsShapeBased(t *testing.T) {
+	fieldsOf := func(oneof string) string {
+		t.Helper()
+		src := "version: 1\nmessages:\n  m:\n    payload:\n      u: { id: 0, type: union, oneof: { " + oneof + " } }\n"
+		files, err := generateYAML(t, src, map[string]any{})
+		if err != nil {
+			t.Fatalf("oneof %q must generate: %v", oneof, err)
+		}
+		return section(t, string(files[0].Content), "pub const M_U = union(enum) {")
+	}
+	alone := fieldsOf("a_id: { id: 0, type: u8 }, bMut: { id: 1, type: u8 }, c: { id: 2, type: u8 }")
+	together := fieldsOf("a_id: { id: 0, type: u8 }, bMut: { id: 1, type: u8 }, c: { id: 2, type: u8 }, a: { id: 3, type: u8 }, b: { id: 4, type: u8 }")
+	for name, u := range map[string]string{"alone": alone, "together": together} {
+		for _, w := range []string{"a_id_: u8,", "bMut_: u8,", "c: u8,", "pub fn a_idMut(self: *M_U) *u8 {", "pub fn bMutMut(self: *M_U) *u8 {", "pub const a_id_id: sofab.Id = 0;"} {
+			if !strings.Contains(u, w) {
+				t.Errorf("%s: missing %q in:\n%s", name, w, u)
+			}
+		}
+	}
+	for name, want := range map[string]string{
+		"a_id": "a_id_", "bMut": "bMut_", "Mut": "Mut_", "init": "init_", "which": "which_",
+		"serialize": "serialize_", "isDefault": "isDefault_", "decode": "decode_", "error": `@"error"`,
+		"a": "a", "a_ID": "a_ID", "aMUT": "aMUT", "idx": "idx", "mute": "mute",
+	} {
+		if got := optIdent(name); got != want {
+			t.Errorf("optIdent(%q) = %q, want %q", name, got, want)
+		}
+	}
+}
+
 // Options that spell another option's derived member generate: the option takes
 // the trailing `_` of a declaration clash, the derived member keeps its name.
 func TestZigUnionNameClash(t *testing.T) {

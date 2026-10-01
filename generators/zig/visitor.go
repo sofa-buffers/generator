@@ -88,7 +88,7 @@ func memberAcc(fr frame, fld *ir.Field) string {
 // value are one statement, which discards the option held before.
 func leafStore(fr frame, fld *ir.Field, val string) string {
 	if fr.union {
-		return fmt.Sprintf("%s = .{ .%s = %s }", fr.path, optIdent(fr.fields, fld.Name), val)
+		return fmt.Sprintf("%s = .{ .%s = %s }", fr.path, optIdent(fld.Name), val)
 	}
 	return fr.path + "." + zigIdent(fld.Name) + " = " + val
 }
