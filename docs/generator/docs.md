@@ -39,7 +39,9 @@ A field of union type shows the same default option in its **Default** column,
 e.g. `pt (id 2)`, or `num (id 0, implicit)` when that field omits `default_id`.
 
 A union defined once under `$defs` and used by fields with different
-`default_id`s is documented once per default, as `<Name>_default_<option>` —
-the same types the code targets generate — and each field links to the one it
-uses. An array of unions links to its element's union section; every element
+`default_id`s is documented once per default, titled `<name> (default <option>)`
+— one section for each type the code targets generate — and each field links
+to the one it uses. Every named type is titled by its schema path: a `$defs`
+type by its name, an inline type by the dotted path to the field that declares
+it (`myfirstmessage.somestruct`). An array of unions links to its element's union section; every element
 the message does not carry holds that section's default option.

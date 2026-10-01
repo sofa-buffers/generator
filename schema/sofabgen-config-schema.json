@@ -138,7 +138,8 @@
         },
         "symbol_prefix": {
           "type": "string",
-          "description": "Prefix applied to every generated C symbol - struct typedefs, descriptor tables, and the encode/decode/init functions (default: message_)."
+          "pattern": "^[A-Za-z][A-Za-z0-9_]*$",
+          "description": "Prefix applied to every generated C symbol - struct typedefs, descriptor tables, and the encode/decode/init functions (default: message_). It must start with a letter: generated names stay distinct only under that assumption."
         }
       }
     },
