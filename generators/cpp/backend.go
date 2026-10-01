@@ -65,12 +65,14 @@ func (*Backend) Generate(s *ir.Schema, cfg map[string]any) ([]generator.File, er
 	allowDynamic := cfgBool(cfg, "allow_dynamic", !clib)
 	fixed := !allowDynamic
 	g := &gen{schema: s, ns: cfgString(cfg, "namespace", "message"), banner: cfgString(cfg, "tool_banner", "sofabgen"), license: generator.LicenseID(cfg), clib: clib, fixed: fixed, allowDynamic: allowDynamic, size: generator.NewSizePolicy(cfg)}
+	// Names first: checkBounded keys every owner by its type identifier, and
+	// names that owner in its error.
+	g.assignNames(s)
 	if clib {
 		if err := g.checkBounded(s); err != nil {
 			return nil, err
 		}
 	}
-	g.assignNames(s)
 	g.resolveLimits(s, cfg)
 	var files []generator.File
 	for _, m := range s.Messages {
