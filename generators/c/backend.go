@@ -11,6 +11,7 @@ package c
 
 import (
 	"fmt"
+	"regexp"
 	"sort"
 	"strings"
 
@@ -19,6 +20,10 @@ import (
 )
 
 func init() { generator.Register(&Backend{}) }
+
+// prefixRe is the spelling symbol_prefix must have, the same pattern the config
+// schema pins.
+var prefixRe = regexp.MustCompile(`^[A-Za-z][A-Za-z0-9_]*$`)
 
 // Backend implements generator.Backend for embedded C.
 type Backend struct{}
@@ -31,6 +36,11 @@ func (*Backend) Lang() string { return "c" }
 // message sources placed under generated/.
 func (*Backend) Generate(s *ir.Schema, cfg map[string]any) ([]generator.File, error) {
 	g := &gen{schema: s, prefix: cfgString(cfg, "symbol_prefix", "message_"), banner: cfgString(cfg, "tool_banner", "sofabgen"), license: generator.LicenseID(cfg), size: generator.NewSizePolicy(cfg)}
+	// The naming guarantee assumes a prefix that starts with a letter (see
+	// names.go); a config that breaks it is refused, never a schema.
+	if !prefixRe.MatchString(g.prefix) {
+		return nil, fmt.Errorf("c backend: symbol_prefix %q must start with a letter and hold only letters, digits and underscores", g.prefix)
+	}
 	if err := checkBounded(s); err != nil {
 		return nil, err
 	}

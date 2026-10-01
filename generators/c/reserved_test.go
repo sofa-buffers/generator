@@ -9,6 +9,10 @@ import (
 	"sort"
 	"strings"
 	"testing"
+
+	"github.com/sofa-buffers/generator/internal/analysis"
+	"github.com/sofa-buffers/generator/internal/model"
+	"github.com/sofa-buffers/generator/internal/parser"
 )
 
 // corelibMacroFields are fields in the corelib's macro namespace: its include
@@ -101,6 +105,34 @@ messages:
 	} {
 		if !strings.Contains(h, want) {
 			t.Errorf("header missing %q:\n%s", want, h)
+		}
+	}
+}
+
+// TestSymbolPrefixMustStartWithALetter: the naming guarantee assumes a
+// symbol_prefix that starts with a letter, so any other prefix is a config
+// error — named, and raised before anything is generated.
+func TestSymbolPrefixMustStartWithALetter(t *testing.T) {
+	doc, err := parser.Parse([]byte("version: 1\nmessages:\n  m: { payload: { x: { id: 0, type: u8 } } }\n"), "t.yaml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	s, err := model.Build(doc)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := analysis.Analyze(s); err != nil {
+		t.Fatal(err)
+	}
+	for _, p := range []string{"_x", "1x", "a-b", "a b"} {
+		_, err := (&Backend{}).Generate(s, map[string]any{"symbol_prefix": p})
+		if err == nil || !strings.Contains(err.Error(), "symbol_prefix") {
+			t.Errorf("prefix %q: want a symbol_prefix config error, got %v", p, err)
+		}
+	}
+	for _, p := range []string{"u", "message_", "sofab_", "My_Proj1_"} {
+		if _, err := (&Backend{}).Generate(s, map[string]any{"symbol_prefix": p}); err != nil {
+			t.Errorf("prefix %q: %v", p, err)
 		}
 	}
 }
