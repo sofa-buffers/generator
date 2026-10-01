@@ -94,49 +94,56 @@ func (g *gen) unionShapeOf(key string, _ *ir.NamedType) *unionShape {
 }
 
 // buildUnionShape names the members of one union class. A class's static and
-// instance members share one namespace, so the getters, has/mutable members, id
-// constants, raw-bits properties and private slots are handed out by ONE
-// memberAlloc, beside the union's own `which` / `_which` / serialize / reset:
-// the options' own names first -- so an option keeps its name -- and every
-// derived member after them, each taking a trailing `_` where it lands on a
-// name already given (`a`'s aId beside an option `aId`, `x`'s hasX beside an
-// option `hasX`). Nothing is left to refuse.
-func (g *gen) buildUnionShape(key string, nt *ir.NamedType, blocked func(string) bool) *unionShape {
+// instance members share one namespace -- the getters, has/mutable members, id
+// constants, raw-bits properties, private slots, and the union's own `which` /
+// `_which` / serialize / reset -- and every option's names are spelled from
+// that option's name alone (optionMembers), so they are distinct by
+// construction (see "member names" in reserved.go) and an option's names never
+// change with the other options of the union.
+func (g *gen) buildUnionShape(key string, nt *ir.NamedType) *unionShape {
 	u := &unionShape{typeName: g.typeName(key), nt: nt, byField: map[*ir.Field]*unionOpt{}}
-	a := newMemberAlloc(func(n string) bool { return blocked(n) || unionFixed[n] }, "_which")
 	for _, fld := range nt.Fields {
-		cp := *fld
-		switch fld.Kind {
-		case ir.KindString, ir.KindBlob, ir.KindArray:
-			cp.Default = nil
-		}
-		o := &unionOpt{f: &cp, orig: fld, prop: a.take(fld.Name), isD: nt.IsDefaultOption(fld)}
+		o := optionMembers(fld)
+		o.isD = nt.IsDefaultOption(fld)
 		u.opts = append(u.opts, o)
 		u.byField[fld] = o
 		if o.isD {
 			u.d = o
 		}
 	}
-	for _, o := range u.opts {
-		pascal := naming.Pascal(o.orig.Name)
-		o.idConst = a.take(o.orig.Name + "Id")
-		o.has = a.take("has" + pascal)
-		if unionMutable(o.f) {
-			o.mutable = a.take("mutable" + pascal)
-		}
-		if o.f.Kind == ir.KindFP32 {
-			o.bits = a.take(o.prop + "Fp32Bits")
-		}
-	}
-	// The private slots last: `_` + a name no option has, so they meet only
-	// each other and the library's private helpers.
-	for _, o := range u.opts {
-		o.slot = a.take("_" + o.prop)
-		if o.f.Kind == ir.KindFP32 {
-			o.bitSlot = a.take("_" + o.prop + "Fp32Bits")
-		}
-	}
 	return u
+}
+
+// optionMembers is one union option with every member name it gets, from its
+// own name and kind alone.
+func optionMembers(fld *ir.Field) *unionOpt {
+	cp := *fld
+	switch fld.Kind {
+	case ir.KindString, ir.KindBlob, ir.KindArray:
+		cp.Default = nil
+	}
+	shaped := optionShaped(fld.Name)
+	s := stem(fld.Name, shaped)
+	pascal := naming.Pascal(fld.Name)
+	o := &unionOpt{
+		f:       &cp,
+		orig:    fld,
+		prop:    escapeMember(fld.Name, shaped, func(n string) bool { return memberReserved(n) || unionFixed[n] }),
+		idConst: s + "Id",
+		has:     "has" + pascal,
+	}
+	if unionMutable(fld) {
+		o.mutable = "mutable" + pascal
+	}
+	o.slot = "_" + o.prop
+	if dartPrivateHelpers[o.slot] {
+		o.slot += "_"
+	}
+	if fld.Kind == ir.KindFP32 {
+		o.bits = s + "Fp32Bits"
+		o.bitSlot = "_" + o.bits
+	}
+	return o
 }
 
 // unionIsRef reports whether an option's slot holds an object (nullable, created

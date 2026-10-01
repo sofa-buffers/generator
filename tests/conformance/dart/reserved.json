@@ -29,6 +29,7 @@
   "case": 24,
   "catch": 25,
   "class": 26,
+  "col": 1,
   "const": 27,
   "continue": 28,
   "decode": 29,

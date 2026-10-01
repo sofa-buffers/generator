@@ -70,12 +70,14 @@ var unreachableTypeNames = []string{"ByteBuffer", "Codec", "File", "Int32List", 
 // reservedYAML is the collision schema: every member-reserved name as a field of
 // a message, of a nested struct and as a union option (case twins in a scope of
 // their own); every type-reserved name, and the unreachable probes, as a
-// message; and the member collisions the contract resolves by escaping instead
-// of refusing -- a field beside its neighbour's fp32 companion, a field and a
-// union option spelled like a class, a union option beside another's `<opt>Id`
-// and `has<Opt>`, a bool-array option whose slot would hide `_bools01`, and enum
-// constants spelled like a keyword and like their own class. Names are quoted:
-// `true`, `false` and `null` are YAML scalars.
+// message, holding a field spelled like itself; and the member collisions the
+// contract resolves by escaping instead of refusing -- a field beside its
+// neighbour's fp32 companion, a field and a union option starting upper-case,
+// union options shaped like another's `<opt>Id`, `has<Opt>`, `mutable<Opt>` and
+// `<opt>Fp32Bits` (and `has`, `mutable`, `id` alone), a bool-array option whose
+// slot would hide `_bools01`, and enum constants spelled like a keyword, like
+// their own class and like other classes. Names are quoted: `true`, `false` and
+// `null` are YAML scalars.
 func reservedYAML() string {
 	first, twins := reservedNames()
 	var b strings.Builder
@@ -105,6 +107,15 @@ func reservedYAML() string {
 		fmt.Sprintf(`hasX: { id: %d, type: u8 }`, k+3),
 		fmt.Sprintf(`Inner: { id: %d, type: u8 }`, k+4),
 		fmt.Sprintf(`bools01: { id: %d, type: array, items: { type: boolean, count: 4 } }`, k+5),
+		fmt.Sprintf(`has: { id: %d, type: u8 }`, k+6),
+		fmt.Sprintf(`id: { id: %d, type: u8 }`, k+7),
+		fmt.Sprintf(`mutable: { id: %d, type: u8 }`, k+8),
+		fmt.Sprintf(`y: { id: %d, type: string, maxlen: 4 }`, k+9),
+		fmt.Sprintf(`mutableY: { id: %d, type: u8 }`, k+10),
+		fmt.Sprintf(`g: { id: %d, type: fp32 }`, k+11),
+		fmt.Sprintf(`gFp32Bits: { id: %d, type: u8 }`, k+12),
+		fmt.Sprintf(`hasFoo: { id: %d, type: u8 }`, k+13),
+		fmt.Sprintf(`foo_id: { id: %d, type: u8 }`, k+14),
 	)
 	fmt.Fprintf(&b, `version: 1
 $defs:
@@ -115,6 +126,7 @@ $defs:
       x: { id: 0, type: u8 }
   enum:
     E: { "class": 0, "E": 1, "int": 2 }
+    Col: { "P": 0, "Inner": 1, "Col": 2 }
 messages:
   m:
     payload:
@@ -127,13 +139,16 @@ messages:
       M: { id: %d, type: u8 }
       P: { id: %d, type: struct, fields: { $ref: '#/$defs/struct/P' } }
       ev: { id: %d, type: enum, enum: { $ref: '#/$defs/enum/E' } }
+      col: { id: %d, type: enum, enum: { $ref: '#/$defs/enum/Col' } }
 `, fields(first, "      "), fields(twins, "      "), fields(first, "      "),
 		k, k+1, k+2, strings.Join(uopts, ", "), k+3, strings.Join(opts(twins), ", "),
-		k+4, k+5, k+6, k+7, k+8)
+		k+4, k+5, k+6, k+7, k+8, k+9)
 	types := append(reservedTypeNames(), unreachableTypeNames...)
 	sort.Strings(types)
+	// Each message also holds a field spelled like itself: its class body names
+	// its own class, which that field's member must not hide.
 	for _, n := range types {
-		fmt.Fprintf(&b, "  %q: { payload: { x: { id: 0, type: u8 } } }\n", n)
+		fmt.Fprintf(&b, "  %q: { payload: { x: { id: 0, type: u8 }, %q: { id: 1, type: u8 } } }\n", n, n)
 	}
 	return b.String()
 }
@@ -161,6 +176,7 @@ func reservedJSON() string {
 	top["M"] = 8
 	top["P"] = map[string]any{"x": 9}
 	top["ev"] = 2
+	top["col"] = 1
 	b, _ := json.MarshalIndent(top, "", "  ")
 	return string(b) + "\n"
 }
@@ -211,20 +227,28 @@ func loadSchema(t *testing.T, def string) *ir.Schema {
 
 // TestReservedNamesAreMangled: every name on the list is a member with a
 // trailing underscore -- except the members only a union has -- in the message
-// and in the nested struct; a case twin, in the struct of its own scope. A
-// capitalised one may need more than one: `String_` is also the class of the
-// message `String`.
+// and in the nested struct, and in the message spelled like it; a case twin,
+// in the struct of its own scope. A capitalised one whose type is escaped takes
+// two: `String_` is the class of the message `String`.
 func TestReservedNamesAreMangled(t *testing.T) {
 	first, twins := reservedNames()
 	out := genFor(t, writeDef(t, reservedYAML()), map[string]any{})
+	ownMessage := map[string]bool{}
+	for _, n := range append(reservedTypeNames(), unreachableTypeNames...) {
+		ownMessage[n] = true
+	}
 	check := func(names []string, classes int) {
 		for _, n := range names {
 			re := `(?m)^  int ` + regexp.QuoteMeta(n) + `_+ = 0;$`
 			if unionFixed[n] {
 				re = `(?m)^  int ` + regexp.QuoteMeta(n) + ` = 0;$`
 			}
-			if got := len(regexp.MustCompile(re).FindAllString(out, -1)); got != classes {
-				t.Errorf("field %q is an escaped member in %d of the %d classes", n, got, classes)
+			want := classes
+			if ownMessage[n] {
+				want++ // the message spelled like it holds it too
+			}
+			if got := len(regexp.MustCompile(re).FindAllString(out, -1)); got != want {
+				t.Errorf("field %q is an escaped member in %d of the %d classes", n, got, want)
 			}
 		}
 	}
@@ -256,25 +280,45 @@ func TestTypeNamesAreEscaped(t *testing.T) {
 	}
 }
 
-// TestMemberCollisionsAreEscaped: what used to be refused generates, and the
-// schema's own names keep their spelling -- the derived member, or the one that
-// would hide a class, takes the `_`.
+// TestMemberCollisionsAreEscaped: what used to be refused generates. The
+// escape falls on the name whose OWN spelling asks for it -- a field shaped
+// like a bits companion, an option shaped like an id constant or a has<X>
+// test, a member starting upper-case -- never on a derived member, so no name
+// depends on its siblings.
 func TestMemberCollisionsAreEscaped(t *testing.T) {
 	out := genFor(t, writeDef(t, reservedYAML()), map[string]any{})
 	for _, want := range []string{
-		"  int fFp32Bits = 0;",           // the field keeps its name ...
-		"  int? fFp32Bits_;",             // ... and f's companion yields
-		"  int M_ = 0;",                  // a field spelled like the class M
-		"  P P_ = P();",                  // ... and like the struct it holds
+		"  int fFp32Bits_ = 0;",          // the field shaped like a companion is escaped ...
+		"  int? fFp32Bits;",              // ... and f's companion keeps its spelling
+		"  int M_ = 0;",                  // a field starting upper-case
+		"  P P_ = P();",                  // ... also where it holds the class it is spelled like
 		"  static const int class_ = 0;", // an enum constant spelled like a keyword
 		"  static const int E_ = 1;",     // ... and like its own class
 		"  static const int int_ = 2;",
-		"  static const int aId_ = ", // `a`'s id constant beside an option aId
-		"  static const int aIdId = ",
-		"  bool get hasX_ => ", // `x`'s has<X> beside an option hasX
-		"  int get hasX => ",
-		"  int get Inner_ => ", // an option spelled like a class
-		"_bools01_",            // a slot that would hide the library's _bools01
+		"  static const int aId = ",    // `a`'s id constant ...
+		"  static const int aId_Id = ", // ... beside an option aId, escaped
+		"  bool get hasX => ",          // `x`'s has<X> ...
+		"  int get hasX_ => ",          // ... beside an option hasX, escaped
+		"  int get Inner_ => ",         // an option starting upper-case
+		"_bools01_",                    // a slot that would hide the library's _bools01
+		"  int get has_ => ",           // `has` and `mutable` alone are shaped too
+		"  static const int has_Id = ",
+		"  bool get hasHas => ",
+		"  int get mutable_ => ",
+		"  int get id => ", // `id` is not: no derived member is spelled `id`
+		"  static const int idId = ",
+		"  bool get hasId => ",
+		"  sofab.InlineString mutableY() {", // `y`'s accessor beside an option mutableY
+		"  int get mutableY_ => ",
+		"  int? get gFp32Bits => ", // `g`'s bits beside an option gFp32Bits
+		"  int get gFp32Bits_ => ",
+		"  static const int hasFoo_Id = ", // hasFoo's id is not foo_id's has<X>
+		"  bool get hasFooId => ",
+		"  static const int P = 0;",     // an enum body names only its own class:
+		"  static const int Inner = 1;", // a constant spelled like another class keeps its name
+		"  static const int Col_ = 2;",
+		"  int File_ = 0;",    // a field spelled like its own message's class ...
+		"  int Endian__ = 0;", // ... where that class is the escaped Endian_
 	} {
 		if !strings.Contains(out, want) {
 			t.Errorf("want %q", want)
@@ -321,7 +365,8 @@ func namesInTable(t *memberTable) map[string]bool {
 //     on dartMembers (or a union's own member, or private);
 //   - every OUTER name a class body uses -- an upper-case name, the `sofab`
 //     prefix, a top-level constant -- must be on the list or be a generated
-//     class, which members() keeps every member off;
+//     class, which no member can hide: every member starting upper-case is
+//     escaped (TestMemberNamesInjective);
 //   - every upper-case name the library or the harness uses unqualified must be
 //     a generated class or one typeEscape escapes a type away from.
 //

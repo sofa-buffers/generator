@@ -294,17 +294,20 @@ func TestDartI64JSONReadsAString(t *testing.T) {
 	)
 }
 
-// Two options whose derived members would meet are not an error: the option
-// keeps its own name and the derived member takes the trailing `_` -- `a`'s
-// id constant beside an option `aId`, `x`'s has<X> beside an option `hasX`.
-// The union's own members and Object's are escaped the same way.
+// An option spelled like a member derived from another option takes the
+// trailing `_`, never the derived member: `a`'s id constant is `aId` and `x`'s
+// test is `hasX` whether or not an option `aId` or `hasX` exists. The union's
+// own members and Object's are escaped the same way.
 func TestDartUnionNamesEscaped(t *testing.T) {
 	for _, tc := range []struct {
 		oneof string
 		want  []string
 	}{
-		{"{ a: { id: 0, type: u8 }, aId: { id: 1, type: u8 } }", []string{"  static const int aId_ = 0;", "  static const int aIdId = 1;", "  int get aId => "}},
-		{"{ x: { id: 0, type: u8 }, hasX: { id: 1, type: u8 } }", []string{"  bool get hasX_ => _which == xId;", "  int get hasX => _which == hasXId"}},
+		{"{ a: { id: 0, type: u8 }, aId: { id: 1, type: u8 } }", []string{"  static const int aId = 0;", "  static const int aId_Id = 1;", "  int get aId_ => ", "  int get a => "}},
+		{"{ a: { id: 0, type: u8 } }", []string{"  static const int aId = 0;"}},
+		{"{ x: { id: 0, type: u8 }, hasX: { id: 1, type: u8 } }", []string{"  bool get hasX => _which == xId;", "  int get hasX_ => _which == hasX_Id", "  bool get hasHasX => "}},
+		{"{ x: { id: 0, type: u8 } }", []string{"  bool get hasX => _which == xId;"}},
+		{"{ f: { id: 0, type: fp32 }, fFp32Bits: { id: 1, type: u8 } }", []string{"  int? get fFp32Bits => ", "  int get fFp32Bits_ => "}},
 		{"{ reset: { id: 0, type: u8 }, toString: { id: 1, type: u8 } }", []string{"  int get reset_ => ", "  int get toString_ => "}},
 	} {
 		lib := dartFiles(t, "version: 1\nmessages:\n  M:\n    payload:\n      u: { id: 0, type: union, oneof: "+tc.oneof+" }\n", map[string]any{})["message.dart"]

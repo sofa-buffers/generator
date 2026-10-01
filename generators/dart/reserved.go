@@ -1,6 +1,8 @@
 package dart
 
 import (
+	"strings"
+
 	"github.com/sofa-buffers/generator/internal/ir"
 )
 
@@ -9,8 +11,8 @@ import (
 //
 // MEMBERS. A Dart class member is in scope in the whole class body and SHADOWS
 // every outer name of the same spelling -- a type, a top-level constant, an
-// import prefix -- in every position, a type annotation included. So a member
-// may take none of:
+// import prefix -- in every position, a type annotation included, but only
+// inside that class body. So a member may take none of:
 //
 //   - a keyword or built-in identifier, or a dart:core / dart:typed_data name
 //     the class body uses (dartKeywords);
@@ -19,14 +21,15 @@ import (
 //     cannot override a method, nor runtimeType with another type;
 //   - an outer name the class body uses (dartOuterNames): the `sofab` import
 //     prefix, dart:typed_data and dart:core types, the top-level limits;
-//   - a class the module declares. That set depends on the schema, so it is
-//     not listed: members() reads it off the schema.
+//   - a generated class the body names: its own class, and the class of every
+//     struct, union or list element it holds.
 //
-// Dart has no identifier escape, so such a member takes a trailing `_` -- as
-// many as it needs to clear every name above and every member its class already
-// holds (memberAlloc). A schema name never ends with `_`, so no field is spelled
-// like an escaped one; the wire is keyed by id and the JSON key is the schema
-// name, so neither changes.
+// Dart has no identifier escape, so such a member takes a trailing `_`. Every
+// escape is decided by the member's OWN spelling (see memberNames): a name
+// never depends on which other fields, options or types the schema declares.
+// The last item is therefore not looked up: every generated class starts with
+// an upper-case letter, so every member that does takes the `_` -- a field `M`
+// is `M_` whether or not a class `M` is in reach.
 //
 // TYPES. A type identifier (naming.TypeIdent) spelled like a name the library
 // or its harness uses unqualified takes a trailing `_` (typeEscape): the
@@ -128,43 +131,133 @@ func isTypeReserved(n string) bool {
 }
 
 // dartPrivateHelpers are the library's private top-level helpers. A class body
-// calls them, so a private member -- a union option's slot is `_` + its name --
-// must not hide one.
+// calls them, so a private member -- a union option's slot is `_` + its member
+// -- must not hide one.
 var dartPrivateHelpers = map[string]bool{
 	"_f32FromBits": true, "_prefixEq": true, "_boolsEq": true, "_bools01": true,
 }
 
 // memberReserved: a name no member may take, whatever the schema.
 func memberReserved(n string) bool {
-	return dartKeywords[n] || dartMembers[n] || dartObjectMembers[n] || dartOuterNames[n] || dartPrivateHelpers[n]
+	return dartKeywords[n] || dartMembers[n] || dartObjectMembers[n] || dartOuterNames[n]
 }
 
-// memberAlloc hands out the members of ONE class body: each wanted name, with
-// as many trailing `_` as it needs to clear the reserved lists, the module's
-// classes and every member already handed out. The set is checked, so no two
-// members of a class ever meet and no member hides a class -- by construction,
-// with nothing left to refuse. Callers take the schema's own names first, so a
-// field keeps its name and a derived member (a bits companion, a has<Opt>)
-// is the one that yields.
-type memberAlloc struct {
-	blocked func(string) bool
-	taken   map[string]bool
-}
+// ---- member names -----------------------------------------------------------
+//
+// Every member a schema name gets in its class is spelled from that name ALONE:
+// the reserved lists above and the name's own shape decide, never a sibling
+// field, a sibling option or another type of the schema. Adding, removing or
+// renaming one name renames nothing else.
+//
+// For a schema name n (a struct/message field, a union option), with low(n)
+// = n with its first letter lower-cased:
+//
+//	member   n + "__"   n starts upper-case and a type spelled n is escaped
+//	                    (typeEscape: that class is n + "_", which a body may name)
+//	         n + "_"    n starts upper-case, is on a reserved list (for an
+//	                    option also unionFixed), or has a derived shape (below)
+//	         n          otherwise
+//	stem     low(n) + "_" when n has a derived shape, else low(n)
+//	bits     stem + "Fp32Bits"          (fp32 fields and options)
+//	default  "_" + member + "Default"   (destination fields with a default)
+//	id       stem + "Id"                (options)
+//	has      "has" + Pascal(n)          (options)
+//	mutable  "mutable" + Pascal(n)      (options edited in place)
+//	slot     "_" + member, plus "_" where that is a library helper (options)
+//	bitSlot  "_" + bits                 (fp32 options)
+//
+// A DERIVED SHAPE is a spelling a member derived from another name can have:
+// low(n) ends in `Fp32Bits`; for a union option also: low(n) ends in `Id`, or
+// is `has` or `mutable`, alone or followed by an upper-case letter. A struct
+// has no derived public member but the bits, so `userId` keeps its name as a
+// struct field; as a union option it is `userId_`, and an option `user` has
+// its constant `userId` whether or not that option exists.
+//
+// Why no two members of one class meet (TestMemberNamesInjective):
+//
+//   - Plain members are distinct schema names. Escaped ones end in `_` or `__`,
+//     which no schema name does, and dropping it gives the name back; `n__`
+//     is not `m_`, since then m = n + "_".
+//   - Derived members never end in `_`: they end in `Fp32Bits` or `Id`, or are
+//     `has`/`mutable` + Pascal, which has no `_`. So they meet no escaped
+//     member, and no plain one: a plain member has no derived shape, and the
+//     shape test is exactly "could be one of these spellings".
+//   - Within one channel the spellings are injective: low and Pascal keep the
+//     fold, which no two names of one scope share, and the stem adds `_` only
+//     to a low(n) that does not end in it.
+//   - Across channels: bits end in `s`, ids in `d`; a `has`/`mutable` member is
+//     that word plus an upper-case letter and has no `_`. A shaped stem has a
+//     `_`, so its id and bits are neither; an unshaped stem neither starts with
+//     `has`/`mutable` + upper-case nor is `has`/`mutable`, and a shorter
+//     prefix of those words followed by `Id` or `Fp32Bits` is neither either.
+//   - No list holds a name ending in `_`, `Id` or `Fp32Bits` or starting with
+//     `has`/`mutable` + upper-case (TestDerivedShapesMissTheLists). No class
+//     starts lower-case, and every member starting upper-case is escaped: a
+//     class ending in `_` is n + "_" for a type-escaped n, whose member is
+//     n + "__".
+//   - Private members start with `_`: slots are `_` + distinct members, bit
+//     slots `_` + distinct bits; a library helper ends in neither `_` nor
+//     `Fp32Bits`, and a default ends in `Default`, which no helper and not
+//     `_decodeInto` does.
+//
+// An enum or bitfield class body names only its own class (its private
+// constructor), so a constant or flag takes `_` when it is on a reserved list,
+// and one more when it then reads as its own class (constName).
 
-func newMemberAlloc(blocked func(string) bool, fixed ...string) *memberAlloc {
-	a := &memberAlloc{blocked: blocked, taken: map[string]bool{}}
-	for _, n := range fixed {
-		a.taken[n] = true
+// lowerFirst is n with its first letter lower-cased.
+func lowerFirst(n string) string {
+	if n != "" && isUpperASCII(n[0]) {
+		return string(n[0]+'a'-'A') + n[1:]
 	}
-	return a
+	return n
 }
 
-func (a *memberAlloc) take(want string) string {
-	for a.taken[want] || a.blocked(want) {
-		want += "_"
+func isUpperASCII(c byte) bool { return c >= 'A' && c <= 'Z' }
+
+// startsWord reports whether l is w alone or w followed by an upper-case
+// letter: how a member built as w + Pascal(name) begins.
+func startsWord(l, w string) bool {
+	return strings.HasPrefix(l, w) && (len(l) == len(w) || isUpperASCII(l[len(w)]))
+}
+
+// fieldShaped: a struct or message field spelled like an fp32 bits companion.
+func fieldShaped(n string) bool { return strings.HasSuffix(lowerFirst(n), "Fp32Bits") }
+
+// optionShaped: a union option spelled like a member derived from an option.
+func optionShaped(n string) bool {
+	l := lowerFirst(n)
+	return strings.HasSuffix(l, "Fp32Bits") || strings.HasSuffix(l, "Id") ||
+		startsWord(l, "has") || startsWord(l, "mutable")
+}
+
+// escapeMember is the member a schema name n is reached through.
+func escapeMember(n string, shaped bool, reserved func(string) bool) string {
+	switch {
+	case isUpperASCII(n[0]) && isTypeReserved(n):
+		return n + "__"
+	case isUpperASCII(n[0]) || shaped || reserved(n):
+		return n + "_"
 	}
-	a.taken[want] = true
-	return want
+	return n
+}
+
+// stem is what an option's id and an fp32 member's bits are built from.
+func stem(n string, shaped bool) string {
+	if shaped {
+		return lowerFirst(n) + "_"
+	}
+	return lowerFirst(n)
+}
+
+// constName is the member of an enum constant or bitfield flag in class cls.
+func constName(n, cls string) string {
+	if memberReserved(n) {
+		n += "_"
+	}
+	if n == cls {
+		n += "_"
+	}
+	return n
 }
 
 // fieldNames are the members one struct or message field is reached through.
@@ -174,8 +267,20 @@ type fieldNames struct {
 	def    string // the private static holding a destination's declared default ("" when none)
 }
 
-// memberTable holds every member name the module derives from the schema,
-// allocated class by class.
+// fieldMembers names the members of one struct or message field.
+func fieldMembers(f *ir.Field) fieldNames {
+	shaped := fieldShaped(f.Name)
+	n := fieldNames{member: escapeMember(f.Name, shaped, memberReserved)}
+	if f.Kind == ir.KindFP32 {
+		n.bits = stem(f.Name, shaped) + "Fp32Bits"
+	}
+	if hasDestDefault(f) {
+		n.def = "_" + n.member + "Default"
+	}
+	return n
+}
+
+// memberTable holds every member name the module derives from the schema.
 type memberTable struct {
 	fields map[*ir.Field]fieldNames
 	unions map[string]*unionShape
@@ -206,8 +311,6 @@ func (g *gen) members() *memberTable {
 	if g.mem != nil {
 		return g.mem
 	}
-	classes := g.moduleClasses()
-	blocked := func(n string) bool { return memberReserved(n) || classes[n] }
 	t := &memberTable{
 		fields: map[*ir.Field]fieldNames{},
 		unions: map[string]*unionShape{},
@@ -215,67 +318,41 @@ func (g *gen) members() *memberTable {
 		flags:  map[*ir.BitfieldFlag]string{},
 	}
 	g.mem = t
-	object := func(fields []*ir.Field, isMessage bool) {
-		fixed := []string(nil)
-		if isMessage {
-			fixed = []string{"_decodeInto"}
-		}
-		a := newMemberAlloc(blocked, fixed...)
-		for _, f := range fields {
-			t.fields[f] = fieldNames{member: a.take(f.Name)}
-		}
-		for _, f := range fields {
-			n := t.fields[f]
-			if f.Kind == ir.KindFP32 {
-				n.bits = a.take(n.member + "Fp32Bits")
-			}
-			if hasDestDefault(f) {
-				n.def = a.take("_" + n.member + "Default")
-			}
-			t.fields[f] = n
-		}
-	}
 	for _, key := range g.schema.NamedOrder {
 		nt := g.schema.Named[key]
 		switch nt.Category {
 		case ir.CatStruct:
-			object(nt.Fields, false)
+			for _, f := range nt.Fields {
+				t.fields[f] = fieldMembers(f)
+			}
 		case ir.CatUnion:
-			t.unions[key] = g.buildUnionShape(key, nt, blocked)
+			t.unions[key] = g.buildUnionShape(key, nt)
 		case ir.CatEnum:
-			a := newMemberAlloc(blocked)
 			for _, c := range nt.Consts {
-				t.consts[c] = a.take(c.Name)
+				t.consts[c] = constName(c.Name, g.typeName(key))
 			}
 		case ir.CatBitfield:
-			a := newMemberAlloc(blocked)
 			for _, fl := range nt.Flags {
-				t.flags[fl] = a.take(fl.Name)
+				t.flags[fl] = constName(fl.Name, g.typeName(key))
 			}
 		}
 	}
 	for _, m := range g.schema.Messages {
-		object(m.Fields, true)
+		for _, f := range m.Fields {
+			t.fields[f] = fieldMembers(f)
+		}
 	}
 	return t
 }
 
 // field is the member names of a struct or message field. A field the table
 // does not hold -- a union option's working copy, whose members the union
-// shape names -- is named as a lone field would be.
+// shape names -- is named the same way: the names depend on the field alone.
 func (g *gen) field(f *ir.Field) fieldNames {
 	if n, ok := g.members().fields[f]; ok {
 		return n
 	}
-	a := newMemberAlloc(memberReserved)
-	n := fieldNames{member: a.take(f.Name)}
-	if f.Kind == ir.KindFP32 {
-		n.bits = a.take(n.member + "Fp32Bits")
-	}
-	if hasDestDefault(f) {
-		n.def = a.take("_" + n.member + "Default")
-	}
-	return n
+	return fieldMembers(f)
 }
 
 // member is the member a struct or message field is reached through.
