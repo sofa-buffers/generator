@@ -62,8 +62,11 @@ are not meant to be used.
 A type name that the prefix makes equal to a typedef of the C library or the
 corelib gets a trailing underscore: with `symbol_prefix: sofab_`, a message
 `ostream` is `sofab_ostream_t_` (the corelib's is `sofab_ostream_t`), while its
-functions keep `sofab_ostream__init`, … . The list lives in
-`generators/c/reserved.go`.
+functions keep `sofab_ostream__init`, … . The typedefs covered are those of
+the C standard headers (`size_t`, `uint8_t` and the other `<stdint.h>` types,
+`wchar_t`, …), the common POSIX ones (`ssize_t`, `off_t`, `time_t`, `pid_t`, …)
+and every typedef of the corelib (`sofab_ostream_t`, `sofab_istream_t`,
+`sofab_ret_t`, …).
 
 ## Booleans
 
@@ -129,8 +132,7 @@ stays the schema name.
 A sized blob and a native array carry their length in a sibling member,
 `<field>__len` (`b__len` for a blob `b`), which no field name can spell, so a
 field `b_len` beside it is simply another member. Every macro the generator
-defines contains `__` too, so no field is replaced by one. The list lives in
-`generators/c/reserved.go`.
+defines contains `__` too, so no field is replaced by one.
 
 ## Unions
 
