@@ -48,7 +48,7 @@ names are:
 
 Only the field changes: the wire is keyed by the field id, and the JSON key
 stays the schema name. A schema name never ends with `_`, so a renamed field
-cannot meet another one. The list lives in `generators/java/reserved.go`.
+cannot meet another one.
 
 ## Class names
 
@@ -73,8 +73,14 @@ are the nested `Decoder` class every message declares, the corelib-java types
 the generated code uses (`OStream`, `IStream`, `Visitor`, `Seq`, …), the
 `java.util` and `java.io` types it uses (`List`, `ArrayList`, `Arrays`,
 `IOException`), and the `java.lang` types and annotations it uses (`String`,
-`Long`, `Object`, `System`, `Deprecated`, `Override`, …). The list is
-`javaTypeNames` in `generators/java/reserved.go`.
+`Long`, `Object`, `System`, `Deprecated`, `Override`, …).
+
+A class whose file Windows cannot create gets the same trailing underscore:
+`CON`, `PRN`, `AUX`, `NUL`, `COM0`–`COM9` and `LPT0`–`LPT9` are device names
+there in any case and with any extension, so a message `con` is the class
+`Con_` in `Con_.java`, and a message `com_1` is `Com1_` in `Com1_.java`. Only a
+whole class name is affected: the inline struct of field `a` in message `con`
+is `Con_A`, and a message `console` is `Console`.
 
 Each message's decode visitor is a package-private class `_<Message>__Visitor`
 in the message's file.

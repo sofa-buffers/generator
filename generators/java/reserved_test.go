@@ -14,6 +14,7 @@ import (
 	"github.com/sofa-buffers/generator/internal/analysis"
 	"github.com/sofa-buffers/generator/internal/ir"
 	"github.com/sofa-buffers/generator/internal/model"
+	"github.com/sofa-buffers/generator/internal/naming"
 	"github.com/sofa-buffers/generator/internal/parser"
 )
 
@@ -202,8 +203,8 @@ func publicClassBody(src string) string {
 // TestJavaNamesInScope is the drift guard for javaStatics and javaQualifiers:
 // over the whole corpus, realworld set and example, every static field a public
 // generated class declares and every name its body uses as an expression
-// qualifier must be on the list (union option ids and `_`-prefixed names aside,
-// which no schema field can spell or which checkUnionNames owns). A backend that
+// qualifier must be on the list (union option ids `<OPT>_ID` and `_`-prefixed
+// names aside, which no schema field can spell). A backend that
 // starts writing `Math.max(...)` or declares another static fails here until the
 // name is reserved -- instead of shipping a class a field named `Math` breaks.
 // Lower-case qualifiers other than package roots are locals and parameters,
@@ -426,7 +427,10 @@ func TestNamesSchemaDeclaresEachClassOnce(t *testing.T) {
 			{"Decoder_.java", "public class Decoder_ {"},         // escaped: the nested Decoder
 			{"String_.java", "public class String_ {"},           // escaped: java.lang
 			{"Seq_.java", "public class Seq_ {"},                 // escaped: corelib
-			{"Json.java", "public class Json {"},                 // no longer the harness's
+			{"Con_.java", "public class Con_ {"},                 // escaped: Windows device names
+			{"Nul_.java", "public class Nul_ {"},
+			{"Com1_.java", "public class Com1_ {"},
+			{"Json.java", "public class Json {"}, // no longer the harness's
 			{"Main.java", "public class Main {"},
 			{"harness/Json.java", "final class Json {"},
 			{"harness/Main.java", "public class Main {"},
@@ -436,6 +440,60 @@ func TestNamesSchemaDeclaresEachClassOnce(t *testing.T) {
 			}
 			if got := files["src/main/java/message/"+c.file]; !strings.Contains(got, c.want) {
 				t.Errorf("%s: %s lacks %q", emit, c.file, c.want)
+			}
+		}
+	}
+}
+
+// deviceYAML has messages and a $defs type spelled like Windows device names
+// (naming.IsDeviceStem), one referring to another, so both the declaring and
+// the referring side of the escape are seen.
+const deviceYAML = `version: 1
+$defs:
+  struct:
+    nul: { x: { id: 0, type: u8 } }
+messages:
+  con:
+    payload:
+      a: { id: 0, type: struct, fields: { b: { id: 0, type: u8 } } }
+      n: { id: 1, type: struct, fields: { $ref: '#/$defs/struct/nul' } }
+  aux: { payload: { x: { id: 0, type: u8 } } }
+  com_1: { payload: { x: { id: 0, type: u8 } } }
+  LPT9: { payload: { x: { id: 0, type: u8 } } }
+  console: { payload: { x: { id: 0, type: u8 } } }
+`
+
+// TestDeviceTypeNamesAreEscaped: a type spelled like a Windows device name is
+// the class <Name>_ in <Name>_.java -- Con.java, Nul.java, Com1.java cannot
+// exist there -- while a longer name (Console) and a path below an escaped type
+// (Con_A) are kept, and the visitor is built from the unescaped identifier.
+func TestDeviceTypeNamesAreEscaped(t *testing.T) {
+	for _, emit := range []string{"sources", "project"} {
+		files := genJavaFromYAML(t, deviceYAML, map[string]any{"emit": emit})
+		const dir = "src/main/java/message/"
+		for _, c := range []struct{ file, want string }{
+			{"Con_.java", "public class Con_ {"},
+			{"Con_.java", "class _Con__Visitor implements Visitor {"},
+			{"Con_.java", "public Nul_ n"},
+			{"Aux_.java", "public class Aux_ {"},
+			{"Com1_.java", "public class Com1_ {"},
+			{"LPT9_.java", "public class LPT9_ {"},
+			{"Nul_.java", "public class Nul_ {"},
+			{"Con_A.java", "public class Con_A {"},
+			{"Console.java", "public class Console {"},
+		} {
+			src, ok := files[dir+c.file]
+			if !ok {
+				t.Errorf("%s: no file %s", emit, c.file)
+				continue
+			}
+			if !strings.Contains(src, c.want) {
+				t.Errorf("%s: %s lacks %q", emit, c.file, c.want)
+			}
+		}
+		for path := range files {
+			if stem, _, _ := strings.Cut(filepath.Base(path), "."); naming.IsDeviceStem(stem) {
+				t.Errorf("%s: %s cannot exist on Windows", emit, path)
 			}
 		}
 	}

@@ -494,9 +494,64 @@ func TestKotlinNamesSchemaDeclaresOnce(t *testing.T) {
 			"Shape__DefaultPt", "Shape__DefaultNum", "ShapeDefault_Pt", "ShapeDefaultPt",
 			"A_BC", "AB_C", "Point", "StructPoint", "Decoder_", "Companion_", "String_", "Seq_",
 			"_M__Visitor", "_Decoder__Visitor", "Json", "JsonValue", "Main",
+			"Con_", "Nul_", "Com1_", "_Con__Visitor",
 		} {
 			if _, ok := seen[want]; !ok {
 				t.Errorf("%s: no namespace-level declaration %s", mode, want)
+			}
+		}
+	}
+}
+
+// ktDeviceYAML has messages and a $defs type spelled like Windows device names
+// (naming.IsDeviceStem), one referring to another, so both the declaring and
+// the referring side of the escape are seen.
+const ktDeviceYAML = `version: 1
+$defs:
+  struct:
+    nul: { x: { id: 0, type: u8 } }
+messages:
+  con:
+    payload:
+      a: { id: 0, type: struct, fields: { b: { id: 0, type: u8 } } }
+      n: { id: 1, type: struct, fields: { $ref: '#/$defs/struct/nul' } }
+  aux: { payload: { x: { id: 0, type: u8 } } }
+  com_1: { payload: { x: { id: 0, type: u8 } } }
+  LPT9: { payload: { x: { id: 0, type: u8 } } }
+  console: { payload: { x: { id: 0, type: u8 } } }
+`
+
+// TestDeviceTypeNamesAreEscaped: a type spelled like a Windows device name is
+// the class <Name>_ in <Name>_.kt -- Con.kt and Con.class cannot exist there --
+// while a longer name (Console) and a path below an escaped type (Con_A) are
+// kept, and the visitor is built from the unescaped identifier.
+func TestDeviceTypeNamesAreEscaped(t *testing.T) {
+	for _, emit := range []string{"sources", "project"} {
+		files := genFromYAML(t, ktDeviceYAML, map[string]any{"emit": emit})
+		const dir = "src/main/kotlin/message/"
+		for _, c := range []struct{ file, want string }{
+			{"Con_.kt", "class Con_"},
+			{"Con_.kt", "class _Con__Visitor"},
+			{"Con_.kt", ": Nul_"},
+			{"Aux_.kt", "class Aux_"},
+			{"Com1_.kt", "class Com1_"},
+			{"LPT9_.kt", "class LPT9_"},
+			{"Nul_.kt", "class Nul_"},
+			{"Con_A.kt", "class Con_A"},
+			{"Console.kt", "class Console"},
+		} {
+			src, ok := files[dir+c.file]
+			if !ok {
+				t.Errorf("%s: no file %s", emit, c.file)
+				continue
+			}
+			if !strings.Contains(src, c.want) {
+				t.Errorf("%s: %s lacks %q", emit, c.file, c.want)
+			}
+		}
+		for path := range files {
+			if stem, _, _ := strings.Cut(filepath.Base(path), "."); naming.IsDeviceStem(stem) {
+				t.Errorf("%s: %s cannot exist on Windows", emit, path)
 			}
 		}
 	}

@@ -40,8 +40,14 @@ element struct of an array field `a`. A `$defs` union used with different
 A type whose name the generated code already uses — a Kotlin type such as
 `String` or `UByte`, a corelib type such as `Seq` or `Visitor`, or `Decoder`
 and `Companion`, which every message class declares inside itself — gets a
-trailing underscore: the message `string` is `String_`. The list lives in
-`generators/kotlin/reserved.go`.
+trailing underscore: the message `string` is `String_`.
+
+A type whose file Windows cannot create gets the same trailing underscore:
+`CON`, `PRN`, `AUX`, `NUL`, `COM0`–`COM9` and `LPT0`–`LPT9` are device names
+there in any case and with any extension, so a message `con` is the class
+`Con_` in `Con_.kt`, and a message `com_1` is `Com1_` in `Com1_.kt`. Only a
+whole type name is affected: the inline struct of field `a` in message `con`
+is `Con_A`, and a message `console` is `Console`.
 
 With `emit: project`, the harness declarations (`_Json`, `_JsonValue`, `main`
 in `_Main.kt`) start with an underscore, so no type can take their names.
@@ -63,7 +69,7 @@ there — the field `encode` is `encode_`. Those names are:
   a call like `Seq.boolsToBytes(...)` would no longer compile.
 
 Only the property changes: the wire is keyed by the field id, and the JSON key
-stays the schema name. The list lives in `generators/kotlin/reserved.go`.
+stays the schema name.
 
 **JVM setter names.** Kotlin names the setter of a property `isOpen` `setOpen`,
 the same as the setter of a property `open`. When a class has both, the setter
