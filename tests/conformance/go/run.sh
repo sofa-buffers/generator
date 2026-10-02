@@ -1286,9 +1286,8 @@ python3 "$ROOT/tests/conformance/lib/check_repeated_id.py" "Go" \
 # option as a present frame); on decode the last correctly-typed option wins, a
 # §7.3-skipped or unknown id never switches, and several children or re-opened
 # frames are legal. The driver forges the frames no encoder emits and prints its
-# own schema. `--sizes 1`: this harness's streamdecode feeds ONE byte per call
-# (dripReader) whatever split it is handed, so larger splits would repeat the
-# same run under a label that claims otherwise.
+# own schema. `--sizes 1`: this harness's streamdecode takes a chunk size, but
+# one split is enough for this table.
 echo "==> §4.2/§7.4.1 tagged unions: one option held, last option wins (generator#608)"
 python3 "$ROOT/tests/conformance/lib/check_union.py" --emit-schema > "$WORK/union.yaml"
 ( cd "$ROOT" && go run ./cmd/sofabgen --config "$WORK/cfg.yaml" --lang go --in "$WORK/union.yaml" --out "$WORK/union" )

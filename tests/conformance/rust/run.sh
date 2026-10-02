@@ -478,8 +478,7 @@ run_variant() {
     # but its options live in String/Vec on one and heapless storage on the other,
     # and a string option is selected only at the completion store, which the
     # streamed run reaches one chunk at a time. `--sizes 1`: this harness's
-    # streamdecode feeds ONE byte per call whatever split it is handed, so larger
-    # splits would repeat the same run under a label that claims otherwise.
+    # streamdecode takes a chunk size, but one split is enough for this table.
     echo "==> [$label] §4.2/§7.4.1 tagged unions: one option held, last option wins (generator#608)"
     python3 "$ROOT/tests/conformance/lib/check_union.py" --emit-schema > "$WORK/union.yaml"
     rust_build "$WORK/union.yaml" "$WORK/union-$label"
