@@ -31,9 +31,11 @@ clone_corelib() {
 # log_corelib <repo> <dir>
 # Names the commit of a corelib checkout the suite is about to use, whether it
 # was cloned above or handed in by the caller, so a log ties a green run to the
-# exact corelib it tested. A directory that is not a git checkout says so.
+# exact corelib it tested. A directory that is not a git checkout says so. Only
+# a checkout root counts: "git -C" would otherwise walk up into an enclosing
+# repository and report that repository's commit as the corelib's.
 log_corelib() {
-    if _lc_sha=$(git -C "$2" rev-parse HEAD 2>/dev/null); then
+    if [ -e "$2/.git" ] && _lc_sha=$(git -C "$2" rev-parse HEAD 2>/dev/null); then
         echo "==> $1: $2 @ $_lc_sha"
     else
         echo "==> $1: $2 (not a git checkout)"
