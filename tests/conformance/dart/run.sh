@@ -1114,6 +1114,24 @@ compile_project "$WORK/defaults"
 python3 "$ROOT/tests/conformance/lib/check_defaults.py" "Dart" \
     -- "$WORK/defaults/harness"
 
+# A native array round-trips at every length, for every element kind
+# (generator#550, #643): lengths either side of 16, empty, and 257 elements for
+# the unbounded field, all 14 kinds in one message per round. The shared driver
+# prints its own schema and runs on both decode surfaces; `streamdecode` drips
+# the message, so a long array crosses chunk boundaries.
+# 64-bit elements go in quoted (--int64-json string), as for check_union.py: the
+# Dart harness reads its JSON front door through a double.
+echo "==> native arrays round-trip at every length, for every element kind (generator#643)"
+printf 'version: 1\nmessages:\n' > "$WORK/arrlen.yaml"
+python3 "$ROOT/tests/conformance/lib/check_array_lengths.py" --emit-schema >> "$WORK/arrlen.yaml"
+( cd "$ROOT" && go run ./cmd/sofabgen --format=off --config "$WORK/cfg.yaml" --lang dart --in "$WORK/arrlen.yaml" --out "$WORK/arrlen" )
+sed -i "s#\${SOFAB_DART_CORELIB}#$CORELIB#" "$WORK/arrlen/pubspec.yaml"
+compile_project "$WORK/arrlen"
+for surface in decode streamdecode; do
+    python3 "$ROOT/tests/conformance/lib/check_array_lengths.py" "Dart" --int64-json string --verb "$surface" \
+        -- "$WORK/arrlen/harness"
+done
+
 # Every backend test, against the real corelib, with no skip allowed: the tests
 # that drive `dart format` for real live there, and the lang-dart job is the
 # only place a Dart SDK exists to run them (tests/conformance/lib/backend_tests.sh).

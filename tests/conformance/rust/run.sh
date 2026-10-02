@@ -510,6 +510,24 @@ run_variant() {
     python3 "$ROOT/tests/conformance/lib/check_defaults.py" "Rust [$label]" \
         --cwd "$WORK/defaults-$label" -- cargo run -q --
 
+    # A native array round-trips at every length, for every element kind
+    # (generator#550, #643): lengths either side of 16, empty, and 257 elements for
+    # the unbounded field, all 14 kinds in one message per round. The shared driver
+    # prints its own schema and runs on both decode surfaces; `streamdecode` drips
+    # the message, so a long array crosses chunk boundaries.
+    # Every rs-no-std profile (heapless, allow_dynamic, std crate) rejects an
+    # unbounded array at generate time, so those labels run the bounded half only.
+    ARRLEN_OPTS=""
+    case "$label" in no-std-*) ARRLEN_OPTS="--bounded-only" ;; esac
+    echo "==> [$label] native arrays round-trip at every length, for every element kind (generator#643)"
+    printf 'version: 1\nmessages:\n' > "$WORK/arrlen.yaml"
+    python3 "$ROOT/tests/conformance/lib/check_array_lengths.py" --emit-schema $ARRLEN_OPTS >> "$WORK/arrlen.yaml"
+    rust_build "$WORK/arrlen.yaml" "$WORK/arrlen-$label"
+    for surface in decode streamdecode; do
+        python3 "$ROOT/tests/conformance/lib/check_array_lengths.py" "Rust [$label]" $ARRLEN_OPTS --verb "$surface" \
+            --cwd "$WORK/arrlen-$label" -- cargo run -q --
+    done
+
     # Over-maxlen scalar blob (Option B / MESSAGE_SPEC S7.1): someblob (id 12)
     # declares maxlen: 16; a 17-byte blob exceeds it -> INVALID, never truncated.
     # Wire: 62 (blob id12) 8b 01 (fixlen word len 17, blob subtype 3) + 17 bytes;

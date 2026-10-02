@@ -4,8 +4,11 @@
 Usage:
   check_array_lengths.py --emit-schema
   check_array_lengths.py <label> [--cwd DIR] [--verb VERB] [--message NAME]
-                         [--skip-kinds LIST] [--max-dyn N]
+                         [--skip-kinds LIST] [--max-dyn N] [--bounded-only]
+                         [--int64-json number|string]
                          -- <harness argv...>
+  (--emit-schema takes --skip-kinds and --bounded-only too, and they must match
+  the run's.)
 
 ## The gap this closes
 
@@ -37,11 +40,18 @@ JSON and decoded back. The comparison is the input against the output, as data:
     target object or a shared count register that is not reset between two
     arrays of one message is invisible to a suite that decodes them apart.
 
-Numbers are compared BY VALUE across the string/number spelling split: a 64-bit
-field is quoted on the way in (JSON has no unsigned 64-bit number, and a JS
-number is a double) and several backends quote it on the way out too, while
-others do not. That is rendering, not a wire fact -- `json_equal.py` makes the
-same argument for member order.
+Numbers are compared BY VALUE across the string/number spelling split: several
+backends quote a 64-bit field on the way out and others do not, and a `u8` array
+is a JSON array in one harness and a base64 string in another (Go `[]byte`).
+That is rendering, not a wire fact -- `json_equal.py` makes the same argument
+for member order. The spellings live in `harness_dialect.py`, shared with the
+other drivers.
+
+`--int64-json number|string` picks how a 64-bit element goes IN, with the same
+meaning as `check_union.py`'s: `number` (default) is a bare JSON integer, which
+C, C++, Zig, Go and Rust read exactly; `string` is the quoted decimal, for a
+harness whose JSON front door is a double (TypeScript, Dart). A wrong-dialect
+run fails loudly.
 
 ## The kinds
 
@@ -71,13 +81,18 @@ rather than the rounding the type is entitled to.
 itself in the final line, so a declined kind is a decision on the record).
 `--max-dyn N` states the receiver cap the project was generated with, so the
 unbounded rounds stay under it; without it the unbounded field is exercised at
-the same lengths as the bounded one.
+the same lengths as the bounded one. `--bounded-only` omits the unbounded `d_*`
+fields from the emitted schema and from every round, for a profile that has no
+heap to hold one (C, C++ over the C corelib, Rust no_std without
+`allow_dynamic`); the final line says so.
 """
 
 import argparse
 import json
 import subprocess
 import sys
+
+import harness_dialect as hd
 
 MESSAGE = "arrlen"
 
@@ -88,11 +103,11 @@ KINDS = {
     "u8":    ("{ type: u8 }",   [0, 255, 1, 128, 7]),
     "u16":   ("{ type: u16 }",  [0, 65535, 1, 32768, 513]),
     "u32":   ("{ type: u32 }",  [0, 4294967295, 1, 2147483648, 70000]),
-    "u64":   ("{ type: u64 }",  ["0", "18446744073709551615", "1", "9223372036854775808", "4294967296"]),
+    "u64":   ("{ type: u64 }",  [0, 18446744073709551615, 1, 9223372036854775808, 4294967296]),
     "i8":    ("{ type: i8 }",   [0, -128, 127, -1, 42]),
     "i16":   ("{ type: i16 }",  [0, -32768, 32767, -1, 300]),
     "i32":   ("{ type: i32 }",  [0, -2147483648, 2147483647, -1, 70000]),
-    "i64":   ("{ type: i64 }",  ["0", "-9223372036854775808", "9223372036854775807", "-1", "-4294967296"]),
+    "i64":   ("{ type: i64 }",  [0, -9223372036854775808, 9223372036854775807, -1, -4294967296]),
     # Exactly representable in 32 bits, so the narrowing is value-preserving.
     "fp32":  ("{ type: fp32 }", [0.0, -1.5, 3.25, 0.125, -0.0625]),
     "fp64":  ("{ type: fp64 }", [0.0, -1.5, 1e300, 0.1, -2.25]),
@@ -101,8 +116,16 @@ KINDS = {
     "bitfield": ("{ type: bitfield, bits: { A: { pos: 0 }, B: { pos: 1 }, D: { pos: 3 } } }",
                  [0, 11, 1, 8, 3]),
     "bitfield64": ("{ type: bitfield, bits: { A: { pos: 0 }, B: { pos: 40 }, D: { pos: 63 } } }",
-                   ["0", "9223373136366403585", "1", "9223372036854775808", "1099511627776"]),
+                   [0, 9223373136366403585, 1, 9223372036854775808, 1099511627776]),
 }
+
+# The kinds a backend may carry as one byte per element (a declared width of 8
+# bits or less), and so may print as a base64 string -- Go's `[]byte` does, for
+# `u8` and for the gapped enum and bitfield, whose carriers are `uint8`.
+BYTE_KINDS = ("u8", "enum", "bitfield")
+
+# The kinds whose elements are 64-bit integers, and so are spelled per dialect.
+WIDE = ("u64", "i64", "bitfield64")
 
 # The capacity the bounded field declares, and the lengths each round carries.
 #
@@ -126,7 +149,7 @@ def dyn_field(kind: str) -> str:
     return "d_" + kind
 
 
-def emit_schema(kinds) -> int:
+def emit_schema(kinds, bounded_only=False) -> int:
     print("# The native-array length message (generator#550), printed by")
     print("# tests/conformance/lib/check_array_lengths.py so the capacity the driver")
     print("# fills to and the capacity the schema declares have one definition.")
@@ -143,6 +166,8 @@ def emit_schema(kinds) -> int:
         bounded = items[:-1].rstrip() + f", count: {CAP} }}"
         print(f"      {field(k)}: {{ id: {fid}, type: array, items: {bounded} }}")
         fid += 1
+        if bounded_only:
+            continue
         print(f"      {dyn_field(k)}: {{ id: {fid}, type: array, items: {items} }}")
         fid += 1
     return 0
@@ -152,55 +177,43 @@ def cycle(values, n):
     return [values[i % len(values)] for i in range(n)]
 
 
-def build(kinds, blen: int, dlen: int):
-    """One round's input: every field filled to its round's length."""
+def build(kinds, blen: int, dlen, dialect="number"):
+    """One round's input: every field filled to its round's length.
+
+    `dlen` None leaves the unbounded fields out. 64-bit elements are spelled in
+    `dialect`.
+    """
+    def vals(k, n):
+        v = cycle(KINDS[k][1], n)
+        return [hd.int64_in(x, dialect) for x in v] if k in WIDE else v
+
     out = {}
     for k in kinds:
-        vals = KINDS[k][1]
-        out[field(k)] = cycle(vals, blen)
-        out[dyn_field(k)] = cycle(vals, dlen)
+        out[field(k)] = vals(k, blen)
+        if dlen is not None:
+            out[dyn_field(k)] = vals(k, dlen)
     return out
 
 
-def same(exp, act) -> bool:
-    """Compare by value across the string/number spelling of an integer.
+def same(exp, act, kind=None) -> bool:
+    """Compare by value across the harness's JSON spelling of an element.
 
-    A 64-bit field is quoted on the way in whatever the target does on the way
-    out; JSON has no unsigned 64-bit number and a JS number is a double, so the
-    quoting is the only portable spelling of the input and cannot also be an
-    assertion about the output.
+    An integer may come back quoted, and a one-byte array as a base64 string; both
+    are rendering (`harness_dialect.py`), so neither can be an assertion.
     """
+    if kind in BYTE_KINDS and isinstance(act, str):
+        got = hd.bytes_of(act)
+        want = hd.bytes_of([hd.as_int(x) for x in exp])
+        return got is not None and got == want
     if isinstance(exp, list) and isinstance(act, list):
         return len(exp) == len(act) and all(same(e, a) for e, a in zip(exp, act))
     if isinstance(exp, bool) or isinstance(act, bool):
         return bool(exp) == bool(act)
-    for norm in (_as_int, _as_float):
+    for norm in (hd.as_int, hd.as_float):
         e, a = norm(exp), norm(act)
         if e is not None and a is not None:
             return e == a
     return exp == act
-
-
-def _as_int(v):
-    if isinstance(v, int):
-        return v
-    if isinstance(v, str):
-        try:
-            return int(v)
-        except ValueError:
-            return None
-    return None
-
-
-def _as_float(v):
-    if isinstance(v, (int, float)):
-        return float(v)
-    if isinstance(v, str):
-        try:
-            return float(v)
-        except ValueError:
-            return None
-    return None
 
 
 def die(msg: str) -> None:
@@ -222,6 +235,8 @@ def main() -> int:
     ap.add_argument("--message", default=MESSAGE)
     ap.add_argument("--skip-kinds", default="")
     ap.add_argument("--max-dyn", type=int, default=0)
+    ap.add_argument("--bounded-only", action="store_true")
+    ap.add_argument("--int64-json", default="number")
     # The harness argv is split off BY HAND at `--`, as every other driver in
     # this directory does. Leaving it to argparse's own `--` handling is what
     # broke CI: whether the separator survives into a trailing nargs="*" differs
@@ -248,26 +263,34 @@ def main() -> int:
             return 2
     kinds = [k for k in KINDS if k not in skipped]
 
+    try:
+        dialect = hd.check_dialect(args.int64_json)
+    except ValueError as e:
+        print(f"FAIL: {e}", file=sys.stderr)
+        return 2
+
     if args.emit_schema:
-        return emit_schema(kinds)
+        return emit_schema(kinds, args.bounded_only)
     if not args.label or not args.harness:
         print(__doc__.strip().splitlines()[2], file=sys.stderr)
         return 2
 
     dyn_lengths = DYN_LENGTHS
-    if args.max_dyn:
+    if args.bounded_only:
+        dyn_lengths = ()
+    elif args.max_dyn:
         dyn_lengths = tuple(n for n in DYN_LENGTHS if n <= args.max_dyn)
 
     rounds = []
     for i, blen in enumerate(BOUNDED_LENGTHS):
-        rounds.append((blen, dyn_lengths[i % len(dyn_lengths)]))
+        rounds.append((blen, dyn_lengths[i % len(dyn_lengths)] if dyn_lengths else None))
     # ...and one round carrying the longest of both at once, so the longest
     # arrays in the file are exercised side by side rather than only apart.
     if dyn_lengths and (CAP, max(dyn_lengths)) not in rounds:
         rounds.append((CAP, max(dyn_lengths)))
 
     for blen, dlen in rounds:
-        want = build(kinds, blen, dlen)
+        want = build(kinds, blen, dlen, dialect)
         text = json.dumps(want)
         enc = run(args.harness + ["encode", args.message], text.encode(), args.cwd)
         if enc.returncode != 0:
@@ -294,7 +317,7 @@ def main() -> int:
                 print(f"FAIL: [{args.label}] bounded={blen} dynamic={dlen}:"
                       f" field {name!r} missing from the decoded message", file=sys.stderr)
                 return 1
-            if not same(exp, act):
+            if not same(exp, act, name[2:]):
                 print(f"FAIL: [{args.label}] bounded={blen} dynamic={dlen}: {name}"
                       f" round-tripped as {len(act) if isinstance(act, list) else act}"
                       f" element(s), expected {len(exp)}", file=sys.stderr)
@@ -303,9 +326,12 @@ def main() -> int:
                 return 1
 
     note = f"; skipped {', '.join(skipped)}" if skipped else ""
+    if args.bounded_only:
+        note += "; bounded only (unbounded d_* fields omitted)"
+    note += f"; int64 as {dialect}"
     print(f"==> [{args.label}] native arrays round-trip via `{args.verb}`:"
           f" {len(rounds)} length round(s) x {len(kinds)} element kind(s),"
-          f" bounded {BOUNDED_LENGTHS} / unbounded {dyn_lengths}{note}")
+          f" bounded {BOUNDED_LENGTHS} / unbounded {dyn_lengths or 'none'}{note}")
     return 0
 
 
