@@ -2439,10 +2439,11 @@ MUST agree on which messages are valid," regardless of allocation strategy.
   the c-cpp harness names the §6.3 category (`decode error: <CATEGORY>` on both
   decode verbs, plus the `status` verb) from `Result::invalid()` /
   `incomplete()` / `limitExceeded()` / `code()`, so those legs assert the
-  category and not only the exit status. One category is still held back: a
-  nested row past its schema count is `INVALID_ARGUMENT` on `c-cpp-static`
-  (element past a fixed destination's capacity, the §6.6.3 tier) instead of
-  `INVALID`.
+  category and not only the exit status. One leg stays on exit status alone: a
+  nested row past its schema count on `c-cpp-static`. corelib-c-cpp answers it
+  `INVALID_ARGUMENT` (element past a fixed destination's capacity, the §6.6.3
+  tier) where §7.1 requires `INVALID`; this is a known corelib-c-cpp gap (issue
+  to be filed), so the suite asserts the reject there but not the category.
 
 #### Decode verdict: an over-width integer is INVALID (every target but `c`/`cpp-c-cpp`)
 
@@ -6111,10 +6112,11 @@ A reimplementation is **conformant** when it reproduces these gates:
    under either flag. The `c` harness therefore grew the same `status` verb its
    C++ sibling already had (`generators/c/project.go`, printing
    `INVALID`/`INCOMPLETE`/`LIMIT_EXCEEDED`/`COMPLETE` on line 1 and always exiting
-   0). The one leg still on exit status alone is the `corelib: c-cpp` C++ one,
-   whose wrapper `Result` carries no category predicates; the `c` suite reaches
-   that same C corelib through the C API, which does separate
-   `SOFAB_RET_E_INVALID_MSG` from `SOFAB_RET_INCOMPLETE`.
+   0). The `corelib: c-cpp` C++ leg now names the category too: its harness
+   derives it from the wrapper `Result` predicates and has the same `status`
+   verb; only the `c-cpp-static` nested-row over-count stays on exit status
+   (see §7.1 above). The `c` suite reaches the same C corelib through the C API,
+   which separates `SOFAB_RET_E_INVALID_MSG` from `SOFAB_RET_INCOMPLETE`.
 
    Values are compared as JSON **numbers**, not greps: the same skipped field
    prints `[0,-1.5,3.25]`, `[0.0,-1.5,3.25]` and `[0, -1.5, 3.25]` across the
@@ -6213,12 +6215,9 @@ A reimplementation is **conformant** when it reproduces these gates:
    `sofab_ret_t`, and its `status` verb runs the one-shot `_decode`, so pointing
    `--status-verb` at the streaming row would have asserted the wrong decoder;
    that arm now prints `decode error: <CATEGORY>` from the same `sofab_ret_t`
-   mapping `status` prints, exactly as its C++ sibling already did. One suite is
-   still short a channel and says so in place: the two `c-cpp` legs of `cpp` take
-   their four `INVALID` rows on the exit status alone, because the wrapper
-   `Result` those builds use carries no `invalid()`/`incomplete()` predicates —
-   `tests/conformance/c` reaches the same C corelib through the C API, where both
-   surfaces do name the category.
+   mapping `status` prints, exactly as its C++ sibling already did. Every suite now names the
+   category, the two `c-cpp` legs of `cpp` included: their harness derives it from
+   the wrapper `Result` predicates, so their `INVALID` rows assert it too.
 
    Where a suite already owns a chunk-size sweep, the skip rows are worth running
    through it as well. `typescript`'s `stream_check.ts` pinned the *declared* half

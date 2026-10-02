@@ -957,16 +957,17 @@ YAML
     # SCHEMA's statement, and §6.2.1/§6.3 forbid answering a schema bound with
     # LimitExceeded.
     #
-    # c-cpp-static is the one leg that answers INVALID_ARGUMENT: the row lands in
-    # a fixed-capacity destination, and corelib-c-cpp reports an element past that
-    # capacity as the §6.6.3 "destination too short" tier rather than as the
-    # schema's INVALID. The reject itself (asserted above) holds; only the
-    # category is held back there until corelib-c-cpp refuses it as INVALID.
-    ROWS_OVER=$("$WORK/rows-$label/harness/harness" status NestedRows < "$WORK/rows-over-$label.bin")
-    ROWS_WANT=INVALID
-    [ "$label" = c-cpp-static ] && ROWS_WANT=INVALID_ARGUMENT
-    [ "$ROWS_OVER" = "$ROWS_WANT" ] \
-        || { echo "FAIL: [$label] a row past its schema count is $ROWS_OVER, not $ROWS_WANT"; exit 1; }
+    # c-cpp-static asserts the exit-status reject above and nothing more: its row
+    # lands in a fixed-capacity destination and corelib-c-cpp answers an element
+    # past that capacity with INVALID_ARGUMENT (the §6.6.3 destination tier),
+    # where §7.1/§6.3 make a schema count bound INVALID. That is a corelib-c-cpp
+    # gap, not behaviour to pin here; no corelib-c-cpp issue number exists yet
+    # (to be filed), so this leg keeps no category assertion until it is fixed.
+    if [ "$label" != c-cpp-static ]; then
+        ROWS_OVER=$("$WORK/rows-$label/harness/harness" status NestedRows < "$WORK/rows-over-$label.bin")
+        [ "$ROWS_OVER" = INVALID ] \
+            || { echo "FAIL: [$label] a row past its schema count is $ROWS_OVER, not INVALID"; exit 1; }
+    fi
     echo "==> [$label] nested rows OK"
 
     # MESSAGE_SPEC §7.4 -- a field id REPEATED inside one scope (generator#523),
