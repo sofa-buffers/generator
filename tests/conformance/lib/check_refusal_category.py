@@ -10,7 +10,7 @@ Usage:
                             [--status-verb VERB] [--status-limit NAME]
                             [--status-invalid NAME] [--status-complete NAME]
                             [--limit-pattern REGEX] [--invalid-pattern REGEX]
-                            [--no-values] -- <harness argv...>
+                            [--no-values] [--blob-base64] -- <harness argv...>
 
 CORELIB_PLAN §6.3 keeps three refusals apart, and the first two are the pair a
 decode can confuse:
@@ -128,6 +128,7 @@ so is not this driver's to own.
 """
 
 import argparse
+import base64
 import json
 import re
 import subprocess
@@ -367,7 +368,14 @@ def decoded_field(out, field):
     return None
 
 
-def same_value(got, want):
+def same_value(got, want, blob_base64=False):
+    if blob_base64 and isinstance(got, str) and isinstance(want, list):
+        # A harness whose JSON writer renders a blob as base64 (Go's) rather than
+        # as an array of byte values.
+        try:
+            got = list(base64.b64decode(got, validate=True))
+        except ValueError:
+            return False
     if isinstance(want, str):
         return got == want
     if not isinstance(got, list) or len(got) != len(want):
@@ -401,6 +409,7 @@ def main():
     ap.add_argument("--limit-pattern", default=None)
     ap.add_argument("--invalid-pattern", default=None)
     ap.add_argument("--no-values", action="store_true")
+    ap.add_argument("--blob-base64", action="store_true")
 
     argv = sys.argv[1:]
     if "--" in argv:
@@ -456,7 +465,7 @@ def main():
                 if got is None:
                     die("[%s] %s -- the harness printed no %r; got:\n%s"
                         % (args.label, name, field, out.strip()))
-                if not same_value(got, want):
+                if not same_value(got, want, args.blob_base64):
                     die("[%s] %s decoded, but %r is %s -- want %s (%s); bytes: %s"
                         % (args.label, name, field, json.dumps(got),
                            json.dumps(want), why, wire.hex()))

@@ -469,6 +469,9 @@ OUT=$(cd "$WORK/proj" && GOFLAGS=-mod=mod go run ./harness decode myfirstmessage
 echo "$OUT" | grep -q '"nestedstring":"x"' || { echo "FAIL: skipped occurrence must not clear the struct (nestedstring \"x\" lost); got: $OUT"; exit 1; }
 echo "==> skipped occurrence keeps struct OK"
 
+# These local cap legs are NOT made redundant by the shared check_refusal_category.py
+# run further down: they also cover over-cap-then-EOF precedence, a skipped field
+# never being capped, the same bytes under a looser cap, and the allocation budget.
 echo "==> receiver-side decode limits (generator#102)"
 cat > "$WORK/dyn102.yaml" <<'YAML'
 version: 1
@@ -886,48 +889,48 @@ python3 "$ROOT/tests/conformance/lib/check_declared_width_kinds.py" "go" \
     --cwd "$WORK/closed" --invalid-pattern 'invalid message' \
     --stream-verb streamdecode -- go run ./harness
 
-# The verdict must not depend on the chunking either (CORELIB_PLAN S6.4 / S7.2
-# item 4: a chunk boundary MUST NOT affect the outcome). Every malformed fixture
-# built above is replayed through the byte-at-a-time reader and must land on the
-# SAME side as the in-memory decode -- with the well-formed controls alongside,
-# so this cannot pass by rejecting everything.
-#
-# Written as a table rather than as one assertion per file: the interesting
-# property is that decode and streamdecode never disagree, and that is a claim
-# about the whole set.
-echo "==> a chunk boundary must not change the verdict (generator#312)"
-CHECKED=0
-ACCEPTED=0
-REJECTED=0
-for f in overcount control fp64_at_fp32 fp32_overcount skipped_bad_utf8 declared_bad_utf8 \
-         overcount_trunc incount_trunc overindex overindex_control overindex_trunc \
-         inindex_trunc overmaxlen overmaxlen_control rt; do
-    # A missing fixture is a FAILURE, not a skip. Silently continuing would turn
-    # a renamed .bin into a green run that checked nothing -- the exact shape
-    # that makes a conformance suite lie.
-    [ -f "$WORK/$f.bin" ] || { echo "FAIL: fixture $f.bin missing (renamed?)"; exit 1; }
-    CHECKED=$((CHECKED + 1))
-    if (cd "$WORK/proj" && GOFLAGS=-mod=mod go run ./harness decode myfirstmessage < "$WORK/$f.bin" >/dev/null 2>&1); then
-        W=accept
-    else
-        W=reject
-    fi
-    if (cd "$WORK/proj" && GOFLAGS=-mod=mod go run ./harness streamdecode myfirstmessage < "$WORK/$f.bin" >/dev/null 2>&1); then
-        D=accept
-    else
-        D=reject
-    fi
-    [ "$W" = "$D" ] || { echo "FAIL: $f.bin -> decode=$W streamdecode=$D"; exit 1; }
-    if [ "$W" = accept ]; then ACCEPTED=$((ACCEPTED + 1)); else REJECTED=$((REJECTED + 1)); fi
+# A receiver cap answers LimitExceeded, a schema bound answers InvalidMessage
+# (CORELIB_PLAN S6.3, generator#416, #648), on both decode surfaces. One driver
+# table over scalar string/blob, count-headed array and wrapper-array shapes; the
+# generator#102 legs further up stay because they also cover what the
+# table does not (over-cap-then-EOF precedence, a skipped field is never capped,
+# the same bytes under a looser cap, the allocation budget).
+echo "==> a cap is LimitExceeded, a schema bound is InvalidMessage (S6.3, generator#416)"
+{ echo "version: 1"; echo "messages:"; } > "$WORK/refusal.yaml"
+python3 "$ROOT/tests/conformance/lib/check_refusal_category.py" --emit-schema >> "$WORK/refusal.yaml"
+cat > "$WORK/cfg-refusal.yaml" <<YAML
+generic: { emit: project, max_dyn_array_count: 4, max_dyn_string_len: 8, max_dyn_blob_len: 8 }
+targets: { go: { package: message, module_path: example.com/gen, go_version: "1.21" } }
+YAML
+( cd "$ROOT" && go run ./cmd/sofabgen --config "$WORK/cfg-refusal.yaml" --lang go --in "$WORK/refusal.yaml" --out "$WORK/refusal" )
+sed -i "s#\${SOFAB_GO_CORELIB}#$CORELIB#" "$WORK/refusal/go.mod"
+( cd "$WORK/refusal" && GOFLAGS=-mod=mod go mod tidy >/dev/null 2>&1 && go build -o "$WORK/refusal.bin" ./harness )
+for surface in decode streamdecode; do
+    python3 "$ROOT/tests/conformance/lib/check_refusal_category.py" "go" \
+        --verb "$surface" --blob-base64 --limit-pattern 'limit exceeded' --invalid-pattern 'invalid message' \
+        -- "$WORK/refusal.bin"
 done
-[ "$CHECKED" -eq 15 ] || { echo "FAIL: expected 15 fixtures, checked $CHECKED"; exit 1; }
-# Both outcomes must appear. A streaming path that accepted everything, or one
-# that rejected everything, agrees with itself perfectly -- the table is only
-# evidence if it straddles the boundary.
-[ "$ACCEPTED" -gt 0 ] && [ "$REJECTED" -gt 0 ] || {
-    echo "FAIL: table is one-sided ($ACCEPTED accept / $REJECTED reject)"; exit 1
-}
-echo "==> chunk-invariant verdicts OK ($CHECKED fixtures: $ACCEPTED accept, $REJECTED reject)"
+
+# The verdict AND the decoded value must not depend on where the chunks were cut
+# (CORELIB_PLAN S5.2/S6.0/S6.4 / S7.2 item 4; generator#312, #648). Every fixture
+# built above, malformed and well-formed, is fed through the reader at six chunk
+# sizes (1, 2, 3, 5, 16 and the whole message), and each answer must equal the
+# unchunked streaming one in verdict and in value. Written as a table rather than
+# as one assertion per file because the claim is about the whole set; the driver
+# refuses a one-sided table and a missing fixture.
+#
+# No --oneshot: `decode` here and the reader-driven decode are both strict, but
+# the property is about the streaming path alone.
+echo "==> a chunk boundary must not change the verdict or the value (generator#312, #648)"
+( cd "$WORK/proj" && GOFLAGS=-mod=mod go build -o "$WORK/harness.bin" ./harness )
+python3 "$ROOT/tests/conformance/lib/check_chunk_invariance.py" "Go" \
+    --message myfirstmessage --expect 15 \
+    "$WORK/overcount.bin" "$WORK/control.bin" "$WORK/fp64_at_fp32.bin" \
+    "$WORK/fp32_overcount.bin" "$WORK/skipped_bad_utf8.bin" "$WORK/declared_bad_utf8.bin" \
+    "$WORK/overcount_trunc.bin" "$WORK/incount_trunc.bin" "$WORK/overindex.bin" \
+    "$WORK/overindex_control.bin" "$WORK/overindex_trunc.bin" "$WORK/inindex_trunc.bin" \
+    "$WORK/overmaxlen.bin" "$WORK/overmaxlen_control.bin" "$WORK/rt.bin" \
+    -- "$WORK/harness.bin"
 
 # The BOUNDED encode arm (CORELIB_PLAN §5.1). A schema whose every field carries
 # a count/maxlen has a worst case, so Encode allocates exactly MaxSize bytes and
