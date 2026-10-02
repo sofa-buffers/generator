@@ -393,9 +393,10 @@ for ENGINE in $ENGINES; do
 done
 
 # Every leg from here on runs once per engine in $ENGINES, in a loop of its own.
-# The few that do not run an engine at all -- the corpus import check, the
-# max_message_size encode check and the format gate -- stay on the default one,
-# which is the native engine wherever it exists. A leg that only GENERATES does
+# The few that stay on the default engine, which is the native one wherever it
+# exists -- the corpus import check and the max_message_size encode check -- run
+# once, so the pure encoder is not covered for max_message_size. The format gate
+# runs no engine at all. A leg that only GENERATES does
 # that once, ahead of its loop: the generated source is the same on both engines.
 # The shared-vector decode and chunk-invariance legs run both engines side by
 # side. Reading the pure engine's verdicts off the loop above alone would prove
