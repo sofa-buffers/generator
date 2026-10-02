@@ -41,7 +41,7 @@ degenerate split of the path under test, and it separates "the streaming path is
 wrong" from "it is wrong *when it suspends*".
 
 `--oneshot` adds the cross-check back for the suites where `decode` IS fallible
-(python, dart): there the one-shot verdict and value must match too, which
+(python, dart, go): there the one-shot verdict and value must match too, which
 catches a streaming path that is self-consistently wrong at every size.
 
 Every verdict must equal the reference. Every accepted decode must equal the

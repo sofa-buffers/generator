@@ -848,7 +848,7 @@ YAML
         for surface in decode streamdecode; do
             python3 "$ROOT/tests/conformance/lib/check_refusal_category.py" "C++ [$label]" \
                 --verb "$surface" --limit-pattern 'decode error: LIMIT_EXCEEDED' \
-                --invalid-pattern 'decode error: INVALID' \
+                --invalid-pattern 'decode error: INVALID\b' \
                 -- "$WORK/refusal-$label/harness/harness"
         done
     fi
