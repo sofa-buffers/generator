@@ -917,13 +917,11 @@ YAML
     ROWS_IN='{"strrows":[["a","b","c"],["d"]],"blobrows":[[[1,2],[3]],[[4]]],"structrows":[[{"x":1,"y":2},{"x":3,"y":4}],[{"x":5,"y":6}]],"strcube":[[["a","b"],["c"]],[["d"]]],"numrows":[[1,2,3],[4,5,6]],"fprows":[[1.5,2.5],[3.5]],"enumrows":[[0,1,2],[2]],"bfrows":[[1,2,3],[0]],"boolrows":[[true,false,true],[false]]}'
     ROWS_BIN="$WORK/rows-$label.bin"
     printf '%s' "$ROWS_IN" | "$WORK/rows-$label/harness/harness" encode NestedRows > "$ROWS_BIN"
-    if [ -z "$corelib" ]; then
-        # The pure legs can name the outcome. All four refusals are distinct
-        # there, InvalidArgument -- the verdict the defect produced -- included.
-        ROWS_ST=$("$WORK/rows-$label/harness/harness" status NestedRows < "$ROWS_BIN")
-        [ "$ROWS_ST" = COMPLETE ] \
-            || { echo "FAIL: [$label] nested rows decode is $ROWS_ST, not COMPLETE"; exit 1; }
-    fi
+    # Every variant names the outcome: all four refusals are distinct, and
+    # InvalidArgument -- the verdict the defect produced -- is one of them.
+    ROWS_ST=$("$WORK/rows-$label/harness/harness" status NestedRows < "$ROWS_BIN")
+    [ "$ROWS_ST" = COMPLETE ] \
+        || { echo "FAIL: [$label] nested rows decode is $ROWS_ST, not COMPLETE"; exit 1; }
     ROWS_OUT=$("$WORK/rows-$label/harness/harness" decode NestedRows < "$ROWS_BIN")
     for chk in \
         '"numrows":\[\[1,2,3\],\[4,5,6\]\]' \
@@ -957,17 +955,17 @@ YAML
     # SCHEMA's statement, and §6.2.1/§6.3 forbid answering a schema bound with
     # LimitExceeded.
     #
-    # c-cpp-static asserts the exit-status reject above and nothing more: its row
-    # lands in a fixed-capacity destination and corelib-c-cpp answers an element
-    # past that capacity with INVALID_ARGUMENT (the §6.6.3 destination tier),
-    # where §7.1/§6.3 make a schema count bound INVALID. That is a corelib-c-cpp
-    # gap, not behaviour to pin here; no corelib-c-cpp issue number exists yet
-    # (to be filed), so this leg keeps no category assertion until it is fixed.
-    if [ "$label" != c-cpp-static ]; then
-        ROWS_OVER=$("$WORK/rows-$label/harness/harness" status NestedRows < "$WORK/rows-over-$label.bin")
-        [ "$ROWS_OVER" = INVALID ] \
-            || { echo "FAIL: [$label] a row past its schema count is $ROWS_OVER, not INVALID"; exit 1; }
-    fi
+    # c-cpp-static is a PINNED KNOWN GAP: its row lands in a fixed-capacity
+    # destination and corelib-c-cpp answers an element past that capacity with
+    # INVALID_ARGUMENT (the §6.6.3 destination tier), where §7.1/§6.3 make a
+    # schema count bound INVALID. The leg asserts today's verdict so it still has
+    # a negative control; when corelib-c-cpp is fixed it fails here, and the
+    # expectation becomes INVALID like every other variant.
+    ROWS_WANT=INVALID
+    [ "$label" = c-cpp-static ] && ROWS_WANT=INVALID_ARGUMENT
+    ROWS_OVER=$("$WORK/rows-$label/harness/harness" status NestedRows < "$WORK/rows-over-$label.bin")
+    [ "$ROWS_OVER" = "$ROWS_WANT" ] \
+        || { echo "FAIL: [$label] a row past its schema count is $ROWS_OVER, not $ROWS_WANT"; exit 1; }
     echo "==> [$label] nested rows OK"
 
     # MESSAGE_SPEC §7.4 -- a field id REPEATED inside one scope (generator#523),

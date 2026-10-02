@@ -127,8 +127,8 @@ a *rejection* needs the category named, or a wrongly-INCOMPLETE verdict passes
 on exit status alone. So the INVALID rows go through whichever of two shapes a
 harness has: `--status-verb` for a verb printing `INVALID`/`COMPLETE` on line 1
 (`status`, `trydecode`), `--invalid-pattern` for a harness that names the
-category in its error text. Suites with neither may still run the skip half --
-that half does not need a category -- but they are asked to say so.
+category in its error text. A suite with neither may still run the skip half --
+that half does not need a category -- but it is asked to say so.
 
 ## Both decode surfaces
 

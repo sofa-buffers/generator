@@ -2439,11 +2439,12 @@ MUST agree on which messages are valid," regardless of allocation strategy.
   the c-cpp harness names the §6.3 category (`decode error: <CATEGORY>` on both
   decode verbs, plus the `status` verb) from `Result::invalid()` /
   `incomplete()` / `limitExceeded()` / `code()`, so those legs assert the
-  category and not only the exit status. One leg stays on exit status alone: a
+  category and not only the exit status. One leg is a pinned known gap: a
   nested row past its schema count on `c-cpp-static`. corelib-c-cpp answers it
   `INVALID_ARGUMENT` (element past a fixed destination's capacity, the §6.6.3
-  tier) where §7.1 requires `INVALID`; this is a known corelib-c-cpp gap (issue
-  to be filed), so the suite asserts the reject there but not the category.
+  tier) where §7.1 requires `INVALID`; the suite asserts `INVALID_ARGUMENT`
+  there, so the leg fails the moment the corelib is fixed and the expectation
+  moves to `INVALID`.
 
 #### Decode verdict: an over-width integer is INVALID (every target but `c`/`cpp-c-cpp`)
 
@@ -6114,8 +6115,8 @@ A reimplementation is **conformant** when it reproduces these gates:
    `INVALID`/`INCOMPLETE`/`LIMIT_EXCEEDED`/`COMPLETE` on line 1 and always exiting
    0). The `corelib: c-cpp` C++ leg now names the category too: its harness
    derives it from the wrapper `Result` predicates and has the same `status`
-   verb; only the `c-cpp-static` nested-row over-count stays on exit status
-   (see §7.1 above). The `c` suite reaches the same C corelib through the C API,
+   verb; only the `c-cpp-static` nested-row over-count pins the corelib's
+   current `INVALID_ARGUMENT` (see §7.1 above). The `c` suite reaches the same C corelib through the C API,
    which separates `SOFAB_RET_E_INVALID_MSG` from `SOFAB_RET_INCOMPLETE`.
 
    Values are compared as JSON **numbers**, not greps: the same skipped field
