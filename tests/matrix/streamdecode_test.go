@@ -97,31 +97,43 @@ func TestEveryHarnessEmitsStreamDecode(t *testing.T) {
 // a half-read varint, a payload accumulator that is not carried, a scope stack
 // that unwinds one level too far. `0` feeds the whole message in one call.
 //
-// Five entries, not eleven, and that is deliberate. generator#413 scoped the
-// sweep to the four suites that had NO chunked check at all; generator#516 added
-// kotlin, because that is one of the two backends where an enum or bitfield
-// ARRAY is stored at the width its declaration implies and filled in BULK by the
-// corelib — so the §1 width bound is applied by a fill that suspends mid-element,
-// and a single split width is thin evidence for a bound that lives there. The
-// remaining six already run a chunked check of their own (go/zig/typescript
-// compare verdicts across splits; rust/cpp/c feed a streaming round-trip) and
-// their `streamdecode` keeps the one-byte default, which
-// tests/conformance/lib/check_declared_width_kinds.py drives them at. Adding a
-// target here is what lets a driver sweep several widths on it.
+// Every backend takes it (generator#648). generator#413 first scoped the sweep
+// to the four suites that had NO chunked check at all, and generator#516 added
+// kotlin; the other six kept a one-byte `streamdecode` and a local chunked leg
+// that compared only verdicts, used one split width, or fed only valid messages
+// -- strictly weaker than the shared driver. Every suite now runs
+// tests/conformance/lib/check_chunk_invariance.py, so every harness has to parse
+// the argument. A new target is added here with the exact parse it emits.
 var chunkSizeBackends = map[string]string{
-	"java":   "int csz = args.length > 2 ? Integer.parseInt(args[2]) : 1;",
-	"csharp": "var csz = args.Length > 2 ? int.Parse(args[2]) : 1;",
-	"python": "csz = int(sys.argv[3]) if len(sys.argv) > 3 else 1",
-	"dart":   "final csz = args.length > 2 ? int.parse(args[2]) : 1;",
-	"kotlin": "val csz = if (args.size > 2) args[2].toInt() else 1",
+	"java":       "int csz = args.length > 2 ? Integer.parseInt(args[2]) : 1;",
+	"csharp":     "var csz = args.Length > 2 ? int.Parse(args[2]) : 1;",
+	"python":     "csz = int(sys.argv[3]) if len(sys.argv) > 3 else 1",
+	"dart":       "final csz = args.length > 2 ? int.parse(args[2]) : 1;",
+	"kotlin":     "val csz = if (args.size > 2) args[2].toInt() else 1",
+	"go":         "&dripReader{b: in, n: chunkArg()}",
+	"c":          "size_t csz = argc > 3 ? (size_t)strtoull(argv[3], NULL, 10) : 1;",
+	"cpp":        "std::size_t csz = argc > 3 ? std::strtoull(argv[3], nullptr, 10) : 1;",
+	"rust":       "let csz: usize = args.get(3).and_then(|s| s.parse().ok()).unwrap_or(1);",
+	"zig":        "const csz: usize = if (args.next()) |a| (std.fmt.parseInt(usize, a, 10) catch 1) else 1;",
+	"typescript": "const csz = Number(process.argv[4] ?? 1);",
 }
 
 func TestChunkSizeArgumentWhereTheSweepRuns(t *testing.T) {
-	s, err := buildIR(t, filepath.Join("..", "..", "examples", "messages", "example.yaml"))
+	// The heapless C target cannot size an unbounded field, so it is checked on
+	// the fully bounded definition, as the sweep above does.
+	example, err := buildIR(t, filepath.Join("..", "..", "examples", "messages", "example.yaml"))
 	if err != nil {
 		t.Fatalf("example.yaml should validate: %v", err)
 	}
+	bounded, err := buildIR(t, filepath.Join("corpus", "defs", "scalars.yaml"))
+	if err != nil {
+		t.Fatalf("scalars.yaml should validate: %v", err)
+	}
 	for lang, want := range chunkSizeBackends {
+		s := example
+		if fixedOnlyTarget(lang) {
+			s = bounded
+		}
 		b, ok := generator.Lookup(lang)
 		if !ok {
 			t.Errorf("%s is named here but not registered", lang)

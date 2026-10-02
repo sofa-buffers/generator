@@ -6038,18 +6038,20 @@ A reimplementation is **conformant** when it reproduces these gates:
    `--expect` pins the count, and a table that does not straddle accept/reject is
    rejected as no evidence at all.
 
-   It runs on `java`, `csharp`, `python` and `dart` — the four suites that had no
-   chunked-decode check of any shape. The other seven already carry one of their
-   own: `go`, `zig` (#293) and `typescript` compare verdicts across splits over
-   their own fixtures; `rust`, `cpp`, `kotlin` and `c` feed a streaming
-   round-trip. Adopting this driver there means giving their `streamdecode` the
-   chunk-size argument (`tests/matrix/streamdecode_test.go` records which
-   backends carry it — `kotlin` gained one for the declared-width sweep, so it is
-   the next candidate). Its fixtures are the suite's own, and none of them is an
+   It runs in all eleven suites, in every cpp profile, every rust label, every
+   typescript `int64` mode and both python engines (generator#648). `streamdecode`
+   takes the chunk size as its optional third argument in every generated harness
+   (default 1, `0` = the whole message in one feed), and
+   `tests/matrix/streamdecode_test.go` pins the exact parse each backend emits.
+   The weaker per-language legs it replaced — `go`'s verdict-only table over one
+   split — are gone; what the driver cannot reach stays: the in-memory value
+   checks that bypass JSON (`streaming_check.*`, zig's chunk probe, the
+   TypeScript `stream_check.ts`), the truncation sweeps, the 40-deep skip and the
+   ownership checks. Its fixtures are the suite's own, and none of them is an
    enum or bitfield array carrying an over-width element, which is why the
    declared-width driver replays its own table rather than handing fixtures here:
-   this driver was built for accepting shapes and reaches four suites, and the
-   width rule's rejecting rows have to hold in all eleven.
+   this driver was built for accepting shapes, and the width rule's rejecting rows
+   have to hold in all eleven.
 
    *Fixlen-array subtype* (`tests/conformance/lib/check_fixlen_array_subtype.py`):
    CORELIB_PLAN §4.8.1 fixes the fixlen-array decode order in five steps, and the
@@ -6240,6 +6242,13 @@ A reimplementation is **conformant** when it reproduces these gates:
    The mirror rule is §6.3's "never raised for a field the schema bounds": a
    `count`/`maxlen` breach is `InvalidMessage` and never the cap category.
 
+   It runs in every suite except `c` (which has no receiver caps), on `decode` and
+   on `streamdecode`, against one capped project built from `--emit-schema`
+   (generator#648); `cpp` and `rust` run it on every profile that has caps. Each
+   suite's own cap legs stay beside it, because they also cover what this table
+   does not: over-cap-then-EOF precedence, a skipped field never being capped, the
+   same bytes under a looser cap, the allocation budget and the latch.
+
    Neither half is visible on an exit status — both refusals exit non-zero — so
    the driver **refuses to run** without a category channel, and takes whichever
    of the two shapes a harness has: `--status-verb` for a verb printing the
@@ -6399,10 +6408,11 @@ A reimplementation is **conformant** when it reproduces these gates:
    after the message name (`0` = the whole buffer in one feed, the degenerate
    split, which separates "the streaming path is wrong" from "it is wrong *when
    it suspends*"). It is given only where the harness actually reads that
-   argument — `java`, `kotlin`, `csharp`, `dart`, `python` (see
-   `tests/matrix/streamdecode_test.go`) — because a harness that ignores it would
-   let the summary claim a sweep that never happened; the other six are invoked
-   bare and drive their own fixed split, one byte per feed. A suite with no
+   argument, and a harness that ignores it would let the summary claim a sweep that
+   never happened. Every harness reads it now (see
+   `tests/matrix/streamdecode_test.go`); the suites of `go`, `c`, `cpp`, `rust`,
+   `zig` and `typescript` still invoke this driver bare, at the one-byte default,
+   and sweep the sizes through `check_chunk_invariance.py` instead. A suite with no
    streaming surface at all would decline by name with `--no-stream REASON`,
    printed in the summary line, and the driver REFUSES to run with neither flag,
    so the leg cannot go missing in silence. No suite declines today: all eleven
@@ -7554,8 +7564,9 @@ removed from the config schema — embedded C++ shipped as the `cpp` target's
 5. Add a project/harness template, corpus coverage, and a `tests/conformance/<lang>/run.sh`
    (generate → build → round-trip → byte-exact vectors) plus a gated unit test.
    The harness needs **both** decode surfaces: `decode` (one-shot, whole buffer)
-   and `streamdecode` (the same raw bytes on stdin, fed **one byte per feed**
-   through the incremental decoder, printing exactly what `decode` prints).
+   and `streamdecode` (the same raw bytes on stdin, fed **one byte per feed** by
+   default through the incremental decoder, printing exactly what `decode`
+   prints; an optional third argument is the chunk size, `0` = the whole message).
    `tests/matrix/streamdecode_test.go` fails until it is there, and the vector
    driver is then run in both modes — without the second, no skipped field is
    ever cut by a chunk boundary (§12).
