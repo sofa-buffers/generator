@@ -709,13 +709,13 @@ func TestZigProjectMode(t *testing.T) {
 		".number_string => |s| return std.fmt.parseInt(u64, s, 10) catch 0,", // u64 > 2^53 stays exact
 		"std.json.Stringify.encodeJsonString",
 		// The chunked decode surface (generator#456): the same raw wire bytes
-		// `decode` takes, fed ONE BYTE PER feed, so every position inside every
+		// `decode` takes, fed ONE BYTE PER feed by default (the chunk size is an argument), so every position inside every
 		// skipped payload becomes a suspend/resume boundary. It prints what
 		// `decode` prints, and the conformance runner replays the shared vectors
 		// through both and compares.
 		"std.mem.eql(u8, mode, \"streamdecode\")",
 		"var dec = message.Myfirstmessage.decoder(&obj, alloc);",
-		"_ = dec.feed(&[_]u8{b}) catch |e| {",
+		"_ = dec.feed(input[off..@min(off + step, input.len)]) catch |e| {",
 		// The refusal path is the half a passing suite cannot otherwise see: a
 		// reject vector exits non-zero either way, so the harness names what
 		// FINISH answered after the refusal and run.sh greps for it

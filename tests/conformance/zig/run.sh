@@ -591,6 +591,31 @@ cp "$ROOT/tests/conformance/zig/stream_check.zig" "$WORK/probe/src/main.zig"
 "$WORK/probe/zig-out/bin/harness" || { echo "FAIL: chunked decode is not chunk-invariant"; exit 1; }
 echo "==> chunk invariance OK"
 
+# The same property over the generated JSON harness, on the fixtures this suite
+# built for its negative cases (generator#413, #648): the verdict AND the decoded
+# value must not depend on where the chunks were cut. Every fixture above, rejects
+# and controls alike, is fed through the streaming decoder at six chunk sizes (1,
+# 2, 3, 5, 16 and the whole message) and must equal the unchunked streaming
+# answer. stream_check.zig keeps what JSON cannot reach: values compared in memory
+# on a probe schema of split string/blob payloads.
+echo "==> a chunk boundary must not change the verdict or the value (generator#413, #648)"
+python3 "$ROOT/tests/conformance/lib/check_chunk_invariance.py" "Zig" \
+    --message myfirstmessage --expect 27 \
+    "$WORK/shortcount.bin" "$WORK/overcount.bin" "$WORK/control.bin" \
+    "$WORK/fp64_at_fp32.bin" "$WORK/fp32_overcount.bin" \
+    "$WORK/overcount_trunc.bin" "$WORK/incount_trunc.bin" \
+    "$WORK/overmaxlen_trunc.bin" "$WORK/inmaxlen_trunc.bin" \
+    "$WORK/overindex.bin" "$WORK/overindex_control.bin" \
+    "$WORK/overmaxlen.bin" "$WORK/overmaxlen_control.bin" \
+    "$WORK/wiremismatch.bin" "$WORK/wiremismatch_control.bin" \
+    "$WORK/arr_at_scalar_u.bin" "$WORK/arr_at_scalar_i.bin" "$WORK/arr_at_scalar_control.bin" \
+    "$WORK/fp_arr_at_scalar.bin" "$WORK/fp_arr_at_scalar_control.bin" \
+    "$WORK/reopen_struct.bin" "$WORK/reopen_array.bin" \
+    "$WORK/fixsubtype.bin" "$WORK/fixsubtype_control.bin" \
+    "$WORK/skipped_occ_array.bin" "$WORK/skipped_occ_struct.bin" \
+    "$WORK/dangling.bin" \
+    -- "$WORK/ex/zig-out/bin/harness"
+
 # A decoded message OWNS its bytes (CORELIB_PLAN §6.7 / §6.7.1, generator#412).
 # The lifetime half of the property the block above pins by value: no
 # destination may keep a window into the buffer the bytes came from, on the
@@ -760,6 +785,21 @@ sb_expect '\022\302\002ABC'                  InvalidMessage "a 40-byte string ov
 sb_expect '\002\113ABC'  IncompleteMessage "an over-cap BLOB at the string-declared id 0 (§7.3 skip), then EOF"
 sb_expect '\072\112ABC'  IncompleteMessage "an over-cap string at the UNKNOWN id 7, then EOF"
 echo "==> string/blob cap enforcement point OK"
+
+# A receiver cap answers LimitExceeded, a schema bound InvalidMessage (CORELIB_PLAN
+# S6.3, generator#416, #648), on both decode surfaces. The generator#102 legs above
+# stay beside it: they also cover over-cap-then-EOF precedence, row-count caps, a
+# skipped field never being capped and the latch, which this table does not.
+echo "==> a cap is LimitExceeded, a schema bound is InvalidMessage (S6.3, generator#416)"
+printf 'version: 1\nmessages:\n' > "$WORK/refusal.yaml"
+python3 "$ROOT/tests/conformance/lib/check_refusal_category.py" --emit-schema >> "$WORK/refusal.yaml"
+printf 'generic: { emit: project, max_dyn_array_count: 4, max_dyn_string_len: 8, max_dyn_blob_len: 8 }\n' > "$WORK/cfg_refusal.yaml"
+zig_build "$WORK/refusal.yaml" "$WORK/refusal" "$WORK/cfg_refusal.yaml"
+for surface in decode streamdecode; do
+    python3 "$ROOT/tests/conformance/lib/check_refusal_category.py" "zig" \
+        --verb "$surface" --limit-pattern 'LimitExceeded' --invalid-pattern 'InvalidMessage' \
+        -- "$WORK/refusal/zig-out/bin/harness"
+done
 # The receiver cap on a WRAPPER array's element INDEX, and on a matrix row's own
 # element count (CORELIB_PLAN 6.2.1). These are the caps corelib-zig compares --
 # generated code passes max_dyn_array_count as the `.{ .receiver = ... }` bound of
@@ -1011,9 +1051,8 @@ python3 "$ROOT/tests/conformance/lib/check_repeated_id.py" "Zig" \
 # option as a present frame); on decode the last correctly-typed option wins, a
 # §7.3-skipped or unknown id never switches, and several children or re-opened
 # frames are legal. The driver forges the frames no encoder emits and prints its
-# own schema. `--sizes 1`: this harness's
-# streamdecode feeds ONE byte per call whatever split it is handed, so larger
-# splits would repeat the same run under a label that claims otherwise.
+# own schema. `--sizes 1`: one split is enough for this table; the sweep over
+# chunk sizes is check_chunk_invariance.py's.
 echo "==> §4.2/§7.4.1 tagged unions: one option held, last option wins (generator#608)"
 python3 "$ROOT/tests/conformance/lib/check_union.py" --emit-schema > "$WORK/union.yaml"
 zig_build "$WORK/union.yaml" "$WORK/union"
@@ -1025,7 +1064,7 @@ python3 "$ROOT/tests/conformance/lib/check_union.py" "Zig" --sizes 1 \
 # one-level array and at a row of an array of arrays (wrapper, enum, boolean,
 # depth 3). The corelib collectors order the two tests themselves; the driver
 # keeps every backend's row path to the same order. It prints its own schema.
-# `--sizes 1`: this harness's streamdecode feeds ONE byte per call.
+# `--sizes 1`: one split is enough for this table; the sweep is check_chunk_invariance.py's.
 echo "==> §7.3 before §7.1: a mistyped element past the bound is skipped (generator#627)"
 python3 "$ROOT/tests/conformance/lib/check_skip_before_bound.py" --emit-schema > "$WORK/sbb.yaml"
 zig_build "$WORK/sbb.yaml" "$WORK/sbb"

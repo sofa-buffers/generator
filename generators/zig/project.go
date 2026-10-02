@@ -216,7 +216,7 @@ func (g *gen) harness(s *ir.Schema) []byte {
 		f.line("            try toJson_%s(&obj, out);", mb)
 		f.line("            try out.writeByte('\\n');")
 		// The same bytes through the incremental decoder (PLAN §5.6), fed ONE BYTE
-		// per feed. A whole-buffer feed would exercise the Decoder's signature
+		// per feed by default. A whole-buffer feed would exercise the Decoder's signature
 		// without ever making it suspend and resume, which is the half that can
 		// actually be wrong; drip-feeding turns every byte offset -- inside a
 		// skipped payload included -- into a boundary the parse state has to
@@ -228,7 +228,12 @@ func (g *gen) harness(s *ir.Schema) []byte {
 		// An .incomplete per feed is the normal verdict for a chunk that ended
 		// mid-field: it says the BYTES ended there, not that the message is bad.
 		// Only finish() decides on the message as a whole.
-		f.line("            for (input) |b| {")
+		// The chunk size is an argument (default 1; 0 = the whole message in one
+		// feed), swept by tests/conformance/lib/check_chunk_invariance.py.
+		f.line("            const csz: usize = if (args.next()) |a| (std.fmt.parseInt(usize, a, 10) catch 1) else 1;")
+		f.line("            const step: usize = if (csz > 0) csz else @max(input.len, 1);")
+		f.line("            var off: usize = 0;")
+		f.line("            while (off < input.len) : (off += step) {")
 		// `catch`, not `try`: a refusal is terminal and would otherwise leave main
 		// without anyone naming what FINISH then answers. A refusal is latched --
 		// by the corelib for anything raised inside `is.feed`, by the sticky
@@ -243,7 +248,7 @@ func (g *gen) harness(s *ir.Schema) []byte {
 		// message. It cannot be a leftover from an earlier call the way the old
 		// remembered status could (#528) -- nothing but this finish produces it.
 		// tests/conformance/zig/run.sh greps this line.
-		f.line("                _ = dec.feed(&[_]u8{b}) catch |e| {")
+		f.line("                _ = dec.feed(input[off..@min(off + step, input.len)]) catch |e| {")
 		f.line("                    var fin: []const u8 = \"RETURNED\";")
 		f.line("                    dec.finish() catch |fe| { fin = @errorName(fe); };")
 		f.line("                    std.debug.print(\"decode error: {s} [finish={s}]\\n\", .{ @errorName(e), fin });")
