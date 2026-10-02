@@ -312,7 +312,7 @@ func TestTSHeaderBoundReject(t *testing.T) {
 	for _, want := range []string{
 		`mode === "streamdecode"`,
 		`const dec = new DECODERS[name]();`,
-		`dec.feed(one);`,
+		`dec.feed(new Uint8Array(input.subarray(off, Math.min(off + step, input.length))));`,
 		// On the refusal path, NAME what FINISH answered (generator#541). A refusal
 		// is terminal and the corelib latches it, so a finish that follows one must
 		// re-throw the same code; a reject vector exits non-zero either way, so

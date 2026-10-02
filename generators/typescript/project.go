@@ -182,7 +182,7 @@ func (g *gen) harness(s *ir.Schema) []byte {
 	f.line("  } else if (mode === \"decode\") {")
 	f.line("    const obj = cls.decode(new Uint8Array(input));")
 	f.line("    process.stdout.write(JSON.stringify(obj.toJSON()) + \"\\n\");")
-	// The same bytes through the incremental decoder, fed ONE BYTE per feed. A
+	// The same bytes through the incremental decoder, fed ONE BYTE per feed by default. A
 	// whole-buffer feed would exercise the Decoder's signature without ever making
 	// it suspend and resume, which is the half that can actually be wrong;
 	// drip-feeding turns every byte offset -- inside a skipped payload included --
@@ -194,12 +194,14 @@ func (g *gen) harness(s *ir.Schema) []byte {
 	// mid-field: it says the BYTES ended there, not that the message is bad. Only
 	// finish() decides on the message as a whole, and it throws when the stream
 	// ended half-read.
-	f.line("    const one = new Uint8Array(1);")
+	// The chunk size is an argument (default 1; 0 = the whole message in one
+	// feed), swept by tests/conformance/lib/check_chunk_invariance.py.
+	f.line("    const csz = Number(process.argv[4] ?? 1);")
+	f.line("    const step = csz > 0 ? csz : Math.max(input.length, 1);")
 	f.line("    let obj;")
 	f.line("    try {")
-	f.line("      for (const b of input) {")
-	f.line("        one[0] = b;")
-	f.line("        dec.feed(one);")
+	f.line("      for (let off = 0; off < input.length; off += step) {")
+	f.line("        dec.feed(new Uint8Array(input.subarray(off, Math.min(off + step, input.length))));")
 	f.line("      }")
 	f.line("      obj = dec.finish();")
 	f.line("    } catch (e) {")
