@@ -919,12 +919,12 @@ done
 # as one assertion per file because the claim is about the whole set; the driver
 # refuses a one-sided table and a missing fixture.
 #
-# No --oneshot: `decode` here and the reader-driven decode are both strict, but
-# the property is about the streaming path alone.
+# --oneshot also compares the reader-driven decode against the one-shot `decode`
+# for each fixture, so a streamdecode that is self-consistently wrong still fails.
 echo "==> a chunk boundary must not change the verdict or the value (generator#312, #648)"
 ( cd "$WORK/proj" && GOFLAGS=-mod=mod go build -o "$WORK/harness.bin" ./harness )
 python3 "$ROOT/tests/conformance/lib/check_chunk_invariance.py" "Go" \
-    --message myfirstmessage --expect 15 \
+    --message myfirstmessage --oneshot --expect 15 \
     "$WORK/overcount.bin" "$WORK/control.bin" "$WORK/fp64_at_fp32.bin" \
     "$WORK/fp32_overcount.bin" "$WORK/skipped_bad_utf8.bin" "$WORK/declared_bad_utf8.bin" \
     "$WORK/overcount_trunc.bin" "$WORK/incount_trunc.bin" "$WORK/overindex.bin" \
