@@ -1445,7 +1445,9 @@ route by `(scope, id)` and are forward-compatible (skip unknown ids).
      would be dead storage and a dead branch on every row. The runtime pair is
      still there for `Count = -1`, for hand-written callers.
      `tests/conformance/lib/check_skip_before_bound.py` pins the order on all four
-     profiles. Measured on that driver's schema (5 nested row fields), against
+     profiles. Every other suite runs the same driver too, on each of its profiles,
+     engines and int64 modes, so no backend's row path can drift from this order.
+     Measured on that driver's schema (5 nested row fields), against
      the generated collector it replaces:
      - **corelib-c-cpp, bench recipe** (`bench_size`, `-Os`):
        - static storage: `.text` −10 / −12 B (ARMv6-m / ARMv7-m), `.data`/`.bss`

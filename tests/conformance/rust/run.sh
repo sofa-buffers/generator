@@ -481,6 +481,19 @@ run_variant() {
     python3 "$ROOT/tests/conformance/lib/check_union.py" "Rust [$label]" --sizes 1 \
         --cwd "$WORK/union-$label" -- cargo run -q --
 
+    # MESSAGE_SPEC §7.3 before §7.1 (generator#627): a mistyped array element past
+    # the schema `count` is SKIPPED and a correctly typed one is INVALID, at a
+    # one-level array and at a row of an array of arrays (wrapper, enum, boolean,
+    # depth 3). The corelib collectors order the two tests themselves; the driver
+    # keeps every backend's row path to the same order. It prints its own schema.
+    # On every profile: the rows live in Vec on one and heapless storage on the
+    # other. `--sizes 1`: this harness's streamdecode feeds ONE byte per call.
+    echo "==> [$label] §7.3 before §7.1: a mistyped element past the bound is skipped (generator#627)"
+    python3 "$ROOT/tests/conformance/lib/check_skip_before_bound.py" --emit-schema > "$WORK/sbb.yaml"
+    rust_build "$WORK/sbb.yaml" "$WORK/sbb-$label"
+    python3 "$ROOT/tests/conformance/lib/check_skip_before_bound.py" "Rust [$label]" --sizes 1 \
+        --cwd "$WORK/sbb-$label" -- cargo run -q --
+
     # Nested defaults (generator#609): absence reads as the schema's defaults at
     # every depth and inside a struct array's element, on every profile --
     # asserted against the driver's own schema, never this harness's baseline.
