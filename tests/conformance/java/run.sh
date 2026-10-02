@@ -484,6 +484,24 @@ OUT=$($H decode myfirstmessage < "$WORK/skipped_occ_struct.bin") \
 echo "$OUT" | grep -q '"nestedstring":"x"' || { echo "FAIL: skipped occurrence must not clear the struct (nestedstring \"x\" lost); got: $OUT"; exit 1; }
 echo "==> skipped occurrence keeps struct OK"
 
+# A receiver cap answers LimitExceeded, a schema bound InvalidMessage (CORELIB_PLAN
+# S6.3, generator#416, #648), on both decode surfaces. The generator#102 legs below
+# stay beside it: they also cover over-cap-then-EOF precedence, a skipped field
+# never being capped and the `[finish=...]` latch, which this table does not.
+echo "==> a cap is LIMIT_EXCEEDED, a schema bound is INVALID_MSG (S6.3, generator#416)"
+printf 'version: 1\nmessages:\n' > "$WORK/refusal.yaml"
+python3 "$ROOT/tests/conformance/lib/check_refusal_category.py" --emit-schema >> "$WORK/refusal.yaml"
+cat > "$WORK/refusalcfg.yaml" <<'YAML'
+generic: { emit: project, max_dyn_array_count: 4, max_dyn_string_len: 8, max_dyn_blob_len: 8 }
+targets: { java: { package: message } }
+YAML
+build "$WORK/refusal.yaml" "$WORK/refusal" "$WORK/refusalcfg.yaml"
+for surface in decode streamdecode; do
+    python3 "$ROOT/tests/conformance/lib/check_refusal_category.py" "java" \
+        --verb "$surface" --limit-pattern 'LIMIT_EXCEEDED' --invalid-pattern 'INVALID_MSG' \
+        -- java -jar "$WORK/refusal/target/harness.jar"
+done
+
 # Receiver-side decode limits (generator#102): `a` is an UNBOUNDED u64 array
 # (id 0 -> header 0x03 = 0<<3 | unsigned-array). With max_dyn_array_count: 4
 # a wire count of 5 MUST fail with LIMIT_EXCEEDED (decode exits non-zero,
