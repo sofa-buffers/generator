@@ -1052,6 +1052,20 @@ build "$WORK/defaults.yaml" "$WORK/defaults"
 python3 "$ROOT/tests/conformance/lib/check_defaults.py" "Kotlin" \
     -- "$WORK/defaults/build/install/harness/bin/harness"
 
+# A native array round-trips at every length, for every element kind
+# (generator#550, #643): lengths either side of 16, empty, and 257 elements for
+# the unbounded field, all 14 kinds in one message per round. The shared driver
+# prints its own schema and runs on both decode surfaces; `streamdecode` drips
+# the message, so a long array crosses chunk boundaries.
+echo "==> native arrays round-trip at every length, for every element kind (generator#643)"
+printf 'version: 1\nmessages:\n' > "$WORK/arrlen.yaml"
+python3 "$ROOT/tests/conformance/lib/check_array_lengths.py" --emit-schema >> "$WORK/arrlen.yaml"
+build "$WORK/arrlen.yaml" "$WORK/arrlen"
+for surface in decode streamdecode; do
+    python3 "$ROOT/tests/conformance/lib/check_array_lengths.py" "Kotlin" --verb "$surface" \
+        -- "$WORK/arrlen/build/install/harness/bin/harness"
+done
+
 # The backend's own Go tests, unfiltered, against this corelib: any skip fails
 # (tests/conformance/lib/backend_tests.sh).
 run_backend_tests generators/kotlin SOFAB_KOTLIN_CORELIB "$CORELIB"

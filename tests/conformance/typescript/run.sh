@@ -1383,7 +1383,7 @@ ln -s "$WORK/ex/node_modules" "$WORK/arrlen/node_modules"
 tsc_strict "$WORK/arrlen"
 for surface in decode streamdecode; do
     python3 "$ROOT/tests/conformance/lib/check_array_lengths.py" "typescript" \
-        --cwd "$WORK/arrlen" --verb "$surface" -- "$TH"
+        --cwd "$WORK/arrlen" --int64-json string --verb "$surface" -- "$TH"
 done
 # ...and the same shapes under the two Long modes, where a 64-bit array is a
 # `Long[]` rather than a `bigint[]` and therefore takes a different destination
@@ -1397,7 +1397,7 @@ for mode in long number; do
     # drips one byte per feed, and its Long/number destinations are separate arms.
     for surface in decode streamdecode; do
         python3 "$ROOT/tests/conformance/lib/check_array_lengths.py" "typescript int64: $mode" \
-            --cwd "$WORK/arrlen-$mode" --verb "$surface" -- "$TH"
+            --cwd "$WORK/arrlen-$mode" --int64-json string --verb "$surface" -- "$TH"
     done
 done
 

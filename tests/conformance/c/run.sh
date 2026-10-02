@@ -920,6 +920,24 @@ make -C "$WORK/defaults" SOFAB_C_CORELIB="$CORELIB" >/dev/null
 python3 "$ROOT/tests/conformance/lib/check_defaults.py" "C" \
     -- "$WORK/defaults/harness/harness"
 
+# A native array round-trips at every length, for every element kind
+# (generator#550, #643): lengths either side of 16, empty, and 257 elements for
+# the unbounded field, all 14 kinds in one message per round. The shared driver
+# prints its own schema and runs on both decode surfaces; `streamdecode` drips
+# the message, so a long array crosses chunk boundaries.
+# Bounded half only: the C target has no heap, so it cannot express the
+# unbounded `d_*` fields (tests/matrix/corpus/defs/array_lengths_dyn.yaml).
+echo "==> native arrays round-trip at every length, for every element kind (generator#643)"
+printf 'version: 1\nmessages:\n' > "$WORK/arrlen.yaml"
+python3 "$ROOT/tests/conformance/lib/check_array_lengths.py" --emit-schema --bounded-only >> "$WORK/arrlen.yaml"
+( cd "$ROOT" && go run ./cmd/sofabgen --config "$WORK/proj.yaml" --lang c \
+    --in "$WORK/arrlen.yaml" --out "$WORK/arrlen" )
+make -C "$WORK/arrlen" SOFAB_C_CORELIB="$CORELIB" >/dev/null
+for surface in decode streamdecode; do
+    python3 "$ROOT/tests/conformance/lib/check_array_lengths.py" "C" --bounded-only --verb "$surface" \
+        -- "$WORK/arrlen/harness/harness"
+done
+
 # Conflict-free names (ARCHITECTURE §8 "Naming", generator#624): the shared
 # name-collision schema -- path clashes (m_a beside m.a, a.b_c beside a_b.c, a
 # $defs type beside struct_<name>), every role word, fixed, imported and builtin

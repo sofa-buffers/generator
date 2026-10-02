@@ -1323,6 +1323,22 @@ sed -i "s#\${SOFAB_GO_CORELIB}#$CORELIB#" "$WORK/defaults/go.mod"
 python3 "$ROOT/tests/conformance/lib/check_defaults.py" "Go" \
     -- "$WORK/defaults-harness"
 
+# A native array round-trips at every length, for every element kind
+# (generator#550, #643): lengths either side of 16, empty and 257 elements, all
+# 14 kinds in one message per round. The shared driver prints its own schema and
+# is run on both decode surfaces; `streamdecode` drips the message, so a long
+# array crosses chunk boundaries.
+echo "==> native arrays round-trip at every length, for every element kind (generator#643)"
+printf 'version: 1\nmessages:\n' > "$WORK/arrlen.yaml"
+python3 "$ROOT/tests/conformance/lib/check_array_lengths.py" --emit-schema >> "$WORK/arrlen.yaml"
+( cd "$ROOT" && go run ./cmd/sofabgen --config "$WORK/cfg.yaml" --lang go --in "$WORK/arrlen.yaml" --out "$WORK/arrlen" )
+sed -i "s#\${SOFAB_GO_CORELIB}#$CORELIB#" "$WORK/arrlen/go.mod"
+( cd "$WORK/arrlen" && GOFLAGS=-mod=mod go build -o "$WORK/arrlen-harness" ./harness )
+for surface in decode streamdecode; do
+    python3 "$ROOT/tests/conformance/lib/check_array_lengths.py" "Go" --verb "$surface" \
+        -- "$WORK/arrlen-harness"
+done
+
 # Conflict-free names (ARCHITECTURE §8, "Naming"; generator#624). The shared
 # collision schema spells, as messages, $defs types and inline paths, every
 # identifier that used to clash: paths that joined to one name (`m_a` beside

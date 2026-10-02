@@ -6443,8 +6443,17 @@ A reimplementation is **conformant** when it reproduces these gates:
    suspend/resume boundary. `--skip-kinds` declines a kind by name, and prints
    itself in the final line.
 
-   Wired in `typescript` (the default mode plus both `int64` Long modes, where a
-   64-bit array is a different destination entirely). The COMPILE half is
+   Wired in every suite, on both decode surfaces where the harness has a chunked
+   one (`typescript` also under both `int64` Long modes, where a 64-bit array is a
+   different destination entirely; `cpp` in every profile of its variant loop,
+   `rust` in every label, `python` under both engines). `--bounded-only` drops the
+   unbounded `d_*` fields from the emitted schema and from every round for the
+   fixed-storage profiles named below, and the final line says so; `--int64-json
+   number|string` has `check_union.py`'s meaning (`string` for `dart` and
+   `typescript`). The spellings a harness may use for the same value (a quoted
+   64-bit integer, a base64 `u8` array in Go) are read by
+   `tests/conformance/lib/harness_dialect.py`, shared by the drivers, so a
+   rendering difference is never an assertion. The COMPILE half is
    `tests/matrix/corpus/defs/array_lengths.yaml`, which declares the same shapes
    statically so every backend generates and builds them whether or not its suite
    runs the driver yet — and its count-LESS twin `array_lengths_dyn.yaml`, split

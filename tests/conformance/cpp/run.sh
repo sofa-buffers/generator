@@ -1054,6 +1054,26 @@ YAML
     make -C "$WORK/defaults-$label" "$@" >/dev/null
     python3 "$ROOT/tests/conformance/lib/check_defaults.py" "C++ [$label]" \
         -- "$WORK/defaults-$label/harness/harness"
+
+    # A native array round-trips at every length, for every element kind
+    # (generator#550, #643): lengths either side of 16, empty, and 257 elements for
+    # the unbounded field, all 14 kinds in one message per round. The shared driver
+    # prints its own schema and runs on both decode surfaces; `streamdecode` drips
+    # the message, so a long array crosses chunk boundaries.
+    # corelib: c-cpp (both storage modes) is the embedded profile and cannot
+    # express an unbounded array, so it runs the bounded half only.
+    ARRLEN_OPTS=""
+    if [ -n "$corelib" ]; then ARRLEN_OPTS="--bounded-only"; fi
+    echo "==> [$label] native arrays round-trip at every length, for every element kind (generator#643)"
+    printf 'version: 1\nmessages:\n' > "$WORK/arrlen.yaml"
+    python3 "$ROOT/tests/conformance/lib/check_array_lengths.py" --emit-schema $ARRLEN_OPTS >> "$WORK/arrlen.yaml"
+    ( cd "$ROOT" && go run ./cmd/sofabgen --config "$WORK/cfg-$label.yaml" --lang cpp \
+        --in "$WORK/arrlen.yaml" --out "$WORK/arrlen-$label" )
+    make -C "$WORK/arrlen-$label" "$@" >/dev/null
+    for surface in decode streamdecode; do
+        python3 "$ROOT/tests/conformance/lib/check_array_lengths.py" "C++ [$label]" $ARRLEN_OPTS --verb "$surface" \
+            -- "$WORK/arrlen-$label/harness/harness"
+    done
 }
 
 # Pure C++20 corelib-cpp (default).

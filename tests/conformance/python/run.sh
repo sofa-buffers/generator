@@ -1339,6 +1339,26 @@ done
 unset SOFAB_PUREPYTHON || true
 if [ "$NATIVE" = yes ]; then require_engine native; else require_engine python; fi
 
+# A native array round-trips at every length, for every element kind
+# (generator#550, #643): lengths either side of 16, empty, and 257 elements for
+# the unbounded field, all 14 kinds in one message per round. Both engines and
+# both decode surfaces: the native engine fills arrays through the destination
+# table, the pure one through the visitor, and `streamdecode` drips the message.
+echo "==> native arrays round-trip at every length, for every element kind (generator#643)"
+printf 'version: 1\nmessages:\n' > "$WORK/arrlen.yaml"
+python3 "$ROOT/tests/conformance/lib/check_array_lengths.py" --emit-schema >> "$WORK/arrlen.yaml"
+( cd "$ROOT" && go run ./cmd/sofabgen --format=off --config "$WORK/cfg.yaml" --lang python --in "$WORK/arrlen.yaml" --out "$WORK/arrlen" >/dev/null )
+for ENGINE in $ENGINES; do
+    if [ "$ENGINE" = python ]; then export SOFAB_PUREPYTHON=1; else unset SOFAB_PUREPYTHON || true; fi
+    require_engine "$ENGINE"
+    for surface in decode streamdecode; do
+        python3 "$ROOT/tests/conformance/lib/check_array_lengths.py" "python/$ENGINE" --verb "$surface" \
+            --cwd "$WORK/arrlen" -- python3 harness.py
+    done
+done
+unset SOFAB_PUREPYTHON || true
+if [ "$NATIVE" = yes ]; then require_engine native; else require_engine python; fi
+
 # The DESTINATION TABLE (ARCHITECTURE §9.5.1, generator#561): part of a class is
 # decoded through a corelib-py `Binding` instead of through the visitor's hooks,
 # and the two run in one decoder. A round-trip cannot see the difference -- which
