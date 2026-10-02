@@ -768,6 +768,28 @@ OUT=$("$WORK/proj/harness/harness" decode < "$WORK/w_u8_255_ctl.bin") || { echo 
 echo "$OUT" | tr -d ' ' | grep -q '"someu8":255' || { echo "FAIL: control must keep 255 exactly; got: $OUT"; exit 1; }
 echo "==> declared-width reject OK"
 
+# The verdict AND the decoded value must not depend on where the chunks were cut
+# (CORELIB_PLAN S5.2/S6.0/S5.2.3, generator#413, #648). Every fixture the blocks
+# above built, rejects and controls alike, plus the two truncations below, is fed
+# through the streaming decoder at six chunk sizes (1, 2, 3, 5, 16 and the whole
+# message) and must equal the unchunked streaming answer. streaming_check.c keeps
+# what a JSON-printing harness cannot reach: the encode-through-a-sink half and
+# in-memory values.
+echo "==> a chunk boundary must not change the verdict or the value (generator#413, #648)"
+printf '\173\006\001\002' > "$WORK/overcount_trunc.bin"   # count 6 > 4, then EOF
+printf '\173\004\001\002' > "$WORK/incount_trunc.bin"     # count 4, two elements, then EOF
+python3 "$ROOT/tests/conformance/lib/check_chunk_invariance.py" "c" \
+    --message myfirstmessage --expect 18 \
+    "$WORK/control.bin" "$WORK/overcount.bin" \
+    "$WORK/overcount_trunc.bin" "$WORK/incount_trunc.bin" \
+    "$WORK/overindex.bin" "$WORK/overindex_control.bin" \
+    "$WORK/wiremismatch.bin" "$WORK/wiremismatch_control.bin" \
+    "$WORK/fixsubtype.bin" "$WORK/fixsubtype_control.bin" \
+    "$WORK/reopen_struct.bin" "$WORK/reopen_array.bin" \
+    "$WORK/skipped_occ_array.bin" "$WORK/skipped_occ_struct.bin" \
+    "$WORK/w_u8_16383.bin" "$WORK/w_u8_256.bin" "$WORK/w_u16_70000.bin" "$WORK/w_u8_255_ctl.bin" \
+    -- "$WORK/proj/harness/harness"
+
 # An `enum` and a `bitfield` are bound by the WIDTH their declaration implies
 # (MESSAGE_SPEC §1, doc `382159e`, PR #95, generator#516): for an enum the
 # smallest SIGNED type holding every declared constant, for a bitfield the

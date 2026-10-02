@@ -652,7 +652,7 @@ func (g *gen) emitMain(h *cfile, s *ir.Schema) {
 		h.line("            if (%s(&obj, in, len) != SOFAB_RET_OK) return 1;", role(b, "decode"))
 		h.line("            %s(&obj, stdout);", toJSON(b))
 		h.line("            fputc('\\n', stdout);")
-		// The same bytes through the SAME corelib stream, fed ONE BYTE per feed.
+		// The same bytes through the SAME corelib stream, fed ONE BYTE per feed by default.
 		// `decode` above is the incremental decoder fed once, so it never makes the
 		// decoder suspend and resume -- and that is the half that can actually be
 		// wrong: a skip's own length computation and its progress counter both have
@@ -669,7 +669,11 @@ func (g *gen) emitMain(h *cfile, s *ir.Schema) {
 		h.line("            sofab_ret_t ret;")
 		h.line("            size_t i;")
 		h.line("            %s(&d, &obj);", role(b, "decoder_init"))
-		h.line("            for (i = 0; i < len; i++) { (void)%s(&d, in + i, 1); }", role(b, "decoder_feed"))
+		// The chunk size is an argument (default 1; 0 = the whole message in one
+		// feed), swept by tests/conformance/lib/check_chunk_invariance.py.
+		h.line("            size_t csz = argc > 3 ? (size_t)strtoull(argv[3], NULL, 10) : 1;")
+		h.line("            size_t step = csz > 0 ? csz : (len > 0 ? len : 1);")
+		h.line("            for (i = 0; i < len; i += step) { (void)%s(&d, in + i, len - i < step ? len - i : step); }", role(b, "decoder_feed"))
 		h.line("            ret = %s(&d, NULL, 0);", role(b, "decoder_feed"))
 		h.line("            if (ret != SOFAB_RET_OK) { fprintf(stderr, \"decode error: %%s\\n\", sofab_ret_name(ret)); return 1; }")
 		h.line("            %s(&obj, stdout);", toJSON(b))
