@@ -29,6 +29,8 @@ fi
 
 # Shared MAX_SIZE fill check (ARCHITECTURE §9.6).
 . "$(dirname "$0")/../lib/maxsize_fill.sh"
+# Backend Go tests against the real corelib (lib/backend_tests.sh).
+. "$(dirname "$0")/../lib/backend_tests.sh"
 
 ROOT=$(cd "$(dirname "$0")/../../.." && pwd)
 CORELIB="${1:-${SOFAB_KOTLIN_CORELIB:-}}"
@@ -1028,5 +1030,9 @@ python3 "$ROOT/tests/conformance/lib/check_defaults.py" --emit-schema >> "$WORK/
 build "$WORK/defaults.yaml" "$WORK/defaults"
 python3 "$ROOT/tests/conformance/lib/check_defaults.py" "Kotlin" \
     -- "$WORK/defaults/build/install/harness/bin/harness"
+
+# The backend's own Go tests, unfiltered, against this corelib: any skip fails
+# (tests/conformance/lib/backend_tests.sh).
+run_backend_tests generators/kotlin SOFAB_KOTLIN_CORELIB "$CORELIB"
 
 echo "PASS"

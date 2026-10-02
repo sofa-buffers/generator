@@ -12,6 +12,8 @@ set -eu
 # Corelib checkout + ref pinning (docs/CI.md).
 . "$(dirname "$0")/../lib/corelib.sh"
 . "$(dirname "$0")/../lib/maxsize_fill.sh"
+# Backend Go tests against the real corelib (lib/backend_tests.sh).
+. "$(dirname "$0")/../lib/backend_tests.sh"
 # Generated code against the canonical formatter (ARCHITECTURE §12).
 . "$(dirname "$0")/../lib/check_format.sh"
 
@@ -1048,5 +1050,9 @@ format_gen zig "$WORK/fmt/repeated" --config "$WORK/cfg.yaml" --in "$WORK/repeat
 format_gen zig "$WORK/fmt/union" --config "$WORK/cfg.yaml" --in "$WORK/union.yaml"
 format_gen_corpus zig "$WORK/fmt" --config "$WORK/cfg.yaml"
 check_format zig "$WORK/fmt"
+
+# The backend's own Go tests, unfiltered, against this corelib: any skip fails
+# (tests/conformance/lib/backend_tests.sh).
+run_backend_tests generators/zig SOFAB_ZIG_CORELIB "$CORELIB"
 
 echo "PASS"
