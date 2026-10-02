@@ -30,11 +30,12 @@ without needing a corelib: their gated tests want a real `prettier` or
 `generators/zig/` is gated on the `zig` binary (its layout test holds the
 backend's line breaks to `zig fmt`). Every suite calls `run_backend_tests`,
 including those whose package has no gated test yet (`csharp`, `java`,
-`kotlin`), so a gated test written later is picked up on day one. The `lang-<x>` job is
-where they run: its `run.sh` calls `run_backend_tests` (`tests/conformance/lib/backend_tests.sh`), which runs
-the backend's **whole** test package with the corelib variable set, no `-run`
-filter, and fails on any `--- SKIP` — in a lang job nothing has a reason to
-skip. A new gated test is therefore covered the moment it is written; there is
+`kotlin`), so a gated test written later is picked up on day one. The
+`lang-<x>` job is where they run: its `run.sh` calls `run_backend_tests`
+(`tests/conformance/lib/backend_tests.sh`), which runs the backend's **whole**
+test package with the corelib variable set, no `-run` filter, and fails on any
+`--- SKIP` — in a lang job nothing has a reason to skip. A new gated test is
+therefore covered the moment it is written; there is
 no allowlist to forget to extend.
 
 The one exception is a test gated on a **canonical formatter**, which is
