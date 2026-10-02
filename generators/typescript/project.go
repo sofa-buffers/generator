@@ -251,7 +251,7 @@ func (g *gen) harness(s *ir.Schema) []byte {
 	f.line("  return 0;")
 	f.line("}")
 	f.blank()
-	f.line("main().then((c) => process.exit(c));")
+	f.line("main().then((c) => { process.exitCode = c; });")
 	return f.bytes()
 }
 

@@ -10,6 +10,7 @@ set -eu
 . "$(dirname "$0")/../lib/corelib.sh"
 # Shared MAX_SIZE fill check (ARCHITECTURE §9.6).
 . "$(dirname "$0")/../lib/maxsize_fill.sh"
+. "$(dirname "$0")/../lib/max_message_size.sh"
 # Shared canonical-formatter check (ARCHITECTURE §12 gate 10).
 . "$(dirname "$0")/../lib/check_format.sh"
 # Every backend Go test, run against the corelib with no skips allowed.
@@ -976,6 +977,27 @@ compile_project "$WORK/growth"
 python3 "$ROOT/tests/conformance/lib/check_growth.py" \
     "$CORELIB/assets/test_vectors.json" "Dart" --cap 4 \
     -- "$WORK/growth/harness"
+
+# max_message_size (generator#637, ARCHITECTURE §9.6): for an unbounded message the
+# key is an imposed ceiling, so it must neither size the encode buffer nor refuse an
+# encode. Encoded here at the default ceiling and at an explicit small one, with
+# messages more than 4x above each; the budget half is the generate-time refusal.
+echo "==> max_message_size: the ceiling never refuses an unbounded message (generator#637)"
+mms_schema "$WORK/mms.yaml"
+cat > "$WORK/cfg-mms.yaml" <<'YAML'
+generic: { emit: project }
+targets: { dart: { max_message_size: 64 } }
+YAML
+build "$WORK/mms.yaml" "$WORK/mms-default"
+( cd "$ROOT" && go run ./cmd/sofabgen --format=off --config "$WORK/cfg-mms.yaml" --lang dart --in "$WORK/mms.yaml" --out "$WORK/mms-small" )
+sed -i "s#\${SOFAB_DART_CORELIB}#$CORELIB#" "$WORK/mms-small/pubspec.yaml"
+compile_project "$WORK/mms-small"
+check_max_size_limit dart 4096 "$WORK/mms-default/lib/message.dart" 'maxSizeLimit = @@;$'
+check_max_size_limit dart 64 "$WORK/mms-small/lib/message.dart" 'maxSizeLimit = @@;$'
+check_max_message_size dart 4096 -- "$WORK/mms-default/harness"
+check_max_message_size dart 64 -- "$WORK/mms-small/harness"
+check_max_message_budget dart dart ''
+
 
 # CORELIB_PLAN S5.2/S6.0/S5.2.3, one property: the verdict AND the decoded value
 # must not depend on where the chunks were cut (generator#413). A resume bug -- a

@@ -18,6 +18,7 @@ set -eu
 # Corelib checkout + ref pinning (docs/CI.md).
 . "$(dirname "$0")/../lib/corelib.sh"
 . "$(dirname "$0")/../lib/maxsize_fill.sh"
+. "$(dirname "$0")/../lib/max_message_size.sh"
 # Generated code against the canonical formatter (ARCHITECTURE §12).
 . "$(dirname "$0")/../lib/check_format.sh"
 # Every backend Go test, run against the corelib with no unexplained skip.
@@ -1473,6 +1474,30 @@ crate_bin_name "$WORK/growth"
 python3 "$ROOT/tests/conformance/lib/check_growth.py" \
     "$STD/assets/test_vectors.json" "Rust" --cap 4 \
     --cwd "$WORK/growth" -- cargo run -q --
+
+# max_message_size (generator#637, ARCHITECTURE §9.6): for an unbounded message the
+# key is an imposed ceiling, so it must neither size the encode buffer nor refuse an
+# encode. Encoded here at the default ceiling and at an explicit small one, with
+# messages more than 4x above each; the budget half is the generate-time refusal.
+echo "==> max_message_size: the ceiling never refuses an unbounded message (generator#637)"
+mms_schema "$WORK/mms.yaml"
+printf 'generic: { emit: project }\ntargets: { rust: { corelib: rs } }\n' > "$WORK/cfg-mms-default.yaml"
+printf 'generic: { emit: project }\ntargets: { rust: { corelib: rs, max_message_size: 64 } }\n' > "$WORK/cfg-mms-small.yaml"
+for mms in default:4096 small:64; do
+    tag=${mms%%:*}; ceil=${mms#*:}
+    ( cd "$ROOT" && go run ./cmd/sofabgen --format=off --config "$WORK/cfg-mms-$tag.yaml" --lang rust \
+        --in "$WORK/mms.yaml" --out "$WORK/mms-$tag" )
+    sed -i "s#\${SOFAB_RS_CORELIB}#$STD#" "$WORK/mms-$tag/Cargo.toml"
+    crate_bin_name "$WORK/mms-$tag"
+    ( cd "$WORK/mms-$tag" && cargo build -q )
+    check_max_size_limit rust "$ceil" "$WORK/mms-$tag/src/message.rs" 'MAX_SIZE_LIMIT: usize = @@;$'
+    check_max_message_size rust "$ceil" --cwd "$WORK/mms-$tag" -- cargo run -q --
+done
+check_max_message_budget rust rust 'corelib: rs'
+# The no_std profile bounds every field, so it has no unbounded encode to check:
+# only the budget half, and the rejection of an unbounded field.
+check_max_message_budget rust-no-std rust 'corelib: rs-no-std' --static
+
 
 # corelib-rs-no-std is the genuinely #![no_std] profile. Every field is
 # schema-bounded there whatever storage it uses, and allow_dynamic selects that

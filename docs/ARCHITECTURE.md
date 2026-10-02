@@ -5430,7 +5430,8 @@ produce two different generated shapes, and conflating them is a truncation bug:
 - **bounded** — one exactly-sized buffer holds the whole message, handed to the
   corelib's buffer constructor (Rust `OStream::new`, Java `new OStream(buf)`, Go
   `sofab.NewEncoderBuffer`, Python `Encoder.over_buffer(buf, 0)`, TypeScript
-  `new OStream(buf)`, Dart `Encoder.overBuffer(buf)`, Kotlin `OStream(buf)`).
+  `new OStream(buf)`, Dart `Encoder.overBuffer(buf)`, Kotlin `OStream(buf)`, C#
+  `new OStream(buf)`).
   A value the caller filled past its own declared bound does not fit, and is **reported** (buffer-full) rather than emitted short —
   §5.1 forbids returning partial output as if it were complete.
 - **unbounded** — `MAX_SIZE` is an imposed ceiling, so it must not size a buffer:
@@ -5439,8 +5440,11 @@ produce two different generated shapes, and conflating them is a truncation bug:
   `OStream::with_flush`, Go `sofab.NewEncoderSink`, Python
   `Encoder.over_buffer(scratch, 0, sink)`, TypeScript
   `new OStream(scratch, 0, sink)`, Dart `Encoder(sink, buffer: scratch)`, Kotlin
-  `OStream(scratch, 0, FlushSink { … })`), which bounds memory by the scratch
-  instead of by the message.
+  `OStream(scratch, 0, FlushSink { … })`, Java `new OStream(scratch, 0,
+  out::write)` over a `ByteArrayOutputStream`, C# `new OStream(scratch, 0,
+  ms.Write)` over a `MemoryStream`), which bounds memory by the scratch instead
+  of by the message. A message above the ceiling therefore encodes on every heap
+  target; `tests/conformance/lib/check_max_message_size.py` drives it.
 
 A streaming entry point (`EncodeTo(writer)` and peers) is the sink shape for both
 cases, the writer being the drain. Where the drain only *copies* what it is handed
@@ -5939,6 +5943,19 @@ A reimplementation is **conformant** when it reproduces these gates:
    another option replaces it (§7.4.1), compared strictly at the union level: the
    decoded union must hold exactly the one expected option. They run in every
    suite.
+
+   *Message-size ceiling* (`tests/conformance/lib/check_max_message_size.py`,
+   generator#637): §9.6's two buffer shapes differ only above the ceiling, and no
+   other driver ever set `max_message_size`, so a backend that sized its one-shot
+   `encode()` from the imposed ceiling (Java and C# did) passed every suite. The
+   driver prints a schema with an unbounded string, blob and native array, builds
+   the wire for each itself (one field), and encodes sizes below, at and well
+   above the ceiling through the harness `encode` verb — at the default 4096 and at
+   an explicit 64 — requiring success, the exact bytes and a round trip. The
+   generate-time half runs on every target: a bounded schema over an explicit key
+   fails generation. The fixed-storage targets (c, cpp `corelib: c-cpp`, rust
+   `no_std`) have no unbounded encode, so there it asserts only that half plus the
+   generate-time rejection of an unbounded field.
 
    *Tagged unions* (`tests/conformance/lib/check_union.py`, generator#608): a
    union holds exactly one option (MESSAGE_SPEC §4.2, §7.4.1; §11 *Tagged

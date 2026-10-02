@@ -19,7 +19,8 @@ const DefaultMaxMessageSize = 4096
 // Bounded distinguishes the two cases generated code must not conflate: a size
 // DERIVED from the schema (exact — the message can never exceed it) and a size
 // IMPOSED by configuration because some field is unbounded (a ceiling — the
-// message could in principle exceed it, and an encode that would is refused).
+// message could in principle exceed it, and that is legal: the ceiling never
+// sizes an encode buffer or refuses an encode, ARCHITECTURE §9.6).
 // Backends emit the derived number as MAX_SIZE alone, and the imposed one as
 // MAX_SIZE_LIMIT with MAX_SIZE aliasing it, so a reader can tell which kind of
 // number they are looking at.

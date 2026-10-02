@@ -14,6 +14,7 @@ set -eu
 . "$(dirname "$0")/../lib/maxsize_fill.sh"
 # Backend Go tests against the real corelib (lib/backend_tests.sh).
 . "$(dirname "$0")/../lib/backend_tests.sh"
+. "$(dirname "$0")/../lib/max_message_size.sh"
 # Generated code against the canonical formatter (ARCHITECTURE §12).
 . "$(dirname "$0")/../lib/check_format.sh"
 
@@ -964,6 +965,25 @@ zig_build "$WORK/growth.yaml" "$WORK/growth" "$WORK/cfg_lim.yaml"
 python3 "$ROOT/tests/conformance/lib/check_growth.py" \
     "$CORELIB/assets/test_vectors.json" "Zig" --cap 4 \
     -- "$WORK/growth/zig-out/bin/harness"
+
+# max_message_size (generator#637, ARCHITECTURE §9.6): for an unbounded message the
+# key is an imposed ceiling, so it must neither size the encode buffer nor refuse an
+# encode. Encoded here at the default ceiling and at an explicit small one, with
+# messages more than 4x above each; the budget half is the generate-time refusal.
+echo "==> max_message_size: the ceiling never refuses an unbounded message (generator#637)"
+mms_schema "$WORK/mms.yaml"
+cat > "$WORK/cfg_mms.yaml" <<'YAML'
+generic: { emit: project }
+targets: { zig: { max_message_size: 64 } }
+YAML
+zig_build "$WORK/mms.yaml" "$WORK/mms-default"
+zig_build "$WORK/mms.yaml" "$WORK/mms-small" "$WORK/cfg_mms.yaml"
+check_max_size_limit zig 4096 "$WORK/mms-default/src/message.zig" 'MAX_SIZE_LIMIT: usize = @@;$'
+check_max_size_limit zig 64 "$WORK/mms-small/src/message.zig" 'MAX_SIZE_LIMIT: usize = @@;$'
+check_max_message_size zig 4096 -- "$WORK/mms-default/zig-out/bin/harness"
+check_max_message_size zig 64 -- "$WORK/mms-small/zig-out/bin/harness"
+check_max_message_budget zig zig ''
+
 
 # MESSAGE_SPEC §7.4 -- a field id REPEATED inside one scope (generator#523). The
 # rule has two halves and this checks BOTH on one message: a re-opened SEQUENCE

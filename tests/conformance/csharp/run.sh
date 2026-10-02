@@ -13,6 +13,7 @@ set -eu
 . "$(dirname "$0")/../lib/maxsize_fill.sh"
 # Backend Go tests against the real corelib (lib/backend_tests.sh).
 . "$(dirname "$0")/../lib/backend_tests.sh"
+. "$(dirname "$0")/../lib/max_message_size.sh"
 
 ROOT=$(cd "$(dirname "$0")/../../.." && pwd)
 CORELIB="${1:-${SOFAB_CS_CORELIB:-}}"
@@ -1002,6 +1003,26 @@ dbuild "$WORK/growth"
 python3 "$ROOT/tests/conformance/lib/check_growth.py" \
     "$CORELIB/assets/test_vectors.json" "C#" --cap 4 \
     -- dotnet "$WORK/growth/bin/Debug/net9.0/harness.dll"
+
+# max_message_size (generator#637, ARCHITECTURE §9.6): for an unbounded message the
+# key is an imposed ceiling, so it must neither size the encode buffer nor refuse an
+# encode. Encoded here at the default ceiling and at an explicit small one, with
+# messages more than 4x above each; the budget half is the generate-time refusal.
+echo "==> max_message_size: the ceiling never refuses an unbounded message (generator#637)"
+mms_schema "$WORK/mms.yaml"
+cat > "$WORK/mmscfg.yaml" <<'YAML'
+generic: { emit: project }
+targets: { csharp: { namespace: Sofabuffers, max_message_size: 64 } }
+YAML
+build "$WORK/mms.yaml" "$WORK/mms-default"
+( cd "$ROOT" && go run ./cmd/sofabgen --config "$WORK/mmscfg.yaml" --lang csharp --in "$WORK/mms.yaml" --out "$WORK/mms-small" )
+dbuild "$WORK/mms-small"
+check_max_size_limit csharp 4096 "$WORK/mms-default/Message.cs" 'MaxSizeLimit = @@;$'
+check_max_size_limit csharp 64 "$WORK/mms-small/Message.cs" 'MaxSizeLimit = @@;$'
+check_max_message_size csharp 4096 -- dotnet "$WORK/mms-default/bin/Debug/net9.0/harness.dll"
+check_max_message_size csharp 64 -- dotnet "$WORK/mms-small/bin/Debug/net9.0/harness.dll"
+check_max_message_budget csharp csharp 'namespace: Sofabuffers'
+
 
 # CORELIB_PLAN S5.2/S6.0/S5.2.3, one property: the verdict AND the decoded value
 # must not depend on where the chunks were cut (generator#413). A resume bug -- a

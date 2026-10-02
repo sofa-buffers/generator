@@ -14,6 +14,7 @@ set -eu
 # Corelib checkout + ref pinning (docs/CI.md).
 . "$(dirname "$0")/../lib/corelib.sh"
 . "$(dirname "$0")/../lib/maxsize_fill.sh"
+. "$(dirname "$0")/../lib/max_message_size.sh"
 # shellcheck source=../lib/backend_tests.sh
 . "$(dirname "$0")/../lib/backend_tests.sh"
 
@@ -1669,6 +1670,27 @@ make -C "$WORK/growth" SOFAB_CPP_DIR="$CPP" SOFAB_C_DIR="$CC" >/dev/null
 python3 "$ROOT/tests/conformance/lib/check_growth.py" \
     "$CC/assets/test_vectors.json" "C++" --cap 4 \
     -- "$WORK/growth/harness/harness"
+
+# max_message_size (generator#637, ARCHITECTURE §9.6): for an unbounded message the
+# key is an imposed ceiling, so it must neither size the encode buffer nor refuse an
+# encode. Encoded here at the default ceiling and at an explicit small one, with
+# messages more than 4x above each; the budget half is the generate-time refusal.
+echo "==> max_message_size: the ceiling never refuses an unbounded message (generator#637)"
+mms_schema "$WORK/mms.yaml"
+printf 'generic: { emit: project }\ntargets: { cpp: { namespace: sofabuffers } }\n' > "$WORK/cfg-mms-default.yaml"
+printf 'generic: { emit: project }\ntargets: { cpp: { namespace: sofabuffers, max_message_size: 64 } }\n' > "$WORK/cfg-mms-small.yaml"
+for mms in default:4096 small:64; do
+    tag=${mms%%:*}; ceil=${mms#*:}
+    ( cd "$ROOT" && go run ./cmd/sofabgen --config "$WORK/cfg-mms-$tag.yaml" --lang cpp --in "$WORK/mms.yaml" --out "$WORK/mms-$tag" )
+    make -C "$WORK/mms-$tag" SOFAB_CPP_DIR="$CPP" SOFAB_C_DIR="$CC" >/dev/null
+    check_max_size_limit cpp "$ceil" "$WORK/mms-$tag/us.hpp" '_maxSizeLimit = @@;$'
+    check_max_message_size cpp "$ceil" -- "$WORK/mms-$tag/harness/harness"
+done
+check_max_message_budget cpp cpp 'namespace: sofabuffers'
+# corelib: c-cpp is fixed storage: no unbounded encode, so the budget half and
+# the rejection of an unbounded field only.
+check_max_message_budget cpp-c-cpp cpp 'namespace: sofabuffers, corelib: c-cpp' --static
+
 
 # CORELIB_PLAN S6.2 / generator#529: corelib-c-cpp may be built with a 32-bit
 # value type (SOFAB_DISABLE_INT64_SUPPORT), and the (id<<3)|type field header is

@@ -377,10 +377,10 @@ func TestCsStructural(t *testing.T) {
 		"else _s = (pay ??= new global::sofab.PayloadAcc()).String(total, offset, data, chunkOffset, chunkLength, _cap);",
 		"if (offset == 0 && chunkLength >= total) { _b = new byte[total]; global::System.Array.Copy(data, chunkOffset, _b, 0, total); }",
 		"else _b = (pay ??= new global::sofab.PayloadAcc()).Blob(total, offset, data, chunkOffset, chunkLength, _cap);",
-		// Encode() reuses a per-thread encoder; Reset drops whatever a previous,
-		// failed Encode() left open.
-		"[global::System.ThreadStatic] private static global::sofab.OStream _encStream;",
-		"if (os == null) { _encStream = os = new global::sofab.OStream(buf); } else { os.Reset(buf, 0); }",
+		// The example is unbounded: MaxSize is a ceiling, so Encode() drains a fixed
+		// scratch into a growing output instead of sizing a buffer from it (§9.6).
+		"var os = new global::sofab.OStream(new byte[512], 0, outp.Write);",
+		"return outp.ToArray();",
 		// over-count scalar array rejected as INVALID before the (untrusted-count) allocation (#100)
 		"if (count > 4) throw new global::sofab.SofabException(global::sofab.SofabError.InvalidMessage, \"someuintarray: array count above schema capacity 4\"); ",
 	} {
@@ -396,6 +396,27 @@ func TestCsStructural(t *testing.T) {
 // wrapped in a CS0612 pragma so the output builds warning-clean), each enum
 // constant carries its description, and each flag carries its description with
 // the (default: true/false) note when the flag declares a default.
+// TestCsEncodeBufferShape: a bounded message reuses one exactly-sized per-thread
+// buffer and encoder (Reset drops whatever a failed Encode() left open); an
+// unbounded one drains a fixed scratch into a growing output, so the imposed
+// max_message_size ceiling never refuses a legal message (ARCHITECTURE §9.6).
+func TestCsEncodeBufferShape(t *testing.T) {
+	b := buildModule(t, []byte("version: 1\nmessages:\n  b:\n    payload:\n      n: { id: 0, type: u8 }\n"), "b.yaml", nil)
+	for _, want := range []string{
+		"new byte[MaxSize]",
+		"[global::System.ThreadStatic] private static global::sofab.OStream _encStream;",
+		"if (os == null) { _encStream = os = new global::sofab.OStream(buf); } else { os.Reset(buf, 0); }",
+	} {
+		if !strings.Contains(b, want) {
+			t.Errorf("bounded Message.cs missing %q", want)
+		}
+	}
+	u := buildModule(t, []byte("version: 1\nmessages:\n  u:\n    payload:\n      s: { id: 0, type: string }\n"), "u.yaml", nil)
+	if strings.Contains(u, "new byte[MaxSize]") || !strings.Contains(u, "new global::sofab.OStream(new byte[512], 0, outp.Write)") {
+		t.Error("an unbounded message must not size its buffer from MaxSize")
+	}
+}
+
 func TestCsMetadataDoc(t *testing.T) {
 	const src = `
 version: 1
