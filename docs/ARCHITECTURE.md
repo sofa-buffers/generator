@@ -358,7 +358,18 @@ validator must reproduce all of `schema/README.md` §Validation. Checklist:
      `#/$defs/…` and once per referencing site, never twice at one location
      (`schema/README.md` *Union options*).
 5. **Enum values are signed 32-bit** (−2³¹ … 2³¹−1), values and `default` alike.
-6. **Nesting-depth cap** (`MaxNestingDepth = 256`) and recursive-ref rejection.
+6. **Nesting-depth cap** (`ir.MaxSeqDepth = 255`, the wire `MAX_DEPTH`) and
+   recursive-ref rejection. The cap counts the **sequences** a message opens,
+   not struct levels: `ir.SeqDepth` is the one definition, shared by analysis
+   and the Go, Dart and C backends (`<Msg>__MaxDepth` / `maxDepth` / the
+   decoder's `dec[]` slots). A struct/union field opens 1 plus its deepest
+   child; a native array (scalar/enum/bool/bitfield/float) 0; an array of
+   string/blob 1 (the wrapper); an array of struct/union 2 (wrapper plus one
+   sequence per element) plus the target's deepest child; an array of array 1
+   per array level plus the innermost element's count (array of array of struct
+   = 3). The error reports the real count and the field path. Because analysis
+   rejects deeper schemas, the C decoder has at most 256 slots and its 8-bit
+   depth counter cannot wrap.
    Recursive/dangling refs are rejected fail-fast during `$ref` resolution
    (stage [1]); the depth cap runs in the **analysis** stage ([3]) — both are
    pre-codegen hard gates.

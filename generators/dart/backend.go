@@ -481,14 +481,14 @@ func (g *gen) emitClass(f *dfile, name, raw, summary string, fields []*ir.Field,
 			f.line("  /// buffer from it.")
 			f.line("  static const int maxSize = %d;", ms.Size)
 		}
-		// Encode-side nesting bound (see seqDepth). Passed to the encoder encode()
+		// Encode-side nesting bound (see ir.SeqDepth). Passed to the encoder encode()
 		// constructs, it sizes the corelib's held-back sequence run to the schema
 		// at construction (§6.6) instead of to MAX_DEPTH -- a few words rather than
 		// 1 KiB zeroed on every one-shot encode. A depth above the format's
 		// MAX_DEPTH, or a recursive type, passes no bound: the corelib default
 		// (maxDepth) then applies, exactly as before.
 		depthArg := ""
-		if depth, ok := seqDepth(fields, map[string]bool{}); ok && depth <= wireMaxDepth {
+		if depth, ok := ir.SeqDepth(fields, map[string]bool{}); ok && depth <= wireMaxDepth {
 			f.line("  /// Deepest sequence nesting [serialize] opens, derived from the schema: no")
 			f.line("  /// value of this message nests deeper, so [encode] builds its encoder for")
 			f.line("  /// exactly this depth.")
@@ -846,75 +846,6 @@ func (g *gen) emitMarshalArray(f *dfile, ind string, fld *ir.Field, acc string, 
 // A schema bound above it is not passed -- the corelib would refuse the
 // argument, and the value anyway.
 const wireMaxDepth = 255
-
-// seqDepth returns the deepest sequence nesting serialize opens under fields,
-// counted exactly as corelib-dart's Encoder counts open sequences: one per
-// beginSequenceLazy still unmatched by its endSequence/endSequenceKeep. It walks
-// the same shapes emitMarshal/marshalWrapperArray emit:
-//
-//   - a struct/union field opens one frame around its target's own fields;
-//   - a native array (scalar/enum/bool/bitfield/float) is one count-prefixed
-//     value and opens none;
-//   - every other array opens its wrapper, plus arrayDepth of its elements.
-//
-// ok is false when a type recurses into itself: its nesting would then depend
-// on the value, not the schema, and the caller passes no bound. The parser
-// rejects a circular $ref today, so this is a guard for the day it does not.
-// The count is an UPPER bound -- a lazy frame that stays contentless is still
-// counted, because the Encoder counts it while it is open. One short would make
-// a valid value throw invalidArgument, which the round-trip test pins.
-func seqDepth(fields []*ir.Field, onPath map[string]bool) (int, bool) {
-	best := 0
-	for _, fld := range fields {
-		d, ok := 0, true
-		switch fld.Kind {
-		case ir.KindStruct, ir.KindUnion:
-			d, ok = targetDepth(fld.Ref, onPath)
-			d++
-		case ir.KindArray:
-			d, ok = arrayDepth(fld.Elem, fld.ElemRef, fld.ElemItems, onPath)
-		}
-		if !ok {
-			return 0, false
-		}
-		best = max(best, d)
-	}
-	return best, true
-}
-
-// targetDepth is seqDepth of a struct/union target's fields, reporting a
-// recursive back-edge as unbounded.
-func targetDepth(ref *ir.TypeRef, onPath map[string]bool) (int, bool) {
-	if ref == nil || ref.Target == nil {
-		return 0, true
-	}
-	key := ref.Target.Key
-	if onPath[key] {
-		return 0, false
-	}
-	onPath[key] = true
-	defer delete(onPath, key)
-	return seqDepth(ref.Target.Fields, onPath)
-}
-
-// arrayDepth is the nesting an array field or row with this element opens: 0
-// for a native element (no frame), else 1 for its wrapper plus what one element
-// nests -- nothing for a string/blob leaf, a per-element frame plus the target's
-// depth for a struct/union, and the inner array's own depth for a nested array.
-func arrayDepth(elem ir.Kind, ref *ir.TypeRef, items *ir.ArrayElem, onPath map[string]bool) (int, bool) {
-	if nativeArrayElem(elem) {
-		return 0, true
-	}
-	switch elem {
-	case ir.KindStruct, ir.KindUnion:
-		d, ok := targetDepth(ref, onPath)
-		return 2 + d, ok
-	case ir.KindArray:
-		d, ok := arrayDepth(items.Elem, items.ElemRef, items.ElemItems, onPath)
-		return 1 + d, ok
-	}
-	return 1, true // string / blob
-}
 
 // writeDestStmt is the corelib call writing destination `acc` -- a string, a
 // blob, or a native array / matrix row of `elem` -- as field `idExpr`: its

@@ -192,7 +192,7 @@ Notes that shape the backends:
 ### 4.2 Nesting & depth
 
 - `struct`, `union`, and variable `sequence` are emitted using the corelib's `sequence_begin(id)` / `sequence_end()` API calls (the corelib handles the on-wire representation).
-- **Max nesting depth = 256 — a hard limit from the SofaBuffers spec.** Every generator carries the same `MAX_NESTING_DEPTH = 256` **constant** and validates depth ≤ 256 at generation time, emitting a hard error past it. 256 is already an enormous nesting depth in practice, so the cap is never a real-world constraint; using one shared constant keeps every backend portable and the embedded **C** decoder (a `uint8_t depth` counter in `object.h` / `istream.h`) within its natural bound.
+- **Max nesting depth = 255 sequences — the wire `MAX_DEPTH`.** Generation rejects a schema that can open more than 255 nested sequences (an array of struct/union opens two per level; see ARCHITECTURE §5), emitting a hard error past it. 255 is already an enormous nesting depth in practice, so the cap is never a real-world constraint; using one shared constant keeps every backend portable and the embedded **C** decoder (a `uint8_t depth` counter in `object.h` / `istream.h`) within its natural bound.
 
 ---
 
@@ -702,7 +702,7 @@ YAML / JSON ─▶ [1] Parser            parse + JSON-Schema validate (hard gate
 Two language-independent layers, both **trees of objects in which every code element implements a common `Node` interface** (`accept(visitor)`, `children()`) for uniform recursive traversal:
 
 - **Generic domain model** (`internal/model`) — the direct, validated lowering of the parsed definition. **Node kinds**, one per definition concept: `Package`/`Module`, `Message`, `Struct`, `Union`, `Enum`, `Bitfield`, `Field`, `EnumConst`, `BitfieldFlag`, `ArrayType`, `SequenceType`, `Primitive`, `Ref`, …. Composite nodes (message/struct/union) hold children; leaves (field/primitive) don't.
-- **Analysis** (`internal/analysis`) — resolves `$ref` / dependencies into a **shared-type graph** (not duplicated, §3.4), assigns canonical names, and runs the **semantic checks**: unique ids, nesting depth ≤ 256, default-in-range, enum default matches, array element primitive/string, name collisions, reserved-word handling.
+- **Analysis** (`internal/analysis`) — resolves `$ref` / dependencies into a **shared-type graph** (not duplicated, §3.4), assigns canonical names, and runs the **semantic checks**: unique ids, sequence depth ≤ 255, default-in-range, enum default matches, array element primitive/string, name collisions, reserved-word handling.
 - **IR** (`internal/ir`) — the analyzed, normalized, **language-neutral Intermediate Representation** that backends consume. Typical leaf data: `Field { name, id, kind, typeRef, constraints, default, deprecated, description, unit }`; `Kind ∈ {U8..U64, I8..I64, FP32, FP64, Bool, String, Blob, Array(elem,count), Sequence(elem), Enum(ref), Bitfield(ref), Struct(ref), Union(ref)}`.
 - The IR is the **freeze point** (settle `sequence`, §3.3, before locking it) and is **independent of any output language** — visitors, builders and strategies depend on it, never the reverse, and **must not modify it** (§8.6). New node kinds extend the model/IR without touching visitors that don't care about them.
 
@@ -871,7 +871,7 @@ Auto-generate / hand-curate a broad set of `.yaml` definitions covering each sch
 - **Arrays:** every numeric element type at `count` 1 and large; **array-of-`string`** (the sequence-of-strings special case, §5).
 - **Enums:** contiguous, non-contiguous, **negative** values, explicit vs shorthand, `default`, and `$ref` to `$defs`.
 - **Bitfields:** flags at `pos` 0 and 63, defaults true/false, `$ref`.
-- **Structs:** flat, nested, **nesting depth 1, 2, … up to the 256 cap and one past it (must fail)**; `$ref` and shared/reused structs; recursive references.
+- **Structs:** flat, nested, **nesting depth 1, 2, … up to the 255-sequence cap and one past it (must fail)**; `$ref` and shared/reused structs; recursive references.
 - **Unions:** multiple options, `default_id`, `$ref`.
 - **Wire sequences:** `struct`/`union` nesting and `array`-of-`string`/`blob`, exercised at depth (§3.3).
 - **Field ids:** `0`, large, non-contiguous, and **duplicate-id (must fail validation)**.

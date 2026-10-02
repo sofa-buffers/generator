@@ -51,9 +51,10 @@ func (k Kind) String() string {
 	return "invalid"
 }
 
-// MaxNestingDepth is the hard SofaBuffers spec limit (PLAN §4.2). Every backend
-// shares this one constant; analysis rejects definitions that exceed it.
-const MaxNestingDepth = 256
+// MaxSeqDepth is the format's MAX_DEPTH (CORELIB_PLAN §4.9): the most sequences
+// an encoder may hold open, which a decoder rejects as INVALID past it. Analysis
+// rejects definitions whose SeqDepth exceeds it.
+const MaxSeqDepth = 255
 
 // Node is the Composite interface implemented by every IR element.
 type Node interface {

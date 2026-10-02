@@ -17,6 +17,7 @@ import (
 	"github.com/sofa-buffers/generator/internal/ir"
 	"github.com/sofa-buffers/generator/internal/model"
 	defparser "github.com/sofa-buffers/generator/internal/parser"
+	"github.com/sofa-buffers/generator/internal/testschema"
 
 	// Register every backend.
 	_ "github.com/sofa-buffers/generator/generators/c"
@@ -199,7 +200,7 @@ func TestNestingDepthCap(t *testing.T) {
 	b.WriteString("version: 1\nmessages:\n  Deep:\n    payload:\n")
 	indent := "      "
 	// build a chain of nested structs deeper than the cap
-	depth := ir.MaxNestingDepth + 2
+	depth := ir.MaxSeqDepth + 2
 	for i := 0; i < depth; i++ {
 		b.WriteString(indent + "f:\n")
 		b.WriteString(indent + "  id: 0\n")
@@ -214,6 +215,31 @@ func TestNestingDepthCap(t *testing.T) {
 		t.Fatal(err)
 	}
 	if _, err := buildIR(t, tmp); err == nil {
-		t.Fatalf("nesting depth %d should exceed the cap (%d)", depth, ir.MaxNestingDepth)
+		t.Fatalf("nesting depth %d should exceed the cap (%d)", depth, ir.MaxSeqDepth)
+	}
+}
+
+// TestSequenceDepthCapPerShape: past the last accepted N of every nesting shape
+// (arrays count their wrapper and per-element sequence, §4.9) the definition is
+// rejected with the real sequence count and a messages/M/... path; at the last
+// accepted N it builds.
+func TestSequenceDepthCapPerShape(t *testing.T) {
+	for _, shape := range testschema.Shapes {
+		last := testschema.Boundary[shape].Last
+		for _, n := range []int{last, last + 1} {
+			path := filepath.Join(t.TempDir(), shape+".yaml")
+			if err := os.WriteFile(path, []byte(testschema.Deep(shape, n)), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			_, err := buildIR(t, path)
+			switch {
+			case n == last && err != nil:
+				t.Errorf("%s N=%d must build: %v", shape, n, err)
+			case n > last && err == nil:
+				t.Errorf("%s N=%d must exceed MAX_DEPTH (%d)", shape, n, ir.MaxSeqDepth)
+			case n > last && (!strings.Contains(err.Error(), "exceeds MAX_DEPTH") || !strings.Contains(err.Error(), "messages/M/")):
+				t.Errorf("%s N=%d: error lacks the depth message and path: %v", shape, n, err)
+			}
+		}
 	}
 }
