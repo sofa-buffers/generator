@@ -108,11 +108,9 @@ error text. Without one of them a wrongly-INCOMPLETE verdict passes on exit
 status alone, which is not a hypothetical: a harness answering INCOMPLETE to
 every step-3 row was measured to satisfy the exit-status leg on all eleven rows
 and to fail instantly under either flag. So every suite pins it, `c` included --
-its harness grew the same `status` verb its C++ sibling already had. The one
-remaining gap is the `corelib: c-cpp` C++ leg of `cpp`, whose wrapper `Result`
-carries no category predicates at all; the `c` suite reaches the same C corelib
-through the C API, which does distinguish `SOFAB_RET_E_INVALID_MSG` from
-`SOFAB_RET_INCOMPLETE`, so the substance is covered there.
+its harness grew the same `status` verb its C++ sibling already had. The
+`corelib: c-cpp` C++ leg of `cpp` pins it too, through the `status` verb of its
+harness.
 
 ## Both decode surfaces
 
