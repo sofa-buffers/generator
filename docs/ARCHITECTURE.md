@@ -216,7 +216,7 @@ identifiers distinct by construction; objects are **closed** (unknown keys are r
 
 **Bounds and fixed-storage targets.** `maxlen` and array `count` are optional
 at the schema level, but the fixed-storage backends (C, the C++ `c-cpp`
-profile, `no_std` Rust) require every string/blob/array to be bounded so
+profile, Rust against `corelib: rs-no-std`, whatever `no_std` says) require every string/blob/array to be bounded so
 storage can be sized at compile time — an unbounded field there is a generation
 error (a `checkBounded` pass names the offending field before any code is
 emitted). That holds in both C++ `c-cpp` storage modes: `allow_dynamic` chooses

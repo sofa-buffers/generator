@@ -58,10 +58,11 @@ func (*Backend) Generate(s *ir.Schema, cfg map[string]any) ([]generator.File, er
 	if g.std() {
 		g.limits = resolveLimits(s, cfg)
 	}
-	if noStd {
-		// The heap-free profile lowers every field to fixed-capacity heapless
-		// storage sized from the schema; a field with no maxlen/count cannot be
-		// sized, so reject it (unless allow_dynamic keeps a heap fallback).
+	if corelib == "rs-no-std" {
+		// corelib-rs-no-std has no receiver cap to stand in for a schema bound, so
+		// every field must be bounded by the schema whether or not the crate is
+		// #![no_std]: the heap-free profile sizes heapless storage from it, and the
+		// std crate over the same corelib has nothing else to bound decode with.
 		if err := g.checkBounded(s); err != nil {
 			return nil, err
 		}

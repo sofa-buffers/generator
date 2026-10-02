@@ -60,14 +60,14 @@ func (g *gen) checkField(owner string, f *ir.Field, seen map[string]bool, walk f
 	switch f.Kind {
 	case ir.KindString, ir.KindBlob:
 		if !f.HasMaxlen {
-			return fmt.Errorf("no_std: field %q of %q is an unbounded %s (no maxlen); add a maxlen. The bound is required in both storage modes - allow_dynamic chooses the container, not whether a bound is needed (use corelib: rs for genuinely unbounded fields)", f.Name, owner, kindName(f.Kind))
+			return fmt.Errorf("rs-no-std: field %q of %q is an unbounded %s (no maxlen); add a maxlen. The bound is required in both storage modes - allow_dynamic chooses the container, not whether a bound is needed (use corelib: rs for genuinely unbounded fields)", f.Name, owner, kindName(f.Kind))
 		}
 	case ir.KindArray:
 		if !f.HasCount {
-			return fmt.Errorf("no_std: array field %q of %q has no count; add a count. The bound is required in both storage modes (use corelib: rs for genuinely unbounded fields)", f.Name, owner)
+			return fmt.Errorf("rs-no-std: array field %q of %q has no count; add a count. The bound is required in both storage modes (use corelib: rs for genuinely unbounded fields)", f.Name, owner)
 		}
 		if (f.Elem == ir.KindString || f.Elem == ir.KindBlob) && !f.ElemMaxHas {
-			return fmt.Errorf("no_std: %s-array field %q of %q has no element maxlen; add items.maxlen. The bound is required in both storage modes (use corelib: rs for genuinely unbounded fields)", kindName(f.Elem), f.Name, owner)
+			return fmt.Errorf("rs-no-std: %s-array field %q of %q has no element maxlen; add items.maxlen. The bound is required in both storage modes (use corelib: rs for genuinely unbounded fields)", kindName(f.Elem), f.Name, owner)
 		}
 	case ir.KindStruct, ir.KindUnion:
 		if !seen[f.Ref.Key] {

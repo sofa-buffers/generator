@@ -196,6 +196,24 @@ func TestRustStructural(t *testing.T) {
 	}
 }
 
+// TestRustNoStdCorelibRequiresBounds: corelib-rs-no-std has no receiver cap, so a
+// field the schema leaves unbounded is a generation error under every no_std
+// setting -- never a panic in the emitter.
+func TestRustNoStdCorelibRequiresBounds(t *testing.T) {
+	for _, cfg := range []map[string]any{
+		{"corelib": "rs-no-std", "no_std": false},
+		{"corelib": "rs-no-std", "no_std": false, "allow_dynamic": true},
+	} {
+		_, err := (&Backend{}).Generate(exampleSchema(t), cfg)
+		if err == nil {
+			t.Fatalf("(%v) expected an unbounded-field error", cfg)
+		}
+		if !strings.Contains(err.Error(), "somemap") || !strings.Contains(err.Error(), "no count") {
+			t.Errorf("(%v) unexpected error: %v", cfg, err)
+		}
+	}
+}
+
 // TestRustDecodeLimits: the max_dyn_* config keys bake receiver-side decode
 // limits (generator#102) into the generated module — constants plus per-field
 // guards on schema-unbounded fields only (an unbounded array's wire count is
@@ -783,9 +801,9 @@ messages:
       dynu:    { id: 5, type: array, items: { type: u32 } }
       dynf32:  { id: 6, type: array, items: { type: fp32 } }
 `
-	// The count-less arrays belong to the std profile only: no_std requires a bound
-	// on every array in both storage modes, so its legs take the same schema minus
-	// those two fields.
+	// The count-less arrays belong to corelib-rs only: corelib-rs-no-std requires a
+	// bound on every array whatever no_std says, so its legs take the same schema
+	// minus those two fields.
 	srcBounded := strings.Replace(src, "      dynu:    { id: 5, type: array, items: { type: u32 } }\n", "", 1)
 	srcBounded = strings.Replace(srcBounded, "      dynf32:  { id: 6, type: array, items: { type: fp32 } }\n", "", 1)
 
@@ -796,7 +814,7 @@ messages:
 		{"corelib": "rs-no-std", "no_std": false},       // no-std corelib, std crate
 	} {
 		in := src
-		if cfg["corelib"] == "rs-no-std" && cfg["no_std"] != false {
+		if cfg["corelib"] == "rs-no-std" {
 			in = srcBounded
 		}
 		m := moduleFromYAML(t, in, cfg)
