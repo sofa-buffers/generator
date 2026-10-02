@@ -32,8 +32,9 @@ if [ -z "$CC" ]; then
     clone_corelib corelib-c-cpp "$WORK/c"
     CC="$WORK/c"
 fi
-echo "==> corelib-cpp: $CPP"
-echo "==> corelib-c-cpp: $CC"
+log_corelib corelib-cpp "$CPP"
+log_corelib corelib-c-cpp "$CC"
+log_vectors corelib-c-cpp "$CC"
 
 # Warning policy for every build of generated C++ here, in all four profiles
 # (ARCHITECTURE §12): a warning in generated code is an error in a user's -Werror

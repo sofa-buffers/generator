@@ -38,7 +38,8 @@ if [ -z "$CORELIB" ]; then
     CORELIB="$WORK/corelib"
 fi
 export SOFAB_CS_CORELIB="$CORELIB"
-echo "==> corelib-cs: $CORELIB"
+log_corelib corelib-cs "$CORELIB"
+log_vectors corelib-cs "$CORELIB"
 
 cat > "$WORK/cfg.yaml" <<'YAML'
 generic: { emit: project }

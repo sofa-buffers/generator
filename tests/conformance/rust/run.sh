@@ -98,8 +98,10 @@ if [ -z "$STD" ]; then
     clone_corelib corelib-rs "$WORK/std"
     STD="$WORK/std"
 fi
-echo "==> corelib-rs-no-std: $NOSTD"
-echo "==> corelib-rs: $STD"
+log_corelib corelib-rs-no-std "$NOSTD"
+log_vectors corelib-rs-no-std "$NOSTD"
+log_corelib corelib-rs "$STD"
+log_vectors corelib-rs "$STD"
 
 cat > "$WORK/conf.yaml" <<'YAML'
 version: 1

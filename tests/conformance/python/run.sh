@@ -83,7 +83,8 @@ if [ -z "$CORELIB" ]; then
     clone_corelib corelib-py "$WORK/corelib"
     CORELIB="$WORK/corelib"
 fi
-echo "==> corelib-py: $CORELIB"
+log_corelib corelib-py "$CORELIB"
+log_vectors corelib-py "$CORELIB"
 export PYTHONPATH="$CORELIB/src"
 
 # corelib-py ships TWO engines: the pure-Python classes and an optional Cython

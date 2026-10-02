@@ -37,7 +37,8 @@ SRC="$CORELIB/src"
 # there could fail them for a reason other than the guard.
 WARNFLAGS="-Wall -Wextra -Werror"
 export WARNFLAGS
-echo "==> corelib: $CORELIB"
+log_corelib corelib-c-cpp "$CORELIB"
+log_vectors corelib-c-cpp "$CORELIB"
 
 # The shared example intentionally leaves `somemap` unbounded (a dynamic map for
 # heap targets). The heapless C target requires a bound on every array, so derive

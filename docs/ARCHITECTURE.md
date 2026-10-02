@@ -7258,6 +7258,19 @@ A reimplementation is **conformant** when it reproduces these gates:
     choosing a house style for generated code is a separate decision. Every
     target whose language HAS one canonical formatter is now in the table.
 
+11. **Traceable and current corelib runs** — a green `lang-<x>` run has to name
+    the corelib it tested, and has to be re-run when the corelib moves.
+    `tests/conformance/lib/corelib.sh` logs the commit of every corelib a suite
+    uses: `clone_corelib` prints `==> corelib-x @ <ref> (<sha>)`, and
+    `log_corelib` prints the SHA of a caller-supplied checkout, or says it is not
+    a git checkout. `log_vectors` prints the git blob SHA of the
+    `assets/test_vectors.json` the suite reads. CI runs nightly (`schedule:`) so
+    a corelib change that breaks generated code is seen within a day, and the
+    `vector-copies` job runs `tests/conformance/lib/check_vector_copies.sh`,
+    which compares every corelib's copy of that file on `main` with
+    `corelib-c-cpp`'s, canonical copy and fails, naming each corelib that
+    differs. It never skips: an unreachable GitHub API is a failure.
+
 ---
 
 ## 13. Repository structure & dependency rule

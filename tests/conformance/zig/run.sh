@@ -31,7 +31,8 @@ fi
 # generated project points at a sibling symlink to the corelib checkout.
 CORELIB=$(cd "$CORELIB" && pwd)
 ln -sfn "$CORELIB" "$WORK/corelib-link"
-echo "==> corelib-zig: $CORELIB"
+log_corelib corelib-zig "$CORELIB"
+log_vectors corelib-zig "$CORELIB"
 
 cat > "$WORK/conf.yaml" <<'YAML'
 version: 1

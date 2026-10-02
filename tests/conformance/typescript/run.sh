@@ -28,7 +28,8 @@ if [ -z "$CORELIB" ]; then
     ( cd "$WORK/corelib" && npm install >/dev/null 2>&1 && npm run build >/dev/null 2>&1 )
     CORELIB="$WORK/corelib"
 fi
-echo "==> corelib-ts: $CORELIB"
+log_corelib corelib-ts "$CORELIB"
+log_vectors corelib-ts "$CORELIB"
 [ -f "$CORELIB/dist/index.js" ] || { echo "FAIL: corelib-ts not built (no dist/)"; exit 1; }
 
 # The formatter generated TypeScript is held to (ARCHITECTURE §12 gate 10).
