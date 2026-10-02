@@ -498,6 +498,10 @@ func (v *validator) checkFloatDefault(f map[string]any, loc, typ string) {
 		v.add(loc+"/default", "default for %s must be a number", typ)
 		return
 	}
+	if math.IsNaN(n) || math.IsInf(n, 0) {
+		v.add(loc+"/default", "default %v for %s must be finite", n, typ)
+		return
+	}
 	if typ == "fp32" && (n < -fp32Max || n > fp32Max) {
 		v.add(loc+"/default", "default %v out of fp32 range", n)
 	}
