@@ -6476,8 +6476,11 @@ A reimplementation is **conformant** when it reproduces these gates:
    printed whichever name they got (generator#451). The harness now builds the
    accelerator and **asserts** `sofab.IMPL` per leg — a missing one fails the run
    instead of halving its coverage, unless `SOFAB_PY_ALLOW_PURE_ONLY=1` says so
-   out loud — and everything after the loop, the shared-vector check included,
-   runs on the native engine, which is what a user with a compiler gets. This is
+   out loud — and the legs after the loop run once per engine too: the section 7
+   battery, the caps, growth, `max_message_size` and the Go-run shared encode
+   vectors each go through the pure and the native engine. Only the corpus import
+   check, which runs on the default (native where it exists) engine, and the
+   format gate stay single-engine. This is
    the same discipline §15 already applies to the `python`/`python-native` bench
    rows, for the same reason: an engine that silently substitutes itself reports
    one implementation's result under the other's name.

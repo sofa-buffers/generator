@@ -733,12 +733,11 @@ if [ "$NATIVE" = yes ]; then require_engine native; else require_engine python; 
 # INCOMPLETE is exactly what a corelib that mis-routes step 3 into the skip
 # reports once it walks off the end of the shorter payload.
 #
-# This is the one leg below the engine split that runs on BOTH engines. The rule
-# is decided entirely inside the corelib, and corelib-py carries two independent
-# decoders -- the pure `sofab.decoder` and the Cython `sofab._speedups` -- each
-# with its own fixlen_word arm, so a single-engine run leaves one of the two
-# gates wholly unexercised. Nine subprocesses per engine is a cheap price for
-# that. The engine is put back to the file's default afterwards.
+# Like the legs around it, this one runs once per engine. The rule is decided
+# entirely inside the corelib, and corelib-py carries two independent decoders --
+# the pure `sofab.decoder` and the Cython `sofab._speedups` -- each with its own
+# fixlen_word arm, so a single-engine run leaves one of the two gates wholly
+# unexercised. Nine subprocesses per engine is a cheap price for that.
 #
 # Run on BOTH decode surfaces. The verdict is the corelib's, taken at the
 # fixlen_word, and several corelibs reach that word twice -- one arm for a
