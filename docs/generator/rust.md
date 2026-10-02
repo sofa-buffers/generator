@@ -42,6 +42,13 @@ Set it to `false` to emit an ordinary `std` crate that still links the no-std
 corelib — useful when the same schema has to be consumed by a host-side tool
 built from the same generated code.
 
+`corelib: rs-no-std` has no receiver-side limit to stand in for a schema bound,
+so it requires every field to be bounded by the schema whatever `no_std` says:
+a `maxlen` on each string and blob, a `count` on each array, and `items.maxlen`
+on string and blob arrays. A schema that leaves one open is rejected at
+generation time with an error naming the field; use `corelib: rs` for genuinely
+unbounded fields.
+
 ## `allow_dynamic`
 
 Decides the **storage of schema-bounded fields only**. The wire is identical

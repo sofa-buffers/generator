@@ -206,6 +206,9 @@ run_variant() {
     # capacities). So the schema travels with the check, not with the leg.
     case "$label" in
         no-std-static) STREAM_CHECK="" ;;
+        # An std crate over the no-std corelib still holds heapless fields
+        # (allow_dynamic defaults off there), so it takes the heapless check.
+        no-std-std)    STREAM_CHECK=streaming_check_nostd.rs; STREAM_DEF="$WORK/conf.yaml" ;;
         *-static)      STREAM_CHECK=streaming_check_nostd.rs; STREAM_DEF="$WORK/conf.yaml" ;;
         *)             STREAM_CHECK=streaming_check.rs;       STREAM_DEF="$EXAMPLE" ;;
     esac
@@ -214,7 +217,7 @@ run_variant() {
     rm -rf "$WORK/stream-$label"
     rust_build "$STREAM_DEF" "$WORK/stream-$label"
     case "$label" in
-        no-std-*) printf 'use sofabuffers_generated::*;\n' > "$WORK/stream-$label/src/main.rs" ;;
+        no-std-dynamic|no-std-static) printf 'use sofabuffers_generated::*;\n' > "$WORK/stream-$label/src/main.rs" ;;
         *)        printf 'pub mod message;\nuse message::*;\n' > "$WORK/stream-$label/src/main.rs" ;;
     esac
     sed '/^\/\/SOFAB_IMPORT$/d' "$ROOT/tests/conformance/rust/$STREAM_CHECK" \
@@ -222,7 +225,7 @@ run_variant() {
     case "$label" in
         # The lib is #![no_std] without this; the binary above needs it linked
         # for println!/Vec in the check itself.
-        no-std-*) ( cd "$WORK/stream-$label" && cargo run -q --features std ) ;;
+        no-std-dynamic|no-std-static) ( cd "$WORK/stream-$label" && cargo run -q --features std ) ;;
         *)        ( cd "$WORK/stream-$label" && cargo run -q ) ;;
     esac
     fi
@@ -432,14 +435,14 @@ run_variant() {
     rm -rf "$WORK/rep-$label"
     rust_build "$EXAMPLE" "$WORK/rep-$label"
     case "$label" in
-        no-std-*) printf 'use sofabuffers_generated::*;\n' > "$WORK/rep-$label/src/main.rs" ;;
+        no-std-dynamic|no-std-static) printf 'use sofabuffers_generated::*;\n' > "$WORK/rep-$label/src/main.rs" ;;
         *)        printf 'pub mod message;\nuse message::*;\n' > "$WORK/rep-$label/src/main.rs" ;;
     esac
     sed '/^\/\/SOFAB_IMPORT$/d' "$ROOT/tests/conformance/rust/repeated_id.rs" \
         >> "$WORK/rep-$label/src/main.rs"
     case "$label" in
         # The lib is #![no_std] without this; the check itself uses Vec/format!.
-        no-std-*) ( cd "$WORK/rep-$label" && cargo run -q --features std ) ;;
+        no-std-dynamic|no-std-static) ( cd "$WORK/rep-$label" && cargo run -q --features std ) ;;
         *)        ( cd "$WORK/rep-$label" && cargo run -q ) ;;
     esac
 
@@ -1522,6 +1525,13 @@ run_variant no-std-dynamic "corelib: rs-no-std, allow_dynamic: true" "$NOSTD"
 # The pure heapless profile through the same matrix. It is the DEFAULT for
 # corelib: rs-no-std, and until now only its builds were checked.
 run_variant no-std-static "corelib: rs-no-std" "$NOSTD"
+
+# The fourth configuration: the no-std corelib under an ordinary std crate. It
+# generates different code from every leg above (a bin crate with the std
+# spellings over corelib-rs-no-std's visitor and PayloadAcc), so it runs the same
+# checks. Its crate is a bin, not a #![no_std] lib, so the lib checks below do not
+# apply to it; the bounded-schema skips (label prefix no-std-) do.
+run_variant no-std-std "corelib: rs-no-std, no_std: false" "$NOSTD"
 
 # The point of the no_std profile is a crate that builds as #![no_std] and
 # heap-free. A bin cannot be no_std on a hosted target, so prove it on the lib

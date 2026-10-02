@@ -215,7 +215,7 @@
         },
         "no_std": {
           "type": "boolean",
-          "description": "rust corelib: rs-no-std only. Emit a genuinely #![no_std], heap-free crate: heapless::String<N>/Vec<T,N> fixed-capacity fields sized from the schema, a bounded decode stack, and serde gated behind a cargo feature. On by default for corelib: rs-no-std; set false to emit an ordinary std crate against the no-std corelib."
+          "description": "rust corelib: rs-no-std only. Emit a genuinely #![no_std], heap-free crate: heapless::String<N>/Vec<T,N> fixed-capacity fields sized from the schema, a bounded decode stack, and serde gated behind a cargo feature. On by default for corelib: rs-no-std; set false to emit an ordinary std crate against the no-std corelib. Every rs-no-std build, whatever no_std says, requires each string/blob to carry maxlen and each array a count (and items.maxlen for string/blob arrays); use corelib: rs for unbounded fields."
         }
       }
     },
