@@ -346,7 +346,7 @@ func destElemsFromJSON(kind, elem ir.Kind, jx string) string {
 		return fmt.Sprintf("<int>[for (final _b in (%s as List)) (_b as bool) ? 1 : 0]", jx)
 	case elem == ir.KindFP32 || elem == ir.KindFP64:
 		return fmt.Sprintf("<double>[for (final _b in (%s as List)) (_b as num).toDouble()]", jx)
-	case elem == ir.KindU64 || elem == ir.KindBitfield:
+	case elem == ir.KindU64 || elem == ir.KindI64 || elem == ir.KindBitfield:
 		return fmt.Sprintf("<int>[for (final _b in (%s as List)) %s]", jx, u64FromJSON("_b", true))
 	}
 	return fmt.Sprintf("<int>[for (final _b in (%s as List)) (_b as num).toInt()]", jx)

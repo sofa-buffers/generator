@@ -294,6 +294,16 @@ func TestDartI64JSONReadsAString(t *testing.T) {
 	)
 }
 
+// A native i64 ARRAY element is read the same way: check_array_lengths.py feeds
+// the harness quoted i64 elements, and the `(x as num).toInt()` element reader
+// it used to share with the small integers threw on them.
+func TestDartI64ArrayJSONReadsAString(t *testing.T) {
+	got := genFor(t, writeDef(t, "version: 1\nmessages:\n  M:\n    payload:\n      a: { id: 0, type: array, items: { type: i64, count: 4 } }\n"), map[string]any{"emit": "project"})
+	mustContain(t, "i64 array", got,
+		"<int>[for (final _b in (j['a'] as List)) (_b is String ? BigInt.parse(_b) : BigInt.from(_exact64(_b))).toSigned(64).toInt()]",
+	)
+}
+
 // An option spelled like a member derived from another option takes the
 // trailing `_`, never the derived member: `a`'s id constant is `aId` and `x`'s
 // test is `hasX` whether or not an option `aId` or `hasX` exists. The union's
