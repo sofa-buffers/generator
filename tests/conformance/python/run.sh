@@ -395,10 +395,9 @@ done
 
 # Every leg from here on runs once per engine in $ENGINES, in a loop of its own.
 # The few that stay on the default engine, which is the native one wherever it
-# exists -- the corpus import check and the max_message_size encode check -- run
-# once, so the pure encoder is not covered for max_message_size. The format gate
-# runs no engine at all. A leg that only GENERATES does
-# that once, ahead of its loop: the generated source is the same on both engines.
+# exists -- the corpus import check -- run once. The format gate runs no engine
+# at all. A leg that only GENERATES does that once, ahead of its loop: the
+# generated source is the same on both engines.
 # The shared-vector decode and chunk-invariance legs run both engines side by
 # side. Reading the pure engine's verdicts off the loop above alone would prove
 # nothing about them: that loop holds no round-trip, no section 7 verdict, no cap
@@ -1158,8 +1157,13 @@ YAML
 ( cd "$ROOT" && go run ./cmd/sofabgen --format=off --config "$WORK/mmscfg.yaml" --lang python --in "$WORK/mms.yaml" --out "$WORK/mms-small" >/dev/null )
 check_max_size_limit python 4096 "$WORK/mms-default/message.py" 'MAX_SIZE_LIMIT = @@$'
 check_max_size_limit python 64 "$WORK/mms-small/message.py" 'MAX_SIZE_LIMIT = @@$'
-check_max_message_size python 4096 --cwd "$WORK/mms-default" -- python3 harness.py
-check_max_message_size python 64 --cwd "$WORK/mms-small" -- python3 harness.py
+for ENGINE in $ENGINES; do
+    select_engine "$ENGINE"
+    check_max_message_size "python/$ENGINE" 4096 --cwd "$WORK/mms-default" -- python3 harness.py
+    check_max_message_size "python/$ENGINE" 64 --cwd "$WORK/mms-small" -- python3 harness.py
+done
+unset SOFAB_PUREPYTHON || true
+if [ "$NATIVE" = yes ]; then require_engine native; else require_engine python; fi
 check_max_message_budget python python ''
 
 

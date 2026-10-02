@@ -6276,7 +6276,8 @@ A reimplementation is **conformant** when it reproduces these gates:
    because the array-count cap is raised inside corelib-py and the Cython
    accelerator reimplements that path — and so does every other `python` leg
    that reaches the corelib (the section 7 battery, the receiver caps, growth,
-   the shared ENCODE vectors; each Go test run asserts `sofab.IMPL`). The other nine suites make the assertion
+   the `max_message_size` encode check and the shared ENCODE vectors; each Go
+   test run asserts `sofab.IMPL`). The other nine suites make the assertion
    each in its own `generator#102` block and to its own depth — `rust` reads a
    category off its harness's `decode error:` line, `go` checks the exit status
    and nothing else, which both refusals satisfy — and moving them onto this
