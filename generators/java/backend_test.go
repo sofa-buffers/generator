@@ -72,8 +72,8 @@ func TestJavaStructural(t *testing.T) {
 		"if (!java.util.Arrays.equals(this.someuintarray, _arrdef_someuintarray)) {",    // guard reads the static -- no per-encode new long[] (#146)
 		"m.someuintarray[ai++] = (int) value;",                                          // plain indexed store: arrayBegin sized the array at the checked count (§9.5 shape A)
 		"case 15: if (kind != ArrayKind.UNSIGNED) break; if (count > 4) throw Sofab.invalid(\"someuintarray: array count above schema capacity 4\"); askip = 0; afill = count; atgt = 1; abulk = m.someuintarray = new int[count]; break;", // mis-typed header skipped before the bound (#254); over-count rejected (#100); the M that arrived is the whole value
-		"OStream os = OStream.overScratch(MAX_SIZE);", // the corelib owns the scratch buffer; MAX_SIZE stays ours (§5.1)
-		"return os.copyOfBytesUsed();",                // exact-size copy out of it
+		"OStream os = new OStream(new byte[512], 0, out::write);", // unbounded: a fixed scratch drains into a growing output; MAX_SIZE is a ceiling, not a size (§9.6)
+		"return out.toByteArray();",
 		"String _s = acc.string(total, offset, data, chunkOffset, chunkLength, Bound.SCHEMA_BOUNDED);", // reassembly, UTF-8 and the receiver cap, all the corelib's
 		"private final PayloadAcc acc = new PayloadAcc();",
 		"public List<Boolean> someboolarray", // boolean array stays boxed List
@@ -89,7 +89,6 @@ func TestJavaStructural(t *testing.T) {
 		"private static long[] ensureCap", "private static float[] ensureCap",
 		"private static String _utf8", "_utf8(",
 		"ENC_BUF", "ThreadLocal",
-		"ByteArrayOutputStream",
 		"private static final int ARRAY_INIT_CAP",
 	} {
 		if strings.Contains(m, gone) {
@@ -100,6 +99,34 @@ func TestJavaStructural(t *testing.T) {
 	// (generator#305), so the message file must NOT declare them.
 	if strings.Contains(m, "class MyfirstmessageSomestructNestedstruct {") {
 		t.Error("a schema type must not be declared inside the message's file")
+	}
+}
+
+// TestJavaEncodeBufferShape: a bounded message gets one exactly-sized buffer, an
+// unbounded one a fixed scratch draining into a growing output, so the imposed
+// max_message_size ceiling never refuses a legal message (ARCHITECTURE §9.6).
+func TestJavaEncodeBufferShape(t *testing.T) {
+	const bounded = `
+version: 1
+messages:
+  b:
+    payload:
+      n: { id: 0, type: u8 }
+`
+	const unbounded = `
+version: 1
+messages:
+  u:
+    payload:
+      s: { id: 0, type: string }
+`
+	b := genJavaFromYAML(t, bounded, map[string]any{"package": "message"})["src/main/java/message/B.java"]
+	if !strings.Contains(b, "OStream.overScratch(MAX_SIZE)") || strings.Contains(b, "ByteArrayOutputStream") {
+		t.Error("a bounded message must encode into one MAX_SIZE buffer")
+	}
+	u := genJavaFromYAML(t, unbounded, map[string]any{"package": "message"})["src/main/java/message/U.java"]
+	if strings.Contains(u, "overScratch(MAX_SIZE)") || !strings.Contains(u, "new OStream(new byte[512], 0, out::write)") {
+		t.Error("an unbounded message must not size its buffer from MAX_SIZE")
 	}
 }
 

@@ -10,6 +10,7 @@ set -eu
 . "$(dirname "$0")/../lib/corelib.sh"
 # Shared MAX_SIZE fill check (ARCHITECTURE §9.6).
 . "$(dirname "$0")/../lib/maxsize_fill.sh"
+. "$(dirname "$0")/../lib/max_message_size.sh"
 # Every backend Go test, run against the corelib with no skips allowed.
 . "$(dirname "$0")/../lib/backend_tests.sh"
 # Shared canonical-formatter check (ARCHITECTURE §12 gate 10).
@@ -1076,6 +1077,25 @@ python3 "$ROOT/tests/conformance/lib/check_growth.py" --emit-schema >> "$WORK/gr
 python3 "$ROOT/tests/conformance/lib/check_growth.py" \
     "$CORELIB/assets/test_vectors.json" "Python" --cap 4 \
     --cwd "$WORK/growth" -- python3 harness.py
+
+# max_message_size (generator#637, ARCHITECTURE §9.6): for an unbounded message the
+# key is an imposed ceiling, so it must neither size the encode buffer nor refuse an
+# encode. Encoded here at the default ceiling and at an explicit small one, with
+# messages more than 4x above each; the budget half is the generate-time refusal.
+echo "==> max_message_size: the ceiling never refuses an unbounded message (generator#637)"
+mms_schema "$WORK/mms.yaml"
+cat > "$WORK/mmscfg.yaml" <<'YAML'
+generic: { emit: project }
+targets: { python: { max_message_size: 64 } }
+YAML
+( cd "$ROOT" && go run ./cmd/sofabgen --format=off --config "$WORK/cfg.yaml" --lang python --in "$WORK/mms.yaml" --out "$WORK/mms-default" >/dev/null )
+( cd "$ROOT" && go run ./cmd/sofabgen --format=off --config "$WORK/mmscfg.yaml" --lang python --in "$WORK/mms.yaml" --out "$WORK/mms-small" >/dev/null )
+check_max_size_limit python 4096 "$WORK/mms-default/message.py" 'MAX_SIZE_LIMIT = @@$'
+check_max_size_limit python 64 "$WORK/mms-small/message.py" 'MAX_SIZE_LIMIT = @@$'
+check_max_message_size python 4096 --cwd "$WORK/mms-default" -- python3 harness.py
+check_max_message_size python 64 --cwd "$WORK/mms-small" -- python3 harness.py
+check_max_message_budget python python ''
+
 
 # CORELIB_PLAN S5.2/S6.0/S5.2.3, one property: the verdict AND the decoded value
 # must not depend on where the chunks were cut (generator#413). A resume bug -- a

@@ -10,6 +10,7 @@ set -eu
 . "$(dirname "$0")/../lib/corelib.sh"
 # Shared MAX_SIZE fill check (ARCHITECTURE §9.6).
 . "$(dirname "$0")/../lib/maxsize_fill.sh"
+. "$(dirname "$0")/../lib/max_message_size.sh"
 # Every backend Go test, run against the corelib with no skips allowed.
 . "$(dirname "$0")/../lib/backend_tests.sh"
 # Generated code against the canonical formatter (ARCHITECTURE §12).
@@ -1232,6 +1233,27 @@ sed -i "s#\${SOFAB_GO_CORELIB}#$CORELIB#" "$WORK/growth/go.mod"
 python3 "$ROOT/tests/conformance/lib/check_growth.py" \
     "$CORELIB/assets/test_vectors.json" "Go" --cap 4 \
     -- "$WORK/growth-harness"
+
+# max_message_size (generator#637, ARCHITECTURE §9.6): for an unbounded message the
+# key is an imposed ceiling, so it must neither size the encode buffer nor refuse an
+# encode. Encoded here at the default ceiling and at an explicit small one, with
+# messages more than 4x above each; the budget half is the generate-time refusal.
+echo "==> max_message_size: the ceiling never refuses an unbounded message (generator#637)"
+mms_schema "$WORK/mms.yaml"
+cat > "$WORK/cfg-mms.yaml" <<YAML
+generic: { emit: project }
+targets: { go: { package: message, module_path: example.com/gen, go_version: "1.21", max_message_size: 64 } }
+YAML
+for mms in default:cfg.yaml:4096 small:cfg-mms.yaml:64; do
+    tag=${mms%%:*}; rest=${mms#*:}; cfgf=${rest%%:*}; ceil=${rest#*:}
+    ( cd "$ROOT" && go run ./cmd/sofabgen --config "$WORK/$cfgf" --lang go --in "$WORK/mms.yaml" --out "$WORK/mms-$tag" )
+    sed -i "s#\${SOFAB_GO_CORELIB}#$CORELIB#" "$WORK/mms-$tag/go.mod"
+    ( cd "$WORK/mms-$tag" && GOFLAGS=-mod=mod go build -o "$WORK/mms-$tag-harness" ./harness )
+    check_max_size_limit go "$ceil" "$WORK/mms-$tag" 'Us__MaxSizeLimit = @@$'
+    check_max_message_size go "$ceil" -- "$WORK/mms-$tag-harness"
+done
+check_max_message_budget go go 'package: message, module_path: example.com/gen, go_version: "1.21"'
+
 
 # MESSAGE_SPEC §7.4 -- a field id REPEATED inside one scope (generator#523). The
 # rule has two halves and this checks BOTH on one message: a re-opened SEQUENCE

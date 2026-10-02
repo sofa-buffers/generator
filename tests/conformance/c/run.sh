@@ -11,6 +11,7 @@ set -eu
 # Corelib checkout + ref pinning (docs/CI.md).
 . "$(dirname "$0")/../lib/corelib.sh"
 . "$(dirname "$0")/../lib/maxsize_fill.sh"
+. "$(dirname "$0")/../lib/max_message_size.sh"
 # Every backend Go test, run against the corelib with no skips allowed.
 . "$(dirname "$0")/../lib/backend_tests.sh"
 
@@ -944,5 +945,11 @@ for cfg in names-default proj; do
         --label "C ($cfg): names.yaml message m round-trips" || exit 1
 done
 echo "==> names.yaml builds and round-trips (default prefix and sofab_)"
+
+# max_message_size (generator#637, ARCHITECTURE §9.6): C stores every field in a
+# fixed, schema-bounded object, so there is no unbounded encode to check; only the
+# generate-time budget and the rejection of an unbounded field apply.
+echo "==> max_message_size: budget refusal and unbounded rejection (generator#637)"
+check_max_message_budget c c 'symbol_prefix: sofab_' --static
 
 echo "PASS"

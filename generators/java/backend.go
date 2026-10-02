@@ -303,16 +303,26 @@ func (g *gen) emitClass(f *jfile, name, vis string, fields []*ir.Field, summary 
 		} else {
 			f.line("    public static final int MAX_SIZE = %d;", ms.Size)
 		}
-		// CORELIB_PLAN §5.1 leaves the buffer SIZE to the generated layer, which is
-		// the only side that knows MAX_SIZE; the reuse mechanism behind it is the
-		// corelib's OStream.overScratch. Do not call encode() reentrantly from a
-		// serialize() override on the same thread -- the inner call would write over
-		// the outer one's bytes.
+		// CORELIB_PLAN §5.1 leaves the buffer to the generated layer. A bounded
+		// message gets one exactly-sized buffer, the corelib's reusable
+		// OStream.overScratch; do not call encode() reentrantly from a serialize()
+		// override on the same thread -- the inner call would write over the outer
+		// one's bytes. An unbounded one is not sized by MAX_SIZE (an imposed
+		// ceiling, not a bound): a fixed scratch drains into a growing output, so a
+		// message above the ceiling still encodes.
 		f.line("    public byte[] encode() {")
 		f.line("        try {")
-		f.line("            OStream os = OStream.overScratch(MAX_SIZE);")
-		f.line("            serialize(os);")
-		f.line("            return os.copyOfBytesUsed();")
+		if ms.Bounded {
+			f.line("            OStream os = OStream.overScratch(MAX_SIZE);")
+			f.line("            serialize(os);")
+			f.line("            return os.copyOfBytesUsed();")
+		} else {
+			f.line("            java.io.ByteArrayOutputStream out = new java.io.ByteArrayOutputStream();")
+			f.line("            OStream os = new OStream(new byte[512], 0, out::write);")
+			f.line("            serialize(os);")
+			f.line("            os.flush();")
+			f.line("            return out.toByteArray();")
+		}
 		f.line("        } catch (IOException e) { throw new RuntimeException(e); }")
 		f.line("    }")
 		// Streaming encode. `serialize` writes the fields and nothing else, so a

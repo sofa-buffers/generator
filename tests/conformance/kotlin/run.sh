@@ -31,6 +31,7 @@ fi
 . "$(dirname "$0")/../lib/maxsize_fill.sh"
 # Backend Go tests against the real corelib (lib/backend_tests.sh).
 . "$(dirname "$0")/../lib/backend_tests.sh"
+. "$(dirname "$0")/../lib/max_message_size.sh"
 
 ROOT=$(cd "$(dirname "$0")/../../.." && pwd)
 CORELIB="${1:-${SOFAB_KOTLIN_CORELIB:-}}"
@@ -976,6 +977,25 @@ build "$WORK/growth.yaml" "$WORK/growth" "$WORK/limcfg.yaml"
 python3 "$ROOT/tests/conformance/lib/check_growth.py" \
     "$CORELIB/assets/test_vectors.json" "Kotlin" --cap 4 \
     -- "$WORK/growth/build/install/harness/bin/harness"
+
+# max_message_size (generator#637, ARCHITECTURE §9.6): for an unbounded message the
+# key is an imposed ceiling, so it must neither size the encode buffer nor refuse an
+# encode. Encoded here at the default ceiling and at an explicit small one, with
+# messages more than 4x above each; the budget half is the generate-time refusal.
+echo "==> max_message_size: the ceiling never refuses an unbounded message (generator#637)"
+mms_schema "$WORK/mms.yaml"
+cat > "$WORK/mmscfg.yaml" <<'YAML'
+generic: { emit: project }
+targets: { kotlin: { package: message, max_message_size: 64 } }
+YAML
+build "$WORK/mms.yaml" "$WORK/mms-default"
+build "$WORK/mms.yaml" "$WORK/mms-small" "$WORK/mmscfg.yaml"
+check_max_size_limit kotlin 4096 "$WORK/mms-default/src" 'MAX_SIZE_LIMIT = @@$'
+check_max_size_limit kotlin 64 "$WORK/mms-small/src" 'MAX_SIZE_LIMIT = @@$'
+check_max_message_size kotlin 4096 -- "$WORK/mms-default/build/install/harness/bin/harness"
+check_max_message_size kotlin 64 -- "$WORK/mms-small/build/install/harness/bin/harness"
+check_max_message_budget kotlin kotlin 'package: message'
+
 
 # MESSAGE_SPEC §7.4 -- a field id REPEATED inside one scope (generator#523). The
 # rule has two halves and this checks BOTH on one message: a re-opened SEQUENCE

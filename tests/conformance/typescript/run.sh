@@ -10,6 +10,7 @@ set -eu
 . "$(dirname "$0")/../lib/corelib.sh"
 # Shared MAX_SIZE fill check (ARCHITECTURE §9.6).
 . "$(dirname "$0")/../lib/maxsize_fill.sh"
+. "$(dirname "$0")/../lib/max_message_size.sh"
 # Shared canonical-formatter check (ARCHITECTURE §12 gate 10). Also what keeps
 # this suite honest on a box without prettier.
 . "$(dirname "$0")/../lib/check_format.sh"
@@ -701,6 +702,26 @@ ST=$( (cd "$WORK/wlim" && "$TH" status wbnd) < "$WORK/wrapb17.bin" | head -n1 )
     || { echo "FAIL: over the schema maxlen is INVALID, got $ST"; exit 1; }
 echo "==> wrapper-element caps OK"
 
+# The same cap on every kind it governs, through the shared driver
+# (CORELIB_PLAN S6.3, generator#416): an unbounded blob over max_dyn_blob_len is
+# LIMIT_EXCEEDED (the generated header guard), one the schema bounds is not capped,
+# and an in-cap blob decodes. Before this, max_dyn_blob_len was only ever set where
+# the schema had no unbounded blob, so its enforcing arm ran nowhere (generator#637).
+echo "==> a cap is LIMIT_EXCEEDED, a schema bound is INVALID, blob included (S6.3)"
+printf 'version: 1\nmessages:\n' > "$WORK/refusal.yaml"
+python3 "$ROOT/tests/conformance/lib/check_refusal_category.py" --emit-schema >> "$WORK/refusal.yaml"
+cat > "$WORK/cfg_refusal.yaml" <<'YAML'
+generic: { emit: project, max_dyn_array_count: 4, max_dyn_string_len: 8, max_dyn_blob_len: 8 }
+targets: { typescript: {} }
+YAML
+gen "$WORK/refusal.yaml" "$WORK/refusal" "$WORK/cfg_refusal.yaml"
+ln -s "$WORK/ex/node_modules" "$WORK/refusal/node_modules"
+python3 "$ROOT/tests/conformance/lib/check_refusal_category.py" "typescript" \
+    --cwd "$WORK/refusal" \
+    --max-dyn-array-count 4 --max-dyn-string-len 8 --max-dyn-blob-len 8 \
+    --status-verb status --status-limit LIMIT_EXCEEDED \
+    -- "$TH"
+
 echo "==> shared-vector byte-exact conformance"
 python3 "$ROOT/tests/conformance/typescript/check_vectors.py" "$CORELIB/assets/test_vectors.json" "$WORK/conf"
 
@@ -1212,6 +1233,26 @@ ln -s "$WORK/ex/node_modules" "$WORK/growth/node_modules"
 python3 "$ROOT/tests/conformance/lib/check_growth.py" \
     "$CORELIB/assets/test_vectors.json" "TypeScript" --cap 4 \
     --cwd "$WORK/growth" -- "$TH"
+
+# max_message_size (generator#637, ARCHITECTURE §9.6): for an unbounded message the
+# key is an imposed ceiling, so it must neither size the encode buffer nor refuse an
+# encode. Encoded here at the default ceiling and at an explicit small one, with
+# messages more than 4x above each; the budget half is the generate-time refusal.
+echo "==> max_message_size: the ceiling never refuses an unbounded message (generator#637)"
+mms_schema "$WORK/mms.yaml"
+cat > "$WORK/cfg_mms.yaml" <<'YAML'
+generic: { emit: project }
+targets: { typescript: { max_message_size: 64 } }
+YAML
+gen "$WORK/mms.yaml" "$WORK/mms-default"
+gen "$WORK/mms.yaml" "$WORK/mms-small" "$WORK/cfg_mms.yaml"
+for d in mms-default mms-small; do ln -s "$WORK/ex/node_modules" "$WORK/$d/node_modules"; done
+check_max_size_limit typescript 4096 "$WORK/mms-default/message.ts" 'MAX_SIZE_LIMIT = @@;$'
+check_max_size_limit typescript 64 "$WORK/mms-small/message.ts" 'MAX_SIZE_LIMIT = @@;$'
+check_max_message_size typescript 4096 --cwd "$WORK/mms-default" -- "$TH"
+check_max_message_size typescript 64 --cwd "$WORK/mms-small" -- "$TH"
+check_max_message_budget typescript typescript ''
+
 
 # An `enum` and a `bitfield` are bound by the WIDTH their declaration IMPLIES
 # (MESSAGE_SPEC S1, generator#516): for an enum the smallest SIGNED type holding
