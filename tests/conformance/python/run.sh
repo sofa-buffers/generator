@@ -159,6 +159,17 @@ else
     fi
 fi
 
+# select_engine <native|python> -- put this shell on that engine and assert it,
+# for the per-engine loops. A fallback to the pure engine where the native one was
+# expected would make the second pass a duplicate of the first, silently.
+select_engine() {
+    if [ "$1" = python ]; then export SOFAB_PUREPYTHON=1; else unset SOFAB_PUREPYTHON || true; fi
+    require_engine "$1"
+}
+
+ENGINES="native python"
+[ "$NATIVE" = yes ] || ENGINES=python
+
 # From here on every Python process runs with warnings as errors -- the
 # `python3 -W error` of every leg, both engines, set once so a new leg cannot
 # miss it. A SyntaxWarning in a generated module (it fires when the module is
@@ -179,33 +190,38 @@ echo "==> generating Python project"
 echo "==> syntax check"
 python3 -m py_compile "$WORK/proj/message.py" "$WORK/proj/harness.py"
 
-echo "==> JSON encode -> decode round-trip"
-IN='{"someu8":200,"someu16":4242,"someu32":3000000,"someu64":1234567890123456,"somei8":-42,"somei16":31000,"somei32":123456789,"somei64":-1234567890123456,"somefp32":1.5,"somefp64":-2.5,"somebool":false,"somestring":"round trip","someblob":[1,2,3,4],"someenum":33,"somebitfield":1,"someuintarray":[9,8,7,6],"someintarray":[-1,-2,-3,-4,-5],"somefloatarray":[0.5,0.25,-0.75],"somestringarray":["a","bb","ccc"],"someblobarray":[[1],[2,3]],"somestruct":{"nestedint":12,"nestedstring":"deep","nestedstruct":{"deepint":99}},"someunion":{"option1":4242},"somestructwitharray":{"label":"lbl","values":[9,9,9,9]},"somestructarray":[{"x":1,"y":2},{"x":-3,"y":-4}],"somematrix":[[1,2,3,4],[5,6,7,8]],"someunionarray":[{"asint":7},{"asint":-8}],"someenumarray":[1,0,2,1],"someboolarray":[false,false,true],"somebitfieldarray":[1,2,3],"somemap":[{"key":"k","value":5}]}'
-OUT=$(cd "$WORK/proj" && printf '%s' "$IN" | python3 harness.py encode myfirstmessage | python3 harness.py decode myfirstmessage)
-echo "$OUT" | grep -q '"someu64": 1234567890123456' || { echo "FAIL: u64 round-trip"; exit 1; }
-echo "$OUT" | grep -q '"deepint": 99' || { echo "FAIL: nested struct round-trip"; exit 1; }
-echo "==> round-trip OK"
+for ENGINE in $ENGINES; do
+    select_engine "$ENGINE"
+    echo "==> JSON encode -> decode round-trip, engine=$ENGINE"
+    IN='{"someu8":200,"someu16":4242,"someu32":3000000,"someu64":1234567890123456,"somei8":-42,"somei16":31000,"somei32":123456789,"somei64":-1234567890123456,"somefp32":1.5,"somefp64":-2.5,"somebool":false,"somestring":"round trip","someblob":[1,2,3,4],"someenum":33,"somebitfield":1,"someuintarray":[9,8,7,6],"someintarray":[-1,-2,-3,-4,-5],"somefloatarray":[0.5,0.25,-0.75],"somestringarray":["a","bb","ccc"],"someblobarray":[[1],[2,3]],"somestruct":{"nestedint":12,"nestedstring":"deep","nestedstruct":{"deepint":99}},"someunion":{"option1":4242},"somestructwitharray":{"label":"lbl","values":[9,9,9,9]},"somestructarray":[{"x":1,"y":2},{"x":-3,"y":-4}],"somematrix":[[1,2,3,4],[5,6,7,8]],"someunionarray":[{"asint":7},{"asint":-8}],"someenumarray":[1,0,2,1],"someboolarray":[false,false,true],"somebitfieldarray":[1,2,3],"somemap":[{"key":"k","value":5}]}'
+    OUT=$(cd "$WORK/proj" && printf '%s' "$IN" | python3 harness.py encode myfirstmessage | python3 harness.py decode myfirstmessage)
+    echo "$OUT" | grep -q '"someu64": 1234567890123456' || { echo "FAIL: [$ENGINE] u64 round-trip"; exit 1; }
+    echo "$OUT" | grep -q '"deepint": 99' || { echo "FAIL: [$ENGINE] nested struct round-trip"; exit 1; }
+    echo "==> round-trip OK, engine=$ENGINE"
 
-# The whole message must round-trip to ITSELF, compared as DATA rather than as
-# text (tests/conformance/lib/json_equal.py). The greps above pin a handful of
-# fields; this covers every one the message has, and it needs no fixture to
-# maintain -- OUT already carries the defaults the input left out, so feeding it
-# back is a full-coverage pass that grows with the schema by itself.
-#
-# A string comparison cannot do this job: member order is the backend's choice
-# (cpp orders by schema id, go alphabetically), and a blob is base64 here and a
-# byte array there -- all rendering, no wire fact.
-FULL="$OUT"
-OUT2=$(cd "$WORK/proj" && printf '%s' "$FULL" | python3 harness.py encode myfirstmessage | python3 harness.py decode myfirstmessage)
-python3 "$ROOT/tests/conformance/lib/json_equal.py" "$FULL" "$OUT2" \
-    --label "Python: the whole message round-trips to itself" || exit 1
-echo "==> full-message round-trip OK ($(python3 -c "import json,sys;print(len(json.loads(sys.argv[1])))" "$FULL") fields compared as data)"
-# Every field must sit OFF its schema default, or the round trip above compares
-# a default with itself and cannot tell a working decode from a broken one.
-BASE=$(cd "$WORK/proj" && printf '%s' '{}' | python3 harness.py encode myfirstmessage | python3 harness.py decode myfirstmessage)
-python3 "$ROOT/tests/conformance/lib/check_nondefault.py" "$BASE" "$FULL" \
-    --label "python: round-trip fixture" || exit 1
-echo "==> round-trip fixture OK (no field sits on its schema default)"
+    # The whole message must round-trip to ITSELF, compared as DATA rather than as
+    # text (tests/conformance/lib/json_equal.py). The greps above pin a handful of
+    # fields; this covers every one the message has, and it needs no fixture to
+    # maintain -- OUT already carries the defaults the input left out, so feeding it
+    # back is a full-coverage pass that grows with the schema by itself.
+    #
+    # A string comparison cannot do this job: member order is the backend's choice
+    # (cpp orders by schema id, go alphabetically), and a blob is base64 here and a
+    # byte array there -- all rendering, no wire fact.
+    FULL="$OUT"
+    OUT2=$(cd "$WORK/proj" && printf '%s' "$FULL" | python3 harness.py encode myfirstmessage | python3 harness.py decode myfirstmessage)
+    python3 "$ROOT/tests/conformance/lib/json_equal.py" "$FULL" "$OUT2" \
+        --label "python/$ENGINE: the whole message round-trips to itself" || exit 1
+    echo "==> full-message round-trip OK ($(python3 -c "import json,sys;print(len(json.loads(sys.argv[1])))" "$FULL") fields compared as data), engine=$ENGINE"
+    # Every field must sit OFF its schema default, or the round trip above compares
+    # a default with itself and cannot tell a working decode from a broken one.
+    BASE=$(cd "$WORK/proj" && printf '%s' '{}' | python3 harness.py encode myfirstmessage | python3 harness.py decode myfirstmessage)
+    python3 "$ROOT/tests/conformance/lib/check_nondefault.py" "$BASE" "$FULL" \
+        --label "python/$ENGINE: round-trip fixture" || exit 1
+    echo "==> round-trip fixture OK (no field sits on its schema default), engine=$ENGINE"
+done
+unset SOFAB_PUREPYTHON || true
+if [ "$NATIVE" = yes ]; then require_engine native; else require_engine python; fi
 
 # The two encode-buffer arms (CORELIB_PLAN §5.1). The caller owns the output
 # buffer: generated code allocates it and the corelib neither grows nor
@@ -268,8 +284,6 @@ grep -q "def on_unsigned_array" "$WORK/bools/message.py" || {
     --in "$ROOT/tests/conformance/lib/names.yaml" --out "$WORK/names" )
 python3 -m py_compile "$WORK/names/message.py" "$WORK/names/harness.py"
 
-ENGINES="native python"
-[ "$NATIVE" = yes ] || ENGINES=python
 for ENGINE in $ENGINES; do
     if [ "$ENGINE" = python ]; then export SOFAB_PUREPYTHON=1; else unset SOFAB_PUREPYTHON || true; fi
     # A fallback to the pure engine where the native one was expected would make
@@ -379,63 +393,20 @@ for ENGINE in $ENGINES; do
         || { echo "FAIL: [$ENGINE] a boolean did not follow CORELIB_PLAN §4.4 (generator#590)"; exit 1; }
 done
 
-# Everything below runs on ONE engine -- the shared-vector byte-exactness check
-# included -- and that engine is the native one wherever it exists: it is what a
-# user with a compiler gets, and the pure engine has just been through every leg
-# of the loop above.
+# Every leg from here on runs once per engine in $ENGINES, in a loop of its own.
+# The few that do not run an engine at all -- the corpus import check, the
+# max_message_size encode check and the format gate -- stay on the default one,
+# which is the native engine wherever it exists. A leg that only GENERATES does
+# that once, ahead of its loop: the generated source is the same on both engines.
+# The shared-vector decode and chunk-invariance legs run both engines side by
+# side. Reading the pure engine's verdicts off the loop above alone would prove
+# nothing about them: that loop holds no round-trip, no section 7 verdict, no cap
+# and no growth leg.
 unset SOFAB_PUREPYTHON || true
 if [ "$NATIVE" = yes ]; then require_engine native; else require_engine python; fi
-echo "==> remaining legs run on the $(active_engine) engine"
 
-# Over-count scalar array (generator#100): someuintarray declares count: 4
-# (id 15 -> header 0x7b = 15<<3 | unsigned-array). 5 wire elements MUST be
-# INVALID per MESSAGE_SPEC 3+7 (decode exits non-zero); exactly 4 still decode.
-echo "==> over-count scalar array must reject (generator#100)"
-printf '\173\005\001\002\003\004\005' > "$WORK/overcount.bin"
-printf '\173\004\001\002\003\004' > "$WORK/control.bin"
-if (cd "$WORK/proj" && python3 harness.py decode myfirstmessage) < "$WORK/overcount.bin" >/dev/null 2>&1; then
-    echo "FAIL: over-count scalar array (5 > count 4) must be INVALID"; exit 1
-fi
-(cd "$WORK/proj" && python3 harness.py decode myfirstmessage) < "$WORK/control.bin" >/dev/null || { echo "FAIL: control (count == 4) must decode"; exit 1; }
-echo "==> over-count reject OK"
 
-# Over-count AND truncated: INVALID dominates INCOMPLETE (generator#216 / F-0032,
-# MESSAGE_SPEC S5.2). A count header of 6 (> 4) followed by only 2 elements then EOF
-# is BOTH over-count and truncated; the count is on the delivered field header
-# (fld.count) before any element, so it MUST be reported INVALID (SofaDecodeError),
-# not INCOMPLETE (SofaIncompleteError). Wire: 7b (id 15 unsigned-array) 06 01 02 EOF.
-echo "==> over-count + truncation must be INVALID, not INCOMPLETE (generator#216)"
-printf '\173\006\001\002' > "$WORK/overcount_trunc.bin"
-ERR=$( (cd "$WORK/proj" && python3 harness.py decode myfirstmessage) < "$WORK/overcount_trunc.bin" 2>&1 >/dev/null || true )
-echo "$ERR" | grep -q 'SofaDecodeError' || { echo "FAIL: over-count(6>4)+truncated must be INVALID (SofaDecodeError); got: $ERR"; exit 1; }
-# Precision control: an in-bound count (4 == bound) that is genuinely truncated
-# (2 of 4 elements then EOF) is a clean truncation and MUST stay INCOMPLETE.
-printf '\173\004\001\002' > "$WORK/incount_trunc.bin"
-ERR=$( (cd "$WORK/proj" && python3 harness.py decode myfirstmessage) < "$WORK/incount_trunc.bin" 2>&1 >/dev/null || true )
-echo "$ERR" | grep -q 'SofaIncompleteError' || { echo "FAIL: in-bound(4==4)+truncated must be INCOMPLETE (SofaIncompleteError); got: $ERR"; exit 1; }
-echo "==> over-count/truncation ordering OK"
-
-# Over-index wrapper array (generator#142): somestringarray declares count: 5
-# (id 18). A string element with a wire index >= 5 is INVALID for every target
-# (MESSAGE_SPEC S5.1/S7), never grown-into -- which also bounds an over-index
-# heap-amplification DoS. Wire: 96 01 (sequence_begin id 18) 2a (string id 5,
-# over-index) 0a 78 (fixlen "x") 07 (sequence_end); control puts it at id 4.
-echo "==> over-index wrapper array must reject (generator#142)"
-printf '\226\001\052\012\170\007' > "$WORK/overindex.bin"
-printf '\226\001\042\012\170\007' > "$WORK/overindex_control.bin"
-if (cd "$WORK/proj" && python3 harness.py decode myfirstmessage) < "$WORK/overindex.bin" >/dev/null 2>&1; then
-    echo "FAIL: over-index wrapper element (id 5 >= count 5) must be INVALID"; exit 1
-fi
-(cd "$WORK/proj" && python3 harness.py decode myfirstmessage) < "$WORK/overindex_control.bin" >/dev/null || { echo "FAIL: control (index 4 < 5) must decode"; exit 1; }
-echo "==> over-index reject OK"
-
-# Over-count NESTED NATIVE row (MESSAGE_SPEC S3+S7.1): a row of a nested native
-# array declares its own `count`, and a row whose wire element count exceeds that
-# capacity is INVALID exactly like a top-level native array -- the bound has to be
-# taken at the ROW's count header, which is the row element's header inside the
-# wrapper. example.yaml has no nested row, so this uses its own definition.
-# Wire: 06 (sequence_begin id 0) 03 (row id 0, unsigned array) N <elements> 07.
-echo "==> over-count nested native row must reject (MESSAGE_SPEC S3+S7.1)"
+# The nested-row project is generated once, ahead of the loop: same source on both engines.
 cat > "$WORK/rows-def.yaml" <<YAML
 version: 1
 messages:
@@ -444,124 +415,176 @@ messages:
       a: { id: 0, type: array, items: { type: array, count: 2, items: { type: u32, count: 3 } } }
 YAML
 ( cd "$ROOT" && go run ./cmd/sofabgen --format=off --config "$WORK/cfg.yaml" --lang python --in "$WORK/rows-def.yaml" --out "$WORK/rowsproj" )
-printf '\006\003\004\001\002\003\004\007' > "$WORK/row-over.bin"
-printf '\006\003\003\001\002\003\007' > "$WORK/row-ok.bin"
-if (cd "$WORK/rowsproj" && python3 harness.py decode rows) < "$WORK/row-over.bin" >/dev/null 2>&1; then
-    echo "FAIL: nested native row of 4 (> inner count 3) must be INVALID"; exit 1
-fi
-(cd "$WORK/rowsproj" && python3 harness.py decode rows) < "$WORK/row-ok.bin" >/dev/null || { echo "FAIL: control (row of 3 == count 3) must decode"; exit 1; }
-# Over-count AND truncated: INVALID dominates INCOMPLETE (S5.2) -- the count is
-# known from the row header before a single element is consumed.
-printf '\006\003\004\001' > "$WORK/row-over-trunc.bin"
-ERR=$( (cd "$WORK/rowsproj" && python3 harness.py decode rows) < "$WORK/row-over-trunc.bin" 2>&1 >/dev/null || true )
-echo "$ERR" | grep -q 'SofaDecodeError' || { echo "FAIL: over-count(4>3)+truncated row must be INVALID (SofaDecodeError); got: $ERR"; exit 1; }
-echo "==> nested-row over-count reject OK"
 
-# Over-maxlen scalar blob (Option B / MESSAGE_SPEC S7.1): someblob (id 12) declares
-# maxlen: 16. A 17-byte blob exceeds it -> INVALID, never truncated. Wire: 62 (blob
-# id12) 8b 01 (fixlen word len 17, blob subtype 3) + 17 bytes; control is 16 bytes.
-echo "==> over-maxlen string/blob must reject (Option B, S7.1)"
-printf '\142\213\001\001\001\001\001\001\001\001\001\001\001\001\001\001\001\001\001\001' > "$WORK/overmaxlen.bin"
-printf '\142\203\001\001\001\001\001\001\001\001\001\001\001\001\001\001\001\001\001' > "$WORK/overmaxlen_control.bin"
-if (cd "$WORK/proj" && python3 harness.py decode myfirstmessage) < "$WORK/overmaxlen.bin" >/dev/null 2>&1; then
-    echo "FAIL: over-maxlen blob (17 > maxlen 16) must be INVALID"; exit 1
-fi
-(cd "$WORK/proj" && python3 harness.py decode myfirstmessage) < "$WORK/overmaxlen_control.bin" >/dev/null || { echo "FAIL: control (16 == maxlen) must decode"; exit 1; }
-# ... and the same violation with the message cut RIGHT AFTER the length word
-# (generator#267 / Crucible F-0043). 17 > maxlen 16 is fully established by that
-# word, and S5.2 makes INVALID dominate INCOMPLETE, so the bound must be measured
-# against the peeked wire length BEFORE the payload is read -- reading first and
-# measuring the decoded bytes never reaches the check on such a message.
-# Wire: 62 (blob id 12) 8b 01 (len 17, subtype blob) <EOF>
-echo "==> over-maxlen + truncation must be INVALID, not INCOMPLETE (generator#267)"
-printf '\142\213\001' > "$WORK/overmaxlen_trunc.bin"
-ERR=$( (cd "$WORK/proj" && python3 harness.py decode myfirstmessage) < "$WORK/overmaxlen_trunc.bin" 2>&1 >/dev/null || true )
-echo "$ERR" | grep -q 'SofaDecodeError' \
-    || { echo "FAIL: over-maxlen(17>16)+truncated must be INVALID (SofaDecodeError); got: $ERR"; exit 1; }
-# Precision control: an in-bound length cut at the same offset stays INCOMPLETE.
-printf '\142\203\001' > "$WORK/inmaxlen_trunc.bin"
-ERR=$( (cd "$WORK/proj" && python3 harness.py decode myfirstmessage) < "$WORK/inmaxlen_trunc.bin" 2>&1 >/dev/null || true )
-echo "$ERR" | grep -q 'SofaIncompleteError' \
-    || { echo "FAIL: in-bound(16==16)+truncated must stay INCOMPLETE; got: $ERR"; exit 1; }
-echo "==> over-maxlen reject OK"
+for ENGINE in $ENGINES; do
+    select_engine "$ENGINE"
+    # Over-count scalar array (generator#100): someuintarray declares count: 4
+    # (id 15 -> header 0x7b = 15<<3 | unsigned-array). 5 wire elements MUST be
+    # INVALID per MESSAGE_SPEC 3+7 (decode exits non-zero); exactly 4 still decode.
+    echo "==> over-count scalar array must reject (generator#100), engine=$ENGINE"
+    printf '\173\005\001\002\003\004\005' > "$WORK/overcount.bin"
+    printf '\173\004\001\002\003\004' > "$WORK/control.bin"
+    if (cd "$WORK/proj" && python3 harness.py decode myfirstmessage) < "$WORK/overcount.bin" >/dev/null 2>&1; then
+        echo "FAIL: [$ENGINE] over-count scalar array (5 > count 4) must be INVALID"; exit 1
+    fi
+    (cd "$WORK/proj" && python3 harness.py decode myfirstmessage) < "$WORK/control.bin" >/dev/null || { echo "FAIL: [$ENGINE] control (count == 4) must decode"; exit 1; }
+    echo "==> over-count reject OK, engine=$ENGINE"
 
-# The same ordering one level down, at the ELEMENT (generator#267 residue,
-# Crucible F-0043 width_elem_trunc). someuintarray (id 15) declares u32 elements;
-# an element carrying 2^32 is outside that width, which S7.1 makes INVALID, and it
-# is established by its own bytes -- so S5.2 keeps the verdict INVALID however
-# little of the array follows.
-#
-# The declared width is STATED in on_array_begin, which the decoder calls at the
-# array header, and applied by it AT each element -- so the verdict does not
-# depend on how much of the array followed. A handler cannot do this itself: by
-# the time it holds the list, an array that never arrived is indistinguishable
-# from one that did.
-# Wire: 7b (id 15 unsigned-array) 04 (count 4) 80 80 80 80 10 (2^32) <EOF>.
-echo "==> over-width element + truncation must be INVALID (generator#267)"
-printf '\173\004\200\200\200\200\020' > "$WORK/overwidth_trunc.bin"
-ERR=$( (cd "$WORK/proj" && python3 harness.py decode myfirstmessage) < "$WORK/overwidth_trunc.bin" 2>&1 >/dev/null || true )
-echo "$ERR" | grep -q 'SofaDecodeError' \
-    || { echo "FAIL: over-width element + truncated must be INVALID (SofaDecodeError); got: $ERR"; exit 1; }
-# Precision control: an IN-RANGE element cut at the same offset decides nothing,
-# so the truncation IS the verdict.
-printf '\173\004\001' > "$WORK/inwidth_trunc.bin"
-ERR=$( (cd "$WORK/proj" && python3 harness.py decode myfirstmessage) < "$WORK/inwidth_trunc.bin" 2>&1 >/dev/null || true )
-echo "$ERR" | grep -q 'SofaIncompleteError' \
-    || { echo "FAIL: in-range element + truncated must stay INCOMPLETE; got: $ERR"; exit 1; }
-echo "==> element-width/truncation ordering OK"
+    # Over-count AND truncated: INVALID dominates INCOMPLETE (generator#216 / F-0032,
+    # MESSAGE_SPEC S5.2). A count header of 6 (> 4) followed by only 2 elements then EOF
+    # is BOTH over-count and truncated; the count is on the delivered field header
+    # (fld.count) before any element, so it MUST be reported INVALID (SofaDecodeError),
+    # not INCOMPLETE (SofaIncompleteError). Wire: 7b (id 15 unsigned-array) 06 01 02 EOF.
+    echo "==> over-count + truncation must be INVALID, not INCOMPLETE (generator#216), engine=$ENGINE"
+    printf '\173\006\001\002' > "$WORK/overcount_trunc.bin"
+    ERR=$( (cd "$WORK/proj" && python3 harness.py decode myfirstmessage) < "$WORK/overcount_trunc.bin" 2>&1 >/dev/null || true )
+    echo "$ERR" | grep -q 'SofaDecodeError' || { echo "FAIL: [$ENGINE] over-count(6>4)+truncated must be INVALID (SofaDecodeError); got: $ERR"; exit 1; }
+    # Precision control: an in-bound count (4 == bound) that is genuinely truncated
+    # (2 of 4 elements then EOF) is a clean truncation and MUST stay INCOMPLETE.
+    printf '\173\004\001\002' > "$WORK/incount_trunc.bin"
+    ERR=$( (cd "$WORK/proj" && python3 harness.py decode myfirstmessage) < "$WORK/incount_trunc.bin" 2>&1 >/dev/null || true )
+    echo "$ERR" | grep -q 'SofaIncompleteError' || { echo "FAIL: [$ENGINE] in-bound(4==4)+truncated must be INCOMPLETE (SofaIncompleteError); got: $ERR"; exit 1; }
+    echo "==> over-count/truncation ordering OK, engine=$ENGINE"
 
-# Contradictory wire type (MESSAGE_SPEC S7.3, generator#174): a field whose header
-# wire type is not the one its declared type maps to -- for fixlen, including the
-# subtype -- is SKIPPED, exactly like an unknown id. someu8 (id 0) is declared u8
-# (unsigned wire type) and keeps its schema default 7. Wire: 01 = id 0 with wire
-# type SIGNED (1), then the zig-zag varint 06 (= 3). Reading it as the schema type
-# would yield 3 (or the raw 6); skipping leaves the default. Control: 00 09 is the
-# same id with the correct unsigned wire type and must decode to 9. A third
-# vector, 06 07, gives the same id a SEQUENCE_START header closed by its
-# SEQUENCE_END: skipping that one has to drain the whole nested sequence, not
-# just a scalar payload, so it exercises the riskiest branch of skip().
-echo "==> contradictory wire type must skip (MESSAGE_SPEC S7.3, generator#174)"
-printf '\001\006' > "$WORK/wiremismatch.bin"
-printf '\000\011' > "$WORK/wiremismatch_control.bin"
-printf '\006\007' > "$WORK/wiremismatch_seq.bin"
-OUT=$( (cd "$WORK/proj" && python3 harness.py decode myfirstmessage) < "$WORK/wiremismatch.bin" ) \
-    || { echo "FAIL: mismatched wire type must skip, not fail the decode"; exit 1; }
-echo "$OUT" | grep -q '"someu8": 7' || { echo "FAIL: skipped field must keep its default 7, got: $OUT"; exit 1; }
-OUT=$( (cd "$WORK/proj" && python3 harness.py decode myfirstmessage) < "$WORK/wiremismatch_control.bin" ) \
-    || { echo "FAIL: control (correct wire type) must decode"; exit 1; }
-echo "$OUT" | grep -q '"someu8": 9' || { echo "FAIL: control must decode to 9, got: $OUT"; exit 1; }
-OUT=$( (cd "$WORK/proj" && python3 harness.py decode myfirstmessage) < "$WORK/wiremismatch_seq.bin" ) \
-    || { echo "FAIL: sequence header on a scalar field must skip, not fail the decode"; exit 1; }
-echo "$OUT" | grep -q '"someu8": 7' || { echo "FAIL: skipped sequence must keep the default 7, got: $OUT"; exit 1; }
-echo "==> wire-type skip OK"
+    # Over-index wrapper array (generator#142): somestringarray declares count: 5
+    # (id 18). A string element with a wire index >= 5 is INVALID for every target
+    # (MESSAGE_SPEC S5.1/S7), never grown-into -- which also bounds an over-index
+    # heap-amplification DoS. Wire: 96 01 (sequence_begin id 18) 2a (string id 5,
+    # over-index) 0a 78 (fixlen "x") 07 (sequence_end); control puts it at id 4.
+    echo "==> over-index wrapper array must reject (generator#142), engine=$ENGINE"
+    printf '\226\001\052\012\170\007' > "$WORK/overindex.bin"
+    printf '\226\001\042\012\170\007' > "$WORK/overindex_control.bin"
+    if (cd "$WORK/proj" && python3 harness.py decode myfirstmessage) < "$WORK/overindex.bin" >/dev/null 2>&1; then
+        echo "FAIL: [$ENGINE] over-index wrapper element (id 5 >= count 5) must be INVALID"; exit 1
+    fi
+    (cd "$WORK/proj" && python3 harness.py decode myfirstmessage) < "$WORK/overindex_control.bin" >/dev/null || { echo "FAIL: [$ENGINE] control (index 4 < 5) must decode"; exit 1; }
+    echo "==> over-index reject OK, engine=$ENGINE"
 
-# Repeated field id (MESSAGE_SPEC S7.4, generator#175): last occurrence wins per
-# field id. A re-opened sequence CONTINUES its scope, so a struct merges and the
-# children an earlier opening set whose ids do not recur are retained. somestruct
-# (id 20) is opened twice: the first opening sets nestedstring (id 1) to "x", the
-# second opens only the empty nestedstruct (id 2). nestedstring MUST survive --
-# decoding the re-opening into a fresh object would reset it to "Nested".
-# Wire: a6 01 (seq start id 20) 0a 0a 78 (string id 1, len 1, "x") 07 (seq end)
-#       a6 01 (seq start id 20) 16 07 (empty seq id 2) 07 (seq end)
-echo "==> re-opened struct scope must merge (MESSAGE_SPEC S7.4, generator#175)"
-printf '\246\001\012\012\170\007\246\001\026\007\007' > "$WORK/reopen_struct.bin"
-OUT=$( (cd "$WORK/proj" && python3 harness.py decode myfirstmessage) < "$WORK/reopen_struct.bin" ) \
-    || { echo "FAIL: re-opened struct must decode"; exit 1; }
-echo "$OUT" | grep -q '"nestedstring": "x"' || { echo "FAIL: re-opened struct must retain nestedstring \"x\", got: $OUT"; exit 1; }
-echo "==> struct scope merge OK"
+    # Over-count NESTED NATIVE row (MESSAGE_SPEC S3+S7.1): a row of a nested native
+    # array declares its own `count`, and a row whose wire element count exceeds that
+    # capacity is INVALID exactly like a top-level native array -- the bound has to be
+    # taken at the ROW's count header, which is the row element's header inside the
+    # wrapper. example.yaml has no nested row, so this uses its own definition.
+    # Wire: 06 (sequence_begin id 0) 03 (row id 0, unsigned array) N <elements> 07.
+    echo "==> over-count nested native row must reject (MESSAGE_SPEC S3+S7.1), engine=$ENGINE"
+    printf '\006\003\004\001\002\003\004\007' > "$WORK/row-over.bin"
+    printf '\006\003\003\001\002\003\007' > "$WORK/row-ok.bin"
+    if (cd "$WORK/rowsproj" && python3 harness.py decode rows) < "$WORK/row-over.bin" >/dev/null 2>&1; then
+        echo "FAIL: [$ENGINE] nested native row of 4 (> inner count 3) must be INVALID"; exit 1
+    fi
+    (cd "$WORK/rowsproj" && python3 harness.py decode rows) < "$WORK/row-ok.bin" >/dev/null || { echo "FAIL: [$ENGINE] control (row of 3 == count 3) must decode"; exit 1; }
+    # Over-count AND truncated: INVALID dominates INCOMPLETE (S5.2) -- the count is
+    # known from the row header before a single element is consumed.
+    printf '\006\003\004\001' > "$WORK/row-over-trunc.bin"
+    ERR=$( (cd "$WORK/rowsproj" && python3 harness.py decode rows) < "$WORK/row-over-trunc.bin" 2>&1 >/dev/null || true )
+    echo "$ERR" | grep -q 'SofaDecodeError' || { echo "FAIL: [$ENGINE] over-count(4>3)+truncated row must be INVALID (SofaDecodeError); got: $ERR"; exit 1; }
+    echo "==> nested-row over-count reject OK, engine=$ENGINE"
 
-# Repeated field id, array wrapper (MESSAGE_SPEC S7.4 + S5): an array wrapper IS
-# the array's value, so unlike a struct it is REPLACED whole by a later occurrence
-# rather than merged. somestringarray (id 18) is opened twice: the first opening
-# sets elements 0="a" and 1="b", the second sets only element 0="c". Element 1 MUST
-# NOT survive as "b" -- merging by index is the bug this pins.
-# Wire: 96 01 (seq start id 18) 02 0a 61 (string id 0 "a") 0a 0a 62 (string id 1 "b")
-#       07 (seq end) 96 01 (seq start id 18) 02 0a 63 (string id 0 "c") 07 (seq end)
-echo "==> re-opened array wrapper must replace (MESSAGE_SPEC S7.4, generator#175)"
-printf '\226\001\002\012\141\012\012\142\007\226\001\002\012\143\007' > "$WORK/reopen_array.bin"
-OUT=$( (cd "$WORK/proj" && python3 harness.py decode myfirstmessage) < "$WORK/reopen_array.bin" ) \
-    || { echo "FAIL: re-opened array wrapper must decode"; exit 1; }
-printf '%s' "$OUT" | python3 -c '
+    # Over-maxlen scalar blob (Option B / MESSAGE_SPEC S7.1): someblob (id 12) declares
+    # maxlen: 16. A 17-byte blob exceeds it -> INVALID, never truncated. Wire: 62 (blob
+    # id12) 8b 01 (fixlen word len 17, blob subtype 3) + 17 bytes; control is 16 bytes.
+    echo "==> over-maxlen string/blob must reject (Option B, S7.1), engine=$ENGINE"
+    printf '\142\213\001\001\001\001\001\001\001\001\001\001\001\001\001\001\001\001\001\001' > "$WORK/overmaxlen.bin"
+    printf '\142\203\001\001\001\001\001\001\001\001\001\001\001\001\001\001\001\001\001' > "$WORK/overmaxlen_control.bin"
+    if (cd "$WORK/proj" && python3 harness.py decode myfirstmessage) < "$WORK/overmaxlen.bin" >/dev/null 2>&1; then
+        echo "FAIL: [$ENGINE] over-maxlen blob (17 > maxlen 16) must be INVALID"; exit 1
+    fi
+    (cd "$WORK/proj" && python3 harness.py decode myfirstmessage) < "$WORK/overmaxlen_control.bin" >/dev/null || { echo "FAIL: [$ENGINE] control (16 == maxlen) must decode"; exit 1; }
+    # ... and the same violation with the message cut RIGHT AFTER the length word
+    # (generator#267 / Crucible F-0043). 17 > maxlen 16 is fully established by that
+    # word, and S5.2 makes INVALID dominate INCOMPLETE, so the bound must be measured
+    # against the peeked wire length BEFORE the payload is read -- reading first and
+    # measuring the decoded bytes never reaches the check on such a message.
+    # Wire: 62 (blob id 12) 8b 01 (len 17, subtype blob) <EOF>
+    echo "==> over-maxlen + truncation must be INVALID, not INCOMPLETE (generator#267), engine=$ENGINE"
+    printf '\142\213\001' > "$WORK/overmaxlen_trunc.bin"
+    ERR=$( (cd "$WORK/proj" && python3 harness.py decode myfirstmessage) < "$WORK/overmaxlen_trunc.bin" 2>&1 >/dev/null || true )
+    echo "$ERR" | grep -q 'SofaDecodeError' \
+        || { echo "FAIL: [$ENGINE] over-maxlen(17>16)+truncated must be INVALID (SofaDecodeError); got: $ERR"; exit 1; }
+    # Precision control: an in-bound length cut at the same offset stays INCOMPLETE.
+    printf '\142\203\001' > "$WORK/inmaxlen_trunc.bin"
+    ERR=$( (cd "$WORK/proj" && python3 harness.py decode myfirstmessage) < "$WORK/inmaxlen_trunc.bin" 2>&1 >/dev/null || true )
+    echo "$ERR" | grep -q 'SofaIncompleteError' \
+        || { echo "FAIL: [$ENGINE] in-bound(16==16)+truncated must stay INCOMPLETE; got: $ERR"; exit 1; }
+    echo "==> over-maxlen reject OK, engine=$ENGINE"
+
+    # The same ordering one level down, at the ELEMENT (generator#267 residue,
+    # Crucible F-0043 width_elem_trunc). someuintarray (id 15) declares u32 elements;
+    # an element carrying 2^32 is outside that width, which S7.1 makes INVALID, and it
+    # is established by its own bytes -- so S5.2 keeps the verdict INVALID however
+    # little of the array follows.
+    #
+    # The declared width is STATED in on_array_begin, which the decoder calls at the
+    # array header, and applied by it AT each element -- so the verdict does not
+    # depend on how much of the array followed. A handler cannot do this itself: by
+    # the time it holds the list, an array that never arrived is indistinguishable
+    # from one that did.
+    # Wire: 7b (id 15 unsigned-array) 04 (count 4) 80 80 80 80 10 (2^32) <EOF>.
+    echo "==> over-width element + truncation must be INVALID (generator#267), engine=$ENGINE"
+    printf '\173\004\200\200\200\200\020' > "$WORK/overwidth_trunc.bin"
+    ERR=$( (cd "$WORK/proj" && python3 harness.py decode myfirstmessage) < "$WORK/overwidth_trunc.bin" 2>&1 >/dev/null || true )
+    echo "$ERR" | grep -q 'SofaDecodeError' \
+        || { echo "FAIL: [$ENGINE] over-width element + truncated must be INVALID (SofaDecodeError); got: $ERR"; exit 1; }
+    # Precision control: an IN-RANGE element cut at the same offset decides nothing,
+    # so the truncation IS the verdict.
+    printf '\173\004\001' > "$WORK/inwidth_trunc.bin"
+    ERR=$( (cd "$WORK/proj" && python3 harness.py decode myfirstmessage) < "$WORK/inwidth_trunc.bin" 2>&1 >/dev/null || true )
+    echo "$ERR" | grep -q 'SofaIncompleteError' \
+        || { echo "FAIL: [$ENGINE] in-range element + truncated must stay INCOMPLETE; got: $ERR"; exit 1; }
+    echo "==> element-width/truncation ordering OK, engine=$ENGINE"
+
+    # Contradictory wire type (MESSAGE_SPEC S7.3, generator#174): a field whose header
+    # wire type is not the one its declared type maps to -- for fixlen, including the
+    # subtype -- is SKIPPED, exactly like an unknown id. someu8 (id 0) is declared u8
+    # (unsigned wire type) and keeps its schema default 7. Wire: 01 = id 0 with wire
+    # type SIGNED (1), then the zig-zag varint 06 (= 3). Reading it as the schema type
+    # would yield 3 (or the raw 6); skipping leaves the default. Control: 00 09 is the
+    # same id with the correct unsigned wire type and must decode to 9. A third
+    # vector, 06 07, gives the same id a SEQUENCE_START header closed by its
+    # SEQUENCE_END: skipping that one has to drain the whole nested sequence, not
+    # just a scalar payload, so it exercises the riskiest branch of skip().
+    echo "==> contradictory wire type must skip (MESSAGE_SPEC S7.3, generator#174), engine=$ENGINE"
+    printf '\001\006' > "$WORK/wiremismatch.bin"
+    printf '\000\011' > "$WORK/wiremismatch_control.bin"
+    printf '\006\007' > "$WORK/wiremismatch_seq.bin"
+    OUT=$( (cd "$WORK/proj" && python3 harness.py decode myfirstmessage) < "$WORK/wiremismatch.bin" ) \
+        || { echo "FAIL: [$ENGINE] mismatched wire type must skip, not fail the decode"; exit 1; }
+    echo "$OUT" | grep -q '"someu8": 7' || { echo "FAIL: [$ENGINE] skipped field must keep its default 7, got: $OUT"; exit 1; }
+    OUT=$( (cd "$WORK/proj" && python3 harness.py decode myfirstmessage) < "$WORK/wiremismatch_control.bin" ) \
+        || { echo "FAIL: [$ENGINE] control (correct wire type) must decode"; exit 1; }
+    echo "$OUT" | grep -q '"someu8": 9' || { echo "FAIL: [$ENGINE] control must decode to 9, got: $OUT"; exit 1; }
+    OUT=$( (cd "$WORK/proj" && python3 harness.py decode myfirstmessage) < "$WORK/wiremismatch_seq.bin" ) \
+        || { echo "FAIL: [$ENGINE] sequence header on a scalar field must skip, not fail the decode"; exit 1; }
+    echo "$OUT" | grep -q '"someu8": 7' || { echo "FAIL: [$ENGINE] skipped sequence must keep the default 7, got: $OUT"; exit 1; }
+    echo "==> wire-type skip OK, engine=$ENGINE"
+
+    # Repeated field id (MESSAGE_SPEC S7.4, generator#175): last occurrence wins per
+    # field id. A re-opened sequence CONTINUES its scope, so a struct merges and the
+    # children an earlier opening set whose ids do not recur are retained. somestruct
+    # (id 20) is opened twice: the first opening sets nestedstring (id 1) to "x", the
+    # second opens only the empty nestedstruct (id 2). nestedstring MUST survive --
+    # decoding the re-opening into a fresh object would reset it to "Nested".
+    # Wire: a6 01 (seq start id 20) 0a 0a 78 (string id 1, len 1, "x") 07 (seq end)
+    #       a6 01 (seq start id 20) 16 07 (empty seq id 2) 07 (seq end)
+    echo "==> re-opened struct scope must merge (MESSAGE_SPEC S7.4, generator#175), engine=$ENGINE"
+    printf '\246\001\012\012\170\007\246\001\026\007\007' > "$WORK/reopen_struct.bin"
+    OUT=$( (cd "$WORK/proj" && python3 harness.py decode myfirstmessage) < "$WORK/reopen_struct.bin" ) \
+        || { echo "FAIL: [$ENGINE] re-opened struct must decode"; exit 1; }
+    echo "$OUT" | grep -q '"nestedstring": "x"' || { echo "FAIL: [$ENGINE] re-opened struct must retain nestedstring \"x\", got: $OUT"; exit 1; }
+    echo "==> struct scope merge OK, engine=$ENGINE"
+
+    # Repeated field id, array wrapper (MESSAGE_SPEC S7.4 + S5): an array wrapper IS
+    # the array's value, so unlike a struct it is REPLACED whole by a later occurrence
+    # rather than merged. somestringarray (id 18) is opened twice: the first opening
+    # sets elements 0="a" and 1="b", the second sets only element 0="c". Element 1 MUST
+    # NOT survive as "b" -- merging by index is the bug this pins.
+    # Wire: 96 01 (seq start id 18) 02 0a 61 (string id 0 "a") 0a 0a 62 (string id 1 "b")
+    #       07 (seq end) 96 01 (seq start id 18) 02 0a 63 (string id 0 "c") 07 (seq end)
+    echo "==> re-opened array wrapper must replace (MESSAGE_SPEC S7.4, generator#175), engine=$ENGINE"
+    printf '\226\001\002\012\141\012\012\142\007\226\001\002\012\143\007' > "$WORK/reopen_array.bin"
+    OUT=$( (cd "$WORK/proj" && python3 harness.py decode myfirstmessage) < "$WORK/reopen_array.bin" ) \
+        || { echo "FAIL: [$ENGINE] re-opened array wrapper must decode"; exit 1; }
+    printf '%s' "$OUT" | python3 -c '
 import json, sys
 a = json.load(sys.stdin)["somestringarray"]
 if "b" in a:
@@ -569,25 +592,58 @@ if "b" in a:
 if not a or a[0] != "c":
     sys.exit("FAIL: re-opened array wrapper must hold the second opening'"'"'s element 0 == \"c\": %r" % (a,))
 ' || exit 1
-echo "==> array wrapper replace OK"
+    echo "==> array wrapper replace OK, engine=$ENGINE"
 
-# Fixlen SUBTYPE mismatch (MESSAGE_SPEC S7.3, generator#174): for a fixlen field
-# the declared type maps to a wire type PLUS a subtype, so a header that carries
-# the right Fixlen wire type but the WRONG subtype is just as contradictory as a
-# wrong wire type and MUST be SKIPPED like an unknown id. somefp64 (id 9) is
-# declared fp64 and keeps its schema default 3.141592653589793.
-# Wire: 4a (id 9, fixlen) 0a (fixlen word: len 1, STRING subtype) 78 ("x")
-# Control: 4a 41 (fixlen word: len 8, FP64 subtype) + 2.5 little-endian.
-echo "==> fixlen subtype mismatch must skip (MESSAGE_SPEC S7.3, generator#174)"
-printf '\112\012\170' > "$WORK/fixsubtype.bin"
-printf '\112\101\000\000\000\000\000\000\004\100' > "$WORK/fixsubtype_control.bin"
-OUT=$( (cd "$WORK/proj" && python3 harness.py decode myfirstmessage) < "$WORK/fixsubtype.bin" ) \
-    || { echo "FAIL: mismatched fixlen subtype must skip, not fail the decode"; exit 1; }
-echo "$OUT" | grep -q '"somefp64": 3.14159265358979' || { echo "FAIL: skipped fixlen field must keep its default 3.141592653589793; got: $OUT"; exit 1; }
-OUT=$( (cd "$WORK/proj" && python3 harness.py decode myfirstmessage) < "$WORK/fixsubtype_control.bin" ) \
-    || { echo "FAIL: control (correct fp64 subtype) must decode"; exit 1; }
-echo "$OUT" | grep -q '"somefp64": 2.5' || { echo "FAIL: control must decode to 2.5; got: $OUT"; exit 1; }
-echo "==> fixlen subtype skip OK"
+    # Fixlen SUBTYPE mismatch (MESSAGE_SPEC S7.3, generator#174): for a fixlen field
+    # the declared type maps to a wire type PLUS a subtype, so a header that carries
+    # the right Fixlen wire type but the WRONG subtype is just as contradictory as a
+    # wrong wire type and MUST be SKIPPED like an unknown id. somefp64 (id 9) is
+    # declared fp64 and keeps its schema default 3.141592653589793.
+    # Wire: 4a (id 9, fixlen) 0a (fixlen word: len 1, STRING subtype) 78 ("x")
+    # Control: 4a 41 (fixlen word: len 8, FP64 subtype) + 2.5 little-endian.
+    echo "==> fixlen subtype mismatch must skip (MESSAGE_SPEC S7.3, generator#174), engine=$ENGINE"
+    printf '\112\012\170' > "$WORK/fixsubtype.bin"
+    printf '\112\101\000\000\000\000\000\000\004\100' > "$WORK/fixsubtype_control.bin"
+    OUT=$( (cd "$WORK/proj" && python3 harness.py decode myfirstmessage) < "$WORK/fixsubtype.bin" ) \
+        || { echo "FAIL: [$ENGINE] mismatched fixlen subtype must skip, not fail the decode"; exit 1; }
+    echo "$OUT" | grep -q '"somefp64": 3.14159265358979' || { echo "FAIL: [$ENGINE] skipped fixlen field must keep its default 3.141592653589793; got: $OUT"; exit 1; }
+    OUT=$( (cd "$WORK/proj" && python3 harness.py decode myfirstmessage) < "$WORK/fixsubtype_control.bin" ) \
+        || { echo "FAIL: [$ENGINE] control (correct fp64 subtype) must decode"; exit 1; }
+    echo "$OUT" | grep -q '"somefp64": 2.5' || { echo "FAIL: [$ENGINE] control must decode to 2.5; got: $OUT"; exit 1; }
+    echo "==> fixlen subtype skip OK, engine=$ENGINE"
+
+    # S7.3 x S7.4, array wrapper (generator#174 + generator#175): "An occurrence
+    # skipped under S7.3 is not an occurrence for this clause: a correctly typed
+    # earlier occurrence survives a mis-typed later one." somestringarray (id 18) is
+    # opened correctly with element 0 = "a", then id 18 recurs carrying the UNSIGNED
+    # wire type. The mis-typed occurrence is skipped, so the array MUST still hold
+    # "a" -- the failure this guards is an EMPTY array, i.e. generated code clearing
+    # the wrapper before it checks the wire type.
+    # Wire: 96 01 (seq start id 18) 02 0a 61 (string id 0 "a") 07 (seq end)
+    #       90 01 (id 18, UNSIGNED) 05
+    # Asserted as a prefix: heap profiles render ["a"], fixed-capacity ones pad.
+    echo "==> mis-typed later occurrence must not clear the array (MESSAGE_SPEC S7.4, generator#175), engine=$ENGINE"
+    printf '\226\001\002\012\141\007\220\001\005' > "$WORK/skipped_occ_array.bin"
+    OUT=$( (cd "$WORK/proj" && python3 harness.py decode myfirstmessage) < "$WORK/skipped_occ_array.bin" ) \
+        || { echo "FAIL: [$ENGINE] mis-typed later occurrence must decode, not error"; exit 1; }
+    echo "$OUT" | grep -q '"somestringarray": \["a"' || { echo "FAIL: [$ENGINE] skipped occurrence must not clear the array (element 0 == \"a\" lost); got: $OUT"; exit 1; }
+    echo "==> skipped occurrence keeps array OK, engine=$ENGINE"
+
+    # S7.3 x S7.4, struct: same rule for a struct scope. somestruct (id 20) is opened
+    # correctly with nestedstring (id 1) = "x", then id 20 recurs carrying the
+    # UNSIGNED wire type. That occurrence is skipped, so nestedstring MUST still
+    # be "x" rather than falling back to its default "Nested".
+    # Wire: a6 01 (seq start id 20) 0a 0a 78 (string id 1, len 1, "x") 07 (seq end)
+    #       a0 01 (id 20, UNSIGNED) 05
+    echo "==> mis-typed later occurrence must not clear the struct (MESSAGE_SPEC S7.4, generator#175), engine=$ENGINE"
+    printf '\246\001\012\012\170\007\240\001\005' > "$WORK/skipped_occ_struct.bin"
+    OUT=$( (cd "$WORK/proj" && python3 harness.py decode myfirstmessage) < "$WORK/skipped_occ_struct.bin" ) \
+        || { echo "FAIL: [$ENGINE] mis-typed later occurrence must decode, not error"; exit 1; }
+    echo "$OUT" | grep -q '"nestedstring": "x"' || { echo "FAIL: [$ENGINE] skipped occurrence must not clear the struct (nestedstring \"x\" lost); got: $OUT"; exit 1; }
+    echo "==> skipped occurrence keeps struct OK, engine=$ENGINE"
+done
+unset SOFAB_PUREPYTHON || true
+if [ "$NATIVE" = yes ]; then require_engine native; else require_engine python; fi
 
 # The same skip, one rule over: a string a decoder STEPS OVER is never
 # UTF-8-validated (CORELIB_PLAN S6.4.5, generator#417). Validation belongs where
@@ -708,36 +764,6 @@ done
 unset SOFAB_PUREPYTHON || true
 if [ "$NATIVE" = yes ]; then require_engine native; else require_engine python; fi
 
-# S7.3 x S7.4, array wrapper (generator#174 + generator#175): "An occurrence
-# skipped under S7.3 is not an occurrence for this clause: a correctly typed
-# earlier occurrence survives a mis-typed later one." somestringarray (id 18) is
-# opened correctly with element 0 = "a", then id 18 recurs carrying the UNSIGNED
-# wire type. The mis-typed occurrence is skipped, so the array MUST still hold
-# "a" -- the failure this guards is an EMPTY array, i.e. generated code clearing
-# the wrapper before it checks the wire type.
-# Wire: 96 01 (seq start id 18) 02 0a 61 (string id 0 "a") 07 (seq end)
-#       90 01 (id 18, UNSIGNED) 05
-# Asserted as a prefix: heap profiles render ["a"], fixed-capacity ones pad.
-echo "==> mis-typed later occurrence must not clear the array (MESSAGE_SPEC S7.4, generator#175)"
-printf '\226\001\002\012\141\007\220\001\005' > "$WORK/skipped_occ_array.bin"
-OUT=$( (cd "$WORK/proj" && python3 harness.py decode myfirstmessage) < "$WORK/skipped_occ_array.bin" ) \
-    || { echo "FAIL: mis-typed later occurrence must decode, not error"; exit 1; }
-echo "$OUT" | grep -q '"somestringarray": \["a"' || { echo "FAIL: skipped occurrence must not clear the array (element 0 == \"a\" lost); got: $OUT"; exit 1; }
-echo "==> skipped occurrence keeps array OK"
-
-# S7.3 x S7.4, struct: same rule for a struct scope. somestruct (id 20) is opened
-# correctly with nestedstring (id 1) = "x", then id 20 recurs carrying the
-# UNSIGNED wire type. That occurrence is skipped, so nestedstring MUST still
-# be "x" rather than falling back to its default "Nested".
-# Wire: a6 01 (seq start id 20) 0a 0a 78 (string id 1, len 1, "x") 07 (seq end)
-#       a0 01 (id 20, UNSIGNED) 05
-echo "==> mis-typed later occurrence must not clear the struct (MESSAGE_SPEC S7.4, generator#175)"
-printf '\246\001\012\012\170\007\240\001\005' > "$WORK/skipped_occ_struct.bin"
-OUT=$( (cd "$WORK/proj" && python3 harness.py decode myfirstmessage) < "$WORK/skipped_occ_struct.bin" ) \
-    || { echo "FAIL: mis-typed later occurrence must decode, not error"; exit 1; }
-echo "$OUT" | grep -q '"nestedstring": "x"' || { echo "FAIL: skipped occurrence must not clear the struct (nestedstring \"x\" lost); got: $OUT"; exit 1; }
-echo "==> skipped occurrence keeps struct OK"
-
 # refused_as <class> <label> <dir> <message> <fixture> -- the CATEGORY, by
 # exception CLASS, for a `decode` that must fail. sofab.types keeps
 # SofaLimitError a SIBLING of SofaDecodeError, so the class name is the caller's
@@ -757,12 +783,12 @@ refused_as() {
         *) echo "FAIL: refused_as: unknown class $ra_want"; exit 1 ;;
     esac
     if (cd "$ra_dir" && python3 harness.py decode "$ra_msg") < "$ra_fixture" >/dev/null 2>"$WORK/cat-err.txt"; then
-        echo "FAIL: $ra_label -- the decode SUCCEEDED, and must be refused as $ra_want"; exit 1
+        echo "FAIL: [$ENGINE] $ra_label -- the decode SUCCEEDED, and must be refused as $ra_want"; exit 1
     fi
     grep -q "$ra_want" "$WORK/cat-err.txt" \
-        || { echo "FAIL: $ra_label -- refused, but not as $ra_want (S6.3); got:"; cat "$WORK/cat-err.txt"; exit 1; }
+        || { echo "FAIL: [$ENGINE] $ra_label -- refused, but not as $ra_want (S6.3); got:"; cat "$WORK/cat-err.txt"; exit 1; }
     grep -q "$ra_other" "$WORK/cat-err.txt" \
-        && { echo "FAIL: $ra_label -- reported as $ra_other; S6.3 keeps the two apart"; cat "$WORK/cat-err.txt"; exit 1; }
+        && { echo "FAIL: [$ENGINE] $ra_label -- reported as $ra_other; S6.3 keeps the two apart"; cat "$WORK/cat-err.txt"; exit 1; }
     return 0
 }
 
@@ -771,7 +797,7 @@ refused_as() {
 # array; a wire count of 5 MUST fail decode with the corelib limit error,
 # exactly 4 still decodes, and the same oversized bytes decode fine against a
 # project generated WITHOUT the limit (unset = unlimited).
-echo "==> receiver-side decode limits must reject over-cap counts (generator#102)"
+# Generated once, ahead of the loop: the same source on both engines.
 cat > "$WORK/limit-def.yaml" <<YAML
 version: 1
 messages:
@@ -784,52 +810,59 @@ generic: { emit: project, max_dyn_array_count: 4 }
 YAML
 ( cd "$ROOT" && go run ./cmd/sofabgen --format=off --config "$WORK/limit-cfg.yaml" --lang python --in "$WORK/limit-def.yaml" --out "$WORK/limitproj" )
 ( cd "$ROOT" && go run ./cmd/sofabgen --format=off --config "$WORK/cfg.yaml" --lang python --in "$WORK/limit-def.yaml" --out "$WORK/nolimitproj" )
-printf '\003\005\001\002\003\004\005' > "$WORK/limit-over.bin"
-printf '\003\004\001\002\003\004' > "$WORK/limit-ok.bin"
-# The old assertion here was `grep -qi limit` over the traceback, which is no
-# assertion at all: the frames name this very project directory
-# ($WORK/limitproj), so the pattern matched whatever was raised -- a
-# SofaDecodeError included (generator#416).
-refused_as SofaLimitError "wire count 5 > max_dyn_array_count 4" \
-    "$WORK/limitproj" dyn "$WORK/limit-over.bin"
-(cd "$WORK/limitproj" && python3 harness.py decode dyn) < "$WORK/limit-ok.bin" >/dev/null || { echo "FAIL: wire count 4 must decode under limit 4"; exit 1; }
-(cd "$WORK/nolimitproj" && python3 harness.py decode dyn) < "$WORK/limit-over.bin" >/dev/null || { echo "FAIL: unset limit must keep count 5 decodable"; exit 1; }
-echo "==> decode-limit reject OK"
 
-# A refusal is TERMINAL, and the corelib is what holds that (CORELIB_PLAN S5.2 for
-# malformed bytes, S6.3 for a receiver limit). This port has no finish() to gate,
-# so the observable form of "the rejection sticks" is asking AGAIN: decoder.py
-# guards feed at its top -- `if self._limit is not None: raise self._limit` and
-# `if self._status is Status.INVALID: return Status.INVALID` -- so a further feed
-# repeats the same answer without consuming a byte.
-#
-# The harness therefore feeds an EMPTY chunk on its error path and names what came
-# back, `[refeed=X]`. An empty chunk moves no decoder state, so the value can only
-# have come from the latch; a COMPLETE or INCOMPLETE here would mean the decoder
-# forgot it had refused. This leg did not exist before generator#541: python was
-# the one port of the six with no latch assertion at all (#528).
-#
-# Both routes are covered: overcount.bin is refused by a GENERATED schema-bound
-# guard and comes back as a feed status, limit-over.bin by the CORELIB's own cap
-# and arrives as a raise.
-echo "==> a refusal is terminal: re-feeding repeats it (generator#541)"
 refeed() {  # <project-dir> <fixture> <want> <message>
     rdir=$1 rfx=$2 rwant=$3 rmsg=$4
     if (cd "$rdir" && python3 harness.py streamdecode "$rmsg") \
             < "$rfx" >/dev/null 2>"$WORK/refeed.err"; then
-        echo "FAIL: $(basename "$rfx") must be refused by the streaming decoder"; exit 1
+        echo "FAIL: [$ENGINE] $(basename "$rfx") must be refused by the streaming decoder"; exit 1
     fi
     grep -q "\[refeed=$rwant\]" "$WORK/refeed.err" || {
-        echo "FAIL: $(basename "$rfx") -- re-feeding after the refusal must answer $rwant; got:"
+        echo "FAIL: [$ENGINE] $(basename "$rfx") -- re-feeding after the refusal must answer $rwant; got:"
         cat "$WORK/refeed.err"; exit 1; }
 }
-# A varint past the 64-bit bound: 10 continuation bytes and an eleventh (S4.1),
-# refused by the CORELIB itself rather than by a generated guard.
-printf '\000\377\377\377\377\377\377\377\377\377\377\001' > "$WORK/varint_overflow.bin"
-refeed "$WORK/proj"       "$WORK/varint_overflow.bin" INVALID        myfirstmessage
-refeed "$WORK/proj"       "$WORK/overcount.bin"       INVALID        myfirstmessage
-refeed "$WORK/limitproj"  "$WORK/limit-over.bin"      SofaLimitError dyn
-echo "==> terminal-refusal guard OK"
+for ENGINE in $ENGINES; do
+    select_engine "$ENGINE"
+    echo "==> receiver-side decode limits must reject over-cap counts (generator#102), engine=$ENGINE"
+    printf '\003\005\001\002\003\004\005' > "$WORK/limit-over.bin"
+    printf '\003\004\001\002\003\004' > "$WORK/limit-ok.bin"
+    # The old assertion here was `grep -qi limit` over the traceback, which is no
+    # assertion at all: the frames name this very project directory
+    # ($WORK/limitproj), so the pattern matched whatever was raised -- a
+    # SofaDecodeError included (generator#416).
+    refused_as SofaLimitError "wire count 5 > max_dyn_array_count 4" \
+        "$WORK/limitproj" dyn "$WORK/limit-over.bin"
+    (cd "$WORK/limitproj" && python3 harness.py decode dyn) < "$WORK/limit-ok.bin" >/dev/null || { echo "FAIL: [$ENGINE] wire count 4 must decode under limit 4"; exit 1; }
+    (cd "$WORK/nolimitproj" && python3 harness.py decode dyn) < "$WORK/limit-over.bin" >/dev/null || { echo "FAIL: [$ENGINE] unset limit must keep count 5 decodable"; exit 1; }
+    echo "==> decode-limit reject OK, engine=$ENGINE"
+
+    # A refusal is TERMINAL, and the corelib is what holds that (CORELIB_PLAN S5.2 for
+    # malformed bytes, S6.3 for a receiver limit). This port has no finish() to gate,
+    # so the observable form of "the rejection sticks" is asking AGAIN: decoder.py
+    # guards feed at its top -- `if self._limit is not None: raise self._limit` and
+    # `if self._status is Status.INVALID: return Status.INVALID` -- so a further feed
+    # repeats the same answer without consuming a byte.
+    #
+    # The harness therefore feeds an EMPTY chunk on its error path and names what came
+    # back, `[refeed=X]`. An empty chunk moves no decoder state, so the value can only
+    # have come from the latch; a COMPLETE or INCOMPLETE here would mean the decoder
+    # forgot it had refused. This leg did not exist before generator#541: python was
+    # the one port of the six with no latch assertion at all (#528).
+    #
+    # Both routes are covered: overcount.bin is refused by a GENERATED schema-bound
+    # guard and comes back as a feed status, limit-over.bin by the CORELIB's own cap
+    # and arrives as a raise.
+    echo "==> a refusal is terminal: re-feeding repeats it (generator#541), engine=$ENGINE"
+    # A varint past the 64-bit bound: 10 continuation bytes and an eleventh (S4.1),
+    # refused by the CORELIB itself rather than by a generated guard.
+    printf '\000\377\377\377\377\377\377\377\377\377\377\001' > "$WORK/varint_overflow.bin"
+    refeed "$WORK/proj"       "$WORK/varint_overflow.bin" INVALID        myfirstmessage
+    refeed "$WORK/proj"       "$WORK/overcount.bin"       INVALID        myfirstmessage
+    refeed "$WORK/limitproj"  "$WORK/limit-over.bin"      SofaLimitError dyn
+    echo "==> terminal-refusal guard OK, engine=$ENGINE"
+done
+unset SOFAB_PUREPYTHON || true
+if [ "$NATIVE" = yes ]; then require_engine native; else require_engine python; fi
 
 # The two refusals of CORELIB_PLAN §6.3, on one schema and one harness
 # (generator#416). A configured receiver cap on a schema-UNBOUNDED field is a
@@ -861,7 +894,7 @@ echo "==> terminal-refusal guard OK"
 # BOTH engines. The array-count cap is raised inside corelib-py, and the
 # accelerator reimplements that path (`_speedups` _visit_varints) independently
 # of decoder.py -- so a native-only pass would leave the pure decoder's category
-# unmeasured, and the rest of this receiver-limits region runs native-only.
+# unmeasured. The other receiver-limit legs above and below run on both engines too.
 #
 # BOTH decode surfaces, as dart runs them. The two paths reach the corelib
 # separately, so a table that only ever ran the one-shot `decode` passes with the
@@ -895,9 +928,7 @@ done
 unset SOFAB_PUREPYTHON || true
 if [ "$NATIVE" = yes ]; then require_engine native; else require_engine python; fi
 
-# CORELIB_PLAN S6.2.1, the two rules a scope-wide cap could not honour. Both are
-# end-to-end: the generator's unit tests can only see emitted substrings.
-echo "==> a cap must not reach a schema-bounded field, nor a skipped one (S6.2.1)"
+# Generated once, ahead of the loop: the same source on both engines.
 cat > "$WORK/excl.yaml" <<'YAML'
 version: 1
 messages:
@@ -908,47 +939,6 @@ messages:
       w: { id: 2, type: array, items: { type: string } }
 YAML
 ( cd "$ROOT" && go run ./cmd/sofabgen --format=off --config "$WORK/limit-cfg.yaml" --lang python --in "$WORK/excl.yaml" --out "$WORK/exclproj" )
-# b (id 1, signed array, count 6) is bounded by its own `count: 100000`, so the
-# cap of 4 must not touch it.
-printf '\014\006\002\002\002\002\002\002' > "$WORK/bounded6.bin"
-(cd "$WORK/exclproj" && python3 harness.py decode dyn) < "$WORK/bounded6.bin" >/dev/null \
-    || { echo "FAIL: a schema-bounded array must not be judged against the receiver cap"; exit 1; }
-# ...while the unbounded sibling at the same cap still rejects at 6.
-printf '\003\006\001\001\001\001\001\001' > "$WORK/unbounded6.bin"
-refused_as SofaLimitError "the unbounded sibling must still be capped at 4" \
-    "$WORK/exclproj" dyn "$WORK/unbounded6.bin"
-# A field the handler SKIPS is never capped (S6.2.1: it allocates nothing). id 9
-# is declared nowhere, so an over-cap array there must decode.
-printf '\113\005\001\001\001\001\001' > "$WORK/skipcap.bin"
-(cd "$WORK/limitproj" && python3 harness.py decode dyn) < "$WORK/skipcap.bin" >/dev/null \
-    || { echo "FAIL: an over-cap array at an UNDECLARED id must be skipped, not capped"; exit 1; }
-# ...and neither is a field whose wire kind contradicts the declaration (S7.3):
-# id 0 is declared array<u64> (unsigned), so a SIGNED array there is skipped.
-printf '\004\005\002\002\002\002\002' > "$WORK/mistyped.bin"
-(cd "$WORK/limitproj" && python3 harness.py decode dyn) < "$WORK/mistyped.bin" >/dev/null \
-    || { echo "FAIL: an over-cap array of the WRONG kind must be skipped, not capped"; exit 1; }
-# The same rule one level down, where the number generated code states is the
-# only one in play: a WRAPPER array carries no count header, so its element
-# INDEX is its length and takes max_dyn_array_count (4). `w` (id 2) is a
-# count-less string array; an element whose fixlen subtype contradicts `string`
-# is a S7.3 skip, so it never grows the list and the index cap must not fire on
-# it -- which needs the tag test to run AHEAD of the index compare.
-# Wire: 16 seq_begin(id 2) | 2a element id 5 | 0b fixlen_word (len 1, subtype
-# BLOB, contradicting the declared `string`) | 'x' | 07 end.
-printf '\026\052\013\170\007' > "$WORK/wrapmistyped.bin"
-(cd "$WORK/exclproj" && python3 harness.py decode dyn) < "$WORK/wrapmistyped.bin" >/dev/null \
-    || { echo "FAIL: a mis-subtyped wrapper element above the index cap must be skipped, not capped"; exit 1; }
-# ...told apart from the very same element as a STRING, which this scope DOES
-# read and which the index cap therefore does bound.
-printf '\026\052\012\170\007' > "$WORK/wrapovercap.bin"
-refused_as SofaLimitError "a string element at index 5 exceeds max_dyn_array_count 4" \
-    "$WORK/exclproj" dyn "$WORK/wrapovercap.bin"
-echo "==> cap exclusivity OK (bounded sibling decodes; unknown id, mis-typed kind and mis-subtyped wrapper element all skipped)"
-
-# A wrapper string element's own byte LENGTH, and a matrix ROW's own element
-# count: two numbers the generated visitor is the only thing that can bound,
-# since neither reaches a schema bound when the schema declares none.
-echo "==> a wrapper element's length and a matrix row's count are capped (S6.2.1)"
 cat > "$WORK/elem.yaml" <<'YAML'
 version: 1
 messages:
@@ -961,23 +951,73 @@ cat > "$WORK/elem-cfg.yaml" <<YAML
 generic: { emit: project, max_dyn_string_len: 4, max_dyn_array_count: 4 }
 YAML
 ( cd "$ROOT" && go run ./cmd/sofabgen --format=off --config "$WORK/elem-cfg.yaml" --lang python --in "$WORK/elem.yaml" --out "$WORK/elemproj" )
-# 06 seq_begin(id 0) | 02 string elem id 0 | 2a fixlen_word (len 5, subtype
-# string) | "xxxxx" (5 bytes > cap 4) | 07 end
-printf '\006\002\052\170\170\170\170\170\007' > "$WORK/elemover.bin"
-refused_as SofaLimitError "a wrapper string element 5 bytes long exceeds max_dyn_string_len 4" \
-    "$WORK/elemproj" el "$WORK/elemover.bin"
-# ...4 bytes is at the cap and decodes.
-printf '\006\002\042\170\170\170\170\007' > "$WORK/elemok.bin"
-(cd "$WORK/elemproj" && python3 harness.py decode el) < "$WORK/elemok.bin" >/dev/null \
-    || { echo "FAIL: a wrapper string element at the cap must decode"; exit 1; }
-# 0e seq_begin(id 1) | 03 unsigned array elem id 0 | count 5 > cap 4
-printf '\016\003\005\001\002\003\004\005\007' > "$WORK/rowover.bin"
-refused_as SofaLimitError "a matrix row of 5 elements exceeds max_dyn_array_count 4" \
-    "$WORK/elemproj" el "$WORK/rowover.bin"
-printf '\016\003\004\001\002\003\004\007' > "$WORK/rowok.bin"
-(cd "$WORK/elemproj" && python3 harness.py decode el) < "$WORK/rowok.bin" >/dev/null \
-    || { echo "FAIL: a matrix row at the cap must decode"; exit 1; }
-echo "==> element length + row count caps OK"
+
+for ENGINE in $ENGINES; do
+    select_engine "$ENGINE"
+    # CORELIB_PLAN S6.2.1, the two rules a scope-wide cap could not honour. Both are
+    # end-to-end: the generator's unit tests can only see emitted substrings.
+    echo "==> a cap must not reach a schema-bounded field, nor a skipped one (S6.2.1), engine=$ENGINE"
+    # b (id 1, signed array, count 6) is bounded by its own `count: 100000`, so the
+    # cap of 4 must not touch it.
+    printf '\014\006\002\002\002\002\002\002' > "$WORK/bounded6.bin"
+    (cd "$WORK/exclproj" && python3 harness.py decode dyn) < "$WORK/bounded6.bin" >/dev/null \
+        || { echo "FAIL: [$ENGINE] a schema-bounded array must not be judged against the receiver cap"; exit 1; }
+    # ...while the unbounded sibling at the same cap still rejects at 6.
+    printf '\003\006\001\001\001\001\001\001' > "$WORK/unbounded6.bin"
+    refused_as SofaLimitError "the unbounded sibling must still be capped at 4" \
+        "$WORK/exclproj" dyn "$WORK/unbounded6.bin"
+    # A field the handler SKIPS is never capped (S6.2.1: it allocates nothing). id 9
+    # is declared nowhere, so an over-cap array there must decode.
+    printf '\113\005\001\001\001\001\001' > "$WORK/skipcap.bin"
+    (cd "$WORK/limitproj" && python3 harness.py decode dyn) < "$WORK/skipcap.bin" >/dev/null \
+        || { echo "FAIL: [$ENGINE] an over-cap array at an UNDECLARED id must be skipped, not capped"; exit 1; }
+    # ...and neither is a field whose wire kind contradicts the declaration (S7.3):
+    # id 0 is declared array<u64> (unsigned), so a SIGNED array there is skipped.
+    printf '\004\005\002\002\002\002\002' > "$WORK/mistyped.bin"
+    (cd "$WORK/limitproj" && python3 harness.py decode dyn) < "$WORK/mistyped.bin" >/dev/null \
+        || { echo "FAIL: [$ENGINE] an over-cap array of the WRONG kind must be skipped, not capped"; exit 1; }
+    # The same rule one level down, where the number generated code states is the
+    # only one in play: a WRAPPER array carries no count header, so its element
+    # INDEX is its length and takes max_dyn_array_count (4). `w` (id 2) is a
+    # count-less string array; an element whose fixlen subtype contradicts `string`
+    # is a S7.3 skip, so it never grows the list and the index cap must not fire on
+    # it -- which needs the tag test to run AHEAD of the index compare.
+    # Wire: 16 seq_begin(id 2) | 2a element id 5 | 0b fixlen_word (len 1, subtype
+    # BLOB, contradicting the declared `string`) | 'x' | 07 end.
+    printf '\026\052\013\170\007' > "$WORK/wrapmistyped.bin"
+    (cd "$WORK/exclproj" && python3 harness.py decode dyn) < "$WORK/wrapmistyped.bin" >/dev/null \
+        || { echo "FAIL: [$ENGINE] a mis-subtyped wrapper element above the index cap must be skipped, not capped"; exit 1; }
+    # ...told apart from the very same element as a STRING, which this scope DOES
+    # read and which the index cap therefore does bound.
+    printf '\026\052\012\170\007' > "$WORK/wrapovercap.bin"
+    refused_as SofaLimitError "a string element at index 5 exceeds max_dyn_array_count 4" \
+        "$WORK/exclproj" dyn "$WORK/wrapovercap.bin"
+    echo "==> cap exclusivity OK (bounded sibling decodes; unknown id, mis-typed kind and mis-subtyped wrapper element all skipped), engine=$ENGINE"
+
+    # A wrapper string element's own byte LENGTH, and a matrix ROW's own element
+    # count: two numbers the generated visitor is the only thing that can bound,
+    # since neither reaches a schema bound when the schema declares none.
+    echo "==> a wrapper element's length and a matrix row's count are capped (S6.2.1), engine=$ENGINE"
+    # 06 seq_begin(id 0) | 02 string elem id 0 | 2a fixlen_word (len 5, subtype
+    # string) | "xxxxx" (5 bytes > cap 4) | 07 end
+    printf '\006\002\052\170\170\170\170\170\007' > "$WORK/elemover.bin"
+    refused_as SofaLimitError "a wrapper string element 5 bytes long exceeds max_dyn_string_len 4" \
+        "$WORK/elemproj" el "$WORK/elemover.bin"
+    # ...4 bytes is at the cap and decodes.
+    printf '\006\002\042\170\170\170\170\007' > "$WORK/elemok.bin"
+    (cd "$WORK/elemproj" && python3 harness.py decode el) < "$WORK/elemok.bin" >/dev/null \
+        || { echo "FAIL: [$ENGINE] a wrapper string element at the cap must decode"; exit 1; }
+    # 0e seq_begin(id 1) | 03 unsigned array elem id 0 | count 5 > cap 4
+    printf '\016\003\005\001\002\003\004\005\007' > "$WORK/rowover.bin"
+    refused_as SofaLimitError "a matrix row of 5 elements exceeds max_dyn_array_count 4" \
+        "$WORK/elemproj" el "$WORK/rowover.bin"
+    printf '\016\003\004\001\002\003\004\007' > "$WORK/rowok.bin"
+    (cd "$WORK/elemproj" && python3 harness.py decode el) < "$WORK/rowok.bin" >/dev/null \
+        || { echo "FAIL: [$ENGINE] a matrix row at the cap must decode"; exit 1; }
+    echo "==> element length + row count caps OK, engine=$ENGINE"
+done
+unset SOFAB_PUREPYTHON || true
+if [ "$NATIVE" = yes ]; then require_engine native; else require_engine python; fi
 
 # Conformance covers the per-field scalar vectors; WireArraySparsity covers the
 # array ones -- the MESSAGE_SPEC S2 element rule and S3's "count is a capacity",
@@ -990,7 +1030,21 @@ echo "==> backend Go tests against the corelib (shared-vector byte-exact conform
 # $RUFF_ABSENT is "ruff" only when this box has none (see the banner at the top),
 # and it buys exactly one thing: the package's real-ruff test may then say it
 # skipped. With ruff installed it is empty and any skip fails the suite.
-run_backend_tests generators/python SOFAB_PY_CORELIB "$CORELIB" "$RUFF_ABSENT"
+#
+# Once per engine: the package's tests that reach corelib-py (the shared ENCODE
+# vectors above all) run against whichever engine the shell selects, and the
+# engine is handed to them in SOFAB_PY_EXPECT_ENGINE, which they check against
+# sofab.IMPL in their own process. The second run repeats the engine-independent
+# tests; that is the price of not having to name the ones that matter.
+for ENGINE in $ENGINES; do
+    select_engine "$ENGINE"
+    export SOFAB_PY_EXPECT_ENGINE="$ENGINE"
+    echo "==> backend Go tests, engine=$ENGINE"
+    run_backend_tests generators/python SOFAB_PY_CORELIB "$CORELIB" "$RUFF_ABSENT"
+done
+unset SOFAB_PY_EXPECT_ENGINE
+unset SOFAB_PUREPYTHON || true
+if [ "$NATIVE" = yes ]; then require_engine native; else require_engine python; fi
 
 # ...and the decode direction (generator#444): each vector's DENSE bytes fed into
 # a message that declares u64 on the anchors and nothing else, so every other
@@ -1038,27 +1092,32 @@ for def in "$ROOT"/tests/matrix/corpus/defs/*.yaml "$ROOT"/examples/messages/rea
 done
 echo "==> corpus imports ($(ls "$ROOT"/tests/matrix/corpus/defs/*.yaml | wc -l) definitions + $(ls "$ROOT"/examples/messages/realworld/*.yaml | wc -l) realworld)"
 
-# Declared integer width is a VALIDITY bound (MESSAGE_SPEC S7.1 + documentation#32,
-# generator#266, Crucible F-0033 / codegen defect G-0026). A value outside the
-# declared width is INVALID: it MUST NOT be masked to the width, and MUST NOT be
-# kept. someu8 is id 0 (header 0x00 = 0<<3 | unsigned), someu16 is id 1 (0x08).
-#   00 ff 7f = 16383 into a u8 -- the reported reproducer
-#   00 80 02 = 256   into a u8 -- one past the width
-#   08 f0 a2 04 = 70000 into a u16
-#   00 ff 01 = 255   into a u8 -- the in-range control: must decode and keep 255
-echo "==> over-width scalar must be INVALID (S7.1, generator#266)"
-printf '\000\377\177'     > "$WORK/w_u8_16383.bin"
-printf '\000\200\002'     > "$WORK/w_u8_256.bin"
-printf '\010\360\242\004' > "$WORK/w_u16_70000.bin"
-printf '\000\377\001'     > "$WORK/w_u8_255_ctl.bin"
-for v in w_u8_16383 w_u8_256 w_u16_70000; do
-    if (cd "$WORK/proj" && python3 harness.py decode myfirstmessage) < "$WORK/$v.bin" >/dev/null 2>&1; then
-        echo "FAIL: $v must be INVALID (S7.1) -- neither masked to the width nor kept"; exit 1
-    fi
+for ENGINE in $ENGINES; do
+    select_engine "$ENGINE"
+    # Declared integer width is a VALIDITY bound (MESSAGE_SPEC S7.1 + documentation#32,
+    # generator#266, Crucible F-0033 / codegen defect G-0026). A value outside the
+    # declared width is INVALID: it MUST NOT be masked to the width, and MUST NOT be
+    # kept. someu8 is id 0 (header 0x00 = 0<<3 | unsigned), someu16 is id 1 (0x08).
+    #   00 ff 7f = 16383 into a u8 -- the reported reproducer
+    #   00 80 02 = 256   into a u8 -- one past the width
+    #   08 f0 a2 04 = 70000 into a u16
+    #   00 ff 01 = 255   into a u8 -- the in-range control: must decode and keep 255
+    echo "==> over-width scalar must be INVALID (S7.1, generator#266), engine=$ENGINE"
+    printf '\000\377\177'     > "$WORK/w_u8_16383.bin"
+    printf '\000\200\002'     > "$WORK/w_u8_256.bin"
+    printf '\010\360\242\004' > "$WORK/w_u16_70000.bin"
+    printf '\000\377\001'     > "$WORK/w_u8_255_ctl.bin"
+    for v in w_u8_16383 w_u8_256 w_u16_70000; do
+        if (cd "$WORK/proj" && python3 harness.py decode myfirstmessage) < "$WORK/$v.bin" >/dev/null 2>&1; then
+            echo "FAIL: [$ENGINE] $v must be INVALID (S7.1) -- neither masked to the width nor kept"; exit 1
+        fi
+    done
+    OUT=$( (cd "$WORK/proj" && python3 harness.py decode myfirstmessage) < "$WORK/w_u8_255_ctl.bin" ) || { echo "FAIL: [$ENGINE] in-range control 255 must decode"; exit 1; }
+    echo "$OUT" | tr -d ' ' | grep -q '"someu8":255' || { echo "FAIL: [$ENGINE] control must keep 255 exactly; got: $OUT"; exit 1; }
+    echo "==> declared-width reject OK, engine=$ENGINE"
 done
-OUT=$( (cd "$WORK/proj" && python3 harness.py decode myfirstmessage) < "$WORK/w_u8_255_ctl.bin" ) || { echo "FAIL: in-range control 255 must decode"; exit 1; }
-echo "$OUT" | tr -d ' ' | grep -q '"someu8":255' || { echo "FAIL: control must keep 255 exactly; got: $OUT"; exit 1; }
-echo "==> declared-width reject OK"
+unset SOFAB_PUREPYTHON || true
+if [ "$NATIVE" = yes ]; then require_engine native; else require_engine python; fi
 
 # CORELIB_PLAN S7.2 item 8 -- the shared file's `sequence_growth` block
 # (generator#449). A wrapper array carries no element count: its length is
@@ -1075,9 +1134,14 @@ python3 "$ROOT/tests/conformance/lib/check_growth.py" --emit-schema >> "$WORK/gr
 ( cd "$ROOT" && go run ./cmd/sofabgen --format=off --config "$WORK/limit-cfg.yaml" --lang python --in "$WORK/growth.yaml" --out "$WORK/growth" >/dev/null )
 # --cap must equal the max_dyn_array_count the config above generated with:
 # the cases' indices are offsets onto it, so a mismatch moves the boundary.
-python3 "$ROOT/tests/conformance/lib/check_growth.py" \
-    "$CORELIB/assets/test_vectors.json" "Python" --cap 4 \
-    --cwd "$WORK/growth" -- python3 harness.py
+for ENGINE in $ENGINES; do
+    select_engine "$ENGINE"
+    python3 "$ROOT/tests/conformance/lib/check_growth.py" \
+        "$CORELIB/assets/test_vectors.json" "python/$ENGINE" --cap 4 \
+        --cwd "$WORK/growth" -- python3 harness.py
+done
+unset SOFAB_PUREPYTHON || true
+if [ "$NATIVE" = yes ]; then require_engine native; else require_engine python; fi
 
 # max_message_size (generator#637, ARCHITECTURE §9.6): for an unbounded message the
 # key is an imposed ceiling, so it must neither size the encode buffer nor refuse an

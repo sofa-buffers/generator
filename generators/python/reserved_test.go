@@ -214,6 +214,7 @@ func TestReservedNamesImport(t *testing.T) {
 	if err != nil {
 		t.Skip("python3 not found")
 	}
+	pyEngine(t, corelib)
 	names := reservedNames()
 	dir := t.TempDir()
 	for path, content := range genPy(t, schema(t, reservedYAML(names)), map[string]any{}) {

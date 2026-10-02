@@ -764,6 +764,7 @@ func TestPythonConformance(t *testing.T) {
 	if err != nil {
 		t.Skipf("no vectors: %v", err)
 	}
+	engine := pyEngine(t, corelib)
 	var vf struct {
 		Vectors []struct {
 			Name   string `json:"name"`
@@ -826,10 +827,42 @@ func TestPythonConformance(t *testing.T) {
 			checked++
 		}
 	}
-	t.Logf("Python shared-vector conformance: %d byte-exact", checked)
+	t.Logf("Python shared-vector conformance (engine=%s): %d byte-exact", engine, checked)
 	if checked == 0 {
 		t.Fatal("no vectors checked")
 	}
+}
+
+// pyEngine reports which corelib-py engine a test that reaches it WITHOUT its own
+// SOFAB_PUREPYTHON loop is running on, and fails when that is not the engine the
+// caller asked for. tests/conformance/python/run.sh runs this package once per
+// engine and names the one it expects in SOFAB_PY_EXPECT_ENGINE; corelib-py falls
+// back to the pure engine silently when the accelerator cannot be imported, so
+// without the assertion a native run could be a second pure one. A bare
+// `go test` leaves the variable unset and only logs the engine.
+func pyEngine(t *testing.T, corelib string) string {
+	t.Helper()
+	const probe = `import sofab
+impl = sofab.IMPL
+if impl == "native":
+    from sofab import _speedups
+    if sofab.Encoder is not _speedups.Encoder or sofab.Decoder is not _speedups.Decoder:
+        impl = "native-unbound"
+print(impl)
+`
+	cmd := exec.Command("python3", "-c", probe)
+	cmd.Env = append(os.Environ(), "PYTHONPATH="+filepath.Join(corelib, "src"))
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("probing sofab.IMPL: %v\n%s", err, out)
+	}
+	got := strings.TrimSpace(string(out))
+	if want := os.Getenv("SOFAB_PY_EXPECT_ENGINE"); want != "" && got != want {
+		t.Fatalf("this run must be on the %q engine, but corelib-py resolved to %q (SOFAB_PUREPYTHON=%q)",
+			want, got, os.Getenv("SOFAB_PUREPYTHON"))
+	}
+	t.Logf("corelib-py engine=%s", got)
+	return got
 }
 
 // g generates a one-field project into a temp dir and returns it.
@@ -1404,6 +1437,7 @@ func TestPythonWireArraySparsity(t *testing.T) {
 	if _, err := exec.LookPath("python3"); err != nil {
 		t.Skip("python3 not found")
 	}
+	pyEngine(t, corelib)
 	for _, probe := range []struct {
 		what  string
 		def   string
@@ -1615,6 +1649,7 @@ messages:
 	if _, err := exec.LookPath("python3"); err != nil {
 		t.Skip("python3 not found")
 	}
+	pyEngine(t, corelib)
 	dir := pyProject(t, "version: 1\nmessages:\n  vec:\n    payload:\n"+
 		"      arr: { id: 0, type: array, items: { type: array, count: 2, items: { type: u32, count: 3 } } }\n")
 	for _, c := range []struct {
@@ -1976,6 +2011,7 @@ func TestPythonSchemaBoundIsDeclaredNotCopied(t *testing.T) {
 	if _, err := exec.LookPath("python3"); err != nil {
 		t.Skip("python3 not found")
 	}
+	pyEngine(t, corelib)
 	dir := pyProjectCfg(t, `
 version: 1
 messages:
