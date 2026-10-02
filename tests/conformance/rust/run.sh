@@ -1079,7 +1079,21 @@ run_variant rs "corelib: rs" "$STD"
 #     and count 6 against caps of 8 and 4), so a field that answered the cap
 #     would be visible as a rejection where the schema still permits the value.
 #     That is the precision a decoder-level cap cannot have (§6.2.1).
-echo "==> [rs] receiver-side decode limits (generator#102, CORELIB_PLAN §6.2.1)"
+# Every leg below runs on BOTH std storages, `rs` (allow_dynamic default) and
+# `rs-static` (allow_dynamic: false). The switch decides the storage of
+# schema-bounded fields only; an unbounded field keeps a growable Vec/String on
+# either and is governed by the receiver caps, but the two storages generate
+# different code for it (and for the bounded fields beside it), so a cap or an
+# allocation guard proven on one says nothing about the other. Each schema was
+# checked to generate different code under the two. The body is deliberately not
+# indented: it holds heredocs. Each leg works in its own $WORK/legs/<leg> tree.
+WORK_TOP=$WORK
+for LEGSPEC in "rs:" "rs-static:, allow_dynamic: false"; do
+LEG=${LEGSPEC%%:*}
+LEGCFG=${LEGSPEC#*:}
+WORK=$WORK_TOP/legs/$LEG
+mkdir -p "$WORK"
+echo "==> [$LEG] receiver-side decode limits (generator#102, CORELIB_PLAN §6.2.1)"
 cat > "$WORK/dyn.yaml" <<'YAML'
 version: 1
 messages:
@@ -1103,7 +1117,7 @@ messages:
       strs: { id: 0, type: array, items: { type: string } }
       objs: { id: 1, type: array, items: { type: struct, fields: { $ref: '#/$defs/struct/Kv' } } }
 YAML
-printf 'generic: { emit: project, max_dyn_array_count: 4, max_dyn_string_len: 8, max_dyn_blob_len: 8 }\ntargets: { rust: { corelib: rs } }\n' > "$WORK/cfg-lim.yaml"
+printf 'generic: { emit: project, max_dyn_array_count: 4, max_dyn_string_len: 8, max_dyn_blob_len: 8 }\ntargets: { rust: { corelib: rs%s } }\n' "$LEGCFG" > "$WORK/cfg-lim.yaml"
 lim_project() { # DEF OUT -- generate, point at the std corelib, build
     ( cd "$ROOT" && go run ./cmd/sofabgen --format=off --config "$WORK/cfg-lim.yaml" --lang rust --in "$1" --out "$2" )
     sed -i "s#\${SOFAB_RS_CORELIB}#$STD#" "$2/Cargo.toml"
@@ -1231,14 +1245,14 @@ lim_complete "$WORK/wlim" wrap '\016\112\022AB\007'        '"objs":\[\]' "a STRI
 # The keys are what set the number, but an unset key is the TARGET DEFAULT and
 # never "unlimited" (generator#385): the same oversized bytes decode against a
 # project with no key set, because 5 elements is far under that default.
-printf 'generic: { emit: project }\ntargets: { rust: { corelib: rs } }\n' > "$WORK/cfg-nolim.yaml"
+printf 'generic: { emit: project }\ntargets: { rust: { corelib: rs%s } }\n' "$LEGCFG" > "$WORK/cfg-nolim.yaml"
 ( cd "$ROOT" && go run ./cmd/sofabgen --format=off --config "$WORK/cfg-nolim.yaml" --lang rust --in "$WORK/dyn.yaml" --out "$WORK/nolim" )
 sed -i "s#\${SOFAB_RS_CORELIB}#$STD#" "$WORK/nolim/Cargo.toml"
 crate_bin_name "$WORK/nolim"
 ( cd "$WORK/nolim" && cargo build -q )
 printf '\003\005\001\002\003\004\005' > "$WORK/lim-over.bin"
 (cd "$WORK/nolim" && cargo run -q -- decode dyn < "$WORK/lim-over.bin" >/dev/null) || { echo "FAIL: default-cap project must decode oversized input"; exit 1; }
-echo "==> [rs] decode limits OK"
+echo "==> [$LEG] decode limits OK"
 
 # A skipped payload is WALKED, not materialised -- and that is a MEASUREMENT,
 # because every row above passes with a decoder that materialises the payload and
@@ -1254,7 +1268,7 @@ echo "==> [rs] decode limits OK"
 #
 # The check replaces the crate's main with a counting global allocator, the same
 # way the streaming legs replace it with streaming_check.rs.
-echo "==> [rs] a §7.3-skipped 1 MiB blob allocates nothing (CORELIB_PLAN §6.2.1/§6.6)"
+echo "==> [$LEG] a §7.3-skipped 1 MiB blob allocates nothing (CORELIB_PLAN §6.2.1/§6.6)"
 rm -rf "$WORK/skipalloc"
 ( cd "$ROOT" && go run ./cmd/sofabgen --format=off --config "$WORK/cfg-lim.yaml" --lang rust --in "$WORK/dyn.yaml" --out "$WORK/skipalloc" )
 sed -i "s#\${SOFAB_RS_CORELIB}#$STD#" "$WORK/skipalloc/Cargo.toml"
@@ -1263,7 +1277,7 @@ printf 'pub mod message;\nuse message::*;\n' > "$WORK/skipalloc/src/main.rs"
 sed '/^\/\/SOFAB_IMPORT$/d' "$ROOT/tests/conformance/rust/skipped_blob_alloc.rs" \
     >> "$WORK/skipalloc/src/main.rs"
 ( cd "$WORK/skipalloc" && cargo run -q ) || { echo "FAIL: a skipped blob must not be materialised"; exit 1; }
-echo "==> [rs] skipped-blob allocation OK"
+echo "==> [$LEG] skipped-blob allocation OK"
 
 # A TRUNCATED schema-bounded array must not cost its declared count -- also a
 # MEASUREMENT, and the counterweight to generator#505.
@@ -1279,7 +1293,12 @@ echo "==> [rs] skipped-blob allocation OK"
 #
 # Deliberately built with the DEFAULT config (no max_dyn_array_count key), so the
 # ceiling under test is the shipped default and not a test-only value.
-echo "==> [rs] a truncated bounded array does not allocate its declared count (generator#505)"
+# rs only: on rs-static the declared count is INLINE storage, so `count: 2000000`
+# is a 16 MB [u64; 2000000] in the message struct and the harness overflows the
+# stack before it decodes anything. There is no heap reservation to measure, and
+# the clamp under test exists only on the growable-Vec arm.
+if [ "$LEG" = rs ]; then
+echo "==> [$LEG] a truncated bounded array does not allocate its declared count (generator#505)"
 cat > "$WORK/bigarr.yaml" <<'YAML'
 version: 1
 messages:
@@ -1296,6 +1315,7 @@ sed '/^\/\/SOFAB_IMPORT$/d' "$ROOT/tests/conformance/rust/truncated_array_alloc.
     >> "$WORK/bigalloc/src/main.rs"
 ( cd "$WORK/bigalloc" && cargo run -q ) || { echo "FAIL: a truncated bounded array must not allocate its declared count"; exit 1; }
 echo "==> [rs] truncated-array allocation OK"
+fi
 
 # A REJECTED bounded array must stop collecting -- the third measurement, and the
 # one nothing in this suite reached before (generator#508).
@@ -1318,7 +1338,6 @@ echo "==> [rs] truncated-array allocation OK"
 # issue's own scope note -- it called rs-no-std safe, which is true of the
 # heapless default and false of allow_dynamic, where the container is
 # alloc::vec::Vec and the measurement was identical.
-echo "==> [rs] a rejected bounded array stops collecting (generator#508)"
 cat > "$WORK/bndarr.yaml" <<'YAML'
 version: 1
 messages:
@@ -1328,6 +1347,12 @@ messages:
       fx:   { id: 1, type: array, items: { type: fp64, count: 4 } }
       wide: { id: 2, type: array, items: { type: u32, count: 100000 } }
 YAML
+# rs and rs-no-std/allow_dynamic only: the harness compares the decoded array with
+# a std Vec and measures heap bytes, and on rs-static a bounded array is a
+# heapless::Vec in the message struct -- there is no growable container to stop
+# filling (the schema is still generated for it, in the format gate below).
+if [ "$LEG" = rs ]; then
+echo "==> [rs] a rejected bounded array stops collecting (generator#508)"
 rm -rf "$WORK/overalloc"
 ( cd "$ROOT" && go run ./cmd/sofabgen --format=off --config "$WORK/cfg-nolim.yaml" --lang rust --in "$WORK/bndarr.yaml" --out "$WORK/overalloc" )
 sed -i "s#\${SOFAB_RS_CORELIB}#$STD#" "$WORK/overalloc/Cargo.toml"
@@ -1351,6 +1376,7 @@ sed '/^\/\/SOFAB_IMPORT$/d' "$ROOT/tests/conformance/rust/overcount_array_alloc.
 ( cd "$WORK/overalloc-nsdyn" && cargo run -q --features std ) \
     || { echo "FAIL: a rejected bounded array must stop collecting (no_std, allow_dynamic)"; exit 1; }
 echo "==> [rs] rejected-array allocation OK (rs and rs-no-std/allow_dynamic)"
+fi
 
 # Once a cap has been crossed, the REST of the message must stop being
 # materialised -- neither half of which a verdict can see, since try_decode and
@@ -1372,10 +1398,10 @@ echo "==> [rs] rejected-array allocation OK (rs and rs-no-std/allow_dynamic)"
 # here under a counting GlobalAlloc, because a byte count is the only surface
 # either one is visible on.
 #
-# Only the `rs` leg: the caps exist only on the std corelib (resolveLimits runs
+# Both std storages: the caps exist only on the std corelib (resolveLimits runs
 # under std() alone), and on rs-no-std checkBounded refuses a count-less array
 # outright, with or without allow_dynamic -- so there is no guard there to test.
-echo "==> [rs] a crossed cap stops a later count-less array and every container behind it (generator#511, #518)"
+echo "==> [$LEG] a crossed cap stops a later count-less array and every container behind it (generator#511, #518)"
 cat > "$WORK/postlim.yaml" <<'YAML'
 version: 1
 $defs:
@@ -1399,7 +1425,7 @@ YAML
 # counting -- 65536 slots, against the 4 the rest of the limits section uses. The
 # string and blob caps stay at 8: the breach every row sits behind is a 9-byte
 # string, and it must go on being a breach.
-printf 'generic: { emit: project, max_dyn_array_count: 65536, max_dyn_string_len: 8, max_dyn_blob_len: 8 }\ntargets: { rust: { corelib: rs } }\n' > "$WORK/cfg-lim-wide.yaml"
+printf 'generic: { emit: project, max_dyn_array_count: 65536, max_dyn_string_len: 8, max_dyn_blob_len: 8 }\ntargets: { rust: { corelib: rs%s } }\n' "$LEGCFG" > "$WORK/cfg-lim-wide.yaml"
 rm -rf "$WORK/postlim"
 ( cd "$ROOT" && go run ./cmd/sofabgen --format=off --config "$WORK/cfg-lim-wide.yaml" --lang rust --in "$WORK/postlim.yaml" --out "$WORK/postlim" )
 sed -i "s#\${SOFAB_RS_CORELIB}#$STD#" "$WORK/postlim/Cargo.toml"
@@ -1408,7 +1434,9 @@ printf 'pub mod message;\nuse message::*;\n' > "$WORK/postlim/src/main.rs"
 sed '/^\/\/SOFAB_IMPORT$/d' "$ROOT/tests/conformance/rust/post_limit_fill.rs" \
     >> "$WORK/postlim/src/main.rs"
 ( cd "$WORK/postlim" && cargo run -q ) || { echo "FAIL: a crossed cap must stop collecting, and stop materialising containers"; exit 1; }
-echo "==> [rs] post-limit fill and container refusal OK"
+echo "==> [$LEG] post-limit fill and container refusal OK"
+WORK=$WORK_TOP
+done
 
 # The std decoder's scope stack is a fixed [_Loc; D+1], D the schema's deepest
 # frame, and a string/blob wrapper array grows to what the message carries rather
@@ -1461,22 +1489,29 @@ echo "==> [rs, rs-static] decode stack depth and wrapper growth OK"
 # array carries no count, its length is highest present id + 1, and two ports
 # that grow differently emit IDENTICAL bytes -- so no vector can reach this.
 #
-# Only the `rs` leg runs it. `rs-static` and both no_std legs are capacity-bound
-# by construction and never grow, which is exactly what `requires:
-# ["dynamic_arrays"]` excludes; an unsatisfied tag means SKIP, never reject.
-echo "==> [rs] sequence_growth: a wrapper array grows to its highest id, and the index is the bound"
+# `rs` and `rs-static` both run it: the wrapper array in this schema is
+# unbounded, so it keeps a growable Vec on either storage and is governed by the
+# receiver caps, but the two storages emit different arms for it. Both no_std
+# legs are capacity-bound by construction and never grow, which is exactly what
+# `requires: ["dynamic_arrays"]` excludes; an unsatisfied tag means SKIP, never
+# reject.
 printf 'version: 1\nmessages:\n' > "$WORK/growth.yaml"
 python3 "$ROOT/tests/conformance/lib/check_growth.py" --emit-schema >> "$WORK/growth.yaml"
-( cd "$ROOT" && go run ./cmd/sofabgen --format=off --config "$WORK/cfg-lim.yaml" --lang rust \
-    --in "$WORK/growth.yaml" --out "$WORK/growth" )
-sed -i "s#\${SOFAB_RS_CORELIB}#$STD#" "$WORK/growth/Cargo.toml"
-crate_bin_name "$WORK/growth"
-( cd "$WORK/growth" && cargo build -q )
-# --cap must be the max_dyn_array_count cfg-lim.yaml generated with (4): the
-# cases' indices are offsets onto it, so a mismatch silently moves the boundary.
-python3 "$ROOT/tests/conformance/lib/check_growth.py" \
-    "$STD/assets/test_vectors.json" "Rust" --cap 4 \
-    --cwd "$WORK/growth" -- cargo run -q --
+for LEGSPEC in "rs:" "rs-static:, allow_dynamic: false"; do
+    LEG=${LEGSPEC%%:*}
+    echo "==> [$LEG] sequence_growth: a wrapper array grows to its highest id, and the index is the bound"
+    # --cap must be the max_dyn_array_count of this config (4): the cases'
+    # indices are offsets onto it, so a mismatch silently moves the boundary.
+    printf 'generic: { emit: project, max_dyn_array_count: 4, max_dyn_string_len: 8, max_dyn_blob_len: 8 }\ntargets: { rust: { corelib: rs%s } }\n' "${LEGSPEC#*:}" > "$WORK/cfg-growth-$LEG.yaml"
+    ( cd "$ROOT" && go run ./cmd/sofabgen --format=off --config "$WORK/cfg-growth-$LEG.yaml" --lang rust \
+        --in "$WORK/growth.yaml" --out "$WORK/growth-$LEG" )
+    sed -i "s#\${SOFAB_RS_CORELIB}#$STD#" "$WORK/growth-$LEG/Cargo.toml"
+    crate_bin_name "$WORK/growth-$LEG"
+    ( cd "$WORK/growth-$LEG" && cargo build -q )
+    python3 "$ROOT/tests/conformance/lib/check_growth.py" \
+        "$STD/assets/test_vectors.json" "Rust" --cap 4 \
+        --cwd "$WORK/growth-$LEG" -- cargo run -q --
+done
 
 # max_message_size (generator#637, ARCHITECTURE §9.6): for an unbounded message the
 # key is an imposed ceiling, so it must neither size the encode buffer nor refuse an
@@ -1689,12 +1724,16 @@ echo "==> minimal no-std footprint build OK"
 # pass has to reach those shapes too. Same rule as in run_variant: a tree of its
 # own, generated with the pass, checked once.
 echo "==> gate 10: the remaining configs"
-format_gen rust "$WORK/fmt-cfg/lim" --config "$WORK/cfg-lim.yaml" --in "$WORK/dyn.yaml"
-format_gen rust "$WORK/fmt-cfg/nolim" --config "$WORK/cfg-nolim.yaml" --in "$WORK/dyn.yaml"
-format_gen rust "$WORK/fmt-cfg/bigalloc" --config "$WORK/cfg-nolim.yaml" --in "$WORK/bigarr.yaml"
-format_gen rust "$WORK/fmt-cfg/overalloc" --config "$WORK/cfg-nolim.yaml" --in "$WORK/bndarr.yaml"
-format_gen rust "$WORK/fmt-cfg/overalloc-nsdyn" --config "$WORK/cfg-nsdyn-alloc.yaml" --in "$WORK/bndarr.yaml"
-format_gen rust "$WORK/fmt-cfg/postlim" --config "$WORK/cfg-lim-wide.yaml" --in "$WORK/postlim.yaml"
+for LEG in rs rs-static; do
+    L=$WORK/legs/$LEG
+    format_gen rust "$WORK/fmt-cfg/lim-$LEG" --config "$L/cfg-lim.yaml" --in "$L/dyn.yaml"
+    format_gen rust "$WORK/fmt-cfg/nolim-$LEG" --config "$L/cfg-nolim.yaml" --in "$L/dyn.yaml"
+    format_gen rust "$WORK/fmt-cfg/overalloc-$LEG" --config "$L/cfg-nolim.yaml" --in "$L/bndarr.yaml"
+    format_gen rust "$WORK/fmt-cfg/postlim-$LEG" --config "$L/cfg-lim-wide.yaml" --in "$L/postlim.yaml"
+done
+# bigarr.yaml exists on the rs leg only (the 16 MB inline array cannot run on rs-static).
+format_gen rust "$WORK/fmt-cfg/bigalloc" --config "$WORK/legs/rs/cfg-nolim.yaml" --in "$WORK/legs/rs/bigarr.yaml"
+format_gen rust "$WORK/fmt-cfg/overalloc-nsdyn" --config "$WORK/legs/rs/cfg-nsdyn-alloc.yaml" --in "$WORK/legs/rs/bndarr.yaml"
 format_gen rust "$WORK/fmt-cfg/no-std-static" --config "$WORK/cfg-no-std-static.yaml" --in "$WORK/conf.yaml"
 format_gen rust "$WORK/fmt-cfg/skipnostd" --config "$WORK/cfg-no-std-static.yaml" --in "$WORK/sb.yaml"
 format_gen rust "$WORK/fmt-cfg/tiny" --config "$WORK/cfg-tiny.yaml" --in "$WORK/tiny.yaml"

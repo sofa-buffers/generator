@@ -5902,8 +5902,11 @@ A reimplementation is **conformant** when it reproduces these gates:
 
    Indices are cap-relative (`id_from_cap`, `length_from_cap`) because §6.2.1
    fixes no family-wide `max_dyn_array_count`, so each leg passes `--cap` matching
-   the number it generated with. Statically bounded profiles — C, C++
-   `corelib: c-cpp` and `cpp-static`, Rust `no_std` and `rs-static` — are
+   the number it generated with. Rust runs it on `rs` and on `rs-static`: the
+   wrapper array there is unbounded, so it keeps a growable `Vec` under either
+   storage and is governed by the receiver caps, but the two emit different arms.
+   Statically bounded profiles — C, C++ `corelib: c-cpp` and `cpp-static`, Rust
+   `no_std` — are
    capacity-bound by construction, never grow, and are excluded by the block's own
    `requires: ["dynamic_arrays"]`: an unsatisfied tag means **skip**, never
    reject, so those legs simply do not call the driver. One expectation is
