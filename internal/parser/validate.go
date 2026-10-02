@@ -979,8 +979,11 @@ func (v *validator) checkArrayElem(etyp string, el any, enumValues []int64, bitM
 			v.add(loc, "%s", msg)
 		}
 	case "fp32", "fp64":
-		if _, ok := asFloat(el); !ok {
+		n, ok := asFloat(el)
+		if !ok {
 			v.add(loc, "element must be a number")
+		} else if math.IsNaN(n) || math.IsInf(n, 0) {
+			v.add(loc, "element %v for %s must be finite", n, etyp)
 		}
 	case "boolean":
 		if _, ok := el.(bool); !ok {

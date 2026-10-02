@@ -877,3 +877,20 @@ func TestFloatDefaultMustBeFinite(t *testing.T) {
 		}
 	}
 }
+
+func TestFloatArrayDefaultElementMustBeFinite(t *testing.T) {
+	schema := func(typ, def string) string {
+		return "version: 1\nmessages:\n  M:\n    payload:\n      a: {id: 0, type: array, items: {type: " + typ + ", count: 2}, default: " + def + "}\n"
+	}
+	for _, typ := range []string{"fp32", "fp64"} {
+		for _, def := range []string{"[.nan, 1.0]", "[1.0, .inf]", "[-.inf, 1.0]"} {
+			errs := validateString(t, schema(typ, def))
+			if errs == nil || !strings.Contains(errs.Error(), "must be finite") {
+				t.Errorf("%s array default %s: want a finiteness error, got: %v", typ, def, errs)
+			}
+		}
+		if errs := validateString(t, schema(typ, "[1.5, -0.0]")); errs != nil {
+			t.Errorf("%s finite array default should validate, got:\n%s", typ, errs.Error())
+		}
+	}
+}
