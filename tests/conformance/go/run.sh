@@ -1308,6 +1308,23 @@ sed -i "s#\${SOFAB_GO_CORELIB}#$CORELIB#" "$WORK/sbb/go.mod"
 python3 "$ROOT/tests/conformance/lib/check_skip_before_bound.py" "Go" --sizes 1 \
     -- "$WORK/sbb-harness"
 
+# CORELIB_PLAN §4.4 (generator#644): every non-zero boolean reads as true and
+# re-encodes as 1, with no width bound -- 2, 256 and 2^64-1 included. This backend
+# applies the mapping in generated code (`v != 0`), so only a decode of those raw
+# values reaches it. The driver re-tags the corelib's shared `boolean_tolerant`
+# vectors onto every boolean position of its own schema (scalar, array, struct,
+# row, depth-3 row, union arm) and checks the decode and the re-encode, on both
+# decode surfaces. No vector is skipped: Go's varint reads 64 bits.
+echo "==> §4.4 booleans: non-zero is true, re-encoded as 1 (generator#644)"
+python3 "$ROOT/tests/conformance/lib/check_boolean_tolerant.py" --emit-schema > "$WORK/booltol.yaml"
+( cd "$ROOT" && go run ./cmd/sofabgen --config "$WORK/cfg.yaml" --lang go --in "$WORK/booltol.yaml" --out "$WORK/booltol" )
+sed -i "s#\${SOFAB_GO_CORELIB}#$CORELIB#" "$WORK/booltol/go.mod"
+( cd "$WORK/booltol" && GOFLAGS=-mod=mod go build -o "$WORK/booltol-harness" ./harness )
+for surface in decode streamdecode; do
+    python3 "$ROOT/tests/conformance/lib/check_boolean_tolerant.py" "Go" \
+        "$CORELIB/assets/test_vectors.json" --verb "$surface" -- "$WORK/booltol-harness"
+done
+
 # Nested defaults (generator#609): a default declared inside a struct, at any
 # depth and inside a struct array's element, is what absence means. This backend
 # left them at Go's zero value while its encoder compared against them, and the

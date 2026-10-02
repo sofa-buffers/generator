@@ -1042,6 +1042,21 @@ build "$WORK/sbb.yaml" "$WORK/sbb"
 python3 "$ROOT/tests/conformance/lib/check_skip_before_bound.py" "Kotlin" \
     -- "$WORK/sbb/build/install/harness/bin/harness"
 
+# CORELIB_PLAN §4.4 (generator#644): every non-zero boolean reads as true and
+# re-encodes as 1, with no width bound -- 2, 256 and 2^64-1 included. The driver
+# re-tags the corelib's shared `boolean_tolerant` vectors onto every boolean
+# position of its own schema (scalar, array, struct, row, depth-3 row, union arm),
+# checks the decode and the re-encode, and prints that schema. Both decode
+# surfaces; no vector is skipped.
+echo "==> booleans §4.4: non-zero is true, re-encoded as 1 (generator#644)"
+python3 "$ROOT/tests/conformance/lib/check_boolean_tolerant.py" --emit-schema > "$WORK/booltol.yaml"
+build "$WORK/booltol.yaml" "$WORK/booltol"
+for surface in decode streamdecode; do
+    python3 "$ROOT/tests/conformance/lib/check_boolean_tolerant.py" "Kotlin" \
+        "$CORELIB/assets/test_vectors.json" --verb "$surface" \
+        -- "$WORK/booltol/build/install/harness/bin/harness"
+done
+
 # Nested defaults (generator#609): absence reads as the schema's defaults at every
 # depth and inside a struct array's element -- asserted against the driver's own
 # schema, never this harness's baseline.

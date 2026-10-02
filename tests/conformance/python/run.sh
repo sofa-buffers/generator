@@ -1322,6 +1322,28 @@ done
 unset SOFAB_PUREPYTHON || true
 if [ "$NATIVE" = yes ]; then require_engine native; else require_engine python; fi
 
+# CORELIB_PLAN §4.4 (generator#644): every non-zero boolean reads as true and
+# re-encodes as 1, with no width bound -- 2, 256 and 2^64-1 included. The driver
+# re-tags the corelib's shared `boolean_tolerant` vectors onto every boolean
+# position of its own schema (scalar, array, struct, row, depth-3 row, union arm),
+# checks the decode and the re-encode, and prints that schema. Both decode
+# surfaces; no vector is skipped.
+# Both engines: the native one reads a boolean through the destination table.
+echo "==> booleans §4.4: non-zero is true, re-encoded as 1 (generator#644)"
+python3 "$ROOT/tests/conformance/lib/check_boolean_tolerant.py" --emit-schema > "$WORK/booltol.yaml"
+( cd "$ROOT" && go run ./cmd/sofabgen --format=off --config "$WORK/cfg.yaml" --lang python --in "$WORK/booltol.yaml" --out "$WORK/booltol" >/dev/null )
+for ENGINE in $ENGINES; do
+    if [ "$ENGINE" = python ]; then export SOFAB_PUREPYTHON=1; else unset SOFAB_PUREPYTHON || true; fi
+    require_engine "$ENGINE"
+    for surface in decode streamdecode; do
+        python3 "$ROOT/tests/conformance/lib/check_boolean_tolerant.py" "python/$ENGINE" \
+            "$CORELIB/assets/test_vectors.json" --verb "$surface" \
+            --cwd "$WORK/booltol" -- python3 harness.py
+    done
+done
+unset SOFAB_PUREPYTHON || true
+if [ "$NATIVE" = yes ]; then require_engine native; else require_engine python; fi
+
 # Nested defaults (generator#609): absence reads as the schema's defaults at every
 # depth and inside a struct array's element -- asserted against the driver's own
 # schema, never this harness's baseline. Both engines: the native one decodes

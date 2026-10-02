@@ -6463,6 +6463,30 @@ A reimplementation is **conformant** when it reproduces these gates:
    three legs skip the dyn file by name and compile the bounded one, so the
    family-wide claim is about the bounded half and says so.
 
+   *Boolean tolerant decode* (`tests/conformance/lib/check_boolean_tolerant.py`):
+   CORELIB_PLAN §4.4 on every target (generator#644). A decoder reads every
+   non-zero boolean as `true` — `256` and `2^64-1` included, no width bound — and
+   a re-encode emits `1`. Where that mapping lives differs by target (the
+   corelib's read kind, a typed destination, or generated code: Go emits
+   `v != 0`), and a wrong answer is silent, since `0` and `1` are right everywhere;
+   the main `vectors` list carries only canonical booleans, so no other check
+   reaches it. The driver reads nothing but the `boolean_tolerant` block of the
+   corelib's `assets/test_vectors.json`: each vector (on field id 0) is re-tagged
+   onto every position of its kind in the schema the driver prints — a scalar, a
+   bounded array, a scalar and an array inside a struct, a row, a depth-3 row, a
+   scalar and an array arm of a union — by changing the tag byte only, and wrapped
+   in the enclosing sequences. It asserts the decoded value, then feeds the
+   decoded JSON to `encode` and asserts the block's `reencoded_hex` under the
+   sparse rule (a scalar `false` re-encodes to nothing; a non-default union arm is
+   written even at its default). A missing block or a position that receives no
+   vector fails; `--skip-requires TAG` names what a call skipped in the final line.
+   Wired in every suite on `decode` and `streamdecode`; `cpp` in every profile,
+   `rust` in every label, `python` under both engines, `typescript` in one mode
+   (the schema has no 64-bit field, so the three `int64` modes generate identical
+   code). The in-memory checks (`c/bool_check.c`, `cpp/bool_check.cpp`,
+   `python/bool_tolerant_check.py`) stay: they see the STORED value, which a JSON
+   round trip cannot where the member is a `uint8_t` or a Python `int`.
+
 2. **Round-trip harness** — `emit: project` builds the generated code against the
    real corelib and round-trips canonical JSON through encode→decode for every
    field kind (`tests/conformance/<lang>/run.sh`). Each harness also feeds one

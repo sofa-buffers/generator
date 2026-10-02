@@ -908,6 +908,23 @@ make -C "$WORK/sbb" SOFAB_C_CORELIB="$CORELIB" >/dev/null
 python3 "$ROOT/tests/conformance/lib/check_skip_before_bound.py" "C" \
     -- "$WORK/sbb/harness/harness"
 
+# CORELIB_PLAN §4.4 (generator#644): every non-zero boolean reads as true and
+# re-encodes as 1, with no width bound -- 2, 256 and 2^64-1 included. The driver
+# re-tags the corelib's shared `boolean_tolerant` vectors onto every boolean
+# position of its own schema (scalar, array, struct, row, depth-3 row, union arm),
+# checks the decode and the re-encode, and prints that schema. Both decode
+# surfaces; no vector is skipped.
+echo "==> booleans §4.4: non-zero is true, re-encoded as 1 (generator#644)"
+python3 "$ROOT/tests/conformance/lib/check_boolean_tolerant.py" --emit-schema > "$WORK/booltol.yaml"
+( cd "$ROOT" && go run ./cmd/sofabgen --config "$WORK/proj.yaml" --lang c \
+    --in "$WORK/booltol.yaml" --out "$WORK/booltol" )
+make -C "$WORK/booltol" SOFAB_C_CORELIB="$CORELIB" >/dev/null
+for surface in decode streamdecode; do
+    python3 "$ROOT/tests/conformance/lib/check_boolean_tolerant.py" "C" \
+        "$CORELIB/assets/test_vectors.json" --verb "$surface" \
+        -- "$WORK/booltol/harness/harness"
+done
+
 # Nested defaults (generator#609): a default declared inside a struct, at any
 # depth and inside a struct array's element, is what absence means -- asserted
 # against the driver's own schema, never against this harness's own baseline.
