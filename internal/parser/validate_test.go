@@ -853,3 +853,27 @@ func TestUnionOptionErrorOncePerLocation(t *testing.T) {
 		}
 	}
 }
+
+func TestFloatDefaultMustBeFinite(t *testing.T) {
+	schema := func(typ, def string) string {
+		return "version: 1\nmessages:\n  M:\n    payload:\n      f: {id: 0, type: " + typ + ", default: " + def + "}\n"
+	}
+	for _, typ := range []string{"fp32", "fp64"} {
+		for _, def := range []string{".nan", ".inf", "-.inf"} {
+			errs := validateString(t, schema(typ, def))
+			if errs == nil || !strings.Contains(errs.Error(), "#/messages/M/payload/f/default") ||
+				!strings.Contains(errs.Error(), "must be finite") {
+				t.Errorf("%s default %s: want a finiteness error at .../f/default, got: %v", typ, def, errs)
+			}
+		}
+	}
+	for _, c := range []struct{ typ, def string }{
+		{"fp32", "-0.0"}, {"fp64", "-0.0"},
+		{"fp32", "3.4028235e+38"}, {"fp32", "-3.4028235e+38"},
+		{"fp32", "1.4e-45"}, {"fp64", "5e-324"}, {"fp64", "1.7976931348623157e+308"},
+	} {
+		if errs := validateString(t, schema(c.typ, c.def)); errs != nil {
+			t.Errorf("%s default %s should validate, got:\n%s", c.typ, c.def, errs.Error())
+		}
+	}
+}
