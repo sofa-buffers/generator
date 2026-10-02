@@ -4,7 +4,8 @@
 Usage:
   check_vectors_decode.py --emit-schema [--max-id N]
   check_vectors_decode.py <test_vectors.json> <label>
-                          [--cwd DIR] [--mode MODE] [--max-id N] -- <harness argv...>
+                          [--cwd DIR] [--mode MODE] [--max-id N] [--int64-safe]
+                          -- <harness argv...>
 
 The companion `check_vectors.py` drives the *encode* direction and compares
 `serialized_sparse`. This one drives the other half, which no tier covered
@@ -63,6 +64,15 @@ passed identically to `--emit-schema` and to the run, or the expectations stop
 matching the schema. Dropping an id does not drop a vector: the ids above the
 ceiling simply stop being *read*, so the fields on them are skipped like any
 other unknown id and the vector still has to decode cleanly to its end.
+
+## `--int64-safe`
+
+For a harness whose 64-bit scalar is a JS `number` (TypeScript `int64: number`),
+documented lossy above 2^53. An anchor above 2^53-1 cannot come back exact, so it
+is compared to the precision of a double (relative error <= 2^-52) instead of
+exactly. The decode is still driven over every vector and every other anchor,
+and every skipped field, is still asserted exactly; the number of anchors held
+to the weaker comparison is printed.
 
 ## Loud, never quiet
 
@@ -177,6 +187,8 @@ def main() -> int:
     mode = opt(head, "--mode", "decode")
     mx = opt(head, "--max-id")
     max_id = int(mx) if mx else None
+    safe = "--int64-safe" in head
+    lossy = 0
 
     with open(vectors_path) as fh:
         vectors = json.load(fh)["vectors"]
@@ -219,6 +231,10 @@ def main() -> int:
             return 1
         for fid, wv in expected(v, max_id).items():
             gv = as_int(got.get(f"f{fid}", 0))
+            if safe and wv > 2**53 - 1:
+                lossy += 1
+                if abs(gv - wv) <= wv * 2**-52:
+                    continue
             if gv != wv:
                 print(f"FAIL vector {v['name']}: field f{fid} decoded {gv}, want {wv}")
                 print(f"     wire {v['serialized']['hex']}")
@@ -232,6 +248,8 @@ def main() -> int:
     print(f"{label} shared-vector decode conformance [{mode}]: {checked} vectors "
           f"decoded ({skips} carrying skip_ids), every undeclared or "
           f"§7.3-mismatched field skipped")
+    if safe:
+        print(f"  --int64-safe: {lossy} anchors above 2^53 compared to double precision")
     return 0 if checked else 1
 
 

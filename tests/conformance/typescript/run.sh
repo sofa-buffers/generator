@@ -157,23 +157,69 @@ mk_stream_check() { # mk_stream_check <projdir> <import-line> <body>
         "$ROOT/tests/conformance/typescript/stream_check.ts" > "$1/stream_check.ts"
 }
 
-echo "==> generating example + conformance projects"
-gen "$ROOT/examples/messages/example.yaml" "$WORK/ex"
-gen "$WORK/conf.yaml" "$WORK/conf"
-
 setup() {
     node -e "const p=require('$1/package.json');p.dependencies['@sofa-buffers/corelib']='file:$CORELIB';require('fs').writeFileSync('$1/package.json',JSON.stringify(p))"
     # Retry once; surface the output on a second failure (npm can be flaky).
     ( cd "$1" && npm install --no-audit --no-fund --silent ) \
         || ( cd "$1" && npm install --no-audit --no-fund )
 }
-setup "$WORK/ex"
-setup "$WORK/conf"
 
-echo "==> typecheck generated code"
-tsc_strict "$WORK/ex"
+# Everything that is MODE-SENSITIVE runs once per `int64` mode (ARCHITECTURE §12:
+# a config variant that generates different code runs the same checks). The mode
+# changes the generated API and the decode destination of every u64/i64 position
+# -- bigint, Long, number -- so a leg on the default build speaks for neither of
+# the others. Mode-sensitive means: the schema the leg generates contains a
+# 64-bit field (example.yaml, the conformance schema, maxsize_fill, dyn.yaml) or
+# the leg reads that generated code's output.
+#
+# Not run per mode, because their schema holds no 64-bit field and the generated
+# projects are byte-identical in every mode (checked by diffing the three trees):
+# check_repeated_id, check_defaults, check_growth, check_declared_width_kinds,
+# check_skip_before_bound, names.yaml, reserved.yaml, wrap.yaml (strings only) and
+# the nested_rows streaming legs. A 64-bit field added to one of those schemas
+# makes its leg mode-sensitive: move it in here.
+#
+# `number` holds a 64-bit scalar in a double, documented lossy above 2^53
+# (docs/generator/typescript.md). Where a leg's fixture carries such a value the
+# `number` run uses a safe one and says so at that leg ("2^53").
+#
+# The project directories of the default run keep the names every later leg uses
+# ($WORK/ex, $WORK/conf, ...); the other modes generate under $WORK/v-<mode>/.
+for mode in bigint long number; do
+    cat > "$WORK/cfg_$mode.yaml" <<YAML
+generic: { emit: project }
+targets: { typescript: { int64: $mode } }
+YAML
+done
 
-echo "==> JSON encode -> decode round-trip"
+run_variant() { # run_variant <bigint|long|number>
+    mode=$1
+    VL="int64: $mode"
+    if [ "$mode" = bigint ]; then
+        VW="$WORK"; VCFG="$WORK/cfg.yaml"; VT='{}'; SAFE=""
+    else
+        VW="$WORK/v-$mode"; VCFG="$WORK/cfg_$mode.yaml"; VT="{ int64: $mode }"; SAFE=""
+        mkdir -p "$VW"
+        # 2^53: see the legs that test $SAFE below; only `number` is lossy.
+        if [ "$mode" = number ]; then SAFE=--int64-safe; fi
+    fi
+    echo "==> [$VL] generating example + conformance projects"
+    gen "$ROOT/examples/messages/example.yaml" "$VW/ex" "$VCFG"
+    gen "$WORK/conf.yaml" "$VW/conf" "$VCFG"
+    if [ "$mode" = bigint ]; then
+        setup "$VW/ex"
+        setup "$VW/conf"
+    else
+        # One npm install serves every mode: package.json does not depend on it.
+        ln -s "$WORK/ex/node_modules" "$VW/ex/node_modules"
+        ln -s "$WORK/ex/node_modules" "$VW/conf/node_modules"
+    fi
+
+
+echo "==> [$VL] typecheck generated code"
+tsc_strict "$VW/ex"
+
+echo "==> [$VL] JSON encode -> decode round-trip"
 # someblobarray is here for the OWNERSHIP legs of stream_check.ts, which run on
 # this subject: a Uint8Array is the only TypeScript destination that can alias
 # the buffer it was decoded from, and a blob ARRAY reaches that destination
@@ -181,10 +227,10 @@ echo "==> JSON encode -> decode round-trip"
 # default the example subject carried no blob array at all, so only nested_rows
 # exercised the kind.
 IN='{"someu8":200,"someu16":4242,"someu32":3000000,"someu64":1234567890123456,"somei8":-42,"somei16":31000,"somei32":123456789,"somei64":-1234567890123456,"somefp32":1.5,"somefp64":-2.5,"somebool":false,"somestring":"round trip","someblob":[1,2,3,4],"someenum":33,"somebitfield":1,"someuintarray":[9,8,7,6],"someintarray":[-1,-2,-3,-4,-5],"somefloatarray":[0.5,0.25,-0.75],"somestringarray":["a","bb","ccc"],"someblobarray":[[1],[2,3]],"somestruct":{"nestedint":12,"nestedstring":"deep","nestedstruct":{"deepint":99}},"someunion":{"option1":4242},"somestructwitharray":{"label":"lbl","values":[9,9,9,9]},"somestructarray":[{"x":1,"y":2},{"x":-3,"y":-4}],"somematrix":[[1,2,3,4],[5,6,7,8]],"someunionarray":[{"asint":7},{"asint":-8}],"someenumarray":[1,0,2,1],"someboolarray":[false,false,true],"somebitfieldarray":[1,2,3],"somemap":[{"key":"k","value":5}]}'
-OUT=$(cd "$WORK/ex" && printf '%s' "$IN" | "$TH" encode myfirstmessage | "$TH" decode myfirstmessage)
+OUT=$(cd "$VW/ex" && printf '%s' "$IN" | "$TH" encode myfirstmessage | "$TH" decode myfirstmessage)
 echo "$OUT" | grep -q '"someu64":"1234567890123456"' || { echo "FAIL: u64 round-trip"; exit 1; }
 echo "$OUT" | grep -q '"deepint":99' || { echo "FAIL: nested struct round-trip"; exit 1; }
-echo "==> round-trip OK"
+echo "==> [$VL] round-trip OK"
 
 # The whole message must round-trip to ITSELF, compared as DATA rather than as
 # text (tests/conformance/lib/json_equal.py). The greps above pin a handful of
@@ -196,16 +242,16 @@ echo "==> round-trip OK"
 # (cpp orders by schema id, go alphabetically), and a blob is base64 here and a
 # byte array there -- all rendering, no wire fact.
 FULL="$OUT"
-OUT2=$(cd "$WORK/ex" && printf '%s' "$FULL" | "$TH" encode myfirstmessage | "$TH" decode myfirstmessage)
+OUT2=$(cd "$VW/ex" && printf '%s' "$FULL" | "$TH" encode myfirstmessage | "$TH" decode myfirstmessage)
 python3 "$ROOT/tests/conformance/lib/json_equal.py" "$FULL" "$OUT2" \
     --label "TypeScript: the whole message round-trips to itself" || exit 1
-echo "==> full-message round-trip OK ($(python3 -c "import json,sys;print(len(json.loads(sys.argv[1])))" "$FULL") fields compared as data)"
+echo "==> [$VL] full-message round-trip OK ($(python3 -c "import json,sys;print(len(json.loads(sys.argv[1])))" "$FULL") fields compared as data)"
 # Every field must sit OFF its schema default, or the round trip above compares
 # a default with itself and cannot tell a working decode from a broken one.
-BASE=$(cd "$WORK/ex" && printf '%s' '{}' | "$TH" encode myfirstmessage | "$TH" decode myfirstmessage)
+BASE=$(cd "$VW/ex" && printf '%s' '{}' | "$TH" encode myfirstmessage | "$TH" decode myfirstmessage)
 python3 "$ROOT/tests/conformance/lib/check_nondefault.py" "$BASE" "$FULL" \
     --label "typescript: round-trip fixture" || exit 1
-echo "==> round-trip fixture OK (no field sits on its schema default)"
+echo "==> [$VL] round-trip fixture OK (no field sits on its schema default)"
 
 # The two encode-buffer arms (CORELIB_PLAN §5.1). The caller owns the output
 # buffer: generated code allocates it and the corelib neither grows nor
@@ -216,11 +262,11 @@ echo "==> round-trip fixture OK (no field sits on its schema default)"
 # The fill message pins the size from both sides: filling every field to its
 # declared bound must encode to exactly MAX_SIZE bytes, so the buffer can be
 # neither short (a legal message would not fit) nor slack (RAM paid for nothing).
-echo "==> bounded encode buffer is exactly MAX_SIZE (ARCHITECTURE §9.6)"
-gen "$ROOT/tests/conformance/lib/maxsize_fill.yaml" "$WORK/fill"
-ln -s "$WORK/ex/node_modules" "$WORK/fill/node_modules"
-tsc_strict "$WORK/fill"
-check_maxsize_constant typescript "$WORK/fill/message.ts" \
+echo "==> [$VL] bounded encode buffer is exactly MAX_SIZE (ARCHITECTURE §9.6)"
+gen "$ROOT/tests/conformance/lib/maxsize_fill.yaml" "$VW/fill" "$VCFG"
+ln -s "$WORK/ex/node_modules" "$VW/fill/node_modules"
+tsc_strict "$VW/fill"
+check_maxsize_constant typescript "$VW/fill/message.ts" \
     "static readonly MAX_SIZE = $SOFAB_MAXSIZE_FILL_BYTES;\$"
 # JSON.parse is the harness's front door and a JS number is a double, so an
 # integer above 2^53 in the shared fill input would arrive ROUNDED — u64 max
@@ -231,8 +277,34 @@ check_maxsize_constant typescript "$WORK/fill/message.ts" \
 quote_big_ints() {
     python3 -c 'import re,sys; sys.stdout.write(re.sub(r"-?\d+(?![\d.eE\"])", lambda m: "\"%s\"" % m.group(0) if abs(int(m.group(0))) > 2**53 else m.group(0), sys.stdin.read()))'
 }
-fill_encode() { quote_big_ints | ( cd "$WORK/fill" && "$TH" encode fill ); }
-check_maxsize_fill typescript fill_encode
+fill_encode() { quote_big_ints | ( cd "$VW/fill" && "$TH" encode fill ); }
+FILLJSON="$ROOT/tests/conformance/lib/maxsize_fill.json"
+if [ "$mode" = number ]; then
+    # 2^53: a `number` SCALAR cannot hold the widest u64/i64/bitfield values this
+    # fixture is built from (documented lossy above 2^53; the arrays stay Long[]
+    # and keep theirs). Under `number` the byte-exact MAX_SIZE count and the frozen
+    # hex are therefore NOT asserted -- both depend on those ten-byte varints.
+    # Instead the four 64-bit scalars drop to +-(2^53-1) and the encode must (a) fit
+    # the exactly-sized buffer and (b) emit the very bytes the bigint build emits
+    # for the same input. Every other field is still filled to its declared bound.
+    FILLJSON="$WORK/maxsize_fill_number.json"
+    python3 - "$ROOT/tests/conformance/lib/maxsize_fill.json" > "$FILLJSON" <<'PY'
+import json, sys
+d = json.load(open(sys.argv[1]))
+safe = 2**53 - 1
+d["f_u64"], d["f_i64"], d["f_bitfield"] = safe, -safe, safe
+d["f_union"]["u_pt"]["p_i64"] = -safe
+print(json.dumps(d))
+PY
+    fill_encode < "$FILLJSON" > "$WORK/fill_number.bin" \
+        || { echo "FAIL: [$VL] the safe-integer fill must fit MAX_SIZE"; exit 1; }
+    ( cd "$WORK/fill" && quote_big_ints < "$FILLJSON" | "$TH" encode fill ) > "$WORK/fill_bigint_safe.bin"
+    cmp -s "$WORK/fill_number.bin" "$WORK/fill_bigint_safe.bin" \
+        || { echo "FAIL: [$VL] the filled message differs from the bigint build's bytes"; exit 1; }
+    echo "   [$VL] max-fill (64-bit scalars at 2^53-1) encodes to $(wc -c < "$WORK/fill_number.bin") bytes, identical to bigint"
+else
+    check_maxsize_fill typescript fill_encode
+fi
 
 # ...and the other side of owning the buffer: a value the caller filled PAST its
 # own schema bound does not fit, and §5.1 forbids returning partial output as if
@@ -240,10 +312,10 @@ check_maxsize_fill typescript fill_encode
 # stream used to silently emit an over-bound message every receiver then rejects
 # as INVALID. This is also the only encode-side bound the TS backend has: it
 # emits no maxlen/count validation of its own.
-echo "==> an over-filled bounded value must be refused, not truncated (§5.1)"
+echo "==> [$VL] an over-filled bounded value must be refused, not truncated (§5.1)"
 OVERFILL="$WORK/overfill.json"
 sed 's/"f_str": *"[^"]*"/"f_str": "'"$(printf 'x%.0s' $(seq 1 400))"'"/' \
-    "$ROOT/tests/conformance/lib/maxsize_fill.json" > "$OVERFILL"
+    "$FILLJSON" > "$OVERFILL"
 grep -q 'xxxxxxxxxx' "$OVERFILL" || { echo "FAIL: could not build the over-filled input (f_str renamed?)"; exit 1; }
 if fill_encode < "$OVERFILL" > "$WORK/overfill.bin" 2>/dev/null; then
     echo "FAIL: a string 400 bytes into a maxlen-9 field must be reported, not encoded"; exit 1
@@ -251,19 +323,19 @@ fi
 [ ! -s "$WORK/overfill.bin" ] || {
     echo "FAIL: a refused encode emitted $(wc -c < "$WORK/overfill.bin") bytes of partial output"; exit 1
 }
-echo "==> encode-buffer ownership OK"
+echo "==> [$VL] encode-buffer ownership OK"
 
 # Over-count scalar array (generator#100): someuintarray declares count: 4
 # (id 15 -> header 0x7b = 15<<3 | unsigned-array). 5 wire elements MUST be
 # INVALID per MESSAGE_SPEC 3+7 (decode exits non-zero); exactly 4 still decode.
-echo "==> over-count scalar array must reject (generator#100)"
+echo "==> [$VL] over-count scalar array must reject (generator#100)"
 printf '\173\005\001\002\003\004\005' > "$WORK/overcount.bin"
 printf '\173\004\001\002\003\004' > "$WORK/control.bin"
-if (cd "$WORK/ex" && "$TH" decode myfirstmessage) < "$WORK/overcount.bin" >/dev/null 2>&1; then
+if (cd "$VW/ex" && "$TH" decode myfirstmessage) < "$WORK/overcount.bin" >/dev/null 2>&1; then
     echo "FAIL: over-count scalar array (5 > count 4) must be INVALID"; exit 1
 fi
-(cd "$WORK/ex" && "$TH" decode myfirstmessage) < "$WORK/control.bin" >/dev/null || { echo "FAIL: control (count == 4) must decode"; exit 1; }
-echo "==> over-count reject OK"
+(cd "$VW/ex" && "$TH" decode myfirstmessage) < "$WORK/control.bin" >/dev/null || { echo "FAIL: control (count == 4) must decode"; exit 1; }
+echo "==> [$VL] over-count reject OK"
 
 # Over-count AND truncated: INVALID dominates INCOMPLETE (generator#216 / F-0032,
 # MESSAGE_SPEC S5.2). someuintarray declares count 4; a header announcing 6 elements
@@ -273,16 +345,16 @@ echo "==> over-count reject OK"
 # MUST report INVALID. The `status` harness mode surfaces the SofabError.code so the
 # distinction (which a bare non-zero exit hides) is asserted directly.
 # Wire: 7b (id 15 unsigned-array) 06 (count 6) 01 02 (2 of 6 elements) <EOF>.
-echo "==> over-count + truncation must be INVALID, not INCOMPLETE (generator#216)"
+echo "==> [$VL] over-count + truncation must be INVALID, not INCOMPLETE (generator#216)"
 printf '\173\006\001\002' > "$WORK/overcount_trunc.bin"
-ST=$( (cd "$WORK/ex" && "$TH" status myfirstmessage) < "$WORK/overcount_trunc.bin" | head -n1 )
+ST=$( (cd "$VW/ex" && "$TH" status myfirstmessage) < "$WORK/overcount_trunc.bin" | head -n1 )
 [ "$ST" = "INVALID" ] || { echo "FAIL: over-count(6>4)+truncated -> $ST (want INVALID)"; exit 1; }
 # Precision control: an IN-BOUND count (4 == bound) genuinely truncated (2 of 4
 # then EOF) is a clean truncation and MUST stay INCOMPLETE.
 printf '\173\004\001\002' > "$WORK/incount_trunc.bin"
-ST=$( (cd "$WORK/ex" && "$TH" status myfirstmessage) < "$WORK/incount_trunc.bin" | head -n1 )
+ST=$( (cd "$VW/ex" && "$TH" status myfirstmessage) < "$WORK/incount_trunc.bin" | head -n1 )
 [ "$ST" = "INCOMPLETE" ] || { echo "FAIL: in-bound(4==4)+truncated -> $ST (want INCOMPLETE)"; exit 1; }
-echo "==> over-count/truncation ordering OK"
+echo "==> [$VL] over-count/truncation ordering OK"
 
 # The same ordering one level down, at the ELEMENT (generator#267 residue,
 # Crucible F-0043 width_elem_trunc). someuintarray declares u32 elements; an
@@ -292,42 +364,42 @@ echo "==> over-count/truncation ordering OK"
 # is applied at that element; a scan over the returned array cannot fire for one
 # that never assembles.
 # Wire: 7b (id 15 unsigned-array) 04 (count 4) 80 80 80 80 10 (2^32) <EOF>.
-echo "==> over-width element + truncation must be INVALID (generator#267)"
+echo "==> [$VL] over-width element + truncation must be INVALID (generator#267)"
 printf '\173\004\200\200\200\200\020' > "$WORK/overwidth_trunc.bin"
-ST=$( (cd "$WORK/ex" && "$TH" status myfirstmessage) < "$WORK/overwidth_trunc.bin" | head -n1 )
+ST=$( (cd "$VW/ex" && "$TH" status myfirstmessage) < "$WORK/overwidth_trunc.bin" | head -n1 )
 [ "$ST" = "INVALID" ] || { echo "FAIL: over-width element + truncated -> $ST (want INVALID)"; exit 1; }
 # Precision control: an IN-RANGE element cut at the same offset decides nothing,
 # so the truncation IS the verdict.
 printf '\173\004\001' > "$WORK/inwidth_trunc.bin"
-ST=$( (cd "$WORK/ex" && "$TH" status myfirstmessage) < "$WORK/inwidth_trunc.bin" | head -n1 )
+ST=$( (cd "$VW/ex" && "$TH" status myfirstmessage) < "$WORK/inwidth_trunc.bin" | head -n1 )
 [ "$ST" = "INCOMPLETE" ] || { echo "FAIL: in-range element + truncated -> $ST (want INCOMPLETE)"; exit 1; }
-echo "==> element-width/truncation ordering OK"
+echo "==> [$VL] element-width/truncation ordering OK"
 
 # Over-index wrapper array (generator#142): somestringarray declares count: 5
 # (id 18). A string element with a wire index >= 5 is INVALID for every target
 # (MESSAGE_SPEC S5.1/S7), never grown-into -- which also bounds an over-index
 # heap-amplification DoS. Wire: 96 01 (sequence_begin id 18) 2a (string id 5,
 # over-index) 0a 78 (fixlen "x") 07 (sequence_end); control puts it at id 4.
-echo "==> over-index wrapper array must reject (generator#142)"
+echo "==> [$VL] over-index wrapper array must reject (generator#142)"
 printf '\226\001\052\012\170\007' > "$WORK/overindex.bin"
 printf '\226\001\042\012\170\007' > "$WORK/overindex_control.bin"
-if (cd "$WORK/ex" && "$TH" decode myfirstmessage) < "$WORK/overindex.bin" >/dev/null 2>&1; then
+if (cd "$VW/ex" && "$TH" decode myfirstmessage) < "$WORK/overindex.bin" >/dev/null 2>&1; then
     echo "FAIL: over-index wrapper element (id 5 >= count 5) must be INVALID"; exit 1
 fi
-(cd "$WORK/ex" && "$TH" decode myfirstmessage) < "$WORK/overindex_control.bin" >/dev/null || { echo "FAIL: control (index 4 < 5) must decode"; exit 1; }
-echo "==> over-index reject OK"
+(cd "$VW/ex" && "$TH" decode myfirstmessage) < "$WORK/overindex_control.bin" >/dev/null || { echo "FAIL: control (index 4 < 5) must decode"; exit 1; }
+echo "==> [$VL] over-index reject OK"
 
 # Over-maxlen scalar blob (Option B / MESSAGE_SPEC S7.1): someblob (id 12) declares
 # maxlen: 16. A 17-byte blob exceeds it -> INVALID, never truncated. Wire: 62 (blob
 # id12) 8b 01 (fixlen word len 17, blob subtype 3) + 17 bytes; control is 16 bytes.
-echo "==> over-maxlen string/blob must reject (Option B, S7.1)"
+echo "==> [$VL] over-maxlen string/blob must reject (Option B, S7.1)"
 printf '\142\213\001\001\001\001\001\001\001\001\001\001\001\001\001\001\001\001\001\001' > "$WORK/overmaxlen.bin"
 printf '\142\203\001\001\001\001\001\001\001\001\001\001\001\001\001\001\001\001\001' > "$WORK/overmaxlen_control.bin"
-if (cd "$WORK/ex" && "$TH" decode myfirstmessage) < "$WORK/overmaxlen.bin" >/dev/null 2>&1; then
+if (cd "$VW/ex" && "$TH" decode myfirstmessage) < "$WORK/overmaxlen.bin" >/dev/null 2>&1; then
     echo "FAIL: over-maxlen blob (17 > maxlen 16) must be INVALID"; exit 1
 fi
-(cd "$WORK/ex" && "$TH" decode myfirstmessage) < "$WORK/overmaxlen_control.bin" >/dev/null || { echo "FAIL: control (16 == maxlen) must decode"; exit 1; }
-echo "==> over-maxlen reject OK"
+(cd "$VW/ex" && "$TH" decode myfirstmessage) < "$WORK/overmaxlen_control.bin" >/dev/null || { echo "FAIL: control (16 == maxlen) must decode"; exit 1; }
+echo "==> [$VL] over-maxlen reject OK"
 
 # Over-maxlen AND truncated: INVALID dominates INCOMPLETE (generator#216 / F-0032,
 # MESSAGE_SPEC S5.2), the string/blob analogue of the over-count ordering above.
@@ -335,16 +407,16 @@ echo "==> over-maxlen reject OK"
 # payload byte then EOF is decided at the length word (readBlob's schemaMaxlen,
 # before the payload take), so it MUST be INVALID.
 # Wire: 62 (blob id 12) 8b 01 (fixlen word: len 17, blob subtype) 01 (1 of 17) <EOF>.
-echo "==> over-maxlen + truncation must be INVALID, not INCOMPLETE (generator#216)"
+echo "==> [$VL] over-maxlen + truncation must be INVALID, not INCOMPLETE (generator#216)"
 printf '\142\213\001\001' > "$WORK/overmaxlen_trunc.bin"
-ST=$( (cd "$WORK/ex" && "$TH" status myfirstmessage) < "$WORK/overmaxlen_trunc.bin" | head -n1 )
+ST=$( (cd "$VW/ex" && "$TH" status myfirstmessage) < "$WORK/overmaxlen_trunc.bin" | head -n1 )
 [ "$ST" = "INVALID" ] || { echo "FAIL: over-maxlen(17>16)+truncated -> $ST (want INVALID)"; exit 1; }
 # Precision control: an IN-BOUND length (16 == maxlen) genuinely truncated (1 of 16
 # payload bytes then EOF) is a clean truncation and MUST stay INCOMPLETE.
 printf '\142\203\001\001' > "$WORK/inmaxlen_trunc.bin"
-ST=$( (cd "$WORK/ex" && "$TH" status myfirstmessage) < "$WORK/inmaxlen_trunc.bin" | head -n1 )
+ST=$( (cd "$VW/ex" && "$TH" status myfirstmessage) < "$WORK/inmaxlen_trunc.bin" | head -n1 )
 [ "$ST" = "INCOMPLETE" ] || { echo "FAIL: in-bound(16==16)+truncated -> $ST (want INCOMPLETE)"; exit 1; }
-echo "==> over-maxlen/truncation ordering OK"
+echo "==> [$VL] over-maxlen/truncation ordering OK"
 
 # Contradictory wire type (MESSAGE_SPEC S7.3, generator#174): a field whose header
 # wire type is not the one its declared type maps to -- for fixlen, including the
@@ -354,20 +426,20 @@ echo "==> over-maxlen/truncation ordering OK"
 # with the correct unsigned wire type and must decode to 9. A third vector, 06 07,
 # gives the same id a SEQUENCE_START header closed by its SEQUENCE_END: skipping
 # that one has to drain the whole nested sequence, not just a scalar payload.
-echo "==> contradictory wire type must skip (MESSAGE_SPEC S7.3, generator#174)"
+echo "==> [$VL] contradictory wire type must skip (MESSAGE_SPEC S7.3, generator#174)"
 printf '\001\006' > "$WORK/wiremismatch.bin"
 printf '\000\011' > "$WORK/wiremismatch_control.bin"
 printf '\006\007' > "$WORK/wiremismatch_seq.bin"
-OUT=$( (cd "$WORK/ex" && "$TH" decode myfirstmessage) < "$WORK/wiremismatch.bin" ) \
+OUT=$( (cd "$VW/ex" && "$TH" decode myfirstmessage) < "$WORK/wiremismatch.bin" ) \
     || { echo "FAIL: mismatched wire type must skip, not fail the decode"; exit 1; }
 echo "$OUT" | grep -q '"someu8":7' || { echo "FAIL: skipped field must keep its default 7; got: $OUT"; exit 1; }
-OUT=$( (cd "$WORK/ex" && "$TH" decode myfirstmessage) < "$WORK/wiremismatch_control.bin" ) \
+OUT=$( (cd "$VW/ex" && "$TH" decode myfirstmessage) < "$WORK/wiremismatch_control.bin" ) \
     || { echo "FAIL: control (correct wire type) must decode"; exit 1; }
 echo "$OUT" | grep -q '"someu8":9' || { echo "FAIL: control must decode to 9; got: $OUT"; exit 1; }
-OUT=$( (cd "$WORK/ex" && "$TH" decode myfirstmessage) < "$WORK/wiremismatch_seq.bin" ) \
+OUT=$( (cd "$VW/ex" && "$TH" decode myfirstmessage) < "$WORK/wiremismatch_seq.bin" ) \
     || { echo "FAIL: sequence header on a scalar field must skip, not fail the decode"; exit 1; }
 echo "$OUT" | grep -q '"someu8":7' || { echo "FAIL: skipped sequence must keep the default 7; got: $OUT"; exit 1; }
-echo "==> wire-type skip OK"
+echo "==> [$VL] wire-type skip OK"
 
 # Repeated field id (MESSAGE_SPEC S7.4, generator#175): last occurrence wins per
 # field id. A re-opened sequence CONTINUES its scope, so a struct merges and the
@@ -377,12 +449,12 @@ echo "==> wire-type skip OK"
 # decoding the re-opening into a fresh object would reset it to "Nested".
 # Wire: a6 01 (seq start id 20) 0a 0a 78 (string id 1, len 1, "x") 07 (seq end)
 #       a6 01 (seq start id 20) 16 07 (empty seq id 2) 07 (seq end)
-echo "==> re-opened struct scope must merge (MESSAGE_SPEC S7.4, generator#175)"
+echo "==> [$VL] re-opened struct scope must merge (MESSAGE_SPEC S7.4, generator#175)"
 printf '\246\001\012\012\170\007\246\001\026\007\007' > "$WORK/reopen_struct.bin"
-OUT=$( (cd "$WORK/ex" && "$TH" decode myfirstmessage) < "$WORK/reopen_struct.bin" ) \
+OUT=$( (cd "$VW/ex" && "$TH" decode myfirstmessage) < "$WORK/reopen_struct.bin" ) \
     || { echo "FAIL: re-opened struct must decode"; exit 1; }
 echo "$OUT" | grep -q '"nestedstring":"x"' || { echo "FAIL: re-opened struct must retain nestedstring \"x\"; got: $OUT"; exit 1; }
-echo "==> struct scope merge OK"
+echo "==> [$VL] struct scope merge OK"
 
 # Repeated field id, array wrapper (MESSAGE_SPEC S7.4 + S5): an array wrapper IS
 # the array's value, so unlike a struct it is REPLACED whole by a later occurrence
@@ -391,15 +463,15 @@ echo "==> struct scope merge OK"
 # NOT survive as "b" -- merging by index is the bug this pins.
 # Wire: 96 01 (seq start id 18) 02 0a 61 (string id 0 "a") 0a 0a 62 (string id 1 "b")
 #       07 (seq end) 96 01 (seq start id 18) 02 0a 63 (string id 0 "c") 07 (seq end)
-echo "==> re-opened array wrapper must replace (MESSAGE_SPEC S7.4, generator#175)"
+echo "==> [$VL] re-opened array wrapper must replace (MESSAGE_SPEC S7.4, generator#175)"
 printf '\226\001\002\012\141\012\012\142\007\226\001\002\012\143\007' > "$WORK/reopen_array.bin"
-OUT=$( (cd "$WORK/ex" && "$TH" decode myfirstmessage) < "$WORK/reopen_array.bin" ) \
+OUT=$( (cd "$VW/ex" && "$TH" decode myfirstmessage) < "$WORK/reopen_array.bin" ) \
     || { echo "FAIL: re-opened array wrapper must decode"; exit 1; }
 echo "$OUT" | grep -q '"somestringarray":\["c"' || { echo "FAIL: re-opened array wrapper must start with the second opening's element 0 == \"c\"; got: $OUT"; exit 1; }
 if echo "$OUT" | grep -q '"somestringarray":\["c","b"'; then
     echo "FAIL: re-opened array wrapper must be replaced, not merged (element \"b\" survived); got: $OUT"; exit 1
 fi
-echo "==> array wrapper replace OK"
+echo "==> [$VL] array wrapper replace OK"
 
 # Fixlen SUBTYPE mismatch (MESSAGE_SPEC S7.3, generator#174). Under S7.3 a fixlen
 # field's type is its wire type PLUS its subtype, so 4a 0a 78 (id 9 somefp64,
@@ -408,16 +480,16 @@ echo "==> array wrapper replace OK"
 # (corelib-ts#58), so the generated guard checks `c.fixSub !== FixlenSubtype.Fp64`
 # and skips on a mismatch instead of throwing from the wrong-typed reader.
 # Control 4a 41 <8 bytes 2.5> carries the correct fp64 subtype and must decode to 2.5.
-echo "==> fixlen subtype mismatch must skip (MESSAGE_SPEC S7.3, generator#174)"
+echo "==> [$VL] fixlen subtype mismatch must skip (MESSAGE_SPEC S7.3, generator#174)"
 printf '\112\012\170' > "$WORK/subtype_mismatch.bin"
 printf '\112\101\000\000\000\000\000\000\004\100' > "$WORK/subtype_control.bin"
-OUT=$( (cd "$WORK/ex" && "$TH" decode myfirstmessage) < "$WORK/subtype_mismatch.bin" ) \
+OUT=$( (cd "$VW/ex" && "$TH" decode myfirstmessage) < "$WORK/subtype_mismatch.bin" ) \
     || { echo "FAIL: fixlen subtype mismatch must skip, not fail the decode"; exit 1; }
 echo "$OUT" | grep -q '"somefp64":3.14159265358979' || { echo "FAIL: skipped fixlen field must keep its default; got: $OUT"; exit 1; }
-OUT=$( (cd "$WORK/ex" && "$TH" decode myfirstmessage) < "$WORK/subtype_control.bin" ) \
+OUT=$( (cd "$VW/ex" && "$TH" decode myfirstmessage) < "$WORK/subtype_control.bin" ) \
     || { echo "FAIL: control (correct fp64 subtype) must decode"; exit 1; }
 echo "$OUT" | grep -q '"somefp64":2.5' || { echo "FAIL: control must decode to 2.5; got: $OUT"; exit 1; }
-echo "==> fixlen subtype skip OK"
+echo "==> [$VL] fixlen subtype skip OK"
 
 # The same skip, one rule over: a string a decoder STEPS OVER is never
 # UTF-8-validated (CORELIB_PLAN S6.4.5, generator#417). Validation belongs where
@@ -449,15 +521,15 @@ echo "==> fixlen subtype skip OK"
 # (generator#541) -- the code the stream latched the refusal under and re-throws
 # from the finish that follows, and the only way to tell an INVALID_MSG from the
 # INCOMPLETE a mis-measured skip produces the moment it walks off the payload.
-echo "==> a skipped string is not UTF-8-validated (CORELIB_PLAN S6.4.5, generator#417)"
+echo "==> [$VL] a skipped string is not UTF-8-validated (CORELIB_PLAN S6.4.5, generator#417)"
 for surface in decode streamdecode; do
     if [ "$surface" = decode ]; then
         SU_CAT="--status-verb status"
     else
         SU_CAT='--invalid-pattern finish=INVALID_MSG'
     fi
-    python3 "$ROOT/tests/conformance/lib/check_skipped_string_utf8.py" "typescript" \
-        --cwd "$WORK/ex" --verb "$surface" $SU_CAT \
+    python3 "$ROOT/tests/conformance/lib/check_skipped_string_utf8.py" "typescript $VL" \
+        --cwd "$VW/ex" --verb "$surface" $SU_CAT \
         -- "$TH"
 done
 
@@ -493,11 +565,11 @@ done
 # whole-buffer decode and a separate one for the chunked path -- so a table that
 # only ever ran the one-shot verb passes with the streaming copy mutated. This is
 # the sweep the shared-vector and growth drivers beside it already do.
-echo "==> a string/blob/reserved fixlen-array subtype is INVALID (generator#411)"
+echo "==> [$VL] a string/blob/reserved fixlen-array subtype is INVALID (generator#411)"
 for surface in decode streamdecode; do
     if [ "$surface" = decode ]; then FA_CAT="--status-verb status"; else FA_CAT=""; fi
-    python3 "$ROOT/tests/conformance/lib/check_fixlen_array_subtype.py" "typescript" \
-        --cwd "$WORK/ex" --verb "$surface" $FA_CAT \
+    python3 "$ROOT/tests/conformance/lib/check_fixlen_array_subtype.py" "typescript $VL" \
+        --cwd "$VW/ex" --verb "$surface" $FA_CAT \
         -- "$TH"
 done
 
@@ -511,12 +583,12 @@ done
 # Wire: 96 01 (seq start id 18) 02 0a 61 (string id 0 "a") 07 (seq end)
 #       90 01 (id 18, UNSIGNED) 05
 # Asserted as a prefix: heap profiles render ["a"], fixed-capacity ones pad.
-echo "==> mis-typed later occurrence must not clear the array (MESSAGE_SPEC S7.4, generator#175)"
+echo "==> [$VL] mis-typed later occurrence must not clear the array (MESSAGE_SPEC S7.4, generator#175)"
 printf '\226\001\002\012\141\007\220\001\005' > "$WORK/skipped_occ_array.bin"
-OUT=$( (cd "$WORK/ex" && "$TH" decode myfirstmessage) < "$WORK/skipped_occ_array.bin" ) \
+OUT=$( (cd "$VW/ex" && "$TH" decode myfirstmessage) < "$WORK/skipped_occ_array.bin" ) \
     || { echo "FAIL: mis-typed later occurrence must decode, not error"; exit 1; }
 echo "$OUT" | grep -q '"somestringarray":\["a"' || { echo "FAIL: skipped occurrence must not clear the array (element 0 == \"a\" lost); got: $OUT"; exit 1; }
-echo "==> skipped occurrence keeps array OK"
+echo "==> [$VL] skipped occurrence keeps array OK"
 
 # S7.3 x S7.4, struct: same rule for a struct scope. somestruct (id 20) is opened
 # correctly with nestedstring (id 1) = "x", then id 20 recurs carrying the
@@ -524,12 +596,12 @@ echo "==> skipped occurrence keeps array OK"
 # be "x" rather than falling back to its default "Nested".
 # Wire: a6 01 (seq start id 20) 0a 0a 78 (string id 1, len 1, "x") 07 (seq end)
 #       a0 01 (id 20, UNSIGNED) 05
-echo "==> mis-typed later occurrence must not clear the struct (MESSAGE_SPEC S7.4, generator#175)"
+echo "==> [$VL] mis-typed later occurrence must not clear the struct (MESSAGE_SPEC S7.4, generator#175)"
 printf '\246\001\012\012\170\007\240\001\005' > "$WORK/skipped_occ_struct.bin"
-OUT=$( (cd "$WORK/ex" && "$TH" decode myfirstmessage) < "$WORK/skipped_occ_struct.bin" ) \
+OUT=$( (cd "$VW/ex" && "$TH" decode myfirstmessage) < "$WORK/skipped_occ_struct.bin" ) \
     || { echo "FAIL: mis-typed later occurrence must decode, not error"; exit 1; }
 echo "$OUT" | grep -q '"nestedstring":"x"' || { echo "FAIL: skipped occurrence must not clear the struct (nestedstring \"x\" lost); got: $OUT"; exit 1; }
-echo "==> skipped occurrence keeps struct OK"
+echo "==> [$VL] skipped occurrence keeps struct OK"
 
 # Receiver-side decode limits (generator#102): a count-less u64 array with
 # max_dyn_array_count: 4 baked into the generated module (id 0 -> header 0x03 =
@@ -540,24 +612,24 @@ echo "==> skipped occurrence keeps struct OK"
 # The throw comes from the GENERATED visitor since generator#388, not from the
 # corelib: the cap is applied per field, at that field's own count header. The
 # message names the field, which the corelib's could not -- it has no schema.
-echo "==> receiver-side decode limits (generator#102)"
+echo "==> [$VL] receiver-side decode limits (generator#102)"
 cat > "$WORK/dyn.yaml" <<'YAML'
 version: 1
 messages:
   dyn: { payload: { a: { id: 0, type: array, items: { type: u64 } } } }
 YAML
-cat > "$WORK/cfg_lim.yaml" <<'YAML'
+cat > "$VW/cfg_lim.yaml" <<YAML
 generic: { emit: project, max_dyn_array_count: 4 }
-targets: { typescript: {} }
+targets: { typescript: $VT }
 YAML
-( cd "$ROOT" && go run ./cmd/sofabgen --config "$WORK/cfg_lim.yaml" --format=off --lang typescript --in "$WORK/dyn.yaml" --out "$WORK/lim" )
-gen "$WORK/dyn.yaml" "$WORK/nolim"
-ln -s "$WORK/ex/node_modules" "$WORK/lim/node_modules"
-ln -s "$WORK/ex/node_modules" "$WORK/nolim/node_modules"
-tsc_strict "$WORK/lim"
+( cd "$ROOT" && go run ./cmd/sofabgen --config "$VW/cfg_lim.yaml" --format=off --lang typescript --in "$WORK/dyn.yaml" --out "$VW/lim" )
+gen "$WORK/dyn.yaml" "$VW/nolim" "$VCFG"
+ln -s "$WORK/ex/node_modules" "$VW/lim/node_modules"
+ln -s "$WORK/ex/node_modules" "$VW/nolim/node_modules"
+tsc_strict "$VW/lim"
 printf '\003\005\001\002\003\004\005' > "$WORK/overlimit.bin"
 printf '\003\004\001\002\003\004' > "$WORK/atlimit.bin"
-if (cd "$WORK/lim" && "$TH" decode dyn) < "$WORK/overlimit.bin" >/dev/null 2>"$WORK/limerr.txt"; then
+if (cd "$VW/lim" && "$TH" decode dyn) < "$WORK/overlimit.bin" >/dev/null 2>"$WORK/limerr.txt"; then
     echo "FAIL: dynamic array count 5 must exceed max_dyn_array_count 4"; exit 1
 fi
 grep -q "a: array count above configured limit 4" "$WORK/limerr.txt" \
@@ -566,19 +638,19 @@ grep -q "a: array count above configured limit 4" "$WORK/limerr.txt" \
 # and the nolim project below decodes them (CORELIB_PLAN S6.2.1). Read through the
 # `status` mode, not by grepping stderr -- a thrown stack trace echoes the source
 # line, so grepping it would match the generated code rather than the outcome.
-ST=$( (cd "$WORK/lim" && "$TH" status dyn) < "$WORK/overlimit.bin" | head -n1 )
+ST=$( (cd "$VW/lim" && "$TH" status dyn) < "$WORK/overlimit.bin" | head -n1 )
 [ "$ST" = "LIMIT_EXCEEDED" ] \
     || { echo "FAIL: an over-cap count is a policy rejection, got $ST"; exit 1; }
 # The corelib is handed no cap at all, by any module: every receiver bound is a
 # per-field guard in generated code (generator#388) or an argument to the wrapper
 # collector that owns the field's headers (generator#405).
-grep -q "_LIMITS" "$WORK/lim/message.ts" \
+grep -q "_LIMITS" "$VW/lim/message.ts" \
     && { echo "FAIL: a generated module must pass the corelib no DecodeLimits"; exit 1; }
-grep -q "_decode(bytes, new _Dyn__Visitor(o, new PayloadAcc()));" "$WORK/lim/message.ts" \
+grep -q "_decode(bytes, new _Dyn__Visitor(o, new PayloadAcc()));" "$VW/lim/message.ts" \
     || { echo "FAIL: decode() must take the bytes and the visitor, nothing else"; exit 1; }
-(cd "$WORK/lim" && "$TH" decode dyn) < "$WORK/atlimit.bin" >/dev/null || { echo "FAIL: count == limit (4) must decode"; exit 1; }
-(cd "$WORK/nolim" && "$TH" decode dyn) < "$WORK/overlimit.bin" >/dev/null || { echo "FAIL: default-cap project must accept count 5"; exit 1; }
-echo "==> decode limits OK"
+(cd "$VW/lim" && "$TH" decode dyn) < "$WORK/atlimit.bin" >/dev/null || { echo "FAIL: count == limit (4) must decode"; exit 1; }
+(cd "$VW/nolim" && "$TH" decode dyn) < "$WORK/overlimit.bin" >/dev/null || { echo "FAIL: default-cap project must accept count 5"; exit 1; }
+echo "==> [$VL] decode limits OK"
 
 # A refusal is TERMINAL, and the corelib is what holds that (CORELIB_PLAN S5.2 for
 # malformed bytes, S6.3 for a receiver limit): IStream latches the verdict and
@@ -593,7 +665,7 @@ echo "==> decode limits OK"
 #
 # The code is the real one now, not a status it was flattened into: a receiver
 # cap reports LIMIT_EXCEEDED rather than the INCOMPLETE the old mapping produced.
-echo "==> a refusal is terminal: finish refuses under the same code (generator#541)"
+echo "==> [$VL] a refusal is terminal: finish refuses under the same code (generator#541)"
 # A varint past the 64-bit bound: 10 continuation bytes and an eleventh. Refused
 # by the CORELIB, where overcount.bin is refused by a GENERATED guard -- the two
 # routes into the same terminal latch (S4.1).
@@ -608,10 +680,10 @@ latch() {   # <project-dir> <fixture> <want-code> <message>
         echo "FAIL: $(basename "$lfx") -- finish after the refusal must throw $lwant; got:"
         cat "$WORK/latch.err"; exit 1; }
 }
-latch "$WORK/ex"  "$WORK/varint_overflow.bin" INVALID_MSG    myfirstmessage
-latch "$WORK/ex"  "$WORK/overcount.bin"       INVALID_MSG    myfirstmessage
-latch "$WORK/lim" "$WORK/overlimit.bin"       LIMIT_EXCEEDED dyn
-echo "==> terminal-refusal guard OK"
+latch "$VW/ex"  "$WORK/varint_overflow.bin" INVALID_MSG    myfirstmessage
+latch "$VW/ex"  "$WORK/overcount.bin"       INVALID_MSG    myfirstmessage
+latch "$VW/lim" "$WORK/overlimit.bin"       LIMIT_EXCEEDED dyn
+echo "==> [$VL] terminal-refusal guard OK"
 
 # CORELIB_PLAN S6.2.1, "a skipped field is never capped": a limit bounds an
 # ALLOCATION, and a field MESSAGE_SPEC S7.3 skips is walked, not materialised, so
@@ -630,15 +702,15 @@ echo "==> terminal-refusal guard OK"
 # Widen either -- hoist the cap out of the switch, or drop the kind test -- and
 # both rows answer LIMIT_EXCEEDED while every existing assertion here still
 # passes, because the cap is still present and still fires on the control.
-echo "==> a S7.3-skipped field is never capped (CORELIB_PLAN S6.2.1, generator#410)"
+echo "==> [$VL] a S7.3-skipped field is never capped (CORELIB_PLAN S6.2.1, generator#410)"
 printf '\004\005\000\000\000\000\000' > "$WORK/skipmistyped.bin"
 printf '\113\005\001\001\001\001\001' > "$WORK/skipunknown.bin"
 for v in skipmistyped skipunknown; do
-    ST=$( (cd "$WORK/lim" && "$TH" status dyn) < "$WORK/$v.bin" | head -n1 )
+    ST=$( (cd "$VW/lim" && "$TH" status dyn) < "$WORK/$v.bin" | head -n1 )
     [ "$ST" = "COMPLETE" ] \
         || { echo "FAIL: $v -- an over-cap SKIPPED array must leave the decode COMPLETE, got $ST"; exit 1; }
     # ...and skipped means the field is not touched at all: `a` keeps its default.
-    OUT=$( (cd "$WORK/lim" && "$TH" decode dyn) < "$WORK/$v.bin" )
+    OUT=$( (cd "$VW/lim" && "$TH" decode dyn) < "$WORK/$v.bin" )
     echo "$OUT" | grep -q '"a":\[\]' \
         || { echo "FAIL: $v -- a skipped field must bind nothing; got: $OUT"; exit 1; }
 done
@@ -646,10 +718,10 @@ done
 # matching kind is the field's own count, and is still LIMIT_EXCEEDED -- pinned
 # above via $WORK/overlimit.bin, re-read here as the category (S6.3), since a
 # backend that simply stopped capping would pass both rows above.
-ST=$( (cd "$WORK/lim" && "$TH" status dyn) < "$WORK/overlimit.bin" | head -n1 )
+ST=$( (cd "$VW/lim" && "$TH" status dyn) < "$WORK/overlimit.bin" | head -n1 )
 [ "$ST" = "LIMIT_EXCEEDED" ] \
     || { echo "FAIL: the matching-kind over-cap control must stay LIMIT_EXCEEDED, got $ST"; exit 1; }
-echo "==> skipped-field cap exclusivity OK"
+echo "==> [$VL] skipped-field cap exclusivity OK"
 
 # A wrapper array's string/blob elements never reach the generated visitor: their
 # index and their length word both go to the corelib's StringSeq/BlobSeq. So both
@@ -660,70 +732,70 @@ echo "==> skipped-field cap exclusivity OK"
 # the schema already bounds (CORELIB_PLAN S6.2.1). Both messages live in the SAME
 # project, under the same tight max_dyn_string_len, so the exemption is the only
 # thing that can tell them apart.
-echo "==> wrapper-element receiver caps (generator#405)"
+echo "==> [$VL] wrapper-element receiver caps (generator#405)"
 cat > "$WORK/wrap.yaml" <<'YAML'
 version: 1
 messages:
   wdyn: { payload: { w: { id: 0, type: array, items: { type: string } } } }
   wbnd: { payload: { w: { id: 0, type: array, items: { type: string, maxlen: 16 } } } }
 YAML
-cat > "$WORK/cfg_wlim.yaml" <<'YAML'
+cat > "$VW/cfg_wlim.yaml" <<YAML
 generic: { emit: project, max_dyn_string_len: 4 }
-targets: { typescript: {} }
+targets: { typescript: $VT }
 YAML
-( cd "$ROOT" && go run ./cmd/sofabgen --config "$WORK/cfg_wlim.yaml" --format=off --lang typescript --in "$WORK/wrap.yaml" --out "$WORK/wlim" )
-gen "$WORK/wrap.yaml" "$WORK/wnolim"
-ln -s "$WORK/ex/node_modules" "$WORK/wlim/node_modules"
-ln -s "$WORK/ex/node_modules" "$WORK/wnolim/node_modules"
-tsc_strict "$WORK/wlim"
+( cd "$ROOT" && go run ./cmd/sofabgen --config "$VW/cfg_wlim.yaml" --format=off --lang typescript --in "$WORK/wrap.yaml" --out "$VW/wlim" )
+gen "$WORK/wrap.yaml" "$VW/wnolim" "$VCFG"
+ln -s "$WORK/ex/node_modules" "$VW/wlim/node_modules"
+ln -s "$WORK/ex/node_modules" "$VW/wnolim/node_modules"
+tsc_strict "$VW/wlim"
 # The bytes are produced by the UNCAPPED project, so they are well formed by
 # construction and the capped project's refusal can only be a policy one.
-printf '%s' '{"w":["abcdefgh"]}' | (cd "$WORK/wnolim" && "$TH" encode wdyn) > "$WORK/wrap8.bin"
-if (cd "$WORK/wlim" && "$TH" decode wdyn) < "$WORK/wrap8.bin" >/dev/null 2>"$WORK/wraperr.txt"; then
+printf '%s' '{"w":["abcdefgh"]}' | (cd "$VW/wnolim" && "$TH" encode wdyn) > "$WORK/wrap8.bin"
+if (cd "$VW/wlim" && "$TH" decode wdyn) < "$WORK/wrap8.bin" >/dev/null 2>"$WORK/wraperr.txt"; then
     echo "FAIL: an 8-byte unbounded wrapper element must exceed max_dyn_string_len 4"; exit 1
 fi
 grep -q "exceeds the receiver cap 4" "$WORK/wraperr.txt" \
     || { echo "FAIL: the over-cap element must name the receiver cap"; cat "$WORK/wraperr.txt"; exit 1; }
-ST=$( (cd "$WORK/wlim" && "$TH" status wdyn) < "$WORK/wrap8.bin" | head -n1 )
+ST=$( (cd "$VW/wlim" && "$TH" status wdyn) < "$WORK/wrap8.bin" | head -n1 )
 [ "$ST" = "LIMIT_EXCEEDED" ] \
     || { echo "FAIL: an over-cap element is a policy rejection, got $ST"; exit 1; }
-(cd "$WORK/wnolim" && "$TH" decode wdyn) < "$WORK/wrap8.bin" >/dev/null \
+(cd "$VW/wnolim" && "$TH" decode wdyn) < "$WORK/wrap8.bin" >/dev/null \
     || { echo "FAIL: default-cap project must accept an 8-byte element"; exit 1; }
 # The exemption: the SAME 8 bytes at an element the schema bounds at 16 decode
 # under the same cap of 4. The schema bound governs and the cap never applies --
 # this is what the raised residual DecodeLimits used to buy, one module at a time.
-printf '%s' '{"w":["abcdefgh"]}' | (cd "$WORK/wnolim" && "$TH" encode wbnd) > "$WORK/wrapb8.bin"
-(cd "$WORK/wlim" && "$TH" decode wbnd) < "$WORK/wrapb8.bin" >/dev/null \
+printf '%s' '{"w":["abcdefgh"]}' | (cd "$VW/wnolim" && "$TH" encode wbnd) > "$WORK/wrapb8.bin"
+(cd "$VW/wlim" && "$TH" decode wbnd) < "$WORK/wrapb8.bin" >/dev/null \
     || { echo "FAIL: a schema-bounded element must not be capped (S6.2.1)"; exit 1; }
 # ...and over its own bound it is INVALID, not a policy rejection.
-printf '%s' '{"w":["0123456789abcdefg"]}' | (cd "$WORK/wnolim" && "$TH" encode wbnd) > "$WORK/wrapb17.bin"
-ST=$( (cd "$WORK/wlim" && "$TH" status wbnd) < "$WORK/wrapb17.bin" | head -n1 )
+printf '%s' '{"w":["0123456789abcdefg"]}' | (cd "$VW/wnolim" && "$TH" encode wbnd) > "$WORK/wrapb17.bin"
+ST=$( (cd "$VW/wlim" && "$TH" status wbnd) < "$WORK/wrapb17.bin" | head -n1 )
 [ "$ST" = "INVALID" ] \
     || { echo "FAIL: over the schema maxlen is INVALID, got $ST"; exit 1; }
-echo "==> wrapper-element caps OK"
+echo "==> [$VL] wrapper-element caps OK"
 
 # The same cap on every kind it governs, through the shared driver
 # (CORELIB_PLAN S6.3, generator#416): an unbounded blob over max_dyn_blob_len is
 # LIMIT_EXCEEDED (the generated header guard), one the schema bounds is not capped,
 # and an in-cap blob decodes. Before this, max_dyn_blob_len was only ever set where
 # the schema had no unbounded blob, so its enforcing arm ran nowhere (generator#637).
-echo "==> a cap is LIMIT_EXCEEDED, a schema bound is INVALID, blob included (S6.3)"
+echo "==> [$VL] a cap is LIMIT_EXCEEDED, a schema bound is INVALID, blob included (S6.3)"
 printf 'version: 1\nmessages:\n' > "$WORK/refusal.yaml"
 python3 "$ROOT/tests/conformance/lib/check_refusal_category.py" --emit-schema >> "$WORK/refusal.yaml"
-cat > "$WORK/cfg_refusal.yaml" <<'YAML'
+cat > "$VW/cfg_refusal.yaml" <<YAML
 generic: { emit: project, max_dyn_array_count: 4, max_dyn_string_len: 8, max_dyn_blob_len: 8 }
-targets: { typescript: {} }
+targets: { typescript: $VT }
 YAML
-gen "$WORK/refusal.yaml" "$WORK/refusal" "$WORK/cfg_refusal.yaml"
-ln -s "$WORK/ex/node_modules" "$WORK/refusal/node_modules"
-python3 "$ROOT/tests/conformance/lib/check_refusal_category.py" "typescript" \
-    --cwd "$WORK/refusal" \
+gen "$WORK/refusal.yaml" "$VW/refusal" "$VW/cfg_refusal.yaml"
+ln -s "$WORK/ex/node_modules" "$VW/refusal/node_modules"
+python3 "$ROOT/tests/conformance/lib/check_refusal_category.py" "typescript $VL" \
+    --cwd "$VW/refusal" \
     --max-dyn-array-count 4 --max-dyn-string-len 8 --max-dyn-blob-len 8 \
     --status-verb status --status-limit LIMIT_EXCEEDED \
     -- "$TH"
 
-echo "==> shared-vector byte-exact conformance"
-python3 "$ROOT/tests/conformance/typescript/check_vectors.py" "$CORELIB/assets/test_vectors.json" "$WORK/conf"
+echo "==> [$VL] shared-vector byte-exact conformance"
+python3 "$ROOT/tests/conformance/typescript/check_vectors.py" "$CORELIB/assets/test_vectors.json" "$VW/conf" $SAFE
 
 # ...and the other direction (generator#444): feed each vector's DENSE bytes
 # into a message that declares u64 on the anchors and nothing else, so every
@@ -734,11 +806,11 @@ python3 "$ROOT/tests/conformance/typescript/check_vectors.py" "$CORELIB/assets/t
 # feed, so every position inside every skipped payload becomes a suspend/resume
 # boundary; that is where a resync bug the single-buffer path hides shows up
 # (generator#456).
-echo "==> shared-vector decode conformance (skip matrix)"
+echo "==> [$VL] shared-vector decode conformance (skip matrix)"
 for surface in decode streamdecode; do
     python3 "$ROOT/tests/conformance/lib/check_vectors_decode.py" \
-        "$CORELIB/assets/test_vectors.json" "TypeScript" --mode "$surface" \
-        --cwd "$WORK/conf" -- "$TH"
+        "$CORELIB/assets/test_vectors.json" "TypeScript $VL" --mode "$surface" $SAFE \
+        --cwd "$VW/conf" -- "$TH"
 done
 
 # fp32 signaling-NaN bit-for-bit round-trip (issue #235). A JS number is a 64-bit
@@ -761,13 +833,116 @@ done
 # array row expressible here: it is this target's per-array raw-bits companion
 # (`Uint8Array | null`) that a presence flag is most likely to be derived from.
 # Both row kinds are pinned by count, so one silently becoming the other fails.
-echo "==> fp32 signaling-NaN bit-exact round-trip (issue #235)"
-python3 "$ROOT/tests/conformance/lib/check_fp32_nan.py" "TypeScript" \
+echo "==> [$VL] fp32 signaling-NaN bit-exact round-trip (issue #235)"
+python3 "$ROOT/tests/conformance/lib/check_fp32_nan.py" "TypeScript $VL" \
     --schema "$WORK/conf.yaml" \
     --scalar-message vecf32 --scalar-field a \
     --array-message vecf32a --array-field a \
     --array-default-message vecf32ad --array-default-field a \
-    --expect 10 --expect-normalize 2 --cwd "$WORK/conf" -- "$TH"
+    --expect 10 --expect-normalize 2 --cwd "$VW/conf" -- "$TH"
+
+# ONE decoder, fed two ways, must not drift. decode() and decoder()/feed() build
+# the same visitor over the same corelib IStream (CORELIB_PLAN S5.3.1), so what
+# is still free to vary is where the chunk boundaries fall -- and every S7
+# verdict has to be reached identically whether or not a field arrives in
+# pieces. This feeds the SAME bytes both ways, at six chunk sizes with one byte
+# at a time included, and requires deeply equal values.
+#
+# It also carries the LIFETIME half of the rule (CORELIB_PLAN S6.7 / S6.7.1,
+# generator#412): a decoded message must OWN its bytes, so the buffer it came
+# from may be overwritten the moment the call returns. Nothing else in this
+# suite reaches that -- every other decode here reads a buffer that stays alive
+# and unmodified, and an aliased destination reads back correctly out of one.
+# stream_check.ts destroys the input instead, on BOTH paths, and states in its
+# header which field kinds a pass can actually speak for.
+#
+# Run over the shared example (every field shape) and over nested_rows (the
+# wrapper-row collectors, depth 3).
+echo "==> [$VL] streaming: decode() and feed() must agree, and a decoded message owns its bytes"
+mk_stream_check "$VW/ex" \
+    'import { Myfirstmessage, Myfirstmessage__Decoder } from "./message.js";' \
+    'const _m = Myfirstmessage.fromJSON(JSON.parse(process.argv[2])); check("example", _m, Myfirstmessage.decode, () => new Myfirstmessage__Decoder());'
+( cd "$VW/ex" && npx tsx stream_check.ts "$IN" )
+
+# The two paths must also REJECT alike. Values only cover messages that decode;
+# a rejection additionally has an exception TYPE, and the paths reach it through
+# different code -- the cursor decodes strings inside the corelib, the visitor
+# transcodes in generated code. Only the cursor converted the fatal TextDecoder's
+# TypeError, so feed() threw a raw TypeError past any `instanceof SofabError`
+# guard (generator#297, Crucible F-0060 / codegen defect G-0037).
+#   5a  somestring (id 11) << 3 | 2 (FIXLEN)
+#   12  fixlen word: string subtype, length 2
+#   ff ff  two bytes that are not valid UTF-8
+mk_stream_check "$VW/ex" \
+    'import { Myfirstmessage, Myfirstmessage__Decoder } from "./message.js";' \
+    'checkReject("invalid utf-8", new Uint8Array([0x5a, 0x12, 0xff, 0xff]), Myfirstmessage.decode, () => new Myfirstmessage__Decoder());'
+( cd "$VW/ex" && npx tsx stream_check.ts )
+
+# ...and the OTHER half of that same rule, on the same bytes (CORELIB_PLAN S6.4.5,
+# generator#417). The rejection above is the corelib's: decodeUtf8 raises wherever
+# it is called from, so it says nothing about which fields generated code decides
+# to read. S6.4.5 -- validation runs only where a string is MATERIALIZED, never on
+# a skip, in any mode -- is about exactly that decision, and the same ff ff is a
+# non-event once it sits at a position the decoder steps over. The shared driver
+# beside the S7.3 markers runs the full nine-row table on both harness verbs; this
+# re-runs the two skip shapes through checkAccept for what the verbs cannot give,
+# the six-chunk-size sweep across BOTH decoders -- generator#300 was a skip that
+# was only wrong once a header and its payload landed in different feeds.
+#   9a 06  an id the schema does not declare (99), FIXLEN
+#   5a     somestring (id 11) << 3 | 2, with...
+#   13     ...a fixlen word announcing the BLOB subtype: a S7.3 skip at an id whose
+#          string destination is live, so only the subtype disqualifies the field
+#   12     fixlen word: string subtype, length 2
+#   ff ff  the same two bytes checkReject just required a rejection for
+#   00 2a  someu8 = 42, not its default 7: a skip that ate one byte too many or
+#          too few leaves somestring at "" either way, and cannot leave this at 42
+mk_stream_check "$VW/ex" \
+    'import { Myfirstmessage, Myfirstmessage__Decoder } from "./message.js";' \
+    'checkAccept("skipped invalid utf-8, undeclared id", new Uint8Array([0x9a, 0x06, 0x12, 0xff, 0xff, 0x00, 0x2a]), Myfirstmessage.decode, () => new Myfirstmessage__Decoder(), { somestring: "", someu8: 42 }); checkAccept("skipped invalid utf-8, blob subtype at the string id", new Uint8Array([0x5a, 0x13, 0xff, 0xff, 0x00, 0x2a]), Myfirstmessage.decode, () => new Myfirstmessage__Decoder(), { somestring: "", someu8: 42 });'
+( cd "$VW/ex" && npx tsx stream_check.ts )
+
+# ...and on the same VERDICT, not just the same exception type. An array header
+# whose element kind contradicts the declared field is skipped whole (S7.3), so
+# its count is NOT this field's count and must never be measured against this
+# field's capacity. The visitor bounded it by id alone, which turned a skippable
+# contradiction into INVALID -- visible only when the header arrives without the
+# elements behind it, i.e. only when chunked (generator#300, Crucible F-0061 /
+# codegen defect G-0038).
+#   7c  someuintarray (id 15, count 4) carrying the SIGNED-array wire type
+#   7f  count 127, then EOF -> a truncated skip -> INCOMPLETE on both paths
+mk_stream_check "$VW/ex" \
+    'import { Myfirstmessage, Myfirstmessage__Decoder } from "./message.js";' \
+    'checkReject("contradictory array kind", new Uint8Array([0x7c, 0x7f]), Myfirstmessage.decode, () => new Myfirstmessage__Decoder());'
+( cd "$VW/ex" && npx tsx stream_check.ts )
+
+# Declared integer width is a VALIDITY bound (MESSAGE_SPEC S7.1 + documentation#32,
+# generator#266, Crucible F-0033 / codegen defect G-0026). A value outside the
+# declared width is INVALID: it MUST NOT be masked to the width, and MUST NOT be
+# kept. someu8 is id 0 (header 0x00 = 0<<3 | unsigned), someu16 is id 1 (0x08).
+#   00 ff 7f = 16383 into a u8 -- the reported reproducer
+#   00 80 02 = 256   into a u8 -- one past the width
+#   08 f0 a2 04 = 70000 into a u16
+#   00 ff 01 = 255   into a u8 -- the in-range control: must decode and keep 255
+echo "==> [$VL] over-width scalar must be INVALID (S7.1, generator#266)"
+printf '\000\377\177'     > "$WORK/w_u8_16383.bin"
+printf '\000\200\002'     > "$WORK/w_u8_256.bin"
+printf '\010\360\242\004' > "$WORK/w_u16_70000.bin"
+printf '\000\377\001'     > "$WORK/w_u8_255_ctl.bin"
+for v in w_u8_16383 w_u8_256 w_u16_70000; do
+    if (cd "$VW/ex" && "$TH" decode myfirstmessage) < "$WORK/$v.bin" >/dev/null 2>&1; then
+        echo "FAIL: $v must be INVALID (S7.1) -- neither masked to the width nor kept"; exit 1
+    fi
+done
+OUT=$( (cd "$VW/ex" && "$TH" decode myfirstmessage) < "$WORK/w_u8_255_ctl.bin" ) || { echo "FAIL: in-range control 255 must decode"; exit 1; }
+echo "$OUT" | tr -d ' ' | grep -q '"someu8":255' || { echo "FAIL: control must keep 255 exactly; got: $OUT"; exit 1; }
+echo "==> [$VL] declared-width reject OK"
+
+}
+
+run_variant bigint
+run_variant long
+run_variant number
+
 
 # int64: long / number — the Long-backed 64-bit hot path must be wire-identical
 # to the default bigint representation (issue #51; corelib-ts #19/#20).
@@ -802,10 +977,6 @@ messages:
       rows: { id: 8, type: array, items: { type: array, count: 3, items: { type: u64, count: 3 } } }
 YAML
 for mode in bigint long number; do
-    cat > "$WORK/cfg_$mode.yaml" <<YAML
-generic: { emit: project }
-targets: { typescript: { int64: $mode } }
-YAML
     gen "$WORK/i64.yaml" "$WORK/i64-$mode" "$WORK/cfg_$mode.yaml"
     ln -s "$WORK/ex/node_modules" "$WORK/i64-$mode/node_modules"
 done
@@ -1064,27 +1235,26 @@ python3 "$ROOT/tests/conformance/lib/json_equal.py" "$(cat "$ROOT/tests/conforma
     --label "TypeScript: names.json round-trips through message m" || exit 1
 echo "==> conflict-free names OK"
 
-# ...and the same definitions again under `int64: long`, for every one that has a
-# 64-bit field. The loop above generates in the DEFAULT mode, so nothing here used
-# to typecheck the Long-backed shapes in a nested position — a struct or union
-# member, a wrapper row — even though the mode changes every 64-bit position in
-# the tree (#339 made that the scalars too). The mode touches nothing else, so
-# definitions without a u64/i64 are skipped rather than compiled twice.
-echo "==> corpus: 64-bit definitions typecheck under int64: long"
-cat > "$WORK/cfg_corpus_long.yaml" <<'YAML'
-generic: { emit: project }
-targets: { typescript: { int64: long } }
-YAML
-n64=0
-for def in "$ROOT"/tests/matrix/corpus/defs/*.yaml "$ROOT"/examples/messages/realworld/*.yaml; do
-    grep -Eq '\b(u64|i64)\b' "$def" || continue
-    name=$(basename "$def" .yaml)
-    gen "$def" "$WORK/corpus-long/$name" "$WORK/cfg_corpus_long.yaml"
-    ln -s "$WORK/ex/node_modules" "$WORK/corpus-long/$name/node_modules"
-    tsc_strict "$WORK/corpus-long/$name"
-    n64=$((n64 + 1))
+# ...and the same definitions again under `int64: long` and `int64: number`, for
+# every one that has a 64-bit field. The loop above generates in the DEFAULT mode,
+# so nothing here used to typecheck the Long-backed or number-backed shapes in a
+# nested position -- a struct or union member, a wrapper row -- even though the
+# mode changes every 64-bit position in the tree (#339 made that the scalars too).
+# The mode touches nothing else, so definitions without a u64/i64 are skipped
+# rather than compiled three times.
+for mode in long number; do
+    echo "==> corpus: 64-bit definitions typecheck under int64: $mode"
+    n64=0
+    for def in "$ROOT"/tests/matrix/corpus/defs/*.yaml "$ROOT"/examples/messages/realworld/*.yaml; do
+        grep -Eq '\b(u64|i64)\b' "$def" || continue
+        name=$(basename "$def" .yaml)
+        gen "$def" "$WORK/corpus-$mode/$name" "$WORK/cfg_$mode.yaml"
+        ln -s "$WORK/ex/node_modules" "$WORK/corpus-$mode/$name/node_modules"
+        tsc_strict "$WORK/corpus-$mode/$name"
+        n64=$((n64 + 1))
+    done
+    echo "==> int64: $mode corpus typechecks ($n64 definitions with a 64-bit field)"
 done
-echo "==> int64: long corpus typechecks ($n64 definitions with a 64-bit field)"
 
 # Nested WRAPPER rows round-trip, not only typecheck. Typechecking alone would
 # accept a collector that compiles but drops rows, so the shape that used to fail
@@ -1097,29 +1267,6 @@ NR='{"strrows":[["a","bb","ccc"],["","","zz"]],"blobrows":[[[1,2],[3]],[[],[9,9,
 NROUT=$(cd "$WORK/corpus/nested_rows" && printf '%s' "$NR" | "$TH" encode NestedRows | "$TH" decode NestedRows)
 [ "$NROUT" = "$NR" ] || { echo "FAIL: nested wrapper row round-trip drift"; echo "  in : $NR"; echo "  out: $NROUT"; exit 1; }
 echo "==> nested wrapper rows OK"
-
-# ONE decoder, fed two ways, must not drift. decode() and decoder()/feed() build
-# the same visitor over the same corelib IStream (CORELIB_PLAN S5.3.1), so what
-# is still free to vary is where the chunk boundaries fall -- and every S7
-# verdict has to be reached identically whether or not a field arrives in
-# pieces. This feeds the SAME bytes both ways, at six chunk sizes with one byte
-# at a time included, and requires deeply equal values.
-#
-# It also carries the LIFETIME half of the rule (CORELIB_PLAN S6.7 / S6.7.1,
-# generator#412): a decoded message must OWN its bytes, so the buffer it came
-# from may be overwritten the moment the call returns. Nothing else in this
-# suite reaches that -- every other decode here reads a buffer that stays alive
-# and unmodified, and an aliased destination reads back correctly out of one.
-# stream_check.ts destroys the input instead, on BOTH paths, and states in its
-# header which field kinds a pass can actually speak for.
-#
-# Run over the shared example (every field shape) and over nested_rows (the
-# wrapper-row collectors, depth 3).
-echo "==> streaming: decode() and feed() must agree, and a decoded message owns its bytes"
-mk_stream_check "$WORK/ex" \
-    'import { Myfirstmessage, Myfirstmessage__Decoder } from "./message.js";' \
-    'const _m = Myfirstmessage.fromJSON(JSON.parse(process.argv[2])); check("example", _m, Myfirstmessage.decode, () => new Myfirstmessage__Decoder());'
-( cd "$WORK/ex" && npx tsx stream_check.ts "$IN" )
 
 mk_stream_check "$WORK/corpus/nested_rows" \
     'import { NestedRows, NestedRows__Decoder } from "./message.js";' \
@@ -1141,78 +1288,6 @@ mk_stream_check "$WORK/corpus/nested_rows" \
     'checkReject("nested row element over u32", new Uint8Array([0x26, 0x03, 0x01, 0x80, 0x80, 0x80, 0x80, 0x10, 0x07]), NestedRows.decode, () => new NestedRows__Decoder());'
 ( cd "$WORK/corpus/nested_rows" && npx tsx stream_check.ts )
 
-# The two paths must also REJECT alike. Values only cover messages that decode;
-# a rejection additionally has an exception TYPE, and the paths reach it through
-# different code -- the cursor decodes strings inside the corelib, the visitor
-# transcodes in generated code. Only the cursor converted the fatal TextDecoder's
-# TypeError, so feed() threw a raw TypeError past any `instanceof SofabError`
-# guard (generator#297, Crucible F-0060 / codegen defect G-0037).
-#   5a  somestring (id 11) << 3 | 2 (FIXLEN)
-#   12  fixlen word: string subtype, length 2
-#   ff ff  two bytes that are not valid UTF-8
-mk_stream_check "$WORK/ex" \
-    'import { Myfirstmessage, Myfirstmessage__Decoder } from "./message.js";' \
-    'checkReject("invalid utf-8", new Uint8Array([0x5a, 0x12, 0xff, 0xff]), Myfirstmessage.decode, () => new Myfirstmessage__Decoder());'
-( cd "$WORK/ex" && npx tsx stream_check.ts )
-
-# ...and the OTHER half of that same rule, on the same bytes (CORELIB_PLAN S6.4.5,
-# generator#417). The rejection above is the corelib's: decodeUtf8 raises wherever
-# it is called from, so it says nothing about which fields generated code decides
-# to read. S6.4.5 -- validation runs only where a string is MATERIALIZED, never on
-# a skip, in any mode -- is about exactly that decision, and the same ff ff is a
-# non-event once it sits at a position the decoder steps over. The shared driver
-# beside the S7.3 markers runs the full nine-row table on both harness verbs; this
-# re-runs the two skip shapes through checkAccept for what the verbs cannot give,
-# the six-chunk-size sweep across BOTH decoders -- generator#300 was a skip that
-# was only wrong once a header and its payload landed in different feeds.
-#   9a 06  an id the schema does not declare (99), FIXLEN
-#   5a     somestring (id 11) << 3 | 2, with...
-#   13     ...a fixlen word announcing the BLOB subtype: a S7.3 skip at an id whose
-#          string destination is live, so only the subtype disqualifies the field
-#   12     fixlen word: string subtype, length 2
-#   ff ff  the same two bytes checkReject just required a rejection for
-#   00 2a  someu8 = 42, not its default 7: a skip that ate one byte too many or
-#          too few leaves somestring at "" either way, and cannot leave this at 42
-mk_stream_check "$WORK/ex" \
-    'import { Myfirstmessage, Myfirstmessage__Decoder } from "./message.js";' \
-    'checkAccept("skipped invalid utf-8, undeclared id", new Uint8Array([0x9a, 0x06, 0x12, 0xff, 0xff, 0x00, 0x2a]), Myfirstmessage.decode, () => new Myfirstmessage__Decoder(), { somestring: "", someu8: 42 }); checkAccept("skipped invalid utf-8, blob subtype at the string id", new Uint8Array([0x5a, 0x13, 0xff, 0xff, 0x00, 0x2a]), Myfirstmessage.decode, () => new Myfirstmessage__Decoder(), { somestring: "", someu8: 42 });'
-( cd "$WORK/ex" && npx tsx stream_check.ts )
-
-# ...and on the same VERDICT, not just the same exception type. An array header
-# whose element kind contradicts the declared field is skipped whole (S7.3), so
-# its count is NOT this field's count and must never be measured against this
-# field's capacity. The visitor bounded it by id alone, which turned a skippable
-# contradiction into INVALID -- visible only when the header arrives without the
-# elements behind it, i.e. only when chunked (generator#300, Crucible F-0061 /
-# codegen defect G-0038).
-#   7c  someuintarray (id 15, count 4) carrying the SIGNED-array wire type
-#   7f  count 127, then EOF -> a truncated skip -> INCOMPLETE on both paths
-mk_stream_check "$WORK/ex" \
-    'import { Myfirstmessage, Myfirstmessage__Decoder } from "./message.js";' \
-    'checkReject("contradictory array kind", new Uint8Array([0x7c, 0x7f]), Myfirstmessage.decode, () => new Myfirstmessage__Decoder());'
-( cd "$WORK/ex" && npx tsx stream_check.ts )
-
-# Declared integer width is a VALIDITY bound (MESSAGE_SPEC S7.1 + documentation#32,
-# generator#266, Crucible F-0033 / codegen defect G-0026). A value outside the
-# declared width is INVALID: it MUST NOT be masked to the width, and MUST NOT be
-# kept. someu8 is id 0 (header 0x00 = 0<<3 | unsigned), someu16 is id 1 (0x08).
-#   00 ff 7f = 16383 into a u8 -- the reported reproducer
-#   00 80 02 = 256   into a u8 -- one past the width
-#   08 f0 a2 04 = 70000 into a u16
-#   00 ff 01 = 255   into a u8 -- the in-range control: must decode and keep 255
-echo "==> over-width scalar must be INVALID (S7.1, generator#266)"
-printf '\000\377\177'     > "$WORK/w_u8_16383.bin"
-printf '\000\200\002'     > "$WORK/w_u8_256.bin"
-printf '\010\360\242\004' > "$WORK/w_u16_70000.bin"
-printf '\000\377\001'     > "$WORK/w_u8_255_ctl.bin"
-for v in w_u8_16383 w_u8_256 w_u16_70000; do
-    if (cd "$WORK/ex" && "$TH" decode myfirstmessage) < "$WORK/$v.bin" >/dev/null 2>&1; then
-        echo "FAIL: $v must be INVALID (S7.1) -- neither masked to the width nor kept"; exit 1
-    fi
-done
-OUT=$( (cd "$WORK/ex" && "$TH" decode myfirstmessage) < "$WORK/w_u8_255_ctl.bin" ) || { echo "FAIL: in-range control 255 must decode"; exit 1; }
-echo "$OUT" | tr -d ' ' | grep -q '"someu8":255' || { echo "FAIL: control must keep 255 exactly; got: $OUT"; exit 1; }
-echo "==> declared-width reject OK"
 
 # CORELIB_PLAN S7.2 item 8 -- the shared file's `sequence_growth` block
 # (generator#449). A wrapper array carries no element count: its length is
@@ -1317,8 +1392,12 @@ for mode in long number; do
     gen "$WORK/arrlen.yaml" "$WORK/arrlen-$mode" "$WORK/cfg_$mode.yaml"
     ln -s "$WORK/ex/node_modules" "$WORK/arrlen-$mode/node_modules"
     tsc_strict "$WORK/arrlen-$mode"
-    python3 "$ROOT/tests/conformance/lib/check_array_lengths.py" "typescript int64: $mode" \
-        --cwd "$WORK/arrlen-$mode" -- "$TH"
+    # Both verbs, as the default-mode run above: `streamdecode` is the half that
+    # drips one byte per feed, and its Long/number destinations are separate arms.
+    for surface in decode streamdecode; do
+        python3 "$ROOT/tests/conformance/lib/check_array_lengths.py" "typescript int64: $mode" \
+            --cwd "$WORK/arrlen-$mode" --verb "$surface" -- "$TH"
+    done
 done
 
 # MESSAGE_SPEC §7.4 -- a field id REPEATED inside one scope (generator#523). The
@@ -1386,17 +1465,18 @@ done
 # one-level array and at a row of an array of arrays (wrapper, enum, boolean,
 # depth 3). The corelib collectors order the two tests themselves; the driver
 # keeps every backend's row path to the same order. It prints its own schema.
-# Every int64 mode, since each generates its own module. `--sizes 1`: this
-# harness's streamdecode feeds ONE byte per call.
+# One run, default mode: the schema has no 64-bit field, so the projects of the
+# three `int64` modes are byte-identical and a loop over them would execute one
+# code path three times. If a 64-bit field is ever added to that schema, run it
+# per mode like the union driver above. `--sizes 1`: this harness's streamdecode
+# feeds ONE byte per call.
 echo "==> §7.3 before §7.1: a mistyped element past the bound is skipped (generator#627)"
 python3 "$ROOT/tests/conformance/lib/check_skip_before_bound.py" --emit-schema > "$WORK/sbb.yaml"
-for mode in bigint long number; do
-    gen "$WORK/sbb.yaml" "$WORK/sbb-$mode" "$WORK/cfg_$mode.yaml"
-    ln -s "$WORK/ex/node_modules" "$WORK/sbb-$mode/node_modules"
-    tsc_strict "$WORK/sbb-$mode"
-    python3 "$ROOT/tests/conformance/lib/check_skip_before_bound.py" "TypeScript int64: $mode" --sizes 1 \
-        --cwd "$WORK/sbb-$mode" -- "$TH"
-done
+gen "$WORK/sbb.yaml" "$WORK/sbb"
+ln -s "$WORK/ex/node_modules" "$WORK/sbb/node_modules"
+tsc_strict "$WORK/sbb"
+python3 "$ROOT/tests/conformance/lib/check_skip_before_bound.py" "TypeScript" --sizes 1 \
+    --cwd "$WORK/sbb" -- "$TH"
 
 # Nested defaults (generator#609): absence reads as the schema's defaults at every
 # depth and inside a struct array's element -- asserted against the driver's own
@@ -1463,13 +1543,23 @@ format_gen typescript "$WORK/fmt/growth" --config "$WORK/cfg_lim.yaml" --in "$WO
 format_gen typescript "$WORK/fmt/closed" --config "$WORK/cfg.yaml" --in "$WORK/closed.yaml"
 format_gen typescript "$WORK/fmt/arrlen" --config "$WORK/cfg.yaml" --in "$WORK/arrlen.yaml"
 format_gen typescript "$WORK/fmt/repeated" --config "$WORK/cfg.yaml" --in "$WORK/repeated.yaml"
+# The per-mode projects of run_variant: same schemas, the two non-default modes.
+for mode in long number; do
+    format_gen typescript "$WORK/fmt/ex-$mode" --config "$WORK/cfg_$mode.yaml" --in "$ROOT/examples/messages/example.yaml"
+    format_gen typescript "$WORK/fmt/conf-$mode" --config "$WORK/cfg_$mode.yaml" --in "$WORK/conf.yaml"
+    format_gen typescript "$WORK/fmt/fill-$mode" --config "$WORK/cfg_$mode.yaml" --in "$ROOT/tests/conformance/lib/maxsize_fill.yaml"
+    format_gen typescript "$WORK/fmt/lim-$mode" --config "$WORK/v-$mode/cfg_lim.yaml" --in "$WORK/dyn.yaml"
+    format_gen typescript "$WORK/fmt/wlim-$mode" --config "$WORK/v-$mode/cfg_wlim.yaml" --in "$WORK/wrap.yaml"
+    format_gen typescript "$WORK/fmt/refusal-$mode" --config "$WORK/v-$mode/cfg_refusal.yaml" --in "$WORK/refusal.yaml"
+done
 for mode in bigint long number; do
     format_gen typescript "$WORK/fmt/union-$mode" --config "$WORK/cfg_$mode.yaml" --in "$WORK/union.yaml"
     format_gen typescript "$WORK/fmt/i64-$mode" --config "$WORK/cfg_$mode.yaml" --in "$WORK/i64.yaml"
     format_gen typescript "$WORK/fmt/arrlen-$mode" --config "$WORK/cfg_$mode.yaml" --in "$WORK/arrlen.yaml"
 done
 format_gen_corpus typescript "$WORK/fmt" --config "$WORK/cfg.yaml"
-format_gen_corpus typescript "$WORK/fmt-long" --config "$WORK/cfg_corpus_long.yaml"
-check_format typescript "$WORK/fmt" "$WORK/fmt-long"
+format_gen_corpus typescript "$WORK/fmt-long" --config "$WORK/cfg_long.yaml"
+format_gen_corpus typescript "$WORK/fmt-number" --config "$WORK/cfg_number.yaml"
+check_format typescript "$WORK/fmt" "$WORK/fmt-long" "$WORK/fmt-number"
 
 echo "PASS"

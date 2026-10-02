@@ -1,12 +1,18 @@
 #!/usr/bin/env python3
 """Drive the generated TS harness against the shared wire vectors (byte-exact).
 
-Usage: check_vectors.py <test_vectors.json> <conf-project-dir>
+Usage: check_vectors.py <test_vectors.json> <conf-project-dir> [--int64-safe]
 For each single-field, id-0 scalar vector it feeds {"a": value} to
 `npx tsx harness.ts encode <message>` and compares the hex output byte-for-byte to
 the vector's `serialized_sparse` — the sparse-canonical bytes a generated encoder
 must produce (MESSAGE_SPEC S2): empty for a default-valued field, else the dense
 bytes. 64-bit values are passed as JSON strings (the TS harness parses BigInt).
+
+--int64-safe is for a build generated with `int64: number`, whose 64-bit SCALAR is
+a double and documented lossy above 2^53. A vector whose unsigned/signed value
+lies outside +-(2^53-1) cannot be encoded exactly from such a scalar, so it is
+NOT asserted there; each one is counted and named in the output rather than
+dropped quietly. Every other vector is still byte-exact.
 """
 import json
 import subprocess
@@ -38,8 +44,10 @@ def string_array_values(fields):
 
 def main() -> int:
     vectors_path, proj = sys.argv[1], sys.argv[2]
+    safe = "--int64-safe" in sys.argv[3:]
     data = json.load(open(vectors_path))
     checked = 0
+    unsafe = []
     for v in data["vectors"]:
         if v.get("offset", 0) != 0:
             continue
@@ -55,6 +63,9 @@ def main() -> int:
             if op in ("fp32", "fp64") and isinstance(val, str):  # inf/-inf
                 continue
             if op in ("unsigned", "signed"):
+                if safe and abs(int(val)) > 2**53 - 1:
+                    unsafe.append(v["name"])
+                    continue
                 payload = {"a": str(val)}  # bigint via string
             else:
                 payload = {"a": val}
@@ -73,6 +84,8 @@ def main() -> int:
             return 1
         checked += 1
     print(f"TypeScript shared-vector conformance: {checked} byte-exact")
+    if unsafe:
+        print(f"  --int64-safe: {len(unsafe)} vectors above 2^53 not asserted: {', '.join(unsafe)}")
     return 0 if checked else 1
 
 
