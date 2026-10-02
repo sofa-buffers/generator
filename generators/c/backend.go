@@ -1210,7 +1210,7 @@ func (g *gen) emitProtos(h *cfile, m *ir.Message, msgType string, root *objectPl
 		"the last verdict says whether it ended half-read.")
 	h.line("typedef struct {")
 	h.line("    sofab_istream_t is;")
-	h.line("    sofab_object_decoder_t dec[%d];", g.maxDepth(m.Fields)+1)
+	h.line("    sofab_object_decoder_t dec[%d];", seqDepth(m.Fields)+1)
 	h.line("} %s;", decT)
 	h.blank()
 	h.doc("Bind a decoder to msg. Call %s on msg first to apply defaults.", role(pfx, "init"))
@@ -1567,45 +1567,17 @@ func bitfieldC(ref *ir.TypeRef) string {
 	return "uint32_t"
 }
 
-// maxDepth returns the maximum struct/union nesting under fields (for the
-// decoder stack size). Array-of-string holders count as one level too.
-func (g *gen) maxDepth(fields []*ir.Field) int {
-	best := 0
-	for _, f := range fields {
-		d := 0
-		switch {
-		case f.Kind == ir.KindStruct || f.Kind == ir.KindUnion:
-			d = 1 + g.maxDepth(f.Ref.Target.Fields)
-		case f.Kind == ir.KindArray && isHolderElem(f.Elem):
-			d = g.arrayDepth(specOfField(f))
-		}
-		if d > best {
-			best = d
-		}
-	}
-	return best
-}
-
-// arrayDepth returns the sequence-nesting depth a holder-lowered array adds to
-// the decoder stack: the holder sequence itself plus whatever its elements nest.
-// string/blob holders are one level; struct/union elements add a per-element
-// sequence plus the element's own depth; nested arrays add their inner array's
-// depth. Native array elements contribute nothing beyond the holder.
-func (g *gen) arrayDepth(spec arraySpec) int {
-	switch spec.elem {
-	case ir.KindString, ir.KindBlob:
-		return 1
-	case ir.KindStruct, ir.KindUnion:
-		return 2 + g.maxDepth(spec.ref.Target.Fields)
-	case ir.KindArray:
-		return 1 + g.arrayDepth(specOfItems(spec.items))
-	}
-	return 0
-}
-
 func cfgString(cfg map[string]any, key, dflt string) string {
 	if v, ok := cfg[key].(string); ok && v != "" {
 		return v
 	}
 	return dflt
+}
+
+// seqDepth is the sequence nesting a message's decoder stack must hold (the
+// shared ir.SeqDepth). Analysis caps it at ir.MaxSeqDepth, so the decoder's
+// slot count never exceeds 256 and its 8-bit depth counter cannot wrap.
+func seqDepth(fields []*ir.Field) int {
+	d, _ := ir.SeqDepth(fields, map[string]bool{})
+	return d
 }

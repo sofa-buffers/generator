@@ -97,49 +97,23 @@ func (a *analyzer) resolveRef(r *ir.TypeRef, loc string) {
 	r.Target = target
 }
 
-// checkDepth enforces the shared MAX_NESTING_DEPTH = 256 cap (§4.2). Each
-// struct/union opens one nesting level. Cycles (recursive structs) are broken
-// at the back-edge: their runtime depth is data-dependent, not statically
-// bounded, so a cycle is not itself an error here.
+// checkDepth enforces the wire MAX_DEPTH = 255 cap (§4.9) on the number of
+// sequences a message can open (ir.SeqDepth): a struct/union opens one, an array
+// of struct/union two (wrapper + element), a string/blob array one, a native
+// array none. Cycles (recursive structs) are not statically bounded and are
+// rejected as circular elsewhere, so they are not themselves an error here.
 func (a *analyzer) checkDepth() {
 	for _, m := range a.schema.Messages {
-		a.walkDepth(m.Fields, 1, "messages/"+m.Name, map[string]bool{})
-	}
-}
-
-func (a *analyzer) walkDepth(fields []*ir.Field, depth int, loc string, onPath map[string]bool) {
-	if depth > ir.MaxNestingDepth {
-		a.add(loc, "nesting depth %d exceeds MAX_NESTING_DEPTH (%d)", depth, ir.MaxNestingDepth)
-		return
-	}
-	for _, f := range fields {
-		// A composite field, or a composite array element (array-of-struct /
-		// array-of-union), opens a nesting level; a nested array's element does
-		// too. enum/bitfield/scalar/string/blob elements are leaves.
-		a.descend(f.Ref, depth, loc+"/"+f.Name, onPath)
-		a.descend(f.ElemRef, depth, loc+"/"+f.Name, onPath)
-		for e := f.ElemItems; e != nil; e = e.ElemItems {
-			a.descend(e.ElemRef, depth, loc+"/"+f.Name, onPath)
+		d, ok := ir.SeqDepth(m.Fields, map[string]bool{})
+		if !ok || d <= ir.MaxSeqDepth {
+			continue
 		}
+		loc := "messages/" + m.Name
+		if p := ir.DeepestSeqPath(m.Fields, map[string]bool{}); p != "" {
+			loc += "/" + p
+		}
+		a.add(loc, "sequence depth %d exceeds MAX_DEPTH (%d)", d, ir.MaxSeqDepth)
 	}
-}
-
-// descend recurses into a struct/union target one nesting level deeper, breaking
-// recursive back-edges (their runtime depth is data-dependent, not static).
-func (a *analyzer) descend(r *ir.TypeRef, depth int, loc string, onPath map[string]bool) {
-	if r == nil || r.Target == nil {
-		return
-	}
-	t := r.Target
-	if t.Category != ir.CatStruct && t.Category != ir.CatUnion {
-		return
-	}
-	if onPath[t.Key] {
-		return
-	}
-	onPath[t.Key] = true
-	a.walkDepth(t.Fields, depth+1, loc, onPath)
-	delete(onPath, t.Key)
 }
 
 // unionSite is one place a union type is used: a union field, an array's union
