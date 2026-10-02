@@ -447,6 +447,48 @@ OUT=$($H decode myfirstmessage < "$WORK/skipped_occ_struct.bin") \
 echo "$OUT" | grep -q '"nestedstring":"x"' || { echo "FAIL: skipped occurrence must not clear the struct (nestedstring \"x\" lost); got: $OUT"; exit 1; }
 echo "==> skipped occurrence keeps struct OK"
 
+# The verdict AND the decoded value must not depend on where the chunks were cut
+# (CORELIB_PLAN S5.2/S6.0/S5.2.3, generator#413, #648). Every fixture the blocks
+# above built, rejects and controls alike, is fed through the streaming decoder at
+# six chunk sizes (1, 2, 3, 5, 16 and the whole message) and must equal the
+# unchunked streaming answer.
+echo "==> a chunk boundary must not change the verdict or the value (generator#413, #648)"
+python3 "$ROOT/tests/conformance/lib/check_chunk_invariance.py" "Kotlin" \
+    --message myfirstmessage --expect 27 \
+    "$WORK/control.bin" "$WORK/overcount.bin" \
+    "$WORK/fp64_at_fp32.bin" "$WORK/fp32_overcount.bin" \
+    "$WORK/overindex.bin" "$WORK/overindex_control.bin" \
+    "$WORK/overmaxlen.bin" "$WORK/overmaxlen_control.bin" \
+    "$WORK/overmaxlen_trunc.bin" "$WORK/inmaxlen_trunc.bin" \
+    "$WORK/wiremismatch.bin" "$WORK/wiremismatch_control.bin" \
+    "$WORK/arr_at_uscalar.bin" "$WORK/arr_at_iscalar.bin" "$WORK/arr_at_scalar_control.bin" \
+    "$WORK/mistyped_array.bin" "$WORK/mistyped_array_mirror.bin" \
+    "$WORK/mistyped_array_overcount.bin" "$WORK/mistyped_array_control.bin" \
+    "$WORK/fp_arr_at_scalar.bin" "$WORK/fp_arr_at_scalar_control.bin" \
+    "$WORK/reopen_struct.bin" "$WORK/reopen_array.bin" \
+    "$WORK/fixsubtype.bin" "$WORK/fixsubtype_control.bin" \
+    "$WORK/skipped_occ_array.bin" "$WORK/skipped_occ_struct.bin" \
+    -- "$H"
+
+# A receiver cap answers LimitExceeded, a schema bound InvalidMessage (CORELIB_PLAN
+# S6.3, generator#416, #648), on both decode surfaces. The generator#102 legs below
+# stay beside it: they also cover over-cap-then-EOF precedence (with a loose-cap
+# INCOMPLETE control), a skipped field never being capped and the latch, which this
+# table does not.
+echo "==> a cap is LIMIT_EXCEEDED, a schema bound is INVALID_MSG (S6.3, generator#416)"
+printf 'version: 1\nmessages:\n' > "$WORK/refusal.yaml"
+python3 "$ROOT/tests/conformance/lib/check_refusal_category.py" --emit-schema >> "$WORK/refusal.yaml"
+cat > "$WORK/refusalcfg.yaml" <<'YAML'
+generic: { emit: project, max_dyn_array_count: 4, max_dyn_string_len: 8, max_dyn_blob_len: 8 }
+targets: { kotlin: { package: message } }
+YAML
+build "$WORK/refusal.yaml" "$WORK/refusal" "$WORK/refusalcfg.yaml"
+for surface in decode streamdecode; do
+    python3 "$ROOT/tests/conformance/lib/check_refusal_category.py" "kotlin" \
+        --verb "$surface" --limit-pattern 'LIMIT_EXCEEDED' --invalid-pattern 'INVALID_MSG' \
+        -- "$WORK/refusal/build/install/harness/bin/harness"
+done
+
 # Receiver-side decode limits (generator#102): `a` is an UNBOUNDED u64 array
 # (id 0 -> header 0x03). With max_dyn_array_count: 4 a wire count of 5 MUST fail
 # with LIMIT_EXCEEDED (checked at the count header, before allocation); exactly 4
