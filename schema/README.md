@@ -63,7 +63,7 @@ rejected rather than ignored.
 |---|---|
 | `u8 u16 u32 u64` | unsigned ints; optional `default` (range-checked per width). For `u64`, a `default` beyond 2^53 must be a **JSON string** (exact) — see §8 |
 | `i8 i16 i32 i64` | signed ints; optional `default` (range-checked per width). For `i64`, a `default` beyond ±2^53 must be a **JSON string** — see §8 |
-| `fp32` `fp64` | floats; optional `default` (real number); optional `decimals` (0–15) |
+| `fp32` `fp64` | floats; optional `default` (finite real number); optional `decimals` (0–15) |
 | `boolean` | optional `default` |
 | `string` | optional `maxlen`, optional `default` |
 | `blob` | optional `maxlen`; `default` is base64 |

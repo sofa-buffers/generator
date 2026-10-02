@@ -1,0 +1,2 @@
+version: 1
+messages: { M: { payload: { a: { id: 0, type: array, items: { type: fp64, count: 2 }, default: [1.0, .inf] } } } }
