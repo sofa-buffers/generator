@@ -613,6 +613,9 @@ echo "==> [$VL] skipped occurrence keeps struct OK"
 # The throw comes from the GENERATED visitor since generator#388, not from the
 # corelib: the cap is applied per field, at that field's own count header. The
 # message names the field, which the corelib's could not -- it has no schema.
+# These local cap legs are NOT made redundant by the check_refusal_category.py run
+# below: they also cover over-cap-then-EOF precedence, a skipped field never
+# being capped, the bounded wrapper-element INVALID pair and the latch.
 echo "==> [$VL] receiver-side decode limits (generator#102)"
 cat > "$WORK/dyn.yaml" <<'YAML'
 version: 1
@@ -794,6 +797,14 @@ python3 "$ROOT/tests/conformance/lib/check_refusal_category.py" "typescript $VL"
     --max-dyn-array-count 4 --max-dyn-string-len 8 --max-dyn-blob-len 8 \
     --status-verb status --status-limit LIMIT_EXCEEDED \
     -- "$TH"
+# ...and through the chunked decoder, which prints the category as `[finish=<code>]`
+# (a thrown stack trace echoes the generated source, so `decode` is read through
+# `status` above instead).
+python3 "$ROOT/tests/conformance/lib/check_refusal_category.py" "typescript $VL" \
+    --cwd "$VW/refusal" --verb streamdecode \
+    --max-dyn-array-count 4 --max-dyn-string-len 8 --max-dyn-blob-len 8 \
+    --limit-pattern 'finish=LIMIT_EXCEEDED' --invalid-pattern 'finish=INVALID_MSG' \
+    -- "$TH"
 
 echo "==> [$VL] shared-vector byte-exact conformance"
 python3 "$ROOT/tests/conformance/typescript/check_vectors.py" "$CORELIB/assets/test_vectors.json" "$VW/conf" $SAFE
@@ -937,6 +948,28 @@ done
 OUT=$( (cd "$VW/ex" && "$TH" decode myfirstmessage) < "$WORK/w_u8_255_ctl.bin" ) || { echo "FAIL: in-range control 255 must decode"; exit 1; }
 echo "$OUT" | tr -d ' ' | grep -q '"someu8":255' || { echo "FAIL: control must keep 255 exactly; got: $OUT"; exit 1; }
 echo "==> [$VL] declared-width reject OK"
+
+# The verdict AND the decoded value must not depend on where the chunks were cut
+# (CORELIB_PLAN S5.2/S6.0/S5.2.3, generator#413, #648). Every fixture the blocks
+# above built, rejects and controls alike, is fed through the streaming decoder at
+# six chunk sizes (1, 2, 3, 5, 16 and the whole message) and must equal the
+# unchunked streaming answer, in every int64 mode. stream_check.ts keeps what a
+# JSON-printing harness cannot reach: in-memory values and the nested-row legs.
+echo "==> [$VL] a chunk boundary must not change the verdict or the value (generator#413, #648)"
+python3 "$ROOT/tests/conformance/lib/check_chunk_invariance.py" "typescript $VL" \
+    --message myfirstmessage --expect 25 --cwd "$VW/ex" \
+    "$WORK/control.bin" "$WORK/overcount.bin" \
+    "$WORK/overcount_trunc.bin" "$WORK/incount_trunc.bin" \
+    "$WORK/overwidth_trunc.bin" "$WORK/inwidth_trunc.bin" \
+    "$WORK/overindex.bin" "$WORK/overindex_control.bin" \
+    "$WORK/overmaxlen.bin" "$WORK/overmaxlen_control.bin" \
+    "$WORK/overmaxlen_trunc.bin" "$WORK/inmaxlen_trunc.bin" \
+    "$WORK/wiremismatch.bin" "$WORK/wiremismatch_control.bin" "$WORK/wiremismatch_seq.bin" \
+    "$WORK/reopen_struct.bin" "$WORK/reopen_array.bin" \
+    "$WORK/subtype_mismatch.bin" "$WORK/subtype_control.bin" \
+    "$WORK/skipped_occ_array.bin" "$WORK/skipped_occ_struct.bin" \
+    "$WORK/w_u8_16383.bin" "$WORK/w_u8_256.bin" "$WORK/w_u16_70000.bin" "$WORK/w_u8_255_ctl.bin" \
+    -- "$TH"
 
 }
 
@@ -1437,9 +1470,8 @@ python3 "$ROOT/tests/conformance/lib/check_repeated_id.py" "TypeScript" \
 # mode. `number` holds a 64-bit scalar in a double, documented as lossy above
 # 2^53, so it runs with --int64-safe.
 #
-# --sizes 1: this harness's streamdecode ignores the chunk size and feeds ONE
-# byte per call, so every byte offset is already a resume point; the driver's
-# other sizes would repeat the identical run.
+# --sizes 1: one split is enough for this table; the sweep over chunk sizes is
+# check_chunk_invariance.py's.
 #
 # union_api_check.ts then drives the generated union API itself (accessors,
 # select-if-not-held, what a real switch builds and releases, clear()), which
@@ -1469,8 +1501,8 @@ done
 # One run, default mode: the schema has no 64-bit field, so the projects of the
 # three `int64` modes are byte-identical and a loop over them would execute one
 # code path three times. If a 64-bit field is ever added to that schema, run it
-# per mode like the union driver above. `--sizes 1`: this harness's streamdecode
-# feeds ONE byte per call.
+# per mode like the union driver above. `--sizes 1`: one split is enough for this
+# table; the sweep over chunk sizes is check_chunk_invariance.py's.
 echo "==> §7.3 before §7.1: a mistyped element past the bound is skipped (generator#627)"
 python3 "$ROOT/tests/conformance/lib/check_skip_before_bound.py" --emit-schema > "$WORK/sbb.yaml"
 gen "$WORK/sbb.yaml" "$WORK/sbb"
