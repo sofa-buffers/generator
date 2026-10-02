@@ -2651,7 +2651,7 @@ func TestRustHarnessTreatsBothStatusesAsOrdinary(t *testing.T) {
 		t.Fatal("no src/main.rs")
 	}
 	for _, want := range []string{
-		"                    match dec.feed(&[*b]) {",
+		"                    match dec.feed(chunk) {",
 		"                        Ok(_) => {}",
 		"                        Err(e) => { eprintln!(\"decode error: {:?}\", e); std::process::exit(1); }",
 	} {

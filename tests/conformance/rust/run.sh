@@ -859,6 +859,32 @@ YAML
     echo "$OUT" | tr -d ' ' | grep -q '"someu8":255' || { echo "FAIL: [$label] control must keep 255; got: $OUT"; exit 1; }
     echo "==> [$label] declared-width reject OK"
 
+    # The verdict AND the decoded value must not depend on where the chunks were cut
+    # (CORELIB_PLAN S5.2/S6.0/S5.2.3, generator#413, #648). Every fixture the blocks
+    # above built, rejects and controls alike, is fed through the streaming decoder
+    # at six chunk sizes (1, 2, 3, 5, 16 and the whole message) and must equal the
+    # unchunked streaming answer. streaming_check*.rs keep what a JSON-printing
+    # harness cannot reach: in-memory values, the 40-deep skip and the truncation
+    # sweeps.
+    echo "==> [$label] a chunk boundary must not change the verdict or the value (generator#413, #648)"
+    python3 "$ROOT/tests/conformance/lib/check_chunk_invariance.py" "Rust [$label]" \
+        --message myfirstmessage --expect 34 --cwd "$WORK/ex-$label" \
+        "$WORK/control.bin" "$WORK/overcount.bin" "$WORK/fp64_at_fp32.bin" "$WORK/fp32_overcount.bin" \
+        "$WORK/overcount_trunc.bin" "$WORK/incount_trunc.bin" \
+        "$WORK/overindex.bin" "$WORK/overindex_control.bin" \
+        "$WORK/rowovercount.bin" "$WORK/rowovercount_control.bin" \
+        "$WORK/rowoverindex.bin" "$WORK/rowoverindex_control.bin" "$WORK/rowovercount_trunc.bin" \
+        "$WORK/overmaxlen.bin" "$WORK/overmaxlen_control.bin" \
+        "$WORK/overmaxlen_trunc.bin" "$WORK/inmaxlen_trunc.bin" \
+        "$WORK/wiremismatch.bin" "$WORK/wiremismatch_control.bin" \
+        "$WORK/arr_at_scalar_u.bin" "$WORK/arr_at_scalar_i.bin" "$WORK/arr_at_scalar_control.bin" \
+        "$WORK/fp_arr_at_scalar.bin" "$WORK/fp_arr_at_scalar_control.bin" \
+        "$WORK/reopen_struct.bin" "$WORK/reopen_array.bin" \
+        "$WORK/fixsubtype.bin" "$WORK/fixsubtype_control.bin" \
+        "$WORK/skipped_occ_array.bin" "$WORK/skipped_occ_struct.bin" \
+        "$WORK/w_u8_16383.bin" "$WORK/w_u8_256.bin" "$WORK/w_u16_70000.bin" "$WORK/w_u8_255_ctl.bin" \
+        -- cargo run -q --
+
     # An `enum` and a `bitfield` are bound by the WIDTH their declaration implies
     # (MESSAGE_SPEC S1, generator#516): for an enum the smallest SIGNED type
     # holding every declared constant, for a bitfield the smallest UNSIGNED type
@@ -1129,6 +1155,10 @@ LEG=${LEGSPEC%%:*}
 LEGCFG=${LEGSPEC#*:}
 WORK=$WORK_TOP/legs/$LEG
 mkdir -p "$WORK"
+# These local cap legs are NOT made redundant by the check_refusal_category.py run in
+# the growth loop below: they also cover over-cap-then-EOF precedence, a skipped
+# field never being capped, the same bytes under a looser cap and the post-limit
+# allocation budget.
 echo "==> [$LEG] receiver-side decode limits (generator#102, CORELIB_PLAN §6.2.1)"
 cat > "$WORK/dyn.yaml" <<'YAML'
 version: 1
@@ -1547,6 +1577,26 @@ for LEGSPEC in "rs:" "rs-static:, allow_dynamic: false"; do
     python3 "$ROOT/tests/conformance/lib/check_growth.py" \
         "$STD/assets/test_vectors.json" "Rust" --cap 4 \
         --cwd "$WORK/growth-$LEG" -- cargo run -q --
+
+    # A receiver cap answers LimitExceeded, a schema bound InvalidMessage (CORELIB_PLAN
+    # S6.3, generator#416, #648), on both decode surfaces, on both std storages. The
+    # generator#102 legs above stay beside it: they also cover over-cap-then-EOF
+    # precedence, a skipped field never being capped, and the post-limit allocation
+    # budget, which this table does not.
+    echo "==> [$LEG] a cap is LimitExceeded, a schema bound is InvalidMessage (S6.3, generator#416)"
+    printf 'version: 1\nmessages:\n' > "$WORK/refusal.yaml"
+    python3 "$ROOT/tests/conformance/lib/check_refusal_category.py" --emit-schema >> "$WORK/refusal.yaml"
+    ( cd "$ROOT" && go run ./cmd/sofabgen --format=off --config "$WORK/cfg-growth-$LEG.yaml" --lang rust \
+        --in "$WORK/refusal.yaml" --out "$WORK/refusal-$LEG" )
+    sed -i "s#\${SOFAB_RS_CORELIB}#$STD#" "$WORK/refusal-$LEG/Cargo.toml"
+    crate_bin_name "$WORK/refusal-$LEG"
+    ( cd "$WORK/refusal-$LEG" && cargo build -q )
+    for surface in decode streamdecode; do
+        python3 "$ROOT/tests/conformance/lib/check_refusal_category.py" "Rust [$LEG]" \
+            --cwd "$WORK/refusal-$LEG" --verb "$surface" \
+            --limit-pattern 'LimitExceeded' --invalid-pattern 'InvalidMsg' \
+            -- cargo run -q --
+    done
 done
 
 # max_message_size (generator#637, ARCHITECTURE §9.6): for an unbounded message the
