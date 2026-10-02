@@ -6,11 +6,14 @@
 
 ## The jobs
 
-`.github/workflows/ci.yml` runs on every push and pull request:
+`.github/workflows/ci.yml` runs on every push and pull request, and nightly
+(03:17 UTC, default branch) so a corelib change that breaks generated code is
+seen within a day without waiting for a generator change:
 
 | job | what it proves |
 |---|---|
 | `hermetic` | the generator builds and its unit + matrix tests pass, with no network |
+| `vector-copies` | every corelib's `assets/test_vectors.json` on `main` is byte-identical to `corelib-c-cpp`'s (see below) |
 | `lang-<x>` (10) | generated code for `<x>` compiles against the real corelib, round-trips JSON, encodes the shared vectors byte for byte, and decodes all 131 of them into a message declaring only their anchors — so every other field must be skipped — and, where its containers grow, replays the `sequence_growth` block (ARCHITECTURE §12 item 1) |
 | `lang-docs` | the `docs` target renders |
 | `build-binaries` | release artifacts (main only) |
@@ -101,11 +104,17 @@ The same variables work locally:
 SOFAB_CORELIB_CPP_REF=feat/type-reconciliation-seam tests/conformance/cpp/run.sh
 ```
 
-Every runner prints what it used, so a log never leaves you guessing:
+Every runner prints what it used, so a log never leaves you guessing. A clone
+logs its ref and the commit that ref resolved to; a path logs the checkout's
+commit, or says it is not a git checkout. Each runner then prints the blob SHA of
+the `assets/test_vectors.json` it reads:
 
 ```
-==> corelib-cpp @ feat/type-reconciliation-seam
-==> corelib-c-cpp @ main
+==> corelib-cpp @ feat/type-reconciliation-seam (<40-hex commit>)
+==> corelib-c-cpp @ main (<40-hex commit>)
+==> corelib-cpp: /path/to/corelib-cpp @ <40-hex commit>
+==> corelib-cpp: /path/to/non-git-dir (not a git checkout)
+==> corelib-c-cpp: assets/test_vectors.json blob <40-hex blob SHA>
 ```
 
 ### Two rules that keep this honest
@@ -133,3 +142,17 @@ pin exists to fix.
 
 Step 2 is what makes the pin safe to introduce: the file's presence in the diff
 is the reminder, and the reviewer sees the dependency without being told.
+
+## The vector copies
+
+The shared vectors live in `assets/test_vectors.json` of **every** corelib, with
+`corelib-c-cpp`'s copy canonical, and each `lang-<x>` suite reads its own
+corelib's copy. `tests/conformance/lib/check_vector_copies.sh` compares the git
+blob SHA of every corelib's copy on `main` (GitHub contents API) with the
+canonical one and exits non-zero, naming each corelib that differs. It runs in
+the `vector-copies` job, so the nightly run covers it too. An unreachable API is
+a failure, never a skip. To check a local checkout or a fork, name it:
+
+```sh
+tests/conformance/lib/check_vector_copies.sh corelib-go=/path/to/corelib-go
+```

@@ -24,7 +24,8 @@ if [ -z "$CORELIB" ]; then
     clone_corelib corelib-java "$WORK/corelib"
     CORELIB="$WORK/corelib"
 fi
-echo "==> corelib-java: $CORELIB"
+log_corelib corelib-java "$CORELIB"
+log_vectors corelib-java "$CORELIB"
 VER=$(grep -m1 '<version>' "$CORELIB/pom.xml" | sed 's/.*<version>\(.*\)<\/version>.*/\1/')
 echo "==> installing corelib-java $VER to local repo"
 ( cd "$CORELIB" && mvn -q -DskipTests install )

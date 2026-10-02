@@ -26,7 +26,8 @@ if [ -z "$CORELIB" ]; then
     clone_corelib corelib-go "$WORK/corelib"
     CORELIB="$WORK/corelib"
 fi
-echo "==> corelib-go: $CORELIB"
+log_corelib corelib-go "$CORELIB"
+log_vectors corelib-go "$CORELIB"
 
 cat > "$WORK/cfg.yaml" <<YAML
 generic: { emit: project }

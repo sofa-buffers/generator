@@ -25,5 +25,31 @@ clone_corelib() {
         echo "FAIL: cannot clone $_cl_repo at ref '$_cl_ref' (\$$_cl_var)"
         exit 1
     fi
-    echo "==> $_cl_repo @ $_cl_ref"
+    echo "==> $_cl_repo @ $_cl_ref ($(git -C "$_cl_dest" rev-parse HEAD))"
+}
+
+# log_corelib <repo> <dir>
+# Names the commit of a corelib checkout the suite is about to use, whether it
+# was cloned above or handed in by the caller, so a log ties a green run to the
+# exact corelib it tested. A directory that is not a git checkout says so.
+log_corelib() {
+    if _lc_sha=$(git -C "$2" rev-parse HEAD 2>/dev/null); then
+        echo "==> $1: $2 @ $_lc_sha"
+    else
+        echo "==> $1: $2 (not a git checkout)"
+    fi
+}
+
+# log_vectors <repo> <dir>
+# Prints the git blob SHA of the assets/test_vectors.json the suite reads from
+# <dir>. The file is copied into every corelib, so this is what shows which copy
+# a run used (tests/conformance/lib/check_vector_copies.sh compares them).
+log_vectors() {
+    _lv_file="$2/assets/test_vectors.json"
+    if [ -f "$_lv_file" ]; then
+        echo "==> $1: assets/test_vectors.json blob $(git hash-object "$_lv_file")"
+    else
+        echo "FAIL: $1 has no assets/test_vectors.json ($_lv_file)"
+        exit 1
+    fi
 }

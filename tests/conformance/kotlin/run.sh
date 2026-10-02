@@ -43,7 +43,8 @@ if [ -z "$CORELIB" ]; then
     CORELIB="$WORK/corelib"
 fi
 CORELIB=$(cd "$CORELIB" && pwd)
-echo "==> corelib-kotlin-mp: $CORELIB"
+log_corelib corelib-kotlin-mp "$CORELIB"
+log_vectors corelib-kotlin-mp "$CORELIB"
 GRADLEW="$CORELIB/gradlew"
 VER=$(sed -n 's/^version = "\(.*\)"$/\1/p' "$CORELIB/build.gradle.kts" | head -1)
 echo "==> publishing corelib-kotlin-mp $VER to the local Maven repo"

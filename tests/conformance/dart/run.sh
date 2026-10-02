@@ -33,7 +33,8 @@ if [ -z "$CORELIB" ]; then
     clone_corelib corelib-dart "$WORK/corelib"
     CORELIB="$WORK/corelib"
 fi
-echo "==> corelib-dart: $CORELIB"
+log_corelib corelib-dart "$CORELIB"
+log_vectors corelib-dart "$CORELIB"
 
 cat > "$WORK/cfg.yaml" <<'YAML'
 generic: { emit: project }

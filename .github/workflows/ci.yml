@@ -5,6 +5,11 @@ on:
     branches: [main]
   pull_request:
   workflow_dispatch:
+  # Nightly, so a corelib change that breaks generated code shows up within a day
+  # instead of at the next unrelated generator PR: every lang-<x> job clones the
+  # corelib at main. At most one run per day; scheduled runs use the default branch.
+  schedule:
+    - cron: "17 3 * * *"
 
 permissions:
   contents: read
@@ -42,6 +47,18 @@ jobs:
           for t in linux/amd64 linux/arm64 windows/amd64 darwin/arm64; do
             GOOS=${t%/*} GOARCH=${t#*/} CGO_ENABLED=0 go build -o /dev/null ./cmd/sofabgen
           done
+
+  # Each corelib carries its own copy of assets/test_vectors.json (canonical:
+  # corelib-c-cpp) and every lang-<x> suite reads its own corelib's copy. Fails,
+  # naming the corelib, when a copy on main has drifted. Needs the GitHub API.
+  vector-copies:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: test_vectors.json copies agree
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: ./tests/conformance/lib/check_vector_copies.sh
 
   # Distribution packaging: the PyPI wheel builder writes wheels by hand (stdlib
   # zipfile), so its RECORD, tags and script layout are only as correct as these
@@ -456,7 +473,7 @@ jobs:
   # (not a tag), so `sofabgen --version` on these binaries is traceable but never
   # collides with a real release version.
   build-binaries:
-    if: github.ref == 'refs/heads/main'
+    if: github.ref == 'refs/heads/main' && github.event_name != 'schedule'
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
