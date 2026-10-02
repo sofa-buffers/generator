@@ -955,14 +955,9 @@ YAML
     # SCHEMA's statement, and §6.2.1/§6.3 forbid answering a schema bound with
     # LimitExceeded.
     #
-    # c-cpp-static is a PINNED KNOWN GAP: its row lands in a fixed-capacity
-    # destination and corelib-c-cpp answers an element past that capacity with
-    # INVALID_ARGUMENT (the §6.6.3 destination tier), where §7.1/§6.3 make a
-    # schema count bound INVALID. The leg asserts today's verdict so it still has
-    # a negative control; when corelib-c-cpp is fixed it fails here, and the
-    # expectation becomes INVALID like every other variant.
+    # c-cpp-static used to answer INVALID_ARGUMENT here (the §6.6.3 destination
+    # tier); corelib-c-cpp#187 made it INVALID like every other variant.
     ROWS_WANT=INVALID
-    [ "$label" = c-cpp-static ] && ROWS_WANT=INVALID_ARGUMENT
     ROWS_OVER=$("$WORK/rows-$label/harness/harness" status NestedRows < "$WORK/rows-over-$label.bin")
     [ "$ROWS_OVER" = "$ROWS_WANT" ] \
         || { echo "FAIL: [$label] a row past its schema count is $ROWS_OVER, not $ROWS_WANT"; exit 1; }
