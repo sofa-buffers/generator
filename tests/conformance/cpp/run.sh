@@ -804,6 +804,55 @@ YAML
         --stream-verb streamdecode \
         -- "$WORK/closed-$label/harness/harness"
 
+    # The verdict AND the decoded value must not depend on where the chunks were
+    # cut (CORELIB_PLAN S5.2/S6.0/S5.2.3, generator#413, #648). Every fixture the
+    # blocks above built, rejects and controls alike, is fed through the streaming
+    # decoder at six chunk sizes (1, 2, 3, 5, 16 and the whole message) and must
+    # equal the unchunked streaming answer. streaming_check.cpp keeps what a
+    # JSON-printing harness cannot reach: in-memory values, the truncation sweep
+    # and ownership. The pure legs build the extra fixtures their corelib's
+    # per-field checks need (a measure phase, a wire-type guard).
+    echo "==> [$label] a chunk boundary must not change the verdict or the value (generator#413, #648)"
+    CHUNK_FIXTURES="$WORK/control.bin $WORK/overcount.bin $WORK/dos126.bin \
+        $WORK/overindex.bin $WORK/overindex_control.bin \
+        $WORK/fixsubtype.bin $WORK/fixsubtype_control.bin \
+        $WORK/reopen_struct.bin $WORK/reopen_array.bin \
+        $WORK/skipped_occ_array.bin $WORK/skipped_occ_struct.bin \
+        $WORK/w_u8_16383.bin $WORK/w_u8_256.bin $WORK/w_u16_70000.bin $WORK/w_u8_255_ctl.bin"
+    CHUNK_EXPECT=15
+    if [ -z "$corelib" ]; then
+        CHUNK_FIXTURES="$CHUNK_FIXTURES $WORK/overmaxlen.bin $WORK/overmaxlen_control.bin \
+            $WORK/subtypebound.bin $WORK/wiremismatch.bin $WORK/wiremismatch_control.bin \
+            $WORK/wiremismatch_seq.bin"
+        CHUNK_EXPECT=21
+    fi
+    python3 "$ROOT/tests/conformance/lib/check_chunk_invariance.py" "C++ [$label]" \
+        --message myfirstmessage --expect "$CHUNK_EXPECT" $CHUNK_FIXTURES \
+        -- "$WORK/ex-$label/harness/harness"
+
+    # A receiver cap answers LimitExceeded, a schema bound InvalidMessage (CORELIB_PLAN
+    # S6.3, generator#416, #648), on both decode surfaces. The pure legs only: the
+    # embedded profile has no receiver caps, every field being statically bounded.
+    # The local generator#102/#420 cap legs after the variant loop stay beside it --
+    # they also cover EOF precedence, a skipped field never being capped, the span
+    # budget and the allocation count, which this table does not.
+    if [ -z "$corelib" ]; then
+        echo "==> [$label] a cap is LimitExceeded, a schema bound is InvalidMessage (S6.3, generator#416)"
+        printf 'version: 1\nmessages:\n' > "$WORK/refusal.yaml"
+        python3 "$ROOT/tests/conformance/lib/check_refusal_category.py" --emit-schema >> "$WORK/refusal.yaml"
+        printf 'generic: { emit: project, max_dyn_array_count: 4, max_dyn_string_len: 8, max_dyn_blob_len: 8 }\ntargets: { cpp: { namespace: sofabuffers%s } }\n' \
+            "${dynamic:+, allow_dynamic: $dynamic}" > "$WORK/cfg-refusal-$label.yaml"
+        ( cd "$ROOT" && go run ./cmd/sofabgen --config "$WORK/cfg-refusal-$label.yaml" --lang cpp \
+            --in "$WORK/refusal.yaml" --out "$WORK/refusal-$label" )
+        make -C "$WORK/refusal-$label" "$@" >/dev/null
+        for surface in decode streamdecode; do
+            python3 "$ROOT/tests/conformance/lib/check_refusal_category.py" "C++ [$label]" \
+                --verb "$surface" --limit-pattern 'decode error: LIMIT_EXCEEDED' \
+                --invalid-pattern 'decode error: INVALID' \
+                -- "$WORK/refusal-$label/harness/harness"
+        done
+    fi
+
     echo "==> [$label] shared-vector byte-exact conformance"
     ( cd "$ROOT" && go run ./cmd/sofabgen --config "$WORK/cfg-$label.yaml" --lang cpp --in "$WORK/conf.yaml" --out "$WORK/conf-$label" )
     make -C "$WORK/conf-$label" "$@" >/dev/null
@@ -1100,6 +1149,9 @@ run_backend_tests generators/cpp SOFAB_CPP_DIR "$CPP"
 # the configured max_dyn_array_count must fail the decode (LimitExceeded, raised
 # inside sofab::readArrayCapped, which is handed the cap); the same bytes decode fine
 # without a configured limit.
+# These local cap legs are NOT made redundant by the check_refusal_category.py run
+# inside run_variant: they also cover a skipped field never being capped (#420),
+# the span budget, the allocation count and the same bytes under a looser cap.
 echo "==> [cpp] receiver-side decode limits (generator#102)"
 cat > "$WORK/dyn102.yaml" <<'YAML'
 version: 1
