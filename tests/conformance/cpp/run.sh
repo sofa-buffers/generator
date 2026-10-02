@@ -389,110 +389,107 @@ YAML
     "$WORK/ex-$label/harness/harness" decode myfirstmessage < "$WORK/overindex_control.bin" >/dev/null || { echo "FAIL: [$label] control (index 4 < 5) must decode"; exit 1; }
     echo "==> [$label] over-index reject OK"
 
-    if [ -z "$corelib" ]; then
-        # Over-maxlen scalar blob (Option B / MESSAGE_SPEC S7.1): someblob (id 12)
-        # declares maxlen: 16; a 17-byte blob exceeds it -> INVALID, never truncated.
-        # Wire: 62 (blob id12) 8b 01 (fixlen word len 17, blob subtype 3) + 17 bytes;
-        # control is 16 bytes. Pure corelib-cpp only: the c-cpp FixedBytes profile
-        # currently clamps to N (corelib-c-cpp#90), so it would accept the truncation.
-        echo "==> [$label] over-maxlen string/blob must reject (Option B, S7.1)"
-        printf '\142\213\001\001\001\001\001\001\001\001\001\001\001\001\001\001\001\001\001\001' > "$WORK/overmaxlen.bin"
-        printf '\142\203\001\001\001\001\001\001\001\001\001\001\001\001\001\001\001\001\001' > "$WORK/overmaxlen_control.bin"
-        if "$WORK/ex-$label/harness/harness" decode myfirstmessage < "$WORK/overmaxlen.bin" >/dev/null 2>&1; then
-            echo "FAIL: [$label] over-maxlen blob (17 > maxlen 16) must be INVALID"; exit 1
-        fi
-        "$WORK/ex-$label/harness/harness" decode myfirstmessage < "$WORK/overmaxlen_control.bin" >/dev/null || { echo "FAIL: [$label] control (16 == maxlen) must decode"; exit 1; }
-        echo "==> [$label] over-maxlen reject OK"
-
-        # Schema-bound INVALID dominates truncation (generator#216 / F-0032,
-        # MESSAGE_SPEC S5.2). corelib-cpp measures a whole field for completeness
-        # before delivering it, so a field that is BOTH over-bound and truncated
-        # would misreport INCOMPLETE. The generated measure-phase schema
-        # (setSchema, corelib-cpp#50) rejects at the deciding word instead. The
-        # `status` harness mode surfaces the verdict the bare non-zero exit hides.
-        # Each over-bound+truncated input MUST be INVALID; each in-bound+truncated
-        # control MUST stay INCOMPLETE. Pure corelib-cpp only (no measure phase in
-        # the c-cpp wrapper).
-        echo "==> [$label] schema-bound + truncation ordering (generator#216)"
-        # over-count: someuintarray (id 15) count 4; 7b 06 (count 6>4) 01 02 <EOF>.
-        ST=$(printf '\173\006\001\002' | "$WORK/ex-$label/harness/harness" status myfirstmessage | head -n1)
-        [ "$ST" = "INVALID" ] || { echo "FAIL: [$label] over-count(6>4)+truncated -> $ST (want INVALID)"; exit 1; }
-        ST=$(printf '\173\004\001\002' | "$WORK/ex-$label/harness/harness" status myfirstmessage | head -n1)
-        [ "$ST" = "INCOMPLETE" ] || { echo "FAIL: [$label] in-bound(4==4)+truncated -> $ST (want INCOMPLETE)"; exit 1; }
-        # over-maxlen: someblob (id 12) maxlen 16; 62 8b 01 (len 17>16) 01 <EOF>.
-        ST=$(printf '\142\213\001\001' | "$WORK/ex-$label/harness/harness" status myfirstmessage | head -n1)
-        [ "$ST" = "INVALID" ] || { echo "FAIL: [$label] over-maxlen(17>16)+truncated -> $ST (want INVALID)"; exit 1; }
-        ST=$(printf '\142\203\001\001' | "$WORK/ex-$label/harness/harness" status myfirstmessage | head -n1)
-        [ "$ST" = "INCOMPLETE" ] || { echo "FAIL: [$label] in-bound(16==16)+truncated -> $ST (want INCOMPLETE)"; exit 1; }
-        # over-index: somestringarray (id 18) count 5. A string element rides the
-        # FIXLEN wire type, and S7.3 is decided from the fixlen word's subtype -- a
-        # header alone does not yet say whether this is an element of THIS array.
-        # So the over-index reject fires from the fixlen word on, not on the element
-        # header (corelib-cpp#59 / c-cpp#119). 96 01 (seq id 18) 2a (elem index
-        # 5 >= 5, fixlen) 0a (fixlen word: len 1, subtype string) <EOF>: the payload
-        # is truncated, and the bound still wins.
-        ST=$(printf '\226\001\052\012' | "$WORK/ex-$label/harness/harness" status myfirstmessage | head -n1)
-        [ "$ST" = "INVALID" ] || { echo "FAIL: [$label] over-index(id5>=5)+truncated -> $ST (want INVALID)"; exit 1; }
-        # Cut BETWEEN the element header and its fixlen word: the subtype is not yet
-        # known, so S7.3 cannot be decided and no schema bound may be applied yet.
-        # INCOMPLETE, the analogue of S4.8's ruling for a fixlen array's two words.
-        ST=$(printf '\226\001\052' | "$WORK/ex-$label/harness/harness" status myfirstmessage | head -n1)
-        [ "$ST" = "INCOMPLETE" ] || { echo "FAIL: [$label] over-index cut before the fixlen word -> $ST (want INCOMPLETE)"; exit 1; }
-        ST=$(printf '\226\001\042' | "$WORK/ex-$label/harness/harness" status myfirstmessage | head -n1)
-        [ "$ST" = "INCOMPLETE" ] || { echo "FAIL: [$label] in-bound(id4<5)+truncated -> $ST (want INCOMPLETE)"; exit 1; }
-        echo "==> [$label] schema-bound/truncation ordering OK"
-
-        # The measure-phase bound is gated on the DECLARED fixlen subtype
-        # (MESSAGE_SPEC S7.3, generator#229). fp32/fp64/string/blob all share the
-        # Fixlen wire type, so a schema row that matched the wire type alone
-        # measured a CONTRADICTING value against the field's maxlen and rejected
-        # it, where S7.3 requires it be skipped like an unknown id. someblob
-        # (id 12) declares blob, maxlen 16 and defaults to "Hello".
-        # Wire: 62 (id 12, fixlen) 8a 01 (fixlen word: len 17, STRING subtype 2)
-        #       + 17 bytes -> the STRING contradicts the declared blob, so the
-        # field is skipped whole and someblob keeps its default. Pre-fix this was
-        # INVALID (17 > 16 measured against the blob's maxlen).
-        echo "==> [$label] a contradicting fixlen subtype carries no bound (S7.3, generator#229)"
-        printf '\142\212\001\101\101\101\101\101\101\101\101\101\101\101\101\101\101\101\101\101' > "$WORK/subtypebound.bin"
-        OUT=$("$WORK/ex-$label/harness/harness" decode myfirstmessage < "$WORK/subtypebound.bin") \
-            || { echo "FAIL: [$label] an over-maxlen STRING at a blob id must skip, not reject"; exit 1; }
-        echo "$OUT" | grep -q '"someblob":\[72,101,108,108,111\]' || { echo "FAIL: [$label] skipped fixlen field must keep its default \"Hello\"; got: $OUT"; exit 1; }
-        # Control: the MATCHING subtype at the same length still hits the bound
-        # (62 8b 01 = len 17, BLOB subtype 3) -- covered as INVALID above -- and
-        # the S5.2 anti-folding order is unchanged for it. The truncated form of
-        # the skipped shape is INCOMPLETE, never INVALID: a skipped field is still
-        # measured for completeness.
-        ST=$(printf '\142\212\001\101' | "$WORK/ex-$label/harness/harness" status myfirstmessage | head -n1)
-        [ "$ST" = "INCOMPLETE" ] || { echo "FAIL: [$label] truncated contradicting subtype -> $ST (want INCOMPLETE)"; exit 1; }
-        echo "==> [$label] subtype-gated bound OK"
-
-        # Contradictory wire type (MESSAGE_SPEC S7.3, generator#174): a field whose
-        # header wire type is not the one its declared type maps to -- for fixlen,
-        # including the subtype -- is SKIPPED, exactly like an unknown id. someu8
-        # (id 0) is declared u8 (unsigned wire type) and keeps its schema default 7.
-        # Wire: 01 = id 0 with wire type SIGNED (1), then the zig-zag varint 06.
-        # read<T>() does not check the wire type (it zig-zags on T's signedness
-        # alone), so without the generated guard this silently decoded to 6.
-        # Control: 00 09 is the same id with the correct wire type -> 9. A third
-        # vector, 06 07, gives the same id a SEQUENCE_START header closed by its
-        # SEQUENCE_END, so the skip has to drain a whole nested sequence.
-        # Pure corelib-cpp only: the guard needs is.wire()/is.fixType(), which the
-        # c-cpp wrapper does not expose (corelib-cpp#43 landed for corelib-cpp only).
-        echo "==> [$label] contradictory wire type must skip (MESSAGE_SPEC S7.3, generator#174)"
-        printf '\001\006' > "$WORK/wiremismatch.bin"
-        printf '\000\011' > "$WORK/wiremismatch_control.bin"
-        printf '\006\007' > "$WORK/wiremismatch_seq.bin"
-        OUT=$("$WORK/ex-$label/harness/harness" decode myfirstmessage < "$WORK/wiremismatch.bin") \
-            || { echo "FAIL: [$label] mismatched wire type must skip, not fail the decode"; exit 1; }
-        echo "$OUT" | grep -q '"someu8":7' || { echo "FAIL: [$label] skipped field must keep its default 7; got: $OUT"; exit 1; }
-        OUT=$("$WORK/ex-$label/harness/harness" decode myfirstmessage < "$WORK/wiremismatch_control.bin") \
-            || { echo "FAIL: [$label] control (correct wire type) must decode"; exit 1; }
-        echo "$OUT" | grep -q '"someu8":9' || { echo "FAIL: [$label] control must decode to 9; got: $OUT"; exit 1; }
-        OUT=$("$WORK/ex-$label/harness/harness" decode myfirstmessage < "$WORK/wiremismatch_seq.bin") \
-            || { echo "FAIL: [$label] sequence header on a scalar field must skip, not fail the decode"; exit 1; }
-        echo "$OUT" | grep -q '"someu8":7' || { echo "FAIL: [$label] skipped sequence must keep the default 7; got: $OUT"; exit 1; }
-        echo "==> [$label] wire-type skip OK"
+    # Over-maxlen scalar blob (Option B / MESSAGE_SPEC S7.1): someblob (id 12)
+    # declares maxlen: 16; a 17-byte blob exceeds it -> INVALID, never truncated.
+    # Wire: 62 (blob id12) 8b 01 (fixlen word len 17, blob subtype 3) + 17 bytes;
+    # control is 16 bytes. The harness names the category, so the reject is
+    # asserted as INVALID, not merely as a non-zero exit (a c-cpp FixedBytes<16>
+    # that ran out of room would also exit 1, but not as INVALID).
+    echo "==> [$label] over-maxlen string/blob must reject (Option B, S7.1)"
+    printf '\142\213\001\001\001\001\001\001\001\001\001\001\001\001\001\001\001\001\001\001' > "$WORK/overmaxlen.bin"
+    printf '\142\203\001\001\001\001\001\001\001\001\001\001\001\001\001\001\001\001\001' > "$WORK/overmaxlen_control.bin"
+    if "$WORK/ex-$label/harness/harness" decode myfirstmessage < "$WORK/overmaxlen.bin" >/dev/null 2>"$WORK/overmaxlen.err"; then
+        echo "FAIL: [$label] over-maxlen blob (17 > maxlen 16) must be INVALID"; exit 1
     fi
+    grep -q 'decode error: INVALID$' "$WORK/overmaxlen.err" || { echo "FAIL: [$label] over-maxlen blob must be INVALID; got: $(cat "$WORK/overmaxlen.err")"; exit 1; }
+    "$WORK/ex-$label/harness/harness" decode myfirstmessage < "$WORK/overmaxlen_control.bin" >/dev/null || { echo "FAIL: [$label] control (16 == maxlen) must decode"; exit 1; }
+    echo "==> [$label] over-maxlen reject OK"
+
+    # Schema-bound INVALID dominates truncation (generator#216 / F-0032,
+    # MESSAGE_SPEC S5.2). corelib-cpp measures a whole field for completeness
+    # before delivering it, so a field that is BOTH over-bound and truncated
+    # would misreport INCOMPLETE. The generated measure-phase schema
+    # (setSchema, corelib-cpp#50) rejects at the deciding word instead. The
+    # `status` harness mode surfaces the verdict the bare non-zero exit hides.
+    # Each over-bound+truncated input MUST be INVALID; each in-bound+truncated
+    # control MUST stay INCOMPLETE.
+    echo "==> [$label] schema-bound + truncation ordering (generator#216)"
+    # over-count: someuintarray (id 15) count 4; 7b 06 (count 6>4) 01 02 <EOF>.
+    ST=$(printf '\173\006\001\002' | "$WORK/ex-$label/harness/harness" status myfirstmessage | head -n1)
+    [ "$ST" = "INVALID" ] || { echo "FAIL: [$label] over-count(6>4)+truncated -> $ST (want INVALID)"; exit 1; }
+    ST=$(printf '\173\004\001\002' | "$WORK/ex-$label/harness/harness" status myfirstmessage | head -n1)
+    [ "$ST" = "INCOMPLETE" ] || { echo "FAIL: [$label] in-bound(4==4)+truncated -> $ST (want INCOMPLETE)"; exit 1; }
+    # over-maxlen: someblob (id 12) maxlen 16; 62 8b 01 (len 17>16) 01 <EOF>.
+    ST=$(printf '\142\213\001\001' | "$WORK/ex-$label/harness/harness" status myfirstmessage | head -n1)
+    [ "$ST" = "INVALID" ] || { echo "FAIL: [$label] over-maxlen(17>16)+truncated -> $ST (want INVALID)"; exit 1; }
+    ST=$(printf '\142\203\001\001' | "$WORK/ex-$label/harness/harness" status myfirstmessage | head -n1)
+    [ "$ST" = "INCOMPLETE" ] || { echo "FAIL: [$label] in-bound(16==16)+truncated -> $ST (want INCOMPLETE)"; exit 1; }
+    # over-index: somestringarray (id 18) count 5. A string element rides the
+    # FIXLEN wire type, and S7.3 is decided from the fixlen word's subtype -- a
+    # header alone does not yet say whether this is an element of THIS array.
+    # So the over-index reject fires from the fixlen word on, not on the element
+    # header (corelib-cpp#59 / c-cpp#119). 96 01 (seq id 18) 2a (elem index
+    # 5 >= 5, fixlen) 0a (fixlen word: len 1, subtype string) <EOF>: the payload
+    # is truncated, and the bound still wins.
+    ST=$(printf '\226\001\052\012' | "$WORK/ex-$label/harness/harness" status myfirstmessage | head -n1)
+    [ "$ST" = "INVALID" ] || { echo "FAIL: [$label] over-index(id5>=5)+truncated -> $ST (want INVALID)"; exit 1; }
+    # Cut BETWEEN the element header and its fixlen word: the subtype is not yet
+    # known, so S7.3 cannot be decided and no schema bound may be applied yet.
+    # INCOMPLETE, the analogue of S4.8's ruling for a fixlen array's two words.
+    ST=$(printf '\226\001\052' | "$WORK/ex-$label/harness/harness" status myfirstmessage | head -n1)
+    [ "$ST" = "INCOMPLETE" ] || { echo "FAIL: [$label] over-index cut before the fixlen word -> $ST (want INCOMPLETE)"; exit 1; }
+    ST=$(printf '\226\001\042' | "$WORK/ex-$label/harness/harness" status myfirstmessage | head -n1)
+    [ "$ST" = "INCOMPLETE" ] || { echo "FAIL: [$label] in-bound(id4<5)+truncated -> $ST (want INCOMPLETE)"; exit 1; }
+    echo "==> [$label] schema-bound/truncation ordering OK"
+
+    # The measure-phase bound is gated on the DECLARED fixlen subtype
+    # (MESSAGE_SPEC S7.3, generator#229). fp32/fp64/string/blob all share the
+    # Fixlen wire type, so a schema row that matched the wire type alone
+    # measured a CONTRADICTING value against the field's maxlen and rejected
+    # it, where S7.3 requires it be skipped like an unknown id. someblob
+    # (id 12) declares blob, maxlen 16 and defaults to "Hello".
+    # Wire: 62 (id 12, fixlen) 8a 01 (fixlen word: len 17, STRING subtype 2)
+    #       + 17 bytes -> the STRING contradicts the declared blob, so the
+    # field is skipped whole and someblob keeps its default. Pre-fix this was
+    # INVALID (17 > 16 measured against the blob's maxlen).
+    echo "==> [$label] a contradicting fixlen subtype carries no bound (S7.3, generator#229)"
+    printf '\142\212\001\101\101\101\101\101\101\101\101\101\101\101\101\101\101\101\101\101' > "$WORK/subtypebound.bin"
+    OUT=$("$WORK/ex-$label/harness/harness" decode myfirstmessage < "$WORK/subtypebound.bin") \
+        || { echo "FAIL: [$label] an over-maxlen STRING at a blob id must skip, not reject"; exit 1; }
+    echo "$OUT" | grep -q '"someblob":\[72,101,108,108,111\]' || { echo "FAIL: [$label] skipped fixlen field must keep its default \"Hello\"; got: $OUT"; exit 1; }
+    # Control: the MATCHING subtype at the same length still hits the bound
+    # (62 8b 01 = len 17, BLOB subtype 3) -- covered as INVALID above -- and
+    # the S5.2 anti-folding order is unchanged for it. The truncated form of
+    # the skipped shape is INCOMPLETE, never INVALID: a skipped field is still
+    # measured for completeness.
+    ST=$(printf '\142\212\001\101' | "$WORK/ex-$label/harness/harness" status myfirstmessage | head -n1)
+    [ "$ST" = "INCOMPLETE" ] || { echo "FAIL: [$label] truncated contradicting subtype -> $ST (want INCOMPLETE)"; exit 1; }
+    echo "==> [$label] subtype-gated bound OK"
+
+    # Contradictory wire type (MESSAGE_SPEC S7.3, generator#174): a field whose
+    # header wire type is not the one its declared type maps to -- for fixlen,
+    # including the subtype -- is SKIPPED, exactly like an unknown id. someu8
+    # (id 0) is declared u8 (unsigned wire type) and keeps its schema default 7.
+    # Wire: 01 = id 0 with wire type SIGNED (1), then the zig-zag varint 06.
+    # read<T>() does not check the wire type (it zig-zags on T's signedness
+    # alone), so without the generated guard this silently decoded to 6.
+    # Control: 00 09 is the same id with the correct wire type -> 9. A third
+    # vector, 06 07, gives the same id a SEQUENCE_START header closed by its
+    # SEQUENCE_END, so the skip has to drain a whole nested sequence.
+    echo "==> [$label] contradictory wire type must skip (MESSAGE_SPEC S7.3, generator#174)"
+    printf '\001\006' > "$WORK/wiremismatch.bin"
+    printf '\000\011' > "$WORK/wiremismatch_control.bin"
+    printf '\006\007' > "$WORK/wiremismatch_seq.bin"
+    OUT=$("$WORK/ex-$label/harness/harness" decode myfirstmessage < "$WORK/wiremismatch.bin") \
+        || { echo "FAIL: [$label] mismatched wire type must skip, not fail the decode"; exit 1; }
+    echo "$OUT" | grep -q '"someu8":7' || { echo "FAIL: [$label] skipped field must keep its default 7; got: $OUT"; exit 1; }
+    OUT=$("$WORK/ex-$label/harness/harness" decode myfirstmessage < "$WORK/wiremismatch_control.bin") \
+        || { echo "FAIL: [$label] control (correct wire type) must decode"; exit 1; }
+    echo "$OUT" | grep -q '"someu8":9' || { echo "FAIL: [$label] control must decode to 9; got: $OUT"; exit 1; }
+    OUT=$("$WORK/ex-$label/harness/harness" decode myfirstmessage < "$WORK/wiremismatch_seq.bin") \
+        || { echo "FAIL: [$label] sequence header on a scalar field must skip, not fail the decode"; exit 1; }
+    echo "$OUT" | grep -q '"someu8":7' || { echo "FAIL: [$label] skipped sequence must keep the default 7; got: $OUT"; exit 1; }
+    echo "==> [$label] wire-type skip OK"
 
     # Repeated field id (MESSAGE_SPEC S7.4, generator#175): last occurrence wins per
     # field id. A re-opened sequence CONTINUES its scope, so a struct merges and the
@@ -587,21 +584,14 @@ YAML
     # them: allow_dynamic picks std::string vs FixedString<N> for the destination,
     # which is the arm that validates.
     #
-    # Category: the pure legs pin INVALID on BOTH surfaces, off the error text the
-    # harness prints -- `decode error: INVALID` -- because pure corelib-cpp's
-    # Result carries the invalid()/incomplete()/limitExceeded() predicates and
-    # both the one-shot and the streaming arm name the category with them. Exit
+    # Category: every leg pins INVALID on BOTH surfaces, off the error text the
+    # harness prints -- `decode error: INVALID` -- because both corelibs' Result
+    # carry the invalid()/incomplete()/limitExceeded() predicates and both the
+    # one-shot and the streaming arm name the category with them. Exit
     # status alone would also accept a wrongly INCOMPLETE verdict, which is what a
     # decoder that mis-measures the payload reports the moment it walks off its
     # end.
     #
-    # The c-cpp legs have NO category channel, on either surface: the wrapper
-    # Result those builds use carries no predicates, so its arm prints a bare
-    # "decode error" -- the same gap the generator#411 block above records -- and
-    # those four INVALID rows are asserted on the exit status alone. That is
-    # stated rather than hidden. tests/conformance/c reaches the same C corelib
-    # through the C API, where both surfaces do name the category, so the
-    # substance is covered there.
     echo "==> [$label] a skipped string is not UTF-8-validated (CORELIB_PLAN S6.4.5, generator#417)"
     if [ -z "$corelib" ]; then
         for surface in decode streamdecode; do
@@ -620,9 +610,11 @@ YAML
         for surface in decode streamdecode; do
             python3 "$ROOT/tests/conformance/lib/check_skipped_string_utf8.py" "$label" \
                 --schema "$EXAMPLE" --verb "$surface" --no-declared-leg \
+                --invalid-pattern 'decode error: INVALID' \
                 -- "$WORK/ex-$label/harness/harness"
             python3 "$ROOT/tests/conformance/lib/check_skipped_string_utf8.py" "$label-strict" \
                 --schema "$EXAMPLE" --verb "$surface" \
+                --invalid-pattern 'decode error: INVALID' \
                 -- "$WORK/ex-$label-strict/harness/harness"
         done
     fi
@@ -651,9 +643,8 @@ YAML
     # writes and the values it asserts cannot drift from what this leg was built
     # with -- which is why the c-cpp legs hand it their own bounded schema.
     #
-    # The category is asserted on the pure legs only: the corelib-c-cpp harness
-    # has no `status` verb, the same split the nested-row check below makes. That
-    # leg is not decoration -- a corelib that skipped instead of rejecting would
+    # The category is asserted on every leg, off the harness's `status` verb. That
+    # is not decoration -- a corelib that skipped instead of rejecting would
     # still fail the decode on some rows, just as the wrong category.
     #
     # Run on BOTH decode surfaces. The verdict is the corelib's, taken at the
@@ -664,7 +655,7 @@ YAML
     echo "==> [$label] a string/blob/reserved fixlen-array subtype is INVALID (generator#411)"
     for surface in decode streamdecode; do
         FA_CAT=""
-        if [ -z "$corelib" ] && [ "$surface" = decode ]; then FA_CAT="--status-verb status"; fi
+        if [ "$surface" = decode ]; then FA_CAT="--status-verb status"; fi
         python3 "$ROOT/tests/conformance/lib/check_fixlen_array_subtype.py" "$label" \
             --schema "$EXAMPLE" --verb "$surface" $FA_CAT \
             -- "$WORK/ex-$label/harness/harness"
@@ -794,13 +785,6 @@ YAML
     #   cpp, cpp-static             : 12/12, 106 rows; the two over-width
     #                                 matrix:bitfield rows are storage-masked.
     #
-    # The c-cpp leg's category channel is the harness's own "decode error", not the
-    # named verdict the pure leg matches: sofab::Result on that wrapper carries no
-    # invalid()/incomplete()/limitExceeded() predicates, so its harness cannot name
-    # one (see cppProject's decode arm). It is still a decoder VERDICT and not a
-    # bare exit status -- a panic or a safety-checked abort prints nothing that
-    # matches it -- and every payload the driver forges is COMPLETE, so truncation
-    # cannot explain a rejection either.
     echo "==> [$label] enum/bitfield: the declared width is the bound (S1, generator#516)"
     { echo "version: 1"; echo "messages:"; } > "$WORK/closed-$label.yaml"
     python3 "$ROOT/tests/conformance/lib/check_declared_width_kinds.py" --emit-schema \
@@ -808,11 +792,10 @@ YAML
     ( cd "$ROOT" && go run ./cmd/sofabgen --config "$WORK/cfg-$label.yaml" --lang cpp \
         --in "$WORK/closed-$label.yaml" --out "$WORK/closed-$label" )
     make -C "$WORK/closed-$label" "$@" >/dev/null
+    CLOSED_PATTERN='decode error: INVALID'
     if [ -z "$corelib" ]; then
-        CLOSED_PATTERN='INVALID'
         CLOSED_MASKED='matrix:bitfield'
     else
-        CLOSED_PATTERN='decode error'
         CLOSED_MASKED=''
     fi
     python3 "$ROOT/tests/conformance/lib/check_declared_width_kinds.py" "$label" \
@@ -972,13 +955,18 @@ YAML
         || { echo "FAIL: [$label] control (row count == 3) must decode"; exit 1; }
     # ...and it is INVALID, not the policy category: the row's `count: 3` is the
     # SCHEMA's statement, and §6.2.1/§6.3 forbid answering a schema bound with
-    # LimitExceeded. Only the pure legs can be asked -- the corelib-c-cpp harness
-    # has no `status` verb -- and only they had the defect.
-    if [ -z "$corelib" ]; then
-        ROWS_OVER=$("$WORK/rows-$label/harness/harness" status NestedRows < "$WORK/rows-over-$label.bin")
-        [ "$ROWS_OVER" = INVALID ] \
-            || { echo "FAIL: [$label] a row past its schema count is $ROWS_OVER, not INVALID"; exit 1; }
-    fi
+    # LimitExceeded.
+    #
+    # c-cpp-static is the one leg that answers INVALID_ARGUMENT: the row lands in
+    # a fixed-capacity destination, and corelib-c-cpp reports an element past that
+    # capacity as the §6.6.3 "destination too short" tier rather than as the
+    # schema's INVALID. The reject itself (asserted above) holds; only the
+    # category is held back there until corelib-c-cpp refuses it as INVALID.
+    ROWS_OVER=$("$WORK/rows-$label/harness/harness" status NestedRows < "$WORK/rows-over-$label.bin")
+    ROWS_WANT=INVALID
+    [ "$label" = c-cpp-static ] && ROWS_WANT=INVALID_ARGUMENT
+    [ "$ROWS_OVER" = "$ROWS_WANT" ] \
+        || { echo "FAIL: [$label] a row past its schema count is $ROWS_OVER, not $ROWS_WANT"; exit 1; }
     echo "==> [$label] nested rows OK"
 
     # MESSAGE_SPEC §7.4 -- a field id REPEATED inside one scope (generator#523),
@@ -1031,16 +1019,14 @@ YAML
     # collectors order the two tests themselves; a row of an array of arrays goes
     # through a GENERATED collector on this target, which has to order them too.
     # Every profile -- the collector's bound is cap on the growable ones and the
-    # inline capacity on the static ones. The INVALID category is pinned where the
-    # harness can name it (corelib-cpp's `status` verb).
+    # inline capacity on the static ones. The INVALID category is pinned through the
+    # harness's `status` verb.
     echo "==> [$label] §7.3 before §7.1: a mistyped element past the bound is skipped (generator#627)"
     python3 "$ROOT/tests/conformance/lib/check_skip_before_bound.py" --emit-schema > "$WORK/sbb.yaml"
     ( cd "$ROOT" && go run ./cmd/sofabgen --config "$WORK/cfg-$label.yaml" --lang cpp \
         --in "$WORK/sbb.yaml" --out "$WORK/sbb-$label" )
     make -C "$WORK/sbb-$label" "$@" >/dev/null
-    SBB_CAT=""
-    if [ -z "$corelib" ]; then SBB_CAT="--status-verb status"; fi
-    python3 "$ROOT/tests/conformance/lib/check_skip_before_bound.py" "C++ [$label]" $SBB_CAT \
+    python3 "$ROOT/tests/conformance/lib/check_skip_before_bound.py" "C++ [$label]" --status-verb status \
         -- "$WORK/sbb-$label/harness/harness"
 
     # CORELIB_PLAN §4.4 (generator#644): every non-zero boolean reads as true and
@@ -1545,21 +1531,27 @@ ST=$("$WORK/lim228/harness/harness" status m < "$WORK/overcap228.bin" | head -n1
 # string. Nothing here is dynamic, yet a count-derived cap (5 * 10 = 50) rejected
 # it -- the exact opposite of the "legitimately schema-bounded fields always still
 # fit" property the cap exists to preserve.
-cat > "$WORK/cfg-lim228b.yaml" <<'YAML'
-generic: { emit: project, max_dyn_string_len: 16 }
-targets: { cpp: { namespace: sofabuffers } }
+# This leg and the #229 one below generate DIFFERENT storage code on cpp-static
+# (InlineVector<FixedString<16>, 5> / FixedBytes<4> instead of std::vector), so
+# they run on both storages. Every other cap leg above was checked to generate
+# identical code with and without allow_dynamic: false and runs once.
+for st in cpp cpp-static; do
+    DYN=""; [ "$st" = cpp-static ] && DYN=", allow_dynamic: false"
+    cat > "$WORK/cfg-lim228b-$st.yaml" <<YAML
+    generic: { emit: project, max_dyn_string_len: 16 }
+    targets: { cpp: { namespace: sofabuffers$DYN } }
 YAML
-cat > "$WORK/bnd228.yaml" <<'YAML'
-version: 1
-messages:
-  m:
-    payload:
-      sa: { id: 0, type: array, items: { type: string, count: 5, maxlen: 16 } }
-      s:  { id: 1, type: string }
+    cat > "$WORK/bnd228.yaml" <<'YAML'
+    version: 1
+    messages:
+      m:
+        payload:
+          sa: { id: 0, type: array, items: { type: string, count: 5, maxlen: 16 } }
+          s:  { id: 1, type: string }
 YAML
-( cd "$ROOT" && go run ./cmd/sofabgen --config "$WORK/cfg-lim228b.yaml" --lang cpp --in "$WORK/bnd228.yaml" --out "$WORK/lim228b" )
-make -C "$WORK/lim228b" SOFAB_CPP_DIR="$CPP" SOFAB_C_DIR="$CC" >/dev/null
-python3 -c "
+    ( cd "$ROOT" && go run ./cmd/sofabgen --config "$WORK/cfg-lim228b-$st.yaml" --lang cpp --in "$WORK/bnd228.yaml" --out "$WORK/lim228b-$st" )
+    make -C "$WORK/lim228b-$st" SOFAB_CPP_DIR="$CPP" SOFAB_C_DIR="$CC" >/dev/null
+    python3 -c "
 import sys
 def varint(x):
     out = bytearray()
@@ -1572,11 +1564,11 @@ for i in range(5):                                       # element id IS its ind
     out += varint((i << 3) | 2) + varint((16 << 3) | 2) + b'A' * 16
 out += bytes([0x07])                                     # sequence end
 sys.stdout.buffer.write(bytes(out))" > "$WORK/bnd228.bin"
-ST=$("$WORK/lim228b/harness/harness" status m < "$WORK/bnd228.bin" | head -n1)
-[ "$ST" = "COMPLETE" ] || { echo "FAIL: [cpp] a fully schema-bounded string array -> $ST (want COMPLETE)"; exit 1; }
-# Amplification control: a fixlen field claiming far more than any legitimate
-# field span is still stopped at the length word, before the bytes are buffered.
-python3 -c "
+    ST=$("$WORK/lim228b-$st/harness/harness" status m < "$WORK/bnd228.bin" | head -n1)
+    [ "$ST" = "COMPLETE" ] || { echo "FAIL: [$st] a fully schema-bounded string array -> $ST (want COMPLETE)"; exit 1; }
+    # Amplification control: a fixlen field claiming far more than any legitimate
+    # field span is still stopped at the length word, before the bytes are buffered.
+    python3 -c "
 import sys
 def varint(x):
     out = bytearray()
@@ -1585,50 +1577,55 @@ def varint(x):
         out.append(b | 0x80 if x else b)
         if not x: return bytes(out)
 sys.stdout.buffer.write(bytes([0x0a]) + varint((1000000 << 3) | 2) + b'A' * 4)" > "$WORK/amp228.bin"
-ST=$("$WORK/lim228b/harness/harness" status m < "$WORK/amp228.bin" | head -n1)
-[ "$ST" = "LIMIT_EXCEEDED" ] || { echo "FAIL: [cpp] a 1 MB fixlen claim -> $ST (want LIMIT_EXCEEDED)"; exit 1; }
-echo "==> [cpp] byte-dimensioned reassembly cap OK"
+    ST=$("$WORK/lim228b-$st/harness/harness" status m < "$WORK/amp228.bin" | head -n1)
+    [ "$ST" = "LIMIT_EXCEEDED" ] || { echo "FAIL: [$st] a 1 MB fixlen claim -> $ST (want LIMIT_EXCEEDED)"; exit 1; }
+done
+echo "==> [cpp, cpp-static] byte-dimensioned reassembly cap OK"
 
 # generator#229 verbatim reproducer: a NESTED maxlen-4 blob (so the bound lives in
 # a child SeqNode, the descend-into-child measure path) carrying an fp64 value. The
 # subtype contradicts the declared blob, so S7.3 skips the field -- but the
 # measure-phase schema used to maxlen-check any Fixlen at the id and reject the
-# 8-byte payload as INVALID. Pure corelib-cpp only (no measure phase in c-cpp).
+# 8-byte payload as INVALID. Runs on both storages of corelib-cpp.
 echo "==> [cpp] nested maxlen-4 blob vs a contradicting fp64 (generator#229)"
-cat > "$WORK/probe229.yaml" <<'YAML'
-version: 1
-messages:
-  probe:
-    payload:
-      nested:
-        id: 10
-        type: struct
-        fields:
-          bytes_field: { id: 3, type: blob, maxlen: 4 }
+for st in cpp cpp-static; do
+    DYN=""; [ "$st" = cpp-static ] && DYN=", allow_dynamic: false"
+    printf 'generic: { emit: project }\ntargets: { cpp: { namespace: sofabuffers%s } }\n' "$DYN" > "$WORK/cfg-nolimits-$st.yaml"
+    cat > "$WORK/probe229.yaml" <<'YAML'
+    version: 1
+    messages:
+      probe:
+        payload:
+          nested:
+            id: 10
+            type: struct
+            fields:
+              bytes_field: { id: 3, type: blob, maxlen: 4 }
 YAML
-( cd "$ROOT" && go run ./cmd/sofabgen --config "$WORK/cfg-nolimits.yaml" --lang cpp --in "$WORK/probe229.yaml" --out "$WORK/probe229" )
-make -C "$WORK/probe229" SOFAB_CPP_DIR="$CPP" SOFAB_C_DIR="$CC" >/dev/null
-# 56 (seq start id 10) 1a (fixlen id 3) 41 (fixlen word: len 8, FP64 subtype 1)
-# + the 8 bytes of 1.5 + 07 (seq end).
-printf '\126\032\101\000\000\000\000\000\000\370\077\007' > "$WORK/f229_fp64.bin"
-DEC=$("$WORK/probe229/harness/harness" decode probe < "$WORK/f229_fp64.bin") \
-    || { echo "FAIL: [cpp] an fp64 at a maxlen-4 blob id must skip, not reject (generator#229)"; exit 1; }
-echo "$DEC" | grep -q '"bytes_field":\[\]' || { echo "FAIL: [cpp] the skipped fp64 must leave bytes_field at its default; got: $DEC"; exit 1; }
-# Control: the same 8-byte payload with the MATCHING blob subtype (43 = len 8,
-# BLOB subtype 3) is genuinely over maxlen 4 -> INVALID; the bound still bites.
-printf '\126\032\103\000\000\000\000\000\000\370\077\007' > "$WORK/f229_blob8.bin"
-ST=$("$WORK/probe229/harness/harness" status probe < "$WORK/f229_blob8.bin" | head -n1)
-[ "$ST" = "INVALID" ] || { echo "FAIL: [cpp] an 8-byte BLOB at maxlen 4 -> $ST (want INVALID)"; exit 1; }
-# Control: over-bound AND truncated with the matching subtype still resolves to
-# INVALID, i.e. the gate did not weaken the S5.2 anti-folding order.
-ST=$(printf '\126\032\103\000\000' | "$WORK/probe229/harness/harness" status probe | head -n1)
-[ "$ST" = "INVALID" ] || { echo "FAIL: [cpp] over-maxlen(8>4)+truncated -> $ST (want INVALID)"; exit 1; }
-# Control: an in-bound blob (23 = len 4, BLOB subtype 3) decodes to its bytes.
-printf '\126\032\043\001\002\003\004\007' > "$WORK/f229_blob4.bin"
-DEC=$("$WORK/probe229/harness/harness" decode probe < "$WORK/f229_blob4.bin") \
-    || { echo "FAIL: [cpp] an in-bound blob must decode"; exit 1; }
-echo "$DEC" | grep -q '"bytes_field":\[1,2,3,4\]' || { echo "FAIL: [cpp] in-bound blob lost its bytes; got: $DEC"; exit 1; }
-echo "==> [cpp] nested subtype-gated bound OK"
+    ( cd "$ROOT" && go run ./cmd/sofabgen --config "$WORK/cfg-nolimits-$st.yaml" --lang cpp --in "$WORK/probe229.yaml" --out "$WORK/probe229-$st" )
+    make -C "$WORK/probe229-$st" SOFAB_CPP_DIR="$CPP" SOFAB_C_DIR="$CC" >/dev/null
+    # 56 (seq start id 10) 1a (fixlen id 3) 41 (fixlen word: len 8, FP64 subtype 1)
+    # + the 8 bytes of 1.5 + 07 (seq end).
+    printf '\126\032\101\000\000\000\000\000\000\370\077\007' > "$WORK/f229_fp64.bin"
+    DEC=$("$WORK/probe229-$st/harness/harness" decode probe < "$WORK/f229_fp64.bin") \
+        || { echo "FAIL: [$st] an fp64 at a maxlen-4 blob id must skip, not reject (generator#229)"; exit 1; }
+    echo "$DEC" | grep -q '"bytes_field":\[\]' || { echo "FAIL: [$st] the skipped fp64 must leave bytes_field at its default; got: $DEC"; exit 1; }
+    # Control: the same 8-byte payload with the MATCHING blob subtype (43 = len 8,
+    # BLOB subtype 3) is genuinely over maxlen 4 -> INVALID; the bound still bites.
+    printf '\126\032\103\000\000\000\000\000\000\370\077\007' > "$WORK/f229_blob8.bin"
+    ST=$("$WORK/probe229-$st/harness/harness" status probe < "$WORK/f229_blob8.bin" | head -n1)
+    [ "$ST" = "INVALID" ] || { echo "FAIL: [$st] an 8-byte BLOB at maxlen 4 -> $ST (want INVALID)"; exit 1; }
+    # Control: over-bound AND truncated with the matching subtype still resolves to
+    # INVALID, i.e. the gate did not weaken the S5.2 anti-folding order.
+    ST=$(printf '\126\032\103\000\000' | "$WORK/probe229-$st/harness/harness" status probe | head -n1)
+    [ "$ST" = "INVALID" ] || { echo "FAIL: [$st] over-maxlen(8>4)+truncated -> $ST (want INVALID)"; exit 1; }
+    # Control: an in-bound blob (23 = len 4, BLOB subtype 3) decodes to its bytes.
+    printf '\126\032\043\001\002\003\004\007' > "$WORK/f229_blob4.bin"
+    DEC=$("$WORK/probe229-$st/harness/harness" decode probe < "$WORK/f229_blob4.bin") \
+        || { echo "FAIL: [$st] an in-bound blob must decode"; exit 1; }
+    echo "$DEC" | grep -q '"bytes_field":\[1,2,3,4\]' || { echo "FAIL: [$st] in-bound blob lost its bytes; got: $DEC"; exit 1; }
+done
+echo "==> [cpp, cpp-static] nested subtype-gated bound OK"
 
 # corelib-c-cpp feature-subset configs. The C++ wrapper (sofab/sofab.hpp) gates
 # its methods on ARRAY / FP64 / INT64 (SOFAB_CPP_HAVE_*), so generated C++ that
@@ -1699,6 +1696,8 @@ echo "==> C++ feature-subset configs OK"
 #
 # The index check lives in GENERATED code in every backend, which is why this
 # runs here and not only in the corelibs.
+# Storage-independent: this schema generates identical code with and without
+# allow_dynamic: false (checked), so it runs once.
 echo "==> sequence_growth: a wrapper array grows to its highest id, and the index is the bound"
 printf 'version: 1\nmessages:\n' > "$WORK/growth.yaml"
 python3 "$ROOT/tests/conformance/lib/check_growth.py" --emit-schema >> "$WORK/growth.yaml"

@@ -2431,11 +2431,18 @@ MUST agree on which messages are valid," regardless of allocation strategy.
   flag), but the generated maxlen guard now fires first and sets the `inv` flag,
   so the outcome is `INVALID` (not a capacity error) — converging with the heap
   families. No corelib change was needed.
-- **C and C++ `c-cpp` still clamp** — corelib-c-cpp's `FixedString`/`FixedBytes`
-  `set_len` truncates to `N` (`len_ = n > N ? N : n`), so an over-`maxlen` value
-  is silently accepted, shortened. This is a §7.1 violation the generator cannot
-  fix on its own — the c-cpp `IStreamImpl` exposes no `invalidate()` hook (the
-  same gap the over-index reject hit) — so it is tracked as **corelib-c-cpp#90**.
+- **C and C++ `c-cpp` reject too** — corelib-c-cpp's `FixedString`/`FixedBytes`
+  decode path refuses an over-`maxlen` value (corelib-c-cpp#90, closed), so the
+  outcome is `INVALID` and not a clamp to `N`. The `cpp` conformance suite runs
+  the over-maxlen, truncation-ordering, subtype-gated and wire-type-skip legs on
+  all four variants (`cpp`, `cpp-static`, `c-cpp-dynamic`, `c-cpp-static`), and
+  the c-cpp harness names the §6.3 category (`decode error: <CATEGORY>` on both
+  decode verbs, plus the `status` verb) from `Result::invalid()` /
+  `incomplete()` / `limitExceeded()` / `code()`, so those legs assert the
+  category and not only the exit status. One category is still held back: a
+  nested row past its schema count is `INVALID_ARGUMENT` on `c-cpp-static`
+  (element past a fixed destination's capacity, the §6.6.3 tier) instead of
+  `INVALID`.
 
 #### Decode verdict: an over-width integer is INVALID (every target but `c`/`cpp-c-cpp`)
 
