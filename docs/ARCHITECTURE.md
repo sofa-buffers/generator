@@ -537,6 +537,16 @@ A backend is a self-contained, additive plugin. The contract:
 - **Emit modes** (`emit`): `sources` = just the message types; `project` = a
   buildable project (build files + an encode/decode **canonical-JSON harness**
   that the conformance tests drive).
+  The harness is test scaffolding, not generated message code, and the §8
+  "no silent static helpers" rule does not apply to its JSON front door. The Go
+  and Rust harnesses carry a schema-independent block that maps the strings
+  `"inf"`/`"-inf"` (how the shared vectors write an infinite float) onto a float
+  position, because `encoding/json` and `serde_json` have no number for an
+  infinity. It cannot live in `corelib-go` / `corelib-rs`: those libraries have
+  no JSON layer (they never see JSON), and adding one only for a test harness
+  would put test-only code into the library users ship. The Java harness's
+  `Json.java` and the Kotlin and C# harness spellings are the same kind of code.
+  A user building from `emit: sources` never receives it.
 - **Determinism**: identical (definition, config) → byte-identical output.
 
 ### Generated-code principles (every backend follows these)

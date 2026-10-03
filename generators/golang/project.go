@@ -471,7 +471,8 @@ func defaultMessage(s *ir.Schema) string {
 	return ""
 }
 
-// emitInfSpelling emits unmarshalJSON, the harness's JSON front door. It is
+// emitInfSpelling emits unmarshalJSON, the harness's JSON front door (harness-only
+// scaffolding, never part of emit: sources; see ARCHITECTURE §8 emit modes). It is
 // json.Unmarshal plus the one spelling encoding/json has no number for: the
 // strings "inf" and "-inf" at a float position, which is how the shared vector
 // file writes an infinite float and how the encode driver passes it on

@@ -349,7 +349,8 @@ func defaultMessage(s *ir.Schema) string {
 
 var _ = ir.KindU8
 
-// emitInfSpelling emits from_json, the harness's JSON front door. serde_json has
+// emitInfSpelling emits from_json, the harness's JSON front door (harness-only
+// scaffolding, never part of emit: sources; see ARCHITECTURE §8 emit modes). serde_json has
 // no number for an infinity, so the strings "inf" and "-inf" are accepted at a
 // float position instead: that is how the shared vector file writes one and how
 // the encode driver passes it on (tests/conformance/lib/check_vectors_encode.py).
