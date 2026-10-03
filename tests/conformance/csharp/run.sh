@@ -464,10 +464,11 @@ echo "==> skipped occurrence keeps struct OK"
 # A receiver cap answers LimitExceeded, a schema bound InvalidMessage (CORELIB_PLAN
 # S6.3, generator#416, #648), on both decode surfaces. The generator#102 legs below
 # stay beside it: they also cover over-cap-then-EOF precedence, a skipped field
-# never being capped and the latch, which this table does not.
+# never being capped, which this table does not.
 echo "==> a cap is LimitExceeded, a schema bound is InvalidMessage (S6.3, generator#416)"
 printf 'version: 1\nmessages:\n' > "$WORK/refusal.yaml"
 python3 "$ROOT/tests/conformance/lib/check_refusal_category.py" --emit-schema >> "$WORK/refusal.yaml"
+python3 "$ROOT/tests/conformance/lib/check_terminal_refusal.py" --emit-schema >> "$WORK/refusal.yaml"
 cat > "$WORK/cfg-refusal.yaml" <<'YAML'
 generic: { emit: project, max_dyn_array_count: 4, max_dyn_string_len: 8, max_dyn_blob_len: 8 }
 YAML
@@ -478,6 +479,31 @@ for surface in decode streamdecode; do
         --verb "$surface" --limit-pattern 'LimitExceeded' --invalid-pattern 'InvalidMessage' \
         -- dotnet "$WORK/refusal/bin/Debug/net9.0/harness.dll"
 done
+
+# A refusal is TERMINAL, and the corelib is what holds that (CORELIB_PLAN 5.2 for
+# malformed bytes, 6.3 for a receiver limit): IStream latches the verdict and
+# re-throws the very code it was refused with from every later call, before
+# looking at a byte. So a Finish() after a caught refusal must refuse too, under
+# that same code -- it cannot hand back a message from a decoder that rejected
+# one.
+#
+# generator#541 deleted the generated status latch that used to restate this one
+# layer up. #528 records why: the old assertion read a remembered field that an
+# EARLIER feed had already written, so it passed whether or not the mapping arm
+# existed. Finish's answer cannot be a leftover -- nothing but this Finish
+# produces it -- so this block is discriminating at every chunk width.
+#
+# The code is the real one now, not a status it was flattened into: a receiver
+# cap reports LimitExceeded rather than the Incomplete the old mapping produced,
+# which is what 6.3 asks for ("raise my limit" is not "these bytes are broken").
+#
+# All three arrival routes are covered: overcount.bin trips a GENERATED
+# schema-bound guard mid-array, cap_eof_maxlen.bin trips one at a fixlen length
+# word, and cap_str_over.bin is refused by the CORELIB's own cap check.
+echo "==> a refusal is terminal: Finish refuses under the same code (generator#541, #647)"
+python3 "$ROOT/tests/conformance/lib/check_terminal_refusal.py" "csharp" \
+    --marker finish --invalid-name InvalidMessage --limit-name LimitExceeded \
+    -- dotnet "$WORK/refusal/bin/Debug/net9.0/harness.dll"
 
 # Receiver-side decode limits (generator#102): `a` is a count-less array
 # (id 0 -> header 0x03 = 0<<3 | unsigned-array), so a configured
@@ -743,47 +769,6 @@ grep -q "InvalidMessage" "$WORK/cap_eof_maxlen.err" || {
     cat "$WORK/cap_eof_maxlen.err"; exit 1; }
 
 echo "==> string/blob caps OK"
-
-# A refusal is TERMINAL, and the corelib is what holds that (CORELIB_PLAN 5.2 for
-# malformed bytes, 6.3 for a receiver limit): IStream latches the verdict and
-# re-throws the very code it was refused with from every later call, before
-# looking at a byte. So a Finish() after a caught refusal must refuse too, under
-# that same code -- it cannot hand back a message from a decoder that rejected
-# one.
-#
-# generator#541 deleted the generated status latch that used to restate this one
-# layer up. #528 records why: the old assertion read a remembered field that an
-# EARLIER feed had already written, so it passed whether or not the mapping arm
-# existed. Finish's answer cannot be a leftover -- nothing but this Finish
-# produces it -- so this block is discriminating at every chunk width.
-#
-# The code is the real one now, not a status it was flattened into: a receiver
-# cap reports LimitExceeded rather than the Incomplete the old mapping produced,
-# which is what 6.3 asks for ("raise my limit" is not "these bytes are broken").
-#
-# All three arrival routes are covered: overcount.bin trips a GENERATED
-# schema-bound guard mid-array, cap_eof_maxlen.bin trips one at a fixlen length
-# word, and cap_str_over.bin is refused by the CORELIB's own cap check.
-echo "==> a refusal is terminal: Finish refuses under the same code (generator#541)"
-latch() {   # <fixture> <want-code> <message> <harness...>
-    lfx=$1 lwant=$2 lmsg=$3
-    shift 3
-    if "$@" streamdecode "$lmsg" < "$lfx" >/dev/null 2>"$WORK/latch.err"; then
-        echo "FAIL: $(basename "$lfx") must be refused by the streaming decoder"; exit 1
-    fi
-    grep -q "\[finish=$lwant\]" "$WORK/latch.err" || {
-        echo "FAIL: $(basename "$lfx") -- Finish after the refusal must throw $lwant; got:"
-        cat "$WORK/latch.err"; exit 1; }
-}
-# A varint past the 64-bit bound: 10 continuation bytes and an eleventh. This one
-# is refused by the CORELIB itself rather than by a generated guard, so it is the
-# other side of the same terminal guard (S4.1 -- INVALID only past the bound).
-printf '\000\377\377\377\377\377\377\377\377\377\377\001' > "$WORK/varint_overflow.bin"
-latch "$WORK/overcount.bin"       InvalidMessage myfirstmessage $H
-latch "$WORK/varint_overflow.bin" InvalidMessage myfirstmessage $H
-latch "$WORK/cap_eof_maxlen.bin"  InvalidMessage caps           $HP
-latch "$WORK/cap_str_over.bin"    LimitExceeded  caps           $HP
-echo "==> terminal-refusal guard OK"
 
 echo "==> shared-vector byte-exact conformance"
 python3 "$ROOT/tests/conformance/csharp/check_vectors.py" "$CORELIB/assets/test_vectors.json" "$WORK/conf/bin/Debug/net9.0/harness.dll"

@@ -810,16 +810,6 @@ YAML
 ( cd "$ROOT" && go run ./cmd/sofabgen --format=off --config "$WORK/limit-cfg.yaml" --lang python --in "$WORK/limit-def.yaml" --out "$WORK/limitproj" )
 ( cd "$ROOT" && go run ./cmd/sofabgen --format=off --config "$WORK/cfg.yaml" --lang python --in "$WORK/limit-def.yaml" --out "$WORK/nolimitproj" )
 
-refeed() {  # <project-dir> <fixture> <want> <message>
-    rdir=$1 rfx=$2 rwant=$3 rmsg=$4
-    if (cd "$rdir" && python3 harness.py streamdecode "$rmsg") \
-            < "$rfx" >/dev/null 2>"$WORK/refeed.err"; then
-        echo "FAIL: [$ENGINE] $(basename "$rfx") must be refused by the streaming decoder"; exit 1
-    fi
-    grep -q "\[refeed=$rwant\]" "$WORK/refeed.err" || {
-        echo "FAIL: [$ENGINE] $(basename "$rfx") -- re-feeding after the refusal must answer $rwant; got:"
-        cat "$WORK/refeed.err"; exit 1; }
-}
 for ENGINE in $ENGINES; do
     select_engine "$ENGINE"
     echo "==> receiver-side decode limits must reject over-cap counts (generator#102), engine=$ENGINE"
@@ -834,31 +824,6 @@ for ENGINE in $ENGINES; do
     (cd "$WORK/limitproj" && python3 harness.py decode dyn) < "$WORK/limit-ok.bin" >/dev/null || { echo "FAIL: [$ENGINE] wire count 4 must decode under limit 4"; exit 1; }
     (cd "$WORK/nolimitproj" && python3 harness.py decode dyn) < "$WORK/limit-over.bin" >/dev/null || { echo "FAIL: [$ENGINE] unset limit must keep count 5 decodable"; exit 1; }
     echo "==> decode-limit reject OK, engine=$ENGINE"
-
-    # A refusal is TERMINAL, and the corelib is what holds that (CORELIB_PLAN S5.2 for
-    # malformed bytes, S6.3 for a receiver limit). This port has no finish() to gate,
-    # so the observable form of "the rejection sticks" is asking AGAIN: decoder.py
-    # guards feed at its top -- `if self._limit is not None: raise self._limit` and
-    # `if self._status is Status.INVALID: return Status.INVALID` -- so a further feed
-    # repeats the same answer without consuming a byte.
-    #
-    # The harness therefore feeds an EMPTY chunk on its error path and names what came
-    # back, `[refeed=X]`. An empty chunk moves no decoder state, so the value can only
-    # have come from the latch; a COMPLETE or INCOMPLETE here would mean the decoder
-    # forgot it had refused. This leg did not exist before generator#541: python was
-    # the one port of the six with no latch assertion at all (#528).
-    #
-    # Both routes are covered: overcount.bin is refused by a GENERATED schema-bound
-    # guard and comes back as a feed status, limit-over.bin by the CORELIB's own cap
-    # and arrives as a raise.
-    echo "==> a refusal is terminal: re-feeding repeats it (generator#541), engine=$ENGINE"
-    # A varint past the 64-bit bound: 10 continuation bytes and an eleventh (S4.1),
-    # refused by the CORELIB itself rather than by a generated guard.
-    printf '\000\377\377\377\377\377\377\377\377\377\377\001' > "$WORK/varint_overflow.bin"
-    refeed "$WORK/proj"       "$WORK/varint_overflow.bin" INVALID        myfirstmessage
-    refeed "$WORK/proj"       "$WORK/overcount.bin"       INVALID        myfirstmessage
-    refeed "$WORK/limitproj"  "$WORK/limit-over.bin"      SofaLimitError dyn
-    echo "==> terminal-refusal guard OK, engine=$ENGINE"
 done
 unset SOFAB_PUREPYTHON || true
 if [ "$NATIVE" = yes ]; then require_engine native; else require_engine python; fi
@@ -905,6 +870,7 @@ if [ "$NATIVE" = yes ]; then require_engine native; else require_engine python; 
 echo "==> a cap is SofaLimitError, a schema bound is SofaDecodeError (§6.3, generator#416)"
 printf 'version: 1\nmessages:\n' > "$WORK/refusal.yaml"
 python3 "$ROOT/tests/conformance/lib/check_refusal_category.py" --emit-schema >> "$WORK/refusal.yaml"
+python3 "$ROOT/tests/conformance/lib/check_terminal_refusal.py" --emit-schema >> "$WORK/refusal.yaml"
 cat > "$WORK/refusal-cfg.yaml" <<YAML
 generic: { emit: project, max_dyn_array_count: 4, max_dyn_string_len: 8, max_dyn_blob_len: 8 }
 YAML
@@ -922,6 +888,15 @@ for ENGINE in $ENGINES; do
         --max-dyn-array-count 4 --max-dyn-string-len 8 --max-dyn-blob-len 8 \
         --limit-pattern 'decode error: SofaLimitError' \
         --invalid-pattern 'decode failed: INVALID' \
+        -- python3 harness.py
+    # A refusal is terminal (CORELIB_PLAN S5.2, S6.3): the harness re-feeds an empty
+    # chunk after the refusal and names what came back, `[refeed=X]`. An empty chunk
+    # moves no decoder state, so the answer can only come from the latch -- decoder.py
+    # on the pure engine, the accelerator's own path on the native one -- and a
+    # COMPLETE or INCOMPLETE there would mean the decoder forgot it had refused.
+    python3 "$ROOT/tests/conformance/lib/check_terminal_refusal.py" "python/$ENGINE" \
+        --cwd "$WORK/refusalproj" --marker refeed \
+        --invalid-name INVALID --limit-name SofaLimitError \
         -- python3 harness.py
 done
 unset SOFAB_PUREPYTHON || true

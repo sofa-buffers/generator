@@ -977,6 +977,20 @@ for surface in decode streamdecode; do
         -- "$WORK/arrlen/harness/harness"
 done
 
+# A refusal is terminal (CORELIB_PLAN S5.2): after INVALID the stream, probed again at
+# end of input, repeats the refusal and never reports COMPLETE (generator#647). The
+# C target has no receiver cap (every field is statically bounded), so this runs the
+# driver's --bounded table: a corelib refusal and two schema-bound ones.
+echo "==> a refusal is terminal: asking again repeats it (generator#647)"
+printf 'version: 1\nmessages:\n' > "$WORK/terminal.yaml"
+python3 "$ROOT/tests/conformance/lib/check_terminal_refusal.py" --emit-schema --bounded >> "$WORK/terminal.yaml"
+( cd "$ROOT" && go run ./cmd/sofabgen --format=off --config "$WORK/proj.yaml" --lang c \
+    --in "$WORK/terminal.yaml" --out "$WORK/terminal" )
+make -C "$WORK/terminal" SOFAB_C_CORELIB="$CORELIB" >/dev/null
+python3 "$ROOT/tests/conformance/lib/check_terminal_refusal.py" "c" --bounded \
+    --marker finish --invalid-name INVALID --limit-name LIMIT_EXCEEDED \
+    -- "$WORK/terminal/harness/harness"
+
 # Conflict-free names (ARCHITECTURE §8 "Naming", generator#624): the shared
 # name-collision schema -- path clashes (m_a beside m.a, a.b_c beside a_b.c, a
 # $defs type beside struct_<name>), every role word, fixed, imported and builtin

@@ -473,11 +473,12 @@ python3 "$ROOT/tests/conformance/lib/check_chunk_invariance.py" "Kotlin" \
 # A receiver cap answers LimitExceeded, a schema bound InvalidMessage (CORELIB_PLAN
 # S6.3, generator#416, #648), on both decode surfaces. The generator#102 legs below
 # stay beside it: they also cover over-cap-then-EOF precedence (with a loose-cap
-# INCOMPLETE control), a skipped field never being capped and the latch, which this
+# INCOMPLETE control), a skipped field never being capped, which this
 # table does not.
 echo "==> a cap is LIMIT_EXCEEDED, a schema bound is INVALID_MSG (S6.3, generator#416)"
 printf 'version: 1\nmessages:\n' > "$WORK/refusal.yaml"
 python3 "$ROOT/tests/conformance/lib/check_refusal_category.py" --emit-schema >> "$WORK/refusal.yaml"
+python3 "$ROOT/tests/conformance/lib/check_terminal_refusal.py" --emit-schema >> "$WORK/refusal.yaml"
 cat > "$WORK/refusalcfg.yaml" <<'YAML'
 generic: { emit: project, max_dyn_array_count: 4, max_dyn_string_len: 8, max_dyn_blob_len: 8 }
 targets: { kotlin: { package: message } }
@@ -488,6 +489,28 @@ for surface in decode streamdecode; do
         --verb "$surface" --limit-pattern 'LIMIT_EXCEEDED' --invalid-pattern 'INVALID_MSG' \
         -- "$WORK/refusal/build/install/harness/bin/harness"
 done
+
+# A refusal is TERMINAL, and the corelib is what holds that (CORELIB_PLAN S5.2 for
+# malformed bytes, S6.3 for a receiver limit): IStream latches the verdict and
+# re-throws the very code it was refused with from every later call, before
+# looking at a byte. So a finish() after a caught refusal must refuse too, under
+# that same code: a decoder that rejected a message cannot hand one back.
+#
+# generator#541 deleted the generated status latch that used to restate this one
+# layer up, and with it `streamdecode1`. That second mode existed only because
+# the remembered status could be read back from a value an EARLIER feed had left
+# behind: feeding `03 05 ...` a byte at a time leaves the stream mid-field, so the
+# feed before a cap refusal had already written INCOMPLETE into the memory and a
+# DELETED arm still printed the expected value (#528). Feeding the whole buffer in
+# one call was the workaround. finish's answer has no such ambiguity -- nothing
+# but that finish produces it -- so the chunked replay alone discriminates.
+#
+# The code is the real one now, not a status it was flattened into: a receiver
+# cap reports LIMIT_EXCEEDED rather than the INCOMPLETE the old mapping produced.
+echo "==> a refusal is terminal: finish refuses under the same code (generator#541, #647)"
+python3 "$ROOT/tests/conformance/lib/check_terminal_refusal.py" "kotlin" \
+    --marker finish --invalid-name INVALID_MSG --limit-name LIMIT_EXCEEDED \
+    -- "$WORK/refusal/build/install/harness/bin/harness"
 
 # Receiver-side decode limits (generator#102): `a` is an UNBOUNDED u64 array
 # (id 0 -> header 0x03). With max_dyn_array_count: 4 a wire count of 5 MUST fail
@@ -687,42 +710,6 @@ grep -q "INVALID_MSG" "$WORK/eof_maxlen.err" || {
     cat "$WORK/eof_maxlen.err"; exit 1; }
 
 echo "==> decode limits OK"
-
-# A refusal is TERMINAL, and the corelib is what holds that (CORELIB_PLAN S5.2 for
-# malformed bytes, S6.3 for a receiver limit): IStream latches the verdict and
-# re-throws the very code it was refused with from every later call, before
-# looking at a byte. So a finish() after a caught refusal must refuse too, under
-# that same code: a decoder that rejected a message cannot hand one back.
-#
-# generator#541 deleted the generated status latch that used to restate this one
-# layer up, and with it `streamdecode1`. That second mode existed only because
-# the remembered status could be read back from a value an EARLIER feed had left
-# behind: feeding `03 05 ...` a byte at a time leaves the stream mid-field, so the
-# feed before a cap refusal had already written INCOMPLETE into the memory and a
-# DELETED arm still printed the expected value (#528). Feeding the whole buffer in
-# one call was the workaround. finish's answer has no such ambiguity -- nothing
-# but that finish produces it -- so the chunked replay alone discriminates.
-#
-# The code is the real one now, not a status it was flattened into: a receiver
-# cap reports LIMIT_EXCEEDED rather than the INCOMPLETE the old mapping produced.
-echo "==> a refusal is terminal: finish refuses under the same code (generator#541)"
-# A varint past the 64-bit bound: 10 continuation bytes and an eleventh. Refused
-# by the CORELIB (MESSAGE_SPEC S4.1), so it arrives as a bare SofabException.
-printf '\000\377\377\377\377\377\377\377\377\377\377\001' > "$WORK/varint_overflow.bin"
-latch() {   # <fixture> <want-code> <message> <harness...>
-    lfx=$1 lwant=$2 lmsg=$3
-    shift 3
-    if "$@" streamdecode "$lmsg" < "$lfx" >/dev/null 2>"$WORK/latch.err"; then
-        echo "FAIL: $(basename "$lfx") must be refused by the streaming decoder"; exit 1
-    fi
-    grep -q "\[finish=$lwant\]" "$WORK/latch.err" || {
-        echo "FAIL: $(basename "$lfx") -- finish after the refusal must throw $lwant; got:"
-        cat "$WORK/latch.err"; exit 1; }
-}
-latch "$WORK/varint_overflow.bin" INVALID_MSG    myfirstmessage $H
-latch "$WORK/overcount.bin"       INVALID_MSG    myfirstmessage $H
-latch "$WORK/overlimit.bin"       LIMIT_EXCEEDED dyn            $HL
-echo "==> terminal-refusal guard OK"
 
 echo "==> shared-vector byte-exact conformance"
 python3 "$ROOT/tests/conformance/kotlin/check_vectors.py" "$CORELIB/assets/test_vectors.json" \

@@ -297,6 +297,8 @@ func (g *gen) harness(s *ir.Schema, modPath string) []byte {
 	if hasMsg {
 		f.imp("encoding/hex")
 		f.imp("encoding/json")
+		f.imp("errors")
+		f.imp(corelibImport)
 	}
 	f.imp("fmt")
 	f.imp("io")
@@ -360,7 +362,15 @@ func (g *gen) harness(s *ir.Schema, modPath string) []byte {
 		f.line("\t\t} else if mode == \"streamdecode\" {")
 		f.line("\t\t\tobj, err := %s.%s__DecodeFrom(&dripReader{b: in, n: chunkArg()})", pkgAlias, base)
 		f.line("\t\t\tif err != nil {")
-		f.line("\t\t\t\tfail(err)")
+		// A refusal is terminal (CORELIB_PLAN §5.2, §6.3), and Go has no finish():
+		// asking again is an empty Feed on the same decoder. The refused decode is
+		// replayed on a decoder this harness owns, because DecodeFrom does not hand
+		// its decoder back, and the second answer is printed as `[finish=X]` for
+		// tests/conformance/lib/check_terminal_refusal.py.
+		f.line("\t\t\t\td := sofab.NewDecoder(%s.%s__New())", pkgAlias, base)
+		f.line("\t\t\t\td.FeedFrom(&dripReader{b: in, n: chunkArg()}, make([]byte, 4096))")
+		f.line("\t\t\t\t_, again := d.Feed(nil)")
+		f.line("\t\t\t\tfail(fmt.Errorf(\"%%v [finish=%%s]\", err, verdictName(again)))")
 		f.line("\t\t\t}")
 		f.line("\t\t\tout, _ := json.Marshal(obj)")
 		f.line("\t\t\tos.Stdout.Write(out)")
@@ -374,6 +384,22 @@ func (g *gen) harness(s *ir.Schema, modPath string) []byte {
 	f.line("\t}")
 	f.line("}")
 	f.blank()
+	if hasMsg {
+		f.line("// verdictName names the category a decoder answered with, `none` when it")
+		f.line("// answered nothing -- which, after a refusal, is itself the failure.")
+		f.line("func verdictName(err error) string {")
+		f.line("\tswitch {")
+		f.line("\tcase err == nil:")
+		f.line("\t\treturn \"none\"")
+		f.line("\tcase errors.Is(err, sofab.ErrLimitExceeded):")
+		f.line("\t\treturn \"LimitExceeded\"")
+		f.line("\tcase errors.Is(err, sofab.ErrInvalidMsg):")
+		f.line("\t\treturn \"InvalidMessage\"")
+		f.line("\t}")
+		f.line("\treturn err.Error()")
+		f.line("}")
+		f.blank()
+	}
 	f.line("func fail(err error) {")
 	f.line("\tfmt.Fprintln(os.Stderr, \"error:\", err)")
 	f.line("\tos.Exit(1)")

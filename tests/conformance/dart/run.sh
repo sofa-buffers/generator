@@ -575,38 +575,6 @@ ST=$("$WORK/dynlim/harness" trydecode dyn < "$WORK/overlimit.bin" | sed -n 1p)
 "$WORK/dynfree/harness" decode dyn < "$WORK/overlimit.bin" >/dev/null || { echo "FAIL: default-cap build must decode the oversized message"; exit 1; }
 echo "==> decode limits OK"
 
-# A refusal is TERMINAL, and the corelib is what holds that (CORELIB_PLAN S5.2 for
-# malformed bytes, S6.3 for a receiver limit): corelib-dart's feed checks its
-# latched verdict before looking at a byte and returns it again. The generated
-# decoder keeps no copy of its own (S5.2.1, generator#555) -- finish() asks the
-# stream with an empty feed.
-#
-# The harness's streaming error path names two answers: `[refeed=X]`, what an
-# empty feed returns after the refusal -- the same category, never complete or
-# incomplete, which would mean the decoder forgot it had refused -- and
-# `[finish=null]`; RETURNED means finish handed back a message from a decoder
-# that had rejected one. Neither can be a leftover of an earlier feed: nothing but
-# the call in question produces its answer.
-#
-# Three routes: a varint past the 64-bit bound is refused by the CORELIB,
-# overcount.bin by a GENERATED schema-bound guard, overlimit.bin by a generated
-# receiver-cap guard -- which must come back as limitExceeded, not INVALID.
-echo "==> a refusal is terminal: re-feeding repeats it, finish refuses (generator#555)"
-latch() {   # <harness> <message> <fixture> <want-status>
-    lh=$1 lmsg=$2 lfx=$3 lwant=$4
-    if "$lh" streamdecode "$lmsg" < "$lfx" >/dev/null 2>"$WORK/latch.err"; then
-        echo "FAIL: $(basename "$lfx") must be refused by the streaming decoder"; exit 1
-    fi
-    grep -q "decode failed: $lwant \[refeed=$lwant\] \[finish=null\]" "$WORK/latch.err" || {
-        echo "FAIL: $(basename "$lfx") -- after the refusal, an empty feed must answer $lwant and finish() null; got:"
-        cat "$WORK/latch.err"; exit 1; }
-}
-printf '\000\377\377\377\377\377\377\377\377\377\377\001' > "$WORK/varint_overflow.bin"
-latch "$H"                  myfirstmessage "$WORK/varint_overflow.bin" invalid
-latch "$H"                  myfirstmessage "$WORK/overcount.bin"       invalid
-latch "$WORK/dynlim/harness" dyn           "$WORK/overlimit.bin"       limitExceeded
-echo "==> terminal-refusal guard OK"
-
 # The two refusals of CORELIB_PLAN S6.3, on one schema and one harness
 # (generator#416). A configured receiver cap on a schema-UNBOUNDED field is a
 # policy verdict -- limitExceeded, because the bytes are well formed and the same
@@ -645,6 +613,7 @@ echo "==> terminal-refusal guard OK"
 echo "==> a cap is limitExceeded, a schema bound is INVALID (S6.3, generator#416)"
 printf 'version: 1\nmessages:\n' > "$WORK/refusal.yaml"
 python3 "$ROOT/tests/conformance/lib/check_refusal_category.py" --emit-schema >> "$WORK/refusal.yaml"
+python3 "$ROOT/tests/conformance/lib/check_terminal_refusal.py" --emit-schema >> "$WORK/refusal.yaml"
 cat > "$WORK/cfg-refusal.yaml" <<'YAML'
 generic: { emit: project, max_dyn_array_count: 4, max_dyn_string_len: 8, max_dyn_blob_len: 8 }
 YAML
@@ -658,6 +627,28 @@ python3 "$ROOT/tests/conformance/lib/check_refusal_category.py" "dart" \
     --max-dyn-array-count 4 --max-dyn-string-len 8 --max-dyn-blob-len 8 \
     --verb streamdecode --limit-pattern 'decode failed: limitExceeded' \
     --invalid-pattern 'decode failed: invalid' -- "$WORK/refusal/harness"
+
+# A refusal is TERMINAL, and the corelib is what holds that (CORELIB_PLAN S5.2 for
+# malformed bytes, S6.3 for a receiver limit): corelib-dart's feed checks its
+# latched verdict before looking at a byte and returns it again. The generated
+# decoder keeps no copy of its own (S5.2.1, generator#555) -- finish() asks the
+# stream with an empty feed.
+#
+# The harness's streaming error path names two answers: `[refeed=X]`, what an
+# empty feed returns after the refusal -- the same category, never complete or
+# incomplete, which would mean the decoder forgot it had refused -- and
+# `[finish=null]`; RETURNED means finish handed back a message from a decoder
+# that had rejected one. Neither can be a leftover of an earlier feed: nothing but
+# the call in question produces its answer.
+#
+# Three routes: a varint past the 64-bit bound is refused by the CORELIB,
+# overcount.bin by a GENERATED schema-bound guard, overlimit.bin by a generated
+# receiver-cap guard -- which must come back as limitExceeded, not INVALID.
+echo "==> a refusal is terminal: re-feeding repeats it, finish refuses (generator#555, #647)"
+python3 "$ROOT/tests/conformance/lib/check_terminal_refusal.py" "dart" \
+    --marker refeed --marker finish:null:null \
+    --invalid-name invalid --limit-name limitExceeded \
+    -- "$WORK/refusal/harness"
 
 # The WRAPPER half of the same cap (generator#387/#402 item 3). A wrapper array
 # carries no count header: its elements are keyed by an unbounded varint index and

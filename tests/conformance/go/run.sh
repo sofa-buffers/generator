@@ -898,6 +898,7 @@ python3 "$ROOT/tests/conformance/lib/check_declared_width_kinds.py" "go" \
 echo "==> a cap is LimitExceeded, a schema bound is InvalidMessage (S6.3, generator#416)"
 { echo "version: 1"; echo "messages:"; } > "$WORK/refusal.yaml"
 python3 "$ROOT/tests/conformance/lib/check_refusal_category.py" --emit-schema >> "$WORK/refusal.yaml"
+python3 "$ROOT/tests/conformance/lib/check_terminal_refusal.py" --emit-schema >> "$WORK/refusal.yaml"
 cat > "$WORK/cfg-refusal.yaml" <<YAML
 generic: { emit: project, max_dyn_array_count: 4, max_dyn_string_len: 8, max_dyn_blob_len: 8 }
 targets: { go: { package: message, module_path: example.com/gen, go_version: "1.21" } }
@@ -910,6 +911,14 @@ for surface in decode streamdecode; do
         --verb "$surface" --blob-base64 --limit-pattern 'limit exceeded' --invalid-pattern 'invalid message' \
         -- "$WORK/refusal.bin"
 done
+
+# A refusal is terminal (CORELIB_PLAN S5.2, S6.3): asking the decoder again, here an
+# empty Feed, repeats the refusal under the same category and never hands back a
+# message. Same capped project as above, the driver's own message.
+echo "==> a refusal is terminal: asking again repeats it (generator#647)"
+python3 "$ROOT/tests/conformance/lib/check_terminal_refusal.py" "go" \
+    --marker finish --invalid-name InvalidMessage --limit-name LimitExceeded \
+    -- "$WORK/refusal.bin"
 
 # The verdict AND the decoded value must not depend on where the chunks were cut
 # (CORELIB_PLAN S5.2/S6.0/S6.4 / S7.2 item 4; generator#312, #648). Every fixture

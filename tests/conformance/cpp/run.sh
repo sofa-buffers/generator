@@ -840,6 +840,7 @@ YAML
         echo "==> [$label] a cap is LimitExceeded, a schema bound is InvalidMessage (S6.3, generator#416)"
         printf 'version: 1\nmessages:\n' > "$WORK/refusal.yaml"
         python3 "$ROOT/tests/conformance/lib/check_refusal_category.py" --emit-schema >> "$WORK/refusal.yaml"
+        python3 "$ROOT/tests/conformance/lib/check_terminal_refusal.py" --emit-schema >> "$WORK/refusal.yaml"
         printf 'generic: { emit: project, max_dyn_array_count: 4, max_dyn_string_len: 8, max_dyn_blob_len: 8 }\ntargets: { cpp: { namespace: sofabuffers%s } }\n' \
             "${dynamic:+, allow_dynamic: $dynamic}" > "$WORK/cfg-refusal-$label.yaml"
         ( cd "$ROOT" && go run ./cmd/sofabgen --config "$WORK/cfg-refusal-$label.yaml" --lang cpp \
@@ -851,6 +852,26 @@ YAML
                 --invalid-pattern 'decode error: INVALID\b' \
                 -- "$WORK/refusal-$label/harness/harness"
         done
+    fi
+
+    # A refusal is terminal (CORELIB_PLAN S5.2, S6.3): after INVALID or LimitExceeded the
+    # stream, asked again with an empty feed, repeats the refusal under the same category
+    # and never reports COMPLETE. Every profile; the embedded ones have no receiver cap,
+    # so they run the driver's --bounded table (INVALID only) on their own project.
+    echo "==> [$label] a refusal is terminal: asking again repeats it (generator#647)"
+    if [ -z "$corelib" ]; then
+        python3 "$ROOT/tests/conformance/lib/check_terminal_refusal.py" "C++ [$label]" \
+            --marker finish --invalid-name INVALID --limit-name LIMIT_EXCEEDED \
+            -- "$WORK/refusal-$label/harness/harness"
+    else
+        printf 'version: 1\nmessages:\n' > "$WORK/terminal.yaml"
+        python3 "$ROOT/tests/conformance/lib/check_terminal_refusal.py" --emit-schema --bounded >> "$WORK/terminal.yaml"
+        ( cd "$ROOT" && go run ./cmd/sofabgen --config "$WORK/cfg-$label.yaml" --lang cpp \
+            --in "$WORK/terminal.yaml" --out "$WORK/terminal-$label" )
+        make -C "$WORK/terminal-$label" "$@" >/dev/null
+        python3 "$ROOT/tests/conformance/lib/check_terminal_refusal.py" "C++ [$label]" --bounded \
+            --marker finish --invalid-name INVALID --limit-name LIMIT_EXCEEDED \
+            -- "$WORK/terminal-$label/harness/harness"
     fi
 
     echo "==> [$label] shared-vector byte-exact conformance"

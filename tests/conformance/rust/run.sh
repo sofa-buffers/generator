@@ -543,6 +543,21 @@ run_variant() {
             --cwd "$WORK/arrlen-$label" -- cargo run -q --
     done
 
+    # A refusal is terminal (CORELIB_PLAN S5.2, generator#647): after INVALID the
+    # decoder, asked for the message anyway, refuses again under the same category.
+    # The rs-no-std labels take no receiver cap (every field is statically bounded),
+    # so they run the driver's --bounded table; the std corelib labels run the full
+    # one, over the capped project of the refusal leg below.
+    case "$label" in no-std-*)
+        echo "==> [$label] a refusal is terminal: asking again repeats it (generator#647)"
+        printf 'version: 1\nmessages:\n' > "$WORK/terminal.yaml"
+        python3 "$ROOT/tests/conformance/lib/check_terminal_refusal.py" --emit-schema --bounded >> "$WORK/terminal.yaml"
+        rust_build "$WORK/terminal.yaml" "$WORK/terminal-$label"
+        python3 "$ROOT/tests/conformance/lib/check_terminal_refusal.py" "Rust [$label]" --bounded \
+            --marker finish --invalid-name 'Sofab(InvalidMsg)' --limit-name 'Sofab(LimitExceeded)' \
+            --cwd "$WORK/terminal-$label" -- cargo run -q -- ;;
+    esac
+
     # Over-maxlen scalar blob (Option B / MESSAGE_SPEC S7.1): someblob (id 12)
     # declares maxlen: 16; a 17-byte blob exceeds it -> INVALID, never truncated.
     # Wire: 62 (blob id12) 8b 01 (fixlen word len 17, blob subtype 3) + 17 bytes;
@@ -1585,6 +1600,7 @@ for LEGSPEC in "rs:" "rs-static:, allow_dynamic: false"; do
     echo "==> [$LEG] a cap is LimitExceeded, a schema bound is InvalidMessage (S6.3, generator#416)"
     printf 'version: 1\nmessages:\n' > "$WORK/refusal.yaml"
     python3 "$ROOT/tests/conformance/lib/check_refusal_category.py" --emit-schema >> "$WORK/refusal.yaml"
+    python3 "$ROOT/tests/conformance/lib/check_terminal_refusal.py" --emit-schema >> "$WORK/refusal.yaml"
     ( cd "$ROOT" && go run ./cmd/sofabgen --format=off --config "$WORK/cfg-growth-$LEG.yaml" --lang rust \
         --in "$WORK/refusal.yaml" --out "$WORK/refusal-$LEG" )
     sed -i "s#\${SOFAB_RS_CORELIB}#$STD#" "$WORK/refusal-$LEG/Cargo.toml"
@@ -1596,6 +1612,11 @@ for LEGSPEC in "rs:" "rs-static:, allow_dynamic: false"; do
             --limit-pattern 'LimitExceeded' --invalid-pattern 'InvalidMsg' \
             -- cargo run -q --
     done
+
+    echo "==> [$LEG] a refusal is terminal: asking again repeats it (generator#647)"
+    python3 "$ROOT/tests/conformance/lib/check_terminal_refusal.py" "Rust [$LEG]" \
+        --cwd "$WORK/refusal-$LEG" --marker finish --invalid-name 'Sofab(InvalidMsg)' --limit-name 'Sofab(LimitExceeded)' \
+        -- cargo run -q --
 done
 
 # max_message_size (generator#637, ARCHITECTURE §9.6): for an unbounded message the
