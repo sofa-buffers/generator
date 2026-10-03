@@ -439,11 +439,23 @@ done
 # ...at every other string position, plus the encode half (generator#652).
 echo "==> invalid UTF-8 at every string position + multi-byte round trip (generator#652)"
 for surface in decode streamdecode; do
-    ENC=; [ "$surface" = decode ] && ENC="--encode --surrogates --refusal-pattern surrogate|Argument"
+    ENC=; [ "$surface" = decode ] && ENC="--encode"
     python3 "$ROOT/tests/conformance/lib/check_utf8_positions.py" "csharp" \
         --verb "$surface" --invalid-pattern 'InvalidMessage' $ENC \
         -- $H
 done
+
+# The surrogate half of the encode check cannot go through the JSON harness:
+# System.Text.Json refuses a lone-surrogate escape itself, before the corelib is
+# reached. SurrogateCheck.cs builds the strings in C# and calls Encode() directly.
+echo "==> unpaired surrogate is refused by the encoder (CORELIB_PLAN §6.4.1, generator#652)"
+( cd "$ROOT" && go run ./cmd/sofabgen --config "$WORK/cfg.yaml" --lang csharp \
+    --in "$ROOT/examples/messages/example.yaml" --out "$WORK/sur" )
+rm "$WORK/sur/Program.cs"
+cp "$ROOT/tests/conformance/csharp/SurrogateCheck.cs" "$WORK/sur/"
+dbuild "$WORK/sur"
+dotnet "$WORK/sur/bin/Debug/net9.0/harness.dll" \
+    || { echo "FAIL: the encoder accepted or mis-categorised an unpaired surrogate"; exit 1; }
 
 # S7.3 x S7.4, array wrapper (generator#174 + generator#175): "An occurrence
 # skipped under S7.3 is not an occurrence for this clause: a correctly typed
