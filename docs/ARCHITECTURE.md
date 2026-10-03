@@ -5858,7 +5858,9 @@ A reimplementation is **conformant** when it reproduces these gates:
 1. **The shared conformance file** — each corelib ships
    `assets/test_vectors.json` (authored by `corelib-c-cpp`). It has six
    top-level blocks, and every one of them has a driver in
-   `tests/conformance/lib` that all eleven suites call:
+   `tests/conformance/lib`. All eleven suites call every driver except
+   `check_growth.py`, which runs in each suite whose target grows wrapper arrays
+   (every suite but `c`):
 
    | block | rows | driver |
    | --- | --- | --- |
@@ -5999,8 +6001,8 @@ A reimplementation is **conformant** when it reproduces these gates:
    such a string in JSON text take it as raw bytes (C, C++, Zig) or, where the
    JSON decoder replaces them (Go), as `\xNN` escapes.
 
-   *Growth* (`tests/conformance/lib/check_growth.py`): the third block,
-   `sequence_growth` — CORELIB_PLAN §7.2 item 8, the shape-B allocation of §9.5.
+   *Growth* (`tests/conformance/lib/check_growth.py`): the `sequence_growth`
+   block, — CORELIB_PLAN §7.2 item 8, the shape-B allocation of §9.5.
    A wrapper array carries no element count, so its length is *highest present id
    + 1* and the container **grows** as elements arrive; two ports that grow
    differently emit **identical bytes**, which is why these cases are a delivery
