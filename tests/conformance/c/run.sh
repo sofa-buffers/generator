@@ -1039,6 +1039,22 @@ python3 "$ROOT/tests/conformance/lib/check_terminal_refusal.py" "c" --bounded \
     --marker finish --invalid-name INVALID --limit-name LIMIT_EXCEEDED \
     -- "$WORK/terminal/harness/harness"
 
+# Explicit empty is not absent (MESSAGE_SPEC §2; generator#645): an empty array,
+# string or blob whose declared default is non-empty is a value, written as a
+# zero-length one and read back empty; `{}` writes nothing and reads back as
+# the defaults. The shared driver prints its own schema and asserts the exact
+# bytes of each case.
+echo "==> explicit empty is not absent (generator#645)"
+printf 'version: 1\nmessages:\n' > "$WORK/emptyabs.yaml"
+python3 "$ROOT/tests/conformance/lib/check_empty_vs_absent.py" --emit-schema --bounded-only >> "$WORK/emptyabs.yaml"
+( cd "$ROOT" && go run ./cmd/sofabgen --config "$WORK/proj.yaml" --lang c \
+    --in "$WORK/emptyabs.yaml" --out "$WORK/emptyabs" )
+make -C "$WORK/emptyabs" SOFAB_C_CORELIB="$CORELIB" >/dev/null
+for surface in decode streamdecode; do
+    python3 "$ROOT/tests/conformance/lib/check_empty_vs_absent.py" "C" --bounded-only --verb "$surface" \
+        -- "$WORK/emptyabs/harness/harness"
+done
+
 # Conflict-free names (ARCHITECTURE §8 "Naming", generator#624): the shared
 # name-collision schema -- path clashes (m_a beside m.a, a.b_c beside a_b.c, a
 # $defs type beside struct_<name>), every role word, fixed, imported and builtin

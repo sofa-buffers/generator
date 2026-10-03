@@ -1151,6 +1151,22 @@ for surface in decode streamdecode; do
         -- "$WORK/arrlen/harness"
 done
 
+# Explicit empty is not absent (MESSAGE_SPEC §2; generator#645): an empty array,
+# string or blob whose declared default is non-empty is a value, written as a
+# zero-length one and read back empty; `{}` writes nothing and reads back as
+# the defaults. The shared driver prints its own schema and asserts the exact
+# bytes of each case.
+echo "==> explicit empty is not absent (generator#645)"
+printf 'version: 1\nmessages:\n' > "$WORK/emptyabs.yaml"
+python3 "$ROOT/tests/conformance/lib/check_empty_vs_absent.py" --emit-schema >> "$WORK/emptyabs.yaml"
+( cd "$ROOT" && go run ./cmd/sofabgen --format=off --config "$WORK/cfg.yaml" --lang dart --in "$WORK/emptyabs.yaml" --out "$WORK/emptyabs" )
+sed -i "s#\${SOFAB_DART_CORELIB}#$CORELIB#" "$WORK/emptyabs/pubspec.yaml"
+compile_project "$WORK/emptyabs"
+for surface in decode streamdecode; do
+    python3 "$ROOT/tests/conformance/lib/check_empty_vs_absent.py" "Dart" --verb "$surface" \
+        -- "$WORK/emptyabs/harness"
+done
+
 # Every backend test, against the real corelib, with no skip allowed: the tests
 # that drive `dart format` for real live there, and the lang-dart job is the
 # only place a Dart SDK exists to run them (tests/conformance/lib/backend_tests.sh).

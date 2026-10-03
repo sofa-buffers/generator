@@ -1110,6 +1110,20 @@ for surface in decode streamdecode; do
         -- "$WORK/arrlen/zig-out/bin/harness"
 done
 
+# Explicit empty is not absent (MESSAGE_SPEC §2; generator#645): an empty array,
+# string or blob whose declared default is non-empty is a value, written as a
+# zero-length one and read back empty; `{}` writes nothing and reads back as
+# the defaults. The shared driver prints its own schema and asserts the exact
+# bytes of each case.
+echo "==> explicit empty is not absent (generator#645)"
+printf 'version: 1\nmessages:\n' > "$WORK/emptyabs.yaml"
+python3 "$ROOT/tests/conformance/lib/check_empty_vs_absent.py" --emit-schema >> "$WORK/emptyabs.yaml"
+zig_build "$WORK/emptyabs.yaml" "$WORK/emptyabs"
+for surface in decode streamdecode; do
+    python3 "$ROOT/tests/conformance/lib/check_empty_vs_absent.py" "Zig" --verb "$surface" \
+        -- "$WORK/emptyabs/zig-out/bin/harness"
+done
+
 # Gate 10 (ARCHITECTURE §12): every generated file -- message.zig, the harness,
 # build.zig and build.zig.zon -- must pass `zig fmt --check`, so a user's own
 # zig fmt gate over a tree holding generated code passes. The backend emits zig

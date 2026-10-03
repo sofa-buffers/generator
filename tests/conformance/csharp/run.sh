@@ -1156,6 +1156,20 @@ for surface in decode streamdecode; do
         -- dotnet "$WORK/arrlen/bin/Debug/net9.0/harness.dll"
 done
 
+# Explicit empty is not absent (MESSAGE_SPEC §2; generator#645): an empty array,
+# string or blob whose declared default is non-empty is a value, written as a
+# zero-length one and read back empty; `{}` writes nothing and reads back as
+# the defaults. The shared driver prints its own schema and asserts the exact
+# bytes of each case.
+echo "==> explicit empty is not absent (generator#645)"
+printf 'version: 1\nmessages:\n' > "$WORK/emptyabs.yaml"
+python3 "$ROOT/tests/conformance/lib/check_empty_vs_absent.py" --emit-schema >> "$WORK/emptyabs.yaml"
+build "$WORK/emptyabs.yaml" "$WORK/emptyabs"
+for surface in decode streamdecode; do
+    python3 "$ROOT/tests/conformance/lib/check_empty_vs_absent.py" "C#" --verb "$surface" \
+        -- dotnet "$WORK/emptyabs/bin/Debug/net9.0/harness.dll"
+done
+
 # The backend's own Go tests, unfiltered, against this corelib: any skip fails
 # (tests/conformance/lib/backend_tests.sh).
 run_backend_tests generators/csharp SOFAB_CS_CORELIB "$CORELIB"
