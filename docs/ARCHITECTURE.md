@@ -1488,7 +1488,8 @@ route by `(scope, id)` and are forward-compatible (skip unknown ids).
    `sofab::FixedBytes<N>`); `_init` zeroes the struct first because the length
    member is not a descriptor field. A non-empty blob `default` puts its length
    in the const default image beside the bytes (`.b__len = n`), exactly as a
-   compact array does: `sofab_object_init` seeds the companion from the image at
+   compact array does (an all-zero default keeps its length; only its byte
+   image is elided): `sofab_object_init` seeds the companion from the image at
    `offset - width`, at every nesting level, and the corelib's default test
    compares length and bytes against the same image. So a blob left at its
    default is omitted, and an explicit empty blob over a non-empty default is

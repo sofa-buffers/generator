@@ -361,6 +361,7 @@ messages:
     payload:
       bl: { id: 0, type: blob, maxlen: 8, default: "SGVsbG8=" }
       be: { id: 1, type: blob, maxlen: 8 }
+      bz: { id: 4, type: blob, maxlen: 8, default: "AAAA" }
       s:
         id: 2
         type: struct
@@ -377,10 +378,15 @@ messages:
             ab: { id: 0, type: blob, maxlen: 8, default: "SGk=" }
 `)
 	c := files["m_sofab.c"]
-	for _, want := range []string{".bl__len = 5,", ".sb__len = 2,", ".ab__len = 2,"} {
+	for _, want := range []string{".bl__len = 5,", ".bz__len = 3,", ".sb__len = 2,", ".ab__len = 2,"} {
 		if !strings.Contains(c, want) {
 			t.Errorf("m.c default image missing %q:\n%s", want, c)
 		}
+	}
+	// An all-zero default is a length-3 blob: its length is recorded even
+	// though its byte image is elided.
+	if strings.Contains(c, ".bz = ") {
+		t.Errorf("m.c should elide the all-zero byte image:\n%s", c)
 	}
 	for _, bad := range []string{".be__len", ".se__len", "msg->bl__len", "msg->be__len"} {
 		if strings.Contains(c, bad) {
