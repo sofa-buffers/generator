@@ -77,7 +77,7 @@ to the weaker comparison is printed.
 ## Loud, never quiet
 
 A driver that silently narrows what it selects passes while testing less than it
-claims -- the failure mode `check_vectors_encode.py`'s `checked == 0` guard exists for,
+claims -- the failure mode `check_vectors_encode.py`'s checked-plus-excluded balance exists for,
 and the one the upstream C harness hit with a fixed `MAXSKIP` that truncated an
 over-long `skip_ids` list. So: every vector in the file is run, a harness that
 exits non-zero (a decoder that rejects rather than skips) is a failure and not a

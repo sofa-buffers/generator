@@ -1000,7 +1000,7 @@ if [ "$NATIVE" = yes ]; then require_engine native; else require_engine python; 
 # S6.2.1/S6.3 split the same way: a schema-bounded field decodes past a tighter
 # receiver cap, its own bound still rejects as INVALID, and a header that
 # contradicts the declared type is skipped rather than measured against it (S7.3).
-echo "==> backend Go tests against the corelib (...)"
+echo "==> backend tests against the corelib"
 # $RUFF_ABSENT is "ruff" only when this box has none (see the banner at the top),
 # and it buys exactly one thing: the package's real-ruff test may then say it
 # skipped. With ruff installed it is empty and any skip fails the suite.
