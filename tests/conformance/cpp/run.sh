@@ -15,6 +15,8 @@ set -eu
 . "$(dirname "$0")/../lib/corelib.sh"
 . "$(dirname "$0")/../lib/maxsize_fill.sh"
 . "$(dirname "$0")/../lib/max_message_size.sh"
+# The header_limits / invalid_utf8 side tables (generator#651).
+. "$(dirname "$0")/../lib/tables.sh"
 # shellcheck source=../lib/backend_tests.sh
 . "$(dirname "$0")/../lib/backend_tests.sh"
 
@@ -876,6 +878,45 @@ YAML
             -- "$WORK/terminal-$label/harness/harness"
     fi
 
+    # The shared header-ceiling and invalid-UTF-8 tables (generator#651): a declared
+    # length or count and then end of input, at the top level and inside open
+    # sequences, answered at the word with the ceiling's own verdict and terminal;
+    # and every invalid_utf8 row decoded as INVALID and, strings being byte
+    # containers here, refused on encode.
+    #
+    # The embedded profile (corelib c-cpp) has no receiver caps, so there the
+    # `receiver_caps` rows are skipped by name and the schema-bounded rows run. It
+    # also defaults SOFAB_STRICT_UTF8 OFF and CORELIB_PLAN S6.4.2 requires the
+    # check-ON configuration to be tested, so that project is built strict, as the
+    # skipped-string block above does; pure corelib-cpp defaults it ON.
+    echo "==> [$label] header ceilings and invalid UTF-8, from the shared vector tables (generator#651)"
+    TABLES="$CC/assets/test_vectors.json"
+    WITHOUT=""
+    [ -n "$corelib" ] && WITHOUT="--without receiver_caps"
+    tables_schema "$TABLES" "$WORK/tables-$label.yaml" $WITHOUT
+    { printf 'generic: %s\n' "$TABLES_GENERIC"; cat "$WORK/cfg-corpus-$label.yaml"; } > "$WORK/cfg-tables-$label.yaml"
+    ( cd "$ROOT" && go run ./cmd/sofabgen --config "$WORK/cfg-tables-$label.yaml" --lang cpp \
+        --in "$WORK/tables-$label.yaml" --out "$WORK/tables-$label" >/dev/null )
+    if [ -z "$corelib" ]; then
+        make -C "$WORK/tables-$label" "$@" >/dev/null
+    else
+        make -C "$WORK/tables-$label" "$@" \
+            CFLAGS="-Os -ffunction-sections -fdata-sections -DSOFAB_STRICT_UTF8=1" \
+            CXXFLAGS="-Os -ffunction-sections -fdata-sections -fno-exceptions -fno-rtti -DSOFAB_STRICT_UTF8=1" \
+            >/dev/null
+    fi
+    TH="$WORK/tables-$label/harness/harness"
+    for surface in decode streamdecode; do
+        MARK=""
+        [ "$surface" = streamdecode ] && MARK="--marker finish --invalid-name INVALID --limit-name LIMIT_EXCEEDED"
+        python3 "$ROOT/tests/conformance/lib/check_header_limits.py" "$TABLES" "C++ [$label]" $WITHOUT \
+            --verb "$surface" --limit-pattern 'decode error: LIMIT_EXCEEDED' \
+            --invalid-pattern 'decode error: INVALID\b' $MARK -- "$TH"
+        python3 "$ROOT/tests/conformance/lib/check_invalid_utf8.py" "$TABLES" "C++ [$label]" \
+            --verb "$surface" --limit-pattern 'decode error: LIMIT_EXCEEDED' \
+            --invalid-pattern 'decode error: INVALID\b' --encode -- "$TH"
+    done
+
     # Every shared vector that is not decode-only by design, byte for byte against
     # its `serialized_sparse` column (generator#650).
     echo "==> [$label] shared-vector encode conformance"
@@ -898,6 +939,16 @@ YAML
     for surface in decode streamdecode; do
         python3 "$ROOT/tests/conformance/lib/check_vectors_decode.py" \
             "$CC/assets/test_vectors.json" "C++" --mode "$surface" \
+            -- "$WORK/conf-$label/harness/harness"
+    done
+
+    # ...and the VALUES: the same dense bytes into the message the encode driver
+    # derives from each vector, every decoded field compared with the vector's
+    # `fields` (generator#651). The skip matrix above reads u64 only.
+    echo "==> [$label] shared-vector typed decode conformance"
+    for surface in decode streamdecode; do
+        python3 "$ROOT/tests/conformance/lib/check_vectors_decode.py" --typed \
+            "$CC/assets/test_vectors.json" "C++ [$label]" --mode "$surface" \
             -- "$WORK/conf-$label/harness/harness"
     done
 

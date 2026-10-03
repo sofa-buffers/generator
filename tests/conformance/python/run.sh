@@ -11,6 +11,8 @@ set -eu
 # Shared MAX_SIZE fill check (ARCHITECTURE §9.6).
 . "$(dirname "$0")/../lib/maxsize_fill.sh"
 . "$(dirname "$0")/../lib/max_message_size.sh"
+# The header_limits / invalid_utf8 side tables (generator#651).
+. "$(dirname "$0")/../lib/tables.sh"
 # Every backend Go test, run against the corelib with no skips allowed.
 . "$(dirname "$0")/../lib/backend_tests.sh"
 # Shared canonical-formatter check (ARCHITECTURE §12 gate 10).
@@ -875,6 +877,15 @@ cat > "$WORK/refusal-cfg.yaml" <<YAML
 generic: { emit: project, max_dyn_array_count: 4, max_dyn_string_len: 8, max_dyn_blob_len: 8 }
 YAML
 ( cd "$ROOT" && go run ./cmd/sofabgen --format=off --config "$WORK/refusal-cfg.yaml" --lang python --in "$WORK/refusal.yaml" --out "$WORK/refusalproj" )
+# The shared header_limits / header_limits_nested / invalid_utf8 tables
+# (generator#651), one project for both drivers. Python strings are text, so the
+# invalid_utf8 encode half cannot be handed the bytes and only decode runs.
+TABLES="$CORELIB/assets/test_vectors.json"
+tables_schema "$TABLES" "$WORK/tables.yaml"
+cat > "$WORK/tables-cfg.yaml" <<YAML
+generic: $TABLES_GENERIC
+YAML
+( cd "$ROOT" && go run ./cmd/sofabgen --format=off --config "$WORK/tables-cfg.yaml" --lang python --in "$WORK/tables.yaml" --out "$WORK/tablesproj" )
 for ENGINE in $ENGINES; do
     if [ "$ENGINE" = python ]; then export SOFAB_PUREPYTHON=1; else unset SOFAB_PUREPYTHON || true; fi
     require_engine "$ENGINE"
@@ -897,6 +908,23 @@ for ENGINE in $ENGINES; do
     python3 "$ROOT/tests/conformance/lib/check_terminal_refusal.py" "python/$ENGINE" \
         --cwd "$WORK/refusalproj" --marker refeed \
         --invalid-name INVALID --limit-name SofaLimitError \
+        -- python3 harness.py
+    # The shared header-ceiling and invalid-UTF-8 tables, on both surfaces; the
+    # chunked one also asks again after each refusal (generator#651).
+    python3 "$ROOT/tests/conformance/lib/check_header_limits.py" "$TABLES" "python/$ENGINE" \
+        --cwd "$WORK/tablesproj" --limit-pattern SofaLimitError --invalid-pattern SofaDecodeError \
+        -- python3 harness.py
+    python3 "$ROOT/tests/conformance/lib/check_header_limits.py" "$TABLES" "python/$ENGINE" \
+        --cwd "$WORK/tablesproj" --verb streamdecode \
+        --limit-pattern 'decode error: SofaLimitError' --invalid-pattern 'decode failed: INVALID' \
+        --marker refeed --invalid-name INVALID --limit-name SofaLimitError \
+        -- python3 harness.py
+    python3 "$ROOT/tests/conformance/lib/check_invalid_utf8.py" "$TABLES" "python/$ENGINE" \
+        --cwd "$WORK/tablesproj" --limit-pattern SofaLimitError --invalid-pattern SofaDecodeError \
+        -- python3 harness.py
+    python3 "$ROOT/tests/conformance/lib/check_invalid_utf8.py" "$TABLES" "python/$ENGINE" \
+        --cwd "$WORK/tablesproj" --verb streamdecode \
+        --limit-pattern 'decode error: SofaLimitError' --invalid-pattern 'decode failed: INVALID' \
         -- python3 harness.py
 done
 unset SOFAB_PUREPYTHON || true
@@ -1048,6 +1076,9 @@ if [ "$NATIVE" = yes ]; then
         python3 "$ROOT/tests/conformance/lib/check_vectors_decode.py" \
             "$CORELIB/assets/test_vectors.json" "Python (native)" --mode "$surface" \
             --cwd "$WORK/vecskip" -- python3 harness.py
+        python3 "$ROOT/tests/conformance/lib/check_vectors_decode.py" --typed \
+            "$CORELIB/assets/test_vectors.json" "Python (native)" --mode "$surface" \
+            --cwd "$WORK/vecskip" -- python3 harness.py
     done
     # The encode direction (generator#650) runs on the accelerator too: its
     # encoder is a separate implementation from the pure one.
@@ -1060,6 +1091,9 @@ export SOFAB_PUREPYTHON
 require_engine python
 for surface in decode streamdecode; do
     python3 "$ROOT/tests/conformance/lib/check_vectors_decode.py" \
+        "$CORELIB/assets/test_vectors.json" "Python (pure)" --mode "$surface" \
+        --cwd "$WORK/vecskip" -- python3 harness.py
+    python3 "$ROOT/tests/conformance/lib/check_vectors_decode.py" --typed \
         "$CORELIB/assets/test_vectors.json" "Python (pure)" --mode "$surface" \
         --cwd "$WORK/vecskip" -- python3 harness.py
 done
@@ -1513,6 +1547,7 @@ format_gen python "$WORK/fmt/fill" --config "$WORK/cfg.yaml" --in "$ROOT/tests/c
 format_gen python "$WORK/fmt/rows" --config "$WORK/cfg.yaml" --in "$WORK/rows-def.yaml"
 format_gen python "$WORK/fmt/limit" --config "$WORK/limit-cfg.yaml" --in "$WORK/limit-def.yaml"
 format_gen python "$WORK/fmt/refusal" --config "$WORK/refusal-cfg.yaml" --in "$WORK/refusal.yaml"
+format_gen python "$WORK/fmt/tables" --config "$WORK/tables-cfg.yaml" --in "$WORK/tables.yaml"
 format_gen python "$WORK/fmt/excl" --config "$WORK/limit-cfg.yaml" --in "$WORK/excl.yaml"
 format_gen python "$WORK/fmt/elem" --config "$WORK/elem-cfg.yaml" --in "$WORK/elem.yaml"
 format_gen python "$WORK/fmt/growth" --config "$WORK/limit-cfg.yaml" --in "$WORK/growth.yaml"

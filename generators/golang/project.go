@@ -352,7 +352,7 @@ func (g *gen) harness(s *ir.Schema, modPath string) []byte {
 		f.line("\t\t\tif err != nil {")
 		f.line("\t\t\t\tfail(err)")
 		f.line("\t\t\t}")
-		f.line("\t\t\tout, _ := json.Marshal(obj)")
+		f.line("\t\t\tout, _ := marshalJSON(obj)")
 		f.line("\t\t\tos.Stdout.Write(out)")
 		f.line("\t\t\tfmt.Fprintln(os.Stdout)")
 		// The same bytes through the reader-driven entry point (§5.6). Fed a byte
@@ -375,7 +375,7 @@ func (g *gen) harness(s *ir.Schema, modPath string) []byte {
 		f.line("\t\t\t\t_, again := d.Feed(nil)")
 		f.line("\t\t\t\tfail(fmt.Errorf(\"%%v [finish=%%s]\", err, verdictName(again)))")
 		f.line("\t\t\t}")
-		f.line("\t\t\tout, _ := json.Marshal(obj)")
+		f.line("\t\t\tout, _ := marshalJSON(obj)")
 		f.line("\t\t\tos.Stdout.Write(out)")
 		f.line("\t\t\tfmt.Fprintln(os.Stdout)")
 		f.line("\t\t} else {")
@@ -471,7 +471,7 @@ func defaultMessage(s *ir.Schema) string {
 	return ""
 }
 
-// emitInfSpelling emits unmarshalJSON, the harness's JSON front door (harness-only
+// emitInfSpelling emits marshalJSON and unmarshalJSON, the harness's JSON front door (harness-only
 // scaffolding, never part of emit: sources; see ARCHITECTURE §8 emit modes). It is
 // json.Unmarshal plus the one spelling encoding/json has no number for: the
 // strings "inf" and "-inf" at a float position, which is how the shared vector
@@ -482,10 +482,13 @@ func defaultMessage(s *ir.Schema) string {
 // rest of the message has been unmarshalled.
 func (g *gen) emitInfSpelling(f *gofile) {
 	for _, l := range []string{
-		"// infAt is a float position the input spelled \"inf\" or \"-inf\".",
+		"// infAt is a position the input spelled in a way encoding/json cannot carry: a float",
+		"// written \"inf\" or \"-inf\", or a string written with \\xNN escapes for bytes that",
+		"// are not UTF-8 (raw is then those bytes).",
 		"type infAt struct {",
 		"\tpath []any // map keys (string) and slice indexes (int) from the root",
 		"\tneg  bool",
+		"\traw  *string",
 		"}",
 		"",
 		"func jsonName(sf reflect.StructField) string {",
@@ -518,15 +521,111 @@ func (g *gen) emitInfSpelling(f *gofile) {
 		"\t\t\tx[i] = scrubInf(e, t.Elem(), append(append([]any{}, path...), i), out)",
 		"\t\t}",
 		"\tcase string:",
+		"\t\tif t.Kind() == reflect.String {",
+		"\t\t\tvar raw strings.Builder",
+		"\t\t\thas := false",
+		"\t\t\tfor _, r := range x {",
+		"\t\t\t\tif r >= 0xF700 && r <= 0xF7FF {",
+		"\t\t\t\t\traw.WriteByte(byte(r - 0xF700))",
+		"\t\t\t\t\thas = true",
+		"\t\t\t\t} else {",
+		"\t\t\t\t\traw.WriteRune(r)",
+		"\t\t\t\t}",
+		"\t\t\t}",
+		"\t\t\tif has {",
+		"\t\t\t\ts := raw.String()",
+		"\t\t\t\t*out = append(*out, infAt{path: path, raw: &s})",
+		"\t\t\t\treturn \"\"",
+		"\t\t\t}",
+		"\t\t}",
 		"\t\tif (x == \"inf\" || x == \"-inf\") && (t.Kind() == reflect.Float32 || t.Kind() == reflect.Float64) {",
-		"\t\t\t*out = append(*out, infAt{path, x == \"-inf\"})",
+		"\t\t\t*out = append(*out, infAt{path: path, neg: x == \"-inf\"})",
 		"\t\t\treturn json.Number(\"0\")",
 		"\t\t}",
 		"\t}",
 		"\treturn v",
 		"}",
 		"",
+		"// jsonTree is the value as encoding/json would render it, except that a float",
+		"// with no JSON number (an infinity, a NaN) becomes the string \"inf\", \"-inf\"",
+		"// or \"nan\". Only marshalJSON uses it, when json.Marshal has refused.",
+		"func jsonTree(v reflect.Value) any {",
+		"\tswitch v.Kind() {",
+		"\tcase reflect.Pointer, reflect.Interface:",
+		"\t\tif v.IsNil() {",
+		"\t\t\treturn nil",
+		"\t\t}",
+		"\t\treturn jsonTree(v.Elem())",
+		"\tcase reflect.Struct:",
+		"\t\tm := map[string]any{}",
+		"\t\tfor i := 0; i < v.NumField(); i++ {",
+		"\t\t\tif name := jsonName(v.Type().Field(i)); name != \"\" && name != \"-\" {",
+		"\t\t\t\tm[name] = jsonTree(v.Field(i))",
+		"\t\t\t}",
+		"\t\t}",
+		"\t\treturn m",
+		"\tcase reflect.Slice, reflect.Array:",
+		"\t\tif v.Kind() == reflect.Slice && v.IsNil() {",
+		"\t\t\treturn nil",
+		"\t\t}",
+		"\t\tif v.Type().Elem().Kind() == reflect.Uint8 {",
+		"\t\t\treturn v.Interface()",
+		"\t\t}",
+		"\t\tout := make([]any, v.Len())",
+		"\t\tfor i := range out {",
+		"\t\t\tout[i] = jsonTree(v.Index(i))",
+		"\t\t}",
+		"\t\treturn out",
+		"\tcase reflect.Float32, reflect.Float64:",
+		"\t\tf := v.Float()",
+		"\t\tswitch {",
+		"\t\tcase math.IsNaN(f):",
+		"\t\t\treturn \"nan\"",
+		"\t\tcase math.IsInf(f, 1):",
+		"\t\t\treturn \"inf\"",
+		"\t\tcase math.IsInf(f, -1):",
+		"\t\t\treturn \"-inf\"",
+		"\t\t}",
+		"\t\tbits := 64",
+		"\t\tif v.Kind() == reflect.Float32 {",
+		"\t\t\tbits = 32",
+		"\t\t}",
+		"\t\treturn json.Number(strconv.FormatFloat(f, 'g', -1, bits))",
+		"\t}",
+		"\treturn v.Interface()",
+		"}",
+		"",
+		"// marshalJSON is json.Marshal plus the output half of the infinity spelling:",
+		"// the same strings unmarshalJSON reads, so a decoded +-inf can be printed.",
+		"func marshalJSON(obj any) ([]byte, error) {",
+		"\tout, err := json.Marshal(obj)",
+		"\tif err == nil {",
+		"\t\treturn out, nil",
+		"\t}",
+		"\treturn json.Marshal(jsonTree(reflect.ValueOf(obj)))",
+		"}",
+		"",
+		"// byteEscapes rewrites each \\xNN in the input, which JSON has no such escape for, to",
+		"// \\uF7NN so the text still parses; scrubInf turns those back into the bytes.",
+		"func byteEscapes(in []byte) []byte {",
+		"\tvar out []byte",
+		"\tfor i := 0; i < len(in); i++ {",
+		"\t\tswitch {",
+		"\t\tcase in[i] == '\\\\' && i+1 < len(in) && in[i+1] == '\\\\':",
+		"\t\t\tout = append(out, '\\\\', '\\\\')",
+		"\t\t\ti++",
+		"\t\tcase in[i] == '\\\\' && i+3 < len(in) && in[i+1] == 'x':",
+		"\t\t\tout = append(out, '\\\\', 'u', 'F', '7', in[i+2], in[i+3])",
+		"\t\t\ti += 3",
+		"\t\tdefault:",
+		"\t\t\tout = append(out, in[i])",
+		"\t\t}",
+		"\t}",
+		"\treturn out",
+		"}",
+		"",
 		"func unmarshalJSON(in []byte, obj any) error {",
+		"\tin = byteEscapes(in)",
 		"\tdec := json.NewDecoder(bytes.NewReader(in))",
 		"\tdec.UseNumber() // keeps a 64-bit integer exact while the tree is rewritten",
 		"\tvar tree any",
@@ -559,6 +658,10 @@ func (g *gen) emitInfSpelling(f *gofile) {
 		"\t\t\tcase int:",
 		"\t\t\t\trv = rv.Index(k)",
 		"\t\t\t}",
+		"\t\t}",
+		"\t\tif at.raw != nil {",
+		"\t\t\trv.SetString(*at.raw)",
+		"\t\t\tcontinue",
 		"\t\t}",
 		"\t\tsign := 1",
 		"\t\tif at.neg {",

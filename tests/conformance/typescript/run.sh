@@ -11,6 +11,8 @@ set -eu
 # Shared MAX_SIZE fill check (ARCHITECTURE §9.6).
 . "$(dirname "$0")/../lib/maxsize_fill.sh"
 . "$(dirname "$0")/../lib/max_message_size.sh"
+# The header_limits / invalid_utf8 side tables (generator#651).
+. "$(dirname "$0")/../lib/tables.sh"
 # Shared canonical-formatter check (ARCHITECTURE §12 gate 10). Also what keeps
 # this suite honest on a box without prettier.
 . "$(dirname "$0")/../lib/check_format.sh"
@@ -795,6 +797,38 @@ python3 "$ROOT/tests/conformance/lib/check_terminal_refusal.py" "typescript $VL"
     --cwd "$VW/refusal" --marker finish --invalid-name INVALID_MSG --limit-name LIMIT_EXCEEDED \
     -- "$TH"
 
+# The shared header-ceiling and invalid-UTF-8 tables (generator#651): a declared
+# length or count and then end of input, at the top level and inside open sequences,
+# each answered at the word with the ceiling's own verdict and never INCOMPLETE; and
+# every invalid_utf8 row decoded as INVALID. JS strings are text, so only the decode
+# half of invalid_utf8 can run. `status` is the category channel on the one-shot
+# surface, `[finish=<code>]` on the chunked one, which also asks again after the
+# refusal.
+echo "==> [$VL] header ceilings and invalid UTF-8, from the shared vector tables (generator#651)"
+TABLES="$CORELIB/assets/test_vectors.json"
+tables_schema "$TABLES" "$WORK/tables.yaml"
+cat > "$VW/cfg_tables.yaml" <<YAML
+generic: $TABLES_GENERIC
+targets: { typescript: $VT }
+YAML
+gen "$WORK/tables.yaml" "$VW/tables" "$VW/cfg_tables.yaml"
+ln -s "$WORK/ex/node_modules" "$VW/tables/node_modules"
+python3 "$ROOT/tests/conformance/lib/check_header_limits.py" "$TABLES" "typescript $VL" \
+    --cwd "$VW/tables" --status-verb status --status-limit LIMIT_EXCEEDED \
+    -- "$TH"
+python3 "$ROOT/tests/conformance/lib/check_header_limits.py" "$TABLES" "typescript $VL" \
+    --cwd "$VW/tables" --verb streamdecode \
+    --limit-pattern 'finish=LIMIT_EXCEEDED' --invalid-pattern 'finish=INVALID_MSG' \
+    --marker finish --invalid-name INVALID_MSG --limit-name LIMIT_EXCEEDED \
+    -- "$TH"
+python3 "$ROOT/tests/conformance/lib/check_invalid_utf8.py" "$TABLES" "typescript $VL" \
+    --cwd "$VW/tables" --status-verb status --status-limit LIMIT_EXCEEDED \
+    -- "$TH"
+python3 "$ROOT/tests/conformance/lib/check_invalid_utf8.py" "$TABLES" "typescript $VL" \
+    --cwd "$VW/tables" --verb streamdecode \
+    --limit-pattern 'finish=LIMIT_EXCEEDED' --invalid-pattern 'finish=INVALID_MSG' \
+    -- "$TH"
+
 echo "==> [$VL] shared-vector encode conformance"
 # Every shared vector that is not decode-only by design, byte for byte against its
 # `serialized_sparse` column (generator#650).
@@ -814,6 +848,17 @@ python3 "$ROOT/tests/conformance/lib/check_vectors_encode.py" \
 echo "==> [$VL] shared-vector decode conformance (skip matrix)"
 for surface in decode streamdecode; do
     python3 "$ROOT/tests/conformance/lib/check_vectors_decode.py" \
+        "$CORELIB/assets/test_vectors.json" "TypeScript $VL" --mode "$surface" $SAFE \
+        --cwd "$VW/conf" -- "$TH"
+done
+
+# ...and the VALUES: the same dense bytes into the message the encode driver derives
+# from each vector, every decoded field compared with the vector's `fields`
+# (generator#651). The skip matrix above reads u64 only. Under `int64: number` the
+# vectors that carry a 64-bit value above 2^53-1 are excluded by name.
+echo "==> [$VL] shared-vector typed decode conformance"
+for surface in decode streamdecode; do
+    python3 "$ROOT/tests/conformance/lib/check_vectors_decode.py" --typed \
         "$CORELIB/assets/test_vectors.json" "TypeScript $VL" --mode "$surface" $SAFE \
         --cwd "$VW/conf" -- "$TH"
 done
@@ -1653,6 +1698,7 @@ format_gen typescript "$WORK/fmt/growth" --config "$WORK/cfg_lim.yaml" --in "$WO
 format_gen typescript "$WORK/fmt/closed" --config "$WORK/cfg.yaml" --in "$WORK/closed.yaml"
 format_gen typescript "$WORK/fmt/arrlen" --config "$WORK/cfg.yaml" --in "$WORK/arrlen.yaml"
 format_gen typescript "$WORK/fmt/repeated" --config "$WORK/cfg.yaml" --in "$WORK/repeated.yaml"
+format_gen typescript "$WORK/fmt/tables" --config "$WORK/cfg_tables.yaml" --in "$WORK/tables.yaml"
 # The per-mode projects of run_variant: same schemas, the two non-default modes.
 for mode in long number; do
     format_gen typescript "$WORK/fmt/ex-$mode" --config "$WORK/cfg_$mode.yaml" --in "$ROOT/examples/messages/example.yaml"
@@ -1661,6 +1707,7 @@ for mode in long number; do
     format_gen typescript "$WORK/fmt/lim-$mode" --config "$WORK/v-$mode/cfg_lim.yaml" --in "$WORK/dyn.yaml"
     format_gen typescript "$WORK/fmt/wlim-$mode" --config "$WORK/v-$mode/cfg_wlim.yaml" --in "$WORK/wrap.yaml"
     format_gen typescript "$WORK/fmt/refusal-$mode" --config "$WORK/v-$mode/cfg_refusal.yaml" --in "$WORK/refusal.yaml"
+    format_gen typescript "$WORK/fmt/tables-$mode" --config "$WORK/v-$mode/cfg_tables.yaml" --in "$WORK/tables.yaml"
 done
 for mode in bigint long number; do
     format_gen typescript "$WORK/fmt/union-$mode" --config "$WORK/cfg_$mode.yaml" --in "$WORK/union.yaml"

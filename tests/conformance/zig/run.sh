@@ -15,6 +15,8 @@ set -eu
 # Backend Go tests against the real corelib (lib/backend_tests.sh).
 . "$(dirname "$0")/../lib/backend_tests.sh"
 . "$(dirname "$0")/../lib/max_message_size.sh"
+# The header_limits / invalid_utf8 side tables (generator#651).
+. "$(dirname "$0")/../lib/tables.sh"
 # Generated code against the canonical formatter (ARCHITECTURE §12).
 . "$(dirname "$0")/../lib/check_format.sh"
 
@@ -789,6 +791,28 @@ echo "==> a refusal is terminal: finish refuses under the same code (generator#5
 python3 "$ROOT/tests/conformance/lib/check_terminal_refusal.py" "zig" \
     --marker finish --invalid-name InvalidMessage --limit-name LimitExceeded \
     -- "$WORK/refusal/zig-out/bin/harness"
+
+# The shared header-ceiling and invalid-UTF-8 tables (generator#651): a declared
+# length or count and then end of input, at the top level and inside open sequences,
+# answered at the word with the ceiling's own verdict and terminal; and every
+# invalid_utf8 row decoded as INVALID and, `[]const u8` being a byte container,
+# refused on encode. corelib-zig defaults SOFAB_STRICT_UTF8 ON, so the default
+# build is the check-ON one.
+echo "==> header ceilings and invalid UTF-8, from the shared vector tables (generator#651)"
+TABLES="$CORELIB/assets/test_vectors.json"
+tables_schema "$TABLES" "$WORK/tables.yaml"
+printf 'generic: %s\n' "$TABLES_GENERIC" > "$WORK/cfg_tables.yaml"
+zig_build "$WORK/tables.yaml" "$WORK/tables" "$WORK/cfg_tables.yaml"
+for surface in decode streamdecode; do
+    MARK=""
+    [ "$surface" = streamdecode ] && MARK="--marker finish --invalid-name InvalidMessage --limit-name LimitExceeded"
+    python3 "$ROOT/tests/conformance/lib/check_header_limits.py" "$TABLES" "zig" \
+        --verb "$surface" --limit-pattern 'LimitExceeded' --invalid-pattern 'InvalidMessage' $MARK \
+        -- "$WORK/tables/zig-out/bin/harness"
+    python3 "$ROOT/tests/conformance/lib/check_invalid_utf8.py" "$TABLES" "zig" \
+        --verb "$surface" --limit-pattern 'LimitExceeded' --invalid-pattern 'InvalidMessage' --encode \
+        -- "$WORK/tables/zig-out/bin/harness"
+done
 # The receiver cap on a WRAPPER array's element INDEX, and on a matrix row's own
 # element count (CORELIB_PLAN 6.2.1). These are the caps corelib-zig compares --
 # generated code passes max_dyn_array_count as the `.{ .receiver = ... }` bound of
@@ -880,6 +904,16 @@ python3 "$ROOT/tests/conformance/lib/check_vectors_encode.py" \
 echo "==> shared-vector decode conformance (skip matrix)"
 for surface in decode streamdecode; do
     python3 "$ROOT/tests/conformance/lib/check_vectors_decode.py" \
+        "$CORELIB/assets/test_vectors.json" "Zig" --mode "$surface" \
+        -- "$WORK/conf/zig-out/bin/harness"
+done
+
+# ...and the VALUES: the same dense bytes into the message the encode driver derives
+# from each vector, every decoded field compared with the vector's `fields`
+# (generator#651). The skip matrix above reads u64 only.
+echo "==> shared-vector typed decode conformance"
+for surface in decode streamdecode; do
+    python3 "$ROOT/tests/conformance/lib/check_vectors_decode.py" --typed \
         "$CORELIB/assets/test_vectors.json" "Zig" --mode "$surface" \
         -- "$WORK/conf/zig-out/bin/harness"
 done
@@ -1156,6 +1190,7 @@ done
 echo "==> gate 10: regenerating every schema for the formatter check"
 format_gen zig "$WORK/fmt/ex" --config "$WORK/cfg.yaml" --in "$ROOT/examples/messages/example.yaml"
 format_gen zig "$WORK/fmt/conf" --config "$WORK/cfg.yaml" --in "$WORK/conf.yaml"
+format_gen zig "$WORK/fmt/tables" --config "$WORK/cfg_tables.yaml" --in "$WORK/tables.yaml"
 format_gen zig "$WORK/fmt/fill" --config "$WORK/cfg.yaml" --in "$ROOT/tests/conformance/lib/maxsize_fill.yaml"
 format_gen zig "$WORK/fmt/skiprepro" --config "$WORK/cfg.yaml" --in "$WORK/skiprepro.yaml"
 format_gen zig "$WORK/fmt/probe" --config "$WORK/cfg.yaml" --in "$WORK/probe.yaml"
