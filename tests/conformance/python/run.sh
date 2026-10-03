@@ -703,6 +703,18 @@ for ENGINE in $ENGINES; do
             --cwd "$WORK/proj" --verb "$surface" --invalid-pattern "$U8_CAT" \
             -- python3 harness.py
     done
+    # ...at every other string position, plus the encode half (generator#652).
+    echo "==> [$ENGINE] invalid UTF-8 at every string position + multi-byte round trip (generator#652)"
+    for surface in decode streamdecode; do
+        if [ "$surface" = decode ]; then
+            U8_CAT="SofaDecodeError"; ENC="--encode --surrogates --refusal-pattern SofaArgumentError"
+        else
+            U8_CAT="decode failed: INVALID"; ENC=
+        fi
+        python3 "$ROOT/tests/conformance/lib/check_utf8_positions.py" "python/$ENGINE" \
+            --cwd "$WORK/proj" --verb "$surface" --invalid-pattern "$U8_CAT" $ENC \
+            -- python3 harness.py
+    done
 done
 unset SOFAB_PUREPYTHON || true
 if [ "$NATIVE" = yes ]; then require_engine native; else require_engine python; fi

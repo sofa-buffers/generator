@@ -6001,6 +6001,24 @@ A reimplementation is **conformant** when it reproduces these gates:
    such a string in JSON text take it as raw bytes (C, C++, Zig) or, where the
    JSON decoder replaces them (Go), as `\xNN` escapes.
 
+   *UTF-8 positions* (`check_utf8_positions.py`, generator#652): the two drivers
+   above reach one string, the top-level one. Generated code renders the
+   validation call once per scope (Go one `UTF8Valid` site per message, Zig one
+   `_takeStr` per string arm), so a scope that forgets it is invisible to them.
+   This driver reads `example.yaml` and asserts INVALID (`ff ff`, and `e2 82`
+   which only fails at payload completion) plus a valid-bytes control at every
+   string position: a wrapper-array element (first, and after a gap), a nested
+   struct, a struct that also holds an array, a union option, a union inside a
+   wrapper array, and a map key. Both decode surfaces run it. Its encode half
+   byte-compares the encoding of a string with a 2-, 3- and two 4-byte characters
+   (U+10FFFF is `F4 8F BF BF`) at every position, which fails for a UTF-16 target
+   that emits CESU-8, and decodes it back. On the Unicode-string targets (Java,
+   Kotlin, C#, TypeScript, Dart, Python) it also encodes a lone high surrogate, a
+   lone low surrogate, a trailing high surrogate and a reversed pair and requires
+   a refusal with the invalid-argument category and no output bytes (§6.4.1).
+   Byte-container targets get their encode refusal from the `invalid_utf8` table;
+   a Rust `String` cannot hold either input.
+
    *Growth* (`tests/conformance/lib/check_growth.py`): the `sequence_growth`
    block, CORELIB_PLAN §7.2 item 8, the shape-B allocation of §9.5.
    A wrapper array carries no element count, so its length is *highest present id

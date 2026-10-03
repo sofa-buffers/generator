@@ -895,6 +895,15 @@ for surface in decode streamdecode; do
         -- "$H"
 done
 
+# ...at every other string position, plus the encode half (generator#652).
+echo "==> invalid UTF-8 at every string position + multi-byte round trip (generator#652)"
+for surface in decode streamdecode; do
+    ENC=; [ "$surface" = decode ] && ENC="--encode --surrogates --refusal-pattern ARGUMENT"
+    python3 "$ROOT/tests/conformance/lib/check_utf8_positions.py" "kotlin" \
+        --verb "$surface" --invalid-pattern 'INVALID_MSG' $ENC \
+        -- "$H"
+done
+
 # The claim this target is built around: the generated MESSAGE sources are plain
 # `commonMain` Kotlin -- the standard library and `sofab`, nothing else -- so one
 # source set serves the JVM, Node/browser and native. A JVM-only reference
