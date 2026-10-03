@@ -499,6 +499,20 @@ run_variant() {
     python3 "$ROOT/tests/conformance/lib/check_skip_before_bound.py" "Rust [$label]" --sizes 1 \
         --cwd "$WORK/sbb-$label" -- cargo run -q --
 
+    # CORELIB_PLAN §4.9/§6.2 (generator#646): MAX_DEPTH is 255. The generated visitor
+    # tracks the decode scope on a schema-sized stack beside the corelib's depth
+    # counter, on every profile, so the two have to agree on the boundary. Bound and
+    # skipped levels together reach 255 and decode with every field after the unwind
+    # intact; 256 is INVALID, closed or not; 300 shallow unwinds do not accumulate
+    # depth. The driver builds its own bytes and prints its own schema. The 40-level
+    # leg above stays: it runs through the same visitor with a larger schema.
+    echo "==> [$label] MAX_DEPTH 255: bound + skipped levels decode, 256 is INVALID (generator#646)"
+    python3 "$ROOT/tests/conformance/lib/check_max_depth.py" --emit-schema > "$WORK/deep.yaml"
+    rust_build "$WORK/deep.yaml" "$WORK/deep-$label"
+    python3 "$ROOT/tests/conformance/lib/check_max_depth.py" "Rust [$label]" --sizes 1 \
+        --invalid-pattern 'InvalidMsg' \
+        --cwd "$WORK/deep-$label" -- cargo run -q --
+
     # CORELIB_PLAN §4.4 (generator#644): every non-zero boolean reads as true and
     # re-encodes as 1, with no width bound -- 2, 256 and 2^64-1 included. The driver
     # re-tags the corelib's shared `boolean_tolerant` vectors onto every boolean

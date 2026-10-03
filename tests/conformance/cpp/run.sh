@@ -1093,6 +1093,20 @@ YAML
     python3 "$ROOT/tests/conformance/lib/check_skip_before_bound.py" "C++ [$label]" --status-verb status \
         -- "$WORK/sbb-$label/harness/harness"
 
+    # CORELIB_PLAN §4.9/§6.2 (generator#646): MAX_DEPTH is 255. Every profile: the
+    # nesting is corelib-driven, and the boundary is a property of the whole decode
+    # path. Bound and skipped levels together reach 255 and decode with every field
+    # after the unwind intact; 256 is INVALID, closed or not; 300 shallow unwinds do
+    # not accumulate depth. The driver builds its own bytes and prints its own schema.
+    echo "==> [$label] MAX_DEPTH 255: bound + skipped levels decode, 256 is INVALID (generator#646)"
+    python3 "$ROOT/tests/conformance/lib/check_max_depth.py" --emit-schema > "$WORK/deep.yaml"
+    ( cd "$ROOT" && go run ./cmd/sofabgen --config "$WORK/cfg-$label.yaml" --lang cpp \
+        --in "$WORK/deep.yaml" --out "$WORK/deep-$label" )
+    make -C "$WORK/deep-$label" "$@" >/dev/null
+    python3 "$ROOT/tests/conformance/lib/check_max_depth.py" "C++ [$label]" \
+        --invalid-pattern 'decode error: INVALID\b' \
+        -- "$WORK/deep-$label/harness/harness"
+
     # CORELIB_PLAN §4.4 (generator#644): every non-zero boolean reads as true and
     # re-encodes as 1, with no width bound -- 2, 256 and 2^64-1 included. The driver
     # re-tags the corelib's shared `boolean_tolerant` vectors onto every boolean
