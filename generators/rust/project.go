@@ -308,9 +308,19 @@ func (g *gen) harness(s *ir.Schema) []byte {
 		f.line("                let csz: usize = args.get(3).and_then(|s| s.parse().ok()).unwrap_or(1);")
 		f.line("                let step = if csz > 0 { csz } else { input.len().max(1) };")
 		f.line("                for chunk in input.chunks(step) {")
+		// A refusal is terminal (CORELIB_PLAN §5.2, §6.3): the decoder is asked for
+		// the message anyway and the answer is printed as `[finish=X]`, `none` if it
+		// handed one back, for tests/conformance/lib/check_terminal_refusal.py.
 		f.line("                    match dec.feed(chunk) {")
 		f.line("                        Ok(_) => {}")
-		f.line("                        Err(e) => { eprintln!(\"decode error: {:?}\", e); std::process::exit(1); }")
+		f.line("                        Err(e) => {")
+		f.line("                            let again = match dec.finish() {")
+		f.line("                                Ok(_) => \"none\".to_string(),")
+		f.line("                                Err(a) => format!(\"{:?}\", a),")
+		f.line("                            };")
+		f.line("                            eprintln!(\"decode error: {:?} [finish={}]\", e, again);")
+		f.line("                            std::process::exit(1);")
+		f.line("                        }")
 		f.line("                    }")
 		f.line("                }")
 		f.line("                let obj = match dec.finish() {")

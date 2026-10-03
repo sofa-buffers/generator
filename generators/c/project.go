@@ -673,7 +673,21 @@ func (g *gen) emitMain(h *cfile, s *ir.Schema) {
 		// feed), swept by tests/conformance/lib/check_chunk_invariance.py.
 		h.line("            size_t csz = argc > 3 ? (size_t)strtoull(argv[3], NULL, 10) : 1;")
 		h.line("            size_t step = csz > 0 ? csz : (len > 0 ? len : 1);")
-		h.line("            for (i = 0; i < len; i += step) { (void)%s(&d, in + i, len - i < step ? len - i : step); }", role(b, "decoder_feed"))
+		// A refusal is terminal (CORELIB_PLAN §5.2, §6.3): the first one stops the
+		// feed, and the end-of-input probe that follows must repeat it. It is
+		// printed as `[finish=X]` (`none` if the decoder answered COMPLETE after
+		// refusing) for tests/conformance/lib/check_terminal_refusal.py.
+		h.line("            ret = SOFAB_RET_OK;")
+		h.line("            for (i = 0; i < len; i += step) {")
+		h.line("                ret = %s(&d, in + i, len - i < step ? len - i : step);", role(b, "decoder_feed"))
+		h.line("                if (ret != SOFAB_RET_OK && ret != SOFAB_RET_INCOMPLETE) break;")
+		h.line("            }")
+		h.line("            if (ret != SOFAB_RET_OK && ret != SOFAB_RET_INCOMPLETE) {")
+		h.line("                sofab_ret_t again = %s(&d, NULL, 0);", role(b, "decoder_feed"))
+		h.line("                fprintf(stderr, \"decode error: %%s [finish=%%s]\\n\", sofab_ret_name(ret),")
+		h.line("                        again == SOFAB_RET_OK ? \"none\" : sofab_ret_name(again));")
+		h.line("                return 1;")
+		h.line("            }")
 		h.line("            ret = %s(&d, NULL, 0);", role(b, "decoder_feed"))
 		h.line("            if (ret != SOFAB_RET_OK) { fprintf(stderr, \"decode error: %%s\\n\", sofab_ret_name(ret)); return 1; }")
 		h.line("            %s(&obj, stdout);", toJSON(b))

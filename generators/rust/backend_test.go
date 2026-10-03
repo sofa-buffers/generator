@@ -2653,7 +2653,9 @@ func TestRustHarnessTreatsBothStatusesAsOrdinary(t *testing.T) {
 	for _, want := range []string{
 		"                    match dec.feed(chunk) {",
 		"                        Ok(_) => {}",
-		"                        Err(e) => { eprintln!(\"decode error: {:?}\", e); std::process::exit(1); }",
+		"                        Err(e) => {",
+		"                            let again = match dec.finish() {",
+		"                            eprintln!(\"decode error: {:?} [finish={}]\", e, again);",
 	} {
 		if !strings.Contains(main, want) {
 			t.Errorf("main.rs missing %q", want)

@@ -474,15 +474,19 @@ func (g *gen) fromJSONArray(f *hfile, ind, node, target string, elem ir.Kind, re
 // corelibs' Result carry invalid()/incomplete()/limitExceeded(); only the pure
 // corelib-cpp one has invalidArgument(), the c-cpp one exposes code(). With
 // status set, the expression also covers the non-refusal outcome (COMPLETE).
-func (g *gen) categoryExpr(status bool) string {
-	ia := "r.invalidArgument()"
+func (g *gen) categoryExpr(status bool) string { return g.categoryOf("r", status) }
+
+// categoryOf is categoryExpr over the Result held in the variable v.
+func (g *gen) categoryOf(v string, status bool) string {
+	ia := v + ".invalidArgument()"
 	if g.clib {
-		ia = "r.code() == sofab::Error::InvalidArgument"
+		ia = v + ".code() == sofab::Error::InvalidArgument"
 	}
+	chain := v + `.invalid() ? "INVALID" : ` + v + `.incomplete() ? "INCOMPLETE" : ` + v + `.limitExceeded() ? "LIMIT_EXCEEDED" : `
 	if status {
-		return `(r.invalid() ? "INVALID" : r.incomplete() ? "INCOMPLETE" : r.limitExceeded() ? "LIMIT_EXCEEDED" : ` + ia + ` ? "INVALID_ARGUMENT" : "COMPLETE")`
+		return "(" + chain + ia + ` ? "INVALID_ARGUMENT" : "COMPLETE")`
 	}
-	return `(r.invalid() ? "INVALID" : r.incomplete() ? "INCOMPLETE" : r.limitExceeded() ? "LIMIT_EXCEEDED" : "INVALID_ARGUMENT")`
+	return "(" + chain + `"INVALID_ARGUMENT")`
 }
 
 func (g *gen) harnessMain(s *ir.Schema) []byte {
@@ -566,7 +570,20 @@ func (g *gen) harnessMain(s *ir.Schema) []byte {
 		// feed), swept by tests/conformance/lib/check_chunk_invariance.py.
 		f.line("            std::size_t csz = argc > 3 ? std::strtoull(argv[3], nullptr, 10) : 1;")
 		f.line("            std::size_t step = csz > 0 ? csz : (in.size() > 0 ? in.size() : 1);")
-		f.line("            for (std::size_t i = 0; i < in.size(); i += step) { r = _is.feed(p + i, std::min(step, in.size() - i)); }")
+		// A refusal is terminal (CORELIB_PLAN §5.2, §6.3): the first one stops the
+		// feed, and the end-of-input probe that follows must repeat it. It is
+		// printed as `[finish=X]` (`none` if the decoder answered COMPLETE after
+		// refusing) for tests/conformance/lib/check_terminal_refusal.py.
+		f.line("            for (std::size_t i = 0; i < in.size(); i += step) {")
+		f.line("                r = _is.feed(p + i, std::min(step, in.size() - i));")
+		f.line("                if (!r.ok() && !r.incomplete()) break;")
+		f.line("            }")
+		f.line("            if (!r.ok() && !r.incomplete()) {")
+		f.line("                sofab::IStreamImpl::Result again = _is.feed(p, 0);")
+		f.line("                std::cerr << \"decode error: \" << %s << \" [finish=\"", g.categoryExpr(false))
+		f.line("                          << (again.ok() ? \"none\" : %s) << \"]\\n\";", g.categoryOf("again", false))
+		f.line("                return 1;")
+		f.line("            }")
 		f.line("            r = _is.feed(p, 0);")
 		f.line("            if (!r.ok()) { std::cerr << \"decode error: \" << %s << \"\\n\"; return 1; }", g.categoryExpr(false))
 		if g.clib {

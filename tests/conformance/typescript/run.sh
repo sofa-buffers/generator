@@ -615,7 +615,7 @@ echo "==> [$VL] skipped occurrence keeps struct OK"
 # message names the field, which the corelib's could not -- it has no schema.
 # These local cap legs are NOT made redundant by the check_refusal_category.py run
 # below: they also cover over-cap-then-EOF precedence, a skipped field never
-# being capped, the bounded wrapper-element INVALID pair and the latch.
+# being capped and the bounded wrapper-element INVALID pair, which this table does not.
 echo "==> [$VL] receiver-side decode limits (generator#102)"
 cat > "$WORK/dyn.yaml" <<'YAML'
 version: 1
@@ -655,39 +655,6 @@ grep -q "_decode(bytes, new _Dyn__Visitor(o, new PayloadAcc()));" "$VW/lim/messa
 (cd "$VW/lim" && "$TH" decode dyn) < "$WORK/atlimit.bin" >/dev/null || { echo "FAIL: count == limit (4) must decode"; exit 1; }
 (cd "$VW/nolim" && "$TH" decode dyn) < "$WORK/overlimit.bin" >/dev/null || { echo "FAIL: default-cap project must accept count 5"; exit 1; }
 echo "==> [$VL] decode limits OK"
-
-# A refusal is TERMINAL, and the corelib is what holds that (CORELIB_PLAN S5.2 for
-# malformed bytes, S6.3 for a receiver limit): IStream latches the verdict and
-# re-throws the very code it was refused with from every later call, before
-# looking at a byte. So a finish() after a caught refusal must refuse too, under
-# that same code: a decoder that rejected a message cannot hand one back.
-#
-# generator#541 deleted the generated status latch that used to restate this one
-# layer up. #528 records why the old assertion could not see a deleted arm: it
-# read a remembered field an EARLIER feed had already written. finish's answer
-# cannot be a leftover, so this block is discriminating at every chunk width.
-#
-# The code is the real one now, not a status it was flattened into: a receiver
-# cap reports LIMIT_EXCEEDED rather than the INCOMPLETE the old mapping produced.
-echo "==> [$VL] a refusal is terminal: finish refuses under the same code (generator#541)"
-# A varint past the 64-bit bound: 10 continuation bytes and an eleventh. Refused
-# by the CORELIB, where overcount.bin is refused by a GENERATED guard -- the two
-# routes into the same terminal latch (S4.1).
-printf '\000\377\377\377\377\377\377\377\377\377\377\001' > "$WORK/varint_overflow.bin"
-latch() {   # <project-dir> <fixture> <want-code> <message>
-    ldir=$1 lfx=$2 lwant=$3 lmsg=$4
-    if (cd "$ldir" && "$TH" streamdecode "$lmsg") \
-            < "$lfx" >/dev/null 2>"$WORK/latch.err"; then
-        echo "FAIL: $(basename "$lfx") must be refused by the streaming decoder"; exit 1
-    fi
-    grep -q "\[finish=$lwant\]" "$WORK/latch.err" || {
-        echo "FAIL: $(basename "$lfx") -- finish after the refusal must throw $lwant; got:"
-        cat "$WORK/latch.err"; exit 1; }
-}
-latch "$VW/ex"  "$WORK/varint_overflow.bin" INVALID_MSG    myfirstmessage
-latch "$VW/ex"  "$WORK/overcount.bin"       INVALID_MSG    myfirstmessage
-latch "$VW/lim" "$WORK/overlimit.bin"       LIMIT_EXCEEDED dyn
-echo "==> [$VL] terminal-refusal guard OK"
 
 # CORELIB_PLAN S6.2.1, "a skipped field is never capped": a limit bounds an
 # ALLOCATION, and a field MESSAGE_SPEC S7.3 skips is walked, not materialised, so
@@ -786,6 +753,7 @@ echo "==> [$VL] wrapper-element caps OK"
 echo "==> [$VL] a cap is LIMIT_EXCEEDED, a schema bound is INVALID, blob included (S6.3)"
 printf 'version: 1\nmessages:\n' > "$WORK/refusal.yaml"
 python3 "$ROOT/tests/conformance/lib/check_refusal_category.py" --emit-schema >> "$WORK/refusal.yaml"
+python3 "$ROOT/tests/conformance/lib/check_terminal_refusal.py" --emit-schema >> "$WORK/refusal.yaml"
 cat > "$VW/cfg_refusal.yaml" <<YAML
 generic: { emit: project, max_dyn_array_count: 4, max_dyn_string_len: 8, max_dyn_blob_len: 8 }
 targets: { typescript: $VT }
@@ -804,6 +772,24 @@ python3 "$ROOT/tests/conformance/lib/check_refusal_category.py" "typescript $VL"
     --cwd "$VW/refusal" --verb streamdecode \
     --max-dyn-array-count 4 --max-dyn-string-len 8 --max-dyn-blob-len 8 \
     --limit-pattern 'finish=LIMIT_EXCEEDED' --invalid-pattern 'finish=INVALID_MSG' \
+    -- "$TH"
+
+# A refusal is TERMINAL, and the corelib is what holds that (CORELIB_PLAN S5.2 for
+# malformed bytes, S6.3 for a receiver limit): IStream latches the verdict and
+# re-throws the very code it was refused with from every later call, before
+# looking at a byte. So a finish() after a caught refusal must refuse too, under
+# that same code: a decoder that rejected a message cannot hand one back.
+#
+# generator#541 deleted the generated status latch that used to restate this one
+# layer up. #528 records why the old assertion could not see a deleted arm: it
+# read a remembered field an EARLIER feed had already written. finish's answer
+# cannot be a leftover, so this block is discriminating at every chunk width.
+#
+# The code is the real one now, not a status it was flattened into: a receiver
+# cap reports LIMIT_EXCEEDED rather than the INCOMPLETE the old mapping produced.
+echo "==> [$VL] a refusal is terminal: finish refuses under the same code (generator#541, #647)"
+python3 "$ROOT/tests/conformance/lib/check_terminal_refusal.py" "typescript $VL" \
+    --cwd "$VW/refusal" --marker finish --invalid-name INVALID_MSG --limit-name LIMIT_EXCEEDED \
     -- "$TH"
 
 echo "==> [$VL] shared-vector byte-exact conformance"

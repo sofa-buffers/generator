@@ -6274,6 +6274,31 @@ A reimplementation is **conformant** when it reproduces these gates:
    count. `--shapes` selects them (default: all four), so a suite whose harness
    cannot build one declines it **by name** rather than by silence.
 
+   *Terminal refusal* (`tests/conformance/lib/check_terminal_refusal.py`):
+   CORELIB_PLAN §5.2 makes `INVALID` terminal and §6.3 makes `LimitExceeded` "a
+   terminal, receiver-local policy rejection", so after either the decoder must
+   refuse **again**, under the same category, and never hand back a message
+   (generator#541, #555, #647). The property is asserted black-box on the
+   harness, because which layer holds the latch differs per backend: the corelib
+   in most, sticky `err`/`inv`/`lim` flags in the generated Rust decoder.
+
+   The streaming arm of every generated harness therefore asks again after a
+   refusal and prints the answer as a second-verdict marker: `[finish=X]` (a
+   `finish()`, or an empty feed where the port has none: C, C++, Go) or
+   `[refeed=X]` (an empty feed, Python and Dart), `none` when a message came
+   back. The driver prints its own message (`--emit-schema`), builds its own
+   fixtures and requires the marker to name the category the fixture breached:
+   a varint past the 64-bit bound (refused by the corelib), an over-`count` array
+   and an over-`maxlen` string, the latter also with the input ending at the
+   length word (schema bound), and an over-cap array and string (`LimitExceeded`).
+   What varies per suite is only the rendering, so the verdict names and the
+   marker are arguments (`--marker`, `--invalid-name`, `--limit-name`).
+
+   It runs in all eleven suites, in every profile: `cpp` per variant, `rust` per
+   label, `python` under both engines. The footprint profiles (`c`, `cpp` over
+   `corelib-c-cpp`, `rs-no-std`) take no receiver cap, so they run the `--bounded`
+   table, which keeps the INVALID rows and has no `LimitExceeded` row.
+
    Generated with `max_dyn_array_count: 4, max_dyn_string_len: 8,
    max_dyn_blob_len: 8`, that is fourteen rows: four breach a cap
    (`LimitExceeded`), three breach a schema bound (`InvalidMessage`), and seven

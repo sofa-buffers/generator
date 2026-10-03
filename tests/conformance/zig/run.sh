@@ -661,40 +661,6 @@ fi
 "$WORK/nolim/zig-out/bin/harness" decode dyn < "$WORK/overlimit.bin" >/dev/null || { echo "FAIL: default-cap project must accept count 5"; exit 1; }
 echo "==> decode limits OK"
 
-# A refusal is TERMINAL, and it is latched on whichever side raised it. Anything
-# raised INSIDE the corelib -- a malformed varint, a receiver cap -- is latched by
-# IStream (CORELIB_PLAN 5.2, 6.3), which re-throws the very code it was refused
-# with from every later call. The two GENERATED guards are the other side: `v.inv`
-# and `v.lim` are read after is.feed has already returned, so the stream never
-# sees those errors; the sticky flags themselves are the latch, and finish
-# re-tests them in the same order feed does. Either way a finish() after a caught
-# refusal must fail under that refusal's own code.
-#
-# generator#541 deleted the generated status latch that used to restate the
-# corelib half one layer up. #528 records why the old assertion could not see a
-# deleted arm: it read a remembered field an EARLIER feed had already written.
-# finish's answer cannot be a leftover, so this block is discriminating at every
-# chunk width. Catching in the harness is also what makes Zig compile the error
-# path at all: it analyses only what something reaches.
-echo "==> a refusal is terminal: finish refuses under the same code (generator#541)"
-# A varint past the 64-bit bound: 10 continuation bytes and an eleventh. Refused
-# by the CORELIB, where overcount.bin is refused by a GENERATED guard -- one
-# fixture per side of the split above (4.1).
-printf '\000\377\377\377\377\377\377\377\377\377\377\001' > "$WORK/varint_overflow.bin"
-latch() {   # <harness> <fixture> <want-error> <message>
-    lh=$1 lfx=$2 lwant=$3 lmsg=$4
-    if "$lh" streamdecode "$lmsg" < "$lfx" >/dev/null 2>"$WORK/latch.err"; then
-        echo "FAIL: $(basename "$lfx") must be refused by the streaming decoder"; exit 1
-    fi
-    grep -q "\[finish=$lwant\]" "$WORK/latch.err" || {
-        echo "FAIL: $(basename "$lfx") -- finish after the refusal must fail with $lwant; got:"
-        cat "$WORK/latch.err"; exit 1; }
-}
-latch "$WORK/ex/zig-out/bin/harness"  "$WORK/varint_overflow.bin" InvalidMessage myfirstmessage
-latch "$WORK/ex/zig-out/bin/harness"  "$WORK/overcount.bin"       InvalidMessage myfirstmessage
-latch "$WORK/lim/zig-out/bin/harness" "$WORK/overlimit.bin"       LimitExceeded  dyn
-echo "==> terminal-refusal guard OK"
-
 # CORELIB_PLAN 6.2.1, "a skipped field is never capped": a limit bounds an
 # ALLOCATION, and a field MESSAGE_SPEC 7.3 skips is walked, not materialised, so
 # no cap may reach it. A decode that steps over an over-cap field it was never
@@ -789,10 +755,11 @@ echo "==> string/blob cap enforcement point OK"
 # A receiver cap answers LimitExceeded, a schema bound InvalidMessage (CORELIB_PLAN
 # S6.3, generator#416, #648), on both decode surfaces. The generator#102 legs above
 # stay beside it: they also cover over-cap-then-EOF precedence, row-count caps, a
-# skipped field never being capped and the latch, which this table does not.
+# skipped field never being capped, which this table does not.
 echo "==> a cap is LimitExceeded, a schema bound is InvalidMessage (S6.3, generator#416)"
 printf 'version: 1\nmessages:\n' > "$WORK/refusal.yaml"
 python3 "$ROOT/tests/conformance/lib/check_refusal_category.py" --emit-schema >> "$WORK/refusal.yaml"
+python3 "$ROOT/tests/conformance/lib/check_terminal_refusal.py" --emit-schema >> "$WORK/refusal.yaml"
 printf 'generic: { emit: project, max_dyn_array_count: 4, max_dyn_string_len: 8, max_dyn_blob_len: 8 }\n' > "$WORK/cfg_refusal.yaml"
 zig_build "$WORK/refusal.yaml" "$WORK/refusal" "$WORK/cfg_refusal.yaml"
 for surface in decode streamdecode; do
@@ -800,6 +767,26 @@ for surface in decode streamdecode; do
         --verb "$surface" --limit-pattern 'LimitExceeded' --invalid-pattern 'InvalidMessage' \
         -- "$WORK/refusal/zig-out/bin/harness"
 done
+
+# A refusal is TERMINAL, and it is latched on whichever side raised it. Anything
+# raised INSIDE the corelib -- a malformed varint, a receiver cap -- is latched by
+# IStream (CORELIB_PLAN 5.2, 6.3), which re-throws the very code it was refused
+# with from every later call. The two GENERATED guards are the other side: `v.inv`
+# and `v.lim` are read after is.feed has already returned, so the stream never
+# sees those errors; the sticky flags themselves are the latch, and finish
+# re-tests them in the same order feed does. Either way a finish() after a caught
+# refusal must fail under that refusal's own code.
+#
+# generator#541 deleted the generated status latch that used to restate the
+# corelib half one layer up. #528 records why the old assertion could not see a
+# deleted arm: it read a remembered field an EARLIER feed had already written.
+# finish's answer cannot be a leftover, so this block is discriminating at every
+# chunk width. Catching in the harness is also what makes Zig compile the error
+# path at all: it analyses only what something reaches.
+echo "==> a refusal is terminal: finish refuses under the same code (generator#541, #647)"
+python3 "$ROOT/tests/conformance/lib/check_terminal_refusal.py" "zig" \
+    --marker finish --invalid-name InvalidMessage --limit-name LimitExceeded \
+    -- "$WORK/refusal/zig-out/bin/harness"
 # The receiver cap on a WRAPPER array's element INDEX, and on a matrix row's own
 # element count (CORELIB_PLAN 6.2.1). These are the caps corelib-zig compares --
 # generated code passes max_dyn_array_count as the `.{ .receiver = ... }` bound of

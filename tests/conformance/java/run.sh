@@ -487,10 +487,11 @@ echo "==> skipped occurrence keeps struct OK"
 # A receiver cap answers LimitExceeded, a schema bound InvalidMessage (CORELIB_PLAN
 # S6.3, generator#416, #648), on both decode surfaces. The generator#102 legs below
 # stay beside it: they also cover over-cap-then-EOF precedence, a skipped field
-# never being capped and the `[finish=...]` latch, which this table does not.
+# never being capped, which this table does not.
 echo "==> a cap is LIMIT_EXCEEDED, a schema bound is INVALID_MSG (S6.3, generator#416)"
 printf 'version: 1\nmessages:\n' > "$WORK/refusal.yaml"
 python3 "$ROOT/tests/conformance/lib/check_refusal_category.py" --emit-schema >> "$WORK/refusal.yaml"
+python3 "$ROOT/tests/conformance/lib/check_terminal_refusal.py" --emit-schema >> "$WORK/refusal.yaml"
 cat > "$WORK/refusalcfg.yaml" <<'YAML'
 generic: { emit: project, max_dyn_array_count: 4, max_dyn_string_len: 8, max_dyn_blob_len: 8 }
 targets: { java: { package: message } }
@@ -501,6 +502,28 @@ for surface in decode streamdecode; do
         --verb "$surface" --limit-pattern 'LIMIT_EXCEEDED' --invalid-pattern 'INVALID_MSG' \
         -- java -jar "$WORK/refusal/target/harness.jar"
 done
+
+# A refusal is TERMINAL, and the corelib is what holds that (CORELIB_PLAN S5.2 for
+# malformed bytes, S6.3 for a receiver limit): IStream latches the verdict and
+# re-throws the very code it was refused with from every later call, before
+# looking at a byte. It does so for BOTH carriers -- a Visitor cannot declare a
+# checked exception, so a generated guard arrives wrapped in an
+# UncheckedIOException while the corelib's own raise does not, and IStream.feed
+# catches each. So a finish() after a caught refusal must refuse too, under that
+# same code: a decoder that rejected a message cannot hand one back.
+#
+# generator#541 deleted the generated status latch that used to restate this one
+# layer up -- including the second catch arm that existed only for the wrapper.
+# #528 records why the old assertion could not see a deleted arm: it read a
+# remembered field an EARLIER feed had already written. finish's answer cannot be
+# a leftover, so this block is discriminating at every chunk width.
+#
+# The code is the real one now, not a status it was flattened into: a receiver
+# cap reports LIMIT_EXCEEDED rather than the INCOMPLETE the old mapping produced.
+echo "==> a refusal is terminal: finish refuses under the same code (generator#541, #647)"
+python3 "$ROOT/tests/conformance/lib/check_terminal_refusal.py" "java" \
+    --marker finish --invalid-name INVALID_MSG --limit-name LIMIT_EXCEEDED \
+    -- java -jar "$WORK/refusal/target/harness.jar"
 
 # Receiver-side decode limits (generator#102): `a` is an UNBOUNDED u64 array
 # (id 0 -> header 0x03 = 0<<3 | unsigned-array). With max_dyn_array_count: 4
@@ -772,43 +795,6 @@ done
 OUT=$($HPC decode pl < "$WORK/pl_mis_s.bin")
 echo "$OUT" | grep -q '"n":0' || { echo "FAIL: a skipped payload must leave n at its default; got: $OUT"; exit 1; }
 echo "==> payload length caps OK (rejects, off schema-bounded fields, off skipped ones)"
-
-# A refusal is TERMINAL, and the corelib is what holds that (CORELIB_PLAN S5.2 for
-# malformed bytes, S6.3 for a receiver limit): IStream latches the verdict and
-# re-throws the very code it was refused with from every later call, before
-# looking at a byte. It does so for BOTH carriers -- a Visitor cannot declare a
-# checked exception, so a generated guard arrives wrapped in an
-# UncheckedIOException while the corelib's own raise does not, and IStream.feed
-# catches each. So a finish() after a caught refusal must refuse too, under that
-# same code: a decoder that rejected a message cannot hand one back.
-#
-# generator#541 deleted the generated status latch that used to restate this one
-# layer up -- including the second catch arm that existed only for the wrapper.
-# #528 records why the old assertion could not see a deleted arm: it read a
-# remembered field an EARLIER feed had already written. finish's answer cannot be
-# a leftover, so this block is discriminating at every chunk width.
-#
-# The code is the real one now, not a status it was flattened into: a receiver
-# cap reports LIMIT_EXCEEDED rather than the INCOMPLETE the old mapping produced.
-echo "==> a refusal is terminal: finish refuses under the same code (generator#541)"
-# A varint past the 64-bit bound: 10 continuation bytes and an eleventh. Refused
-# by the CORELIB, so it arrives through the BARE SofabException carrier (S4.1).
-printf '\000\377\377\377\377\377\377\377\377\377\377\001' > "$WORK/varint_overflow.bin"
-latch() {   # <fixture> <want-code> <message> <harness...>
-    lfx=$1 lwant=$2 lmsg=$3
-    shift 3
-    if "$@" streamdecode "$lmsg" < "$lfx" >/dev/null 2>"$WORK/latch.err"; then
-        echo "FAIL: $(basename "$lfx") must be refused by the streaming decoder"; exit 1
-    fi
-    grep -q "\[finish=$lwant\]" "$WORK/latch.err" || {
-        echo "FAIL: $(basename "$lfx") -- finish after the refusal must throw $lwant; got:"
-        cat "$WORK/latch.err"; exit 1; }
-}
-latch "$WORK/varint_overflow.bin" INVALID_MSG    myfirstmessage $H
-latch "$WORK/overcount.bin"       INVALID_MSG    myfirstmessage $H
-latch "$WORK/pl_bs_eof.bin"       INVALID_MSG    pl             $HPC
-latch "$WORK/pl_ds16.bin"         LIMIT_EXCEEDED pl             $HPC
-echo "==> terminal-refusal guard OK"
 
 echo "==> shared-vector byte-exact conformance"
 python3 "$ROOT/tests/conformance/java/check_vectors.py" "$CORELIB/assets/test_vectors.json" "$WORK/conf/target/harness.jar"
