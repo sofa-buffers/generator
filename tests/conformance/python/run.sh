@@ -1366,6 +1366,22 @@ done
 unset SOFAB_PUREPYTHON || true
 if [ "$NATIVE" = yes ]; then require_engine native; else require_engine python; fi
 
+# Float defaults (generator#636): a float is compared with its default by bit
+# pattern, so -0.0 is written next to a default of 0. The expectations are wire
+# byte literals in the driver; its KNOWN_GAP lists what still fails.
+echo "==> float default compared by bit pattern (generator#636)"
+printf 'version: 1\nmessages:\n' > "$WORK/fdef.yaml"
+python3 "$ROOT/tests/conformance/lib/check_float_default.py" --emit-schema >> "$WORK/fdef.yaml"
+( cd "$ROOT" && go run ./cmd/sofabgen --format=off --config "$WORK/cfg.yaml" --lang python --in "$WORK/fdef.yaml" --out "$WORK/fdef" >/dev/null )
+for ENGINE in $ENGINES; do
+    if [ "$ENGINE" = python ]; then export SOFAB_PUREPYTHON=1; else unset SOFAB_PUREPYTHON || true; fi
+    require_engine "$ENGINE"
+    python3 "$ROOT/tests/conformance/lib/check_float_default.py" "python/$ENGINE" --backend python \
+        --cwd "$WORK/fdef" -- python3 harness.py
+done
+unset SOFAB_PUREPYTHON || true
+if [ "$NATIVE" = yes ]; then require_engine native; else require_engine python; fi
+
 # A native array round-trips at every length, for every element kind
 # (generator#550, #643): lengths either side of 16, empty, and 257 elements for
 # the unbounded field, all 14 kinds in one message per round. Both engines and

@@ -1018,6 +1018,18 @@ make -C "$WORK/defaults" SOFAB_C_CORELIB="$CORELIB" >/dev/null
 python3 "$ROOT/tests/conformance/lib/check_defaults.py" "C" \
     -- "$WORK/defaults/harness/harness"
 
+# Float defaults (generator#636): a float is compared with its default by bit
+# pattern, so -0.0 is written next to a default of 0. The expectations are wire
+# byte literals in the driver; its KNOWN_GAP lists what still fails.
+echo "==> float default compared by bit pattern (generator#636)"
+printf 'version: 1\nmessages:\n' > "$WORK/fdef.yaml"
+python3 "$ROOT/tests/conformance/lib/check_float_default.py" --emit-schema >> "$WORK/fdef.yaml"
+( cd "$ROOT" && go run ./cmd/sofabgen --config "$WORK/proj.yaml" --lang c \
+    --in "$WORK/fdef.yaml" --out "$WORK/fdef" )
+make -C "$WORK/fdef" SOFAB_C_CORELIB="$CORELIB" >/dev/null
+python3 "$ROOT/tests/conformance/lib/check_float_default.py" "C" --backend c \
+    -- "$WORK/fdef/harness/harness"
+
 # A native array round-trips at every length, for every element kind
 # (generator#550, #643): lengths either side of 16, empty, and 257 elements for
 # the unbounded field, all 14 kinds in one message per round. The shared driver

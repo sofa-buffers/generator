@@ -1586,6 +1586,19 @@ for mode in bigint long number; do
         --cwd "$WORK/defaults-$mode" -- "$TH"
 done
 
+# Float defaults (generator#636): a float is compared with its default by bit
+# pattern, so -0.0 is written next to a default of 0. The expectations are wire
+# byte literals in the driver; its KNOWN_GAP lists what still fails.
+echo "==> float default compared by bit pattern (generator#636)"
+printf 'version: 1\nmessages:\n' > "$WORK/fdef.yaml"
+python3 "$ROOT/tests/conformance/lib/check_float_default.py" --emit-schema >> "$WORK/fdef.yaml"
+for mode in bigint long number; do
+    gen "$WORK/fdef.yaml" "$WORK/fdef-$mode" "$WORK/cfg_$mode.yaml"
+    ln -s "$WORK/ex/node_modules" "$WORK/fdef-$mode/node_modules"
+    python3 "$ROOT/tests/conformance/lib/check_float_default.py" "TypeScript int64: $mode" --backend typescript \
+        --cwd "$WORK/fdef-$mode" -- "$TH"
+done
+
 # Every generated project in the run, typechecked under $TSC_STRICT (ARCHITECTURE
 # §12 gate 9). Several legs only RUN their project through tsx, which does not
 # typecheck, so they are swept here rather than trusted to a per-leg call: the
