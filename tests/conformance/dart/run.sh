@@ -11,6 +11,8 @@ set -eu
 # Shared MAX_SIZE fill check (ARCHITECTURE §9.6).
 . "$(dirname "$0")/../lib/maxsize_fill.sh"
 . "$(dirname "$0")/../lib/max_message_size.sh"
+# The header_limits / invalid_utf8 side tables (generator#651).
+. "$(dirname "$0")/../lib/tables.sh"
 # Shared canonical-formatter check (ARCHITECTURE §12 gate 10).
 . "$(dirname "$0")/../lib/check_format.sh"
 # Every backend Go test, run against the corelib with no skips allowed.
@@ -782,33 +784,33 @@ echo "==> cap exclusivity OK (bounded sibling decodes; unknown id, mis-typed kin
 #
 # Wire: 02 (id 0, fixlen) a2 06 (fixlen_word = (100 << 3) | 2 -> a 100-byte
 # string) then end of input. The cap is 24.
-echo "==> an over-cap length must be refused AT THE HEADER, not after the payload"
-cat > "$WORK/dynstr.yaml" <<'YAML'
-version: 1
-messages:
-  dyn: { payload: { s: { id: 0, type: string } } }
+echo "==> header ceilings and invalid UTF-8, from the shared vector tables (generator#651)"
+# header_limits and header_limits_nested hold the bytes: a declared length or count
+# and then end of input, at the top level and inside open sequences, each with an
+# in-cap control that must stay incomplete. The table's `trydecode` pass reads the
+# category off line 1; the chunked pass reads `decode failed: <status>` and also
+# asks again after each refusal. Dart strings are UTF-16 text, so no invalid string
+# can be handed to the encoder and invalid_utf8 runs its decode half only.
+TABLES="$CORELIB/assets/test_vectors.json"
+tables_schema "$TABLES" "$WORK/tables.yaml"
+cat > "$WORK/cfg-tables.yaml" <<YAML
+generic: $TABLES_GENERIC
 YAML
-cat > "$WORK/cfg-strlim.yaml" <<'YAML'
-generic: { emit: project, max_dyn_string_len: 24 }
-YAML
-( cd "$ROOT" && go run ./cmd/sofabgen --format=off --config "$WORK/cfg-strlim.yaml" --lang dart --in "$WORK/dynstr.yaml" --out "$WORK/strlim" )
-sed -i "s#\${SOFAB_DART_CORELIB}#$CORELIB#" "$WORK/strlim/pubspec.yaml"
-compile_project "$WORK/strlim"
-printf '\002\242\006' > "$WORK/overcap_trunc.bin"
-OUT=$("$WORK/strlim/harness" decode dyn < "$WORK/overcap_trunc.bin" 2>&1 || true)
-case "$OUT" in
-    *limitExceeded*) ;;
-    *) echo "FAIL: an over-cap length word followed by truncation must be limitExceeded, got: $OUT"; exit 1 ;;
-esac
-# The control: the same shape UNDER the cap, equally truncated, is incomplete --
-# so the case above is the cap firing at the header and not the truncation being
-# reported under a different name. 02 62 = fixlen_word (12 << 3) | 2.
-printf '\002\142' > "$WORK/incap_trunc.bin"
-OUT=$("$WORK/strlim/harness" decode dyn < "$WORK/incap_trunc.bin" 2>&1 || true)
-case "$OUT" in
-    *incomplete*) ;;
-    *) echo "FAIL: an under-cap truncated string must be incomplete, got: $OUT"; exit 1 ;;
-esac
+( cd "$ROOT" && go run ./cmd/sofabgen --format=off --config "$WORK/cfg-tables.yaml" --lang dart --in "$WORK/tables.yaml" --out "$WORK/tables" )
+sed -i "s#\${SOFAB_DART_CORELIB}#$CORELIB#" "$WORK/tables/pubspec.yaml"
+compile_project "$WORK/tables"
+python3 "$ROOT/tests/conformance/lib/check_header_limits.py" "$TABLES" "dart" \
+    --status-verb trydecode --status-limit LIMITEXCEEDED -- "$WORK/tables/harness"
+python3 "$ROOT/tests/conformance/lib/check_header_limits.py" "$TABLES" "dart" \
+    --verb streamdecode --limit-pattern 'decode failed: limitExceeded' \
+    --invalid-pattern 'decode failed: invalid' \
+    --marker refeed --marker finish:null:null --invalid-name invalid --limit-name limitExceeded \
+    -- "$WORK/tables/harness"
+python3 "$ROOT/tests/conformance/lib/check_invalid_utf8.py" "$TABLES" "dart" \
+    --status-verb trydecode --status-limit LIMITEXCEEDED -- "$WORK/tables/harness"
+python3 "$ROOT/tests/conformance/lib/check_invalid_utf8.py" "$TABLES" "dart" \
+    --verb streamdecode --limit-pattern 'decode failed: limitExceeded' \
+    --invalid-pattern 'decode failed: invalid' -- "$WORK/tables/harness"
 echo "==> header enforcement point OK"
 
 # A native matrix ROW's own element count. The outer `count:` bounds the row ID;
@@ -855,6 +857,16 @@ python3 "$ROOT/tests/conformance/lib/check_vectors_encode.py" \
 echo "==> shared-vector decode conformance (skip matrix)"
 for surface in decode streamdecode; do
     python3 "$ROOT/tests/conformance/lib/check_vectors_decode.py" \
+        "$CORELIB/assets/test_vectors.json" "Dart" --mode "$surface" \
+        -- "$WORK/conf/harness"
+done
+
+# ...and the VALUES: the same dense bytes into the message the encode driver derives
+# from each vector, every decoded field compared with the vector's `fields`
+# (generator#651). The skip matrix above reads u64 only.
+echo "==> shared-vector typed decode conformance"
+for surface in decode streamdecode; do
+    python3 "$ROOT/tests/conformance/lib/check_vectors_decode.py" --typed \
         "$CORELIB/assets/test_vectors.json" "Dart" --mode "$surface" \
         -- "$WORK/conf/harness"
 done
@@ -1211,7 +1223,7 @@ format_gen dart "$WORK/fmt/conf" --config "$WORK/cfg.yaml" --in "$WORK/conf.yaml
 format_gen_corpus dart "$WORK/fmt" --config "$WORK/cfg.yaml"
 format_gen dart "$WORK/fmt/dynlim" --config "$WORK/cfg-limit.yaml" --in "$WORK/dyn.yaml"
 format_gen dart "$WORK/fmt/refusal" --config "$WORK/cfg-refusal.yaml" --in "$WORK/refusal.yaml"
-format_gen dart "$WORK/fmt/strlim" --config "$WORK/cfg-strlim.yaml" --in "$WORK/dynstr.yaml"
+format_gen dart "$WORK/fmt/tables" --config "$WORK/cfg-tables.yaml" --in "$WORK/tables.yaml"
 format_gen dart "$WORK/fmt/growth" --config "$WORK/cfg-limit.yaml" --in "$WORK/growth.yaml"
 format_gen dart "$WORK/fmt/repeated" --config "$WORK/cfg.yaml" --in "$WORK/repeated.yaml"
 format_gen dart "$WORK/fmt/union" --config "$WORK/cfg.yaml" --in "$WORK/union.yaml"

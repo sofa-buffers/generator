@@ -12,6 +12,8 @@ set -eu
 . "$(dirname "$0")/../lib/corelib.sh"
 . "$(dirname "$0")/../lib/maxsize_fill.sh"
 . "$(dirname "$0")/../lib/max_message_size.sh"
+# The header_limits / invalid_utf8 side tables (generator#651).
+. "$(dirname "$0")/../lib/tables.sh"
 # Every backend Go test, run against the corelib with no skips allowed.
 . "$(dirname "$0")/../lib/backend_tests.sh"
 
@@ -909,6 +911,47 @@ for surface in decode streamdecode; do
         "$CORELIB/assets/test_vectors.json" "C" --max-id 65535 --mode "$surface" \
         -- "$WORK/vecskip/harness/harness"
 done
+
+# ...and the VALUES: the same dense bytes into the message the encode driver derives
+# from each vector, every decoded field compared with the vector's `fields`
+# (generator#651). The skip matrix above reads u64 only. Same ceiling as above.
+echo "==> shared-vector typed decode conformance"
+for surface in decode streamdecode; do
+    python3 "$ROOT/tests/conformance/lib/check_vectors_decode.py" --typed \
+        "$CORELIB/assets/test_vectors.json" "C" --max-id 65535 --mode "$surface" \
+        -- "$WORK/vecskip/harness/harness"
+done
+
+# The shared header-ceiling and invalid-UTF-8 tables (generator#651). C is a
+# footprint profile: it has no receiver caps, so the rows that need `receiver_caps`
+# are skipped by name and the schema-bounded rows (INVALID at the length word, with
+# their in-bound controls) run, top level and nested. The project is built STRICT:
+# corelib-c-cpp defaults SOFAB_STRICT_UTF8 OFF and CORELIB_PLAN S6.4.2 requires the
+# check-ON configuration to be tested, which is the one invalid_utf8 needs. C
+# strings are byte containers, so the encode half runs as well. The category
+# channel is `status` on the one-shot surface and the `decode error:` text on the
+# chunked one.
+echo "==> header ceilings and invalid UTF-8, from the shared vector tables (generator#651)"
+TABLES="$CORELIB/assets/test_vectors.json"
+tables_schema "$TABLES" "$WORK/tables.yaml" --without receiver_caps
+cat > "$WORK/tables-proj.yaml" <<YAML
+generic: $TABLES_GENERIC
+targets: { c: { symbol_prefix: sofab_ } }
+YAML
+( cd "$ROOT" && go run ./cmd/sofabgen --config "$WORK/tables-proj.yaml" --lang c \
+    --in "$WORK/tables.yaml" --out "$WORK/tablesproj" >/dev/null )
+make -C "$WORK/tablesproj" SOFAB_C_CORELIB="$CORELIB" CFLAGS="-DSOFAB_STRICT_UTF8=1" >/dev/null
+TH="$WORK/tablesproj/harness/harness"
+python3 "$ROOT/tests/conformance/lib/check_header_limits.py" "$TABLES" "c" --without receiver_caps \
+    --status-verb status -- "$TH"
+python3 "$ROOT/tests/conformance/lib/check_header_limits.py" "$TABLES" "c" --without receiver_caps \
+    --verb streamdecode --invalid-pattern 'decode error: INVALID\b' \
+    --limit-pattern 'decode error: LIMIT_EXCEEDED' -- "$TH"
+python3 "$ROOT/tests/conformance/lib/check_invalid_utf8.py" "$TABLES" "c" \
+    --status-verb status --encode -- "$TH"
+python3 "$ROOT/tests/conformance/lib/check_invalid_utf8.py" "$TABLES" "c" \
+    --verb streamdecode --invalid-pattern 'decode error: INVALID\b' \
+    --limit-pattern 'decode error: LIMIT_EXCEEDED' --encode -- "$TH"
 
 # ...and the encode direction (generator#650): every vector that is not decode-only
 # by design, byte for byte against its `serialized_sparse` column.

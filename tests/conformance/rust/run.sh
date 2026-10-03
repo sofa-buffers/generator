@@ -19,6 +19,8 @@ set -eu
 . "$(dirname "$0")/../lib/corelib.sh"
 . "$(dirname "$0")/../lib/maxsize_fill.sh"
 . "$(dirname "$0")/../lib/max_message_size.sh"
+# The header_limits / invalid_utf8 side tables (generator#651).
+. "$(dirname "$0")/../lib/tables.sh"
 # Generated code against the canonical formatter (ARCHITECTURE §12).
 . "$(dirname "$0")/../lib/check_format.sh"
 # Every backend Go test, run against the corelib with no unexplained skip.
@@ -1080,6 +1082,49 @@ YAML
         python3 "$ROOT/tests/conformance/lib/check_vectors_decode.py" \
             "$corelib/assets/test_vectors.json" "Rust" --mode "$surface" \
             --cwd "$WORK/conf-$label" -- cargo run -q --
+    done
+
+    # ...and the VALUES: the same dense bytes into the message the encode driver
+    # derives from each vector, every decoded field compared with the vector's
+    # `fields` (generator#651). The skip matrix above reads u64 only. serde_json
+    # prints an infinity as null, so those two floats are met by null.
+    echo "==> [$label] shared-vector typed decode conformance"
+    for surface in decode streamdecode; do
+        python3 "$ROOT/tests/conformance/lib/check_vectors_decode.py" --typed \
+            "$corelib/assets/test_vectors.json" "Rust [$label]" --nonfinite-null --mode "$surface" \
+            --cwd "$WORK/conf-$label" -- cargo run -q --
+    done
+
+    # The shared header-ceiling and invalid-UTF-8 tables (generator#651): a declared
+    # length or count and then end of input, at the top level and inside open
+    # sequences, answered at the word with the ceiling's own verdict and terminal;
+    # and every invalid_utf8 row decoded as INVALID. Rust strings are Unicode types,
+    # so there is no byte container to hand an invalid string to and only the decode
+    # half runs; the validation is unconditional on every label, rs-no-std
+    # included. The no_std profile has no receiver caps, so there the
+    # `receiver_caps` rows are skipped by name and the schema-bounded rows run.
+    echo "==> [$label] header ceilings and invalid UTF-8, from the shared vector tables (generator#651)"
+    TABLES="$corelib/assets/test_vectors.json"
+    WITHOUT=""
+    case "$label" in no-std-*) WITHOUT="--without receiver_caps" ;; esac
+    tables_schema "$TABLES" "$WORK/tables-$label.yaml" $WITHOUT
+    printf 'generic: %s\ntargets: { rust: { %s } }\n' "$TABLES_GENERIC" "$cfgbody" > "$WORK/cfg-tables-$label.yaml"
+    ( cd "$ROOT" && go run ./cmd/sofabgen --format=off --config "$WORK/cfg-tables-$label.yaml" --lang rust \
+        --in "$WORK/tables-$label.yaml" --out "$WORK/tables-$label" >/dev/null )
+    sed -i "s#\${SOFAB_RS_CORELIB}#$corelib#" "$WORK/tables-$label/Cargo.toml"
+    crate_bin_name "$WORK/tables-$label"
+    ( cd "$WORK/tables-$label" && cargo build -q )
+    for surface in decode streamdecode; do
+        MARK=""
+        [ "$surface" = streamdecode ] && MARK="--marker finish --invalid-name Sofab(InvalidMsg) --limit-name Sofab(LimitExceeded)"
+        python3 "$ROOT/tests/conformance/lib/check_header_limits.py" "$TABLES" "Rust [$label]" $WITHOUT \
+            --cwd "$WORK/tables-$label" --verb "$surface" \
+            --limit-pattern 'LimitExceeded' --invalid-pattern 'InvalidMsg' $MARK \
+            -- cargo run -q --
+        python3 "$ROOT/tests/conformance/lib/check_invalid_utf8.py" "$TABLES" "Rust [$label]" \
+            --cwd "$WORK/tables-$label" --verb "$surface" \
+            --limit-pattern 'LimitExceeded' --invalid-pattern 'InvalidMsg' \
+            -- cargo run -q --
     done
 
     echo "==> [$label] corpus + realworld: every definition builds, clippy-clean"

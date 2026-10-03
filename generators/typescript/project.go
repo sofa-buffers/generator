@@ -162,6 +162,18 @@ func (g *gen) harness(s *ir.Schema) []byte {
 	f.line("  return 2;")
 	f.line("}")
 	f.blank()
+	// JSON has no number for an infinity or a NaN and JSON.stringify writes null for
+	// both, which a conformance driver cannot tell apart, and it writes -0 as 0; the
+	// harness spells them "inf", "-inf", "nan" and "-0", the strings the encode
+	// input already takes for an infinity.
+	f.line("function showJSON(v: unknown): string {")
+	f.line("  return JSON.stringify(v, (_k, x) => {")
+	f.line("    if (typeof x !== \"number\") return x;")
+	f.line("    if (Object.is(x, -0)) return \"-0\";")
+	f.line("    return Number.isFinite(x) ? x : Number.isNaN(x) ? \"nan\" : x > 0 ? \"inf\" : \"-inf\";")
+	f.line("  });")
+	f.line("}")
+	f.blank()
 	f.line("async function main(): Promise<number> {")
 	f.line("  const mode = process.argv[2];")
 	f.line("  const name = process.argv[3] ?? %q;", defaultMessage(s))
@@ -181,7 +193,7 @@ func (g *gen) harness(s *ir.Schema) []byte {
 	f.line("    process.stdout.write(obj.encode());")
 	f.line("  } else if (mode === \"decode\") {")
 	f.line("    const obj = cls.decode(new Uint8Array(input));")
-	f.line("    process.stdout.write(JSON.stringify(obj.toJSON()) + \"\\n\");")
+	f.line("    process.stdout.write(showJSON(obj.toJSON()) + \"\\n\");")
 	// The same bytes through the incremental decoder, fed ONE BYTE per feed by default. A
 	// whole-buffer feed would exercise the Decoder's signature without ever making
 	// it suspend and resume, which is the half that can actually be wrong;
@@ -225,7 +237,7 @@ func (g *gen) harness(s *ir.Schema) []byte {
 	f.line("        `decode error: ${String(e)} [finish=${fin}]\\n`);")
 	f.line("      return 1;")
 	f.line("    }")
-	f.line("    process.stdout.write(JSON.stringify(obj.toJSON()) + \"\\n\");")
+	f.line("    process.stdout.write(showJSON(obj.toJSON()) + \"\\n\");")
 	f.line("  } else if (mode === \"recode\") {")
 	// Bytes in, bytes out: decode and re-encode without a JSON detour. JSON cannot
 	// carry every wire distinction a message can (a NaN renders as null, and no JSON

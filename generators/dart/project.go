@@ -75,6 +75,17 @@ func (g *gen) harness(s *ir.Schema) []byte {
 
 	g.emitBench(f, s)
 
+	// jsonEncode refuses an infinity or a NaN, which a decoded float can be; the
+	// harness spells them "inf", "-inf" and "nan", the strings the encode input
+	// already takes for an infinity.
+	if len(s.Messages) > 0 {
+		f.line("Object? _nonFinite(Object? o) => o is double")
+		f.line("    ? (o.isNaN ? 'nan' : (o.isNegative ? '-inf' : 'inf'))")
+		f.line("    : throw convert.JsonUnsupportedObjectError(o);")
+		f.blank()
+		f.line("String _showJSON(Object? v) => convert.jsonEncode(v, toEncodable: _nonFinite);")
+		f.blank()
+	}
 	// Dart ignores an int returned from main; the process exit code is set only
 	// via io.exit()/exitCode, which the conformance harness relies on to distinguish
 	// a rejected (INVALID/INCOMPLETE/limitExceeded) decode from a clean one.
@@ -103,7 +114,7 @@ func (g *gen) harness(s *ir.Schema) []byte {
 		f.line("          io.stderr.writeln('decode failed: ${st.name}');")
 		f.line("          io.exit(1);")
 		f.line("        }")
-		f.line("        io.stdout.writeln(convert.jsonEncode(%s(obj)));", toJSONName(raw))
+		f.line("        io.stdout.writeln(_showJSON(%s(obj)));", toJSONName(raw))
 		// The same bytes through the incremental decoder (PLAN §5.6), fed ONE BYTE
 		// per feed. A whole-buffer feed would exercise the decoder's signature
 		// without ever making it suspend and resume, which is the half that can
@@ -149,12 +160,12 @@ func (g *gen) harness(s *ir.Schema) []byte {
 		f.line("          io.stderr.writeln('decode failed: ${dec.feed(const <int>[]).name}');")
 		f.line("          io.exit(1);")
 		f.line("        }")
-		f.line("        io.stdout.writeln(convert.jsonEncode(%s(obj)));", toJSONName(raw))
+		f.line("        io.stdout.writeln(_showJSON(%s(obj)));", toJSONName(raw))
 		f.line("      } else if (mode == 'trydecode') {")
 		f.line("        final obj = %s();", mt)
 		f.line("        final st = %s.tryDecode(input, obj);", mt)
 		f.line("        io.stdout.writeln(st.name.toUpperCase());")
-		f.line("        io.stdout.writeln(convert.jsonEncode(%s(obj)));", toJSONName(raw))
+		f.line("        io.stdout.writeln(_showJSON(%s(obj)));", toJSONName(raw))
 		f.line("      } else if (mode == 'recode') {")
 		// Wire -> object -> wire, no JSON in the loop: the byte-exact re-encode path
 		// that must preserve an fp32 signaling NaN's raw bits (issue #226).

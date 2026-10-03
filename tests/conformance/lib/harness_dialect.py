@@ -11,7 +11,10 @@ import this module so the tolerance is written once:
     bare token `Infinity` or the literal `1e999` -- `float_in()`, `dumps_in()`;
   * a 64-bit integer comes OUT in either spelling -- `as_int()`;
   * a `u8` array comes out as a JSON array or as a base64 string (Go `[]byte`)
-    -- `bytes_of()`.
+    -- `bytes_of()`;
+  * a non-finite float comes OUT as a bare `inf` / `-inf` / `nan` (C), as
+    `Infinity` / `NaN` (Python, Dart, Java), or as the strings "inf" / "-inf" /
+    "nan" (Go, TypeScript) -- `loads_out()` reads all of them, and `-0` as -0.0.
 
 Nothing here knows about any one backend; a harness that needs a spelling this
 module does not cover gets it added here, not in a driver.
@@ -20,6 +23,7 @@ module does not cover gets it added here, not in a driver.
 import base64
 import binascii
 import json
+import re
 
 DIALECTS = ("number", "string")
 
@@ -122,3 +126,16 @@ def bytes_of(v):
         except (binascii.Error, ValueError):
             return None
     return None
+
+
+_BARE_NONFINITE = re.compile(r'("(?:\\.|[^"\\])*")|(?<![\w.])(-?)(inf|nan)(?![\w.])')
+
+
+def loads_out(text: str):
+    """json.loads for a harness's DECODE output. A bare `inf` / `-inf` / `nan`
+    token is read as the matching string (as_float turns it into the float), and a
+    `-0` literal is read as negative zero, a different float from 0 that
+    json.loads would otherwise turn into the int 0."""
+    text = _BARE_NONFINITE.sub(
+        lambda m: m.group(1) or '"%s%s"' % (m.group(2), m.group(3)), text)
+    return json.loads(text, parse_int=lambda s: -0.0 if s == "-0" else int(s))

@@ -32,6 +32,8 @@ fi
 # Backend Go tests against the real corelib (lib/backend_tests.sh).
 . "$(dirname "$0")/../lib/backend_tests.sh"
 . "$(dirname "$0")/../lib/max_message_size.sh"
+# The header_limits / invalid_utf8 side tables (generator#651).
+. "$(dirname "$0")/../lib/tables.sh"
 
 ROOT=$(cd "$(dirname "$0")/../../.." && pwd)
 CORELIB="${1:-${SOFAB_KOTLIN_CORELIB:-}}"
@@ -515,6 +517,31 @@ python3 "$ROOT/tests/conformance/lib/check_terminal_refusal.py" "kotlin" \
     --marker finish --invalid-name INVALID_MSG --limit-name LIMIT_EXCEEDED \
     -- "$WORK/refusal/build/install/harness/bin/harness"
 
+# The shared header-ceiling and invalid-UTF-8 tables (generator#651): a declared
+# length or count and then end of input, at the top level and inside open sequences,
+# answered at the word with the ceiling's own verdict and terminal; and every
+# invalid_utf8 row decoded as INVALID. Kotlin strings are Unicode, so no invalid
+# string can be handed to the encoder and only the decode half runs. `tryDecode`
+# throws on malformed input, so the category comes from the error text.
+echo "==> header ceilings and invalid UTF-8, from the shared vector tables (generator#651)"
+TABLES="$CORELIB/assets/test_vectors.json"
+tables_schema "$TABLES" "$WORK/tables.yaml"
+cat > "$WORK/tablescfg.yaml" <<YAML
+generic: $TABLES_GENERIC
+targets: { kotlin: { package: message } }
+YAML
+build "$WORK/tables.yaml" "$WORK/tables" "$WORK/tablescfg.yaml"
+for surface in decode streamdecode; do
+    MARK=""
+    [ "$surface" = streamdecode ] && MARK="--marker finish --invalid-name INVALID_MSG --limit-name LIMIT_EXCEEDED"
+    python3 "$ROOT/tests/conformance/lib/check_header_limits.py" "$TABLES" "kotlin" \
+        --verb "$surface" --limit-pattern 'LIMIT_EXCEEDED' --invalid-pattern 'INVALID_MSG' $MARK \
+        -- "$WORK/tables/build/install/harness/bin/harness"
+    python3 "$ROOT/tests/conformance/lib/check_invalid_utf8.py" "$TABLES" "kotlin" \
+        --verb "$surface" --limit-pattern 'LIMIT_EXCEEDED' --invalid-pattern 'INVALID_MSG' \
+        -- "$WORK/tables/build/install/harness/bin/harness"
+done
+
 # Receiver-side decode limits (generator#102): `a` is an UNBOUNDED u64 array
 # (id 0 -> header 0x03). With max_dyn_array_count: 4 a wire count of 5 MUST fail
 # with LIMIT_EXCEEDED (checked at the count header, before allocation); exactly 4
@@ -663,10 +690,13 @@ grep -q "INVALID_MSG" "$WORK/bserr.txt" || { echo "FAIL: over-maxlen must be INV
 # refused -- five bytes holding a connection open, the amplification the caps
 # exist to close.
 echo "==> an over-cap length word with NO payload is LIMIT_EXCEEDED, not INCOMPLETE"
+# The 100-byte string and blob cases that sat here are the shared table's
+# header_string_over_cap / header_blob_over_cap, run above on every suite. What stays
+# is the 1 MiB claim, which the table does not carry (its amplification row is 1 GiB),
+# and eof_str.bin, kept for the default-cap control below.
 printf '\012\242\006'           > "$WORK/eof_str.bin"
-printf '\022\243\006'           > "$WORK/eof_blob.bin"
 printf '\012\202\200\200\004' > "$WORK/eof_1m.bin"
-for v in eof_str eof_blob eof_1m; do
+for v in eof_1m; do
     if $HL decode dyn < "$WORK/$v.bin" >/dev/null 2>"$WORK/$v.err"; then
         echo "FAIL: $v -- an over-cap length word then EOF must be refused, not accepted"; exit 1
     fi
@@ -733,6 +763,16 @@ python3 "$ROOT/tests/conformance/lib/check_vectors_encode.py" \
 echo "==> shared-vector decode conformance (skip matrix)"
 for surface in decode streamdecode; do
     python3 "$ROOT/tests/conformance/lib/check_vectors_decode.py" \
+        "$CORELIB/assets/test_vectors.json" "Kotlin" --mode "$surface" \
+        -- "$WORK/conf/build/install/harness/bin/harness"
+done
+
+# ...and the VALUES: the same dense bytes into the message the encode driver derives
+# from each vector, every decoded field compared with the vector's `fields`
+# (generator#651). The skip matrix above reads u64 only.
+echo "==> shared-vector typed decode conformance"
+for surface in decode streamdecode; do
+    python3 "$ROOT/tests/conformance/lib/check_vectors_decode.py" --typed \
         "$CORELIB/assets/test_vectors.json" "Kotlin" --mode "$surface" \
         -- "$WORK/conf/build/install/harness/bin/harness"
 done

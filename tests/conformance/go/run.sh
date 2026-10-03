@@ -11,6 +11,8 @@ set -eu
 # Shared MAX_SIZE fill check (ARCHITECTURE §9.6).
 . "$(dirname "$0")/../lib/maxsize_fill.sh"
 . "$(dirname "$0")/../lib/max_message_size.sh"
+# The header_limits / invalid_utf8 side tables (generator#651).
+. "$(dirname "$0")/../lib/tables.sh"
 # Every backend Go test, run against the corelib with no skips allowed.
 . "$(dirname "$0")/../lib/backend_tests.sh"
 # Generated code against the canonical formatter (ARCHITECTURE §12).
@@ -581,7 +583,8 @@ echo "==> cap exclusivity OK (bounded sibling decodes; unknown id, mis-typed kin
 
 # The ENFORCEMENT POINT, pinned end-to-end (CORELIB_PLAN S6.2.1: a limit "MUST be
 # enforced at the count/length header -- before the allocation it is meant to
-# prevent -- for the same reason INVALID is decided there").
+# prevent -- for the same reason INVALID is decided there"), and the strict UTF-8
+# table, both read from the shared vector file (generator#651).
 #
 # This is what keeps the scalar cap in the generated FixlenBegin arm rather than
 # on the one corelib call further down the path, sofab.PayloadAcc.Take. Take is
@@ -591,34 +594,33 @@ echo "==> cap exclusivity OK (bounded sibling decodes; unknown id, mis-typed kin
 # after the payload was buffered. A guard that moves there looks identical in
 # review -- hence a byte-level probe rather than a codegen assertion.
 #
-# Wire: 02 (id 0, fixlen) a2 06 (fixlen_word = (100 << 3) | 2 -> a 100-byte
-# string) and then end of input. The cap is 24.
-echo "==> an over-cap length must be refused AT THE HEADER, not after the payload"
-cat > "$WORK/dynstr.yaml" <<'YAML'
-version: 1
-messages:
-  dyn: { payload: { s: { id: 0, type: string } } }
-YAML
-cat > "$WORK/cfg-strlim.yaml" <<YAML
-generic: { emit: project, max_dyn_string_len: 24 }
+# header_limits and header_limits_nested hold the bytes: a declared length or count
+# and then end of input, at the top level and inside open sequences, each with an
+# in-cap control that must stay INCOMPLETE, and header_string_amplification claims
+# a 1 GiB string in six bytes. The invalid_utf8 rows go in the same project: Go strings are byte containers, so the
+# encode half runs too, with the \xNN spelling because encoding/json cannot carry
+# bytes that are not UTF-8.
+echo "==> header ceilings and invalid UTF-8, from the shared vector tables (generator#651)"
+TABLES="$CORELIB/assets/test_vectors.json"
+tables_schema "$TABLES" "$WORK/tables.yaml"
+cat > "$WORK/cfg-tables.yaml" <<YAML
+generic: $TABLES_GENERIC
 targets: { go: { package: message, module_path: example.com/gen, go_version: "1.21" } }
 YAML
-( cd "$ROOT" && go run ./cmd/sofabgen --config "$WORK/cfg-strlim.yaml" --lang go --in "$WORK/dynstr.yaml" --out "$WORK/strlim" )
-sed -i "s#\${SOFAB_GO_CORELIB}#$CORELIB#" "$WORK/strlim/go.mod"
-printf '\002\242\006' > "$WORK/overcap_trunc.bin"
-OUT=$( (cd "$WORK/strlim" && GOFLAGS=-mod=mod go run ./harness decode dyn < "$WORK/overcap_trunc.bin" 2>&1) || true )
-case "$OUT" in
-    *"limit exceeded"*) ;;
-    *) echo "FAIL: an over-cap length word followed by truncation must be LimitExceeded at the header, got: $OUT"; exit 1 ;;
-esac
-# The control: the same header under the cap, equally truncated, is INCOMPLETE --
-# so the case above is the cap firing and not the truncation being misreported.
-# 02 62 = fixlen_word (12 << 3) | 2, a 12-byte string, no payload.
-printf '\002\142' > "$WORK/incap_trunc.bin"
-OUT=$( (cd "$WORK/strlim" && GOFLAGS=-mod=mod go run ./harness decode dyn < "$WORK/incap_trunc.bin" 2>&1) || true )
-case "$OUT" in
-    *"limit exceeded"*) echo "FAIL: an UNDER-cap truncated string must not be LimitExceeded, got: $OUT"; exit 1 ;;
-esac
+( cd "$ROOT" && go run ./cmd/sofabgen --config "$WORK/cfg-tables.yaml" --lang go --in "$WORK/tables.yaml" --out "$WORK/tables" )
+sed -i "s#\${SOFAB_GO_CORELIB}#$CORELIB#" "$WORK/tables/go.mod"
+( cd "$WORK/tables" && GOFLAGS=-mod=mod go mod tidy >/dev/null 2>&1 && go build -o "$WORK/tables.bin" ./harness )
+for surface in decode streamdecode; do
+    MARK=""
+    [ "$surface" = streamdecode ] && MARK="--marker finish --invalid-name InvalidMessage --limit-name LimitExceeded"
+    python3 "$ROOT/tests/conformance/lib/check_header_limits.py" "$TABLES" "go" \
+        --verb "$surface" --limit-pattern 'limit exceeded' --invalid-pattern 'invalid message' $MARK \
+        -- "$WORK/tables.bin"
+    python3 "$ROOT/tests/conformance/lib/check_invalid_utf8.py" "$TABLES" "go" \
+        --verb "$surface" --limit-pattern 'limit exceeded' --invalid-pattern 'invalid message' \
+        --encode --encode-spelling escape --refusal-pattern 'invalid' \
+        -- "$WORK/tables.bin"
+done
 echo "==> header enforcement point OK"
 
 # A native matrix ROW's own element count. The outer `count:` bounds the row ID;
@@ -1219,6 +1221,16 @@ for surface in decode streamdecode; do
         "$CORELIB/assets/test_vectors.json" "Go" --mode "$surface" -- "$WORK/vecskip"
 done
 
+# ...and the VALUES: the same dense bytes into the message the encode driver derives
+# from each vector, every decoded field compared with the vector's `fields`
+# (generator#651). vecskip above reads u64 only, so this is what asserts a signed,
+# float, string, blob, array or sequence value on decode.
+echo "==> shared-vector typed decode conformance"
+for surface in decode streamdecode; do
+    python3 "$ROOT/tests/conformance/lib/check_vectors_decode.py" --typed \
+        "$CORELIB/assets/test_vectors.json" "Go" --mode "$surface" -- "$WORK/vecskip"
+done
+
 # ...and the encode direction (generator#650): every vector that is not decode-only
 # by design, byte for byte against its `serialized_sparse` column.
 echo "==> shared-vector encode conformance"
@@ -1477,7 +1489,7 @@ format_gen go "$WORK/fmt/fill" --config "$WORK/cfg.yaml" --in "$ROOT/tests/confo
 format_gen go "$WORK/fmt/fixsub" --config "$WORK/cfg.yaml" --in "$WORK/fixsub.yaml"
 format_gen go "$WORK/fmt/lim102" --config "$WORK/cfg-limits.yaml" --in "$WORK/dyn102.yaml"
 format_gen go "$WORK/fmt/excl" --config "$WORK/cfg-limits.yaml" --in "$WORK/excl.yaml"
-format_gen go "$WORK/fmt/strlim" --config "$WORK/cfg-strlim.yaml" --in "$WORK/dynstr.yaml"
+format_gen go "$WORK/fmt/tables" --config "$WORK/cfg-tables.yaml" --in "$WORK/tables.yaml"
 format_gen go "$WORK/fmt/mat" --config "$WORK/cfg.yaml" --in "$WORK/mat.yaml"
 format_gen go "$WORK/fmt/lim402" --config "$WORK/cfg-402.yaml" --in "$WORK/dyn402.yaml"
 format_gen go "$WORK/fmt/width" --config "$WORK/cfg.yaml" --in "$WORK/width.yaml"

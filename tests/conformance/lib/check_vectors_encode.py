@@ -348,30 +348,48 @@ def lossy_int64(vector):
     return None
 
 
-def classify(vector, max_id):
-    """Return None when the vector is checked, else the reason it is excluded.
-
-    Only what the SCHEMA depends on is decided here, so `--emit-schema` and the
-    run agree on which messages exist. `--int64-safe` changes what is fed to a
-    message, never which messages there are, and is applied by `main`."""
+def schema_reason(vector, max_id):
+    """Return None when the vector gets a message in the shared schema, else the
+    reason it has none. Only what the SCHEMA depends on is decided here, so
+    `--emit-schema` and every run agree on which messages exist: the encode driver
+    and the typed-decode half of `check_vectors_decode.py` read the same set."""
     g = vector["group"]
     if g in EXCLUDED_GROUPS:
         return EXCLUDED_GROUPS[g]
-    if not ids_ascend(vector["fields"]):
-        return ("ops written out of ascending id order; a generated encoder "
-                "writes a message's fields by ascending id")
     if max_id is not None and any(i > max_id for i in all_ids(vector["fields"])):
         return f"id above --max-id {max_id} (descriptor profile cannot declare it)"
     return None
 
 
+def classify(vector, max_id):
+    """Return None when the vector is byte-checked on ENCODE, else the reason it
+    is excluded. A vector whose ops are not in ascending id order still has a
+    message (`schema_reason`) and is still decoded; only the encode comparison
+    needs the ascending order.
+
+    `--int64-safe` changes what is fed to a message, never which messages there
+    are, and is applied by `main`."""
+    why = schema_reason(vector, max_id)
+    if why:
+        return why
+    if not ids_ascend(vector["fields"]):
+        return ("ops written out of ascending id order; a generated encoder "
+                "writes a message's fields by ascending id")
+    return None
+
+
 def prepare(vectors, max_id):
-    """(checked, excluded, messages): checked is [(vector, msg_index, root, type)],
-    excluded is [(vector, reason)], messages the ordered unique resolved types."""
-    checked, excluded, messages = [], [], []
+    """(checked, excluded, messages, decodable).
+
+    `checked` is [(vector, msg_index, root, type)], the byte-compared ones;
+    `excluded` is [(vector, reason)]; `messages` the ordered unique resolved types,
+    one per shape of any vector with a message; `decodable` is the same tuples as
+    `checked` for every vector with a message, which is what the typed decode
+    compares."""
+    checked, excluded, messages, decodable = [], [], [], []
     for v in vectors:
         why = classify(v, max_id)
-        if why:
+        if schema_reason(v, max_id):
             excluded.append((v, why))
             continue
         root, t = message_type(v)
@@ -381,12 +399,17 @@ def prepare(vectors, max_id):
         t = resolve(t)
         if t not in messages:
             messages.append(t)
-        checked.append((v, messages.index(t), root, t))
-    return checked, excluded, messages
+        entry = (v, messages.index(t), root, t)
+        decodable.append(entry)
+        if why:
+            excluded.append((v, why))
+        else:
+            checked.append(entry)
+    return checked, excluded, messages, decodable
 
 
 def emit_schema(vectors, max_id) -> int:
-    _, _, messages = prepare(vectors, max_id)
+    messages = prepare(vectors, max_id)[2]
     print("# The encode-side shared-vector messages (generator#650), printed by")
     print("# tests/conformance/lib/check_vectors_encode.py from the vector file itself,")
     print("# so the schema and the values fed to it have exactly one definition.")
@@ -437,7 +460,7 @@ def main() -> int:
     floor = int(opt(head, "--min-checked", str(MIN_CHECKED)))
 
     vectors = load_vectors(vectors_path)
-    checked, excluded, _ = prepare(vectors, max_id)
+    checked, excluded, _, _ = prepare(vectors, max_id)
     if safe:
         # Not a schema matter (see classify): the message stays, the vector goes.
         kept = []

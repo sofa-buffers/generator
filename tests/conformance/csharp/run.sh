@@ -14,6 +14,8 @@ set -eu
 # Backend Go tests against the real corelib (lib/backend_tests.sh).
 . "$(dirname "$0")/../lib/backend_tests.sh"
 . "$(dirname "$0")/../lib/max_message_size.sh"
+# The header_limits / invalid_utf8 side tables (generator#651).
+. "$(dirname "$0")/../lib/tables.sh"
 
 ROOT=$(cd "$(dirname "$0")/../../.." && pwd)
 CORELIB="${1:-${SOFAB_CS_CORELIB:-}}"
@@ -508,6 +510,31 @@ python3 "$ROOT/tests/conformance/lib/check_terminal_refusal.py" "csharp" \
     --marker finish --invalid-name InvalidMessage --limit-name LimitExceeded \
     -- dotnet "$WORK/refusal/bin/Debug/net9.0/harness.dll"
 
+# The shared header-ceiling and invalid-UTF-8 tables (generator#651): a declared
+# length or count and then end of input, at the top level and inside open sequences,
+# answered at the word with the ceiling's own verdict and terminal; and every
+# invalid_utf8 row decoded as INVALID. .NET strings are UTF-16 text, so no invalid
+# string can be handed to the encoder and only the decode half runs. `TryDecode`
+# throws on malformed input, so the category comes from the error text.
+echo "==> header ceilings and invalid UTF-8, from the shared vector tables (generator#651)"
+TABLES="$CORELIB/assets/test_vectors.json"
+tables_schema "$TABLES" "$WORK/tables.yaml"
+cat > "$WORK/cfg-tables.yaml" <<YAML
+generic: $TABLES_GENERIC
+YAML
+( cd "$ROOT" && go run ./cmd/sofabgen --config "$WORK/cfg-tables.yaml" --lang csharp --in "$WORK/tables.yaml" --out "$WORK/tables" )
+dbuild "$WORK/tables"
+for surface in decode streamdecode; do
+    MARK=""
+    [ "$surface" = streamdecode ] && MARK="--marker finish --invalid-name InvalidMessage --limit-name LimitExceeded"
+    python3 "$ROOT/tests/conformance/lib/check_header_limits.py" "$TABLES" "csharp" \
+        --verb "$surface" --limit-pattern 'LimitExceeded' --invalid-pattern 'InvalidMessage' $MARK \
+        -- dotnet "$WORK/tables/bin/Debug/net9.0/harness.dll"
+    python3 "$ROOT/tests/conformance/lib/check_invalid_utf8.py" "$TABLES" "csharp" \
+        --verb "$surface" --limit-pattern 'LimitExceeded' --invalid-pattern 'InvalidMessage' \
+        -- dotnet "$WORK/tables/bin/Debug/net9.0/harness.dll"
+done
+
 # Receiver-side decode limits (generator#102): `a` is a count-less array
 # (id 0 -> header 0x03 = 0<<3 | unsigned-array), so a configured
 # max_dyn_array_count: 4 makes a wire count of 5 fail decode with
@@ -727,10 +754,11 @@ $HP decode caps < "$WORK/cap_blob_skipped.bin" >/dev/null \
 # refused -- five bytes holding a connection open, the amplification the caps
 # exist to close.
 echo "==> an over-cap length word with NO payload is LimitExceeded, not Incomplete"
-printf '\002\242\006'           > "$WORK/cap_eof_str.bin"
-printf '\022\243\006'           > "$WORK/cap_eof_blob.bin"
+# The 100-byte string and blob cases that sat here are the shared table's
+# header_string_over_cap / header_blob_over_cap, run above on every suite. What stays
+# is the 1 MiB claim, which the table does not carry (its amplification row is 1 GiB).
 printf '\002\202\200\200\004' > "$WORK/cap_eof_1m.bin"
-for v in cap_eof_str cap_eof_blob cap_eof_1m; do
+for v in cap_eof_1m; do
     if $HP decode caps < "$WORK/$v.bin" >/dev/null 2>"$WORK/$v.err"; then
         echo "FAIL: $v -- an over-cap length word then EOF must be refused, not accepted"; exit 1
     fi
@@ -792,6 +820,16 @@ python3 "$ROOT/tests/conformance/lib/check_vectors_encode.py" \
 echo "==> shared-vector decode conformance (skip matrix)"
 for surface in decode streamdecode; do
     python3 "$ROOT/tests/conformance/lib/check_vectors_decode.py" \
+        "$CORELIB/assets/test_vectors.json" "C#" --mode "$surface" \
+        -- dotnet "$WORK/conf/bin/Debug/net9.0/harness.dll"
+done
+
+# ...and the VALUES: the same dense bytes into the message the encode driver derives
+# from each vector, every decoded field compared with the vector's `fields`
+# (generator#651). The skip matrix above reads u64 only.
+echo "==> shared-vector typed decode conformance"
+for surface in decode streamdecode; do
+    python3 "$ROOT/tests/conformance/lib/check_vectors_decode.py" --typed \
         "$CORELIB/assets/test_vectors.json" "C#" --mode "$surface" \
         -- dotnet "$WORK/conf/bin/Debug/net9.0/harness.dll"
 done

@@ -5856,10 +5856,21 @@ target renders the same metadata as HTML page content
 A reimplementation is **conformant** when it reproduces these gates:
 
 1. **The shared conformance file** — each corelib ships
-   `assets/test_vectors.json` (authored by `corelib-c-cpp`). It has three
-   top-level blocks: 131 positive `vectors` with two byte columns, the negative
-   `invalid_utf8` cases, and `sequence_growth`. A conformant generator is checked
-   against the vectors in **both** byte directions and against the growth block.
+   `assets/test_vectors.json` (authored by `corelib-c-cpp`). It has six
+   top-level blocks, and every one of them has a driver in
+   `tests/conformance/lib` that all eleven suites call:
+
+   | block | rows | driver |
+   | --- | --- | --- |
+   | `vectors` | 131 positive vectors, two byte columns | `check_vectors_encode.py` (encode, byte-exact), `check_vectors_decode.py` (skip matrix, and `--typed` for the decoded values) |
+   | `invalid_utf8` | 11 strings that are not UTF-8 | `check_invalid_utf8.py` |
+   | `sequence_growth` | wrapper-array growth sequences | `check_growth.py` |
+   | `header_limits` | 10 length/count words with no payload behind them | `check_header_limits.py` |
+   | `header_limits_nested` | 8, the same inside open sequences | `check_header_limits.py` |
+   | `boolean_tolerant` | §4.4 decode of every non-0 byte | `check_boolean_tolerant.py` |
+
+   A conformant generator is checked against the vectors in **both** byte
+   directions, against the decoded **values**, and against each side block.
 
    *Encode* (`tests/conformance/lib/check_vectors_encode.py`, one driver for all
    eleven backends): the generated encoder's output must be byte-identical to the
@@ -5938,6 +5949,55 @@ A reimplementation is **conformant** when it reproduces these gates:
    the encode driver asserts that checked plus excluded equals the file's total and enforces a floor and required groups, the decode driver asserts `checked == len(vectors)`, and the upstream C harness
    stopped silently truncating an over-long `skip_ids`: a driver that quietly
    narrows what it selects passes while testing less than it claims.
+
+   *Typed decode* (`check_vectors_decode.py --typed`, generator#651): the skip
+   matrix reads `u64` and nothing else, so on its own it never asserts a signed,
+   float, string, blob, array or sequence value. This half feeds the same dense
+   bytes into the message the encode driver derives from each vector (`venc<N>`,
+   printed by `check_vectors_encode.py --emit-schema`, so **one schema serves both
+   directions**) and compares the harness's JSON with the vector's `fields` as
+   data, by the vector's types: 64-bit integers in either spelling, floats by
+   value (an fp32 by its single-precision bits, NaN equal to NaN, signed zero
+   kept, infinities through whichever spelling the harness uses --
+   `harness_dialect.loads_out`), blobs and `u8` arrays as an array or base64, a
+   struct by the keys the vector sets. A vector whose ops are not in ascending id
+   order has no byte-exact encode but is a valid decode input, so it is compared
+   here; every vector with a message is either compared or named in the excluded
+   list. The run prints `compared + excluded = 131` and a per-group breakdown and
+   fails when a required group has no compared vector (79 are compared; the
+   `skip` and `skip/matrix` groups carry fields no message declares and stay with
+   the skip matrix). It runs on both decode surfaces in every suite, with the same
+   `--max-id` and `--int64-safe` as the other half.
+
+   *Header ceilings* (`check_header_limits.py`, generator#651): the
+   `header_limits` and `header_limits_nested` blocks hold bytes that declare a
+   length or a count and then end. The ceiling is decided at that word, before any
+   payload exists, and answers with its own category (`LimitExceeded` for a
+   receiver cap, `INVALID` for a schema `maxlen`), terminally, never INCOMPLETE;
+   every rejection is paired with an in-cap control that must stay INCOMPLETE, and
+   the nested rows repeat each case inside one or two open sequence frames. The
+   driver prints one message per distinct `(kind, schema-bounded, frames)` shape
+   and the `max_dyn_*` caps the rows name (`--emit-limits`), so a suite builds one
+   project for the whole table. A row whose `requires` names a capability the
+   target lacks is **skipped by name and counted** (`--without receiver_caps`):
+   the footprint profiles (C, C++ over c-cpp, Rust over rs-no-std) have no
+   receiver caps and still run the schema-bounded rows. The category channel is a
+   status verb or a pair of patterns, as in `check_refusal_category.py`, and
+   terminality is asserted through the `[finish=X]` / `[refeed=X]` markers the
+   chunked verb prints (the contract of `check_terminal_refusal.py`); a row with
+   `chunks` is dripped a byte at a time on the chunked surface, which cuts the
+   length varint itself.
+
+   *Invalid UTF-8* (`check_invalid_utf8.py`, generator#651): every `invalid_utf8`
+   row's `serialized_hex` is decoded into a `string` at id 0 and must answer
+   INVALID. On the targets whose string is a byte container (C, C++, Go, Zig) the
+   row's `string_hex` is also handed to the encoder, which must refuse it, and a
+   valid multi-byte control in the same spelling must still encode to exactly the
+   expected bytes. The check-ON configuration is what the rows need, so the
+   footprint targets (C, C++ over c-cpp, which default `SOFAB_STRICT_UTF8` off per
+   CORELIB_PLAN §6.4.2) build this project strict. The harnesses that cannot carry
+   such a string in JSON text take it as raw bytes (C, C++, Zig) or, where the
+   JSON decoder replaces them (Go), as `\xNN` escapes.
 
    *Growth* (`tests/conformance/lib/check_growth.py`): the third block,
    `sequence_growth` — CORELIB_PLAN §7.2 item 8, the shape-B allocation of §9.5.

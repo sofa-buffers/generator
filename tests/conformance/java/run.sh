@@ -14,6 +14,8 @@ set -eu
 # Backend Go tests against the real corelib (lib/backend_tests.sh).
 . "$(dirname "$0")/../lib/backend_tests.sh"
 . "$(dirname "$0")/../lib/max_message_size.sh"
+# The header_limits / invalid_utf8 side tables (generator#651).
+. "$(dirname "$0")/../lib/tables.sh"
 
 ROOT=$(cd "$(dirname "$0")/../../.." && pwd)
 CORELIB="${1:-${SOFAB_JAVA_CORELIB:-}}"
@@ -528,6 +530,31 @@ python3 "$ROOT/tests/conformance/lib/check_terminal_refusal.py" "java" \
     --marker finish --invalid-name INVALID_MSG --limit-name LIMIT_EXCEEDED \
     -- java -jar "$WORK/refusal/target/harness.jar"
 
+# The shared header-ceiling and invalid-UTF-8 tables (generator#651): a declared
+# length or count and then end of input, at the top level and inside open sequences,
+# answered at the word with the ceiling's own verdict and terminal; and every
+# invalid_utf8 row decoded as INVALID. Java strings are Unicode, so no invalid
+# string can be handed to the encoder and only the decode half runs. `tryDecode`
+# throws on malformed input, so the category comes from the error text.
+echo "==> header ceilings and invalid UTF-8, from the shared vector tables (generator#651)"
+TABLES="$CORELIB/assets/test_vectors.json"
+tables_schema "$TABLES" "$WORK/tables.yaml"
+cat > "$WORK/tablescfg.yaml" <<YAML
+generic: $TABLES_GENERIC
+targets: { java: { package: message } }
+YAML
+build "$WORK/tables.yaml" "$WORK/tables" "$WORK/tablescfg.yaml"
+for surface in decode streamdecode; do
+    MARK=""
+    [ "$surface" = streamdecode ] && MARK="--marker finish --invalid-name INVALID_MSG --limit-name LIMIT_EXCEEDED"
+    python3 "$ROOT/tests/conformance/lib/check_header_limits.py" "$TABLES" "java" \
+        --verb "$surface" --limit-pattern 'LIMIT_EXCEEDED' --invalid-pattern 'INVALID_MSG' $MARK \
+        -- java -jar "$WORK/tables/target/harness.jar"
+    python3 "$ROOT/tests/conformance/lib/check_invalid_utf8.py" "$TABLES" "java" \
+        --verb "$surface" --limit-pattern 'LIMIT_EXCEEDED' --invalid-pattern 'INVALID_MSG' \
+        -- java -jar "$WORK/tables/target/harness.jar"
+done
+
 # Receiver-side decode limits (generator#102): `a` is an UNBOUNDED u64 array
 # (id 0 -> header 0x03 = 0<<3 | unsigned-array). With max_dyn_array_count: 4
 # a wire count of 5 MUST fail with LIMIT_EXCEEDED (decode exits non-zero,
@@ -737,10 +764,11 @@ grep -q "INVALID_MSG\|InvalidMessage" "$WORK/plerr.txt" || {
 # refused -- five bytes holding a connection open, which is the amplification the
 # caps exist to close.
 echo "==> an over-cap length word with NO payload is LIMIT_EXCEEDED, not INCOMPLETE"
-printf '\002\242\006'         > "$WORK/pl_eof_s.bin"
-printf '\022\243\006'         > "$WORK/pl_eof_b.bin"
+# The 100-byte string and blob cases that sat here are the shared table's
+# header_string_over_cap / header_blob_over_cap, run above on every suite; what stays
+# is the 1 MiB claim, which the table does not carry (its amplification row is 1 GiB).
 printf '\002\202\200\200\004' > "$WORK/pl_eof_1m.bin"
-for v in pl_eof_s pl_eof_b pl_eof_1m; do
+for v in pl_eof_1m; do
     if $HPC decode pl < "$WORK/$v.bin" >/dev/null 2>"$WORK/plerr.txt"; then
         echo "FAIL: $v -- an over-cap length word then EOF must be refused, not accepted"; exit 1
     fi
@@ -818,6 +846,16 @@ python3 "$ROOT/tests/conformance/lib/check_vectors_encode.py" \
 echo "==> shared-vector decode conformance (skip matrix)"
 for surface in decode streamdecode; do
     python3 "$ROOT/tests/conformance/lib/check_vectors_decode.py" \
+        "$CORELIB/assets/test_vectors.json" "Java" --mode "$surface" \
+        -- java -jar "$WORK/conf/target/harness.jar"
+done
+
+# ...and the VALUES: the same dense bytes into the message the encode driver derives
+# from each vector, every decoded field compared with the vector's `fields`
+# (generator#651). The skip matrix above reads u64 only.
+echo "==> shared-vector typed decode conformance"
+for surface in decode streamdecode; do
+    python3 "$ROOT/tests/conformance/lib/check_vectors_decode.py" --typed \
         "$CORELIB/assets/test_vectors.json" "Java" --mode "$surface" \
         -- java -jar "$WORK/conf/target/harness.jar"
 done
