@@ -6147,6 +6147,18 @@ A reimplementation is **conformant** when it reproduces these gates:
    every leg that generates different code: both cpp configs (`cpp` and `c-cpp`),
    the rust and rs-no-std legs, both python engines and each TypeScript int64 mode.
 
+   The native backends compare a float SCALAR with its default as an integer:
+   C++ `std::bit_cast<std::uint32_t/uint64_t>(x) != 0x<bits>` (the header then
+   includes `<bit>`, so generated C++ is C++20), Rust `x.to_bits() != 0x<bits>`,
+   Zig `@as(u32/u64, @bitCast(x)) != 0x<bits>`. The generator computes the
+   default's bits (zero default: `0`) from the same literal the member is
+   initialised with, and the omission test in `serialize` and the equality /
+   `isDefault` helper share the one expression. The integer form needs no FPU
+   compare, so footprint targets without one drop the soft-float routine behind
+   it. Float ARRAYS keep their element-wise compare (their cells stay in
+   `KNOWN_GAP`) until the corelibs carry a bit-compare helper: it is a static
+   helper and belongs there, never emitted per field.
+
    *Chunk invariance* (`tests/conformance/lib/check_chunk_invariance.py`):
    CORELIB_PLAN §5.2 makes the decode outcome computable at *any* byte boundary,
    §6.0 borrows a fed chunk only for the duration of `feed`, and §5.2.3 fixes the

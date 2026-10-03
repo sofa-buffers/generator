@@ -79,8 +79,8 @@ impl Scalars {
         if self.u64max != 18446744073709551615 { let _ = os.write_unsigned(2, self.u64max as sofab::Unsigned); }
         if self.i8min != -128 { let _ = os.write_signed(3, self.i8min as sofab::Signed); }
         if self.i64min != i64::MIN { let _ = os.write_signed(4, self.i64min as sofab::Signed); }
-        if self.f32 != 3.14 { let _ = os.write_fp32(5, self.f32); }
-        if self.f64 != -2.5 { let _ = os.write_fp64(6, self.f64); }
+        if self.f32.to_bits() != 0x4048f5c3 { let _ = os.write_fp32(5, self.f32); }
+        if self.f64.to_bits() != 0xc004000000000000 { let _ = os.write_fp64(6, self.f64); }
         if !self.flag { let _ = os.write_boolean(7, self.flag); }
         if !self.flags.is_empty() {
             { let _t0: Vec<u8> = self.flags.iter().map(|_v| *_v as u8).collect(); let _ = os.write_array_unsigned(8, &_t0); }

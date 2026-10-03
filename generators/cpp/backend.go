@@ -17,7 +17,10 @@
 package cpp
 
 import (
+	"bytes"
 	"fmt"
+	"math"
+	"strconv"
 	"strings"
 
 	"github.com/sofa-buffers/generator/internal/generator"
@@ -453,7 +456,11 @@ func (g *gen) emitHeader(hs headerSpec) []byte {
 		g.emitStruct(f, g.msgType(m), m.Summary, m.Fields, true)
 	}
 	f.line("} // namespace %s", g.ns)
-	return f.bytes()
+	out := f.bytes()
+	if bytes.Contains(out, []byte("std::bit_cast")) {
+		out = bytes.Replace(out, []byte("#include <cstdint>\n"), []byte("#include <bit>\n#include <cstdint>\n"), 1)
+	}
+	return out
 }
 
 // maxFieldID returns the largest field id this header puts on the wire. Nested
@@ -1265,6 +1272,9 @@ func (g *gen) fieldIsDefaultExprAt(fld *ir.Field, acc string) string {
 		// and the writer cannot drift apart.
 		return fmt.Sprintf("%s.size() == 0", acc)
 	}
+	if cmp := g.floatBitsCmp(fld, acc, "=="); cmp != "" {
+		return cmp
+	}
 	return fmt.Sprintf("%s == %s", acc, g.cppDefault(fld))
 }
 
@@ -1354,7 +1364,27 @@ func (g *gen) fieldIsNotDefaultExprAt(fld *ir.Field, acc string) string {
 	if fld.Kind == ir.KindBlob {
 		return fmt.Sprintf("%s != %s%s", acc, g.cppType(fld), g.cppDefault(fld))
 	}
+	if cmp := g.floatBitsCmp(fld, acc, "!="); cmp != "" {
+		return cmp
+	}
 	return fmt.Sprintf("%s != %s", acc, g.cppDefault(fld))
+}
+
+// floatBitsCmp compares an fp32/fp64 scalar with its default by BIT PATTERN
+// (CORELIB_PLAN §4.6): an IEEE compare would treat -0.0 as the default 0 and
+// drop the field. The default's bits are an integer literal computed here. It
+// returns "" for every other kind.
+func (g *gen) floatBitsCmp(fld *ir.Field, acc, op string) string {
+	switch fld.Kind {
+	case ir.KindFP32:
+		// Parsed from the literal the member is initialised with, so the bits are
+		// the ones the compiler gives that literal (no double rounding).
+		v, _ := strconv.ParseFloat(floatLit(fld.Default), 32)
+		return fmt.Sprintf("std::bit_cast<std::uint32_t>(%s) %s 0x%xu", acc, op, math.Float32bits(float32(v)))
+	case ir.KindFP64:
+		return fmt.Sprintf("std::bit_cast<std::uint64_t>(%s) %s 0x%xull", acc, op, math.Float64bits(floatVal(fld.Default)))
+	}
+	return ""
 }
 
 func (g *gen) emitSerializeArray(f *hfile, fld *ir.Field, acc string) {

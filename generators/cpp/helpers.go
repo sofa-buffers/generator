@@ -625,18 +625,21 @@ func scalarLit(v any) string {
 
 // floatLit renders a numeric default as a C++ floating literal (always with a
 // decimal point so "0" becomes "0.0", which is a valid float when suffixed).
-func floatLit(v any) string {
-	var fv float64
+// floatVal is a float default as a float64 (0 when absent).
+func floatVal(v any) float64 {
 	switch x := v.(type) {
 	case float64:
-		fv = x
+		return x
 	case int:
-		fv = float64(x)
+		return float64(x)
 	case int64:
-		fv = float64(x)
-	default:
-		return "0.0"
+		return float64(x)
 	}
+	return 0
+}
+
+func floatLit(v any) string {
+	fv := floatVal(v)
 	s := fmt.Sprintf("%g", fv)
 	if !strings.ContainsAny(s, ".eE") {
 		s += ".0"

@@ -38,8 +38,8 @@ pub const Scalars = struct {
         if (self.u64max != 18446744073709551615) try os.writeUnsigned(2, self.u64max);
         if (self.i8min != -128) try os.writeSigned(3, self.i8min);
         if (self.i64min != -9223372036854775808) try os.writeSigned(4, self.i64min);
-        if (self.f32 != 3.14) try os.writeFp32(5, self.f32);
-        if (self.f64 != -2.5) try os.writeFp64(6, self.f64);
+        if (@as(u32, @bitCast(self.f32)) != 0x4048f5c3) try os.writeFp32(5, self.f32);
+        if (@as(u64, @bitCast(self.f64)) != 0xc004000000000000) try os.writeFp64(6, self.f64);
         if (self.flag != true) try os.writeBoolean(7, self.flag);
         if (self.flags.len() != 0) {
             try os.writeArrayUnsigned(8, std.mem.sliceAsBytes(self.flags.slice()));
@@ -54,8 +54,8 @@ pub const Scalars = struct {
         if (self.u64max != 18446744073709551615) return false;
         if (self.i8min != -128) return false;
         if (self.i64min != -9223372036854775808) return false;
-        if (self.f32 != 3.14) return false;
-        if (self.f64 != -2.5) return false;
+        if (@as(u32, @bitCast(self.f32)) != 0x4048f5c3) return false;
+        if (@as(u64, @bitCast(self.f64)) != 0xc004000000000000) return false;
         if (self.flag != true) return false;
         if (self.flags.len() != 0) return false;
         return true;
