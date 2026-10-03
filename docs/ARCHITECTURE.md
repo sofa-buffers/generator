@@ -6065,6 +6065,26 @@ A reimplementation is **conformant** when it reproduces these gates:
    Wired into all eleven suites, on all four rust and cpp legs and both python
    engines; on its first run only Go failed, on all three symptoms.
 
+   *Float default by bit pattern* (`tests/conformance/lib/check_float_default.py`,
+   generator#636): CORELIB_PLAN §4.6 makes floats round-trip bit-for-bit, so a
+   float is compared with its default by **bit pattern**, not by IEEE `==`:
+   `-0.0` is a value next to a default of `+0.0` and is written, `+0.0` at a zero
+   default is omitted, and a non-zero default is omitted only for its exact bits.
+   An IEEE `!=` in a generated encoder drops the field (`-0.0 == 0.0`) and the
+   decoder hands back `+0.0`. Every expectation is a **wire byte literal** spelled
+   out from MESSAGE_SPEC §4 (`{"f":-0.0,"d":-0.0}` is
+   `02 20 00 00 00 80 0a 41 00 00 00 00 00 00 00 80`), never a decoded JSON value,
+   because JavaScript prints `-0` as `0` and a JSON comparison cannot see the sign.
+   The driver prints its own schema (`--emit-schema`: fp32/fp64 at default 0 and
+   at 1.5, plus an fp32 array defaulting to `[0.0, 1.5]`) so no suite carries a
+   copy. A per-backend `KNOWN_GAP` table (`--backend KEY`) lists the cells that
+   fail today: a listed case that fails is reported as a known gap and the run
+   stays green, a listed case that passes fails the run, so each backend fix
+   removes its own entry and the table is empty when the last one lands. C
+   already compares bytes and has no entry. It is wired into all eleven suites on
+   every leg that generates different code: both cpp configs (`cpp` and `c-cpp`),
+   the rust and rs-no-std legs, both python engines and each TypeScript int64 mode.
+
    *Chunk invariance* (`tests/conformance/lib/check_chunk_invariance.py`):
    CORELIB_PLAN §5.2 makes the decode outcome computable at *any* byte boundary,
    §6.0 borrows a fed chunk only for the duration of `feed`, and §5.2.3 fixes the
