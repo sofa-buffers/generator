@@ -445,6 +445,9 @@ func (g *gen) fieldIsDefaultExpr(fld *ir.Field, acc string) string {
 	case ir.KindArray:
 		return g.arrayIsDefaultExpr(fld, acc)
 	}
+	if cmp := floatBitsCmp(fld, acc, "=="); cmp != "" {
+		return cmp
+	}
 	return fmt.Sprintf("%s == %s", acc, g.csDefaultValue(fld))
 }
 
@@ -567,6 +570,10 @@ func (g *gen) emitMarshalAt(f *cfile, ind string, fld *ir.Field, acc string, for
 	// Scalar/string/enum/bitfield leaf: always omit when equal to the default;
 	// sparse encoding is canonical (MESSAGE_SPEC S2) and the decoder reconstructs
 	// the omitted field from its default.
+	if cmp := floatBitsCmp(fld, acc, "!="); cmp != "" {
+		f.line("%sif (%s) { %s }", ind, cmp, write)
+		return
+	}
 	f.line("%sif (%s != %s) { %s }", ind, acc, g.csDefaultValue(fld), write)
 }
 

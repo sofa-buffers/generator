@@ -25,8 +25,8 @@ public class Scalars {
         if (this.u64max != 18446744073709551615uL) os.writeUnsigned(2, this.u64max)
         if (this.i8min != (-128).toByte()) os.writeSigned(3, this.i8min.toLong())
         if (this.i64min != Long.MIN_VALUE) os.writeSigned(4, this.i64min)
-        if (this.f32 != 3.14f) os.writeFp32(5, this.f32)
-        if (this.f64 != -2.5) os.writeFp64(6, this.f64)
+        if (this.f32.toRawBits() != 1078523331) os.writeFp32(5, this.f32)
+        if (this.f64.toRawBits() != -4610560118520545280L) os.writeFp64(6, this.f64)
         if (this.flag != true) os.writeBoolean(7, this.flag)
         if (this.flags.isNotEmpty()) {
             os.writeArrayUnsigned(8, Seq.boolsToBytes(this.flags))
@@ -40,8 +40,8 @@ public class Scalars {
         if (this.u64max != 18446744073709551615uL) return false
         if (this.i8min != (-128).toByte()) return false
         if (this.i64min != Long.MIN_VALUE) return false
-        if (this.f32 != 3.14f) return false
-        if (this.f64 != -2.5) return false
+        if (this.f32.toRawBits() != 1078523331) return false
+        if (this.f64.toRawBits() != -4610560118520545280L) return false
         if (this.flag != true) return false
         if (this.flags.isNotEmpty()) return false
         return true

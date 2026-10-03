@@ -2,6 +2,7 @@ package golang
 
 import (
 	"fmt"
+	"math"
 	"strconv"
 	"strings"
 
@@ -526,6 +527,9 @@ func (g *gen) fieldIsDefaultExprAt(f *gofile, fld *ir.Field, acc string) string 
 	case ir.KindArray:
 		return g.arrayIsDefaultExpr(f, fld, acc)
 	}
+	if cmp := g.floatBitsCmp(f, fld, acc, "=="); cmp != "" {
+		return cmp
+	}
 	return fmt.Sprintf("%s == %s", acc, g.defaultCompare(fld))
 }
 
@@ -634,9 +638,41 @@ func (g *gen) emitMarshalFieldAt(f *gofile, fld *ir.Field, acc, ind string, forc
 	// Scalar/string/enum/bitfield leaf: always omit when equal to the default;
 	// sparse encoding is canonical (MESSAGE_SPEC S2) and the decoder reconstructs
 	// the omitted field from its default.
-	f.line("%sif %s != %s {", ind, acc, g.defaultCompare(fld))
+	if cmp := g.floatBitsCmp(f, fld, acc, "!="); cmp != "" {
+		f.line("%sif %s {", ind, cmp)
+	} else {
+		f.line("%sif %s != %s {", ind, acc, g.defaultCompare(fld))
+	}
 	f.line("%s\t%s", ind, write)
 	f.line("%s}", ind)
+}
+
+// floatBitsCmp compares an fp32/fp64 scalar with its default by BIT PATTERN
+// (CORELIB_PLAN §4.6): an IEEE compare would treat -0.0 as the default 0 and
+// drop the field. The default's bits are an integer literal computed here, from
+// the same literal the member is initialised with (a -0.0 default is the Go
+// constant 0, so it is +0.0 here too). It returns "" for every other kind.
+func (g *gen) floatBitsCmp(f *gofile, fld *ir.Field, acc, op string) string {
+	if fld.Kind != ir.KindFP32 && fld.Kind != ir.KindFP64 {
+		return ""
+	}
+	lit := "0"
+	if l, ok := g.defaultLiteral(fld); ok {
+		lit = l
+	}
+	f.imp("math")
+	if fld.Kind == ir.KindFP32 {
+		v, _ := strconv.ParseFloat(lit, 32)
+		if v == 0 {
+			v = 0 // -0 parses to -0.0, the member is +0.0
+		}
+		return fmt.Sprintf("math.Float32bits(%s) %s 0x%x", acc, op, math.Float32bits(float32(v)))
+	}
+	v, _ := strconv.ParseFloat(lit, 64)
+	if v == 0 {
+		v = 0
+	}
+	return fmt.Sprintf("math.Float64bits(%s) %s 0x%x", acc, op, math.Float64bits(v))
 }
 
 // defaultCompare is the RHS to compare a field against for omission: its schema

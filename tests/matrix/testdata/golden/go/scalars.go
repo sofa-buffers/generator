@@ -5,6 +5,7 @@ package message
 import (
 	"github.com/sofa-buffers/corelib-go"
 	"io"
+	"math"
 )
 
 // Scalars is a generated SofaBuffers object.
@@ -38,10 +39,10 @@ func (m *Scalars) Serialize(e *sofab.Encoder) {
 	if m.I64min != -9223372036854775808 {
 		e.WriteSigned(4, int64(m.I64min))
 	}
-	if m.F32 != 3.14 {
+	if math.Float32bits(m.F32) != 0x4048f5c3 {
 		e.WriteFloat32(5, m.F32)
 	}
-	if m.F64 != -2.5 {
+	if math.Float64bits(m.F64) != 0xc004000000000000 {
 		e.WriteFloat64(6, m.F64)
 	}
 	if m.Flag != true {
@@ -76,10 +77,10 @@ func (m *Scalars) isDefault() bool {
 	if !(m.I64min == -9223372036854775808) {
 		return false
 	}
-	if !(m.F32 == 3.14) {
+	if !(math.Float32bits(m.F32) == 0x4048f5c3) {
 		return false
 	}
-	if !(m.F64 == -2.5) {
+	if !(math.Float64bits(m.F64) == 0xc004000000000000) {
 		return false
 	}
 	if !(m.Flag == true) {

@@ -23,8 +23,8 @@ public sealed class Scalars {
         if (this.u64max != 18446744073709551615UL) { os.WriteUnsigned(2, (ulong)this.u64max); }
         if (this.i8min != -128) { os.WriteSigned(3, (long)this.i8min); }
         if (this.i64min != -9223372036854775808L) { os.WriteSigned(4, (long)this.i64min); }
-        if (this.f32 != 3.14f) { os.WriteFp32(5, this.f32); }
-        if (this.f64 != -2.5) { os.WriteFp64(6, this.f64); }
+        if (global::System.BitConverter.SingleToInt32Bits(this.f32) != 1078523331) { os.WriteFp32(5, this.f32); }
+        if (global::System.BitConverter.DoubleToInt64Bits(this.f64) != -4610560118520545280L) { os.WriteFp64(6, this.f64); }
         if (this.flag != true) { os.WriteBoolean(7, this.flag); }
         if (this.flags.Count != 0) {
             os.WriteArrayUnsigned(8, global::System.Array.ConvertAll(this.flags.ToArray(), _x => _x ? (byte)1 : (byte)0));
@@ -36,8 +36,8 @@ public sealed class Scalars {
         if (!(this.u64max == 18446744073709551615UL)) return false;
         if (!(this.i8min == -128)) return false;
         if (!(this.i64min == -9223372036854775808L)) return false;
-        if (!(this.f32 == 3.14f)) return false;
-        if (!(this.f64 == -2.5)) return false;
+        if (!(global::System.BitConverter.SingleToInt32Bits(this.f32) == 1078523331)) return false;
+        if (!(global::System.BitConverter.DoubleToInt64Bits(this.f64) == -4610560118520545280L)) return false;
         if (!(this.flag == true)) return false;
         if (!(this.flags.Count == 0)) return false;
         return true;

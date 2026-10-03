@@ -23,8 +23,8 @@ public class Scalars {
         if (this.u64max != 0xFFFFFFFFFFFFFFFFL) { os.writeUnsigned(2, this.u64max); }
         if (this.i8min != -128L) { os.writeSigned(3, this.i8min); }
         if (this.i64min != -9223372036854775808L) { os.writeSigned(4, this.i64min); }
-        if (this.f32 != 3.14f) { os.writeFp32(5, this.f32); }
-        if (this.f64 != -2.5) { os.writeFp64(6, this.f64); }
+        if (java.lang.Float.floatToRawIntBits(this.f32) != 1078523331) { os.writeFp32(5, this.f32); }
+        if (java.lang.Double.doubleToRawLongBits(this.f64) != -4610560118520545280L) { os.writeFp64(6, this.f64); }
         if (this.flag != true) { os.writeBoolean(7, this.flag); }
         if (this.flags != null && !this.flags.isEmpty()) {
             os.writeArrayUnsigned(8, Seq.boolsToLongs(this.flags));
@@ -37,8 +37,8 @@ public class Scalars {
         if (this.u64max != 0xFFFFFFFFFFFFFFFFL) return false;
         if (this.i8min != -128L) return false;
         if (this.i64min != -9223372036854775808L) return false;
-        if (this.f32 != 3.14f) return false;
-        if (this.f64 != -2.5) return false;
+        if (java.lang.Float.floatToRawIntBits(this.f32) != 1078523331) return false;
+        if (java.lang.Double.doubleToRawLongBits(this.f64) != -4610560118520545280L) return false;
         if (this.flag != true) return false;
         if (this.flags != null && !this.flags.isEmpty()) return false;
         return true;
