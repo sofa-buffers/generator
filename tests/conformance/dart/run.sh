@@ -62,6 +62,9 @@ YAML
 # back cannot drift apart.
 python3 "$ROOT/tests/conformance/lib/check_vectors_decode.py" --emit-schema \
     >> "$WORK/conf.yaml"
+# The encode-side messages (generator#650), derived from the vector file itself.
+python3 "$ROOT/tests/conformance/lib/check_vectors_encode.py" --emit-schema \
+    "$CORELIB/assets/test_vectors.json" >> "$WORK/conf.yaml"
 
 # Every generated project is analyzed before it is compiled, with infos fatal
 # (ARCHITECTURE §12 gate 9): `dart compile` fails on errors only, so without this
@@ -833,8 +836,12 @@ ST=$("$WORK/mat/harness" trydecode mat < "$WORK/row_over.bin" | sed -n 1p)
     || { echo "FAIL: a matrix row over its schema count must be INVALID, got $ST"; exit 1; }
 echo "==> matrix row count OK"
 
-echo "==> shared-vector byte-exact conformance"
-python3 "$ROOT/tests/conformance/dart/check_vectors.py" "$CORELIB/assets/test_vectors.json" "$WORK/conf/harness"
+echo "==> shared-vector encode conformance"
+# Every shared vector that is not decode-only by design, byte for byte against its
+# `serialized_sparse` column (generator#650).
+python3 "$ROOT/tests/conformance/lib/check_vectors_encode.py" \
+    "$CORELIB/assets/test_vectors.json" "Dart" --int64-json string --inf-json overflow \
+    -- "$WORK/conf/harness"
 
 # ...and the other direction (generator#444): feed each vector's DENSE bytes
 # into a message that declares u64 on the anchors and nothing else, so every

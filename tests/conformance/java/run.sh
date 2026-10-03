@@ -56,6 +56,9 @@ YAML
 # back cannot drift apart.
 python3 "$ROOT/tests/conformance/lib/check_vectors_decode.py" --emit-schema \
     >> "$WORK/conf.yaml"
+# The encode-side messages (generator#650), derived from the vector file itself.
+python3 "$ROOT/tests/conformance/lib/check_vectors_encode.py" --emit-schema \
+    "$CORELIB/assets/test_vectors.json" >> "$WORK/conf.yaml"
 
 build() {
     ( cd "$ROOT" && go run ./cmd/sofabgen --config "${3:-$WORK/cfg.yaml}" --lang java --in "$1" --out "$2" )
@@ -796,8 +799,12 @@ OUT=$($HPC decode pl < "$WORK/pl_mis_s.bin")
 echo "$OUT" | grep -q '"n":0' || { echo "FAIL: a skipped payload must leave n at its default; got: $OUT"; exit 1; }
 echo "==> payload length caps OK (rejects, off schema-bounded fields, off skipped ones)"
 
-echo "==> shared-vector byte-exact conformance"
-python3 "$ROOT/tests/conformance/java/check_vectors.py" "$CORELIB/assets/test_vectors.json" "$WORK/conf/target/harness.jar"
+echo "==> shared-vector encode conformance"
+# Every shared vector that is not decode-only by design, byte for byte against its
+# `serialized_sparse` column (generator#650).
+python3 "$ROOT/tests/conformance/lib/check_vectors_encode.py" \
+    "$CORELIB/assets/test_vectors.json" "Java" --inf-json infinity \
+    -- java -jar "$WORK/conf/target/harness.jar"
 
 # ...and the other direction (generator#444): feed each vector's DENSE bytes
 # into a message that declares u64 on the anchors and nothing else, so every

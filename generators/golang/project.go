@@ -295,10 +295,13 @@ func (g *gen) harness(s *ir.Schema, modPath string) []byte {
 	// package, JSON or hex, and Go refuses an unused import outright.
 	hasMsg := len(s.Messages) > 0
 	if hasMsg {
+		f.imp("bytes")
 		f.imp("encoding/hex")
 		f.imp("encoding/json")
 		f.imp("errors")
 		f.imp(corelibImport)
+		f.imp("math")
+		f.imp("strings")
 	}
 	f.imp("fmt")
 	f.imp("io")
@@ -336,7 +339,7 @@ func (g *gen) harness(s *ir.Schema, modPath string) []byte {
 		f.line("\tcase %q:", m.Name)
 		f.line("\t\tif mode == \"encode\" {")
 		f.line("\t\t\tobj := %s.%s__New()", pkgAlias, base)
-		f.line("\t\t\tif err := json.Unmarshal(in, obj); err != nil {")
+		f.line("\t\t\tif err := unmarshalJSON(in, obj); err != nil {")
 		f.line("\t\t\t\tfail(err)")
 		f.line("\t\t\t}")
 		f.line("\t\t\tb, err := obj.Encode()")
@@ -399,6 +402,9 @@ func (g *gen) harness(s *ir.Schema, modPath string) []byte {
 		f.line("\treturn err.Error()")
 		f.line("}")
 		f.blank()
+	}
+	if hasMsg {
+		g.emitInfSpelling(f)
 	}
 	f.line("func fail(err error) {")
 	f.line("\tfmt.Fprintln(os.Stderr, \"error:\", err)")
@@ -463,4 +469,106 @@ func defaultMessage(s *ir.Schema) string {
 		return s.Messages[0].Name
 	}
 	return ""
+}
+
+// emitInfSpelling emits unmarshalJSON, the harness's JSON front door. It is
+// json.Unmarshal plus the one spelling encoding/json has no number for: the
+// strings "inf" and "-inf" at a float position, which is how the shared vector
+// file writes an infinite float and how the encode driver passes it on
+// (tests/conformance/lib/check_vectors_encode.py). The strings are located by
+// walking the parsed tree against the destination's type, so a string FIELD
+// holding the text "inf" is left alone, and the infinities are set after the
+// rest of the message has been unmarshalled.
+func (g *gen) emitInfSpelling(f *gofile) {
+	for _, l := range []string{
+		"// infAt is a float position the input spelled \"inf\" or \"-inf\".",
+		"type infAt struct {",
+		"\tpath []any // map keys (string) and slice indexes (int) from the root",
+		"\tneg  bool",
+		"}",
+		"",
+		"func jsonName(sf reflect.StructField) string {",
+		"\tname, _, _ := strings.Cut(sf.Tag.Get(\"json\"), \",\")",
+		"\treturn name",
+		"}",
+		"",
+		"// scrubInf replaces each infinity spelling at a float position of type t with",
+		"// 0 and records where it was.",
+		"func scrubInf(v any, t reflect.Type, path []any, out *[]infAt) any {",
+		"\tfor t.Kind() == reflect.Pointer {",
+		"\t\tt = t.Elem()",
+		"\t}",
+		"\tswitch x := v.(type) {",
+		"\tcase map[string]any:",
+		"\t\tif t.Kind() != reflect.Struct {",
+		"\t\t\treturn v",
+		"\t\t}",
+		"\t\tfor i := 0; i < t.NumField(); i++ {",
+		"\t\t\tname := jsonName(t.Field(i))",
+		"\t\t\tif e, ok := x[name]; ok && name != \"\" {",
+		"\t\t\t\tx[name] = scrubInf(e, t.Field(i).Type, append(append([]any{}, path...), name), out)",
+		"\t\t\t}",
+		"\t\t}",
+		"\tcase []any:",
+		"\t\tif t.Kind() != reflect.Slice && t.Kind() != reflect.Array {",
+		"\t\t\treturn v",
+		"\t\t}",
+		"\t\tfor i, e := range x {",
+		"\t\t\tx[i] = scrubInf(e, t.Elem(), append(append([]any{}, path...), i), out)",
+		"\t\t}",
+		"\tcase string:",
+		"\t\tif (x == \"inf\" || x == \"-inf\") && (t.Kind() == reflect.Float32 || t.Kind() == reflect.Float64) {",
+		"\t\t\t*out = append(*out, infAt{path, x == \"-inf\"})",
+		"\t\t\treturn json.Number(\"0\")",
+		"\t\t}",
+		"\t}",
+		"\treturn v",
+		"}",
+		"",
+		"func unmarshalJSON(in []byte, obj any) error {",
+		"\tdec := json.NewDecoder(bytes.NewReader(in))",
+		"\tdec.UseNumber() // keeps a 64-bit integer exact while the tree is rewritten",
+		"\tvar tree any",
+		"\tif err := dec.Decode(&tree); err != nil {",
+		"\t\treturn json.Unmarshal(in, obj)",
+		"\t}",
+		"\tvar infs []infAt",
+		"\ttree = scrubInf(tree, reflect.TypeOf(obj), nil, &infs)",
+		"\tclean, err := json.Marshal(tree)",
+		"\tif err != nil {",
+		"\t\treturn err",
+		"\t}",
+		"\tif err := json.Unmarshal(clean, obj); err != nil {",
+		"\t\treturn err",
+		"\t}",
+		"\tfor _, at := range infs {",
+		"\t\trv := reflect.ValueOf(obj)",
+		"\t\tfor _, p := range at.path {",
+		"\t\t\tfor rv.Kind() == reflect.Pointer {",
+		"\t\t\t\trv = rv.Elem()",
+		"\t\t\t}",
+		"\t\t\tswitch k := p.(type) {",
+		"\t\t\tcase string:",
+		"\t\t\t\tfor i := 0; i < rv.NumField(); i++ {",
+		"\t\t\t\t\tif jsonName(rv.Type().Field(i)) == k {",
+		"\t\t\t\t\t\trv = rv.Field(i)",
+		"\t\t\t\t\t\tbreak",
+		"\t\t\t\t\t}",
+		"\t\t\t\t}",
+		"\t\t\tcase int:",
+		"\t\t\t\trv = rv.Index(k)",
+		"\t\t\t}",
+		"\t\t}",
+		"\t\tsign := 1",
+		"\t\tif at.neg {",
+		"\t\t\tsign = -1",
+		"\t\t}",
+		"\t\trv.SetFloat(math.Inf(sign))",
+		"\t}",
+		"\treturn nil",
+		"}",
+		"",
+	} {
+		f.line("%s", l)
+	}
 }

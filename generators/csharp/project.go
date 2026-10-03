@@ -78,7 +78,10 @@ func (g *gen) harness(s *ir.Schema) []byte {
 		convs = append(convs, "new "+cn+"()")
 	}
 	f.line("static class _Program {")
-	f.line("    static readonly JsonSerializerOptions Opts = new() { IncludeFields = true, Converters = { %s } };", strings.Join(convs, ", "))
+	// AllowNamedFloatingPointLiterals: the strings "Infinity" and "-Infinity" are
+	// how an infinite float is spelled in JSON, in either direction -- the shared
+	// vector driver passes them in (tests/conformance/lib/check_vectors_encode.py).
+	f.line("    static readonly JsonSerializerOptions Opts = new() { IncludeFields = true, NumberHandling = JsonNumberHandling.AllowNamedFloatingPointLiterals, Converters = { %s } };", strings.Join(convs, ", "))
 	g.emitBenchBody(f, s)
 	f.line("    static int Main(string[] args) {")
 	f.line("        if (args.Length < 1) { Console.Error.WriteLine(\"usage: harness <encode|decode|streamdecode|trydecode|bench> [Message|workload]\"); return 2; }")

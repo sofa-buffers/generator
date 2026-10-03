@@ -43,13 +43,15 @@ messages:
   vecf64: { payload: { a: { id: 0, type: fp64 } } }
   vecs: { payload: { a: { id: 0, type: string, maxlen: 4096 } } }
   vecsa: { payload: { a: { id: 0, type: array, items: { type: string, count: 8, maxlen: 16 } } } }
-  vecua: { payload: { a: { id: 0, type: array, items: { type: u32, count: 8 } } } }
 YAML
 # The decode-side message (generator#444). Printed by the driver that asserts
 # against it, so the ids it declares and the ids that driver expects to read
 # back cannot drift apart.
 python3 "$ROOT/tests/conformance/lib/check_vectors_decode.py" --emit-schema \
     >> "$WORK/conf.yaml"
+# The encode-side messages (generator#650), derived from the vector file itself.
+python3 "$ROOT/tests/conformance/lib/check_vectors_encode.py" --emit-schema \
+    "$CORELIB/assets/test_vectors.json" >> "$WORK/conf.yaml"
 
 printf 'generic: { emit: project }\n' > "$WORK/cfg.yaml"
 
@@ -859,8 +861,12 @@ printf '\003\011\001\002\003\004\005\006\007\010\011' | "$WRAPH" decode wrap >/d
     echo "FAIL: a 7.3-skipped over-cap array must not be capped"; exit 1; }
 echo "==> wrapper index / row count caps OK"
 
-echo "==> shared-vector byte-exact conformance"
-python3 "$ROOT/tests/conformance/zig/check_vectors.py" "$CORELIB/assets/test_vectors.json" "$WORK/conf"
+echo "==> shared-vector encode conformance"
+# Every shared vector that is not decode-only by design, byte for byte against its
+# `serialized_sparse` column (generator#650).
+python3 "$ROOT/tests/conformance/lib/check_vectors_encode.py" \
+    "$CORELIB/assets/test_vectors.json" "Zig" --inf-json overflow \
+    -- "$WORK/conf/zig-out/bin/harness"
 
 # ...and the other direction (generator#444): feed each vector's DENSE bytes
 # into a message that declares u64 on the anchors and nothing else, so every

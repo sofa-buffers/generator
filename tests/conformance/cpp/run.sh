@@ -70,13 +70,15 @@ messages:
   vecf64: { payload: { a: { id: 0, type: fp64 } } }
   vecs: { payload: { a: { id: 0, type: string, maxlen: 4096 } } }
   vecsa: { payload: { a: { id: 0, type: array, items: { type: string, count: 8, maxlen: 16 } } } }
-  vecpa: { payload: { a: { id: 0, type: array, items: { type: struct, count: 8, fields: { k: { id: 0, type: u32 } } } } } }
 YAML
 # The decode-side message (generator#444). Printed by the driver that asserts
 # against it, so the ids it declares and the ids that driver expects to read
 # back cannot drift apart.
 python3 "$ROOT/tests/conformance/lib/check_vectors_decode.py" --emit-schema \
     >> "$WORK/conf.yaml"
+# The encode-side messages (generator#650), derived from the vector file itself.
+python3 "$ROOT/tests/conformance/lib/check_vectors_encode.py" --emit-schema \
+    "$CC/assets/test_vectors.json" >> "$WORK/conf.yaml"
 
 # Exercises every field-type family (ints, u64, fp, bool, string, enum, bitfield,
 # fixed array, blob, string array, blob array, nested struct, union).
@@ -874,10 +876,14 @@ YAML
             -- "$WORK/terminal-$label/harness/harness"
     fi
 
-    echo "==> [$label] shared-vector byte-exact conformance"
+    # Every shared vector that is not decode-only by design, byte for byte against
+    # its `serialized_sparse` column (generator#650).
+    echo "==> [$label] shared-vector encode conformance"
     ( cd "$ROOT" && go run ./cmd/sofabgen --config "$WORK/cfg-$label.yaml" --lang cpp --in "$WORK/conf.yaml" --out "$WORK/conf-$label" )
     make -C "$WORK/conf-$label" "$@" >/dev/null
-    python3 "$ROOT/tests/conformance/cpp/check_vectors.py" "$CC/assets/test_vectors.json" "$WORK/conf-$label/harness/harness"
+    python3 "$ROOT/tests/conformance/lib/check_vectors_encode.py" \
+        "$CC/assets/test_vectors.json" "C++ [$label]" --inf-json overflow \
+        -- "$WORK/conf-$label/harness/harness"
 
     # ...and the other direction (generator#444): feed each vector's DENSE bytes
     # into a message that declares u64 on the anchors and nothing else, so every
