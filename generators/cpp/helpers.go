@@ -623,8 +623,6 @@ func scalarLit(v any) string {
 	return fmt.Sprintf("%v", v)
 }
 
-// floatLit renders a numeric default as a C++ floating literal (always with a
-// decimal point so "0" becomes "0.0", which is a valid float when suffixed).
 // floatVal is a float default as a float64 (0 when absent).
 func floatVal(v any) float64 {
 	switch x := v.(type) {
@@ -638,6 +636,8 @@ func floatVal(v any) float64 {
 	return 0
 }
 
+// floatLit renders a numeric default as a C++ floating literal (always with a
+// decimal point so "0" becomes "0.0", which is a valid float when suffixed).
 func floatLit(v any) string {
 	fv := floatVal(v)
 	s := fmt.Sprintf("%g", fv)
