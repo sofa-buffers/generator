@@ -1565,10 +1565,19 @@ done
 echo "==> nested defaults: absence reads as the schema's defaults (generator#609)"
 printf 'version: 1\nmessages:\n' > "$WORK/defaults.yaml"
 python3 "$ROOT/tests/conformance/lib/check_defaults.py" --emit-schema >> "$WORK/defaults.yaml"
-gen "$WORK/defaults.yaml" "$WORK/defaults"
-ln -s "$WORK/ex/node_modules" "$WORK/defaults/node_modules"
-python3 "$ROOT/tests/conformance/lib/check_defaults.py" "TypeScript" \
-    --cwd "$WORK/defaults" -- "$TH"
+# Per int64 mode, each generated on its own: the 64-bit defaults (u64 max, i64 min)
+# are compared by different code in a bigint, a Long and a number. They go in as
+# decimal STRINGS (--int64-json string, as for check_union.py); `number` is lossy
+# above 2^53, so it runs with --int64-safe, which leaves the 64-bit fields out.
+for mode in bigint long number; do
+    gen "$WORK/defaults.yaml" "$WORK/defaults-$mode" "$WORK/cfg_$mode.yaml"
+    ln -s "$WORK/ex/node_modules" "$WORK/defaults-$mode/node_modules"
+    safe=""
+    [ "$mode" = number ] && safe="--int64-safe"
+    python3 "$ROOT/tests/conformance/lib/check_defaults.py" "TypeScript int64: $mode" \
+        --int64-json string $safe \
+        --cwd "$WORK/defaults-$mode" -- "$TH"
+done
 
 # Every generated project in the run, typechecked under $TSC_STRICT (ARCHITECTURE
 # §12 gate 9). Several legs only RUN their project through tsx, which does not
