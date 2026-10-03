@@ -542,6 +542,17 @@ run_variant() {
     python3 "$ROOT/tests/conformance/lib/check_defaults.py" "Rust [$label]" \
         --cwd "$WORK/defaults-$label" -- cargo run -q --
 
+    # Float defaults (generator#636): a float is compared with its default by bit
+    # pattern, so -0.0 is written next to a default of 0. The expectations are wire
+    # byte literals in the driver; its KNOWN_GAP lists what still fails.
+    echo "==> [$label] float default compared by bit pattern (generator#636)"
+    printf 'version: 1\nmessages:\n' > "$WORK/fdef.yaml"
+    python3 "$ROOT/tests/conformance/lib/check_float_default.py" --emit-schema >> "$WORK/fdef.yaml"
+    rust_build "$WORK/fdef.yaml" "$WORK/fdef-$label"
+    python3 "$ROOT/tests/conformance/lib/check_float_default.py" "Rust [$label]" \
+        --backend "$(case "$label" in no-std-*) echo rs-no-std ;; *) echo rust ;; esac)" \
+        --cwd "$WORK/fdef-$label" -- cargo run -q --
+
     # A native array round-trips at every length, for every element kind
     # (generator#550, #643): lengths either side of 16, empty, and 257 elements for
     # the unbounded field, all 14 kinds in one message per round. The shared driver

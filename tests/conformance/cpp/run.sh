@@ -1143,6 +1143,19 @@ YAML
     python3 "$ROOT/tests/conformance/lib/check_defaults.py" "C++ [$label]" \
         -- "$WORK/defaults-$label/harness/harness"
 
+    # Float defaults (generator#636): a float is compared with its default by bit
+    # pattern, so -0.0 is written next to a default of 0. The expectations are wire
+    # byte literals in the driver; its KNOWN_GAP lists what still fails.
+    echo "==> [$label] float default compared by bit pattern (generator#636)"
+    printf 'version: 1\nmessages:\n' > "$WORK/fdef.yaml"
+    python3 "$ROOT/tests/conformance/lib/check_float_default.py" --emit-schema >> "$WORK/fdef.yaml"
+    ( cd "$ROOT" && go run ./cmd/sofabgen --config "$WORK/cfg-$label.yaml" --lang cpp \
+        --in "$WORK/fdef.yaml" --out "$WORK/fdef-$label" )
+    make -C "$WORK/fdef-$label" "$@" >/dev/null
+    python3 "$ROOT/tests/conformance/lib/check_float_default.py" "C++ [$label]" \
+        --backend "$([ -n "$corelib" ] && echo c-cpp || echo cpp)" \
+        -- "$WORK/fdef-$label/harness/harness"
+
     # A native array round-trips at every length, for every element kind
     # (generator#550, #643): lengths either side of 16, empty, and 257 elements for
     # the unbounded field, all 14 kinds in one message per round. The shared driver

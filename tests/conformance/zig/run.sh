@@ -1102,6 +1102,16 @@ zig_build "$WORK/defaults.yaml" "$WORK/defaults"
 python3 "$ROOT/tests/conformance/lib/check_defaults.py" "Zig" \
     -- "$WORK/defaults/zig-out/bin/harness"
 
+# Float defaults (generator#636): a float is compared with its default by bit
+# pattern, so -0.0 is written next to a default of 0. The expectations are wire
+# byte literals in the driver; its KNOWN_GAP lists what still fails.
+echo "==> float default compared by bit pattern (generator#636)"
+printf 'version: 1\nmessages:\n' > "$WORK/fdef.yaml"
+python3 "$ROOT/tests/conformance/lib/check_float_default.py" --emit-schema >> "$WORK/fdef.yaml"
+zig_build "$WORK/fdef.yaml" "$WORK/fdef"
+python3 "$ROOT/tests/conformance/lib/check_float_default.py" "Zig" --backend zig \
+    -- "$WORK/fdef/zig-out/bin/harness"
+
 # A native array round-trips at every length, for every element kind
 # (generator#550, #643): lengths either side of 16, empty, and 257 elements for
 # the unbounded field, all 14 kinds in one message per round. The shared driver

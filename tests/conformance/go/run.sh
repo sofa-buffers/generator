@@ -1375,6 +1375,18 @@ sed -i "s#\${SOFAB_GO_CORELIB}#$CORELIB#" "$WORK/defaults/go.mod"
 python3 "$ROOT/tests/conformance/lib/check_defaults.py" "Go" \
     -- "$WORK/defaults-harness"
 
+# Float defaults (generator#636): a float is compared with its default by bit
+# pattern, so -0.0 is written next to a default of 0. The expectations are wire
+# byte literals in the driver; its KNOWN_GAP lists what still fails.
+echo "==> float default compared by bit pattern (generator#636)"
+printf 'version: 1\nmessages:\n' > "$WORK/fdef.yaml"
+python3 "$ROOT/tests/conformance/lib/check_float_default.py" --emit-schema >> "$WORK/fdef.yaml"
+( cd "$ROOT" && go run ./cmd/sofabgen --config "$WORK/cfg.yaml" --lang go --in "$WORK/fdef.yaml" --out "$WORK/fdef" )
+sed -i "s#\${SOFAB_GO_CORELIB}#$CORELIB#" "$WORK/fdef/go.mod"
+( cd "$WORK/fdef" && GOFLAGS=-mod=mod go build -o "$WORK/fdef-harness" ./harness )
+python3 "$ROOT/tests/conformance/lib/check_float_default.py" "Go" --backend go \
+    -- "$WORK/fdef-harness"
+
 # A native array round-trips at every length, for every element kind
 # (generator#550, #643): lengths either side of 16, empty and 257 elements, all
 # 14 kinds in one message per round. The shared driver prints its own schema and
