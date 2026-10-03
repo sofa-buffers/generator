@@ -7,7 +7,7 @@ Usage:
                           [--cwd DIR] [--mode MODE] [--max-id N] [--int64-safe]
                           -- <harness argv...>
 
-The companion `check_vectors.py` drives the *encode* direction and compares
+The companion `check_vectors_encode.py` drives the *encode* direction and compares
 `serialized_sparse`. This one drives the other half, which no tier covered
 before (generator#444): it feeds each vector's `serialized.hex` -- the dense
 column, which is what a decoder actually receives -- into
@@ -77,7 +77,7 @@ to the weaker comparison is printed.
 ## Loud, never quiet
 
 A driver that silently narrows what it selects passes while testing less than it
-claims -- the failure mode `check_vectors.py`'s `checked == 0` guard exists for,
+claims -- the failure mode `check_vectors_encode.py`'s `checked == 0` guard exists for,
 and the one the upstream C harness hit with a fixed `MAXSKIP` that truncated an
 over-long `skip_ids` list. So: every vector in the file is run, a harness that
 exits non-zero (a decoder that rejects rather than skips) is a failure and not a
