@@ -125,6 +125,40 @@ gcc -std=c99 -Wall -Wextra -Werror -I"$INC" -I"$WORK/bool" \
     "$SRC/object.c" "$SRC/ostream.c" "$SRC/istream.c" -o "$WORK/bool_check"
 "$WORK/bool_check"
 
+# generator#680: a sized blob's non-empty default carries its length in the
+# default image, so a blob at its default is omitted and an explicit empty blob
+# over it is written. blob_default_check.c covers the message, a struct and a
+# struct-array element, with an ordinary and an all-zero default each.
+echo "==> blob defaults: the default image carries the length (generator#680)"
+mkdir -p "$WORK/blobdef"
+cat > "$WORK/blobdef/blobdef.yaml" <<'YAML'
+version: 1
+messages:
+  blobdef:
+    payload:
+      bl: { id: 0, type: blob, maxlen: 8, default: "SGVsbG8=" }
+      bz: { id: 1, type: blob, maxlen: 8, default: "AAAA" }
+      s:
+        id: 2
+        type: struct
+        fields:
+          sb: { id: 0, type: blob, maxlen: 8, default: "SGk=" }
+          sz: { id: 1, type: blob, maxlen: 8, default: "AAAA" }
+      sa:
+        id: 3
+        type: array
+        items:
+          type: struct
+          count: 2
+          fields:
+            ab: { id: 0, type: blob, maxlen: 8, default: "SGk=" }
+YAML
+( cd "$ROOT" && go run ./cmd/sofabgen --lang c --in "$WORK/blobdef/blobdef.yaml" --out "$WORK/blobdef" )
+gcc -std=c99 $WARNFLAGS -I"$INC" -I"$WORK/blobdef" \
+    "$ROOT/tests/conformance/c/blob_default_check.c" "$WORK"/blobdef/*.c \
+    "$SRC/object.c" "$SRC/ostream.c" "$SRC/istream.c" -o "$WORK/blobdef_check"
+"$WORK/blobdef_check"
+
 # The LIFETIME half of the same contract (CORELIB_PLAN S6.7 / S6.7.1,
 # generator#412): a decoded message must OWN its bytes, so the buffer it came
 # from may be reused, overwritten or FREED the moment the call returns -- S6.0
