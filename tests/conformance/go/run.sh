@@ -1319,6 +1319,21 @@ sed -i "s#\${SOFAB_GO_CORELIB}#$CORELIB#" "$WORK/sbb/go.mod"
 python3 "$ROOT/tests/conformance/lib/check_skip_before_bound.py" "Go" --sizes 1 \
     -- "$WORK/sbb-harness"
 
+# CORELIB_PLAN §4.9/§6.2 (generator#646): MAX_DEPTH is 255.
+# This backend leaves nesting to the corelib; the boundary is a property of
+# the whole decode path, so it runs the same table.
+# Bound and skipped levels together reach 255 and decode with every field after the
+# unwind intact; 256 is INVALID, closed or not; 300 shallow unwinds do not
+# accumulate depth. The driver builds its own bytes and prints its own schema.
+echo "==> MAX_DEPTH 255: bound + skipped levels decode, 256 is INVALID (generator#646)"
+python3 "$ROOT/tests/conformance/lib/check_max_depth.py" --emit-schema > "$WORK/deep.yaml"
+( cd "$ROOT" && go run ./cmd/sofabgen --config "$WORK/cfg.yaml" --lang go --in "$WORK/deep.yaml" --out "$WORK/deep" )
+sed -i "s#\${SOFAB_GO_CORELIB}#$CORELIB#" "$WORK/deep/go.mod"
+( cd "$WORK/deep" && GOFLAGS=-mod=mod go build -o "$WORK/deep-harness" ./harness )
+python3 "$ROOT/tests/conformance/lib/check_max_depth.py" "Go" \
+    --sizes 1 --invalid-pattern 'invalid message' \
+    -- "$WORK/deep-harness"
+
 # CORELIB_PLAN §4.4 (generator#644): every non-zero boolean reads as true and
 # re-encodes as 1, with no width bound -- 2, 256 and 2^64-1 included. This backend
 # applies the mapping in generated code (`v != 0`), so only a decode of those raw

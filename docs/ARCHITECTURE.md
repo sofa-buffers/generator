@@ -6338,6 +6338,30 @@ A reimplementation is **conformant** when it reproduces these gates:
    table is what it exists for. Each suite owns the generate-and-build either
    way: the cap is a generate-time config key, so what the driver is handed is a
    capped project's harness argv.
+   *MAX_DEPTH* (`tests/conformance/lib/check_max_depth.py`): CORELIB_PLAN §4.9/§6.2
+   fixes the nesting ceiling at 255 for every implementation; deeper is `INVALID`.
+   Most backends keep a second counter of the BOUND levels in generated code (a
+   location stack in Kotlin, Java, C#, Zig and Rust; a current scope over a stack in
+   Python and TypeScript), so a stack that drops a push, never shrinks, or disagrees
+   with the corelib's own counter by one loses a field after an unwind or accepts a
+   malformed message (generator#283, #646). The corelib suites and the shared
+   vectors stop at three levels, so the driver asserts the boundary black-box on
+   every generated harness, including the corelib-driven C, C++, Go and Dart, where
+   the boundary is a property of the whole decode path.
+
+   It prints its own message (`deep { s: struct { t: struct { x }, y }, after }`)
+   and builds its own bytes; id 9 is unknown in every scope and gives arbitrary
+   skipped depth. Seven rows: 255 levels mixing bound and skipped ones decode with
+   `x`, `y` and `after` intact at their own scopes; 255 skipped levels decode;
+   256 is `INVALID` for both mixes, closed and with the closing headers never sent;
+   300 sibling unknown sequences, 20 deep each, decode (a counter that drifts per
+   unwind). Accepted rows run on `decode` and `streamdecode`. A refusal must name
+   `INVALID` (pattern or status verb) and not a receiver cap. `--max-depth` takes a
+   lower ceiling if a profile registers one; none does today. It runs in all eleven
+   suites, in every profile: `cpp` per variant, `rust` per label, `python` under
+   both engines. The 40-level Rust leg stays; it runs the same visitor with a
+   larger schema.
+
    *Enum / bitfield declared width* (`tests/conformance/lib/check_declared_width_kinds.py`):
    MESSAGE_SPEC §1 bounds both leaf types by the width their DECLARATION implies —
    an enum by the smallest signed type holding every declared constant, a bitfield

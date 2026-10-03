@@ -1297,6 +1297,25 @@ done
 unset SOFAB_PUREPYTHON || true
 if [ "$NATIVE" = yes ]; then require_engine native; else require_engine python; fi
 
+# CORELIB_PLAN §4.9/§6.2 (generator#646): MAX_DEPTH is 255. The generated visitor
+# tracks the current scope in `_c` over a stack `_s` beside the corelib's depth
+# counter, so the two have to agree on the boundary. Bound and skipped levels
+# together reach 255 and decode with every field after the unwind intact; 256 is
+# INVALID, closed or not; 300 shallow unwinds do not accumulate depth. Both engines:
+# the native one reimplements the visitor dispatch.
+echo "==> MAX_DEPTH 255: bound + skipped levels decode, 256 is INVALID (generator#646)"
+python3 "$ROOT/tests/conformance/lib/check_max_depth.py" --emit-schema > "$WORK/deep.yaml"
+( cd "$ROOT" && go run ./cmd/sofabgen --format=off --config "$WORK/cfg.yaml" --lang python --in "$WORK/deep.yaml" --out "$WORK/deep" >/dev/null )
+for ENGINE in $ENGINES; do
+    if [ "$ENGINE" = python ]; then export SOFAB_PUREPYTHON=1; else unset SOFAB_PUREPYTHON || true; fi
+    require_engine "$ENGINE"
+    python3 "$ROOT/tests/conformance/lib/check_max_depth.py" "python/$ENGINE" \
+        --invalid-pattern SofaDecodeError --stream-invalid-pattern 'decode failed: INVALID' \
+        --cwd "$WORK/deep" -- python3 harness.py
+done
+unset SOFAB_PUREPYTHON || true
+if [ "$NATIVE" = yes ]; then require_engine native; else require_engine python; fi
+
 # CORELIB_PLAN §4.4 (generator#644): every non-zero boolean reads as true and
 # re-encodes as 1, with no width bound -- 2, 256 and 2^64-1 included. The driver
 # re-tags the corelib's shared `boolean_tolerant` vectors onto every boolean
