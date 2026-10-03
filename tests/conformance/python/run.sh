@@ -1375,6 +1375,26 @@ done
 unset SOFAB_PUREPYTHON || true
 if [ "$NATIVE" = yes ]; then require_engine native; else require_engine python; fi
 
+# Explicit empty is not absent (MESSAGE_SPEC §2; generator#645): an empty array,
+# string or blob whose declared default is non-empty is a value, written as a
+# zero-length one and read back empty; `{}` writes nothing and reads back as
+# the defaults. The shared driver prints its own schema and asserts the exact
+# bytes of each case.
+echo "==> explicit empty is not absent (generator#645)"
+printf 'version: 1\nmessages:\n' > "$WORK/emptyabs.yaml"
+python3 "$ROOT/tests/conformance/lib/check_empty_vs_absent.py" --emit-schema >> "$WORK/emptyabs.yaml"
+( cd "$ROOT" && go run ./cmd/sofabgen --format=off --config "$WORK/cfg.yaml" --lang python --in "$WORK/emptyabs.yaml" --out "$WORK/emptyabs" >/dev/null )
+for ENGINE in $ENGINES; do
+    if [ "$ENGINE" = python ]; then export SOFAB_PUREPYTHON=1; else unset SOFAB_PUREPYTHON || true; fi
+    require_engine "$ENGINE"
+    for surface in decode streamdecode; do
+        python3 "$ROOT/tests/conformance/lib/check_empty_vs_absent.py" "python/$ENGINE" --verb "$surface" \
+            --cwd "$WORK/emptyabs" -- python3 harness.py
+    done
+done
+unset SOFAB_PUREPYTHON || true
+if [ "$NATIVE" = yes ]; then require_engine native; else require_engine python; fi
+
 # The DESTINATION TABLE (ARCHITECTURE §9.5.1, generator#561): part of a class is
 # decoded through a corelib-py `Binding` instead of through the visitor's hooks,
 # and the two run in one decoder. A round-trip cannot see the difference -- which

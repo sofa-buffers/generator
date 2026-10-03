@@ -6566,6 +6566,24 @@ A reimplementation is **conformant** when it reproduces these gates:
    `python/bool_tolerant_check.py`) stay: they see the STORED value, which a JSON
    round trip cannot where the member is a `uint8_t` or a Python `int`.
 
+   *Empty is not absent* (`tests/conformance/lib/check_empty_vs_absent.py`):
+   MESSAGE_SPEC §2 on every target (generator#645). A field is written iff it
+   differs from its default, so an explicit empty array, string or blob whose
+   declared default is non-empty is a value: written as a count-0 (length-0)
+   field and read back empty, not refilled with the default; `{}` writes nothing
+   and reads back as the defaults. The driver prints its own schema — one array
+   per native element kind with a non-empty default (14 kinds), a string, a blob,
+   and a struct whose child is such an array, each bounded and (unless
+   `--bounded-only`) unbounded — and keeps the expected bytes beside it. Per
+   field it asserts the exact bytes of `{field: []}`, decodes them and asserts
+   that field empty and every other field at its declared default, and
+   re-encodes to the same bytes; once it asserts `{}` is zero bytes. An array of
+   string, blob, struct, union or array takes no default (validator), so it
+   cannot show the difference and is not covered. Wired in every suite on
+   `decode` and `streamdecode`; `cpp` in every profile, `rust` in every label,
+   `python` under both engines, `typescript` in all three `int64` modes, and
+   `--bounded-only` for `c`, the `c-cpp` profiles and `rust` no_std.
+
 2. **Round-trip harness** — `emit: project` builds the generated code against the
    real corelib and round-trips canonical JSON through encode→decode for every
    field kind (`tests/conformance/<lang>/run.sh`). Each harness also feeds one

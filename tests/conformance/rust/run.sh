@@ -572,6 +572,20 @@ run_variant() {
             --cwd "$WORK/terminal-$label" -- cargo run -q -- ;;
     esac
 
+    # Explicit empty is not absent (MESSAGE_SPEC §2; generator#645): an empty array,
+    # string or blob whose declared default is non-empty is a value, written as a
+    # zero-length one and read back empty; `{}` writes nothing and reads back as
+    # the defaults. The shared driver prints its own schema and asserts the exact
+    # bytes of each case.
+    echo "==> [$label] explicit empty is not absent (generator#645)"
+    printf 'version: 1\nmessages:\n' > "$WORK/emptyabs.yaml"
+    python3 "$ROOT/tests/conformance/lib/check_empty_vs_absent.py" --emit-schema $ARRLEN_OPTS >> "$WORK/emptyabs.yaml"
+    rust_build "$WORK/emptyabs.yaml" "$WORK/emptyabs-$label"
+    for surface in decode streamdecode; do
+        python3 "$ROOT/tests/conformance/lib/check_empty_vs_absent.py" "Rust [$label]" $ARRLEN_OPTS --verb "$surface" \
+            --cwd "$WORK/emptyabs-$label" -- cargo run -q --
+    done
+
     # Over-maxlen scalar blob (Option B / MESSAGE_SPEC S7.1): someblob (id 12)
     # declares maxlen: 16; a 17-byte blob exceeds it -> INVALID, never truncated.
     # Wire: 62 (blob id12) 8b 01 (fixlen word len 17, blob subtype 3) + 17 bytes;

@@ -1420,6 +1420,33 @@ for mode in long number; do
     done
 done
 
+# Explicit empty is not absent (MESSAGE_SPEC §2; generator#645): an empty array,
+# string or blob whose declared default is non-empty is a value, written as a
+# zero-length one and read back empty; `{}` writes nothing and reads back as
+# the defaults. The shared driver prints its own schema and asserts the exact
+# bytes of each case.
+echo "==> explicit empty is not absent (generator#645)"
+printf 'version: 1\nmessages:\n' > "$WORK/emptyabs.yaml"
+python3 "$ROOT/tests/conformance/lib/check_empty_vs_absent.py" --emit-schema >> "$WORK/emptyabs.yaml"
+gen "$WORK/emptyabs.yaml" "$WORK/emptyabs"
+ln -s "$WORK/ex/node_modules" "$WORK/emptyabs/node_modules"
+tsc_strict "$WORK/emptyabs"
+for surface in decode streamdecode; do
+    python3 "$ROOT/tests/conformance/lib/check_empty_vs_absent.py" "typescript" \
+        --cwd "$WORK/emptyabs" --verb "$surface" -- "$TH"
+done
+# ...and under the two Long modes: a 64-bit array is a different destination
+# there, and so is its default, so the default mode speaks for neither.
+for mode in long number; do
+    gen "$WORK/emptyabs.yaml" "$WORK/emptyabs-$mode" "$WORK/cfg_$mode.yaml"
+    ln -s "$WORK/ex/node_modules" "$WORK/emptyabs-$mode/node_modules"
+    tsc_strict "$WORK/emptyabs-$mode"
+    for surface in decode streamdecode; do
+        python3 "$ROOT/tests/conformance/lib/check_empty_vs_absent.py" "typescript int64: $mode" \
+            --cwd "$WORK/emptyabs-$mode" --verb "$surface" -- "$TH"
+    done
+done
+
 # MESSAGE_SPEC §7.4 -- a field id REPEATED inside one scope (generator#523). The
 # rule has two halves and this checks BOTH on one message: a re-opened SEQUENCE
 # continues its scope, so struct/union members MERGE and unrecurring children are

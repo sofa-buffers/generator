@@ -1382,6 +1382,22 @@ for surface in decode streamdecode; do
         -- "$WORK/arrlen-harness"
 done
 
+# Explicit empty is not absent (MESSAGE_SPEC §2; generator#645): an empty array,
+# string or blob whose declared default is non-empty is a value, written as a
+# zero-length one and read back empty -- and `{}` writes nothing and reads back
+# as the defaults. The shared driver prints its own schema and asserts the exact
+# bytes of each case.
+echo "==> explicit empty is not absent (generator#645)"
+printf 'version: 1\nmessages:\n' > "$WORK/emptyabs.yaml"
+python3 "$ROOT/tests/conformance/lib/check_empty_vs_absent.py" --emit-schema >> "$WORK/emptyabs.yaml"
+( cd "$ROOT" && go run ./cmd/sofabgen --config "$WORK/cfg.yaml" --lang go --in "$WORK/emptyabs.yaml" --out "$WORK/emptyabs" )
+sed -i "s#\${SOFAB_GO_CORELIB}#$CORELIB#" "$WORK/emptyabs/go.mod"
+( cd "$WORK/emptyabs" && GOFLAGS=-mod=mod go build -o "$WORK/emptyabs-harness" ./harness )
+for surface in decode streamdecode; do
+    python3 "$ROOT/tests/conformance/lib/check_empty_vs_absent.py" "Go" --verb "$surface" \
+        -- "$WORK/emptyabs-harness"
+done
+
 # Conflict-free names (ARCHITECTURE §8, "Naming"; generator#624). The shared
 # collision schema spells, as messages, $defs types and inline paths, every
 # identifier that used to clash: paths that joined to one name (`m_a` beside
