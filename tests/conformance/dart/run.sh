@@ -318,6 +318,15 @@ for surface in decode streamdecode; do
         --verb "$surface" --invalid-pattern 'decode failed: invalid' \
         -- "$H"
 done
+
+# ...at every other string position, plus the encode half (generator#652).
+echo "==> invalid UTF-8 at every string position + multi-byte round trip (generator#652)"
+for surface in decode streamdecode; do
+    ENC=; [ "$surface" = decode ] && ENC="--encode --surrogates --refusal-pattern invalidArgument"
+    python3 "$ROOT/tests/conformance/lib/check_utf8_positions.py" "dart" \
+        --verb "$surface" --invalid-pattern 'decode failed: invalid' $ENC \
+        -- "$H"
+done
 # The same two shapes as .bin files, for the chunk-invariance sweep near the end
 # of this suite. The driver above feeds one byte at a time and nothing else;
 # check_chunk_invariance.py sweeps several widths plus the degenerate one-shot

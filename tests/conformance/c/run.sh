@@ -471,6 +471,24 @@ for surface in decode streamdecode; do
         -- "$WORK/proj-strict/harness/harness"
 done
 
+# ...at every other string position, plus the multi-byte round trip
+# (generator#652). The default build compiles the check out, so it runs the
+# valid-bytes half only; the strict build runs the INVALID rows.
+echo "==> invalid UTF-8 at every string position + multi-byte round trip (generator#652)"
+for surface in decode streamdecode; do
+    if [ "$surface" = decode ]; then
+        U8_OPT=--status-verb; U8_VAL=status; ENC=--encode
+    else
+        U8_OPT=--invalid-pattern; U8_VAL='decode error: INVALID'; ENC=
+    fi
+    python3 "$ROOT/tests/conformance/lib/check_utf8_positions.py" "c" \
+        --schema "$EXAMPLE" --message '' --verb "$surface" --no-declared-leg $ENC \
+        -- "$WORK/proj/harness/harness"
+    python3 "$ROOT/tests/conformance/lib/check_utf8_positions.py" "c-strict" \
+        --schema "$EXAMPLE" --message '' --verb "$surface" "$U8_OPT" "$U8_VAL" \
+        -- "$WORK/proj-strict/harness/harness"
+done
+
 # ...and the same question one level up, on a fixlen ARRAY, where the answer is
 # the other one (CORELIB_PLAN S4.8.1, generator#411). S4.8.1 fixes five steps and
 # the order of the middle three is normative: read the count; read the

@@ -623,6 +623,29 @@ YAML
         done
     fi
 
+    # ...at every other string position, plus the multi-byte round trip
+    # (generator#652). With a footprint corelib the default build has the check
+    # compiled out, so only the strict build runs the INVALID rows.
+    echo "==> [$label] invalid UTF-8 at every string position + multi-byte round trip (generator#652)"
+    for surface in decode streamdecode; do
+        ENC=; [ "$surface" = decode ] && ENC=--encode
+        if [ -z "$corelib" ]; then
+            python3 "$ROOT/tests/conformance/lib/check_utf8_positions.py" "$label" \
+                --schema "$EXAMPLE" --verb "$surface" $ENC \
+                --invalid-pattern 'decode error: INVALID' \
+                -- "$WORK/ex-$label/harness/harness"
+        else
+            python3 "$ROOT/tests/conformance/lib/check_utf8_positions.py" "$label" \
+                --schema "$EXAMPLE" --verb "$surface" --no-declared-leg $ENC \
+                --invalid-pattern 'decode error: INVALID' \
+                -- "$WORK/ex-$label/harness/harness"
+            python3 "$ROOT/tests/conformance/lib/check_utf8_positions.py" "$label-strict" \
+                --schema "$EXAMPLE" --verb "$surface" \
+                --invalid-pattern 'decode error: INVALID' \
+                -- "$WORK/ex-$label-strict/harness/harness"
+        fi
+    done
+
     # ...and the same question one level up, on a fixlen ARRAY, where the answer
     # is the other one (CORELIB_PLAN S4.8.1, generator#411). S4.8.1 fixes five
     # steps and the order of the middle three is normative: read the count; read

@@ -864,6 +864,18 @@ YAML
             -- cargo run -q --
     done
 
+    # ...at every other string position, plus the multi-byte round trip
+    # (generator#652). A Rust String cannot hold an unpaired surrogate or
+    # non-UTF-8 bytes, so there is no encode-side refusal to test here.
+    echo "==> [$label] invalid UTF-8 at every string position + multi-byte round trip (generator#652)"
+    for surface in decode streamdecode; do
+        ENC=; [ "$surface" = decode ] && ENC=--encode
+        python3 "$ROOT/tests/conformance/lib/check_utf8_positions.py" "$label" \
+            --schema "$EXAMPLE" --cwd "$WORK/ex-$label" --verb "$surface" \
+            --invalid-pattern 'InvalidMsg' $ENC \
+            -- cargo run -q --
+    done
+
     # S7.3 x S7.4, array wrapper (generator#174 + generator#175): "An occurrence
     # skipped under S7.3 is not an occurrence for this clause: a correctly typed
     # earlier occurrence survives a mis-typed later one." somestringarray (id 18) is

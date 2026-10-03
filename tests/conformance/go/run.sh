@@ -200,6 +200,15 @@ for surface in decode streamdecode; do
         --cwd "$WORK/proj" --verb "$surface" --invalid-pattern 'invalid message' \
         -- env GOFLAGS=-mod=mod go run ./harness
 done
+# ...at every other string position the schema has, and the encode half
+# (generator#652). Go validates once per scope in generated code.
+echo "==> invalid UTF-8 at every string position + multi-byte round trip (generator#652)"
+for surface in decode streamdecode; do
+    ENC=; [ "$surface" = decode ] && ENC=--encode
+    python3 "$ROOT/tests/conformance/lib/check_utf8_positions.py" "Go" \
+        --cwd "$WORK/proj" --verb "$surface" --invalid-pattern 'invalid message' $ENC \
+        -- env GOFLAGS=-mod=mod go run ./harness
+done
 # The same two shapes as .bin files, for the fixture table near the end of this
 # suite: it replays every malformed fixture built here through both surfaces and
 # asserts they never disagree, and a skipped-vs-declared string is one of the

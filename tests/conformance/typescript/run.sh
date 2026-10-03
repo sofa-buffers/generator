@@ -539,6 +539,19 @@ for surface in decode streamdecode; do
         -- "$TH"
 done
 
+# ...at every other string position, plus the encode half (generator#652).
+echo "==> invalid UTF-8 at every string position + multi-byte round trip (generator#652)"
+for surface in decode streamdecode; do
+    if [ "$surface" = decode ]; then
+        SU_CAT="--status-verb status --encode --surrogates --refusal-pattern unpaired.surrogate"
+    else
+        SU_CAT='--invalid-pattern finish=INVALID_MSG'
+    fi
+    python3 "$ROOT/tests/conformance/lib/check_utf8_positions.py" "typescript $VL" \
+        --cwd "$VW/ex" --verb "$surface" $SU_CAT \
+        -- "$TH"
+done
+
 # ...and the same question one level up, on a fixlen ARRAY, where the answer is
 # the other one (CORELIB_PLAN S4.8.1, generator#411). S4.8.1 fixes five steps and
 # the order of the middle three is normative: read the count; read the

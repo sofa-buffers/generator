@@ -436,6 +436,15 @@ for surface in decode streamdecode; do
         -- $H
 done
 
+# ...at every other string position, plus the encode half (generator#652).
+echo "==> invalid UTF-8 at every string position + multi-byte round trip (generator#652)"
+for surface in decode streamdecode; do
+    ENC=; [ "$surface" = decode ] && ENC="--encode --surrogates --refusal-pattern surrogate|Argument"
+    python3 "$ROOT/tests/conformance/lib/check_utf8_positions.py" "csharp" \
+        --verb "$surface" --invalid-pattern 'InvalidMessage' $ENC \
+        -- $H
+done
+
 # S7.3 x S7.4, array wrapper (generator#174 + generator#175): "An occurrence
 # skipped under S7.3 is not an occurrence for this clause: a correctly typed
 # earlier occurrence survives a mis-typed later one." somestringarray (id 18) is
