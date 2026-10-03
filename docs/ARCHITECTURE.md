@@ -6002,7 +6002,7 @@ A reimplementation is **conformant** when it reproduces these gates:
    JSON decoder replaces them (Go), as `\xNN` escapes.
 
    *Growth* (`tests/conformance/lib/check_growth.py`): the `sequence_growth`
-   block, — CORELIB_PLAN §7.2 item 8, the shape-B allocation of §9.5.
+   block, CORELIB_PLAN §7.2 item 8, the shape-B allocation of §9.5.
    A wrapper array carries no element count, so its length is *highest present id
    + 1* and the container **grows** as elements arrive; two ports that grow
    differently emit **identical bytes**, which is why these cases are a delivery
