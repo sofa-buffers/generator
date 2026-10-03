@@ -6016,6 +6016,9 @@ A reimplementation is **conformant** when it reproduces these gates:
    Kotlin, C#, TypeScript, Dart, Python) it also encodes a lone high surrogate, a
    lone low surrogate, a trailing high surrogate and a reversed pair and requires
    a refusal with the invalid-argument category and no output bytes (§6.4.1).
+   C# runs that half as its own program (`SurrogateCheck.cs`) because
+   System.Text.Json rejects a lone-surrogate escape before the corelib is
+   reached, so a JSON-driven row would pass whatever the encoder did.
    Byte-container targets get their encode refusal from the `invalid_utf8` table;
    a Rust `String` cannot hold either input.
 
