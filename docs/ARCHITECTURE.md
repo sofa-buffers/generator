@@ -5935,7 +5935,7 @@ A reimplementation is **conformant** when it reproduces these gates:
    drops no vector, the id merely joins those being skipped. The driver runs the
    whole file, treats a non-zero-exiting harness as a **failure** rather than a
    skipped case, and prints its vector count — for the same reason
-   `check_vectors_decode.py` carries a `checked == 0` guard, and the upstream C harness
+   the encode driver asserts that checked plus excluded equals the file's total and enforces a floor and required groups, the decode driver asserts `checked == len(vectors)`, and the upstream C harness
    stopped silently truncating an over-long `skip_ids`: a driver that quietly
    narrows what it selects passes while testing less than it claims.
 

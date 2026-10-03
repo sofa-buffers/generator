@@ -636,7 +636,7 @@ RT=$(printf '%s' '{"a":7,"b":10,"flag":true,"label":"hey"}' | "$DH" encode | "$D
 echo "$RT" | grep -q '"label":"hey"' || { echo "FAIL: non-default string not round-tripped"; exit 1; }
 echo "==> default omission byte-exact OK"
 
-echo "==> M4: backend Go tests against the corelib (shared-vector byte-exact conformance, build tests, ...)"
+echo "==> M4: backend tests against the corelib (build tests, ...)"
 run_backend_tests generators/c SOFAB_C_CORELIB "$CORELIB"
 
 echo "==> corpus + realworld: every definition compiles"
