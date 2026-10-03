@@ -3,7 +3,8 @@
 
 Usage:
   check_defaults.py --emit-schema
-  check_defaults.py <label> [--cwd DIR] [--message NAME] -- <harness argv...>
+  check_defaults.py <label> [--cwd DIR] [--message NAME]
+                    [--int64-json number|string] [--int64-safe] -- <harness argv...>
 
 ## The gap this closes (generator#609)
 
@@ -36,25 +37,132 @@ BACKEND UNDER TEST, and a baseline wrong in the same way as the decoder passes.
    default element is omitted on the wire and must come back as the element
    default, not as zero.
 5. An explicit zero where the default is not zero is a VALUE: it is written and
-   round-trips as 0, so seeding defaults must not paper over it.
+   round-trips as 0, so seeding defaults must not paper over it -- and the bytes
+   it is written as are asserted exactly.
+6. EVERY field set explicitly to its declared default encodes to zero bytes.
+   `{}` alone cannot catch a wrong default literal in the encoder's guard (an
+   fp64 printed with too few digits, a 64-bit compare done in a narrower type):
+   a fresh object may be seeded from the same wrong literal, so `{}` passes while
+   the explicit default does not.
+7. Per field, one value next to the default encodes to the exact bytes written
+   in OFF_DEFAULT below (fp32 exactly representable, fp64 one ulp from the
+   default, a u64 at max-1, an i64 at min+1) and decodes back to the same value.
+
+Every leaf kind with a default is declared: fp32, fp64, enum, bitfield (per-bit
+defaults), blob, boolean, u64 at its maximum, i64 at its minimum. fp64, enum and
+blob are declared again inside the nested struct `s`, because nested defaults are
+seeded by different code than top-level ones. A `-0.0` default is not covered.
+
+## Harness dialects (harness_dialect.py)
+
+`--int64-json number|string` is how a 64-bit scalar goes IN (TypeScript and Dart
+read a double at their JSON front door and need it quoted; Go rejects a quoted
+one). A blob comes OUT as a byte array or a base64 string. `--int64-safe` is for
+a harness whose 64-bit scalar is a JS `number` (lossy above 2^53): the 64-bit
+fields are then left out of the cases, because a double cannot hold their
+declared defaults or their off-default values.
 
 ## Loud, never quiet
 
 Every case must run; a harness failure is a failure; the case count is printed.
 """
 import json
+import struct
 import subprocess
 import sys
+
+import harness_dialect as hd
 
 MSG = "dflt"
 
 # The declared defaults, in the shape a harness renders them. Kept beside the
 # schema text so the two cannot drift apart.
+U64_MAX = 2**64 - 1
+I64_MIN = -2**63
 DEFAULTS = {
     "top": 7,
-    "s": {"a": 5, "t": "hi", "inner": {"b": -3}},
+    "s": {"a": 5, "t": "hi", "inner": {"b": -3},
+          "f64": 3.141592653589793, "e": 2, "bl": b"Hi"},
+    "f32": 1.5,
+    "f64": 3.141592653589793,
+    "e": 2,
+    "bf": 0b101,          # per-bit defaults: A (bit 0) and C (bit 2)
+    "bl": b"Hi",
+    "umax": U64_MAX,
+    "imin": I64_MIN,
+    "flag": True,
 }
+# The fields whose value is a 64-bit integer, spelled per harness dialect.
+WIDE = {("umax",), ("imin",)}
 ELEM_DEFAULT_C = 9
+
+
+def hdr(fid, wtype):
+    """One-byte field header (id < 16): id << 3 | wire type."""
+    return bytes([fid << 3 | wtype])
+
+
+def varint(n):
+    out = bytearray()
+    while True:
+        b = n & 0x7F
+        n >>= 7
+        out.append(b | (0x80 if n else 0))
+        if not n:
+            return bytes(out)
+
+
+END = b"\x07"           # sequence end; a sequence opens with wire type 6
+
+
+def seq(fid, inner):
+    return hdr(fid, 6) + inner + END
+
+
+# Wire bytes of one field per kind, id -> bytes, at the ids the schema gives them.
+# A fixlen field is `hdr(id, 2)`, the fixlen word, then the raw little-endian value
+# (fp32 word 0x20 = 4 bytes, fp64 word 0x41 = 8 bytes, blob word = length << 3 | 3).
+def f32_wire(fid, v):
+    return hdr(fid, 2) + b"\x20" + struct.pack("<f", v)
+
+
+def f64_wire(fid, v):
+    return hdr(fid, 2) + b"\x41" + struct.pack("<d", v)
+
+
+def blob_wire(fid, b):
+    return hdr(fid, 2) + varint(len(b) << 3 | 3) + b
+
+
+def uvar_wire(fid, v):
+    return hdr(fid, 0) + varint(v)
+
+
+def svar_wire(fid, v):
+    return hdr(fid, 1) + varint((v << 1) ^ (v >> 63))
+
+
+# Ids: see emit_schema(); `s` holds f64 = 3, e = 4, bl = 5.
+ULP_UP = struct.unpack("<d", struct.pack("<Q", struct.unpack("<Q", struct.pack("<d", 3.141592653589793))[0] + 1))[0]
+
+# (name, expected wire of the whole message, path -> value sent and expected back).
+# One value next to the default, everything else left at its default. The bytes are
+# written from MESSAGE_SPEC §4, not read back from a backend.
+OFF_DEFAULT = [
+    ("f32", f32_wire(3, 0.0), {("f32",): 0.0}),
+    ("f32 2.5", f32_wire(3, 2.5), {("f32",): 2.5}),
+    ("f64 1 ulp", f64_wire(4, ULP_UP), {("f64",): ULP_UP}),
+    ("f64 0", f64_wire(4, 0.0), {("f64",): 0.0}),
+    ("enum 0", svar_wire(5, 0), {("e",): 0}),
+    ("bitfield 4", uvar_wire(6, 4), {("bf",): 4}),
+    ("blob [0]", blob_wire(7, b"\x00"), {("bl",): b"\x00"}),
+    ("u64 max-1", uvar_wire(8, U64_MAX - 1), {("umax",): U64_MAX - 1}),
+    ("i64 min+1", svar_wire(9, I64_MIN + 1), {("imin",): I64_MIN + 1}),
+    ("boolean false", uvar_wire(10, 0), {("flag",): False}),
+    ("s.f64 1 ulp", seq(1, f64_wire(3, ULP_UP)), {("s", "f64"): ULP_UP}),
+    ("s.enum 0", seq(1, svar_wire(4, 0)), {("s", "e"): 0}),
+    ("s.blob [0]", seq(1, blob_wire(5, b"\x00")), {("s", "bl"): b"\x00"}),
+]
 
 
 def emit_schema() -> int:
@@ -75,6 +183,9 @@ def emit_schema() -> int:
     print("            type: struct")
     print("            fields:")
     print("              b: { id: 0, type: i32, default: -3 }")
+    print("          f64: { id: 3, type: fp64, default: 3.141592653589793 }")
+    print("          e: { id: 4, type: enum, enum: { A: 0, B: 1, C: 2 }, default: 2 }")
+    print('          bl: { id: 5, type: blob, maxlen: 8, default: "SGk=" }')
     print("      arr:")
     print("        id: 2")
     print("        type: array")
@@ -83,6 +194,17 @@ def emit_schema() -> int:
     print("          count: 3")
     print("          fields:")
     print(f"            c: {{ id: 0, type: u8, default: {ELEM_DEFAULT_C} }}")
+    print("      f32: { id: 3, type: fp32, default: 1.5 }")
+    print("      f64: { id: 4, type: fp64, default: 3.141592653589793 }")
+    print("      e: { id: 5, type: enum, enum: { A: 0, B: 1, C: 2 }, default: 2 }")
+    print("      bf:")
+    print("        id: 6")
+    print("        type: bitfield")
+    print("        bits: { A: { pos: 0, default: true }, B: { pos: 1 }, C: { pos: 2, default: true } }")
+    print('      bl: { id: 7, type: blob, maxlen: 8, default: "SGk=" }')
+    print(f'      umax: {{ id: 8, type: u64, default: "{U64_MAX}" }}')
+    print(f'      imin: {{ id: 9, type: i64, default: "{I64_MIN}" }}')
+    print("      flag: { id: 10, type: boolean, default: true }")
     return 0
 
 
@@ -97,12 +219,43 @@ def diag(p) -> str:
 
 def num(v):
     """A harness may render an integer as a JSON number or as a string."""
-    if isinstance(v, str):
-        try:
-            return int(v)
-        except ValueError:
-            return v
+    return hd.as_int(v) if hd.as_int(v) is not None else v
+
+
+def same(have, want):
+    """Whether a decoded `have` is the value `want` stands for, in any dialect."""
+    if isinstance(want, bool):
+        return have is want
+    if isinstance(want, bytes):
+        return hd.bytes_of(have) == want
+    if isinstance(want, float):
+        h = hd.as_float(have)
+        return h is not None and struct.pack("<d", h) == struct.pack("<d", want)
+    if isinstance(want, int):
+        return hd.as_int(have) == want
+    return have == want
+
+
+def to_input(v, path, dialect):
+    """A declared value as the ENCODE input spells it."""
+    if isinstance(v, bytes):
+        return list(v)
+    if path in WIDE:
+        return hd.int64_in(v, dialect)
     return v
+
+
+def nest(flat, dialect, safe):
+    """{path: value} -> the nested JSON object a harness takes, 64-bit per dialect."""
+    out = {}
+    for path, v in flat.items():
+        if safe and path in WIDE:
+            continue
+        d = out
+        for k in path[:-1]:
+            d = d.setdefault(k, {})
+        d[path[-1]] = to_input(v, path, dialect)
+    return out
 
 
 def lookup(obj, path):
@@ -136,6 +289,8 @@ def main() -> int:
     label = head[0]
     cwd = None
     msg = MSG
+    dialect = "number"
+    safe = False
     i = 1
     while i < len(head):
         if head[i] == "--cwd":
@@ -144,6 +299,16 @@ def main() -> int:
         elif head[i] == "--message":
             msg = head[i + 1]
             i += 2
+        elif head[i] == "--int64-json":
+            try:
+                dialect = hd.check_dialect(head[i + 1])
+            except (ValueError, IndexError) as e:
+                print(f"FAIL: {e}", file=sys.stderr)
+                return 2
+            i += 2
+        elif head[i] == "--int64-safe":
+            safe = True
+            i += 1
         else:
             print(f"FAIL: unknown option {head[i]!r}", file=sys.stderr)
             return 2
@@ -181,10 +346,12 @@ def main() -> int:
     got = decode(b"", "empty input")
     if got is not None:
         for path, want in leaves(DEFAULTS):
+            if safe and path in WIDE:
+                continue
             have, ok = lookup(got, path)
             if not ok:
                 failures.append(f"empty input: {'.'.join(path)} missing from the decoded message")
-            elif num(have) != want:
+            elif not same(have, want):
                 failures.append(f"empty input: {'.'.join(path)} decoded as {have!r},"
                                 f" the schema declares {want!r}")
         arr, ok = lookup(got, ("arr",))
@@ -212,13 +379,15 @@ def main() -> int:
                                 " -- an interior element omitted for equalling its default"
                                 " must be refilled with the element default (§5.1)")
 
-    # 5. an explicit zero is a value, not a default
+    # 5. an explicit zero is a value, not a default -- and these are its bytes:
+    #    top (u16) 00 00; s{ a (u8) 00 00; inner{ b (i32) 00 } } with t left out
     cases += 1
+    zeros = hdr(0, 0) + b"\x00" + seq(1, hdr(0, 0) + b"\x00" + seq(2, hdr(0, 1) + b"\x00"))
     wire = encode({"top": 0, "s": {"a": 0, "inner": {"b": 0}}}, "explicit zeros")
     if wire is not None:
-        if wire == b"":
-            failures.append("explicit zeros where the defaults are 7/5/-3 encoded to nothing:"
-                            " a value differing from its default must be written")
+        if wire != zeros:
+            failures.append("explicit zeros where the defaults are 7/5/-3 must be written as"
+                            f" {zeros.hex(' ')}, got {wire.hex(' ')}")
         back = decode(wire, "explicit zeros")
         if back is not None:
             for path in (("top",), ("s", "a"), ("s", "inner", "b")):
@@ -227,6 +396,34 @@ def main() -> int:
                     failures.append(f"explicit zeros: {'.'.join(path)} came back as"
                                     f" {have!r}, sent 0")
 
+    # 6. every field explicitly at its default is the empty message
+    cases += 1
+    flat = dict(leaves(DEFAULTS))
+    wire = encode(nest(flat, dialect, safe), "every field at its default")
+    if wire is not None and wire != b"":
+        failures.append("every field set explicitly to its default must encode to ZERO bytes"
+                        f" (§2), got {len(wire)}: {wire.hex(' ')}")
+
+    # 7. one value next to the default: exact bytes, and it reads back
+    for name, want_wire, want_vals in OFF_DEFAULT:
+        if safe and any(p in WIDE for p in want_vals):
+            continue
+        cases += 1
+        wire = encode(nest(want_vals, dialect, safe), f"off-default {name}")
+        if wire is None:
+            continue
+        if wire != want_wire:
+            failures.append(f"off-default {name}: expected {want_wire.hex(' ')}, got"
+                            f" {wire.hex(' ')}")
+        back = decode(wire, f"off-default {name}")
+        if back is None:
+            continue
+        for path, want in want_vals.items():
+            have, ok = lookup(back, path)
+            if not ok or not same(have, want):
+                failures.append(f"off-default {name}: {'.'.join(path)} came back as {have!r},"
+                                f" sent {want!r}")
+
     if failures:
         print(f"FAIL: [{label}] nested defaults (generator#609):", file=sys.stderr)
         for f in failures:
@@ -234,7 +431,7 @@ def main() -> int:
         return 1
     print(f"==> [{label}] nested defaults: {cases} case(s) -- fresh message and decoded"
           " empty input are the empty message, absence reads as the schema's defaults,"
-          " interior default elements and explicit zeros round-trip")
+          " interior default elements round-trip, explicit zeros, all-default and off-default values have exact bytes")
     return 0
 
 

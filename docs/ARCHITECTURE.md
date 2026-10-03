@@ -6013,7 +6013,15 @@ A reimplementation is **conformant** when it reproduces these gates:
    fresh message (`{}`) and the decoded empty input both encode to zero bytes,
    the empty input decodes to the declared defaults, `[default, x]` round-trips,
    and an explicit zero where the default is not zero is written and comes back
-   as 0. It exists because every earlier check was self-referential: the
+   as 0, as an exact byte string. Every leaf kind with a default is declared (fp32,
+   fp64, enum, bitfield, blob, boolean, u64 max, i64 min; fp64, enum and blob again
+   nested): a message with EVERY field explicitly at its default must encode to zero
+   bytes (the case that catches a wrong default literal, which `{}` cannot, because
+   a fresh object may be seeded from the same wrong literal), and one value next to
+   each default encodes to the bytes the driver spells out from MESSAGE_SPEC §4.
+   64-bit values go in per `harness_dialect.py` (`--int64-json`), and TypeScript
+   runs under bigint, long and number (`--int64-safe` leaves the 64-bit fields out).
+   It exists because every earlier check was self-referential: the
    round-trip baseline is `{}` encoded and decoded by the backend under test, and
    `check_nondefault.py` only compares the fixture against that baseline, so a
    backend wrong the same way on both sides passed — Go left nested defaults at

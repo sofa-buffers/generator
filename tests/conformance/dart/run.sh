@@ -1130,7 +1130,7 @@ python3 "$ROOT/tests/conformance/lib/check_defaults.py" --emit-schema >> "$WORK/
 ( cd "$ROOT" && go run ./cmd/sofabgen --format=off --config "$WORK/cfg.yaml" --lang dart --in "$WORK/defaults.yaml" --out "$WORK/defaults" )
 sed -i "s#\${SOFAB_DART_CORELIB}#$CORELIB#" "$WORK/defaults/pubspec.yaml"
 compile_project "$WORK/defaults"
-python3 "$ROOT/tests/conformance/lib/check_defaults.py" "Dart" \
+python3 "$ROOT/tests/conformance/lib/check_defaults.py" "Dart" --int64-json string \
     -- "$WORK/defaults/harness"
 
 # A native array round-trips at every length, for every element kind
