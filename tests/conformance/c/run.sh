@@ -945,7 +945,8 @@ TH="$WORK/tablesproj/harness/harness"
 python3 "$ROOT/tests/conformance/lib/check_header_limits.py" "$TABLES" "c" --without receiver_caps \
     --status-verb status -- "$TH"
 python3 "$ROOT/tests/conformance/lib/check_header_limits.py" "$TABLES" "c" --without receiver_caps \
-    --verb streamdecode --invalid-pattern 'decode error: INVALID\b' \
+    --verb streamdecode --marker finish --invalid-name INVALID --limit-name LIMIT_EXCEEDED \
+    --invalid-pattern 'decode error: INVALID\b' \
     --limit-pattern 'decode error: LIMIT_EXCEEDED' -- "$TH"
 python3 "$ROOT/tests/conformance/lib/check_invalid_utf8.py" "$TABLES" "c" \
     --status-verb status --encode -- "$TH"
