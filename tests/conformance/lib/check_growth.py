@@ -7,7 +7,7 @@ Usage:
                   [--cwd DIR] [--limit-word W] -- <harness argv...>
 
 `test_vectors.json` carries three top-level blocks. `vectors` is driven by
-`check_vectors.py` (encode) and `check_vectors_decode.py` (decode); this one
+`check_vectors_encode.py` (encode) and `check_vectors_decode.py` (decode); this one
 drives the third, `sequence_growth` -- CORELIB_PLAN §7.2 item 8 (generator#449).
 
 ## Why these cases cannot be vectors, and why they land in this repo
