@@ -5851,10 +5851,36 @@ A reimplementation is **conformant** when it reproduces these gates:
    `invalid_utf8` cases, and `sequence_growth`. A conformant generator is checked
    against the vectors in **both** byte directions and against the growth block.
 
-   *Encode* (`tests/conformance/<lang>/check_vectors.py`): the generated
-   encoder's output must be byte-identical to the file's **`serialized_sparse`**
-   column, over the subset each language harness's filter selects (~37–41 per
-   language). This is what guarantees cross-language interop.
+   *Encode* (`tests/conformance/lib/check_vectors_encode.py`, one driver for all
+   eleven backends): the generated encoder's output must be byte-identical to the
+   file's **`serialized_sparse`** column. This is what guarantees cross-language
+   interop. The driver derives, from each vector's `fields`, the message that op
+   list is an instance of (`unsigned` to u64, `signed` to i64, `array` to a
+   native array of its `element_type`, a `sequence` to a struct, or to a wrapper
+   array when its last element carries the `element: true` marker), prints those
+   messages with `--emit-schema` so the schema and the values fed to it cannot
+   drift, and runs `<harness> encode <message>` for every vector it does not
+   exclude. Each vector is either **checked** or **excluded by name or group in
+   the driver, with a stated reason**; the run prints `checked`, `excluded` and
+   a per-group breakdown, and fails when `checked + excluded != 131`, when
+   `checked` falls below a floor, or when a required group (boolean, blob, id,
+   every array kind, sequence, composite) has no byte-exact vector. Of the 131,
+   52 are excluded as decode-only by design (groups `skip` and `skip/matrix`:
+   fields a decoder must skip, which no schema-driven encoder emits) and 2 as
+   written out of ascending id order (the C vectorgen writes ops in call order; a
+   generated encoder writes a message's fields by ascending id), so **77 are
+   byte-compared**. `--max-id` drops the two ids a 16-bit descriptor profile
+   cannot declare (C: 75), and `--int64-safe` the vectors carrying a 64-bit value
+   above 2^53-1 on a TypeScript `int64: number` build (67), each named in the
+   output. `id_max` and `id_max_32bit` carry the value 0, so they are
+   encoded from a field declared `default: 1` and compared with the dense
+   `serialized` column. An infinite float goes in through the spelling each
+   harness's JSON reader takes (`--inf-json`: `inf`, `Infinity`, the bare token,
+   or the overflowing literal `1e999`); the Go and Rust harnesses, which had
+   none, accept the strings `"inf"` / `"-inf"`, and the C# harness the named
+   floating-point literals. Config variants that generate different encode code
+   run the same driver: cpp over each corelib and storage mode, Rust std and
+   no_std, TypeScript per `int64` mode, Python on both engines.
 
    *Decode* (`tests/conformance/lib/check_vectors_decode.py`, one driver for all
    eleven backends): the **`serialized`** (dense) column is what a decoder

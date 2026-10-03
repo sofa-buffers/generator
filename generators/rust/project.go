@@ -252,6 +252,9 @@ func (g *gen) harness(s *ir.Schema) []byte {
 		f.line("use std::io::Read;")
 	}
 	f.blank()
+	if hasMsg {
+		emitInfSpelling(f)
+	}
 	g.emitBench(f, s)
 	f.line("fn main() {")
 	f.line("    let args: Vec<String> = std::env::args().collect();")
@@ -278,7 +281,7 @@ func (g *gen) harness(s *ir.Schema) []byte {
 		mt := "message::" + msgIdent(m)
 		f.line("        %q => {", m.Name)
 		f.line("            if mode == \"encode\" {")
-		f.line("                let obj: %s = serde_json::from_slice(&input).expect(\"json\");", mt)
+		f.line("                let obj: %s = from_json(&input);", mt)
 		f.line("                std::io::stdout().write_all(&obj.encode()).unwrap();")
 		f.line("            } else if mode == \"decode\" {")
 		// try_decode, not the best-effort decode: the harness must surface the
@@ -345,3 +348,156 @@ func defaultMessage(s *ir.Schema) string {
 }
 
 var _ = ir.KindU8
+
+// emitInfSpelling emits from_json, the harness's JSON front door. serde_json has
+// no number for an infinity, so the strings "inf" and "-inf" are accepted at a
+// float position instead: that is how the shared vector file writes one and how
+// the encode driver passes it on (tests/conformance/lib/check_vectors_encode.py).
+// The parsed tree is handed to serde through a small Deserializer of its own, so
+// the generated types are deserialized exactly as before and a string field that
+// holds the text "inf" is left alone.
+func emitInfSpelling(f *rfile) {
+	for _, l := range []string{
+		"/// A parsed JSON value that deserializes like serde_json's own, except that a",
+		"/// float position also takes the strings \"inf\" and \"-inf\".",
+		"struct Json(serde_json::Value);",
+		"",
+		"impl<'de> serde::de::IntoDeserializer<'de, serde_json::Error> for Json {",
+		"    type Deserializer = Json;",
+		"    fn into_deserializer(self) -> Json {",
+		"        self",
+		"    }",
+		"}",
+		"",
+		"impl<'de> serde::Deserializer<'de> for Json {",
+		"    type Error = serde_json::Error;",
+		"",
+		"    fn deserialize_any<V: serde::de::Visitor<'de>>(self, v: V) -> Result<V::Value, Self::Error> {",
+		"        use serde_json::Value;",
+		"        match self.0 {",
+		"            Value::Null => v.visit_unit(),",
+		"            Value::Bool(b) => v.visit_bool(b),",
+		"            Value::Number(n) => {",
+		"                if let Some(u) = n.as_u64() {",
+		"                    v.visit_u64(u)",
+		"                } else if let Some(i) = n.as_i64() {",
+		"                    v.visit_i64(i)",
+		"                } else {",
+		"                    v.visit_f64(n.as_f64().unwrap_or(0.0))",
+		"                }",
+		"            }",
+		"            Value::String(s) => v.visit_string(s),",
+		"            Value::Array(a) => v.visit_seq(serde::de::value::SeqDeserializer::new(a.into_iter().map(Json))),",
+		"            Value::Object(o) => v.visit_map(serde::de::value::MapDeserializer::new(",
+		"                o.into_iter().map(|(k, x)| (k, Json(x))),",
+		"            )),",
+		"        }",
+		"    }",
+		"",
+		"    fn deserialize_f32<V: serde::de::Visitor<'de>>(self, v: V) -> Result<V::Value, Self::Error> {",
+		"        self.deserialize_f64(v)",
+		"    }",
+		"",
+		"    fn deserialize_f64<V: serde::de::Visitor<'de>>(self, v: V) -> Result<V::Value, Self::Error> {",
+		"        match self.0.as_str() {",
+		"            Some(\"inf\") => v.visit_f64(f64::INFINITY),",
+		"            Some(\"-inf\") => v.visit_f64(f64::NEG_INFINITY),",
+		"            _ => self.deserialize_any(v),",
+		"        }",
+		"    }",
+		"",
+		"    fn deserialize_option<V: serde::de::Visitor<'de>>(self, v: V) -> Result<V::Value, Self::Error> {",
+		"        if self.0.is_null() {",
+		"            v.visit_none()",
+		"        } else {",
+		"            v.visit_some(self)",
+		"        }",
+		"    }",
+		"",
+		"    fn deserialize_newtype_struct<V: serde::de::Visitor<'de>>(",
+		"        self,",
+		"        _name: &'static str,",
+		"        v: V,",
+		"    ) -> Result<V::Value, Self::Error> {",
+		"        v.visit_newtype_struct(self)",
+		"    }",
+		"",
+		"    /// An enum is `{\"variant\": value}`, or the bare variant name for a unit one.",
+		"    fn deserialize_enum<V: serde::de::Visitor<'de>>(",
+		"        self,",
+		"        _name: &'static str,",
+		"        _variants: &'static [&'static str],",
+		"        v: V,",
+		"    ) -> Result<V::Value, Self::Error> {",
+		"        use serde::de::Error;",
+		"        match self.0 {",
+		"            serde_json::Value::String(s) => v.visit_enum(JsonEnum(s, None)),",
+		"            serde_json::Value::Object(o) if o.len() == 1 => {",
+		"                let (k, x) = o.into_iter().next().unwrap();",
+		"                v.visit_enum(JsonEnum(k, Some(Json(x))))",
+		"            }",
+		"            _ => Err(serde_json::Error::custom(\"expected an enum\")),",
+		"        }",
+		"    }",
+		"",
+		"    serde::forward_to_deserialize_any! {",
+		"        bool i8 i16 i32 i64 i128 u8 u16 u32 u64 u128 char str string bytes byte_buf",
+		"        unit unit_struct seq tuple tuple_struct map struct identifier ignored_any",
+		"    }",
+		"}",
+		"",
+		"struct JsonEnum(String, Option<Json>);",
+		"",
+		"impl<'de> serde::de::EnumAccess<'de> for JsonEnum {",
+		"    type Error = serde_json::Error;",
+		"    type Variant = Json;",
+		"",
+		"    fn variant_seed<S: serde::de::DeserializeSeed<'de>>(",
+		"        self,",
+		"        seed: S,",
+		"    ) -> Result<(S::Value, Json), Self::Error> {",
+		"        let name = serde::de::value::StringDeserializer::<serde_json::Error>::new(self.0);",
+		"        Ok((seed.deserialize(name)?, self.1.unwrap_or(Json(serde_json::Value::Null))))",
+		"    }",
+		"}",
+		"",
+		"impl<'de> serde::de::VariantAccess<'de> for Json {",
+		"    type Error = serde_json::Error;",
+		"",
+		"    fn unit_variant(self) -> Result<(), Self::Error> {",
+		"        Ok(())",
+		"    }",
+		"",
+		"    fn newtype_variant_seed<S: serde::de::DeserializeSeed<'de>>(",
+		"        self,",
+		"        seed: S,",
+		"    ) -> Result<S::Value, Self::Error> {",
+		"        seed.deserialize(self)",
+		"    }",
+		"",
+		"    fn tuple_variant<V: serde::de::Visitor<'de>>(",
+		"        self,",
+		"        _len: usize,",
+		"        v: V,",
+		"    ) -> Result<V::Value, Self::Error> {",
+		"        serde::Deserializer::deserialize_seq(self, v)",
+		"    }",
+		"",
+		"    fn struct_variant<V: serde::de::Visitor<'de>>(",
+		"        self,",
+		"        _fields: &'static [&'static str],",
+		"        v: V,",
+		"    ) -> Result<V::Value, Self::Error> {",
+		"        serde::Deserializer::deserialize_map(self, v)",
+		"    }",
+		"}",
+		"",
+		"fn from_json<T: serde::de::DeserializeOwned>(input: &[u8]) -> T {",
+		"    let tree: serde_json::Value = serde_json::from_slice(input).expect(\"json\");",
+		"    serde::Deserialize::deserialize(Json(tree)).expect(\"json\")",
+		"}",
+		"",
+	} {
+		f.line("%s", l)
+	}
+}

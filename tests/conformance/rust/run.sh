@@ -118,6 +118,9 @@ YAML
 # back cannot drift apart.
 python3 "$ROOT/tests/conformance/lib/check_vectors_decode.py" --emit-schema \
     >> "$WORK/conf.yaml"
+# The encode-side messages (generator#650), derived from the vector file itself.
+python3 "$ROOT/tests/conformance/lib/check_vectors_encode.py" --emit-schema \
+    "$NOSTD/assets/test_vectors.json" >> "$WORK/conf.yaml"
 
 IN='{"someu8":200,"someu16":4242,"someu32":3000000,"someu64":1234567890123456,"somei8":-42,"somei16":31000,"somei32":123456789,"somei64":-1234567890123456,"somefp32":1.5,"somefp64":-2.5,"somebool":false,"somestring":"round trip","someblob":[1,2,3,4],"someenum":33,"somebitfield":1,"someuintarray":[9,8,7,6],"someintarray":[-1,-2,-3,-4,-5],"somefloatarray":[0.5,0.25,-0.75],"somestringarray":["a","bb","ccc"],"someblobarray":[[1],[2,3]],"somestruct":{"nestedint":12,"nestedstring":"deep","nestedstruct":{"deepint":99}},"someunion":{"option1":4242},"somestructwitharray":{"label":"lbl","values":[9,9,9,9]},"somestructarray":[{"x":1,"y":2},{"x":-3,"y":-4}],"somematrix":[[1,2,3,4],[5,6,7,8]],"someunionarray":[{"asint":7},{"asint":-8}],"someenumarray":[1,0,2,1],"someboolarray":[false,false,true],"somebitfieldarray":[1,2,3],"somemap":[{"key":"k","value":5}]}'
 
@@ -1045,8 +1048,12 @@ YAML
         || { echo "FAIL: [$label] last occurrence must win (#273); got: $OUT"; exit 1; }
     echo "==> [$label] repeated-element replace OK"
 
-    echo "==> [$label] shared-vector byte-exact conformance"
-    python3 "$ROOT/tests/conformance/rust/check_vectors.py" "$corelib/assets/test_vectors.json" "$WORK/conf-$label"
+    # Every shared vector that is not decode-only by design, byte for byte against
+    # its `serialized_sparse` column (generator#650).
+    echo "==> [$label] shared-vector encode conformance"
+    python3 "$ROOT/tests/conformance/lib/check_vectors_encode.py" \
+        "$corelib/assets/test_vectors.json" "Rust [$label]" \
+        --cwd "$WORK/conf-$label" -- cargo run -q --
 
     # ...and the other direction (generator#444): feed each vector's DENSE bytes
     # into a message that declares u64 on the anchors and nothing else, so every

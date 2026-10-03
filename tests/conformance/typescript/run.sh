@@ -121,6 +121,9 @@ YAML
 # back cannot drift apart.
 python3 "$ROOT/tests/conformance/lib/check_vectors_decode.py" --emit-schema \
     >> "$WORK/conf.yaml"
+# The encode-side messages (generator#650), derived from the vector file itself.
+python3 "$ROOT/tests/conformance/lib/check_vectors_encode.py" --emit-schema \
+    "$CORELIB/assets/test_vectors.json" >> "$WORK/conf.yaml"
 cat > "$WORK/cfg.yaml" <<'YAML'
 generic: { emit: project }
 targets: { typescript: {} }
@@ -792,8 +795,12 @@ python3 "$ROOT/tests/conformance/lib/check_terminal_refusal.py" "typescript $VL"
     --cwd "$VW/refusal" --marker finish --invalid-name INVALID_MSG --limit-name LIMIT_EXCEEDED \
     -- "$TH"
 
-echo "==> [$VL] shared-vector byte-exact conformance"
-python3 "$ROOT/tests/conformance/typescript/check_vectors.py" "$CORELIB/assets/test_vectors.json" "$VW/conf" $SAFE
+echo "==> [$VL] shared-vector encode conformance"
+# Every shared vector that is not decode-only by design, byte for byte against its
+# `serialized_sparse` column (generator#650).
+python3 "$ROOT/tests/conformance/lib/check_vectors_encode.py" \
+    "$CORELIB/assets/test_vectors.json" "TypeScript $VL" --int64-json string --inf-json overflow $SAFE --cwd "$VW/conf" \
+    -- "$TH"
 
 # ...and the other direction (generator#444): feed each vector's DENSE bytes
 # into a message that declares u64 on the anchors and nothing else, so every

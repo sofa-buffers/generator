@@ -1000,7 +1000,7 @@ if [ "$NATIVE" = yes ]; then require_engine native; else require_engine python; 
 # S6.2.1/S6.3 split the same way: a schema-bounded field decodes past a tighter
 # receiver cap, its own bound still rejects as INVALID, and a header that
 # contradicts the declared type is skipped rather than measured against it (S7.3).
-echo "==> backend Go tests against the corelib (shared-vector byte-exact conformance, ...)"
+echo "==> backend Go tests against the corelib (...)"
 # $RUFF_ABSENT is "ruff" only when this box has none (see the banner at the top),
 # and it buys exactly one thing: the package's real-ruff test may then say it
 # skipped. With ruff installed it is empty and any skip fails the suite.
@@ -1031,6 +1031,9 @@ if [ "$NATIVE" = yes ]; then require_engine native; else require_engine python; 
 echo "==> shared-vector decode conformance (skip matrix)"
 printf 'version: 1\nmessages:\n' > "$WORK/vecskip.yaml"
 python3 "$ROOT/tests/conformance/lib/check_vectors_decode.py" --emit-schema >> "$WORK/vecskip.yaml"
+# The encode-side messages (generator#650), derived from the vector file itself.
+python3 "$ROOT/tests/conformance/lib/check_vectors_encode.py" --emit-schema \
+    "$CORELIB/assets/test_vectors.json" >> "$WORK/vecskip.yaml"
 ( cd "$ROOT" && go run ./cmd/sofabgen --format=off --config "$WORK/cfg.yaml" --lang python \
     --in "$WORK/vecskip.yaml" --out "$WORK/vecskip" >/dev/null )
 #
@@ -1046,6 +1049,11 @@ if [ "$NATIVE" = yes ]; then
             "$CORELIB/assets/test_vectors.json" "Python (native)" --mode "$surface" \
             --cwd "$WORK/vecskip" -- python3 harness.py
     done
+    # The encode direction (generator#650) runs on the accelerator too: its
+    # encoder is a separate implementation from the pure one.
+    python3 "$ROOT/tests/conformance/lib/check_vectors_encode.py" \
+        "$CORELIB/assets/test_vectors.json" "Python (native)" --inf-json literal \
+        --cwd "$WORK/vecskip" -- python3 harness.py
 fi
 SOFAB_PUREPYTHON=1
 export SOFAB_PUREPYTHON
@@ -1055,6 +1063,9 @@ for surface in decode streamdecode; do
         "$CORELIB/assets/test_vectors.json" "Python (pure)" --mode "$surface" \
         --cwd "$WORK/vecskip" -- python3 harness.py
 done
+python3 "$ROOT/tests/conformance/lib/check_vectors_encode.py" \
+    "$CORELIB/assets/test_vectors.json" "Python (pure)" --inf-json literal \
+    --cwd "$WORK/vecskip" -- python3 harness.py
 unset SOFAB_PUREPYTHON || true
 
 echo "==> corpus + realworld: every definition imports"

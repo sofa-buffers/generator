@@ -892,6 +892,10 @@ echo "==> shared-vector decode conformance (skip matrix)"
 printf 'version: 1\nmessages:\n' > "$WORK/vecskip.yaml"
 python3 "$ROOT/tests/conformance/lib/check_vectors_decode.py" --emit-schema --max-id 65535 \
     >> "$WORK/vecskip.yaml"
+# The encode-side messages (generator#650), same ceiling: `id_max` and
+# `id_max_32bit` cannot be declared here and are excluded, by name, in the run.
+python3 "$ROOT/tests/conformance/lib/check_vectors_encode.py" --emit-schema --max-id 65535 \
+    "$CORELIB/assets/test_vectors.json" >> "$WORK/vecskip.yaml"
 ( cd "$ROOT" && go run ./cmd/sofabgen --config "$WORK/proj.yaml" --lang c \
     --in "$WORK/vecskip.yaml" --out "$WORK/vecskip" )
 make -C "$WORK/vecskip" SOFAB_C_CORELIB="$CORELIB" >/dev/null
@@ -905,6 +909,13 @@ for surface in decode streamdecode; do
         "$CORELIB/assets/test_vectors.json" "C" --max-id 65535 --mode "$surface" \
         -- "$WORK/vecskip/harness/harness"
 done
+
+# ...and the encode direction (generator#650): every vector that is not decode-only
+# by design, byte for byte against its `serialized_sparse` column.
+echo "==> shared-vector encode conformance"
+python3 "$ROOT/tests/conformance/lib/check_vectors_encode.py" \
+    "$CORELIB/assets/test_vectors.json" "C" --max-id 65535 --inf-json overflow \
+    -- "$WORK/vecskip/harness/harness"
 
 # MESSAGE_SPEC §7.4 -- a field id REPEATED inside one scope (generator#523). The
 # rule has two halves and this checks BOTH on one message: a re-opened SEQUENCE

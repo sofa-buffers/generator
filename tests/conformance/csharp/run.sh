@@ -60,6 +60,9 @@ YAML
 # back cannot drift apart.
 python3 "$ROOT/tests/conformance/lib/check_vectors_decode.py" --emit-schema \
     >> "$WORK/conf.yaml"
+# The encode-side messages (generator#650), derived from the vector file itself.
+python3 "$ROOT/tests/conformance/lib/check_vectors_encode.py" --emit-schema \
+    "$CORELIB/assets/test_vectors.json" >> "$WORK/conf.yaml"
 
 build() {
     ( cd "$ROOT" && go run ./cmd/sofabgen --config "$WORK/cfg.yaml" --lang csharp --in "$1" --out "$2" )
@@ -770,8 +773,12 @@ grep -q "InvalidMessage" "$WORK/cap_eof_maxlen.err" || {
 
 echo "==> string/blob caps OK"
 
-echo "==> shared-vector byte-exact conformance"
-python3 "$ROOT/tests/conformance/csharp/check_vectors.py" "$CORELIB/assets/test_vectors.json" "$WORK/conf/bin/Debug/net9.0/harness.dll"
+echo "==> shared-vector encode conformance"
+# Every shared vector that is not decode-only by design, byte for byte against its
+# `serialized_sparse` column (generator#650).
+python3 "$ROOT/tests/conformance/lib/check_vectors_encode.py" \
+    "$CORELIB/assets/test_vectors.json" "C#" --inf-json infinity \
+    -- dotnet "$WORK/conf/bin/Debug/net9.0/harness.dll"
 
 # ...and the other direction (generator#444): feed each vector's DENSE bytes
 # into a message that declares u64 on the anchors and nothing else, so every

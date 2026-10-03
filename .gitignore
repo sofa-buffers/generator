@@ -15,7 +15,7 @@
 # Generated output (default config output_dir)
 /generated/
 
-# Python bytecode (tests/bench/lib/format.py, tests/conformance/*/check_vectors.py)
+# Python bytecode (tests/bench/lib/format.py, tests/conformance/lib/*.py)
 __pycache__/
 *.pyc
 

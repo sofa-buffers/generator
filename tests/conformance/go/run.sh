@@ -1194,7 +1194,7 @@ GO
     || { echo "FAIL: a decoded field aliased the buffer it was decoded from"; exit 1; }
 echo "==> decode ownership OK"
 
-echo "==> backend Go tests against the corelib (shared-vector byte-exact conformance, wire, round trip, ...)"
+echo "==> backend Go tests against the corelib (wire, round trip, ...)"
 run_backend_tests generators/golang SOFAB_GO_CORELIB "$CORELIB"
 
 # ...and the decode direction (generator#444): each vector's DENSE bytes fed into
@@ -1208,6 +1208,9 @@ run_backend_tests generators/golang SOFAB_GO_CORELIB "$CORELIB"
 echo "==> shared-vector decode conformance (skip matrix)"
 printf 'version: 1\nmessages:\n' > "$WORK/vecskip.yaml"
 python3 "$ROOT/tests/conformance/lib/check_vectors_decode.py" --emit-schema >> "$WORK/vecskip.yaml"
+# The encode-side messages (generator#650), derived from the vector file itself.
+python3 "$ROOT/tests/conformance/lib/check_vectors_encode.py" --emit-schema \
+    "$CORELIB/assets/test_vectors.json" >> "$WORK/vecskip.yaml"
 ( cd "$ROOT" && go run ./cmd/sofabgen --config "$WORK/cfg.yaml" --lang go --in "$WORK/vecskip.yaml" --out "$WORK/vecskip-proj" >/dev/null )
 sed -i "s#\${SOFAB_GO_CORELIB}#$CORELIB#" "$WORK/vecskip-proj/go.mod"
 ( cd "$WORK/vecskip-proj" && GOFLAGS=-mod=mod go mod tidy >/dev/null 2>&1 && GOFLAGS=-mod=mod go build -o "$WORK/vecskip" ./harness )
@@ -1215,6 +1218,12 @@ for surface in decode streamdecode; do
     python3 "$ROOT/tests/conformance/lib/check_vectors_decode.py" \
         "$CORELIB/assets/test_vectors.json" "Go" --mode "$surface" -- "$WORK/vecskip"
 done
+
+# ...and the encode direction (generator#650): every vector that is not decode-only
+# by design, byte for byte against its `serialized_sparse` column.
+echo "==> shared-vector encode conformance"
+python3 "$ROOT/tests/conformance/lib/check_vectors_encode.py" \
+    "$CORELIB/assets/test_vectors.json" "Go" -- "$WORK/vecskip"
 
 echo "==> corpus + realworld: every definition builds"
 for def in "$ROOT"/tests/matrix/corpus/defs/*.yaml "$ROOT"/examples/messages/realworld/*.yaml; do

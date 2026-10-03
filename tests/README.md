@@ -33,15 +33,15 @@ tests/
 │
 ├── conformance/            # Tier 2 — per-language integration harnesses (one CI job each: lang-<x>)
 │   ├── c/        { run.sh, example_roundtrip.c }
-│   ├── cpp/      { run.sh, check_vectors.py }
+│   ├── cpp/      { run.sh }
 │   ├── go/       { run.sh }
 │   ├── python/   { run.sh }
-│   ├── java/     { run.sh, check_vectors.py }
-│   ├── kotlin/   { run.sh, check_vectors.py }
-│   ├── csharp/   { run.sh, check_vectors.py }
-│   ├── rust/     { run.sh, check_vectors.py }
-│   ├── typescript/ { run.sh, check_vectors.py }
-│   └── zig/      { run.sh, check_vectors.py }
+│   ├── java/     { run.sh }
+│   ├── kotlin/   { run.sh }
+│   ├── csharp/   { run.sh }
+│   ├── rust/     { run.sh }
+│   ├── typescript/ { run.sh }
+│   └── zig/      { run.sh }
 │
 ├── bench/                  # Tier 3 — Ir/op + footprint of the generated code (ARCHITECTURE §15)
 │   ├── run.sh              #   regenerates results.txt; --rows <ids> to iterate on one row
@@ -86,12 +86,12 @@ the corelib** into a temp dir; to test against a local checkout, pass its path a
 | Lang | Corelib(s) | Path arg / env var | Extra files |
 |------|-----------|--------------------|-------------|
 | `c` | corelib-c-cpp | `$1` / `SOFAB_C_CORELIB` | `example_roundtrip.c` |
-| `cpp` | corelib-cpp **and** corelib-c-cpp | `$1` `$2` / `SOFAB_CPP_DIR` `SOFAB_C_DIR` | `check_vectors.py` |
-| `rust` | corelib-rs-no-std **and** corelib-rs | `$1` `$2` / `SOFAB_RS_CORELIB` `SOFAB_RS_STD_CORELIB` | `check_vectors.py` |
+| `cpp` | corelib-cpp **and** corelib-c-cpp | `$1` `$2` / `SOFAB_CPP_DIR` `SOFAB_C_DIR` |  |
+| `rust` | corelib-rs-no-std **and** corelib-rs | `$1` `$2` / `SOFAB_RS_CORELIB` `SOFAB_RS_STD_CORELIB` |  |
 | `go` | corelib-go | `$1` / `SOFAB_GO_CORELIB` | |
 | `python` | corelib-py | `$1` / `SOFAB_PY_CORELIB` | |
-| `java` | corelib-java | `$1` / `SOFAB_JAVA_CORELIB` | `check_vectors.py` |
-| `kotlin` | corelib-kotlin-mp | `$1` / `SOFAB_KOTLIN_CORELIB` | `check_vectors.py` |
+| `java` | corelib-java | `$1` / `SOFAB_JAVA_CORELIB` |  |
+| `kotlin` | corelib-kotlin-mp | `$1` / `SOFAB_KOTLIN_CORELIB` |  |
 
 > `kotlin` additionally needs a JDK the Kotlin Gradle plugin supports (17..24),
 > which is **not** the devcontainer's default — it exports `SOFAB_KOTLIN_JDK` at
@@ -105,13 +105,15 @@ the corelib** into a temp dir; to test against a local checkout, pass its path a
 > `sofab.IMPL` per leg — a missing accelerator fails the run rather than quietly
 > making both legs pure (generator#451). `SOFAB_PY_ALLOW_PURE_ONLY=1` accepts the
 > reduced coverage explicitly where the platform cannot compile it.
-| `csharp` | corelib-cs | `$1` / `SOFAB_CS_CORELIB` | `check_vectors.py` |
-| `typescript` | corelib-ts | `$1` / `SOFAB_TS_CORELIB` | `check_vectors.py` |
-| `zig` | corelib-zig | `$1` / `SOFAB_ZIG_CORELIB` | `check_vectors.py` |
+| `csharp` | corelib-cs | `$1` / `SOFAB_CS_CORELIB` |  |
+| `typescript` | corelib-ts | `$1` / `SOFAB_TS_CORELIB` |  |
+| `zig` | corelib-zig | `$1` / `SOFAB_ZIG_CORELIB` |  |
 
 `cpp` and `rust` each exercise **both** of their corelibs (the `corelib` config
-option). `check_vectors.py` drives the generated harness against the corelib's
-shared `assets/test_vectors.json` and asserts byte-exact output.
+option). Every suite drives its generated harness against the corelib's shared
+`assets/test_vectors.json` through `conformance/lib/check_vectors_encode.py`
+(byte-exact against `serialized_sparse`, every vector checked or named as
+excluded) and `check_vectors_decode.py`.
 
 ```sh
 # clone the corelib(s) automatically:
