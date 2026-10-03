@@ -312,7 +312,7 @@ messages:
 // length on the wire instead of being zero-padded to maxlen or dropped when empty
 // (issue #128). _init must zero the struct first (the __len companion is not a
 // descriptor field, so sofab_object_init leaves it untouched), and a non-empty
-// blob default must materialize its used-length there.
+// blob default must carry its used-length in the default image.
 func TestBlobSized(t *testing.T) {
 	files := genCFromYAML(t, `
 version: 1
@@ -337,7 +337,7 @@ messages:
 		"SOFAB_OBJECT_FIELD_BLOB_SIZED(0, message_m_t, plain, plain__len),",
 		"SOFAB_OBJECT_FIELD_BLOB_SIZED(1, message_m_t, big, big__len),",
 		"memset(msg, 0, sizeof(*msg));", // zero first so the non-descriptor __len members are deterministic
-		"msg->dflt__len = 5;",           // "Hello" default materializes its used-length
+		".dflt__len = 5,",               // "Hello" default carries its used-length in the image
 	} {
 		if !strings.Contains(c, want) {
 			t.Errorf("m.c missing %q:\n%s", want, c)
@@ -346,6 +346,46 @@ messages:
 	// A blob must never use the plain fixed-capacity descriptor (the #128 bug).
 	if strings.Contains(c, "message_m_t, plain, SOFAB_OBJECT_FIELDTYPE_BLOB)") {
 		t.Errorf("m.c still emits the unsized plain-BLOB descriptor for a blob field (issue #128):\n%s", c)
+	}
+}
+
+// TestBlobDefaultLenInImage: the default image carries a sized blob's length
+// like an array's, at every nesting level (the message and a struct type), and
+// only for a blob with a non-empty default. sofab_object_init seeds the
+// companion from the image, so _init needs no length assignment of its own.
+func TestBlobDefaultLenInImage(t *testing.T) {
+	files := genCFromYAML(t, `
+version: 1
+messages:
+  m:
+    payload:
+      bl: { id: 0, type: blob, maxlen: 8, default: "SGVsbG8=" }
+      be: { id: 1, type: blob, maxlen: 8 }
+      s:
+        id: 2
+        type: struct
+        fields:
+          sb: { id: 0, type: blob, maxlen: 8, default: "SGk=" }
+          se: { id: 1, type: blob, maxlen: 8 }
+      sa:
+        id: 3
+        type: array
+        items:
+          type: struct
+          count: 2
+          fields:
+            ab: { id: 0, type: blob, maxlen: 8, default: "SGk=" }
+`)
+	c := files["m_sofab.c"]
+	for _, want := range []string{".bl__len = 5,", ".sb__len = 2,", ".ab__len = 2,"} {
+		if !strings.Contains(c, want) {
+			t.Errorf("m.c default image missing %q:\n%s", want, c)
+		}
+	}
+	for _, bad := range []string{".be__len", ".se__len", "msg->bl__len", "msg->be__len"} {
+		if strings.Contains(c, bad) {
+			t.Errorf("m.c unexpectedly contains %q:\n%s", bad, c)
+		}
 	}
 }
 

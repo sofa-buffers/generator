@@ -128,12 +128,7 @@ type objectPlan struct {
 	fields   []fieldEntry
 	nested   []string      // child object keys in nested_list order
 	defaults []defaultInit // non-zero leaf-field defaults, for the const image
-	// blobLenInits materialize a sized blob's declared default used-length in the
-	// generated _init: sofab_object_init copies the blob buffer from the default
-	// image but not the companion __len member (it is not a descriptor field), so
-	// _init sets it explicitly, otherwise the declared default decodes as empty.
-	blobLenInits []blobLenInit
-	maxField     int64
+	maxField int64
 	// hasDeprecated is set when any field lowers to a deprecated struct member.
 	// The generated .c references members by name via sizeof(((T*)0)->field) in
 	// the descriptor table (and by designated initializer in the defaults image),
@@ -170,14 +165,6 @@ type objectPlan struct {
 type defaultInit struct {
 	ident string // C member name (matches the struct decl)
 	expr  string // C initializer RHS
-}
-
-// blobLenInit records a sized blob whose schema default is non-empty: _init sets
-// its length companion (lenMember) to length so the declared default
-// materializes on init/decode.
-type blobLenInit struct {
-	member string // the blob's length companion (lenMember)
-	length int64  // decoded default byte length (0..maxlen)
 }
 
 type member struct {
@@ -642,11 +629,15 @@ func (g *gen) collect(key string, path []string, fields []*ir.Field, un *ir.Name
 			if n, ok := arrayDefaultLen(f); ok {
 				p.defaults = append(p.defaults, defaultInit{ident: lenMember(f.Name), expr: fmt.Sprintf("%d", n)})
 			}
+			// A sized blob's companion length is seeded from the image exactly as an
+			// array's is, so a non-empty default must carry it too: otherwise the
+			// image describes the empty blob and anything comparing against it
+			// (the corelib's default test) takes the default to be empty.
+			if n, ok := blobDefaultRawLen(f); ok {
+				p.defaults = append(p.defaults, defaultInit{ident: lenMember(f.Name), expr: fmt.Sprintf("%d", n)})
+			}
 			if expr, ok := g.cDefaultInit(f); ok {
 				p.defaults = append(p.defaults, defaultInit{ident: cIdent(f.Name), expr: expr})
-				if n, ok := blobDefaultRawLen(f); ok {
-					p.blobLenInits = append(p.blobLenInits, blobLenInit{member: lenMember(f.Name), length: n})
-				}
 			}
 		}
 	}
@@ -1230,9 +1221,6 @@ func (g *gen) emitFuncs(c *cfile, m *ir.Message, msgType string, root *objectPla
 	// left uninitialized and drive a garbage-length encode (issue #128).
 	c.line("    memset(msg, 0, sizeof(*msg));")
 	c.line("    sofab_object_init(&%s, msg);", root.descr)
-	for _, b := range root.blobLenInits {
-		c.line("    msg->%s = %d;", b.member, b.length)
-	}
 	c.line("}")
 	c.blank()
 
