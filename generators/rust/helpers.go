@@ -3,6 +3,8 @@ package rust
 import (
 	"encoding/base64"
 	"fmt"
+	"math"
+	"strconv"
 	"strings"
 
 	"github.com/sofa-buffers/generator/internal/ir"
@@ -284,6 +286,25 @@ func (g *gen) rustLeafNe(acc string, f *ir.Field) string {
 			return fmt.Sprintf("%s.as_str() != %q", acc, lit)
 		}
 		return fmt.Sprintf("%s != %q", acc, lit)
+	case ir.KindFP32, ir.KindFP64:
+		// By BIT PATTERN (CORELIB_PLAN §4.6): an IEEE `!=` reads -0.0 as the
+		// default 0 and drops the field. The default's bits are an integer literal
+		// computed here, parsed from the literal the field's Default is built from.
+		var lit string
+		if f.Default != nil {
+			lit = rustFloat(f.Default)
+		} else {
+			lit = "0.0"
+		}
+		if strings.HasPrefix(acc, "*") {
+			acc = "(" + acc + ")"
+		}
+		if f.Kind == ir.KindFP32 {
+			v, _ := strconv.ParseFloat(lit, 32)
+			return fmt.Sprintf("%s.to_bits() != 0x%x", acc, math.Float32bits(float32(v)))
+		}
+		v, _ := strconv.ParseFloat(lit, 64)
+		return fmt.Sprintf("%s.to_bits() != 0x%x", acc, math.Float64bits(v))
 	}
 	return fmt.Sprintf("%s != %s", acc, g.rustFieldDefault(f))
 }

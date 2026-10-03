@@ -3,6 +3,8 @@ package zig
 import (
 	"encoding/base64"
 	"fmt"
+	"math"
+	"strconv"
 	"strings"
 
 	"github.com/sofa-buffers/generator/internal/ir"
@@ -393,6 +395,20 @@ func (g *gen) zigLeafNe(acc string, f *ir.Field) string {
 			return fmt.Sprintf("!std.mem.eql(u8, %s, %s)", acc, byteSliceLit(raw))
 		}
 		return fmt.Sprintf("%s.len != 0", acc)
+	case ir.KindFP32, ir.KindFP64:
+		// By BIT PATTERN (CORELIB_PLAN §4.6): an IEEE `!=` reads -0.0 as the
+		// default 0 and drops the field. The default's bits are an integer literal
+		// computed here, parsed from the literal the field's Default is built from.
+		lit := "0.0"
+		if f.Default != nil {
+			lit = zigFloat(f.Default)
+		}
+		if f.Kind == ir.KindFP32 {
+			v, _ := strconv.ParseFloat(lit, 32)
+			return fmt.Sprintf("@as(u32, @bitCast(%s)) != 0x%x", acc, math.Float32bits(float32(v)))
+		}
+		v, _ := strconv.ParseFloat(lit, 64)
+		return fmt.Sprintf("@as(u64, @bitCast(%s)) != 0x%x", acc, math.Float64bits(v))
 	}
 	return fmt.Sprintf("%s != %s", acc, g.zigFieldDefault(f))
 }

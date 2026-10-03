@@ -20,7 +20,9 @@ The generic options apply here too; see the [generic config](README.md).
 | `cpp` | `corelib-cpp`, header-only C++20 | throughput; dynamic containers |
 | `c-cpp` | the C++ wrapper over `corelib-c-cpp` | footprint; heap-free, fixed capacity |
 
-The two produce **identical wire bytes**. What differs is what the generated
+Both need a C++20 compiler for the generated headers (`std::bit_cast`, which
+compares a float field with its default by bit pattern, so `-0.0` is not the
+default `0`). The two produce **identical wire bytes**. What differs is what the generated
 code costs at runtime and what the schema must declare.
 
 **`c-cpp` requires a fully bounded schema.** Every `string`, `blob` and `array`
