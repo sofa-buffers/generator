@@ -1486,9 +1486,13 @@ route by `(scope, id)` and are forward-compatible (skip unknown ids).
    used-length member immediately before the buffer and the
    `SOFAB_OBJECT_FIELD_BLOB_SIZED` descriptor (the C counterpart of C++
    `sofab::FixedBytes<N>`); `_init` zeroes the struct first because the length
-   member is not a descriptor field. Omission is length-driven (empty ⇒ omitted),
-   so a non-empty blob `default` materialises on decode but is transmitted rather
-   than omitted at its default value — a benign, wire-compatible divergence. A
+   member is not a descriptor field. A non-empty blob `default` puts its length
+   in the const default image beside the bytes (`.b__len = n`), exactly as a
+   compact array does: `sofab_object_init` seeds the companion from the image at
+   `offset - width`, at every nesting level, and the corelib's default test
+   compares length and bytes against the same image. So a blob left at its
+   default is omitted, and an explicit empty blob over a non-empty default is
+   written and decodes back as empty (MESSAGE_SPEC §2). A
    blob **array** element is a sized blob too (issue #130): the wrapper-sequence
    holder stores each element as a `{ len; buf[maxlen]; }` slot and emits a
    per-element `SOFAB_OBJECT_FIELD_BLOB_SIZED`, so a sub-`maxlen` element keeps
