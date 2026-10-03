@@ -3,6 +3,7 @@ package kotlin
 import (
 	"encoding/base64"
 	"fmt"
+	"math"
 	"strconv"
 	"strings"
 
@@ -681,7 +682,31 @@ func (g *gen) ktWritesExpr(f *ir.Field, acc string) string {
 		}
 		return "!" + acc + ".contentEquals(" + arrDefName(f) + ")"
 	}
+	if cmp := floatBitsNe(f, acc); cmp != "" {
+		return cmp
+	}
 	return acc + " != " + g.ktDefaultValue(f)
+}
+
+// floatBitsNe compares an fp32/fp64 scalar with its default by BIT PATTERN
+// (CORELIB_PLAN §4.6): an IEEE `!=` reads -0.0 as the default 0 and drops the
+// field. The default's bits are an integer literal computed here, parsed from
+// the literal the member is initialised with. It returns "" for every other kind.
+func floatBitsNe(f *ir.Field, acc string) string {
+	switch f.Kind {
+	case ir.KindFP32:
+		v, _ := strconv.ParseFloat(floatLit(f.Default), 32)
+		return fmt.Sprintf("%s.toRawBits() != %d", acc, int32(math.Float32bits(float32(v))))
+	case ir.KindFP64:
+		v, _ := strconv.ParseFloat(floatLit(f.Default), 64)
+		bits := int64(math.Float64bits(v))
+		if bits == math.MinInt64 {
+			// Kotlin cannot spell this magnitude as a literal.
+			return fmt.Sprintf("%s.toRawBits() != Long.MIN_VALUE", acc)
+		}
+		return fmt.Sprintf("%s.toRawBits() != %dL", acc, bits)
+	}
+	return ""
 }
 
 // arrDefName is the companion constant holding a field's omit-compare default.

@@ -33,7 +33,26 @@ func (g *gen) javaOmitCond(f *ir.Field, acc string) string {
 		}
 		return fmt.Sprintf("!%s.equals(%s)", def, acc)
 	}
+	if cmp := floatBitsNe(f, acc); cmp != "" {
+		return cmp
+	}
 	return fmt.Sprintf("%s != %s", acc, def)
+}
+
+// floatBitsNe compares an fp32/fp64 scalar with its default by BIT PATTERN
+// (CORELIB_PLAN §4.6): an IEEE `!=` reads -0.0 as the default 0 and drops the
+// field. The default's bits are an integer literal computed here, parsed from
+// the literal the member is initialised with. It returns "" for every other kind.
+func floatBitsNe(f *ir.Field, acc string) string {
+	switch f.Kind {
+	case ir.KindFP32:
+		v, _ := strconv.ParseFloat(floatLit(f.Default), 32)
+		return fmt.Sprintf("java.lang.Float.floatToRawIntBits(%s) != %d", acc, int32(math.Float32bits(float32(v))))
+	case ir.KindFP64:
+		v, _ := strconv.ParseFloat(floatLit(f.Default), 64)
+		return fmt.Sprintf("java.lang.Double.doubleToRawLongBits(%s) != %dL", acc, int64(math.Float64bits(v)))
+	}
+	return ""
 }
 
 func (g *gen) javaDefaultValue(f *ir.Field) string {

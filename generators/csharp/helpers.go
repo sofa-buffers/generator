@@ -3,6 +3,8 @@ package csharp
 import (
 	"encoding/base64"
 	"fmt"
+	"math"
+	"strconv"
 	"strings"
 
 	"github.com/sofa-buffers/generator/internal/generator"
@@ -418,6 +420,22 @@ func scalarLit(v any) string {
 		return s
 	}
 	return fmt.Sprintf("%v", v)
+}
+
+// floatBitsCmp compares an fp32/fp64 scalar with its default by BIT PATTERN
+// (CORELIB_PLAN §4.6): an IEEE compare reads -0.0 as the default 0 and drops the
+// field. The default's bits are an integer literal computed here, parsed from the
+// literal the member is initialised with. It returns "" for every other kind.
+func floatBitsCmp(f *ir.Field, acc, op string) string {
+	switch f.Kind {
+	case ir.KindFP32:
+		v, _ := strconv.ParseFloat(floatLit(f.Default), 32)
+		return fmt.Sprintf("global::System.BitConverter.SingleToInt32Bits(%s) %s %d", acc, op, int32(math.Float32bits(float32(v))))
+	case ir.KindFP64:
+		v, _ := strconv.ParseFloat(floatLit(f.Default), 64)
+		return fmt.Sprintf("global::System.BitConverter.DoubleToInt64Bits(%s) %s %dL", acc, op, int64(math.Float64bits(v)))
+	}
+	return ""
 }
 
 func floatLit(v any) string {

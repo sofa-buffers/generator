@@ -6150,7 +6150,11 @@ A reimplementation is **conformant** when it reproduces these gates:
    The native backends compare a float SCALAR with its default as an integer:
    C++ `std::bit_cast<std::uint32_t/uint64_t>(x) != 0x<bits>` (the header then
    includes `<bit>`, so generated C++ is C++20), Rust `x.to_bits() != 0x<bits>`,
-   Zig `@as(u32/u64, @bitCast(x)) != 0x<bits>`. The generator computes the
+   Zig `@as(u32/u64, @bitCast(x)) != 0x<bits>`; the managed backends compare the
+   raw bits: Go `math.Float32bits/Float64bits(x) != 0x<bits>`,
+   Java `java.lang.Float.floatToRawIntBits` / `java.lang.Double.doubleToRawLongBits`,
+   Kotlin `x.toRawBits()`, C# `BitConverter.SingleToInt32Bits` / `DoubleToInt64Bits`
+   (a signed decimal literal in those three). The generator computes the
    default's bits (zero default: `0`) from the same literal the member is
    initialised with, and the omission test in `serialize` and the equality /
    `isDefault` helper share the one expression. The integer form needs no FPU
