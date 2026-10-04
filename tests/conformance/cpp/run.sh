@@ -100,7 +100,7 @@ python3 "$ROOT/tests/conformance/lib/check_vectors_encode.py" --emit-schema \
 # ran. It could not decode at all: a native row whose OUTER array is
 # schema-bounded reached sofab::MessageSeq with no bound for the row and every
 # row was refused (corelib-cpp#124). The declaration was not the coverage.
-IN='{"someu8":200,"someu16":4242,"someu32":3000000,"someu64":1234567890123456,"somei8":-42,"somei16":31000,"somei32":123456789,"somei64":-1234567890123456,"somefp32":1.5,"somefp64":-2.5,"somebool":false,"somestring":"round trip","someblob":[1,2,3,4],"someenum":33,"somebitfield":1,"someuintarray":[9,8,7,6],"someintarray":[-1,-2,-3,-4,-5],"somefloatarray":[0.5,0.25,-0.75],"somestringarray":["a","bb","ccc"],"someblobarray":[[1],[2,3]],"somestruct":{"nestedint":12,"nestedstring":"deep","nestedstruct":{"deepint":99}},"someunion":{"option1":4242},"somestructwitharray":{"label":"lbl","values":[9,9,9,9]},"somestructarray":[{"x":1,"y":2},{"x":-3,"y":-4}],"somematrix":[[1,2,3,4],[5,6,7,8]],"someunionarray":[{"asint":7},{"asint":-8}],"someenumarray":[1,0,2,1],"someboolarray":[false,false,true],"somebitfieldarray":[1,2,3],"somemap":[{"key":"k","value":5}]}'
+IN='{"someu8":200,"someu16":4242,"someu32":3000000,"someu64":18446744073709551614,"somei8":-42,"somei16":31000,"somei32":123456789,"somei64":-9223372036854775807,"somefp32":1.5,"somefp64":-2.5,"somebool":false,"somestring":"round trip","someblob":[1,2,3,4],"someenum":33,"somebitfield":1,"someuintarray":[9,8,7,6],"someintarray":[-1,-2,-3,-4,-5],"somefloatarray":[0.5,0.25,-0.75],"somestringarray":["a","bb","ccc"],"someblobarray":[[1],[2,3]],"somestruct":{"nestedint":12,"nestedstring":"deep","nestedstruct":{"deepint":99}},"someunion":{"option1":4242},"somestructwitharray":{"label":"lbl","values":[9,9,9,9]},"somestructarray":[{"x":1,"y":2},{"x":-3,"y":-4}],"somematrix":[[1,2,3,4],[5,6,7,8]],"someunionarray":[{"asint":7},{"asint":-8}],"someenumarray":[1,0,2,1],"someboolarray":[false,false,true],"somebitfieldarray":[1,2,3],"somemap":[{"key":"k","value":5}]}'
 
 # run_variant LABEL CORELIB DYNAMIC INCLUDE MAKEVARS...
 #   CORELIB  - "" for pure corelib-cpp, "c-cpp" for the corelib-c-cpp wrapper.
@@ -175,6 +175,8 @@ run_variant() {
     check_maxsize_constant "$label" "$WORK/fill-$label/fill.hpp" \
         "static constexpr std::size_t _maxSize = $SOFAB_MAXSIZE_FILL_BYTES;\$"
     check_maxsize_fill "$label" "$WORK/fill-$label/harness/harness" encode fill
+    check_maxsize_fill_decode "$label" "$WORK/fill-$label/harness/harness" decode fill
+    check_maxsize_fill_decode "$label"/stream "$WORK/fill-$label/harness/harness" streamdecode fill
 
     # The fill schema is the one place in this suite that carries every wire
     # shape, so it is also the one header most likely to hit a literal or
@@ -274,7 +276,7 @@ YAML
     echo "==> [$label] JSON encode -> decode round-trip"
     OUT=$(printf '%s' "$IN" | "$WORK/ex-$label/harness/harness" encode myfirstmessage | "$WORK/ex-$label/harness/harness" decode myfirstmessage)
     for chk in \
-        '"someu64":1234567890123456' \
+        '"someu64":18446744073709551614' \
         '"somei8":-42' \
         '"someenum":33' \
         '"somebitfield":1' \

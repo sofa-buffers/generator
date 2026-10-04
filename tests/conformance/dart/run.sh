@@ -117,10 +117,21 @@ H="$WORK/ex/harness"
 # stack trace in a green log is exactly what makes a real failure invisible later.
 # `sed -n 1p` reads to EOF, so the writer never sees a closed pipe.
 
+# jsonDecode is the harness's front door and a Dart `int` is SIGNED 64-bit: it
+# reads 18446744073709551615 as a double, which the u64 arm then clamps to
+# 2^63-1 -- four bytes short of the filled message. Quote those so the arm takes
+# its BigInt.parse path, the spelling the u64 round-trip leg above already uses.
+# Only POSITIVE integers above 2^53: i64 min is a bare int jsonDecode reads
+# exactly (the i64 arm takes the quoted spelling too, but needs none here).
+# Nothing else about the input changes, so every field is still filled to its
+# declared bound.
+quote_big_ints() {
+    python3 -c 'import re,sys; sys.stdout.write(re.sub(r"(?<![-\d.])\d+(?![\d.eE\"])", lambda m: "\"%s\"" % m.group(0) if int(m.group(0)) > 2**53 else m.group(0), sys.stdin.read()))'
+}
 echo "==> JSON encode -> decode round-trip"
-IN='{"someu8":200,"someu16":4242,"someu32":3000000,"someu64":1234567890123456,"somei8":-42,"somei16":31000,"somei32":123456789,"somei64":-1234567890123456,"somefp32":1.5,"somefp64":-2.5,"somebool":false,"somestring":"round trip","someblob":[1,2,3,4],"someenum":33,"somebitfield":1,"someuintarray":[9,8,7,6],"someintarray":[-1,-2,-3,-4,-5],"somefloatarray":[0.5,0.25,-0.75],"somestringarray":["a","bb","ccc"],"someblobarray":[[1],[2,3]],"somestruct":{"nestedint":12,"nestedstring":"deep","nestedstruct":{"deepint":99}},"someunion":{"option1":4242},"somestructwitharray":{"label":"lbl","values":[9,9,9,9]},"somestructarray":[{"x":1,"y":2},{"x":-3,"y":-4}],"somematrix":[[1,2,3,4],[5,6,7,8]],"someunionarray":[{"asint":7},{"asint":-8}],"someenumarray":[1,0,2,1],"someboolarray":[false,false,true],"somebitfieldarray":[1,2,3],"somemap":[{"key":"k","value":5}]}'
-OUT=$(printf '%s' "$IN" | "$H" encode myfirstmessage | "$H" decode myfirstmessage)
-echo "$OUT" | grep -q '"someu64":"1234567890123456"' || { echo "FAIL: u64 round-trip"; exit 1; }
+IN='{"someu8":200,"someu16":4242,"someu32":3000000,"someu64":18446744073709551614,"somei8":-42,"somei16":31000,"somei32":123456789,"somei64":-9223372036854775807,"somefp32":1.5,"somefp64":-2.5,"somebool":false,"somestring":"round trip","someblob":[1,2,3,4],"someenum":33,"somebitfield":1,"someuintarray":[9,8,7,6],"someintarray":[-1,-2,-3,-4,-5],"somefloatarray":[0.5,0.25,-0.75],"somestringarray":["a","bb","ccc"],"someblobarray":[[1],[2,3]],"somestruct":{"nestedint":12,"nestedstring":"deep","nestedstruct":{"deepint":99}},"someunion":{"option1":4242},"somestructwitharray":{"label":"lbl","values":[9,9,9,9]},"somestructarray":[{"x":1,"y":2},{"x":-3,"y":-4}],"somematrix":[[1,2,3,4],[5,6,7,8]],"someunionarray":[{"asint":7},{"asint":-8}],"someenumarray":[1,0,2,1],"someboolarray":[false,false,true],"somebitfieldarray":[1,2,3],"somemap":[{"key":"k","value":5}]}'
+OUT=$(printf '%s' "$IN" | quote_big_ints | "$H" encode myfirstmessage | "$H" decode myfirstmessage)
+echo "$OUT" | grep -q '"someu64":"18446744073709551614"' || { echo "FAIL: u64 round-trip"; exit 1; }
 echo "$OUT" | grep -q '"deepint":99' || { echo "FAIL: nested struct round-trip"; exit 1; }
 echo "==> round-trip OK"
 
@@ -159,19 +170,11 @@ echo "==> bounded encode buffer is exactly MAX_SIZE (ARCHITECTURE §9.6)"
 build "$ROOT/tests/conformance/lib/maxsize_fill.yaml" "$WORK/fill"
 check_maxsize_constant dart "$WORK/fill/lib/message.dart" \
     "static const int maxSize = $SOFAB_MAXSIZE_FILL_BYTES;\$"
-# jsonDecode is the harness's front door and a Dart `int` is SIGNED 64-bit: it
-# reads 18446744073709551615 as a double, which the u64 arm then clamps to
-# 2^63-1 -- four bytes short of the filled message. Quote those so the arm takes
-# its BigInt.parse path, the spelling the u64 round-trip leg above already uses.
-# Only POSITIVE integers above 2^53: i64 min is a bare int jsonDecode reads
-# exactly (the i64 arm takes the quoted spelling too, but needs none here).
-# Nothing else about the input changes, so every field is still filled to its
-# declared bound.
-quote_big_ints() {
-    python3 -c 'import re,sys; sys.stdout.write(re.sub(r"(?<![-\d.])\d+(?![\d.eE\"])", lambda m: "\"%s\"" % m.group(0) if int(m.group(0)) > 2**53 else m.group(0), sys.stdin.read()))'
-}
 fill_encode() { quote_big_ints | "$WORK/fill/harness" encode fill; }
 check_maxsize_fill dart fill_encode
+fill_decode() { "$WORK/fill/harness" "$@" fill; }
+check_maxsize_fill_decode dart fill_decode decode
+check_maxsize_fill_decode dart/stream fill_decode streamdecode
 
 # ...and the other side of owning the buffer: a value the caller filled PAST its
 # own schema bound does not fit, and §5.1 forbids returning partial output as if
