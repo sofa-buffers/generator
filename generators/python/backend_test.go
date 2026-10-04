@@ -723,7 +723,7 @@ func TestPythonHarnessEmitsRecode(t *testing.T) {
 		"    elif mode == 'recode':",
 		// Bytes out, not JSON -- the whole point of the verb.
 		"        obj = cls.decode(data)\n        sys.stdout.buffer.write(obj.encode())",
-		"usage: harness.py <encode|decode|recode|streamdecode|bench>",
+		"usage: harness.py <encode|decode|recode|streamdecode|streamencode|bench>",
 	} {
 		if !strings.Contains(h, want) {
 			t.Errorf("harness.py missing %q", want)

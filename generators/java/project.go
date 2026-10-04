@@ -197,6 +197,23 @@ func (g *gen) mainHarness(s *ir.Schema) []byte {
 		f.line("                JsonObject j = JsonParser.parseString(new String(input, StandardCharsets.UTF_8)).getAsJsonObject();")
 		f.line("                %s obj = new %s(); Json.from(j, obj);", mt, mt)
 		f.line("                System.out.write(obj.encode());")
+		// The encode twin of streamdecode: the same message through a sink, drained
+		// into a buffer the harness owns. Window 0 is the generated one-shot
+		// `encode()`; any other window is an OStream of that size (raised to the
+		// corelib's floor) driven through the generated `encodeTo`, so a drain lands
+		// on every kind of boundary. tests/conformance/lib/check_stream_encode.py
+		// sweeps it.
+		f.line("            } else if (mode.equals(\"streamencode\")) {")
+		f.line("                JsonObject j = JsonParser.parseString(new String(input, StandardCharsets.UTF_8)).getAsJsonObject();")
+		f.line("                %s obj = new %s(); Json.from(j, obj);", mt, mt)
+		f.line("                int win = args.length > 2 ? Integer.parseInt(args[2]) : 0;")
+		f.line("                if (win == 0) {")
+		f.line("                    System.out.write(obj.encode());")
+		f.line("                } else {")
+		f.line("                    ByteArrayOutputStream so = new ByteArrayOutputStream();")
+		f.line("                    obj.encodeTo(new org.sofabuffers.sofab.OStream(new byte[Math.max(win, org.sofabuffers.sofab.Sofab.MIN_OUTPUT_BUFFER)], 0, so::write));")
+		f.line("                    System.out.write(so.toByteArray());")
+		f.line("                }")
 		f.line("            } else if (mode.equals(\"decode\")) {")
 		f.line("                %s obj = %s.decode(input);", mt, mt)
 		f.line("                StringBuilder sb = new StringBuilder(); Json.to(obj, sb);")

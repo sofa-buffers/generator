@@ -283,6 +283,29 @@ func (g *gen) harness(s *ir.Schema) []byte {
 		f.line("            if mode == \"encode\" {")
 		f.line("                let obj: %s = from_json(&input);", mt)
 		f.line("                std::io::stdout().write_all(&obj.encode()).unwrap();")
+		// The encode twin of streamdecode: the same message through a sink, drained
+		// into a Vec the harness owns. Window 0 is the generated one-shot `encode()`;
+		// any other window is a scratch of that size (raised to the corelib's floor)
+		// driven through `serialize`, so a drain lands on every kind of boundary.
+		// tests/conformance/lib/check_stream_encode.py sweeps it.
+		f.line("            } else if mode == \"streamencode\" {")
+		f.line("                let obj: %s = from_json(&input);", mt)
+		f.line("                let win: usize = args.get(3).and_then(|s| s.parse().ok()).unwrap_or(0);")
+		f.line("                if win == 0 {")
+		f.line("                    std::io::stdout().write_all(&obj.encode()).unwrap();")
+		f.line("                } else {")
+		f.line("                    let mut out: Vec<u8> = Vec::new();")
+		f.line("                    let mut buf = vec![0u8; win.max(sofab::MIN_OUTPUT_BUFFER)];")
+		f.line("                    {")
+		f.line("                        let mut os = match sofab::OStream::with_flush(&mut buf, 0, |d: &[u8]| out.extend_from_slice(d)) {")
+		f.line("                            Ok(os) => os,")
+		f.line("                            Err(_) => { eprintln!(\"window refused\"); std::process::exit(1); }")
+		f.line("                        };")
+		f.line("                        obj.serialize(&mut os);")
+		f.line("                        let _ = os.flush();")
+		f.line("                    }")
+		f.line("                    std::io::stdout().write_all(&out).unwrap();")
+		f.line("                }")
 		f.line("            } else if mode == \"decode\" {")
 		// try_decode, not the best-effort decode: the harness must surface the
 		// accept/reject verdict (a malformed input exits non-zero) so the

@@ -162,6 +162,7 @@ func (g *gen) harness(s *ir.Schema) []byte {
 	f.line("// JSON encode/decode harness: harness encode|decode <message> (stdin -> stdout).")
 	f.line("const std = @import(\"std\");")
 	f.line("const message = @import(\"message.zig\");")
+	f.line("const sofab = @import(\"sofab\");")
 	f.blank()
 	f.line("%s", jsonHelpers)
 
@@ -211,6 +212,27 @@ func (g *gen) harness(s *ir.Schema) []byte {
 		f.line("            const v = try std.json.parseFromSliceLeaky(std.json.Value, alloc, input, .{});")
 		f.line("            const obj = fromJson_%s(alloc, v);", mb)
 		f.line("            try out.writeAll(try obj.encode(alloc));")
+		// The encode twin of streamdecode: the same message through a sink, drained
+		// into a list the harness owns. Window 0 is the generated one-shot `encode()`
+		// (this target has no encodeTo); any other window is a scratch of that size,
+		// raised to the corelib's floor, driven through `serialize`, so a drain lands
+		// on every kind of boundary. tests/conformance/lib/check_stream_encode.py
+		// sweeps it.
+		f.line("        } else if (std.mem.eql(u8, mode, \"streamencode\")) {")
+		f.line("            const v = try std.json.parseFromSliceLeaky(std.json.Value, alloc, input, .{});")
+		f.line("            const obj = fromJson_%s(alloc, v);", mb)
+		f.line("            const win: usize = if (args.next()) |a| (std.fmt.parseInt(usize, a, 10) catch 0) else 0;")
+		f.line("            if (win == 0) {")
+		f.line("                try out.writeAll(try obj.encode(alloc));")
+		f.line("            } else {")
+		f.line("                var sink: sofab.CollectingSink = .{ .alloc = alloc };")
+		f.line("                defer sink.deinit();")
+		f.line("                const scratch = try alloc.alloc(u8, @max(win, sofab.MIN_OUTPUT_BUFFER));")
+		f.line("                var os = sofab.OStream.initFlush(scratch, 0, &sink, sofab.CollectingSink.push);")
+		f.line("                try obj.serialize(&os);")
+		f.line("                _ = os.flush();")
+		f.line("                try out.writeAll(try sink.toOwnedSlice());")
+		f.line("            }")
 		f.line("        } else if (std.mem.eql(u8, mode, \"decode\")) {")
 		f.line("            const obj = try message.%s.decode(alloc, input);", mt)
 		f.line("            try toJson_%s(&obj, out);", mb)

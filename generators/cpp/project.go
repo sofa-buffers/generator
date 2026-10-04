@@ -501,10 +501,21 @@ func (g *gen) harnessMain(s *ir.Schema) []byte {
 	f.line("#include <cstring>")
 	f.line("#include <cstdio>")
 	f.line("#include <vector>")
+	f.line("#include <span>")
+	f.line("#include <algorithm>")
 	f.blank()
+	if len(s.Messages) > 0 {
+		f.line("// `streamencode`'s sink: every drained piece is appended to one buffer. A plain")
+		f.line("// function, because the corelib-c-cpp callback is a function pointer.")
+		f.line("static std::vector<std::uint8_t> g_streamOut;")
+		f.line("static void streamCollect(std::span<const std::uint8_t> chunk) {")
+		f.line("    g_streamOut.insert(g_streamOut.end(), chunk.begin(), chunk.end());")
+		f.line("}")
+		f.blank()
+	}
 	g.emitBench(f, s)
 	f.line("int main(int argc, char **argv) {")
-	f.line("    if (argc < 2) { std::cerr << \"usage: harness <encode|decode|streamdecode|bench> [Message|workload]\\n\"; return 2; }")
+	f.line("    if (argc < 2) { std::cerr << \"usage: harness <encode|decode|streamdecode|streamencode|bench> [Message|workload]\\n\"; return 2; }")
 	f.line("    std::string mode = argv[1];")
 	f.line("    std::string msg = argc > 2 ? argv[2] : %q;", defaultMessage(s))
 	f.line("    std::ostringstream _in; _in << std::cin.rdbuf(); std::string in = _in.str();")
@@ -524,6 +535,33 @@ func (g *gen) harnessMain(s *ir.Schema) []byte {
 		f.line("            %s obj; from_json(root, obj); sofab_json_free(root);", mt)
 		f.line("            auto bytes = obj.encode();")
 		f.line("            std::cout.write(reinterpret_cast<const char *>(bytes.data()), bytes.size());")
+		// The encode twin of streamdecode: the same message through a sink, drained
+		// into a buffer the harness owns. Window 0 is the generated one-shot
+		// `encode()`; any other window is an OStreamView over a buffer of that size
+		// (raised to the corelib's floor) driven through `serialize`, so a drain lands
+		// on every kind of boundary. tests/conformance/lib/check_stream_encode.py
+		// sweeps it.
+		minBuf := "sofab::MIN_OUTPUT_BUFFER"
+		if g.clib {
+			minBuf = "SOFAB_MIN_OUTPUT_BUFFER"
+		}
+		f.line("        } else if (mode == \"streamencode\") {")
+		f.line("            char err[128];")
+		f.line("            sofab_json_t *root = sofab_json_parse(in.data(), in.size(), err, sizeof(err));")
+		f.line("            if (!root) { std::cerr << \"json: \" << err << \"\\n\"; return 1; }")
+		f.line("            %s obj; from_json(root, obj); sofab_json_free(root);", mt)
+		f.line("            std::size_t win = argc > 3 ? std::strtoull(argv[3], nullptr, 10) : 0;")
+		f.line("            if (win == 0) {")
+		f.line("                auto bytes = obj.encode();")
+		f.line("                std::cout.write(reinterpret_cast<const char *>(bytes.data()), bytes.size());")
+		f.line("            } else {")
+		f.line("                std::vector<std::uint8_t> buf(std::max<std::size_t>(win, %s));", minBuf)
+		f.line("                sofab::OStreamView os{streamCollect, buf.data(), buf.size()};")
+		f.line("                obj.serialize(os);")
+		f.line("                os.flush();")
+		f.line("                if (!os.ok()) { return 1; }")
+		f.line("                std::cout.write(reinterpret_cast<const char *>(g_streamOut.data()), g_streamOut.size());")
+		f.line("            }")
 		f.line("        } else if (mode == \"decode\") {")
 		// try_decode, not the best-effort decode: the harness must surface the
 		// accept/reject verdict (a malformed input exits non-zero) so the
