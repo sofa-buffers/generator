@@ -66,7 +66,7 @@ func TestPythonStructural(t *testing.T) {
 		// fields, so the flat visitor overrides on_field and needs Field/WireType/
 		// FixlenSubtype alongside the always-present decode names -- and it binds
 		// part of the message, which is what pulls Binding in (binding.go).
-		"from sofab import Binding, Decoder, Encoder, Field, FixlenSubtype, SofaDecodeError, SofaIncompleteError, Status, UNBOUNDED, Visitor, WireType, reserve_elem, reserve_leaf",
+		"from sofab import Binding, Decoder, Encoder, Field, FixlenSubtype, SofaDecodeError, SofaIncompleteError, Status, UNBOUNDED, Visitor, WireType, float_array_bits_equal, reserve_elem, reserve_leaf",
 		"@dataclass",
 		"class Myfirstmessage:",
 		"def serialize(self, e: Encoder)",

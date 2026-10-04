@@ -223,7 +223,7 @@ func (f *pyfile) bytes() []byte { return []byte(f.b.String()) }
 // is decodeSection, sorted. Every name is read off the emitted text (see below);
 // TestTypeReservedCoversImports feeds it a text that reaches every branch, so
 // each upper-case name it can return is checked against pyTypeReserved.
-func sofabImports(decodeSection string) []string {
+func sofabImports(decodeSection, typeSection string) []string {
 	// SofaDecodeError and SofaIncompleteError are unconditional: every class's
 	// decode() surfaces the three-valued outcome through them (MESSAGE_SPEC §7).
 	names := []string{
@@ -270,6 +270,10 @@ func sofabImports(decodeSection string) []string {
 	if needWire {
 		names = append(names, "WireType")
 	}
+	// The default compare of a float array is emitted in the type section.
+	if strings.Contains(typeSection, "float_array_bits_equal(") {
+		names = append(names, "float_array_bits_equal")
+	}
 	sort.Strings(names)
 	return names
 }
@@ -301,7 +305,7 @@ func (g *gen) module(s *ir.Schema) []byte {
 	if imp := stdlibImport("typing", typeSection, typingNames); imp != "" {
 		f.line("%s", imp)
 	}
-	f.line("from sofab import %s", strings.Join(sofabImports(decodeSection), ", "))
+	f.line("from sofab import %s", strings.Join(sofabImports(decodeSection, typeSection), ", "))
 	f.blank()
 
 	if g.limits.any() {
@@ -877,6 +881,23 @@ func floatZeroCmp(fld *ir.Field, acc string, differs bool) (string, bool) {
 	return fmt.Sprintf("%s == 0.0 and math.copysign(1.0, %s) %s 0.0", acc, acc, same), true
 }
 
+// arrayEqExpr compares a native array with its default literal lit. A float
+// array is compared by BIT PATTERN through the corelib's float_array_bits_equal
+// (CORELIB_PLAN §4.6): `[-0.0, 1.5] == [0.0, 1.5]` is true in Python, which would
+// drop the sign of the zero. differs selects the write guard (the negation).
+func arrayEqExpr(fld *ir.Field, acc, lit string, differs bool) string {
+	if fld.Elem == ir.KindFP32 || fld.Elem == ir.KindFP64 {
+		if differs {
+			return fmt.Sprintf("not float_array_bits_equal(%s, %s)", acc, lit)
+		}
+		return fmt.Sprintf("float_array_bits_equal(%s, %s)", acc, lit)
+	}
+	if differs {
+		return fmt.Sprintf("%s != %s", acc, lit)
+	}
+	return fmt.Sprintf("%s == %s", acc, lit)
+}
+
 // arrayIsDefaultExpr mirrors emitMarshalArray. An array's declared `count: N` is
 // a CAPACITY, never a length (MESSAGE_SPEC §3), so it takes no part in this test:
 // the value is compared against the declared default exactly as written, with no
@@ -887,7 +908,7 @@ func floatZeroCmp(fld *ir.Field, acc string, differs bool) (string, bool) {
 func (g *gen) arrayIsDefaultExpr(fld *ir.Field, acc string) string {
 	if isNativeArrayElem(fld.Elem) {
 		if lit, ok := g.pyNativeArrayDefault(fld); ok {
-			return fmt.Sprintf("%s == %s", acc, lit)
+			return arrayEqExpr(fld, acc, lit, false)
 		}
 		return fmt.Sprintf("len(%s) == 0", acc)
 	}
@@ -992,7 +1013,7 @@ func (g *gen) emitMarshalArray(f *pyfile, fld *ir.Field, acc, ind string, forced
 			return
 		}
 		if lit, ok := g.pyNativeArrayDefault(fld); ok {
-			f.line("%sif %s != %s:", ind, acc, lit)
+			f.line("%sif %s:", ind, arrayEqExpr(fld, acc, lit, true))
 		} else {
 			f.line("%sif len(%s) != 0:", ind, acc)
 		}
