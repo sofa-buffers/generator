@@ -791,9 +791,28 @@ func (g *gen) nativeArrayNe(fld *ir.Field, acc string) string {
 		// heapless/alloc Vec alike. The literal is the default exactly as declared
 		// -- the same one the field is constructed with -- or a field sitting on
 		// its default would never compare equal and §2 would never omit it.
+		//
+		// A float array is compared by BIT PATTERN through the corelib helper
+		// (CORELIB_PLAN §4.6): an IEEE slice compare reads [-0.0, 1.5] as the
+		// default [0.0, 1.5] and drops the sign.
+		if fld.Elem == ir.KindFP32 || fld.Elem == ir.KindFP64 {
+			return fmt.Sprintf("!%s(&%s[..], &[%s][..])", g.floatBitsEqual(fld.Elem), acc, parts)
+		}
 		return fmt.Sprintf("%s[..] != [%s][..]", acc, parts)
 	}
 	return fmt.Sprintf("!%s.is_empty()", acc)
+}
+
+// floatBitsEqual is the corelib's bit-pattern slice compare for a float element
+// kind: one generic function in corelib-rs, one per width in corelib-rs-no-std.
+func (g *gen) floatBitsEqual(k ir.Kind) string {
+	switch {
+	case g.std():
+		return "sofab::float_bits::bits_equal"
+	case k == ir.KindFP32:
+		return "sofab::floats::bits_equal_f32"
+	}
+	return "sofab::floats::bits_equal_f64"
 }
 
 // lastElemExpr is the "this element is the array's last" test, at loop position
