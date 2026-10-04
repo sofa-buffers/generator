@@ -53,7 +53,7 @@ KNOWN_GAP = {
     "go": ("a[0] -0.0",),
     "java": (),
     "kotlin": (),
-    "csharp": ("a[0] -0.0",),
+    "csharp": (),
     "typescript": ("a[0] -0.0",),
     "python": ("a[0] -0.0",),
     "zig": ("a[0] -0.0",),
