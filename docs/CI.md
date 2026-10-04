@@ -52,9 +52,10 @@ so in CI nothing is skipped either way.
 
 `lang-cpp` also needs the ARM newlib toolchain (`arm-none-eabi-g++`), for the leg
 that re-measures the header-macro escape list on newlib and syntax-checks
-`reserved.yaml` for the embedded profiles. Without it the leg prints a `SKIP` and
-`run.sh` still exits 0 -- right on a laptop, wrong in CI -- so the job sets
-`SOFAB_CROSS_STRICT=1`, which turns the skip into a failure.
+`reserved.yaml` for the embedded profiles. Without it the suite
+fails: the Go backend tests in `generators/cpp` skip when the toolchain is absent,
+and the lang-job guard in `tests/conformance/lib/backend_tests.sh` turns any
+unexplained skip into a failure.
 
 `lang-c` and `lang-cpp` additionally need the **ASan runtime** (`libasan`) on the
 image: their decode-ownership check is built with `-fsanitize=address`, because a

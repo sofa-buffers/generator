@@ -768,7 +768,11 @@ corpus_roundtrip_summary C "$WORK/corpus.tally"
 echo "==> corelib feature-subset configs: generated C builds and runs against each"
 FS="$ROOT/tests/conformance/lib/check_feature_subset.py"
 printf 'generic: { emit: project }\ntargets: { c: { symbol_prefix: sofab_ } }\n' > "$WORK/fs-proj.yaml"
-for row in $(python3 "$FS" --list c); do
+# A failing --list inside a for-word-list would leave the loop empty and the leg
+# green, so capture it first and demand the whole set.
+rows=$(python3 "$FS" --list c) || { echo "FAIL: check_feature_subset.py --list c failed"; exit 1; }
+[ "$(echo $rows | wc -w)" -eq 6 ] || { echo "FAIL: expected 6 c feature-subset rows, got: $rows"; exit 1; }
+for row in $rows; do
     flags=$(python3 "$FS" --flags "$row")
     python3 "$FS" --schema "$row" > "$WORK/sub_$row.yaml"
     ( cd "$ROOT" && go run ./cmd/sofabgen --config "$WORK/fs-proj.yaml" --lang c --in "$WORK/sub_$row.yaml" --out "$WORK/sub_$row" >/dev/null )
