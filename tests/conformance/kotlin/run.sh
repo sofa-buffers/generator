@@ -35,6 +35,8 @@ fi
 . "$(dirname "$0")/../lib/stream_encode.sh"
 # The header_limits / invalid_utf8 side tables (generator#651).
 . "$(dirname "$0")/../lib/tables.sh"
+# Every corpus + realworld message, round-tripped (generator#655).
+. "$(dirname "$0")/../lib/corpus_roundtrip.sh"
 
 ROOT=$(cd "$(dirname "$0")/../../.." && pwd)
 CORELIB="${1:-${SOFAB_KOTLIN_CORELIB:-}}"
@@ -951,30 +953,43 @@ echo "==> corpus + realworld: every definition compiles, warnings as errors"
 mkdir -p "$WORK/corpus"
 # One Gradle project per definition would pay the toolchain cost N times, so the
 # corpus is compiled as ONE project with a source set per definition -- each in
-# its own package, which is what keeps two corpus defs from colliding.
+# its own package, which is what keeps two corpus defs from colliding. Each
+# definition is generated as a project (harness included, `corpus.<name>._MainKt`)
+# so the round trip below can run it; the build files every generation writes are
+# replaced by the one pair that builds them all.
+ndefs=0
+for def in "$ROOT"/tests/matrix/corpus/defs/*.yaml "$ROOT"/examples/messages/realworld/*.yaml; do
+    name=$(basename "$def" .yaml)
+    cat > "$WORK/corpuscfg.yaml" <<YAML
+generic: { emit: project }
+targets: { kotlin: { package: corpus.$name } }
+YAML
+    ( cd "$ROOT" && go run ./cmd/sofabgen --config "$WORK/corpuscfg.yaml" --lang kotlin --in "$def" --out "$WORK/corpus" >/dev/null )
+    ndefs=$((ndefs + 1))
+done
 cat > "$WORK/corpus/settings.gradle.kts" <<'YAML'
 rootProject.name = "corpus"
 pluginManagement { repositories { gradlePluginPortal(); mavenCentral() } }
 dependencyResolutionManagement { repositories { mavenLocal(); mavenCentral() } }
 YAML
 cat > "$WORK/corpus/build.gradle.kts" <<KTS
-plugins { kotlin("jvm") version "2.4.10" }
+plugins { kotlin("jvm") version "2.4.10"; application }
 repositories { mavenLocal(); mavenCentral() }
 dependencies { implementation("org.sofabuffers:corelib-kotlin-mp:$VER") }
 kotlin { jvmToolchain((findProperty("sofab.jdk") as String? ?: "21").toInt()) }
+application { mainClass.set("corpus.scalars._MainKt") }
 KTS
-ndefs=0
-for def in "$ROOT"/tests/matrix/corpus/defs/*.yaml "$ROOT"/examples/messages/realworld/*.yaml; do
-    name=$(basename "$def" .yaml)
-    cat > "$WORK/corpuscfg.yaml" <<YAML
-targets: { kotlin: { package: corpus.$name } }
-YAML
-    ( cd "$ROOT" && go run ./cmd/sofabgen --config "$WORK/corpuscfg.yaml" --lang kotlin --in "$def" --out "$WORK/corpus" >/dev/null )
-    ndefs=$((ndefs + 1))
-done
-( cd "$WORK/corpus" && "$GRADLEW" --console=plain -q $KT_STRICT compileKotlin ) \
+( cd "$WORK/corpus" && "$GRADLEW" --console=plain -q $KT_STRICT installDist ) \
     || { echo "FAIL: corpus definitions did not compile"; exit 1; }
 echo "==> corpus compiles ($ndefs definitions incl. every realworld file)"
+# ...and run: each definition's own harness, every message of it encoded and
+# decoded on both surfaces (generator#655).
+for def in "$ROOT"/tests/matrix/corpus/defs/*.yaml "$ROOT"/examples/messages/realworld/*.yaml; do
+    name=$(basename "$def" .yaml)
+    corpus_roundtrip Kotlin kotlin "$def" "$WORK/corpus.tally" \
+        -- java -cp "$WORK/corpus/build/install/corpus/lib/*" "corpus.${name}._MainKt"
+done
+corpus_roundtrip_summary Kotlin "$WORK/corpus.tally"
 
 # The reserved-name collision test (ARCHITECTURE §8): reserved.yaml uses every
 # member name on generators/kotlin/reserved.go's lists as a message field, a

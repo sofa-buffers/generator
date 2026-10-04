@@ -14,6 +14,8 @@ set -eu
 . "$(dirname "$0")/../lib/stream_encode.sh"
 # The header_limits / invalid_utf8 side tables (generator#651).
 . "$(dirname "$0")/../lib/tables.sh"
+# Every corpus + realworld message, round-tripped (generator#655).
+. "$(dirname "$0")/../lib/corpus_roundtrip.sh"
 # Shared canonical-formatter check (ARCHITECTURE §12 gate 10). Also what keeps
 # this suite honest on a box without prettier.
 . "$(dirname "$0")/../lib/check_format.sh"
@@ -1267,8 +1269,29 @@ for def in "$ROOT"/tests/matrix/corpus/defs/*.yaml "$ROOT"/examples/messages/rea
     gen "$def" "$WORK/corpus/$name"
     ln -s "$WORK/ex/node_modules" "$WORK/corpus/$name/node_modules"
     tsc_strict "$WORK/corpus/$name"
+    # ...and run: every message of the definition, encoded and decoded on both
+    # surfaces (generator#655). 64-bit values go in quoted: the harness reads its
+    # JSON through a double.
+    corpus_roundtrip typescript typescript "$def" "$WORK/corpus.tally" \
+        --cwd "$WORK/corpus/$name" --int64-json string -- "$TH"
 done
 echo "==> corpus typechecks ($(ls "$ROOT"/tests/matrix/corpus/defs/*.yaml | wc -l) definitions + $(ls "$ROOT"/examples/messages/realworld/*.yaml | wc -l) realworld)"
+corpus_roundtrip_summary typescript "$WORK/corpus.tally"
+# ...and under the two Long modes, where a 64-bit field is a Long (or a number)
+# rather than a bigint and takes a different destination entirely. `number` holds
+# no integer above 2^53, so its fixtures stay below it (--int64-safe).
+for mode in long number; do
+    safe=""
+    [ "$mode" = number ] && safe="--int64-safe"
+    for def in "$ROOT"/tests/matrix/corpus/defs/*.yaml "$ROOT"/examples/messages/realworld/*.yaml; do
+        name=$(basename "$def" .yaml)
+        gen "$def" "$WORK/corpus-rt-$mode/$name" "$WORK/cfg_$mode.yaml"
+        ln -s "$WORK/ex/node_modules" "$WORK/corpus-rt-$mode/$name/node_modules"
+        corpus_roundtrip "typescript int64: $mode" typescript "$def" "$WORK/corpus-rt-$mode.tally" \
+            --cwd "$WORK/corpus-rt-$mode/$name" --int64-json string $safe -- "$TH"
+    done
+    corpus_roundtrip_summary "typescript int64: $mode" "$WORK/corpus-rt-$mode.tally"
+done
 
 # The reserved-name collision test (ARCHITECTURE §8): reserved.yaml uses every
 # name on generators/typescript/reserved.go's list as a message field, a nested
@@ -1355,17 +1378,14 @@ for mode in long number; do
     echo "==> int64: $mode corpus typechecks ($n64 definitions with a 64-bit field)"
 done
 
-# Nested WRAPPER rows round-trip, not only typecheck. Typechecking alone would
-# accept a collector that compiles but drops rows, so the shape that used to fail
-# tsc is exercised end to end: a string row, a blob row, a struct row and a
-# depth-3 row of rows, each carrying an INTERIOR element equal to the element
-# default ("" / empty blob / zero-valued Point) that §2 omits on the wire and the
-# id-keyed placement has to restore.
-echo "==> nested wrapper rows round-trip"
+# Nested WRAPPER rows. Typechecking alone would accept a collector that compiles
+# but drops rows, so the shape that used to fail tsc is exercised end to end: a
+# string row, a blob row, a struct row and a depth-3 row of rows, each carrying
+# an INTERIOR element equal to the element default ("" / empty blob / zero-valued
+# Point) that §2 omits on the wire and the id-keyed placement has to restore. The
+# corpus round trip above compares the decoded values (generator#655); what is
+# left here is the streaming differential on the same fixture.
 NR='{"strrows":[["a","bb","ccc"],["","","zz"]],"blobrows":[[[1,2],[3]],[[],[9,9,9,9]]],"structrows":[[{"x":1,"y":2},{"x":0,"y":0}],[{"x":-7,"y":8},{"x":3,"y":4}]],"strcube":[[["p","q"],["","r"]],[["s",""],["t","u"]]],"numrows":[[1,2,3],[4,5,6]],"fprows":[[1.5,2.5],[0,3.25]],"enumrows":[[0,1,2],[2]],"bfrows":[[1,2,3],[0]],"boolrows":[[true,false,true],[false]]}'
-NROUT=$(cd "$WORK/corpus/nested_rows" && printf '%s' "$NR" | "$TH" encode NestedRows | "$TH" decode NestedRows)
-[ "$NROUT" = "$NR" ] || { echo "FAIL: nested wrapper row round-trip drift"; echo "  in : $NR"; echo "  out: $NROUT"; exit 1; }
-echo "==> nested wrapper rows OK"
 
 mk_stream_check "$WORK/corpus/nested_rows" \
     'import { NestedRows, NestedRows__Decoder } from "./message.js";' \

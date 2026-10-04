@@ -22,6 +22,8 @@ set -eu
 . "$(dirname "$0")/../lib/stream_encode.sh"
 # The header_limits / invalid_utf8 side tables (generator#651).
 . "$(dirname "$0")/../lib/tables.sh"
+# Every corpus + realworld message, round-tripped (generator#655).
+. "$(dirname "$0")/../lib/corpus_roundtrip.sh"
 # Generated code against the canonical formatter (ARCHITECTURE §12).
 . "$(dirname "$0")/../lib/check_format.sh"
 # Every backend Go test, run against the corelib with no unexplained skip.
@@ -1164,13 +1166,21 @@ YAML
         # for the same reason. Their bounded counterparts (seq_elements,
         # nested_rows, array_lengths) do compile here.
         case "$label:$(basename "$def")" in
-        no-std-*:no_maxlen.yaml | no-std-*:seq_elements_dyn.yaml | no-std-*:array_lengths_dyn.yaml) continue ;;
+        no-std-*:no_maxlen.yaml | no-std-*:seq_elements_dyn.yaml | no-std-*:array_lengths_dyn.yaml)
+            corpus_roundtrip "Rust [$label]" rust "$def" "$WORK/corpus-$label.tally" \
+                --exclude-all "unbounded fields: the no_std profile rejects them by design"
+            continue ;;
         esac
         name=$(basename "$def" .yaml)
         rust_build "$def" "$WORK/corpus-$label/$name"
         rust_clippy "$WORK/corpus-$label/$name"
+        # ...and run: every message of the definition, encoded and decoded on both
+        # surfaces (generator#655).
+        corpus_roundtrip "Rust [$label]" rust "$def" "$WORK/corpus-$label.tally" \
+            --cwd "$WORK/corpus-$label/$name" -- cargo run -q --
     done
     echo "==> [$label] corpus builds clippy-clean ($(ls "$ROOT"/tests/matrix/corpus/defs/*.yaml | wc -l) definitions + $(ls "$ROOT"/examples/messages/realworld/*.yaml | wc -l) realworld)"
+    corpus_roundtrip_summary "Rust [$label]" "$WORK/corpus-$label.tally"
 
     # The reserved-name collision test (ARCHITECTURE §8): reserved.yaml uses every
     # name on generators/rust/reserved.go's list as a message field, a nested

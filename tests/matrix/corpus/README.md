@@ -60,6 +60,17 @@ Corner-case SofaBuffers definitions, exercised hermetically by `tests/matrix`
 - **`shared/`** — definitions referenced from `defs/` via **cross-file `$ref`**
   (e.g. `common.yaml`); not validated standalone.
 
+### Round trip
+
+The `go test` run above only generates. Every language's conformance suite
+(`tests/conformance/<lang>/run.sh`) additionally builds each definition in
+`defs/` and each file under `examples/messages/realworld/` and **runs it**:
+`tests/conformance/lib/check_corpus_roundtrip.py` derives a value-filled message
+for every message from the resolved IR, encodes and decodes it through the
+suite's harness on both decode surfaces and compares the result as data. A
+definition a profile cannot hold is listed as an exclusion with its reason in the
+suite's output, never skipped silently.
+
 ### `$ref` coverage
 
 - `defs/multi_ref.yaml` — one `$defs` type referenced four times → a single

@@ -14,6 +14,8 @@ set -eu
 . "$(dirname "$0")/../lib/stream_encode.sh"
 # The header_limits / invalid_utf8 side tables (generator#651).
 . "$(dirname "$0")/../lib/tables.sh"
+# Every corpus + realworld message, round-tripped (generator#655).
+. "$(dirname "$0")/../lib/corpus_roundtrip.sh"
 # Every backend Go test, run against the corelib with no skips allowed.
 . "$(dirname "$0")/../lib/backend_tests.sh"
 # Shared canonical-formatter check (ARCHITECTURE §12 gate 10).
@@ -1120,11 +1122,26 @@ unset SOFAB_PUREPYTHON || true
 echo "==> corpus + realworld: every definition imports"
 for def in "$ROOT"/tests/matrix/corpus/defs/*.yaml "$ROOT"/examples/messages/realworld/*.yaml; do
     name=$(basename "$def" .yaml)
-    ( cd "$ROOT" && go run ./cmd/sofabgen --format=off --lang python --in "$def" --out "$WORK/corpus/$name" >/dev/null )
+    # As a project, so the harness the round trip below runs is generated too.
+    ( cd "$ROOT" && go run ./cmd/sofabgen --format=off --config "$WORK/cfg.yaml" --lang python --in "$def" --out "$WORK/corpus/$name" >/dev/null )
     PYTHONPATH="$CORELIB/src:$WORK/corpus/$name" python3 -c "import message" \
         || { echo "FAIL: corpus def $name did not import"; exit 1; }
 done
 echo "==> corpus imports ($(ls "$ROOT"/tests/matrix/corpus/defs/*.yaml | wc -l) definitions + $(ls "$ROOT"/examples/messages/realworld/*.yaml | wc -l) realworld)"
+
+# ...and run: every message of every definition, encoded and decoded on both
+# surfaces, on every engine (generator#655).
+for ENGINE in $ENGINES; do
+    select_engine "$ENGINE"
+    for def in "$ROOT"/tests/matrix/corpus/defs/*.yaml "$ROOT"/examples/messages/realworld/*.yaml; do
+        name=$(basename "$def" .yaml)
+        corpus_roundtrip "python/$ENGINE" python "$def" "$WORK/corpus-$ENGINE.tally" \
+            --cwd "$WORK/corpus/$name" -- python3 harness.py
+    done
+    corpus_roundtrip_summary "python/$ENGINE" "$WORK/corpus-$ENGINE.tally"
+done
+unset SOFAB_PUREPYTHON || true
+if [ "$NATIVE" = yes ]; then require_engine native; else require_engine python; fi
 
 for ENGINE in $ENGINES; do
     select_engine "$ENGINE"

@@ -15,6 +15,8 @@ set -eu
 . "$(dirname "$0")/../lib/stream_encode.sh"
 # The header_limits / invalid_utf8 side tables (generator#651).
 . "$(dirname "$0")/../lib/tables.sh"
+# Every corpus + realworld message, round-tripped (generator#655).
+. "$(dirname "$0")/../lib/corpus_roundtrip.sh"
 # Every backend Go test, run against the corelib with no skips allowed.
 . "$(dirname "$0")/../lib/backend_tests.sh"
 
@@ -723,12 +725,18 @@ echo "==> keyword corpus compiles as C23"
 # (`o->return`), which is a hard error and was invisible while only the types
 # were built (generator#583).
 echo "==> corpus + realworld: every file builds as a project, harness included"
+rm -f "$WORK/corpus.tally"
 for def in "$ROOT"/tests/matrix/corpus/defs/*.yaml "$ROOT"/examples/messages/realworld/*.yaml; do
     name=$(basename "$def" .yaml)
     # The same deliberately-unbounded definitions the compile loop above skips:
     # the heapless C target requires a bound on every field, so none of them is a
     # valid C input.
-    case "$name" in no_maxlen | seq_elements_dyn | array_lengths_dyn) continue ;; esac
+    case "$name" in
+    no_maxlen | seq_elements_dyn | array_lengths_dyn)
+        corpus_roundtrip C c "$def" "$WORK/corpus.tally" \
+            --exclude-all "unbounded fields: the heapless C target requires a bound on every field"
+        continue ;;
+    esac
     ( cd "$ROOT" && go run ./cmd/sofabgen --config "$WORK/proj.yaml" --lang c --in "$def" --out "$WORK/rwproj/$name" >/dev/null )
     # BIG descriptor profile, like the compile loop: ids_and_meta.yaml carries
     # field ids past the default profile's id width and its generated header
@@ -736,8 +744,12 @@ for def in "$ROOT"/tests/matrix/corpus/defs/*.yaml "$ROOT"/examples/messages/rea
     make -C "$WORK/rwproj/$name" SOFAB_C_CORELIB="$CORELIB" \
         CFLAGS="-DSOFAB_OBJECT_DESCR_PROFILE=3" >/dev/null \
         || { echo "FAIL: $name did not build as a project"; exit 1; }
+    # ...and run: every message of the definition, encoded and decoded on both
+    # surfaces (generator#655).
+    corpus_roundtrip C c "$def" "$WORK/corpus.tally" -- "$WORK/rwproj/$name/harness/harness"
 done
 echo "==> projects build ($(ls "$ROOT"/tests/matrix/corpus/defs/*.yaml | wc -l) corpus definitions + $(ls "$ROOT"/examples/messages/realworld/*.yaml | wc -l) realworld files)"
+corpus_roundtrip_summary C "$WORK/corpus.tally"
 
 # corelib feature-subset configs. corelib-c-cpp can be built with SOFAB_DISABLE_*
 # macros to drop wire types for a smaller footprint. The generated code guards

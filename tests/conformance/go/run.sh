@@ -18,6 +18,8 @@ set -eu
 . "$(dirname "$0")/../lib/backend_tests.sh"
 # Generated code against the canonical formatter (ARCHITECTURE §12).
 . "$(dirname "$0")/../lib/check_format.sh"
+# Every corpus + realworld message, round-tripped (generator#655).
+. "$(dirname "$0")/../lib/corpus_roundtrip.sh"
 
 ROOT=$(cd "$(dirname "$0")/../../.." && pwd)
 CORELIB="${1:-${SOFAB_GO_CORELIB:-}}"
@@ -1255,8 +1257,13 @@ for def in "$ROOT"/tests/matrix/corpus/defs/*.yaml "$ROOT"/examples/messages/rea
     ( cd "$ROOT" && go run ./cmd/sofabgen --config "$WORK/cfg.yaml" --lang go --in "$def" --out "$WORK/corpus/$name" >/dev/null )
     sed -i "s#\${SOFAB_GO_CORELIB}#$CORELIB#" "$WORK/corpus/$name/go.mod"
     ( cd "$WORK/corpus/$name" && GOFLAGS=-mod=mod go build ./... )
+    # ...and run: every message of the definition, encoded and decoded on both
+    # surfaces (generator#655).
+    ( cd "$WORK/corpus/$name" && GOFLAGS=-mod=mod go build -o "$WORK/corpus-$name-harness" ./harness )
+    corpus_roundtrip Go go "$def" "$WORK/corpus.tally" -- "$WORK/corpus-$name-harness"
 done
 echo "==> corpus builds ($(ls "$ROOT"/tests/matrix/corpus/defs/*.yaml | wc -l) definitions + $(ls "$ROOT"/examples/messages/realworld/*.yaml | wc -l) realworld)"
+corpus_roundtrip_summary Go "$WORK/corpus.tally"
 
 
 # CORELIB_PLAN S7.2 item 8 -- the shared file's `sequence_growth` block

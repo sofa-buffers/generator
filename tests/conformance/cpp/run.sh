@@ -18,6 +18,8 @@ set -eu
 . "$(dirname "$0")/../lib/stream_encode.sh"
 # The header_limits / invalid_utf8 side tables (generator#651).
 . "$(dirname "$0")/../lib/tables.sh"
+# Every corpus + realworld message, round-tripped (generator#655).
+. "$(dirname "$0")/../lib/corpus_roundtrip.sh"
 # shellcheck source=../lib/backend_tests.sh
 . "$(dirname "$0")/../lib/backend_tests.sh"
 
@@ -1052,14 +1054,22 @@ YAML
         # The same deliberately-unbounded definitions the compile loop above skips
         # on the embedded profile.
         case "$corelib:$(basename "$def")" in
-        c-cpp:no_maxlen.yaml | c-cpp:seq_elements_dyn.yaml | c-cpp:array_lengths_dyn.yaml) continue ;;
+        c-cpp:no_maxlen.yaml | c-cpp:seq_elements_dyn.yaml | c-cpp:array_lengths_dyn.yaml)
+            corpus_roundtrip "C++ [$label]" cpp "$def" "$WORK/corpus-$label.tally" \
+                --exclude-all "unbounded fields: the embedded profile rejects them by design"
+            continue ;;
         esac
         name=$(basename "$def" .yaml)
         ( cd "$ROOT" && go run ./cmd/sofabgen --config "$WORK/cfg-$label.yaml" --lang cpp --in "$def" --out "$WORK/rwproj-$label/$name" >/dev/null )
         make -C "$WORK/rwproj-$label/$name" "$@" >/dev/null \
             || { echo "FAIL: [$label] $name did not build as a project"; exit 1; }
+        # ...and run: every message of the definition, encoded and decoded on both
+        # surfaces (generator#655).
+        corpus_roundtrip "C++ [$label]" cpp "$def" "$WORK/corpus-$label.tally" \
+            -- "$WORK/rwproj-$label/$name/harness/harness"
     done
     echo "==> [$label] projects build ($(ls "$ROOT"/tests/matrix/corpus/defs/*.yaml | wc -l) corpus definitions + $(ls "$ROOT"/examples/messages/realworld/*.yaml | wc -l) realworld files)"
+    corpus_roundtrip_summary "C++ [$label]" "$WORK/corpus-$label.tally"
 
     # Nested rows, DECODED (corelib-cpp#124). The loop above is -fsyntax-only, so
     # for nested_rows.yaml -- the one corpus definition carrying array<array<T>> --
@@ -1070,12 +1080,12 @@ YAML
     # no schema slot of its own. Every row was refused InvalidArgument and the
     # message could not read back its own encoder's output.
     #
-    # The check is a full JSON round-trip and it compares VALUES: the old failure
-    # produced a truncated `numrows` beside its refusal, so a status-only assert
-    # would have passed on it. The wrapper rows travel in the same message as the
-    # control -- they were always correct, being placed by generated code rather
-    # than by the corelib collector, and a regression in either half shows up as
-    # exactly one field going missing.
+    # The status is asserted here and the VALUES by the corpus round trip: the old
+    # failure produced a truncated `numrows` beside its refusal, so a status-only
+    # assert would have passed on it. The wrapper rows travel in the same message
+    # as the control -- they were always correct, being placed by generated code
+    # rather than by the corelib collector, and a regression in either half shows
+    # up as exactly one field going missing.
     echo "==> [$label] nested rows round-trip (corelib-cpp#124)"
     ( cd "$ROOT" && go run ./cmd/sofabgen --config "$WORK/cfg-$label.yaml" --lang cpp \
         --in "$ROOT/tests/matrix/corpus/defs/nested_rows.yaml" --out "$WORK/rows-$label" )
@@ -1088,19 +1098,8 @@ YAML
     ROWS_ST=$("$WORK/rows-$label/harness/harness" status NestedRows < "$ROWS_BIN")
     [ "$ROWS_ST" = COMPLETE ] \
         || { echo "FAIL: [$label] nested rows decode is $ROWS_ST, not COMPLETE"; exit 1; }
-    ROWS_OUT=$("$WORK/rows-$label/harness/harness" decode NestedRows < "$ROWS_BIN")
-    for chk in \
-        '"numrows":\[\[1,2,3\],\[4,5,6\]\]' \
-        '"fprows":\[\[1.5,2.5\],\[3.5\]\]' \
-        '"enumrows":\[\[0,1,2\],\[2\]\]' \
-        '"bfrows":\[\[1,2,3\],\[0\]\]' \
-        '"boolrows":\[\[true,false,true\],\[false\]\]' \
-        '"strrows":\[\["a","b","c"\],\["d"\]\]' \
-        '"blobrows":\[\[\[1,2\],\[3\]\],\[\[4\]\]\]' \
-        '"strcube":\[\[\["a","b"\],\["c"\]\],\[\["d"\]\]\]' \
-        '"structrows":\[\[{"x":1,"y":2},{"x":3,"y":4}\],\[{"x":5,"y":6}\]\]'; do
-        echo "$ROWS_OUT" | grep -q "$chk" || { echo "FAIL: [$label] nested rows round-trip missing $chk"; echo "  got: $ROWS_OUT"; exit 1; }
-    done
+    # The decoded VALUES of every row kind are compared by the corpus round trip
+    # above (generator#655), which runs nested_rows.yaml on this leg.
 
     # §7.1 on the ROW axis: `numrows`' inner `count: 3` bounds the row's own
     # element count, and 4 elements in a row is INVALID -- not LimitExceeded, the

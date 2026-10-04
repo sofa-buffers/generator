@@ -7014,7 +7014,31 @@ A reimplementation is **conformant** when it reproduces these gates:
 3. **Corpus** (`tests/matrix`) — a corner-case corpus generated across **all**
    backends; invalid defs are rejected; dangling-ref + depth-cap enforced.
    Per-language `run.sh` additionally **compiles/builds every corpus def** against
-   the corelib.
+   the corelib, and **runs every message of every corpus and realworld file**
+   through the suite's own harness (`tests/conformance/lib/check_corpus_roundtrip.py`,
+   driven by `corpus_roundtrip.sh`). Building proves the code compiles; the
+   shapes that exist only in those files -- cross-file `$ref` types, nested
+   wrapper rows of string/blob/struct and depth-3 rows, a declared field id at
+   ID_MAX (a 5-byte header varint) -- could otherwise be wrong in every backend
+   with every suite green. The driver reads the resolved IR (`sofabgen --dump-ir`,
+   so a cross-file `$ref` is already spelled out) and derives one deterministic
+   value-filled message per message: every field off its default (the schema's
+   defaults are not in the IR, so the harness decodes an empty message and a
+   candidate equal to what comes back is replaced), inside its declared bounds,
+   with 64-bit values above 2^53, a default element in the interior of an array
+   and a non-default last one, and unions holding their default option at a
+   non-default value; a message with a union gets a second round with each union
+   holding another option. It is encoded and decoded through `decode` and
+   `streamdecode`, and every field the fixture sets must come back (the decoded
+   message may carry more: the defaults the fixture left out). The cpp (both
+   corelibs), rust (std, no_std, `allow_dynamic`), typescript (`int64` bigint, long
+   and number) and python (both engines) legs run it in every configuration the
+   corpus loop builds. A definition a profile cannot hold -- the three
+   deliberately unbounded ones on the heapless C, `c-cpp` and no_std profiles -- is
+   an explicit exclusion with its reason in the printed summary
+   (`<n> definitions, <m> messages round-tripped, <k> excluded`), never a silent
+   skip. The SHA-256 of each message's encoding is recorded in the run's tally so a
+   later step can compare them across backends.
 4. **Corelib feature-subset matrix** — C (and the gated C++ wrapper) build
    generated code against each `SOFAB_DISABLE_*` config paired with a matching
    def, plus negative guard checks; Rust's no-std corpus spans the feature
@@ -7128,8 +7152,9 @@ A reimplementation is **conformant** when it reproduces these gates:
    following the element's own bound and not the container's. Both are hard
    errors, not diagnostics, and neither could surface until the harness itself
    was compiled. The deliberately-unbounded definitions (`no_maxlen`,
-   `seq_elements_dyn`, `array_lengths_dyn`) are skipped where the compile loop
-   already skips them: C always, C++ on the `c-cpp` profile.
+   `seq_elements_dyn`, `array_lengths_dyn`) are not built where the compile loop
+   already skips them -- C always, C++ on the `c-cpp` profile -- and are recorded
+   as exclusions by the round-trip driver.
 
    The generated C and C++ project Makefiles read `WARNFLAGS` (default
    `-Wall -Wextra`) apart from `CFLAGS`/`CXXFLAGS`, which is what lets one
