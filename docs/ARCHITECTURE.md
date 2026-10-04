@@ -7039,10 +7039,24 @@ A reimplementation is **conformant** when it reproduces these gates:
    (`<n> definitions, <m> messages round-tripped, <k> excluded`), never a silent
    skip. The SHA-256 of each message's encoding is recorded in the run's tally so a
    later step can compare them across backends.
-4. **Corelib feature-subset matrix** — C (and the gated C++ wrapper) build
-   generated code against each `SOFAB_DISABLE_*` config paired with a matching
-   def, plus negative guard checks; Rust's no-std corpus spans the feature
-   subsets.
+4. **Corelib feature-subset matrix** — C and the gated C++ wrapper (both
+   `allow_dynamic` storages) build the project harness against each
+   `SOFAB_DISABLE_*` config paired with a matching def, link it with the stripped
+   corelib and **run** it (`lib/check_feature_subset.py`, one table for both
+   suites). A stripped build is a format subset by design (CORELIB_PLAN §6.2.2:
+   conformance is measured on the full build), so the shared vectors are not run
+   on it; the driver checks instead that the features left on work (the stripped
+   build writes the full build's bytes and reads them back) and that a wire type
+   compiled out is `INVALID` at an unknown id while the full build skips it, on
+   the one-shot and the streaming surface. Negative guard checks (a used feature
+   disabled must not compile) stay compile-only. Rust cannot take part: the
+   generator always requests all five wire features (§7.3's skip needs every wire
+   type), so a narrow no-std feature set exists only in the capability-guard
+   rewrites of a generated `Cargo.toml`, which are checked to fail to build.
+   The C descriptor profiles run too: BIG runs the whole shared vector file
+   without `--max-id`; SMALL runs the skip matrix and the corpus round trip (the
+   typed/encode vectors hold a `composite` message larger than SMALL's 255-byte
+   ceiling, and the drivers refuse a run without it rather than drop it).
 5. **Golden reproducibility** — regenerate a fixed def for every backend and
    byte-diff against committed goldens (`tests/matrix/testdata/golden/`); plus a
    frozen IR golden. The goldens are `Generate` output, and a plain `sofabgen`

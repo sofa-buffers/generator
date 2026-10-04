@@ -1860,19 +1860,35 @@ subset_cpp() {  # label  expect(ok|fail)  "DISABLE flags"  "yaml"
     [ "$got" = "$expect" ] || { echo "FAIL: [$name] expected $expect, got $got ($flags)"; exit 1; }
     echo "   [$name] $got"
 }
-# Definitions that AVOID the disabled feature must still compile.
-subset_cpp noarray ok "-DSOFAB_DISABLE_ARRAY_SUPPORT" \
-    'version: 1
-messages: { m: { payload: { a: {id: 0, type: i32}, s: {id: 1, type: string, maxlen: 16}, st: {id: 2, type: struct, fields: {x: {id: 0, type: i32}}}, sa: {id: 3, type: array, items: {type: string, count: 3, maxlen: 16}} } } }'
-subset_cpp nofp64 ok "-DSOFAB_DISABLE_FP64_SUPPORT" \
-    'version: 1
-messages: { m: { payload: { a: {id: 0, type: i32}, f: {id: 1, type: fp32}, s: {id: 2, type: string, maxlen: 16}, arr: {id: 3, type: array, items: {type: u8, count: 4}} } } }'
-subset_cpp noint64 ok "-DSOFAB_DISABLE_INT64_SUPPORT" \
-    'version: 1
-messages: { m: { payload: { a: {id: 0, type: u32}, b: {id: 1, type: i32}, f: {id: 2, type: fp32}, s: {id: 3, type: string, maxlen: 16}, st: {id: 4, type: struct, fields: {x: {id: 0, type: i32}}} } } }'
-subset_cpp stripped ok "-DSOFAB_DISABLE_ARRAY_SUPPORT -DSOFAB_DISABLE_FP64_SUPPORT -DSOFAB_DISABLE_INT64_SUPPORT" \
-    'version: 1
-messages: { m: { payload: { a: {id: 0, type: u8}, b: {id: 1, type: i16}, c: {id: 2, type: i32}, s: {id: 3, type: string, maxlen: 16}, bl: {id: 4, type: blob, maxlen: 8}, st: {id: 5, type: struct, fields: {x: {id: 0, type: i32}}}, sa: {id: 6, type: array, items: {type: string, count: 3, maxlen: 16}} } } }'
+# Definitions that AVOID the disabled feature must still build -- and RUN
+# (generator#659): the project harness is built against the stripped wrapper and
+# the stripped C library behind it (CFLAGS and CXXFLAGS both carry the flags), once
+# more without them, and check_feature_subset.py shows that the features left on
+# work (stripped and full builds write the same bytes and read each other's) and
+# that a wire type that was compiled out is INVALID at an unknown id where the full
+# build skips it (CORELIB_PLAN S5.2.2, S6.2.2). The shared vectors are deliberately
+# not run on a stripped build: S6.2.2 measures conformance on the full build.
+# Both c-cpp storages are generated and run: the heapless one (allow_dynamic: false,
+# the default) is the profile this library ships for; the dynamic one is what the
+# cfg-clib config above, which the rows that must fail use, generates.
+FS="$ROOT/tests/conformance/lib/check_feature_subset.py"
+for st in dynamic static; do
+    dyn=true; [ "$st" = static ] && dyn=false
+    printf 'generic: { emit: project }\ntargets: { cpp: { namespace: sofabuffers, corelib: c-cpp, allow_dynamic: %s } }\n' \
+        "$dyn" > "$WORK/cfg-fs-$st.yaml"
+    for row in $(python3 "$FS" --list cpp); do
+        flags=$(python3 "$FS" --flags "$row")
+        python3 "$FS" --schema "$row" > "$WORK/subc_$row.yaml"
+        ( cd "$ROOT" && go run ./cmd/sofabgen --config "$WORK/cfg-fs-$st.yaml" --lang cpp --in "$WORK/subc_$row.yaml" --out "$WORK/subrun-$st-$row" >/dev/null )
+        cp -r "$WORK/subrun-$st-$row" "$WORK/subrunfull-$st-$row"
+        make -C "$WORK/subrunfull-$st-$row" SOFAB_C_DIR="$CC" >/dev/null \
+            || { echo "FAIL: [c-cpp-$st:$row] the full build of the subset schema did not build"; exit 1; }
+        make -C "$WORK/subrun-$st-$row" SOFAB_C_DIR="$CC" CFLAGS="$flags" CXXFLAGS="$flags" >/dev/null \
+            || { echo "FAIL: [c-cpp-$st:$row] generated C++ did not build against the stripped corelib ($flags)"; exit 1; }
+        python3 "$FS" "c-cpp-$st" "$row" --full "$WORK/subrunfull-$st-$row/harness/harness" \
+            -- "$WORK/subrun-$st-$row/harness/harness" || exit 1
+    done
+done
 # Definitions that USE the disabled feature must fail to compile.
 subset_cpp use_array fail "-DSOFAB_DISABLE_ARRAY_SUPPORT" \
     'version: 1
@@ -2015,8 +2031,15 @@ if command -v arm-none-eabi-g++ >/dev/null 2>&1; then
         done
     done
     echo "==> reserved.yaml builds on newlib on all four profiles"
+elif [ -n "${SOFAB_CROSS_STRICT:-}" ]; then
+    # lang-cpp installs the toolchain and sets this, so what is optional on a
+    # laptop is mandatory in CI (generator#659): a runner image that loses the
+    # package must fail here, not turn the leg into a quiet skip.
+    echo "FAIL: arm-none-eabi-g++ is not on PATH and SOFAB_CROSS_STRICT is set -- skipped: the header-macro"
+    echo "      re-measurement on newlib and the embedded syntax check of reserved.yaml."
+    exit 1
 else
-    echo "==> SKIP header macros on newlib: arm-none-eabi-g++ not on PATH"
+    echo "==> SKIP header macros on newlib: arm-none-eabi-g++ not on PATH (SOFAB_CROSS_STRICT=1 makes this a failure)"
 fi
 
 echo "PASS"

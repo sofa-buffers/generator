@@ -2,10 +2,10 @@
 # Reproducible Rust conformance harness: generate -> cargo build -> round-trip ->
 # byte-exact shared-vector conformance, run against BOTH Rust corelibs:
 #   - corelib-rs-no-std (default)      : #![no_std], heap-free, Cargo feature
-#     flags to shrink the binary. The generated crate turns every feature OFF and
-#     re-enables only the wire types each schema uses, so building the corpus
-#     exercises the full no-std feature-subset matrix (varint-only up to all
-#     features; 32-bit value type when no u64/i64 is present).
+#     flags to shrink the binary. The generated crate requests all five wire
+#     features whatever the schema uses (a S7.3 skip needs every wire type), so
+#     the corpus builds with the full set; a narrower set exists only in the
+#     capability-guard rewrites of its Cargo.toml.
 #   - corelib-rs       (corelib: rs)   : std, high-throughput, every wire type
 #     always compiled in (no feature flags, no require! guard).
 # Both expose the same sofab:: interface and identical wire output.
@@ -1785,8 +1785,7 @@ check_max_message_budget rust-no-std rust 'corelib: rs-no-std' --static
 # schema-bounded there whatever storage it uses, and allow_dynamic selects that
 # storage: alloc::String/alloc::Vec instead of heapless containers, for a target
 # that has an allocator. This leg exercises the alloc mode; the heapless default
-# is proven below. The corpus spans the feature-subset matrix under the same
-# config.
+# is proven below.
 # Static storage on the STD corelib (allow_dynamic: false against corelib-rs):
 # schema-bounded fields become heapless containers in an otherwise ordinary std
 # crate. The whole matrix runs again under it, because the property that matters
@@ -1950,14 +1949,30 @@ done
 echo "==> unbounded field is rejected in both storage modes"
 
 # The point of this one is the SMALLEST build the generator can produce, so it
-# uses the static profile: no allocator, and a varint-only schema needs none of
-# the corelib's wire features. It previously borrowed the dynamic leg's config,
-# which pulls alloc in -- the opposite of what a minimal-footprint check wants.
-echo "==> no-std feature-subset smoke: a varint-only schema builds with no features"
+# uses the static profile: no allocator. It previously borrowed the dynamic leg's
+# config, which pulls alloc in -- the opposite of what a minimal-footprint check
+# wants.
+#
+# It is NOT a feature-subset check, and it used to claim to be one (generator#659):
+# the generator always provisions all five wire features (`capabilities`, because a
+# S7.3 skip of an unknown field needs every wire type the corelib can read), so even
+# a varint-only schema requests the full set. A narrow feature set therefore exists
+# only in the guard_case rewrites above, and nothing with one is ever built or run;
+# the C and C++ suites, where SOFAB_DISABLE_* is a user switch, run theirs. What
+# this proves is that a varint-only crate builds heap-free, and the feature list is
+# asserted as generated so the day the generator narrows it, this leg says so.
+echo "==> no-std minimal build: a varint-only schema builds heap-free with the full feature set"
 printf 'version: 1\nmessages:\n  tiny: { payload: { a: { id: 0, type: i32 }, b: { id: 1, type: u16 }, c: { id: 2, type: boolean } } }\n' > "$WORK/tiny.yaml"
 printf 'generic: { emit: project }\ntargets: { rust: { corelib: rs-no-std } }\n' > "$WORK/cfg-tiny.yaml"
 ( cd "$ROOT" && go run ./cmd/sofabgen --format=off --config "$WORK/cfg-tiny.yaml" --lang rust --in "$WORK/tiny.yaml" --out "$WORK/tiny" )
-grep -q 'default-features = false' "$WORK/tiny/Cargo.toml" || { echo "FAIL: varint-only schema should need no sofab features"; exit 1; }
+FEATS=$(sed -n 's/^sofab = .*features = \[\(.*\)\].*/\1/p' "$WORK/tiny/Cargo.toml")
+[ "$FEATS" = '"array", "fixlen", "fp64", "sequence", "value64", "heapless"' ] || {
+    echo "FAIL: the varint-only crate's feature list is no longer the full set + heapless: [$FEATS]"
+    echo "      If the generator now narrows it, run that subset like the C suite does (generator#659)."
+    exit 1
+}
+grep -q 'default-features = false' "$WORK/tiny/Cargo.toml" || { echo "FAIL: the no_std crate must not take the corelib's default features"; exit 1; }
+if grep '^sofab = ' "$WORK/tiny/Cargo.toml" | grep -q '"alloc"\|"std"'; then echo "FAIL: the static varint-only crate must not enable the corelib's alloc or std"; exit 1; fi
 sed -i "s#\${SOFAB_RS_CORELIB}#$NOSTD#" "$WORK/tiny/Cargo.toml"
 crate_bin_name "$WORK/tiny"
 ( cd "$WORK/tiny" && cargo build -q )

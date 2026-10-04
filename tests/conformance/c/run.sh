@@ -754,38 +754,32 @@ corpus_roundtrip_summary C "$WORK/corpus.tally"
 # corelib feature-subset configs. corelib-c-cpp can be built with SOFAB_DISABLE_*
 # macros to drop wire types for a smaller footprint. The generated code guards
 # every feature it uses with an #error, so a definition that avoids the disabled
-# feature must still compile against that stripped corelib. Each row pairs a set
-# of disable macros with a definition that uses only the features left enabled.
-echo "==> corelib feature-subset configs: generated C compiles against each"
-subset_c() {  # label  "DISABLE flags"  "yaml"
-    name=$1; flags=$2; yaml=$3
-    printf '%s' "$yaml" > "$WORK/sub_$name.yaml"
-    ( cd "$ROOT" && go run ./cmd/sofabgen --lang c --in "$WORK/sub_$name.yaml" --out "$WORK/sub_$name" >/dev/null )
-    for c in "$WORK"/sub_$name/*.c; do
-        gcc -std=c99 $WARNFLAGS -DSOFAB_OBJECT_DESCR_PROFILE=3 $flags -I"$INC" -I"$WORK/sub_$name" -c "$c" -o /dev/null \
-            || { echo "FAIL: [$name] generated C did not compile against the corelib subset"; exit 1; }
-    done
-    echo "   [$name] compiles ($flags)"
-}
-ALL='-DSOFAB_DISABLE_FIXLEN_SUPPORT -DSOFAB_DISABLE_ARRAY_SUPPORT -DSOFAB_DISABLE_SEQUENCE_SUPPORT -DSOFAB_DISABLE_FP64_SUPPORT -DSOFAB_DISABLE_INT64_SUPPORT'
-subset_c min "$ALL" \
-    'version: 1
-messages: { m: { payload: { a: {id: 0, type: u8}, b: {id: 1, type: i16}, c: {id: 2, type: i32}, d: {id: 3, type: boolean} } } }'
-subset_c array "-DSOFAB_DISABLE_FIXLEN_SUPPORT -DSOFAB_DISABLE_SEQUENCE_SUPPORT -DSOFAB_DISABLE_FP64_SUPPORT -DSOFAB_DISABLE_INT64_SUPPORT" \
-    'version: 1
-messages: { m: { payload: { a: {id: 0, type: i32}, arr: {id: 1, type: array, items: {type: u8, count: 4}} } } }'
-subset_c fixlen "-DSOFAB_DISABLE_ARRAY_SUPPORT -DSOFAB_DISABLE_SEQUENCE_SUPPORT -DSOFAB_DISABLE_INT64_SUPPORT" \
-    'version: 1
-messages: { m: { payload: { a: {id: 0, type: i32}, s: {id: 1, type: string, maxlen: 16}, b: {id: 2, type: blob, maxlen: 8}, f: {id: 3, type: fp32}, g: {id: 4, type: fp64} } } }'
-subset_c sequence "-DSOFAB_DISABLE_ARRAY_SUPPORT -DSOFAB_DISABLE_FP64_SUPPORT -DSOFAB_DISABLE_INT64_SUPPORT" \
-    'version: 1
-messages: { m: { payload: { a: {id: 0, type: i32}, st: {id: 1, type: struct, fields: { x: {id: 0, type: i32} }}, sa: {id: 2, type: array, items: {type: string, count: 3, maxlen: 8}} } } }'
-subset_c nofp64 "-DSOFAB_DISABLE_FP64_SUPPORT" \
-    'version: 1
-messages: { m: { payload: { a: {id: 0, type: u64}, f: {id: 1, type: fp32}, s: {id: 2, type: string, maxlen: 16}, arr: {id: 3, type: array, items: {type: u8, count: 4}} } } }'
-subset_c noint64 "-DSOFAB_DISABLE_INT64_SUPPORT" \
-    'version: 1
-messages: { m: { payload: { a: {id: 0, type: u32}, b: {id: 1, type: i32}, f: {id: 2, type: fp32}, s: {id: 3, type: string, maxlen: 16} } } }'
+# feature must still build against that stripped corelib. Each row pairs a set of
+# disable macros with a definition that uses only the features left enabled.
+#
+# The rows are BUILT, LINKED AND RUN (generator#659): the project harness is built
+# once with the flags (the corelib sources too -- the Makefile hands CFLAGS to
+# every translation unit) and once without, then check_feature_subset.py shows
+# that the features left on work (stripped and full builds write the same bytes
+# and read each other's) and that a wire type that was compiled out is INVALID at
+# an unknown id, where the full build skips it (CORELIB_PLAN S5.2.2, S6.2.2: a
+# type loss is refused, not skipped). The shared vectors are deliberately not run
+# on a stripped build: S6.2.2 measures conformance on the full build.
+echo "==> corelib feature-subset configs: generated C builds and runs against each"
+FS="$ROOT/tests/conformance/lib/check_feature_subset.py"
+printf 'generic: { emit: project }\ntargets: { c: { symbol_prefix: sofab_ } }\n' > "$WORK/fs-proj.yaml"
+for row in $(python3 "$FS" --list c); do
+    flags=$(python3 "$FS" --flags "$row")
+    python3 "$FS" --schema "$row" > "$WORK/sub_$row.yaml"
+    ( cd "$ROOT" && go run ./cmd/sofabgen --config "$WORK/fs-proj.yaml" --lang c --in "$WORK/sub_$row.yaml" --out "$WORK/sub_$row" >/dev/null )
+    cp -r "$WORK/sub_$row" "$WORK/subfull_$row"
+    make -C "$WORK/subfull_$row" SOFAB_C_CORELIB="$CORELIB" >/dev/null \
+        || { echo "FAIL: [$row] the full build of the subset schema did not build"; exit 1; }
+    make -C "$WORK/sub_$row" SOFAB_C_CORELIB="$CORELIB" CFLAGS="$flags" >/dev/null \
+        || { echo "FAIL: [$row] generated C did not build against the corelib subset ($flags)"; exit 1; }
+    python3 "$FS" c "$row" --full "$WORK/subfull_$row/harness/harness" \
+        -- "$WORK/sub_$row/harness/harness" || exit 1
+done
 
 echo "==> negative: a guard fires when a used feature is disabled in the corelib"
 # (the full example uses every feature; each disable macro must trip its #error)
@@ -1004,6 +998,81 @@ echo "==> shared-vector encode conformance"
 python3 "$ROOT/tests/conformance/lib/check_vectors_encode.py" \
     "$CORELIB/assets/test_vectors.json" "C" --max-id 65535 --inf-json overflow \
     -- "$WORK/vecskip/harness/harness"
+
+# The descriptor profiles, RUN (generator#659). Every leg above builds with the
+# default MEDIUM profile, which holds a 16-bit field id (hence --max-id 65535);
+# SOFAB_OBJECT_DESCR_PROFILE changes the width of the id, offset and size in every
+# descriptor entry, so the other two are different generated tables read by
+# different corelib code and each gets its own runtime leg.
+#
+# BIG (3) holds the largest id, so the vector drivers run WITHOUT --max-id: the
+# anchor at 100001 and the `id_max` vectors are declared and read, and the whole
+# vector file is checked on all three drivers and both decode surfaces.
+echo "==> descriptor profile BIG: shared vectors without --max-id (generator#659)"
+printf 'version: 1\nmessages:\n' > "$WORK/vecbig.yaml"
+python3 "$ROOT/tests/conformance/lib/check_vectors_decode.py" --emit-schema >> "$WORK/vecbig.yaml"
+python3 "$ROOT/tests/conformance/lib/check_vectors_encode.py" --emit-schema \
+    "$CORELIB/assets/test_vectors.json" >> "$WORK/vecbig.yaml"
+( cd "$ROOT" && go run ./cmd/sofabgen --config "$WORK/proj.yaml" --lang c \
+    --in "$WORK/vecbig.yaml" --out "$WORK/vecbig" >/dev/null )
+make -C "$WORK/vecbig" SOFAB_C_CORELIB="$CORELIB" CFLAGS="-DSOFAB_OBJECT_DESCR_PROFILE=3" >/dev/null \
+    || { echo "FAIL: the vector schema did not build under the BIG descriptor profile"; exit 1; }
+for surface in decode streamdecode; do
+    python3 "$ROOT/tests/conformance/lib/check_vectors_decode.py" \
+        "$CORELIB/assets/test_vectors.json" "C [BIG]" --mode "$surface" \
+        -- "$WORK/vecbig/harness/harness"
+    python3 "$ROOT/tests/conformance/lib/check_vectors_decode.py" --typed \
+        "$CORELIB/assets/test_vectors.json" "C [BIG]" --mode "$surface" \
+        -- "$WORK/vecbig/harness/harness"
+done
+python3 "$ROOT/tests/conformance/lib/check_vectors_encode.py" \
+    "$CORELIB/assets/test_vectors.json" "C [BIG]" --inf-json overflow \
+    -- "$WORK/vecbig/harness/harness"
+
+# SMALL (1) holds an 8-bit id, offset and size, so a schema must keep every field
+# id and every struct's byte size within 255. Two legs. The shared skip matrix runs
+# with --max-id 255 on both decode surfaces. The typed-decode and encode vectors do
+# not: the file's `composite` vector alone is a 336-byte struct, which SMALL refuses
+# at compile time by design, and both drivers fail a run that has no composite
+# vector rather than drop it quietly. So the corpus and realworld definitions are
+# the SMALL value round trip: each builds as a project under SMALL and every
+# message is encoded and decoded on both surfaces. A definition the profile cannot
+# hold is excluded by name, and only after its build log shows the profile's own
+# ceiling check as the reason -- any other build failure is a failure.
+echo "==> descriptor profile SMALL: skip matrix and corpus round trip (generator#659)"
+printf 'version: 1\nmessages:\n' > "$WORK/vecsmall.yaml"
+python3 "$ROOT/tests/conformance/lib/check_vectors_decode.py" --emit-schema --max-id 255 >> "$WORK/vecsmall.yaml"
+( cd "$ROOT" && go run ./cmd/sofabgen --config "$WORK/proj.yaml" --lang c \
+    --in "$WORK/vecsmall.yaml" --out "$WORK/vecsmall" >/dev/null )
+make -C "$WORK/vecsmall" SOFAB_C_CORELIB="$CORELIB" CFLAGS="-DSOFAB_OBJECT_DESCR_PROFILE=1" >/dev/null \
+    || { echo "FAIL: the skip-matrix schema did not build under the SMALL descriptor profile"; exit 1; }
+for surface in decode streamdecode; do
+    python3 "$ROOT/tests/conformance/lib/check_vectors_decode.py" \
+        "$CORELIB/assets/test_vectors.json" "C [SMALL]" --max-id 255 --mode "$surface" \
+        -- "$WORK/vecsmall/harness/harness"
+done
+rm -f "$WORK/small.tally"
+for def in "$ROOT"/tests/matrix/corpus/defs/*.yaml "$ROOT"/examples/messages/realworld/*.yaml; do
+    name=$(basename "$def" .yaml)
+    case "$name" in
+    no_maxlen | seq_elements_dyn | array_lengths_dyn)
+        corpus_roundtrip "C [SMALL]" c "$def" "$WORK/small.tally" \
+            --exclude-all "unbounded fields: the heapless C target requires a bound on every field"
+        continue ;;
+    esac
+    ( cd "$ROOT" && go run ./cmd/sofabgen --config "$WORK/proj.yaml" --lang c --in "$def" --out "$WORK/smallproj/$name" >/dev/null )
+    if make -C "$WORK/smallproj/$name" SOFAB_C_CORELIB="$CORELIB" \
+            CFLAGS="-DSOFAB_OBJECT_DESCR_PROFILE=1" >"$WORK/smallproj/$name.log" 2>&1; then
+        corpus_roundtrip "C [SMALL]" c "$def" "$WORK/small.tally" -- "$WORK/smallproj/$name/harness/harness"
+    elif grep -q 'field_exceeds_the_SOFAB_OBJECT_DESCR_PROFILE_id_offset_or_size_ceiling' "$WORK/smallproj/$name.log"; then
+        corpus_roundtrip "C [SMALL]" c "$def" "$WORK/small.tally" \
+            --exclude-all "a field id, offset or size exceeds the SMALL descriptor ceiling (255)"
+    else
+        cat "$WORK/smallproj/$name.log"
+        echo "FAIL: $name did not build under the SMALL descriptor profile, and not for its ceiling"; exit 1
+    fi
+done
+corpus_roundtrip_summary "C [SMALL]" "$WORK/small.tally"
 
 # MESSAGE_SPEC §7.4 -- a field id REPEATED inside one scope (generator#523). The
 # rule has two halves and this checks BOTH on one message: a re-opened SEQUENCE
