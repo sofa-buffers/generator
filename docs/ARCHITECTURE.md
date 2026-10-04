@@ -5484,8 +5484,8 @@ produce two different generated shapes, and conflating them is a truncation bug:
   corelibs have no sticky error flag; a corelib that latched the first failure and
   reported it once at `finish` would let the generated code drop the per-write branch
   and recover most of this, and is the place to look if the footprint rows need it back.
-  Zig spells the bounded shape in four emitted lines in `encode()` (allocate
-  `MAX_SIZE` from the caller's allocator, `OStream.init`, `serialize`, `realloc` down
+  Zig spells the bounded shape in a few emitted lines in `encode()` (allocate
+  `MAX_SIZE` from the caller's allocator with an `errdefer` free, `OStream.init`, `serialize`, `realloc` down
   to `bytesUsed()`), so the returned slice is owned and exactly the encoded size; an
   over-bound message returns `error.BufferFull`. Measured (`tests/bench/run.sh
   --rows zig`, same corelib): `zig` encode Ir/op 10118 -> 9135 (-9.7 %), decode
