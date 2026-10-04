@@ -15,6 +15,7 @@ set -eu
 . "$(dirname "$0")/../lib/corelib.sh"
 . "$(dirname "$0")/../lib/maxsize_fill.sh"
 . "$(dirname "$0")/../lib/max_message_size.sh"
+. "$(dirname "$0")/../lib/stream_encode.sh"
 # The header_limits / invalid_utf8 side tables (generator#651).
 . "$(dirname "$0")/../lib/tables.sh"
 # shellcheck source=../lib/backend_tests.sh
@@ -177,6 +178,19 @@ run_variant() {
     check_maxsize_fill "$label" "$WORK/fill-$label/harness/harness" encode fill
     check_maxsize_fill_decode "$label" "$WORK/fill-$label/harness/harness" decode fill
     check_maxsize_fill_decode "$label"/stream "$WORK/fill-$label/harness/harness" streamdecode fill
+
+    # Multi-drain encode (generator#653, ARCHITECTURE §9.2/§9.6): a message of tens
+    # of KB through the one-shot encode and through the harness `streamencode` verb
+    # at several window sizes. The bounded variant of the schema, so every profile
+    # (including the fixed-storage one) can hold it: the drain path is what is under
+    # test, not the allocator. The unbounded one-shot encode is checked with the
+    # max_message_size legs.
+    echo "==> [$label] stream encode: a multi-KB message through the drain path (generator#653)"
+    stream_encode_schema "$WORK/stream-$label.yaml" bounded
+    ( cd "$ROOT" && go run ./cmd/sofabgen --config "$WORK/cfg-$label.yaml" --lang cpp \
+        --in "$WORK/stream-$label.yaml" --out "$WORK/streamenc-$label" )
+    make -C "$WORK/streamenc-$label" "$@" >/dev/null
+    check_stream_encode "$label" --base64-bytes -- "$WORK/streamenc-$label/harness/harness"
 
     # The fill schema is the one place in this suite that carries every wire
     # shape, so it is also the one header most likely to hit a literal or
@@ -1917,6 +1931,14 @@ for mms in default:4096 small:64; do
     check_max_message_size cpp "$ceil" -- "$WORK/mms-$tag/harness/harness"
 done
 check_max_message_budget cpp cpp 'namespace: sofabuffers'
+
+# The unbounded one-shot encode() drains a fixed scratch into a vector (generator#653).
+echo "==> stream encode, unbounded: a multi-KB message through the drain path (generator#653)"
+stream_encode_schema "$WORK/stream-unbounded.yaml"
+( cd "$ROOT" && go run ./cmd/sofabgen --config "$WORK/cfg-mms-default.yaml" --lang cpp \
+    --in "$WORK/stream-unbounded.yaml" --out "$WORK/stream-unbounded" )
+make -C "$WORK/stream-unbounded" SOFAB_CPP_DIR="$CPP" SOFAB_C_DIR="$CC" >/dev/null
+check_stream_encode cpp-unbounded --base64-bytes -- "$WORK/stream-unbounded/harness/harness"
 # corelib: c-cpp is fixed storage: no unbounded encode, so the budget half and
 # the rejection of an unbounded field only.
 check_max_message_budget cpp-c-cpp cpp 'namespace: sofabuffers, corelib: c-cpp' --static

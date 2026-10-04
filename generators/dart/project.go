@@ -91,7 +91,7 @@ func (g *gen) harness(s *ir.Schema) []byte {
 	// a rejected (INVALID/INCOMPLETE/limitExceeded) decode from a clean one.
 	f.line("void main(List<String> args) {")
 	f.line("  if (args.isEmpty) {")
-	f.line("    io.stderr.writeln('usage: harness <encode|decode|streamdecode|trydecode|recode|bench> [Message|workload]');")
+	f.line("    io.stderr.writeln('usage: harness <encode|decode|streamdecode|streamencode|trydecode|recode|bench> [Message|workload]');")
 	f.line("    io.exit(2);")
 	f.line("  }")
 	f.line("  final mode = args[0];")
@@ -107,6 +107,23 @@ func (g *gen) harness(s *ir.Schema) []byte {
 		f.line("      if (mode == 'encode') {")
 		f.line("        final obj = %s(convert.jsonDecode(convert.utf8.decode(input)) as Map<String, dynamic>);", fromJSONName(raw))
 		f.line("        io.stdout.add(obj.encode());")
+		// The encode twin of streamdecode: the same message through a sink, drained
+		// into a builder the harness owns. Window 0 is the generated one-shot
+		// `encode()`; any other window is an Encoder over a buffer of that size
+		// (raised to the corelib's floor) driven through the generated `encodeTo`, so
+		// a drain lands on every kind of boundary.
+		// tests/conformance/lib/check_stream_encode.py sweeps it.
+		f.line("      } else if (mode == 'streamencode') {")
+		f.line("        final obj = %s(convert.jsonDecode(convert.utf8.decode(input)) as Map<String, dynamic>);", fromJSONName(raw))
+		f.line("        final win = args.length > 2 ? int.parse(args[2]) : 0;")
+		f.line("        if (win == 0) {")
+		f.line("          io.stdout.add(obj.encode());")
+		f.line("        } else {")
+		f.line("          final sink = typed.BytesBuilder(copy: true);")
+		f.line("          obj.encodeTo(sofab.Encoder(sink.add,")
+		f.line("              buffer: typed.Uint8List(win < sofab.minOutputBuffer ? sofab.minOutputBuffer : win)));")
+		f.line("          io.stdout.add(sink.toBytes());")
+		f.line("        }")
 		f.line("      } else if (mode == 'decode') {")
 		f.line("        final obj = %s();", mt)
 		f.line("        final st = %s.tryDecode(input, obj);", mt)

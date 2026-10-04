@@ -6106,6 +6106,27 @@ A reimplementation is **conformant** when it reproduces these gates:
    `no_std`) have no unbounded encode, so there it asserts only that half plus the
    generate-time rejection of an unbounded field.
 
+   *Multi-drain encode* (`tests/conformance/lib/check_stream_encode.py`,
+   generator#653): §9.2's streaming encode and §9.6's scratch-plus-sink one-shot
+   `encode()` only prove anything once the scratch fills more than once, and every
+   other fixture encodes to a few hundred bytes, below the 512-byte scratch, so a
+   sink bug (wrong slice bounds, a buffer reused before it was copied, a lost tail
+   at `flush`) passed every suite. The driver prints a schema (`--emit-schema`: an
+   unbounded string, blob, u32 native array, fp64 native array, wrapper array of
+   strings and a struct holding a large blob, so a frame spans drains;
+   `--emit-bounded-schema` is the same message with large `maxlen`/`count` for the
+   fixed-storage targets), builds the 45 423-byte wire itself and requires at least
+   8 KiB. Every suite runs the one-shot `encode` against those bytes, then the
+   harness `streamencode <Message> <window>` verb at windows 0, 1, 7, 511, 512 and
+   513 (window 0 is the generated one-shot or streaming method with its own
+   scratch; any other window is a sink buffer of that size, raised to the corelib's
+   `MIN_OUTPUT_BUFFER`, driven through `encodeTo` where the backend has one and
+   through `serialize` where it does not), each of which must equal the one-shot
+   bytes and decode back as data. c, cpp (both corelibs) and rust (`no_std`
+   profiles) run the bounded variant; rust and cpp also run the unbounded schema
+   on their dynamic profile. `tests/matrix/streamencode_test.go` pins the verb into
+   every registered backend's harness.
+
    *Tagged unions* (`tests/conformance/lib/check_union.py`, generator#608): a
    union holds exactly one option (MESSAGE_SPEC §4.2, §7.4.1; §11 *Tagged
    unions*). The driver prints its whole document (`--emit-schema`: a `$defs`

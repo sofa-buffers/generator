@@ -215,6 +215,24 @@ func (g *gen) mainHarness(s *ir.Schema) []byte {
 		b.line("                    _Json.from(_JsonValue.parse(input.decodeToString()).obj(), obj)")
 		b.line("                    java.lang.System.out.write(obj.encode())")
 		b.line("                }")
+		// The encode twin of streamdecode: the same message through a sink, drained
+		// into an accumulator the harness owns. Window 0 is the generated one-shot
+		// `encode()`; any other window is an OStream of that size (raised to the
+		// corelib's floor) driven through the generated `encodeTo`, so a drain lands
+		// on every kind of boundary. tests/conformance/lib/check_stream_encode.py
+		// sweeps it.
+		b.line("                \"streamencode\" -> {")
+		b.line("                    val obj = %s()", mt)
+		b.line("                    _Json.from(_JsonValue.parse(input.decodeToString()).obj(), obj)")
+		b.line("                    val win = if (args.size > 2) args[2].toInt() else 0")
+		b.line("                    if (win == 0) {")
+		b.line("                        java.lang.System.out.write(obj.encode())")
+		b.line("                    } else {")
+		b.line("                        val acc = PayloadAcc()")
+		b.line("                        obj.encodeTo(OStream(ByteArray(maxOf(win, org.sofabuffers.sofab.Sofab.MIN_OUTPUT_BUFFER)), 0, acc))")
+		b.line("                        java.lang.System.out.write(acc.toByteArray())")
+		b.line("                    }")
+		b.line("                }")
 		b.line("                \"decode\" -> {")
 		b.line("                    val obj = %s.decode(input)", mt)
 		b.line("                    val sb = kotlin.text.StringBuilder(); _Json.to(obj, sb)")

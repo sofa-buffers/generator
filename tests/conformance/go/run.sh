@@ -11,6 +11,7 @@ set -eu
 # Shared MAX_SIZE fill check (ARCHITECTURE §9.6).
 . "$(dirname "$0")/../lib/maxsize_fill.sh"
 . "$(dirname "$0")/../lib/max_message_size.sh"
+. "$(dirname "$0")/../lib/stream_encode.sh"
 # The header_limits / invalid_utf8 side tables (generator#651).
 . "$(dirname "$0")/../lib/tables.sh"
 # Every backend Go test, run against the corelib with no skips allowed.
@@ -1298,6 +1299,18 @@ for mms in default:cfg.yaml:4096 small:cfg-mms.yaml:64; do
     check_max_message_size go "$ceil" -- "$WORK/mms-$tag-harness"
 done
 check_max_message_budget go go 'package: message, module_path: example.com/gen, go_version: "1.21"'
+
+# Multi-drain encode (generator#653, ARCHITECTURE §9.2/§9.6): an unbounded
+# one-shot encode() drains a fixed scratch into the result, and every other
+# fixture here is smaller than that scratch, so the drain ran at most once. A
+# message of tens of KB through encode() and through the harness `streamencode`
+# verb (window 0 = the generated EncodeTo, others = a sink of that size).
+echo "==> stream encode: a multi-KB message through the drain path (generator#653)"
+stream_encode_schema "$WORK/stream.yaml"
+( cd "$ROOT" && go run ./cmd/sofabgen --config "$WORK/cfg.yaml" --lang go --in "$WORK/stream.yaml" --out "$WORK/stream" )
+sed -i "s#\${SOFAB_GO_CORELIB}#$CORELIB#" "$WORK/stream/go.mod"
+( cd "$WORK/stream" && GOFLAGS=-mod=mod go build -o "$WORK/stream-harness" ./harness )
+check_stream_encode go --base64-bytes -- "$WORK/stream-harness"
 
 
 # MESSAGE_SPEC §7.4 -- a field id REPEATED inside one scope (generator#523). The

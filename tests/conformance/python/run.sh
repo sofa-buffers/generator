@@ -11,6 +11,7 @@ set -eu
 # Shared MAX_SIZE fill check (ARCHITECTURE §9.6).
 . "$(dirname "$0")/../lib/maxsize_fill.sh"
 . "$(dirname "$0")/../lib/max_message_size.sh"
+. "$(dirname "$0")/../lib/stream_encode.sh"
 # The header_limits / invalid_utf8 side tables (generator#651).
 . "$(dirname "$0")/../lib/tables.sh"
 # Every backend Go test, run against the corelib with no skips allowed.
@@ -1198,6 +1199,22 @@ done
 unset SOFAB_PUREPYTHON || true
 if [ "$NATIVE" = yes ]; then require_engine native; else require_engine python; fi
 check_max_message_budget python python ''
+
+# Multi-drain encode (generator#653, ARCHITECTURE §9.2/§9.6): an unbounded
+# one-shot encode() drains a fixed scratch into the result, and every other
+# fixture here is smaller than that scratch, so the drain ran at most once. A
+# message of tens of KB through encode() and through the harness `streamencode`
+# verb at several window sizes, on both engines (the accelerator has its own
+# flush path).
+echo "==> stream encode: a multi-KB message through the drain path (generator#653)"
+stream_encode_schema "$WORK/stream.yaml"
+( cd "$ROOT" && go run ./cmd/sofabgen --format=off --config "$WORK/cfg.yaml" --lang python --in "$WORK/stream.yaml" --out "$WORK/stream" >/dev/null )
+for ENGINE in $ENGINES; do
+    select_engine "$ENGINE"
+    check_stream_encode "python/$ENGINE" --cwd "$WORK/stream" -- python3 harness.py
+done
+unset SOFAB_PUREPYTHON || true
+if [ "$NATIVE" = yes ]; then require_engine native; else require_engine python; fi
 
 
 # CORELIB_PLAN S5.2/S6.0/S5.2.3, one property: the verdict AND the decoded value

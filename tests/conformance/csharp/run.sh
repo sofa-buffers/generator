@@ -14,6 +14,7 @@ set -eu
 # Backend Go tests against the real corelib (lib/backend_tests.sh).
 . "$(dirname "$0")/../lib/backend_tests.sh"
 . "$(dirname "$0")/../lib/max_message_size.sh"
+. "$(dirname "$0")/../lib/stream_encode.sh"
 # The header_limits / invalid_utf8 side tables (generator#651).
 . "$(dirname "$0")/../lib/tables.sh"
 
@@ -1094,6 +1095,16 @@ check_max_size_limit csharp 64 "$WORK/mms-small/Message.cs" 'MaxSizeLimit = @@;$
 check_max_message_size csharp 4096 -- dotnet "$WORK/mms-default/bin/Debug/net9.0/harness.dll"
 check_max_message_size csharp 64 -- dotnet "$WORK/mms-small/bin/Debug/net9.0/harness.dll"
 check_max_message_budget csharp csharp 'namespace: Sofabuffers'
+
+# Multi-drain encode (generator#653, ARCHITECTURE §9.2/§9.6): an unbounded
+# one-shot encode drains a fixed scratch into the result, and every other
+# fixture here is smaller than that scratch, so the drain ran at most once. A
+# message of tens of KB through the one-shot encode and through the harness
+# `streamencode` verb at several window sizes.
+echo "==> stream encode: a multi-KB message through the drain path (generator#653)"
+stream_encode_schema "$WORK/stream.yaml"
+build "$WORK/stream.yaml" "$WORK/stream"
+check_stream_encode csharp --base64-bytes -- dotnet "$WORK/stream/bin/Debug/net9.0/harness.dll"
 
 
 # CORELIB_PLAN S5.2/S6.0/S5.2.3, one property: the verdict AND the decoded value

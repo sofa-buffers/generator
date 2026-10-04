@@ -11,6 +11,7 @@ set -eu
 # Shared MAX_SIZE fill check (ARCHITECTURE §9.6).
 . "$(dirname "$0")/../lib/maxsize_fill.sh"
 . "$(dirname "$0")/../lib/max_message_size.sh"
+. "$(dirname "$0")/../lib/stream_encode.sh"
 # The header_limits / invalid_utf8 side tables (generator#651).
 . "$(dirname "$0")/../lib/tables.sh"
 # Shared canonical-formatter check (ARCHITECTURE §12 gate 10). Also what keeps
@@ -1425,6 +1426,17 @@ check_max_size_limit typescript 64 "$WORK/mms-small/message.ts" 'MAX_SIZE_LIMIT 
 check_max_message_size typescript 4096 --cwd "$WORK/mms-default" -- "$TH"
 check_max_message_size typescript 64 --cwd "$WORK/mms-small" -- "$TH"
 check_max_message_budget typescript typescript ''
+
+# Multi-drain encode (generator#653, ARCHITECTURE §9.2/§9.6): an unbounded
+# one-shot encode drains a fixed scratch into the result, and every other
+# fixture here is smaller than that scratch, so the drain ran at most once. A
+# message of tens of KB through the one-shot encode and through the harness
+# `streamencode` verb at several window sizes.
+echo "==> stream encode: a multi-KB message through the drain path (generator#653)"
+stream_encode_schema "$WORK/stream.yaml"
+gen "$WORK/stream.yaml" "$WORK/stream"
+ln -s "$WORK/ex/node_modules" "$WORK/stream/node_modules"
+check_stream_encode typescript --int-strings --base64-bytes --cwd "$WORK/stream" -- "$TH"
 
 
 # An `enum` and a `bitfield` are bound by the WIDTH their declaration IMPLIES

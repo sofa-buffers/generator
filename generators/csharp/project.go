@@ -84,7 +84,7 @@ func (g *gen) harness(s *ir.Schema) []byte {
 	f.line("    static readonly JsonSerializerOptions Opts = new() { IncludeFields = true, NumberHandling = JsonNumberHandling.AllowNamedFloatingPointLiterals, Converters = { %s } };", strings.Join(convs, ", "))
 	g.emitBenchBody(f, s)
 	f.line("    static int Main(string[] args) {")
-	f.line("        if (args.Length < 1) { Console.Error.WriteLine(\"usage: harness <encode|decode|streamdecode|trydecode|bench> [Message|workload]\"); return 2; }")
+	f.line("        if (args.Length < 1) { Console.Error.WriteLine(\"usage: harness <encode|decode|streamdecode|streamencode|trydecode|bench> [Message|workload]\"); return 2; }")
 	f.line("        string mode = args[0];")
 	f.line("        string name = args.Length > 1 ? args[1] : %q;", defaultMessage(s))
 	f.line("        using var ms = new MemoryStream();")
@@ -102,6 +102,24 @@ func (g *gen) harness(s *ir.Schema) []byte {
 		f.line("            if (mode == \"encode\") {")
 		f.line("                var obj = JsonSerializer.Deserialize<%s>(input, Opts);", mt)
 		f.line("                var bytes = obj.Encode(); stdout.Write(bytes, 0, bytes.Length);")
+		// The encode twin of streamdecode: the same message through a sink, drained
+		// into a buffer the harness owns. Window 0 is the generated one-shot
+		// `Encode()`; any other window is an OStream of that size (raised to the
+		// corelib's floor) driven through the generated `EncodeTo`, so a drain lands
+		// on every kind of boundary. tests/conformance/lib/check_stream_encode.py
+		// sweeps it.
+		f.line("            } else if (mode == \"streamencode\") {")
+		f.line("                var obj = JsonSerializer.Deserialize<%s>(input, Opts);", mt)
+		f.line("                var win = args.Length > 2 ? int.Parse(args[2]) : 0;")
+		f.line("                byte[] bytes;")
+		f.line("                if (win == 0) {")
+		f.line("                    bytes = obj.Encode();")
+		f.line("                } else {")
+		f.line("                    var sinkStream = new System.IO.MemoryStream();")
+		f.line("                    obj.EncodeTo(new global::sofab.OStream(new byte[Math.Max(win, global::sofab.Sofab.MinOutputBuffer)], 0, sinkStream.Write));")
+		f.line("                    bytes = sinkStream.ToArray();")
+		f.line("                }")
+		f.line("                stdout.Write(bytes, 0, bytes.Length);")
 		f.line("            } else if (mode == \"decode\") {")
 		f.line("                var obj = %s.Decode(input);", mt)
 		f.line("                var json = JsonSerializer.SerializeToUtf8Bytes(obj, Opts);")

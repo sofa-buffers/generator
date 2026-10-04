@@ -12,6 +12,7 @@ set -eu
 . "$(dirname "$0")/../lib/corelib.sh"
 . "$(dirname "$0")/../lib/maxsize_fill.sh"
 . "$(dirname "$0")/../lib/max_message_size.sh"
+. "$(dirname "$0")/../lib/stream_encode.sh"
 # The header_limits / invalid_utf8 side tables (generator#651).
 . "$(dirname "$0")/../lib/tables.sh"
 # Every backend Go test, run against the corelib with no skips allowed.
@@ -94,6 +95,17 @@ check_maxsize_constant c "$WORK/fillproj/generated/fill_sofab.h" \
 check_maxsize_fill c "$WORK/fillproj/harness/harness" encode fill
 check_maxsize_fill_decode c "$WORK/fillproj/harness/harness" decode fill
 check_maxsize_fill_decode c/stream "$WORK/fillproj/harness/harness" streamdecode fill
+
+# Multi-drain encode (generator#653, ARCHITECTURE §9.2): a message of tens of KB
+# through the one-shot encode and through the harness `streamencode` verb at several
+# window sizes. C holds every field in a bounded object, so the schema is the bounded
+# variant with large bounds: the drain path is what is under test.
+echo "==> stream encode: a multi-KB message through the drain path (generator#653)"
+stream_encode_schema "$WORK/stream-enc.yaml" bounded
+( cd "$ROOT" && go run ./cmd/sofabgen --config "$WORK/fill-proj.yaml" --lang c \
+    --in "$WORK/stream-enc.yaml" --out "$WORK/streamenc" )
+make -C "$WORK/streamenc" SOFAB_C_CORELIB="$CORELIB" >/dev/null
+check_stream_encode c --base64-bytes -- "$WORK/streamenc/harness/harness"
 
 echo "==> streaming: encode through a sink, feed the decoder byte by byte"
 ( cd "$ROOT" && go run ./cmd/sofabgen --lang c \

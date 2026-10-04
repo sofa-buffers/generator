@@ -19,6 +19,7 @@ set -eu
 . "$(dirname "$0")/../lib/corelib.sh"
 . "$(dirname "$0")/../lib/maxsize_fill.sh"
 . "$(dirname "$0")/../lib/max_message_size.sh"
+. "$(dirname "$0")/../lib/stream_encode.sh"
 # The header_limits / invalid_utf8 side tables (generator#651).
 . "$(dirname "$0")/../lib/tables.sh"
 # Generated code against the canonical formatter (ARCHITECTURE §12).
@@ -185,6 +186,17 @@ run_variant() {
     ( cd "$WORK/fill-$label" && check_maxsize_fill "$label" cargo run -q -- encode fill )
     ( cd "$WORK/fill-$label" && check_maxsize_fill_decode "$label" cargo run -q -- decode fill )
     ( cd "$WORK/fill-$label" && check_maxsize_fill_decode "$label/stream" cargo run -q -- streamdecode fill )
+
+    # Multi-drain encode (generator#653, ARCHITECTURE §9.2/§9.6): a message of tens
+    # of KB through the one-shot encode and through the harness `streamencode` verb
+    # at several window sizes. Every field of this profile is bounded (or sits behind
+    # a heapless capacity), so the schema is the bounded variant with large bounds:
+    # the drain path is what is under test, not the allocator. The unbounded
+    # one-shot encode of the std profile is checked with the max_message_size legs.
+    echo "==> [$label] stream encode: a multi-KB message through the drain path (generator#653)"
+    stream_encode_schema "$WORK/stream-$label.yaml" bounded
+    rust_build "$WORK/stream-$label.yaml" "$WORK/streamenc-$label"
+    check_stream_encode "$label" --base64-bytes --cwd "$WORK/streamenc-$label" -- cargo run -q --
 
     # Streaming behaviour (PR #242): the generator tests only assert that the
     # streaming API appears in the output. This runs it, and pins the property
@@ -1743,6 +1755,17 @@ for mms in default:4096 small:64; do
     check_max_message_size rust "$ceil" --cwd "$WORK/mms-$tag" -- cargo run -q --
 done
 check_max_message_budget rust rust 'corelib: rs'
+
+# The unbounded one-shot encode() drains a fixed scratch into a Vec (generator#653):
+# the std profile on an UNBOUNDED schema, through the same driver as the bounded legs.
+echo "==> [rs] stream encode, unbounded: a multi-KB message through the drain path (generator#653)"
+stream_encode_schema "$WORK/stream-unbounded.yaml"
+( cd "$ROOT" && go run ./cmd/sofabgen --format=off --config "$WORK/cfg-mms-default.yaml" --lang rust \
+    --in "$WORK/stream-unbounded.yaml" --out "$WORK/stream-unbounded" )
+sed -i "s#\${SOFAB_RS_CORELIB}#$STD#" "$WORK/stream-unbounded/Cargo.toml"
+crate_bin_name "$WORK/stream-unbounded"
+( cd "$WORK/stream-unbounded" && cargo build -q )
+check_stream_encode rust-unbounded --base64-bytes --cwd "$WORK/stream-unbounded" -- cargo run -q --
 # The no_std profile bounds every field, so it has no unbounded encode to check:
 # only the budget half, and the rejection of an unbounded field.
 check_max_message_budget rust-no-std rust 'corelib: rs-no-std' --static
