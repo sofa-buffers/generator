@@ -5533,7 +5533,7 @@ byte count alone cannot see a backend that mis-encodes at the *same* length
 and not just a count; the fill schema is the only place several of those shapes
 meet an encoder at all. `tests/conformance/c/maxsize_fill.c` and the shared
 `tests/conformance/lib/maxsize_fill.{yaml,json,hex,sh}` carry all of it, and
-since generator#415 **all eleven** suites run both legs. The fill schema's own
+since generator#415 **all eleven** suites run both legs. `check_maxsize_fill_decode` feeds the same frozen bytes back through each suite's `decode` and `streamdecode` and compares the JSON with `maxsize_fill.json` as data: the fixture's i64 min, u64 max (scalar, array element, bitfield) sit above 2^53, so a decoder that routes a 64-bit integer through a double fails there. The fill schema's own
 coverage limits are recorded in the fixture's header: an enum is deliberately
 over-charged and can never join it, and a wrapper array whose elements are
 themselves ARRAYS is the last exactly-priced shape still missing. A union and an

@@ -44,9 +44,9 @@ sed -i "s#\${SOFAB_GO_CORELIB}#$CORELIB#" "$WORK/proj/go.mod"
 ( cd "$WORK/proj" && GOFLAGS=-mod=mod go mod tidy >/dev/null 2>&1 && go build ./... )
 
 echo "==> JSON encode -> decode round-trip"
-IN='{"someu8":200,"someu16":4242,"someu32":3000000,"someu64":1234567890123456,"somei8":-42,"somei16":31000,"somei32":123456789,"somei64":-1234567890123456,"somefp32":1.5,"somefp64":-2.5,"somebool":false,"somestring":"round trip","someblob":[1,2,3,4],"someenum":33,"somebitfield":1,"someuintarray":[9,8,7,6],"someintarray":[-1,-2,-3,-4,-5],"somefloatarray":[0.5,0.25,-0.75],"somestringarray":["a","bb","ccc"],"someblobarray":[[1],[2,3]],"somestruct":{"nestedint":12,"nestedstring":"deep","nestedstruct":{"deepint":99}},"someunion":{"option1":4242},"somestructwitharray":{"label":"lbl","values":[9,9,9,9]},"somestructarray":[{"x":1,"y":2},{"x":-3,"y":-4}],"somematrix":[[1,2,3,4],[5,6,7,8]],"someunionarray":[{"asint":7},{"asint":-8}],"someenumarray":[1,0,2,1],"someboolarray":[false,false,true],"somebitfieldarray":[1,2,3],"somemap":[{"key":"k","value":5}]}'
+IN='{"someu8":200,"someu16":4242,"someu32":3000000,"someu64":18446744073709551614,"somei8":-42,"somei16":31000,"somei32":123456789,"somei64":-9223372036854775807,"somefp32":1.5,"somefp64":-2.5,"somebool":false,"somestring":"round trip","someblob":[1,2,3,4],"someenum":33,"somebitfield":1,"someuintarray":[9,8,7,6],"someintarray":[-1,-2,-3,-4,-5],"somefloatarray":[0.5,0.25,-0.75],"somestringarray":["a","bb","ccc"],"someblobarray":[[1],[2,3]],"somestruct":{"nestedint":12,"nestedstring":"deep","nestedstruct":{"deepint":99}},"someunion":{"option1":4242},"somestructwitharray":{"label":"lbl","values":[9,9,9,9]},"somestructarray":[{"x":1,"y":2},{"x":-3,"y":-4}],"somematrix":[[1,2,3,4],[5,6,7,8]],"someunionarray":[{"asint":7},{"asint":-8}],"someenumarray":[1,0,2,1],"someboolarray":[false,false,true],"somebitfieldarray":[1,2,3],"somemap":[{"key":"k","value":5}]}'
 OUT=$(cd "$WORK/proj" && printf '%s' "$IN" | GOFLAGS=-mod=mod go run ./harness encode myfirstmessage | GOFLAGS=-mod=mod go run ./harness decode myfirstmessage)
-echo "$OUT" | grep -q '"someu64":1234567890123456' || { echo "FAIL: u64 round-trip"; exit 1; }
+echo "$OUT" | grep -q '"someu64":18446744073709551614' || { echo "FAIL: u64 round-trip"; exit 1; }
 echo "$OUT" | grep -q '"deepint":99' || { echo "FAIL: nested struct round-trip"; exit 1; }
 echo "==> round-trip OK"
 
@@ -968,6 +968,8 @@ sed -i "s#\${SOFAB_GO_CORELIB}#$CORELIB#" "$WORK/fill/go.mod"
 check_maxsize_constant go "$WORK/fill/message/fill.go" \
     "^const Fill__MaxSize = $SOFAB_MAXSIZE_FILL_BYTES\$"
 check_maxsize_fill go "$WORK/fill/harness_bin" encode fill
+check_maxsize_fill_decode go "$WORK/fill/harness_bin" decode fill
+check_maxsize_fill_decode go/stream "$WORK/fill/harness_bin" streamdecode fill
 
 # ...and the other side of owning the buffer: a value the caller filled PAST its
 # own schema bound does not fit, and §5.1 forbids returning partial output as if

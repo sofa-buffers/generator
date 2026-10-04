@@ -86,6 +86,38 @@ check_maxsize_fill() {
     echo "   [$_label] max-fill encodes to exactly $_got bytes, byte-exact"
 }
 
+# check_maxsize_fill_decode <label> <decode-command...>
+#   Feeds the bytes frozen in maxsize_fill.hex to the decode command and
+#   requires the JSON it prints to carry the same data as maxsize_fill.json.
+#
+#   The encode leg above never decodes. This fixture is the only one holding
+#   several extreme values at once -- i64 min, a 64-bit bitfield with every flag
+#   set, u64 max as a scalar and as native array elements, an fp64 native array,
+#   a union holding its largest option -- so it is also the only place a decoder
+#   that passes a 64-bit integer through a double is caught: the round-trip
+#   fixture stays below 2^53. A 64-bit integer may be printed as a number or as
+#   a decimal string (Dart, TypeScript) and a blob as base64 (Go); json_equal.py
+#   reads both spellings, the integers exactly.
+check_maxsize_fill_decode() {
+    _label=$1
+    shift
+    _json="$ROOT/tests/conformance/lib/maxsize_fill.json"
+    _hex="$ROOT/tests/conformance/lib/maxsize_fill.hex"
+    _bin=$(mktemp)
+    sed 's/#.*//' "$_hex" | tr -d ' \t\n' | python3 -c \
+        'import sys; sys.stdout.buffer.write(bytes.fromhex(sys.stdin.read()))' > "$_bin"
+
+    if ! _dec=$("$@" < "$_bin" 2>/dev/null); then
+        rm -f "$_bin"
+        echo "FAIL: [$_label] max-fill decode failed on the frozen maxsize_fill.hex bytes"
+        exit 1
+    fi
+    rm -f "$_bin"
+    python3 "$ROOT/tests/conformance/lib/json_equal.py" "$(cat "$_json")" "$_dec" \
+        --int-strings --base64-bytes --label "$_label: maxsize_fill.hex decodes to maxsize_fill.json" || exit 1
+    echo "   [$_label] max-fill decodes back to maxsize_fill.json"
+}
+
 # check_maxsize_constant <label> <generated-file> <grep-pattern>
 #   Requires the source generated for maxsize_fill.yaml to carry the DERIVED
 #   constant — leg (2) above. The pattern is a basic regex and every caller

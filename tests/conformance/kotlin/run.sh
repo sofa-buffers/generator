@@ -106,10 +106,10 @@ build "$ROOT/examples/messages/example.yaml" "$WORK/ex"
 build "$WORK/conf.yaml" "$WORK/conf"
 
 echo "==> JSON encode -> decode round-trip"
-IN='{"someu8":200,"someu16":4242,"someu32":3000000,"someu64":1234567890123456,"somei8":-42,"somei16":31000,"somei32":123456789,"somei64":-1234567890123456,"somefp32":1.5,"somefp64":-2.5,"somebool":false,"somestring":"round trip","someblob":[1,2,3,4],"someenum":33,"somebitfield":1,"someuintarray":[9,8,7,6],"someintarray":[-1,-2,-3,-4,-5],"somefloatarray":[0.5,0.25,-0.75],"somestringarray":["a","bb","ccc"],"someblobarray":[[1],[2,3]],"somestruct":{"nestedint":12,"nestedstring":"deep","nestedstruct":{"deepint":99}},"someunion":{"option1":4242},"somestructwitharray":{"label":"lbl","values":[9,9,9,9]},"somestructarray":[{"x":1,"y":2},{"x":-3,"y":-4}],"somematrix":[[1,2,3,4],[5,6,7,8]],"someunionarray":[{"asint":7},{"asint":-8}],"someenumarray":[1,0,2,1],"someboolarray":[false,false,true],"somebitfieldarray":[1,2,3],"somemap":[{"key":"k","value":5}]}'
+IN='{"someu8":200,"someu16":4242,"someu32":3000000,"someu64":18446744073709551614,"somei8":-42,"somei16":31000,"somei32":123456789,"somei64":-9223372036854775807,"somefp32":1.5,"somefp64":-2.5,"somebool":false,"somestring":"round trip","someblob":[1,2,3,4],"someenum":33,"somebitfield":1,"someuintarray":[9,8,7,6],"someintarray":[-1,-2,-3,-4,-5],"somefloatarray":[0.5,0.25,-0.75],"somestringarray":["a","bb","ccc"],"someblobarray":[[1],[2,3]],"somestruct":{"nestedint":12,"nestedstring":"deep","nestedstruct":{"deepint":99}},"someunion":{"option1":4242},"somestructwitharray":{"label":"lbl","values":[9,9,9,9]},"somestructarray":[{"x":1,"y":2},{"x":-3,"y":-4}],"somematrix":[[1,2,3,4],[5,6,7,8]],"someunionarray":[{"asint":7},{"asint":-8}],"someenumarray":[1,0,2,1],"someboolarray":[false,false,true],"somebitfieldarray":[1,2,3],"somemap":[{"key":"k","value":5}]}'
 H="$WORK/ex/build/install/harness/bin/harness"
 OUT=$(printf '%s' "$IN" | $H encode myfirstmessage | $H decode myfirstmessage)
-echo "$OUT" | grep -q '"someu64":1234567890123456' || { echo "FAIL: u64 round-trip"; exit 1; }
+echo "$OUT" | grep -q '"someu64":18446744073709551614' || { echo "FAIL: u64 round-trip"; exit 1; }
 echo "$OUT" | grep -q '"deepint":99' || { echo "FAIL: nested struct round-trip"; exit 1; }
 echo "==> round-trip OK"
 
@@ -171,6 +171,8 @@ build "$ROOT/tests/conformance/lib/maxsize_fill.yaml" "$WORK/fill"
 check_maxsize_constant kotlin "$WORK/fill/src/main/kotlin/message/Fill.kt" \
     "public const val MAX_SIZE = $SOFAB_MAXSIZE_FILL_BYTES\$"
 check_maxsize_fill kotlin "$WORK/fill/build/install/harness/bin/harness" encode fill
+check_maxsize_fill_decode kotlin "$WORK/fill/build/install/harness/bin/harness" decode fill
+check_maxsize_fill_decode kotlin/stream "$WORK/fill/build/install/harness/bin/harness" streamdecode fill
 
 # A decoded message OWNS its bytes (CORELIB_PLAN §6.7 / §6.7.1, generator#412) --
 # the LIFETIME half of the streaming claim just above. No value the codec

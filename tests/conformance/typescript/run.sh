@@ -225,6 +225,15 @@ run_variant() { # run_variant <bigint|long|number>
 echo "==> [$VL] typecheck generated code"
 tsc_strict "$VW/ex"
 
+# JSON.parse is the harness's front door and a JS number is a double, so an
+# integer above 2^53 in the shared fill input would arrive ROUNDED — u64 max
+# reads back as 2^64, which the encoder rightly refuses as out of range. Quote
+# those so the generated fromJSON takes its bigint path, the same spelling the
+# example round-trip above already uses for u64. Nothing else about the input
+# changes, so every field is still filled to its declared bound.
+quote_big_ints() {
+    python3 -c 'import re,sys; sys.stdout.write(re.sub(r"-?\d+(?![\d.eE\"])", lambda m: "\"%s\"" % m.group(0) if abs(int(m.group(0))) > 2**53 else m.group(0), sys.stdin.read()))'
+}
 echo "==> [$VL] JSON encode -> decode round-trip"
 # someblobarray is here for the OWNERSHIP legs of stream_check.ts, which run on
 # this subject: a Uint8Array is the only TypeScript destination that can alias
@@ -232,9 +241,17 @@ echo "==> [$VL] JSON encode -> decode round-trip"
 # through the wrapper-sequence collector rather than the scalar arm. Left at its
 # default the example subject carried no blob array at all, so only nested_rows
 # exercised the kind.
-IN='{"someu8":200,"someu16":4242,"someu32":3000000,"someu64":1234567890123456,"somei8":-42,"somei16":31000,"somei32":123456789,"somei64":-1234567890123456,"somefp32":1.5,"somefp64":-2.5,"somebool":false,"somestring":"round trip","someblob":[1,2,3,4],"someenum":33,"somebitfield":1,"someuintarray":[9,8,7,6],"someintarray":[-1,-2,-3,-4,-5],"somefloatarray":[0.5,0.25,-0.75],"somestringarray":["a","bb","ccc"],"someblobarray":[[1],[2,3]],"somestruct":{"nestedint":12,"nestedstring":"deep","nestedstruct":{"deepint":99}},"someunion":{"option1":4242},"somestructwitharray":{"label":"lbl","values":[9,9,9,9]},"somestructarray":[{"x":1,"y":2},{"x":-3,"y":-4}],"somematrix":[[1,2,3,4],[5,6,7,8]],"someunionarray":[{"asint":7},{"asint":-8}],"someenumarray":[1,0,2,1],"someboolarray":[false,false,true],"somebitfieldarray":[1,2,3],"somemap":[{"key":"k","value":5}]}'
+IN='{"someu8":200,"someu16":4242,"someu32":3000000,"someu64":18446744073709551614,"somei8":-42,"somei16":31000,"somei32":123456789,"somei64":-9223372036854775807,"somefp32":1.5,"somefp64":-2.5,"somebool":false,"somestring":"round trip","someblob":[1,2,3,4],"someenum":33,"somebitfield":1,"someuintarray":[9,8,7,6],"someintarray":[-1,-2,-3,-4,-5],"somefloatarray":[0.5,0.25,-0.75],"somestringarray":["a","bb","ccc"],"someblobarray":[[1],[2,3]],"somestruct":{"nestedint":12,"nestedstring":"deep","nestedstruct":{"deepint":99}},"someunion":{"option1":4242},"somestructwitharray":{"label":"lbl","values":[9,9,9,9]},"somestructarray":[{"x":1,"y":2},{"x":-3,"y":-4}],"somematrix":[[1,2,3,4],[5,6,7,8]],"someunionarray":[{"asint":7},{"asint":-8}],"someenumarray":[1,0,2,1],"someboolarray":[false,false,true],"somebitfieldarray":[1,2,3],"somemap":[{"key":"k","value":5}]}'
+# Above 2^53 the 64-bit scalars go in quoted. Under `number` they are lossy by
+# design, so that variant keeps values it can hold.
+U64=18446744073709551614
+if [ "$mode" = number ]; then
+    U64=1234567890123456
+    IN=$(printf '%s' "$IN" | sed -e 's/18446744073709551614/1234567890123456/' -e 's/-9223372036854775807/-1234567890123456/')
+fi
+IN=$(printf '%s' "$IN" | quote_big_ints)
 OUT=$(cd "$VW/ex" && printf '%s' "$IN" | "$TH" encode myfirstmessage | "$TH" decode myfirstmessage)
-echo "$OUT" | grep -q '"someu64":"1234567890123456"' || { echo "FAIL: u64 round-trip"; exit 1; }
+echo "$OUT" | grep -q "\"someu64\":\"$U64\"" || { echo "FAIL: u64 round-trip"; exit 1; }
 echo "$OUT" | grep -q '"deepint":99' || { echo "FAIL: nested struct round-trip"; exit 1; }
 echo "==> [$VL] round-trip OK"
 
@@ -274,15 +291,6 @@ ln -s "$WORK/ex/node_modules" "$VW/fill/node_modules"
 tsc_strict "$VW/fill"
 check_maxsize_constant typescript "$VW/fill/message.ts" \
     "static readonly MAX_SIZE = $SOFAB_MAXSIZE_FILL_BYTES;\$"
-# JSON.parse is the harness's front door and a JS number is a double, so an
-# integer above 2^53 in the shared fill input would arrive ROUNDED — u64 max
-# reads back as 2^64, which the encoder rightly refuses as out of range. Quote
-# those so the generated fromJSON takes its bigint path, the same spelling the
-# example round-trip above already uses for u64. Nothing else about the input
-# changes, so every field is still filled to its declared bound.
-quote_big_ints() {
-    python3 -c 'import re,sys; sys.stdout.write(re.sub(r"-?\d+(?![\d.eE\"])", lambda m: "\"%s\"" % m.group(0) if abs(int(m.group(0))) > 2**53 else m.group(0), sys.stdin.read()))'
-}
 fill_encode() { quote_big_ints | ( cd "$VW/fill" && "$TH" encode fill ); }
 FILLJSON="$ROOT/tests/conformance/lib/maxsize_fill.json"
 if [ "$mode" = number ]; then
@@ -310,6 +318,11 @@ PY
     echo "   [$VL] max-fill (64-bit scalars at 2^53-1) encodes to $(wc -c < "$WORK/fill_number.bin") bytes, identical to bigint"
 else
     check_maxsize_fill typescript fill_encode
+    # The frozen bytes decoded back. Not under `number`: its 64-bit scalars are
+    # lossy above 2^53 by design, so only the bigint/Long builds can return them.
+    fill_decode() { ( cd "$VW/fill" && "$TH" "$@" fill ); }
+    check_maxsize_fill_decode typescript fill_decode decode
+    check_maxsize_fill_decode typescript/stream fill_decode streamdecode
 fi
 
 # ...and the other side of owning the buffer: a value the caller filled PAST its

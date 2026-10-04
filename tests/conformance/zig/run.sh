@@ -134,11 +134,13 @@ zig_build "$ROOT/tests/conformance/lib/maxsize_fill.yaml" "$WORK/fill"
 check_maxsize_constant zig "$WORK/fill/src/message.zig" \
     "pub const MAX_SIZE: usize = $SOFAB_MAXSIZE_FILL_BYTES;\$"
 check_maxsize_fill zig "$WORK/fill/zig-out/bin/harness" encode fill
+check_maxsize_fill_decode zig "$WORK/fill/zig-out/bin/harness" decode fill
+check_maxsize_fill_decode zig/stream "$WORK/fill/zig-out/bin/harness" streamdecode fill
 
 echo "==> JSON encode -> decode round-trip"
-IN='{"someu8":200,"someu16":4242,"someu32":3000000,"someu64":1234567890123456,"somei8":-42,"somei16":31000,"somei32":123456789,"somei64":-1234567890123456,"somefp32":1.5,"somefp64":-2.5,"somebool":false,"somestring":"round trip","someblob":[1,2,3,4],"someenum":33,"somebitfield":1,"someuintarray":[9,8,7,6],"someintarray":[-1,-2,-3,-4,-5],"somefloatarray":[0.5,0.25,-0.75],"somestringarray":["a","bb","ccc"],"someblobarray":[[1],[2,3]],"somestruct":{"nestedint":12,"nestedstring":"deep","nestedstruct":{"deepint":99}},"someunion":{"option1":4242},"somestructwitharray":{"label":"lbl","values":[9,9,9,9]},"somestructarray":[{"x":1,"y":2},{"x":-3,"y":-4}],"somematrix":[[1,2,3,4],[5,6,7,8]],"someunionarray":[{"asint":7},{"asint":-8}],"someenumarray":[1,0,2,1],"someboolarray":[false,false,true],"somebitfieldarray":[1,2,3],"somemap":[{"key":"k","value":5}]}'
+IN='{"someu8":200,"someu16":4242,"someu32":3000000,"someu64":18446744073709551614,"somei8":-42,"somei16":31000,"somei32":123456789,"somei64":-9223372036854775807,"somefp32":1.5,"somefp64":-2.5,"somebool":false,"somestring":"round trip","someblob":[1,2,3,4],"someenum":33,"somebitfield":1,"someuintarray":[9,8,7,6],"someintarray":[-1,-2,-3,-4,-5],"somefloatarray":[0.5,0.25,-0.75],"somestringarray":["a","bb","ccc"],"someblobarray":[[1],[2,3]],"somestruct":{"nestedint":12,"nestedstring":"deep","nestedstruct":{"deepint":99}},"someunion":{"option1":4242},"somestructwitharray":{"label":"lbl","values":[9,9,9,9]},"somestructarray":[{"x":1,"y":2},{"x":-3,"y":-4}],"somematrix":[[1,2,3,4],[5,6,7,8]],"someunionarray":[{"asint":7},{"asint":-8}],"someenumarray":[1,0,2,1],"someboolarray":[false,false,true],"somebitfieldarray":[1,2,3],"somemap":[{"key":"k","value":5}]}'
 OUT=$(printf '%s' "$IN" | "$WORK/ex/zig-out/bin/harness" encode myfirstmessage | "$WORK/ex/zig-out/bin/harness" decode myfirstmessage)
-echo "$OUT" | grep -q '"someu64":1234567890123456' || { echo "FAIL: u64 round-trip"; exit 1; }
+echo "$OUT" | grep -q '"someu64":18446744073709551614' || { echo "FAIL: u64 round-trip"; exit 1; }
 echo "$OUT" | grep -q '"deepint":99' || { echo "FAIL: nested struct round-trip"; exit 1; }
 echo "$OUT" | grep -q '"someblob":\[1,2,3,4\]' || { echo "FAIL: blob round-trip"; exit 1; }
 # somestringarray declares count: 5, but `count` is a CAPACITY, never a length

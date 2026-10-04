@@ -124,7 +124,7 @@ python3 "$ROOT/tests/conformance/lib/check_vectors_decode.py" --emit-schema \
 python3 "$ROOT/tests/conformance/lib/check_vectors_encode.py" --emit-schema \
     "$NOSTD/assets/test_vectors.json" >> "$WORK/conf.yaml"
 
-IN='{"someu8":200,"someu16":4242,"someu32":3000000,"someu64":1234567890123456,"somei8":-42,"somei16":31000,"somei32":123456789,"somei64":-1234567890123456,"somefp32":1.5,"somefp64":-2.5,"somebool":false,"somestring":"round trip","someblob":[1,2,3,4],"someenum":33,"somebitfield":1,"someuintarray":[9,8,7,6],"someintarray":[-1,-2,-3,-4,-5],"somefloatarray":[0.5,0.25,-0.75],"somestringarray":["a","bb","ccc"],"someblobarray":[[1],[2,3]],"somestruct":{"nestedint":12,"nestedstring":"deep","nestedstruct":{"deepint":99}},"someunion":{"option1":4242},"somestructwitharray":{"label":"lbl","values":[9,9,9,9]},"somestructarray":[{"x":1,"y":2},{"x":-3,"y":-4}],"somematrix":[[1,2,3,4],[5,6,7,8]],"someunionarray":[{"asint":7},{"asint":-8}],"someenumarray":[1,0,2,1],"someboolarray":[false,false,true],"somebitfieldarray":[1,2,3],"somemap":[{"key":"k","value":5}]}'
+IN='{"someu8":200,"someu16":4242,"someu32":3000000,"someu64":18446744073709551614,"somei8":-42,"somei16":31000,"somei32":123456789,"somei64":-9223372036854775807,"somefp32":1.5,"somefp64":-2.5,"somebool":false,"somestring":"round trip","someblob":[1,2,3,4],"someenum":33,"somebitfield":1,"someuintarray":[9,8,7,6],"someintarray":[-1,-2,-3,-4,-5],"somefloatarray":[0.5,0.25,-0.75],"somestringarray":["a","bb","ccc"],"someblobarray":[[1],[2,3]],"somestruct":{"nestedint":12,"nestedstring":"deep","nestedstruct":{"deepint":99}},"someunion":{"option1":4242},"somestructwitharray":{"label":"lbl","values":[9,9,9,9]},"somestructarray":[{"x":1,"y":2},{"x":-3,"y":-4}],"somematrix":[[1,2,3,4],[5,6,7,8]],"someunionarray":[{"asint":7},{"asint":-8}],"someenumarray":[1,0,2,1],"someboolarray":[false,false,true],"somebitfieldarray":[1,2,3],"somemap":[{"key":"k","value":5}]}'
 
 # run_variant LABEL CFGBODY CORELIB_PATH
 #   CFGBODY - the targets.rust config block contents (e.g. "" or "corelib: rs").
@@ -183,6 +183,8 @@ run_variant() {
     check_maxsize_constant "$label" "$WORK/fill-$label/src/message.rs" \
         "pub const MAX_SIZE: usize = $SOFAB_MAXSIZE_FILL_BYTES;\$"
     ( cd "$WORK/fill-$label" && check_maxsize_fill "$label" cargo run -q -- encode fill )
+    ( cd "$WORK/fill-$label" && check_maxsize_fill_decode "$label" cargo run -q -- decode fill )
+    ( cd "$WORK/fill-$label" && check_maxsize_fill_decode "$label/stream" cargo run -q -- streamdecode fill )
 
     # Streaming behaviour (PR #242): the generator tests only assert that the
     # streaming API appears in the output. This runs it, and pins the property
@@ -239,7 +241,7 @@ run_variant() {
 
     echo "==> [$label] JSON encode -> decode round-trip"
     OUT=$(cd "$WORK/ex-$label" && printf '%s' "$IN" | cargo run -q -- encode myfirstmessage | cargo run -q -- decode myfirstmessage)
-    echo "$OUT" | grep -q '"someu64":1234567890123456' || { echo "FAIL: [$label] u64 round-trip"; exit 1; }
+    echo "$OUT" | grep -q '"someu64":18446744073709551614' || { echo "FAIL: [$label] u64 round-trip"; exit 1; }
     echo "$OUT" | grep -q '"deepint":99' || { echo "FAIL: [$label] nested struct round-trip"; exit 1; }
     echo "$OUT" | grep -q '"someblob":\[1,2,3,4\]' || { echo "FAIL: [$label] blob round-trip"; exit 1; }
     echo "==> [$label] round-trip OK"
