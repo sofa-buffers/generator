@@ -46,8 +46,8 @@ MSG = "fdef"
 # their array case passes). C compares bytes and has no entry.
 KNOWN_GAP = {
     "c": (),
-    "cpp": ("a[0] -0.0",),
-    "c-cpp": ("a[0] -0.0",),
+    "cpp": (),
+    "c-cpp": (),
     "rust": ("a[0] -0.0",),
     "rs-no-std": ("a[0] -0.0",),
     "go": ("a[0] -0.0",),
