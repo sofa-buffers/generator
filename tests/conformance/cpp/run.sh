@@ -1265,6 +1265,22 @@ YAML
             -- "$WORK/arrlen-$label/harness/harness"
     done
 
+    # An over-bound value is refused at encode (ARCHITECTURE §9.6; generator#656): a
+    # string or blob past `maxlen`, an array past `count`, a scalar past its width.
+    # The shared driver prints its own schema; its KNOWN_GAP lists what still fails.
+    ENCBND_OPTS=""
+    if [ -n "$corelib" ]; then ENCBND_OPTS="--bounded-only"; fi
+    echo "==> [$label] an over-bound value is refused at encode (generator#656)"
+    python3 "$ROOT/tests/conformance/lib/check_encode_bounds.py" --self-test
+    printf 'version: 1\nmessages:\n' > "$WORK/encbnd.yaml"
+    python3 "$ROOT/tests/conformance/lib/check_encode_bounds.py" --emit-schema $ENCBND_OPTS >> "$WORK/encbnd.yaml"
+    ( cd "$ROOT" && go run ./cmd/sofabgen --config "$WORK/cfg-$label.yaml" --lang cpp \
+        --in "$WORK/encbnd.yaml" --out "$WORK/encbnd-$label" )
+    make -C "$WORK/encbnd-$label" "$@" >/dev/null
+    python3 "$ROOT/tests/conformance/lib/check_encode_bounds.py" "C++ [$label]" $ENCBND_OPTS \
+        --backend "$(case "$label" in cpp) echo cpp ;; cpp-static) echo cpp-static ;; c-cpp-dynamic) echo c-cpp ;; *) echo c-cpp-static ;; esac)" \
+        -- "$WORK/encbnd-$label/harness/harness"
+
     # Explicit empty is not absent (MESSAGE_SPEC §2; generator#645): an empty array,
     # string or blob whose declared default is non-empty is a value, written as a
     # zero-length one and read back empty; `{}` writes nothing and reads back as
