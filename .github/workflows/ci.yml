@@ -257,6 +257,10 @@ jobs:
           arm-none-eabi-g++ --version | head -1
       - uses: ./.github/actions/corelib-refs
       - name: C++ backend — generate, build, round-trip, conformance
+        # SOFAB_CROSS_STRICT: the newlib leg fails instead of skipping when the
+        # toolchain installed above is missing.
+        env:
+          SOFAB_CROSS_STRICT: "1"
         run: ./tests/conformance/cpp/run.sh
       - name: Generate sources (artifact)
         if: always()
