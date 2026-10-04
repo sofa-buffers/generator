@@ -2,11 +2,17 @@ package matrix
 
 import (
 	"path/filepath"
-	"strings"
+	"regexp"
 	"testing"
 
 	"github.com/sofa-buffers/generator/internal/generator"
 )
+
+// streamEncodeArm matches the verb QUOTED, which is how every backend spells
+// its dispatch arm (`mode == "streamencode"`, `strcmp(mode, "streamencode")`,
+// `'streamencode'`, `"streamencode" ->`). The usage line and comments name the
+// verb bare, so they cannot satisfy it.
+var streamEncodeArm = regexp.MustCompile(`["']streamencode["']`)
 
 // TestEveryHarnessEmitsStreamEncode pins the WINDOWED encode surface in every
 // backend's project harness (generator#653).
@@ -61,13 +67,13 @@ func TestEveryHarnessEmitsStreamEncode(t *testing.T) {
 			checked[lang] = true
 			found := false
 			for _, f := range files {
-				if strings.Contains(string(f.Content), "streamencode") {
+				if streamEncodeArm.Match(f.Content) {
 					found = true
 					break
 				}
 			}
 			if !found {
-				t.Errorf("%s (%s): project mode emits no `streamencode` harness mode — "+
+				t.Errorf("%s (%s): project mode emits no quoted \"streamencode\" dispatch arm in its harness — "+
 					"the one-shot encode's drain path then never sees a message larger "+
 					"than its scratch, and no sink is driven with a small window",
 					lang, filepath.Base(def))
