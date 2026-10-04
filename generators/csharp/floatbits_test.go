@@ -1,6 +1,7 @@
 package csharp
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/sofa-buffers/generator/internal/ir"
@@ -20,6 +21,39 @@ func TestCSharpFloatScalarComparesBits(t *testing.T) {
 	} {
 		if got := floatBitsCmp(c.f, "x", c.op); got != c.want {
 			t.Errorf("%v default %v: got %q, want %q", c.f.Kind, c.f.Default, got, c.want)
+		}
+	}
+}
+
+// A float array is compared with its default through the corelib's FloatBits, in
+// the write guard and in IsDefault, and no IEEE-based array compare is left for it;
+// an integer array keeps the element-wise compare.
+func TestCSharpFloatArrayComparesBitsThroughCorelib(t *testing.T) {
+	src := `version: 1
+messages:
+  M:
+    payload:
+      a: { id: 0, type: array, items: { type: fp32, count: 2 }, default: [0.0, 1.5] }
+      d: { id: 1, type: array, items: { type: fp64, count: 2 }, default: [0.0, 1.5] }
+      n: { id: 2, type: array, items: { type: u16, count: 2 }, default: [1, 2] }
+`
+	var all strings.Builder
+	for _, c := range genCs(t, src) {
+		all.WriteString(c)
+	}
+	out := all.String()
+	for _, want := range []string{
+		"global::sofab.FloatBits.BitsEqual(this.a, _arrdef_a)",
+		"global::sofab.FloatBits.BitsEqual(this.d, _arrdef_d)",
+		"SequenceEqual(this.n, _arrdef_n)",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("missing %q", want)
+		}
+	}
+	for _, bad := range []string{"SequenceEqual(this.a,", "SequenceEqual(this.d,"} {
+		if strings.Contains(out, bad) {
+			t.Errorf("IEEE array compare left: %q", bad)
 		}
 	}
 }
