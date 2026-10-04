@@ -265,7 +265,7 @@ func usedEmptyTyped(body string) []string {
 // one call site that needs the free function.
 var corelibNames = []string{
 	"OStream", "WireType", "FixlenSubtype", "ArrayKind", "DecodeStatus",
-	"Long", "SofabError", "SofabErrorCode", "elementsEqual", "longElementsEqual",
+	"Long", "SofabError", "SofabErrorCode", "elementsEqual", "longElementsEqual", "floatArrayBitsEqual",
 	"fp32RawBytes",
 	"Visitor", "ArrayTarget", "IntegerArrayTarget", "FloatArrayTarget", "BoolArrayTarget",
 	"IStream", "PayloadAcc", "decodeUtf8", "StringSeq", "BlobSeq", "ElementSeq", "FramedSeq",
@@ -825,11 +825,7 @@ func (g *gen) floatZeroCmp(fld *ir.Field, acc string, differs bool) (string, boo
 func (g *gen) arrayIsDefaultExpr(fld *ir.Field, acc string) string {
 	if nativeArrayElem(fld.Elem) {
 		if def, ok := g.nativeArrayDefault(fld); ok {
-			eq := "elementsEqual"
-			if g.longBacked(fld) {
-				eq = "longElementsEqual"
-			}
-			return fmt.Sprintf("%s(%s, %s)", eq, acc, def)
+			return fmt.Sprintf("%s(%s, %s)", g.arrayEqualFn(fld), acc, def)
 		}
 		return fmt.Sprintf("%s.length === 0", acc)
 	}
@@ -837,6 +833,20 @@ func (g *gen) arrayIsDefaultExpr(fld *ir.Field, acc string) string {
 	// the LAST element is written whatever its value (§2) — so "no child is written"
 	// is exactly "the array is empty", and the two cannot drift apart.
 	return fmt.Sprintf("%s.length === 0", acc)
+}
+
+// arrayEqualFn names the corelib compare of a native array against its default.
+// Long elements are object identities, so they go by their (low, high) word pair;
+// float elements go by BIT PATTERN (CORELIB_PLAN §4.6), because IEEE `===` drops a
+// -0.0 at a +0.0 default and never recognises a NaN default.
+func (g *gen) arrayEqualFn(fld *ir.Field) string {
+	switch {
+	case g.longBacked(fld):
+		return "longElementsEqual"
+	case isFloatKind(fld.Elem):
+		return "floatArrayBitsEqual"
+	}
+	return "elementsEqual"
 }
 
 func (g *gen) emitMarshal(f *tsfile, fld *ir.Field) {
@@ -997,13 +1007,7 @@ func (g *gen) emitMarshalArray(f *tsfile, ind string, fld *ir.Field, acc string,
 			return
 		}
 		if def, ok := g.nativeArrayDefault(fld); ok {
-			// Long elements are object identities: compare with the (low, high)
-			// word-pair helper instead of elementsEqual's element !==.
-			eq := "elementsEqual"
-			if g.longBacked(fld) {
-				eq = "longElementsEqual"
-			}
-			f.line("%sif (!%s(%s, %s)) {", ind, eq, acc, def)
+			f.line("%sif (!%s(%s, %s)) {", ind, g.arrayEqualFn(fld), acc, def)
 		} else {
 			f.line("%sif (%s.length !== 0) {", ind, acc)
 		}
