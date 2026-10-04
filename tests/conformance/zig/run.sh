@@ -18,6 +18,8 @@ set -eu
 . "$(dirname "$0")/../lib/stream_encode.sh"
 # The header_limits / invalid_utf8 side tables (generator#651).
 . "$(dirname "$0")/../lib/tables.sh"
+# Every corpus + realworld message, round-tripped (generator#655).
+. "$(dirname "$0")/../lib/corpus_roundtrip.sh"
 # Generated code against the canonical formatter (ARCHITECTURE §12).
 . "$(dirname "$0")/../lib/check_format.sh"
 
@@ -112,13 +114,13 @@ ZIG
     ( cd "$2" && zig build --release=fast --cache-dir .zig-cache --global-cache-dir "$WORK/zig-global-cache" )
 }
 
-# zig_typecheck DEF OUT-DIR [CFG] -- generate and COMPILE ONLY. The corpus
-# projects assert one thing, "every definition produces code that builds", and
-# their binaries are never run; a Debug build proves exactly that while skipping
-# the LLVM optimisation pipeline (measured ~7x faster per project, and the
-# corpus is 21 of the harness's 28 builds). The peer harnesses draw the same
-# line: rust builds its projects with `cargo build -q` (no --release), cpp
-# checks its compile-only headers with `g++ -fsyntax-only`.
+# zig_typecheck DEF OUT-DIR [CFG] -- generate and build in Debug, skipping the
+# LLVM optimisation pipeline (measured ~7x faster per project, and the corpus is
+# 21 of the harness's 28 builds). The corpus asserts that every definition
+# produces code that builds, and runs its harness for the round trip of every
+# message (generator#655); the Debug build keeps the safety checks on. The peer
+# harnesses draw the same line: rust builds its projects with `cargo build -q`
+# (no --release), cpp checks its compile-only headers with `g++ -fsyntax-only`.
 zig_typecheck() {
     zig_gen "$1" "$2" "${3:-}"
     ( cd "$2" && zig build --cache-dir .zig-cache --global-cache-dir "$WORK/zig-global-cache" )
@@ -936,8 +938,12 @@ echo "==> corpus + realworld: every definition builds"
 for def in "$ROOT"/tests/matrix/corpus/defs/*.yaml "$ROOT"/examples/messages/realworld/*.yaml; do
     name=$(basename "$def" .yaml)
     zig_typecheck "$def" "$WORK/corpus/$name"
+    # ...and run: the Debug harness the build above installed, every message of
+    # the definition, encoded and decoded on both surfaces (generator#655).
+    corpus_roundtrip Zig zig "$def" "$WORK/corpus.tally" -- "$WORK/corpus/$name/zig-out/bin/harness"
 done
 echo "==> corpus builds ($(ls "$ROOT"/tests/matrix/corpus/defs/*.yaml | wc -l) definitions + $(ls "$ROOT"/examples/messages/realworld/*.yaml | wc -l) realworld)"
+corpus_roundtrip_summary Zig "$WORK/corpus.tally"
 
 # The reserved-name collision test (ARCHITECTURE §8): reserved.yaml uses every
 # name on generators/zig/reserved.go's list as a message field, a nested struct

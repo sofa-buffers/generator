@@ -17,6 +17,8 @@ set -eu
 . "$(dirname "$0")/../lib/stream_encode.sh"
 # The header_limits / invalid_utf8 side tables (generator#651).
 . "$(dirname "$0")/../lib/tables.sh"
+# Every corpus + realworld message, round-tripped (generator#655).
+. "$(dirname "$0")/../lib/corpus_roundtrip.sh"
 
 ROOT=$(cd "$(dirname "$0")/../../.." && pwd)
 CORELIB="${1:-${SOFAB_CS_CORELIB:-}}"
@@ -873,8 +875,12 @@ echo "==> corpus + realworld: every definition builds warning-free"
 for def in "$ROOT"/tests/matrix/corpus/defs/*.yaml "$ROOT"/examples/messages/realworld/*.yaml; do
     name=$(basename "$def" .yaml)
     build "$def" "$WORK/corpus/$name"
+    # ...and run: every message of the definition, encoded and decoded on both
+    # surfaces (generator#655).
+    corpus_roundtrip C# csharp "$def" "$WORK/corpus.tally" -- dotnet "$WORK/corpus/$name/bin/Debug/net9.0/harness.dll"
 done
 echo "==> corpus builds ($(ls "$ROOT"/tests/matrix/corpus/defs/*.yaml | wc -l) definitions + $(ls "$ROOT"/examples/messages/realworld/*.yaml | wc -l) realworld files)"
+corpus_roundtrip_summary C# "$WORK/corpus.tally"
 
 # A consumer that turns on every .NET code-quality analyzer and nullable
 # reference types, with warnings as errors, must still build Message.cs: the

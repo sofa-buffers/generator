@@ -14,6 +14,8 @@ set -eu
 . "$(dirname "$0")/../lib/stream_encode.sh"
 # The header_limits / invalid_utf8 side tables (generator#651).
 . "$(dirname "$0")/../lib/tables.sh"
+# Every corpus + realworld message, round-tripped (generator#655).
+. "$(dirname "$0")/../lib/corpus_roundtrip.sh"
 # Shared canonical-formatter check (ARCHITECTURE §12 gate 10).
 . "$(dirname "$0")/../lib/check_format.sh"
 # Every backend Go test, run against the corelib with no skips allowed.
@@ -916,8 +918,14 @@ echo "==> corpus + realworld: every definition builds"
 for def in "$ROOT"/tests/matrix/corpus/defs/*.yaml "$ROOT"/examples/messages/realworld/*.yaml; do
     name=$(basename "$def" .yaml)
     check "$def" "$WORK/corpus/$name"
+    # ...and run: every message of the definition, encoded and decoded on both
+    # surfaces (generator#655). The harness is compiled here, not analyzed only.
+    ( cd "$WORK/corpus/$name" && dart compile exe bin/harness.dart -o harness >/dev/null )
+    # 64-bit values go in quoted: the Dart harness reads its JSON through a double.
+    corpus_roundtrip Dart dart "$def" "$WORK/corpus.tally" --int64-json string -- "$WORK/corpus/$name/harness"
 done
 echo "==> corpus builds ($(ls "$ROOT"/tests/matrix/corpus/defs/*.yaml | wc -l) definitions + $(ls "$ROOT"/examples/messages/realworld/*.yaml | wc -l) realworld)"
+corpus_roundtrip_summary Dart "$WORK/corpus.tally"
 
 # The reserved-name collision test (ARCHITECTURE §8): reserved.yaml uses every
 # name on generators/dart/reserved.go's list as a message field, a nested struct

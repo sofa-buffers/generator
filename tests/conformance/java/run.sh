@@ -17,6 +17,8 @@ set -eu
 . "$(dirname "$0")/../lib/stream_encode.sh"
 # The header_limits / invalid_utf8 side tables (generator#651).
 . "$(dirname "$0")/../lib/tables.sh"
+# Every corpus + realworld message, round-tripped (generator#655).
+. "$(dirname "$0")/../lib/corpus_roundtrip.sh"
 
 ROOT=$(cd "$(dirname "$0")/../../.." && pwd)
 CORELIB="${1:-${SOFAB_JAVA_CORELIB:-}}"
@@ -891,11 +893,26 @@ for def in "$ROOT"/tests/matrix/corpus/defs/*.yaml "$ROOT"/examples/messages/rea
     # The Java target emits its classes per message, so a $defs-only file
     # (realworld/common.yaml, diagnostics.yaml) emits none; the project block
     # below builds what it does emit, its harness.
-    ls "$WORK"/corpus/"$name"/src/main/java/message/*.java >/dev/null 2>&1 || continue
+    ls "$WORK"/corpus/"$name"/src/main/java/message/*.java >/dev/null 2>&1 \
+        || { corpus_roundtrip Java java "$def" "$WORK/corpus.tally"; continue; }
     javac $JAVAC_STRICT -cp "$JAR" -d "$WORK/corpus/$name/out" "$WORK"/corpus/"$name"/src/main/java/message/*.java \
         || { echo "FAIL: corpus def $name did not compile"; exit 1; }
+    # ...and run: the same definition generated as a project, harness included,
+    # compiled straight against the corelib jar (a Maven build per definition is
+    # the cost this avoids), every message encoded and decoded on both surfaces
+    # (generator#655).
+    ( cd "$ROOT" && go run ./cmd/sofabgen --config "$WORK/cfg.yaml" --lang java --in "$def" --out "$WORK/corpusrt/$name" >/dev/null )
+    mkdir -p "$WORK/corpusrt/$name/out"
+    # The harness reads its JSON through the gson the generated pom declares.
+    GSON_V=$(sed -n 's#.*<artifactId>gson</artifactId><version>\(.*\)</version>.*#\1#p' "$WORK/corpusrt/$name/pom.xml")
+    GSON="$HOME/.m2/repository/com/google/code/gson/gson/$GSON_V/gson-$GSON_V.jar"
+    javac -cp "$JAR:$GSON" -d "$WORK/corpusrt/$name/out" $(find "$WORK/corpusrt/$name/src/main/java" -name '*.java') \
+        || { echo "FAIL: corpus def $name did not compile as a project"; exit 1; }
+    corpus_roundtrip Java java "$def" "$WORK/corpus.tally" \
+        -- java -cp "$WORK/corpusrt/$name/out:$JAR:$GSON" message.harness.Main
 done
 echo "==> corpus compiles ($(ls "$ROOT"/tests/matrix/corpus/defs/*.yaml | wc -l) definitions + $(ls "$ROOT"/examples/messages/realworld/*.yaml | wc -l) realworld)"
+corpus_roundtrip_summary Java "$WORK/corpus.tally"
 
 # The reserved-name collision test (ARCHITECTURE §8): reserved.yaml uses every
 # name on generators/java/reserved.go's list as a message field, a nested struct
