@@ -723,6 +723,10 @@ func (g *gen) destDefaultTest(fld *ir.Field, acc string, differs bool) string {
 	if fld.Kind == ir.KindArray && fld.Elem == ir.KindBool {
 		return fmt.Sprintf("%s_boolsEq(%s.storage, %s.length, %s)", not, acc, acc, def)
 	}
+	if fld.Kind == ir.KindArray && (fld.Elem == ir.KindFP32 || fld.Elem == ir.KindFP64) {
+		// By BIT PATTERN (CORELIB_PLAN §4.6): `==` on a double says -0.0 is 0.0.
+		return fmt.Sprintf("%ssofab.floatBitsEqual(%s.storage, %s, length: %s.length)", not, acc, def, acc)
+	}
 	return fmt.Sprintf("%s_prefixEq(%s.storage, %s.length, %s)", not, acc, acc, def)
 }
 

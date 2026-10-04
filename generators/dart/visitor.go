@@ -508,9 +508,12 @@ func (g *gen) computeNeeds(s *ir.Schema) needs {
 
 func (g *gen) scanField(fld *ir.Field, n *needs) {
 	if hasDestDefault(fld) {
-		if fld.Kind == ir.KindArray && fld.Elem == ir.KindBool {
+		switch {
+		case fld.Kind == ir.KindArray && fld.Elem == ir.KindBool:
 			n.boolDefault = true
-		} else {
+		case fld.Kind == ir.KindArray && (fld.Elem == ir.KindFP32 || fld.Elem == ir.KindFP64):
+			// compared by the corelib's floatBitsEqual: no prelude helper
+		default:
 			n.prefixEq = true
 		}
 	}
