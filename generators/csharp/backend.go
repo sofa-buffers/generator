@@ -461,7 +461,7 @@ func (g *gen) fieldIsDefaultExpr(fld *ir.Field, acc string) string {
 func (g *gen) arrayIsDefaultExpr(fld *ir.Field, acc string) string {
 	if nativeArrayElem(fld.Elem) {
 		if _, ok := g.csArrayCompareDefault(fld); ok {
-			return fmt.Sprintf("global::System.Linq.Enumerable.SequenceEqual(%s, %s)", acc, arrDefName(fld))
+			return arrEqualsDefault(fld, acc)
 		}
 		if primArrayElem(fld.Elem) {
 			return fmt.Sprintf("%s == null || %s.Length == 0", acc, acc)
@@ -580,6 +580,16 @@ func (g *gen) emitMarshalAt(f *cfile, ind string, fld *ir.Field, acc string, for
 // arrDefName is the static holding a native array field's omit-compare default.
 func arrDefName(fld *ir.Field) string { return "_arrdef_" + fld.Name }
 
+// arrEqualsDefault is "this native array equals its declared default". A float
+// array is compared by bit pattern through the corelib's FloatBits (so -0.0 is not
+// the default 0.0); any other element type keeps the element-wise compare.
+func arrEqualsDefault(fld *ir.Field, acc string) string {
+	if fld.Elem == ir.KindFP32 || fld.Elem == ir.KindFP64 {
+		return fmt.Sprintf("global::sofab.FloatBits.BitsEqual(%s, %s)", acc, arrDefName(fld))
+	}
+	return fmt.Sprintf("global::System.Linq.Enumerable.SequenceEqual(%s, %s)", acc, arrDefName(fld))
+}
+
 // csArrayCompareDefault is the literal a native array field's value is compared
 // against for whole-field omission, and ("", false) when the field has no
 // materialized default (a dynamic array with no schema default, or a
@@ -632,7 +642,7 @@ func (g *gen) emitMarshalArray(f *cfile, ind string, fld *ir.Field, acc string, 
 		// Primitive array (T[]): written straight to the OStream overload with
 		// no List.ToArray temporary.
 		if _, ok := g.csArrayCompareDefault(fld); ok {
-			f.line("%sif (!global::System.Linq.Enumerable.SequenceEqual(%s, %s)) {", ind, acc, arrDefName(fld))
+			f.line("%sif (!%s) {", ind, arrEqualsDefault(fld, acc))
 		} else {
 			f.line("%sif (%s != null && %s.Length != 0) {", ind, acc, acc)
 		}
@@ -642,7 +652,7 @@ func (g *gen) emitMarshalArray(f *cfile, ind string, fld *ir.Field, acc string, 
 	}
 	if nativeArrayElem(fld.Elem) {
 		if _, ok := g.csArrayCompareDefault(fld); ok {
-			f.line("%sif (!global::System.Linq.Enumerable.SequenceEqual(%s, %s)) {", ind, acc, arrDefName(fld))
+			f.line("%sif (!%s) {", ind, arrEqualsDefault(fld, acc))
 		} else {
 			f.line("%sif (%s.Count != 0) {", ind, acc)
 		}
