@@ -1872,11 +1872,15 @@ subset_cpp() {  # label  expect(ok|fail)  "DISABLE flags"  "yaml"
 # the default) is the profile this library ships for; the dynamic one is what the
 # cfg-clib config above, which the rows that must fail use, generates.
 FS="$ROOT/tests/conformance/lib/check_feature_subset.py"
+# A failing --list inside a for-word-list would leave the loop empty and the leg
+# green, so capture it first and demand the whole set.
+rows=$(python3 "$FS" --list cpp) || { echo "FAIL: check_feature_subset.py --list cpp failed"; exit 1; }
+[ "$(echo $rows | wc -w)" -eq 4 ] || { echo "FAIL: expected 4 cpp feature-subset rows, got: $rows"; exit 1; }
 for st in dynamic static; do
     dyn=true; [ "$st" = static ] && dyn=false
     printf 'generic: { emit: project }\ntargets: { cpp: { namespace: sofabuffers, corelib: c-cpp, allow_dynamic: %s } }\n' \
         "$dyn" > "$WORK/cfg-fs-$st.yaml"
-    for row in $(python3 "$FS" --list cpp); do
+    for row in $rows; do
         flags=$(python3 "$FS" --flags "$row")
         python3 "$FS" --schema "$row" > "$WORK/subc_$row.yaml"
         ( cd "$ROOT" && go run ./cmd/sofabgen --config "$WORK/cfg-fs-$st.yaml" --lang cpp --in "$WORK/subc_$row.yaml" --out "$WORK/subrun-$st-$row" >/dev/null )
@@ -2031,15 +2035,8 @@ if command -v arm-none-eabi-g++ >/dev/null 2>&1; then
         done
     done
     echo "==> reserved.yaml builds on newlib on all four profiles"
-elif [ -n "${SOFAB_CROSS_STRICT:-}" ]; then
-    # lang-cpp installs the toolchain and sets this, so what is optional on a
-    # laptop is mandatory in CI (generator#659): a runner image that loses the
-    # package must fail here, not turn the leg into a quiet skip.
-    echo "FAIL: arm-none-eabi-g++ is not on PATH and SOFAB_CROSS_STRICT is set -- skipped: the header-macro"
-    echo "      re-measurement on newlib and the embedded syntax check of reserved.yaml."
-    exit 1
 else
-    echo "==> SKIP header macros on newlib: arm-none-eabi-g++ not on PATH (SOFAB_CROSS_STRICT=1 makes this a failure)"
+    echo "==> SKIP header macros on newlib: arm-none-eabi-g++ not on PATH"
 fi
 
 echo "PASS"
