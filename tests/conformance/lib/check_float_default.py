@@ -55,7 +55,7 @@ KNOWN_GAP = {
     "kotlin": (),
     "csharp": (),
     "typescript": ("a[0] -0.0",),
-    "python": ("a[0] -0.0",),
+    "python": (),
     "zig": ("a[0] -0.0",),
     "dart": (),
 }

@@ -1,6 +1,7 @@
 package python
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/sofa-buffers/generator/internal/ir"
@@ -26,5 +27,52 @@ func TestPyFloatZeroDefaultComparesSign(t *testing.T) {
 		if got != c.want || ok != c.ok {
 			t.Errorf("%v default %v: got %q,%v want %q,%v", c.f.Kind, c.f.Default, got, ok, c.want, c.ok)
 		}
+	}
+}
+
+// A float array is compared with its default by bit pattern, through the
+// corelib's float_array_bits_equal, in the write guard and in _is_default; the
+// IEEE list compare is gone for it, and the integer array keeps its plain one.
+func TestPyFloatArrayDefaultUsesCorelibHelper(t *testing.T) {
+	s := schema(t, `version: 1
+messages:
+  m:
+    payload:
+      a:
+        id: 0
+        type: array
+        items: { type: fp32, count: 3 }
+        default: [0.0, 1.5]
+      b:
+        id: 1
+        type: array
+        items: { type: fp64 }
+        default: [0.0]
+      c:
+        id: 2
+        type: array
+        items: { type: u8 }
+        default: [1, 2]
+`)
+	src := string(genPy(t, s, map[string]any{})["message.py"])
+	for _, want := range []string{
+		"if not float_array_bits_equal(self.a, [0, 1.5]):",
+		"if not float_array_bits_equal(self.b, [0]):",
+		"if not (float_array_bits_equal(self.b, [0])):",
+		"if not (float_array_bits_equal(self.a, [0, 1.5])):",
+		"if self.c != [1, 2]:",
+		"from sofab import ", "float_array_bits_equal",
+	} {
+		if !strings.Contains(src, want) {
+			t.Errorf("generated module lacks %q", want)
+		}
+	}
+	for _, bad := range []string{"self.a != [", "self.a == [", "self.b != [", "self.b == ["} {
+		if strings.Contains(src, bad) {
+			t.Errorf("generated module still compares a float array with IEEE equality: %q", bad)
+		}
+	}
+	if !strings.Contains(src, "float_array_bits_equal, ") && !strings.Contains(src, ", float_array_bits_equal") {
+		t.Errorf("float_array_bits_equal is not imported from sofab")
 	}
 }
