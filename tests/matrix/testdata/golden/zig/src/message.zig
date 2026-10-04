@@ -61,15 +61,15 @@ pub const Scalars = struct {
         return true;
     }
 
-    /// Encode into a fresh buffer allocated from `alloc`.
+    /// Encode into a fresh buffer allocated from `alloc`, sized to MAX_SIZE and
+    /// trimmed to the bytes written. A value filled past its declared bound does
+    /// not fit: error.BufferFull, nothing returned.
     pub fn encode(self: *const Scalars, alloc: std.mem.Allocator) (sofab.Error || std.mem.Allocator.Error)![]u8 {
-        var sink: sofab.CollectingSink = .{ .alloc = alloc };
-        defer sink.deinit();
-        var scratch: [512]u8 = undefined;
-        var os = sofab.OStream.initFlush(&scratch, 0, &sink, sofab.CollectingSink.push);
+        const buf = try alloc.alloc(u8, MAX_SIZE);
+        errdefer alloc.free(buf);
+        var os = sofab.OStream.init(buf);
         try self.serialize(&os);
-        _ = os.flush();
-        return sink.toOwnedSlice();
+        return alloc.realloc(buf, os.bytesUsed());
     }
 
     /// Decode a complete message. The result OWNS its bytes: strings, blobs

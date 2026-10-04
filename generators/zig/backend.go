@@ -321,15 +321,29 @@ func (g *gen) emitStruct(f *zfile, name, vis string, fields []*ir.Field, isMessa
 
 	if isMessage {
 		f.blank()
-		f.line("    /// Encode into a fresh buffer allocated from `alloc`.")
-		f.line("    pub fn encode(self: *const %s, alloc: std.mem.Allocator) (sofab.Error || std.mem.Allocator.Error)![]u8 {", name)
-		f.line("        var sink: sofab.CollectingSink = .{ .alloc = alloc };")
-		f.line("        defer sink.deinit();")
-		f.line("        var scratch: [512]u8 = undefined;")
-		f.line("        var os = sofab.OStream.initFlush(&scratch, 0, &sink, sofab.CollectingSink.push);")
-		f.line("        try self.serialize(&os);")
-		f.line("        _ = os.flush();")
-		f.line("        return sink.toOwnedSlice();")
+		if ms := g.messageSize(name, fields); ms.Bounded {
+			// One exactly sized buffer (ARCHITECTURE §9.6): a value filled past its
+			// declared bound does not fit and is reported, never emitted.
+			f.line("    /// Encode into a fresh buffer allocated from `alloc`, sized to MAX_SIZE and")
+			f.line("    /// trimmed to the bytes written. A value filled past its declared bound does")
+			f.line("    /// not fit: error.BufferFull, nothing returned.")
+			f.line("    pub fn encode(self: *const %s, alloc: std.mem.Allocator) (sofab.Error || std.mem.Allocator.Error)![]u8 {", name)
+			f.line("        const buf = try alloc.alloc(u8, MAX_SIZE);")
+			f.line("        errdefer alloc.free(buf);")
+			f.line("        var os = sofab.OStream.init(buf);")
+			f.line("        try self.serialize(&os);")
+			f.line("        return alloc.realloc(buf, os.bytesUsed());")
+		} else {
+			f.line("    /// Encode into a fresh buffer allocated from `alloc`.")
+			f.line("    pub fn encode(self: *const %s, alloc: std.mem.Allocator) (sofab.Error || std.mem.Allocator.Error)![]u8 {", name)
+			f.line("        var sink: sofab.CollectingSink = .{ .alloc = alloc };")
+			f.line("        defer sink.deinit();")
+			f.line("        var scratch: [512]u8 = undefined;")
+			f.line("        var os = sofab.OStream.initFlush(&scratch, 0, &sink, sofab.CollectingSink.push);")
+			f.line("        try self.serialize(&os);")
+			f.line("        _ = os.flush();")
+			f.line("        return sink.toOwnedSlice();")
+		}
 		f.line("    }")
 		f.blank()
 		f.line("    /// Decode a complete message. The result OWNS its bytes: strings, blobs")

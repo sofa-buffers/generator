@@ -127,6 +127,7 @@ build "$ROOT/tests/conformance/lib/maxsize_fill.yaml" "$WORK/fill"
 check_maxsize_constant java "$WORK/fill/src/main/java/message/Fill.java" \
     "public static final int MAX_SIZE = $SOFAB_MAXSIZE_FILL_BYTES;\$"
 check_maxsize_fill java java -jar "$WORK/fill/target/harness.jar" encode fill
+check_maxsize_overfill java java -jar "$WORK/fill/target/harness.jar" encode fill
 check_maxsize_fill_decode java java -jar "$WORK/fill/target/harness.jar" decode fill
 check_maxsize_fill_decode java/stream java -jar "$WORK/fill/target/harness.jar" streamdecode fill
 
