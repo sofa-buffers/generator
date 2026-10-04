@@ -86,6 +86,55 @@ check_maxsize_fill() {
     echo "   [$_label] max-fill encodes to exactly $_got bytes, byte-exact"
 }
 
+# check_maxsize_overfill <label> <encode-command...>
+#   The refusal half of §9.6. MAX_SIZE sizes one exactly-sized encode buffer, so
+#   a value the caller filled past its own declared bound does not fit, and the
+#   encode must REPORT that (§5.1 forbids returning partial output as if it were
+#   the message). Runs the encode command with maxsize_fill.json -- the single
+#   source -- where f_str (maxlen 9) is replaced by a 200-byte string, and
+#   requires a non-zero exit, nothing on stdout and a message on stderr.
+#
+#   A backend that discards the corelib's buffer-full status encodes the same
+#   input to a short, malformed message and exits 0; the exact-fill leg above
+#   cannot see that, because a fully legal message always fits.
+#
+#   Only for a target whose field storage can hold the over-bound value: a
+#   fixed-capacity container refuses it at insert, before any encode runs.
+check_maxsize_overfill() {
+    _label=$1
+    shift
+    _json="$ROOT/tests/conformance/lib/maxsize_fill.json"
+    _in=$(mktemp)
+    _out=$(mktemp)
+    _err=$(mktemp)
+    python3 -c '
+import json, sys
+d = json.load(open(sys.argv[1]))
+d["f_str"] = "x" * 200
+sys.stdout.write(json.dumps(d))' "$_json" > "$_in"
+
+    if "$@" < "$_in" > "$_out" 2> "$_err"; then
+        _got=$(wc -c < "$_out" | tr -d ' ')
+        echo "FAIL: [$_label] a message with f_str 200 bytes past its maxlen of 9 encoded"
+        echo "      successfully ($_got bytes) — the buffer-full status was dropped and a"
+        echo "      truncated message was returned as if it were complete (§9.6, §5.1)"
+        rm -f "$_in" "$_out" "$_err"
+        exit 1
+    fi
+    if [ -s "$_out" ]; then
+        echo "FAIL: [$_label] the refused over-bound encode still wrote $(wc -c < "$_out" | tr -d ' ') bytes to stdout"
+        rm -f "$_in" "$_out" "$_err"
+        exit 1
+    fi
+    if [ ! -s "$_err" ]; then
+        echo "FAIL: [$_label] the over-bound encode failed without saying why (empty stderr)"
+        rm -f "$_in" "$_out" "$_err"
+        exit 1
+    fi
+    rm -f "$_in" "$_out" "$_err"
+    echo "   [$_label] over-bound encode is refused: non-zero exit, empty stdout, reason on stderr"
+}
+
 # check_maxsize_fill_decode <label> <decode-command...>
 #   Feeds the bytes frozen in maxsize_fill.hex to the decode command and
 #   requires the JSON it prints to carry the same data as maxsize_fill.json.

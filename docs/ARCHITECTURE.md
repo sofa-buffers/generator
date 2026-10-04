@@ -5466,6 +5466,13 @@ produce two different generated shapes, and conflating them is a truncation bug:
   `new OStream(buf)`).
   A value the caller filled past its own declared bound does not fit, and is **reported** (buffer-full) rather than emitted short —
   §5.1 forbids returning partial output as if it were complete.
+  Rust reports it in the type: `serialize` and `encode()` return a `Result`, every
+  `write_*` status is propagated with `?`, and the harness `encode` exits non-zero
+  with nothing on stdout. `tests/conformance/lib/maxsize_fill.sh`
+  (`check_maxsize_overfill`) feeds the max-fill message with `f_str` far past its
+  `maxlen` and requires that refusal; a fixed-capacity container refuses the value
+  at insert, so the static Rust variants assert instead that no write status is
+  discarded.
 - **unbounded** — `MAX_SIZE` is an imposed ceiling, so it must not size a buffer:
   a message above it is legal and would be silently refused. The shape is a fixed
   caller scratch plus a flush sink draining into caller-owned storage (Rust

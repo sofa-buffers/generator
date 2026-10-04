@@ -32,7 +32,7 @@ func (g *gen) emitBench(f *rfile, s *ir.Schema) {
 		f.line("#[inline(never)]")
 		f.line("#[no_mangle]")
 		f.line("pub fn run_encode_%s(obj: &%s) -> usize {", low, mt)
-		f.line("    let out = black_box(obj).encode();")
+		f.line("    let out = black_box(obj).encode().expect(\"encode\");")
 		f.line("    black_box(&out);")
 		f.line("    out.len()")
 		f.line("}")
@@ -59,7 +59,7 @@ func (g *gen) emitBench(f *rfile, s *ir.Schema) {
 		low := strings.ToLower(m.Name)
 		f.line("    if w == \"encode_%s\" || w == \"decode_%s\" {", low, low)
 		f.line("        let obj: %s = serde_json::from_slice(input).expect(\"json\");", mt)
-		f.line("        let wire = obj.encode(); // setup: the decode input (not collected)")
+		f.line("        let wire = obj.encode().expect(\"encode\"); // setup: the decode input (not collected)")
 		f.line("        let mut sink: u64 = 0;")
 		f.line("        if w == \"encode_%s\" {", low)
 		f.line("            sink = sink.wrapping_add(run_encode_%s(&obj) as u64);", low)
@@ -282,7 +282,13 @@ func (g *gen) harness(s *ir.Schema) []byte {
 		f.line("        %q => {", m.Name)
 		f.line("            if mode == \"encode\" {")
 		f.line("                let obj: %s = from_json(&input);", mt)
-		f.line("                std::io::stdout().write_all(&obj.encode()).unwrap();")
+		// An Err from encode() (a value filled past its declared bound is
+		// BufferFull) leaves stdout empty and exits non-zero, so a refusal cannot
+		// be mistaken for a message.
+		f.line("                match obj.encode() {")
+		f.line("                    Ok(b) => std::io::stdout().write_all(&b).unwrap(),")
+		f.line("                    Err(e) => { eprintln!(\"encode error: {:?}\", e); std::process::exit(1); }")
+		f.line("                }")
 		// The encode twin of streamdecode: the same message through a sink, drained
 		// into a Vec the harness owns. Window 0 is the generated one-shot `encode()`;
 		// any other window is a scratch of that size (raised to the corelib's floor)
@@ -292,7 +298,10 @@ func (g *gen) harness(s *ir.Schema) []byte {
 		f.line("                let obj: %s = from_json(&input);", mt)
 		f.line("                let win: usize = args.get(3).and_then(|s| s.parse().ok()).unwrap_or(0);")
 		f.line("                if win == 0 {")
-		f.line("                    std::io::stdout().write_all(&obj.encode()).unwrap();")
+		f.line("                    match obj.encode() {")
+		f.line("                        Ok(b) => std::io::stdout().write_all(&b).unwrap(),")
+		f.line("                        Err(e) => { eprintln!(\"encode error: {:?}\", e); std::process::exit(1); }")
+		f.line("                    }")
 		f.line("                } else {")
 		f.line("                    let mut out: Vec<u8> = Vec::new();")
 		f.line("                    let mut buf = vec![0u8; win.max(sofab::MIN_OUTPUT_BUFFER)];")
@@ -301,7 +310,12 @@ func (g *gen) harness(s *ir.Schema) []byte {
 		f.line("                            Ok(os) => os,")
 		f.line("                            Err(_) => { eprintln!(\"window refused\"); std::process::exit(1); }")
 		f.line("                        };")
-		f.line("                        obj.serialize(&mut os);")
+		f.line("                        if let Err(e) = obj.serialize(&mut os) {")
+		f.line("                            eprintln!(\"encode error: {:?}\", e);")
+		f.line("                            std::process::exit(1);")
+		f.line("                        }")
+		// flush() is a Result in corelib-rs and a count in corelib-rs-no-std; the
+		// sink is an infallible Vec push, so there is nothing to report either way.
 		f.line("                        let _ = os.flush();")
 		f.line("                    }")
 		f.line("                    std::io::stdout().write_all(&out).unwrap();")

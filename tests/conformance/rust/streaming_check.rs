@@ -129,7 +129,7 @@ fn main() {
 
     // ---- 1. streaming encode is byte-identical -------------------------
 
-    let one_shot = m.encode();
+    let one_shot = m.encode().expect("encode");
     assert!(!one_shot.is_empty(), "message encoded to nothing");
 
     // 7 bytes: far smaller than any field, so the sink fires mid-value and the
@@ -144,7 +144,7 @@ fn main() {
             streamed.extend_from_slice(d)
         })
         .expect("7 bytes is above MIN_OUTPUT_BUFFER");
-        m.serialize(&mut os);
+        m.serialize(&mut os).expect("serialize");
         let _ = os.flush(); // Result<usize> on corelib-rs, usize on rs-no-std
     }
     assert_eq!(
@@ -291,7 +291,7 @@ so a half-read field would be returned as a value"
         wire.iter_mut().for_each(|b| *b = SCRIBBLE);
         assert_eq!(
             &one_shot[..],
-            &got.encode()[..],
+            &got.encode().expect("encode")[..],
             "one-shot try_decode: a decoded field aliased the buffer it was decoded from"
         );
 
@@ -310,7 +310,7 @@ so a half-read field would be returned as a value"
             let got = dec.finish().expect("ownership: finish failed");
             assert_eq!(
                 &one_shot[..],
-                &got.encode()[..],
+                &got.encode().expect("encode")[..],
                 "streaming chunk size {size}: a decoded field aliased the chunk it arrived in"
             );
         }

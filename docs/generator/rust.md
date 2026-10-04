@@ -80,6 +80,28 @@ Two things worth knowing before switching it off under `corelib: rs`:
 This is the Rust analogue of the C++ [`allow_dynamic`](cpp.md#allow_dynamic),
 and behaves the same way.
 
+## Encoding
+
+```rust
+pub fn encode(&self) -> Result<Vec<u8>, sofab::Error>
+pub fn serialize<_F: sofab::Flush>(&self, os: &mut sofab::OStream<'_, _F>) -> Result<(), sofab::Error>
+```
+
+With `corelib: rs-no-std` `encode()` returns `Result<heapless::Vec<u8, N>, sofab::Error>`,
+`N` being the message's `MAX_SIZE`. Every write the corelib reports is passed on
+with `?`, so an encode that fails never returns bytes. Ignoring the result of
+`serialize` is a `#[must_use]` warning.
+
+`encode()` writes into one buffer of exactly `MAX_SIZE` bytes when the schema
+bounds the message. A value that holds more than its declared `maxlen` or
+`count` allows does not fit and the call returns `Err(sofab::Error::BufferFull)`
+instead of a short message. This can only happen with `String`/`Vec` storage
+(`allow_dynamic: true`, the `rs` default); a `heapless` container refuses the
+over-long value when it is built, so an encode never sees one. A schema with an
+unbounded field drains through a scratch buffer into a `Vec` and has no size to
+overrun; its `Err` can only be a status the corelib reports for an argument it
+refuses, such as an id past the wire limit.
+
 ## Field names
 
 A field's struct member is the field's schema name. A field named like a Rust

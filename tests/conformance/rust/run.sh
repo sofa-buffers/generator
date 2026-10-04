@@ -186,6 +186,20 @@ run_variant() {
     check_maxsize_constant "$label" "$WORK/fill-$label/src/message.rs" \
         "pub const MAX_SIZE: usize = $SOFAB_MAXSIZE_FILL_BYTES;\$"
     ( cd "$WORK/fill-$label" && check_maxsize_fill "$label" cargo run -q -- encode fill )
+    # A value filled past its own bound must be refused, not truncated. Only a
+    # dynamic container can hold one; a heapless container refuses it at insert,
+    # before any encode runs, so there the leg cannot be built and the thing to
+    # assert is that the generated serialize propagates every write status.
+    case "$label" in
+        rs|no-std-dynamic)
+            ( cd "$WORK/fill-$label" && check_maxsize_overfill "$label" cargo run -q -- encode fill ) ;;
+        *)
+            if grep -n 'let _ = os\.write' "$WORK/fill-$label/src/message.rs" > /dev/null; then
+                echo "FAIL: [$label] generated serialize discards a write status (let _ = os.write*)"
+                exit 1
+            fi
+            echo "   [$label] serialize propagates every write status (no let _ = os.write*)" ;;
+    esac
     ( cd "$WORK/fill-$label" && check_maxsize_fill_decode "$label" cargo run -q -- decode fill )
     ( cd "$WORK/fill-$label" && check_maxsize_fill_decode "$label/stream" cargo run -q -- streamdecode fill )
 

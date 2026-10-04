@@ -631,60 +631,58 @@ func (g *gen) emitStruct(f *rfile, name string, fields []*ir.Field, msg *ir.Mess
 	// into a buffer (NoFlush) or straight into a transport that drains the
 	// buffer as it fills -- the corelib supports both, and pinning the signature
 	// to NoFlush made the streaming half unreachable from generated code.
-	f.line("    pub fn serialize<_F: sofab::Flush>(&self, os: &mut sofab::OStream<'_, _F>) {")
+	f.line("    pub fn serialize<_F: sofab::Flush>(&self, os: &mut sofab::OStream<'_, _F>) -> Result<(), sofab::Error> {")
 	for _, fld := range fields {
 		g.emitSerialize(f, fld)
 	}
+	f.line("        Ok(())")
 	f.line("    }")
 
 	if isMessage {
 		if g.noStd {
 			// Heap-free encode into a fixed-capacity heapless::Vec sized by MAX_SIZE.
 			size := g.messageSize(name, fields).Size
-			f.line("    pub fn encode(&self) -> heapless::Vec<u8, %d> {", size)
+			f.line("    pub fn encode(&self) -> Result<heapless::Vec<u8, %d>, sofab::Error> {", size)
 			f.line("        let mut buf: heapless::Vec<u8, %d> = heapless::Vec::new();", size)
 			f.line("        let _ = buf.resize_default(%d);", size)
-			f.line("        let used = { let mut os = sofab::OStream::new(&mut buf); self.serialize(&mut os); os.bytes_used() };")
+			f.line("        let used = { let mut os = sofab::OStream::new(&mut buf); self.serialize(&mut os)?; os.bytes_used() };")
 			f.line("        buf.truncate(used);")
-			f.line("        buf")
+			f.line("        Ok(buf)")
 			f.line("    }")
 		} else if ms.Bounded {
 			// MAX_SIZE is derived from the schema, so one exactly-sized buffer
-			// always holds the message.
-			f.line("    pub fn encode(&self) -> Vec<u8> {")
+			// holds every message that respects its declared bounds. A value the
+			// caller filled past its own bound does not fit: the write reports
+			// BufferFull and encode() returns it, never a short, malformed message
+			// (ARCHITECTURE §9.6).
+			f.line("    pub fn encode(&self) -> Result<Vec<u8>, sofab::Error> {")
 			f.line("        let mut buf = vec![0u8; Self::MAX_SIZE];")
-			f.line("        let used = { let mut os = sofab::OStream::new(&mut buf); self.serialize(&mut os); os.bytes_used() };")
+			f.line("        let used = { let mut os = sofab::OStream::new(&mut buf); self.serialize(&mut os)?; os.bytes_used() };")
 			f.line("        buf.truncate(used);")
-			f.line("        buf")
+			f.line("        Ok(buf)")
 			f.line("    }")
 		} else {
 			// A field with no schema bound has no worst case, so MAX_SIZE here is
 			// the configured ceiling -- a policy number, not a size this message
 			// cannot exceed. Sizing the buffer from it would silently truncate a
-			// larger message (the writes report failure, and encode() has nowhere
-			// to report it to). This profile has a heap, so the buffer grows with
+			// larger message. This profile has a heap, so the buffer grows with
 			// the message instead and the ceiling never applies to a value the
-			// caller legitimately built.
-			f.line("    pub fn encode(&self) -> Vec<u8> {")
+			// caller legitimately built; the sink is an infallible Vec push, so
+			// the only failures left are the ones the writes themselves report.
+			f.line("    pub fn encode(&self) -> Result<Vec<u8>, sofab::Error> {")
 			f.line("        let mut out: Vec<u8> = Vec::new();")
 			f.line("        {")
 			f.line("            let mut scratch = [0u8; 512];")
 			// with_flush reports the MIN_OUTPUT_BUFFER precondition as a status in
-			// both Rust corelibs -- corelib-rs-no-std cannot panic at all (no
-			// core::panicking; a panic is a hard fault on bare metal), and corelib-rs
-			// matches it so one spelling serves both. The Err arm is unreachable
-			// here: the scratch is a fixed 512 bytes, far above any MIN_OUTPUT_BUFFER
-			// (<= 20 by §5.1), and the offset is 0. It is still matched rather than
-			// unwrapped, so this stays panic-free for the no_std profile too.
-			f.line("            if let Ok(mut os) = sofab::OStream::with_flush(&mut scratch, 0, |_d: &[u8]| out.extend_from_slice(_d)) {")
-			f.line("                self.serialize(&mut os);")
-			// corelib-rs's flush() returns a #[must_use] Result; the sink is an
-			// infallible Vec push, so there is nothing to report. The discard is
-			// explicit, like every write_* above it.
-			f.line("                let _ = os.flush();")
-			f.line("            }")
+			// both Rust corelibs, so it is propagated rather than unwrapped and
+			// this stays panic-free. It cannot fire here: the scratch is a fixed
+			// 512 bytes, far above any MIN_OUTPUT_BUFFER (<= 20 by §5.1), and the
+			// offset is 0.
+			f.line("            let mut os = sofab::OStream::with_flush(&mut scratch, 0, |_d: &[u8]| out.extend_from_slice(_d))?;")
+			f.line("            self.serialize(&mut os)?;")
+			f.line("            os.flush()?;")
 			f.line("        }")
-			f.line("        out")
+			f.line("        Ok(out)")
 			f.line("    }")
 		}
 		f.line("    pub fn decode(data: &[u8]) -> Self {")
@@ -715,24 +713,24 @@ func (g *gen) emitSerialize(f *rfile, fld *ir.Field) {
 	var write string
 	switch fld.Kind {
 	case ir.KindU8, ir.KindU16, ir.KindU32, ir.KindU64, ir.KindBitfield:
-		write = fmt.Sprintf("let _ = os.write_unsigned(%d, %s as sofab::Unsigned);", fld.ID, acc)
+		write = fmt.Sprintf("os.write_unsigned(%d, %s as sofab::Unsigned)?;", fld.ID, acc)
 	case ir.KindI8, ir.KindI16, ir.KindI32, ir.KindI64, ir.KindEnum:
-		write = fmt.Sprintf("let _ = os.write_signed(%d, %s as sofab::Signed);", fld.ID, acc)
+		write = fmt.Sprintf("os.write_signed(%d, %s as sofab::Signed)?;", fld.ID, acc)
 	case ir.KindBool:
-		write = fmt.Sprintf("let _ = os.write_boolean(%d, %s);", fld.ID, acc)
+		write = fmt.Sprintf("os.write_boolean(%d, %s)?;", fld.ID, acc)
 	case ir.KindFP32:
-		write = fmt.Sprintf("let _ = os.write_fp32(%d, %s);", fld.ID, acc)
+		write = fmt.Sprintf("os.write_fp32(%d, %s)?;", fld.ID, acc)
 	case ir.KindFP64:
-		write = fmt.Sprintf("let _ = os.write_fp64(%d, %s);", fld.ID, acc)
+		write = fmt.Sprintf("os.write_fp64(%d, %s)?;", fld.ID, acc)
 	case ir.KindString:
-		write = fmt.Sprintf("let _ = os.write_str(%d, &%s);", fld.ID, acc)
+		write = fmt.Sprintf("os.write_str(%d, &%s)?;", fld.ID, acc)
 	case ir.KindBlob:
 		// blob is a leaf: omit when equal to its default. Compare as slices so the
 		// same form works for std Vec and no_std heapless/alloc Vec alike.
 		if raw, ok := g.blobBytes(fld); ok {
-			f.line("        if %s[..] != %s[..] { let _ = os.write_blob(%d, &%s); }", acc, byteSliceLit(raw), fld.ID, acc)
+			f.line("        if %s[..] != %s[..] { os.write_blob(%d, &%s)?; }", acc, byteSliceLit(raw), fld.ID, acc)
 		} else {
-			f.line("        if !%s.is_empty() { let _ = os.write_blob(%d, &%s); }", acc, fld.ID, acc)
+			f.line("        if !%s.is_empty() { os.write_blob(%d, &%s)?; }", acc, fld.ID, acc)
 		}
 		return
 	case ir.KindStruct, ir.KindUnion:
@@ -742,7 +740,7 @@ func (g *gen) emitSerialize(f *rfile, fld *ir.Field) {
 		// that equals its default, so "no child was written" IS "the object equals
 		// its declared default", evaluated per field and recursively. An all-default
 		// nested object is therefore dropped, not emitted as an empty wrapper.
-		f.line("        let _ = os.write_sequence_begin_lazy(%d); %s.serialize(os); let _ = os.write_sequence_end();", fld.ID, acc)
+		f.line("        os.write_sequence_begin_lazy(%d)?; %s.serialize(os)?; os.write_sequence_end()?;", fld.ID, acc)
 		return
 	case ir.KindArray:
 		g.emitSerializeArray(f, fld, acc)
@@ -836,13 +834,13 @@ func lastElemExpr(iv, val string) string {
 func emitSeqEnd(f *rfile, ind, keepIf string) {
 	switch keepIf {
 	case "":
-		f.line("%slet _ = os.write_sequence_end();", ind)
+		f.line("%sos.write_sequence_end()?;", ind)
 		return
 	case keepAlways:
-		f.line("%slet _ = os.write_sequence_end_keep();", ind)
+		f.line("%sos.write_sequence_end_keep()?;", ind)
 		return
 	}
-	f.line("%sif %s { let _ = os.write_sequence_end_keep(); } else { let _ = os.write_sequence_end(); }", ind, keepIf)
+	f.line("%sif %s { os.write_sequence_end_keep()?; } else { os.write_sequence_end()?; }", ind, keepIf)
 }
 
 // serializeArray writes the array val as field idExpr. Numeric/enum/bitfield
@@ -875,34 +873,34 @@ func (g *gen) serializeArray(f *rfile, ind, idExpr, val string, elem ir.Kind, re
 	switch elem {
 	case ir.KindU8, ir.KindU16, ir.KindU32, ir.KindU64, ir.KindBitfield:
 		// bitfield backing is an unsigned int (UnsignedElem), so it writes directly.
-		f.line("%slet _ = os.write_array_unsigned(%s, %s);", ind, idExpr, borrowed)
+		f.line("%sos.write_array_unsigned(%s, %s)?;", ind, idExpr, borrowed)
 	case ir.KindI8, ir.KindI16, ir.KindI32, ir.KindI64, ir.KindEnum:
 		// enum backing is a signed int (SignedElem), so it writes directly.
-		f.line("%slet _ = os.write_array_signed(%s, %s);", ind, idExpr, borrowed)
+		f.line("%sos.write_array_signed(%s, %s)?;", ind, idExpr, borrowed)
 	case ir.KindBool:
 		// bool is not an array element type; lower to a 0/1 unsigned array. The
 		// temporary matches the field's own container, so a heap-free profile stays
 		// heap-free: a heapless::Vec of the declared capacity under static storage,
 		// otherwise the environment's dynamic container.
 		typ := g.rustSeq("u8", hasCount, count)
-		f.line("%s{ let %s: %s = %s.iter().map(|_v| *_v as u8).collect(); let _ = os.write_array_unsigned(%s, &%s); }", ind, tv, typ, val, idExpr, tv)
+		f.line("%s{ let %s: %s = %s.iter().map(|_v| *_v as u8).collect(); os.write_array_unsigned(%s, &%s)?; }", ind, tv, typ, val, idExpr, tv)
 	case ir.KindFP32:
-		f.line("%slet _ = os.write_array_fp32(%s, %s);", ind, idExpr, borrowed)
+		f.line("%sos.write_array_fp32(%s, %s)?;", ind, idExpr, borrowed)
 	case ir.KindFP64:
-		f.line("%slet _ = os.write_array_fp64(%s, %s);", ind, idExpr, borrowed)
+		f.line("%sos.write_array_fp64(%s, %s)?;", ind, idExpr, borrowed)
 	case ir.KindString:
 		// A string element is a leaf: in the array's INTERIOR it is omitted when it
 		// equals the element default (empty), leaving an id gap the decoder restores
 		// from that same default -- the ordinary sparse-field rule of MESSAGE_SPEC
 		// §2, applied to an element. At the LAST index it is written whatever its
 		// value: see lastElemExpr.
-		f.line("%slet _ = os.write_sequence_begin_lazy(%s);", ind, idExpr)
-		f.line("%sfor (%s, %s) in %s.iter().enumerate() { if !%s.is_empty() || %s { let _ = os.write_str(%s as sofab::Id, %s); } }", ind, iv, ev, val, ev, lastElemExpr(iv, val), iv, ev)
+		f.line("%sos.write_sequence_begin_lazy(%s)?;", ind, idExpr)
+		f.line("%sfor (%s, %s) in %s.iter().enumerate() { if !%s.is_empty() || %s { os.write_str(%s as sofab::Id, %s)?; } }", ind, iv, ev, val, ev, lastElemExpr(iv, val), iv, ev)
 		emitSeqEnd(f, ind, keepIf)
 	case ir.KindBlob:
 		// A blob element is a leaf, exactly like the string element above.
-		f.line("%slet _ = os.write_sequence_begin_lazy(%s);", ind, idExpr)
-		f.line("%sfor (%s, %s) in %s.iter().enumerate() { if !%s.is_empty() || %s { let _ = os.write_blob(%s as sofab::Id, %s); } }", ind, iv, ev, val, ev, lastElemExpr(iv, val), iv, ev)
+		f.line("%sos.write_sequence_begin_lazy(%s)?;", ind, idExpr)
+		f.line("%sfor (%s, %s) in %s.iter().enumerate() { if !%s.is_empty() || %s { os.write_blob(%s as sofab::Id, %s)?; } }", ind, iv, ev, val, ev, lastElemExpr(iv, val), iv, ev)
 		emitSeqEnd(f, ind, keepIf)
 	case ir.KindStruct, ir.KindUnion:
 		// A sequence-form element obeys the SAME rule as the leaf elements above --
@@ -912,14 +910,14 @@ func (g *gen) serializeArray(f *rfile, ind, idExpr, val string, elem ir.Kind, re
 		// in the interior, where an all-default element vanishes into an id gap; the
 		// keeping one at the last index, where it survives as an empty frame because
 		// that presence is what fixes the array's length.
-		f.line("%slet _ = os.write_sequence_begin_lazy(%s);", ind, idExpr)
+		f.line("%sos.write_sequence_begin_lazy(%s)?;", ind, idExpr)
 		f.line("%sfor (%s, %s) in %s.iter().enumerate() {", ind, iv, ev, val)
-		f.line("%s    let _ = os.write_sequence_begin_lazy(%s as sofab::Id); %s.serialize(os);", ind, iv, ev)
+		f.line("%s    os.write_sequence_begin_lazy(%s as sofab::Id)?; %s.serialize(os)?;", ind, iv, ev)
 		emitSeqEnd(f, ind+"    ", lastElemExpr(iv, val))
 		f.line("%s}", ind)
 		emitSeqEnd(f, ind, keepIf)
 	case ir.KindArray:
-		f.line("%slet _ = os.write_sequence_begin_lazy(%s);", ind, idExpr)
+		f.line("%sos.write_sequence_begin_lazy(%s)?;", ind, idExpr)
 		f.line("%sfor (%s, %s) in %s.iter().enumerate() {", ind, iv, ev, val)
 		if isNativeArrayElem(items.Elem) {
 			// A native row is a single count-prefixed value with no frame of its own,

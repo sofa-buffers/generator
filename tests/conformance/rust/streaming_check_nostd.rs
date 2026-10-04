@@ -38,7 +38,7 @@ fn main() {
     let mut m = Vecs::default();
     m.a = text;
 
-    let one_shot = m.encode();
+    let one_shot = m.encode().expect("encode");
     let expect = Vecs::try_decode(&one_shot).expect("one-shot decode failed");
 
     // 1. streaming encode is byte-identical, through a buffer far smaller than
@@ -53,7 +53,7 @@ fn main() {
             streamed.extend_from_slice(d)
         })
         .expect("7 bytes is above MIN_OUTPUT_BUFFER");
-        m.serialize(&mut os);
+        m.serialize(&mut os).expect("serialize");
         let _ = os.flush(); // Result<usize> on corelib-rs, usize on rs-no-std
     }
     assert_eq!(
@@ -98,7 +98,7 @@ fn main() {
             )
             .expect("fits the schema count");
     }
-    let wire = arr.encode();
+    let wire = arr.encode().expect("encode");
     let want = Vecsa::try_decode(&wire).expect("one-shot decode failed");
 
     for size in [1usize, 3, 7, 16] {
