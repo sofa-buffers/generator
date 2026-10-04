@@ -5463,7 +5463,7 @@ produce two different generated shapes, and conflating them is a truncation bug:
   corelib's buffer constructor (Rust `OStream::new`, Java `new OStream(buf)`, Go
   `sofab.NewEncoderBuffer`, Python `Encoder.over_buffer(buf, 0)`, TypeScript
   `new OStream(buf)`, Dart `Encoder.overBuffer(buf)`, Kotlin `OStream(buf)`, C#
-  `new OStream(buf)`).
+  `new OStream(buf)`, Zig `sofab.OStream.init(buf)`).
   A value the caller filled past its own declared bound does not fit, and is **reported** (buffer-full) rather than emitted short —
   §5.1 forbids returning partial output as if it were complete.
   Rust reports it in the type: `serialize` and `encode()` return a `Result`, every
@@ -5484,13 +5484,20 @@ produce two different generated shapes, and conflating them is a truncation bug:
   corelibs have no sticky error flag; a corelib that latched the first failure and
   reported it once at `finish` would let the generated code drop the per-write branch
   and recover most of this, and is the place to look if the footprint rows need it back.
+  Zig spells the bounded shape in four emitted lines in `encode()` (allocate
+  `MAX_SIZE` from the caller's allocator, `OStream.init`, `serialize`, `realloc` down
+  to `bytesUsed()`), so the returned slice is owned and exactly the encoded size; an
+  over-bound message returns `error.BufferFull`. Measured (`tests/bench/run.sh
+  --rows zig`, same corelib): `zig` encode Ir/op 10118 -> 9135 (-9.7 %), decode
+  unchanged.
 - **unbounded** — `MAX_SIZE` is an imposed ceiling, so it must not size a buffer:
   a message above it is legal and would be silently refused. The shape is a fixed
   caller scratch plus a flush sink draining into caller-owned storage (Rust
   `OStream::with_flush`, Go `sofab.NewEncoderSink`, Python
   `Encoder.over_buffer(scratch, 0, sink)`, TypeScript
   `new OStream(scratch, 0, sink)`, Dart `Encoder(sink, buffer: scratch)`, Kotlin
-  `OStream(scratch, 0, FlushSink { … })`, Java `new OStream(scratch, 0,
+  `OStream(scratch, 0, FlushSink { … })`, Zig
+  `OStream.initFlush(&scratch, 0, &sink, CollectingSink.push)`, Java `new OStream(scratch, 0,
   out::write)` over a `ByteArrayOutputStream`, C# `new OStream(scratch, 0,
   ms.Write)` over a `MemoryStream`), which bounds memory by the scratch instead
   of by the message. A message above the ceiling therefore encodes on every heap

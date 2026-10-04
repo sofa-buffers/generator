@@ -2155,3 +2155,54 @@ func containsCode(code, want string) bool { return strings.Contains(flat(code), 
 
 // countCode is strings.Count over flattened code (see flat).
 func countCode(code, want string) int { return strings.Count(flat(code), flat(want)) }
+
+// TestZigEncodeBufferFollowsBound: a schema-bounded message encodes into one
+// exactly MAX_SIZE-sized buffer, so a value filled past its bound is reported
+// (error.BufferFull); an unbounded message keeps the flush sink, because its
+// MAX_SIZE is an imposed ceiling that must not size a buffer (ARCHITECTURE §9.6).
+func TestZigEncodeBufferFollowsBound(t *testing.T) {
+	gen := func(src string) string {
+		t.Helper()
+		files, err := (&Backend{}).Generate(buildSchema(t, src), map[string]any{})
+		if err != nil {
+			t.Fatalf("generate: %v", err)
+		}
+		return string(files[0].Content)
+	}
+	bounded := gen(`
+version: 1
+messages:
+  m:
+    payload:
+      s: { id: 0, type: string, maxlen: 4 }
+`)
+	for _, want := range []string{
+		"alloc.alloc(u8, MAX_SIZE)",
+		"sofab.OStream.init(buf)",
+		"alloc.realloc(buf, os.bytesUsed())",
+	} {
+		if !strings.Contains(bounded, want) {
+			t.Errorf("bounded message: encode() must contain %q", want)
+		}
+	}
+	for _, bad := range []string{"CollectingSink", "scratch", "initFlush"} {
+		if strings.Contains(bounded, bad) {
+			t.Errorf("bounded message: encode() must not contain %q", bad)
+		}
+	}
+	unbounded := gen(`
+version: 1
+messages:
+  m:
+    payload:
+      s: { id: 0, type: string }
+`)
+	for _, want := range []string{"sofab.CollectingSink", "var scratch: [512]u8", "initFlush"} {
+		if !strings.Contains(unbounded, want) {
+			t.Errorf("unbounded message: encode() must keep %q", want)
+		}
+	}
+	if strings.Contains(unbounded, "alloc.alloc(u8, MAX_SIZE)") {
+		t.Error("unbounded message: MAX_SIZE is a ceiling and must not size a buffer")
+	}
+}

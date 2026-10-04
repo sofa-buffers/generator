@@ -335,16 +335,8 @@ fi
 # as INVALID. This is also the only encode-side bound the TS backend has: it
 # emits no maxlen/count validation of its own.
 echo "==> [$VL] an over-filled bounded value must be refused, not truncated (§5.1)"
-OVERFILL="$WORK/overfill.json"
-sed 's/"f_str": *"[^"]*"/"f_str": "'"$(printf 'x%.0s' $(seq 1 400))"'"/' \
-    "$FILLJSON" > "$OVERFILL"
-grep -q 'xxxxxxxxxx' "$OVERFILL" || { echo "FAIL: could not build the over-filled input (f_str renamed?)"; exit 1; }
-if fill_encode < "$OVERFILL" > "$WORK/overfill.bin" 2>/dev/null; then
-    echo "FAIL: a string 400 bytes into a maxlen-9 field must be reported, not encoded"; exit 1
-fi
-[ ! -s "$WORK/overfill.bin" ] || {
-    echo "FAIL: a refused encode emitted $(wc -c < "$WORK/overfill.bin") bytes of partial output"; exit 1
-}
+SOFAB_MAXSIZE_OVERFILL_BASE="$FILLJSON"
+check_maxsize_overfill typescript fill_encode
 echo "==> [$VL] encode-buffer ownership OK"
 
 # Over-count scalar array (generator#100): someuintarray declares count: 4

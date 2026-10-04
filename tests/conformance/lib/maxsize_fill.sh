@@ -100,10 +100,14 @@ check_maxsize_fill() {
 #
 #   Only for a target whose field storage can hold the over-bound value: a
 #   fixed-capacity container refuses it at insert, before any encode runs.
+#
+#   SOFAB_MAXSIZE_OVERFILL_BASE names the JSON the over-bound value is spliced
+#   into, when a build cannot read maxsize_fill.json itself (TypeScript `number`
+#   mode: its 64-bit scalars are lossy, so it fills them with safe integers).
 check_maxsize_overfill() {
     _label=$1
     shift
-    _json="$ROOT/tests/conformance/lib/maxsize_fill.json"
+    _json="${SOFAB_MAXSIZE_OVERFILL_BASE:-$ROOT/tests/conformance/lib/maxsize_fill.json}"
     _in=$(mktemp)
     _out=$(mktemp)
     _err=$(mktemp)

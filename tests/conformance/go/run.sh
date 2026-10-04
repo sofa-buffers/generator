@@ -980,15 +980,7 @@ check_maxsize_fill_decode go/stream "$WORK/fill/harness_bin" streamdecode fill
 # corelib-grown buffer silently emitted an over-bound message that every receiver
 # would then reject as INVALID.
 echo "==> an over-filled bounded value must be refused, not truncated (§5.1)"
-sed 's/"f_str": *"[^"]*"/"f_str": "'"$(printf 'x%.0s' $(seq 1 400))"'"/' \
-    "$ROOT/tests/conformance/lib/maxsize_fill.json" > "$WORK/overfill.json"
-grep -q 'xxxxxxxxxx' "$WORK/overfill.json" || { echo "FAIL: could not build the over-filled input (f_str renamed?)"; exit 1; }
-if "$WORK/fill/harness_bin" encode fill < "$WORK/overfill.json" > "$WORK/overfill.bin" 2>/dev/null; then
-    echo "FAIL: a string 400 bytes into a maxlen-9 field must be reported, not encoded"; exit 1
-fi
-[ ! -s "$WORK/overfill.bin" ] || {
-    echo "FAIL: a refused encode emitted $(wc -c < "$WORK/overfill.bin") bytes of partial output"; exit 1
-}
+check_maxsize_overfill go "$WORK/fill/harness_bin" encode fill
 echo "==> over-fill refusal OK"
 
 # The DECODE side of the same ownership rule (CORELIB_PLAN §6.7 / §6.7.1,
