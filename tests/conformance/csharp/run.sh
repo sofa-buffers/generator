@@ -1251,6 +1251,17 @@ for surface in decode streamdecode; do
         -- dotnet "$WORK/arrlen/bin/Debug/net9.0/harness.dll"
 done
 
+# An over-bound value is refused at encode (ARCHITECTURE §9.6; generator#656): a
+# string or blob past `maxlen`, an array past `count`, a scalar past its width.
+# The shared driver prints its own schema; its KNOWN_GAP lists what still fails.
+echo "==> an over-bound value is refused at encode (generator#656)"
+python3 "$ROOT/tests/conformance/lib/check_encode_bounds.py" --self-test
+printf 'version: 1\nmessages:\n' > "$WORK/encbnd.yaml"
+python3 "$ROOT/tests/conformance/lib/check_encode_bounds.py" --emit-schema >> "$WORK/encbnd.yaml"
+build "$WORK/encbnd.yaml" "$WORK/encbnd"
+python3 "$ROOT/tests/conformance/lib/check_encode_bounds.py" "C#" --backend csharp \
+    -- dotnet "$WORK/encbnd/bin/Debug/net9.0/harness.dll"
+
 # Explicit empty is not absent (MESSAGE_SPEC §2; generator#645): an empty array,
 # string or blob whose declared default is non-empty is a value, written as a
 # zero-length one and read back empty; `{}` writes nothing and reads back as

@@ -1204,6 +1204,19 @@ for surface in decode streamdecode; do
         -- "$WORK/arrlen/harness"
 done
 
+# An over-bound value is refused at encode (ARCHITECTURE §9.6; generator#656): a
+# string or blob past `maxlen`, an array past `count`, a scalar past its width.
+# The shared driver prints its own schema; its KNOWN_GAP lists what still fails.
+echo "==> an over-bound value is refused at encode (generator#656)"
+python3 "$ROOT/tests/conformance/lib/check_encode_bounds.py" --self-test
+printf 'version: 1\nmessages:\n' > "$WORK/encbnd.yaml"
+python3 "$ROOT/tests/conformance/lib/check_encode_bounds.py" --emit-schema >> "$WORK/encbnd.yaml"
+( cd "$ROOT" && go run ./cmd/sofabgen --format=off --config "$WORK/cfg.yaml" --lang dart --in "$WORK/encbnd.yaml" --out "$WORK/encbnd" )
+sed -i "s#\${SOFAB_DART_CORELIB}#$CORELIB#" "$WORK/encbnd/pubspec.yaml"
+compile_project "$WORK/encbnd"
+python3 "$ROOT/tests/conformance/lib/check_encode_bounds.py" "Dart" --backend dart \
+    -- "$WORK/encbnd/harness"
+
 # Explicit empty is not absent (MESSAGE_SPEC §2; generator#645): an empty array,
 # string or blob whose declared default is non-empty is a value, written as a
 # zero-length one and read back empty; `{}` writes nothing and reads back as

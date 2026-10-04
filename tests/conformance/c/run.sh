@@ -1223,6 +1223,19 @@ python3 "$ROOT/tests/conformance/lib/check_terminal_refusal.py" "c" --bounded \
     --marker finish --invalid-name INVALID --limit-name LIMIT_EXCEEDED \
     -- "$WORK/terminal/harness/harness"
 
+# An over-bound value is refused at encode (ARCHITECTURE §9.6; generator#656): a
+# string or blob past `maxlen`, an array past `count`, a scalar past its width.
+# The shared driver prints its own schema; its KNOWN_GAP lists what still fails.
+echo "==> an over-bound value is refused at encode (generator#656)"
+python3 "$ROOT/tests/conformance/lib/check_encode_bounds.py" --self-test
+printf 'version: 1\nmessages:\n' > "$WORK/encbnd.yaml"
+python3 "$ROOT/tests/conformance/lib/check_encode_bounds.py" --emit-schema --bounded-only >> "$WORK/encbnd.yaml"
+( cd "$ROOT" && go run ./cmd/sofabgen --config "$WORK/proj.yaml" --lang c \
+    --in "$WORK/encbnd.yaml" --out "$WORK/encbnd" )
+make -C "$WORK/encbnd" SOFAB_C_CORELIB="$CORELIB" >/dev/null
+python3 "$ROOT/tests/conformance/lib/check_encode_bounds.py" "C" --backend c --bounded-only \
+    -- "$WORK/encbnd/harness/harness"
+
 # Explicit empty is not absent (MESSAGE_SPEC §2; generator#645): an empty array,
 # string or blob whose declared default is non-empty is a value, written as a
 # zero-length one and read back empty; `{}` writes nothing and reads back as

@@ -618,6 +618,20 @@ run_variant() {
             --cwd "$WORK/terminal-$label" -- cargo run -q -- ;;
     esac
 
+    # An over-bound value is refused at encode (ARCHITECTURE §9.6; generator#656): a
+    # string or blob past `maxlen`, an array past `count`, a scalar past its width.
+    # The shared driver prints its own schema; its KNOWN_GAP lists what still fails.
+    ENCBND_OPTS=""
+    case "$label" in no-std-*) ENCBND_OPTS="--bounded-only" ;; esac
+    echo "==> [$label] an over-bound value is refused at encode (generator#656)"
+    python3 "$ROOT/tests/conformance/lib/check_encode_bounds.py" --self-test
+    printf 'version: 1\nmessages:\n' > "$WORK/encbnd.yaml"
+    python3 "$ROOT/tests/conformance/lib/check_encode_bounds.py" --emit-schema $ENCBND_OPTS >> "$WORK/encbnd.yaml"
+    rust_build "$WORK/encbnd.yaml" "$WORK/encbnd-$label"
+    python3 "$ROOT/tests/conformance/lib/check_encode_bounds.py" "Rust [$label]" $ENCBND_OPTS \
+        --backend "$(case "$label" in rs) echo rust ;; rs-static) echo rust-static ;; no-std-dynamic) echo rs-no-std-dynamic ;; no-std-static) echo rs-no-std ;; *) echo rs-no-std-std ;; esac)" \
+        --cwd "$WORK/encbnd-$label" -- cargo run -q --
+
     # Explicit empty is not absent (MESSAGE_SPEC §2; generator#645): an empty array,
     # string or blob whose declared default is non-empty is a value, written as a
     # zero-length one and read back empty; `{}` writes nothing and reads back as

@@ -6706,6 +6706,29 @@ A reimplementation is **conformant** when it reproduces these gates:
    `cpp`, `dart` and `python` arm carry the whole width, so an out-of-range element
    is refused where it arrives rather than after the array has landed, and there
    is nothing left for a post-hoc scan to reach.
+   *Encode bounds* (`tests/conformance/lib/check_encode_bounds.py`): an
+   over-bound value of a bounded element is refused at encode (generator#656;
+   §9.6). The driver prints a probe schema (a string and a blob at `maxlen: 4`,
+   native and string arrays at `count: 3`, a nested struct's array, a `u8`, an
+   `i16`, an enum and a bitfield) plus an unbounded control, and sends one
+   over-bound value per message through the harness `encode` verb: a string over
+   `maxlen` by one byte, 60 bytes, 40 x U+00E9 and a cut inside a UTF-8 character,
+   a blob, an array at `count + 1` and `count + 2`, an array of strings with a long
+   element, and a scalar past its declared width. Each must exit non-zero; the
+   controls (every field exactly at its bound, an unbounded field far past any
+   bound) must encode and decode back. Every suite runs it for every variant that
+   generates different code (cpp x4, rust x5, typescript x3, python x2).
+
+   The decoder enforces every bound (MESSAGE_SPEC §7.1) and the encoder, today,
+   enforces none of them per value, so most cells are still open: the driver's
+   `KNOWN_GAP` per variant lists exactly the cells that fail today, a listed cell
+   that starts to pass fails the run, and the backend PR that fixes it removes its
+   entries. A cell the harness cannot reach (its JSON layer or storage type
+   refuses or wraps the value first, or a `heapless` container refuses at
+   assignment) is `STORAGE_BLOCKED` with the reason and is reported, never counted
+   as a pass. `--self-test` is the negative control: a model harness that enforces
+   every bound passes all cases and each removed guard turns exactly its own cases
+   red. A message at exactly `MAX_SIZE` stays `maxsize_fill`'s job.
    *Native array lengths* (`tests/conformance/lib/check_array_lengths.py`): a
    native array round-trips at every length, for every element kind
    (generator#550).

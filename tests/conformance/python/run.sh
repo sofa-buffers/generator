@@ -1475,6 +1475,24 @@ done
 unset SOFAB_PUREPYTHON || true
 if [ "$NATIVE" = yes ]; then require_engine native; else require_engine python; fi
 
+# An over-bound value is refused at encode (ARCHITECTURE §9.6; generator#656): a
+# string or blob past `maxlen`, an array past `count`, a scalar past its width.
+# The shared driver prints its own schema; its KNOWN_GAP lists what still fails.
+echo "==> an over-bound value is refused at encode (generator#656)"
+python3 "$ROOT/tests/conformance/lib/check_encode_bounds.py" --self-test
+printf 'version: 1\nmessages:\n' > "$WORK/encbnd.yaml"
+python3 "$ROOT/tests/conformance/lib/check_encode_bounds.py" --emit-schema >> "$WORK/encbnd.yaml"
+( cd "$ROOT" && go run ./cmd/sofabgen --format=off --config "$WORK/cfg.yaml" --lang python --in "$WORK/encbnd.yaml" --out "$WORK/encbnd" >/dev/null )
+for ENGINE in $ENGINES; do
+    if [ "$ENGINE" = python ]; then export SOFAB_PUREPYTHON=1; else unset SOFAB_PUREPYTHON || true; fi
+    require_engine "$ENGINE"
+    python3 "$ROOT/tests/conformance/lib/check_encode_bounds.py" "python/$ENGINE" \
+        --backend "$([ "$ENGINE" = python ] && echo python-pure || echo python)" \
+        --cwd "$WORK/encbnd" -- python3 harness.py
+done
+unset SOFAB_PUREPYTHON || true
+if [ "$NATIVE" = yes ]; then require_engine native; else require_engine python; fi
+
 # Explicit empty is not absent (MESSAGE_SPEC §2; generator#645): an empty array,
 # string or blob whose declared default is non-empty is a value, written as a
 # zero-length one and read back empty; `{}` writes nothing and reads back as
