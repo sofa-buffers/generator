@@ -1,6 +1,7 @@
 package dart
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/sofa-buffers/generator/internal/ir"
@@ -21,5 +22,29 @@ func TestDartFloatDiffersComparesSign(t *testing.T) {
 		if got := g.floatDiffers(c.f, "x"); got != c.want {
 			t.Errorf("%v default %v: got %q, want %q", c.f.Kind, c.f.Default, got, c.want)
 		}
+	}
+}
+
+// A float array default is compared by bit pattern through the corelib's
+// floatBitsEqual, never by `_prefixEq` (whose `!=` on a double is IEEE): the
+// omission test of fp32 and fp64 arrays, at top level and inside a nested struct.
+func TestDartFloatArrayDefaultUsesCorelibBitCompare(t *testing.T) {
+	const def = "version: 1\nmessages:\n  m:\n    payload:\n" +
+		"      a: { id: 0, type: array, items: { type: fp32, count: 3 }, default: [0.0, 1.5] }\n" +
+		"      b: { id: 1, type: array, items: { type: fp64 }, default: [0.0, 1.5] }\n" +
+		"      n:\n        id: 2\n        type: struct\n        fields:\n" +
+		"          c: { id: 0, type: array, items: { type: fp32 }, default: [0.0] }\n"
+	out := genFor(t, writeDef(t, def), map[string]any{})
+	for _, want := range []string{
+		"if (!sofab.floatBitsEqual(a.storage, _aDefault, length: a.length)) {",
+		"if (!sofab.floatBitsEqual(b.storage, _bDefault, length: b.length)) {",
+		"if (!sofab.floatBitsEqual(c.storage, _cDefault, length: c.length)) {",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("generated Dart missing %q:\n%s", want, out)
+		}
+	}
+	if strings.Contains(out, "_prefixEq") {
+		t.Errorf("an IEEE array compare is left:\n%s", out)
 	}
 }
