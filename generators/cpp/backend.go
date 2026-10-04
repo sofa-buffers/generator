@@ -1263,6 +1263,9 @@ func (g *gen) fieldIsDefaultExprAt(fld *ir.Field, acc string) string {
 			// Every array member is length-carrying now (std::vector or
 			// sofab::InlineVector), so this compares two values of the same length
 			// semantics; the empty-default case is spelled empty() above.
+			if eq := g.floatArrayBitsEqual(fld, acc); eq != "" {
+				return eq
+			}
 			def := g.cppArrayContainer(fld.Elem, fld.ElemRef, fld.ElemItems, fld.Count, fld.ElemMaxHas, fld.ElemMax) + g.cppDefault(fld)
 			return fmt.Sprintf("%s == %s", acc, def)
 		}
@@ -1364,6 +1367,11 @@ func (g *gen) fieldIsNotDefaultExprAt(fld *ir.Field, acc string) string {
 	if fld.Kind == ir.KindBlob {
 		return fmt.Sprintf("%s != %s%s", acc, g.cppType(fld), g.cppDefault(fld))
 	}
+	if fld.Kind == ir.KindArray {
+		if eq := g.floatArrayBitsEqual(fld, acc); eq != "" {
+			return "!" + eq
+		}
+	}
 	if cmp := g.floatBitsCmp(fld, acc, "!="); cmp != "" {
 		return cmp
 	}
@@ -1387,6 +1395,29 @@ func (g *gen) floatBitsCmp(fld *ir.Field, acc, op string) string {
 	return ""
 }
 
+// floatArrayBitsEqual compares a native fp32/fp64 array with its non-empty
+// declared default by BIT PATTERN through the corelib's sofab::bitsEqual
+// (CORELIB_PLAN §4.6): an IEEE container compare treats [-0.0, 1.5] as the default
+// [0.0, 1.5] and drops the -0.0. The default is passed as a typed
+// std::initializer_list, which both corelibs accept (a bare braced list does not
+// deduce in corelib: c-cpp). It returns "" for every other array, and for an empty
+// default, which emptyDefault already spells as empty().
+func (g *gen) floatArrayBitsEqual(fld *ir.Field, acc string) string {
+	if fld.Kind != ir.KindArray || g.emptyDefault(fld) {
+		return ""
+	}
+	var et string
+	switch fld.Elem {
+	case ir.KindFP32:
+		et = "float"
+	case ir.KindFP64:
+		et = "double"
+	default:
+		return ""
+	}
+	return fmt.Sprintf("sofab::bitsEqual(%s, std::initializer_list<%s>%s)", acc, et, g.cppDefault(fld))
+}
+
 func (g *gen) emitSerializeArray(f *hfile, fld *ir.Field, acc string) {
 	g.emitSerializeArrayAt(f, fld, acc, "        ", false)
 }
@@ -1408,6 +1439,9 @@ func (g *gen) emitSerializeArrayAt(f *hfile, fld *ir.Field, acc, ind string, for
 	if isNativeArrayElem(fld.Elem) {
 		guard := fmt.Sprintf("%s != %s%s", acc,
 			g.cppArrayContainer(fld.Elem, fld.ElemRef, fld.ElemItems, fld.Count, fld.ElemMaxHas, fld.ElemMax), g.cppDefault(fld))
+		if eq := g.floatArrayBitsEqual(fld, acc); eq != "" {
+			guard = "!" + eq
+		}
 		if g.emptyDefault(fld) {
 			// No declared default: the test is simply "holds anything".
 			guard = fmt.Sprintf("!%s.empty()", acc)
