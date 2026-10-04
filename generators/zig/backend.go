@@ -431,6 +431,11 @@ func (g *gen) arrayNeExpr(fld *ir.Field, acc string) string {
 	if isNativeArrayElem(fld.Elem) {
 		if parts, ok := g.zigNativeArrayParts(fld); ok {
 			elem := g.zigArrayElem(fld.Elem, fld.ElemRef, fld.ElemItems)
+			// A float array is compared by bit pattern (CORELIB_PLAN 4.6), so -0.0
+			// differs from a default of 0.0; the corelib owns that compare.
+			if fld.Elem == ir.KindFP32 || fld.Elem == ir.KindFP64 {
+				return fmt.Sprintf("!sofab.floats.bitsEqual(%s, %s, &%s)", elem, g.arrayValExpr(fld, acc), anonList(parts))
+			}
 			return fmt.Sprintf("!std.mem.eql(%s, %s, &%s)", elem, g.arrayValExpr(fld, acc), anonList(parts))
 		}
 		// A count:N field keeps its length behind an accessor -- the inline
