@@ -16,34 +16,34 @@
 #
 # Numbers shift when anything below shifts. Check here FIRST: if the header is
 # unchanged and a number moved, the generator caused it.
-# corelib:   c-cpp e379da1 | cpp bb5e39e | cs 6ea2f13 | dart 8d51a53 | go 7dc2f68 | java 50a84b3 | kotlin-mp fb6489e | py 0a7255a | rs 7ef4f6e | rs-no-std f0dad69 | ts f6bc904 | zig 8f920e8
+# corelib:   c-cpp c72a64c | cpp 44c58ef | cs 6ea2f13 | dart ed78b11 | go 7dc2f68 | java 50a84b3 | kotlin-mp 3cf2a6e | py aa13021 | rs 7ef4f6e | rs-no-std 82102fc | ts 6584190 | zig 8f920e8
 #
 ## instruction cost
 row                profile    method    encode_ir/op  decode_ir/op
-c                  footprint  toggle    26068         54510
+c                  footprint  toggle    25974         54510
 cpp-c-cpp          footprint  toggle    33037         40849
 cpp-c-cpp-dyn      footprint  toggle    33368         52096
-cpp-cpp            maxspeed   toggle    12022         28274
-cpp-cpp-static     maxspeed   toggle    10681         21284
+cpp-cpp            maxspeed   toggle    11904         28116
+cpp-cpp-static     maxspeed   toggle    10588         21284
 cpp-cpp-unbounded  maxspeed   toggle    8476          21663
-csharp             maxspeed   subtract  29234         70166
-dart               maxspeed   subtract  23855         38972
+csharp             maxspeed   subtract  29339         70166
+dart               maxspeed   subtract  24592         38972
 go                 maxspeed   toggle    18495         45056
 go-unbounded       maxspeed   toggle    13156         39526
 java               maxspeed   subtract  17006         31714
-kotlin             maxspeed   subtract  17203         32916
+kotlin             maxspeed   subtract  17126         32916
 python             maxspeed   subtract  1077921       1977192
-python-native      maxspeed   subtract  129232        433232
-rust-rs            maxspeed   toggle    8181          22647
-rust-rs-no-std     footprint  toggle    8078          29998
-rust-rs-no-std-dyn footprint  toggle    8280          38452
-rust-rs-static     maxspeed   toggle    8028          16080
-rust-rs-unbounded  maxspeed   toggle    6762          21165
+python-native      maxspeed   subtract  127486        435018
+rust-rs            maxspeed   toggle    9731          22647
+rust-rs-no-std     footprint  toggle    9665          29998
+rust-rs-no-std-dyn footprint  toggle    9864          38452
+rust-rs-static     maxspeed   toggle    9630          16080
+rust-rs-unbounded  maxspeed   toggle    6850          21165
 ts-bigint          maxspeed   subtract  586082        792801
 ts-long            maxspeed   subtract  579927        786744
 ts-number          maxspeed   subtract  596172        782112
-zig                maxspeed   toggle    9929          22227
-zig-unbounded      maxspeed   toggle    7837          18604
+zig                maxspeed   toggle    10118         22227
+zig-unbounded      maxspeed   toggle    8258          18604
 
 ## toolchain
 tool                      version       rows
@@ -65,12 +65,12 @@ zig                       0.16.0        zig,zig-unbounded
 
 ## footprint
 row                profile    arch            text    data   bss
-c                  footprint  ARMv6-m         5616    0      0
-c                  footprint  ARMv7-m+fp.dp   5622    0      0
-c                  footprint  RV32IMC         6170    0      0
-cpp-c-cpp          footprint  ARMv6-m         8824    0      180
-cpp-c-cpp          footprint  ARMv7-m+fp.dp   8424    0      180
-cpp-c-cpp-dyn      footprint  ARMv6-m         15732   0      300
-cpp-c-cpp-dyn      footprint  ARMv7-m+fp.dp   14474   0      300
-rust-rs-no-std     footprint  thumbv6m        9885    0      0
-rust-rs-no-std-dyn footprint  thumbv6m        11681   0      4
+c                  footprint  ARMv6-m         5594    0      0
+c                  footprint  ARMv7-m+fp.dp   5588    0      0
+c                  footprint  RV32IMC         6134    0      0
+cpp-c-cpp          footprint  ARMv6-m         8694    0      180
+cpp-c-cpp          footprint  ARMv7-m+fp.dp   8296    0      180
+cpp-c-cpp-dyn      footprint  ARMv6-m         15632   0      300
+cpp-c-cpp-dyn      footprint  ARMv7-m+fp.dp   14370   0      300
+rust-rs-no-std     footprint  thumbv6m        10465   0      0
+rust-rs-no-std-dyn footprint  thumbv6m        12135   0      4

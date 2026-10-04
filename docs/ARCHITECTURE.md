@@ -5473,6 +5473,17 @@ produce two different generated shapes, and conflating them is a truncation bug:
   `maxlen` and requires that refusal; a fixed-capacity container refuses the value
   at insert, so the static Rust variants assert instead that no write status is
   discarded.
+  Measured cost of propagating every write status with `?` (`tests/bench/run.sh`,
+  full run, same corelibs; main -> this change): encode Ir/op `rust-rs` 8182 -> 9731
+  (+18.9 %), `rust-rs-static` 8029 -> 9630 (+19.9 %), `rust-rs-unbounded` 6762 -> 6850
+  (+1.3 %), `rust-rs-no-std` 8012 -> 9665 (+20.6 %), `rust-rs-no-std-dyn` 8228 -> 9864
+  (+19.9 %); thumbv6m `.text` `rust-rs-no-std` 9609 -> 10465 B (+856, +8.9 %),
+  `rust-rs-no-std-dyn` 11407 -> 12135 B (+728, +6.4 %); decode Ir and `.data`/`.bss`
+  unchanged. The cost is **accepted**: the alternative is a short, malformed message
+  returned as complete (§5.1). A per-write `?` is the only shape available while the
+  corelibs have no sticky error flag; a corelib that latched the first failure and
+  reported it once at `finish` would let the generated code drop the per-write branch
+  and recover most of this, and is the place to look if the footprint rows need it back.
 - **unbounded** — `MAX_SIZE` is an imposed ceiling, so it must not size a buffer:
   a message above it is legal and would be silently refused. The shape is a fixed
   caller scratch plus a flush sink draining into caller-owned storage (Rust
