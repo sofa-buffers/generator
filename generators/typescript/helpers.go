@@ -150,6 +150,8 @@ func (g *gen) fp32RawStorage(recv string, f *ir.Field) string {
 
 func isBig(k ir.Kind) bool { return k == ir.KindU64 || k == ir.KindI64 }
 
+func isFloatKind(k ir.Kind) bool { return k == ir.KindFP32 || k == ir.KindFP64 }
+
 // blobHasNonEmptyDefault reports whether a blob field carries a non-empty schema
 // default (base64 decoding to at least one byte). Only such fields need an
 // element-wise equality guard in marshal; an empty default uses `.length !== 0`.

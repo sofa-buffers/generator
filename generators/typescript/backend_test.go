@@ -2181,12 +2181,12 @@ func TestTSFp32SignalingNaNRawChannel(t *testing.T) {
 func TestTSFp32RawDoesNotMoveTheOmissionTest(t *testing.T) {
 	mod := genTSWith(t, fp32RawDef, map[string]any{})
 	for _, want := range []string{
-		// marshal: the value test, byte for byte what it was before the raw channel.
-		"    if (this.f32 !== 0) {",
+		// marshal: the value test, by bit pattern, and no raw-slot term in it.
+		"    if (this.f32 !== 0 || 1 / this.f32 < 0) {",
 		"    if (this.f32d !== 1.5) {",
 		"    if (this.fa.length !== 0) {",
 		// isDefault: the exact negation of the same test, likewise untouched.
-		"if (!(this.f32 === 0)) return false;",
+		"if (!(this.f32 === 0 && 1 / this.f32 > 0)) return false;",
 		"if (!(this.f32d === 1.5)) return false;",
 		"if (!(this.fa.length === 0)) return false;",
 	} {

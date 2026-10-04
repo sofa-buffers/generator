@@ -38,6 +38,7 @@ package dart
 
 import (
 	"fmt"
+	"math"
 	"regexp"
 	"strconv"
 	"strings"
@@ -766,7 +767,7 @@ func (g *gen) emitMarshalAt(f *dfile, ind string, fld *ir.Field, acc, bits strin
 			f.line("%s%s", ind, w)
 			return
 		}
-		f.line("%sif (%s != %s) {", ind, acc, g.dartDefaultValue(fld))
+		f.line("%sif (%s) {", ind, g.floatDiffers(fld, acc))
 		f.line("%s  %s", ind, w)
 		f.line("%s}", ind)
 		return
@@ -797,7 +798,39 @@ func (g *gen) emitMarshalAt(f *dfile, ind string, fld *ir.Field, acc, bits strin
 		return
 	}
 	// Scalar/string/enum/bitfield/bool leaf: omit when equal to the default.
+	if fld.Kind == ir.KindFP64 {
+		guarded(g.floatDiffers(fld, acc), write)
+		return
+	}
 	guarded(fmt.Sprintf("%s != %s", acc, g.dartDefaultValue(fld)), write)
+}
+
+// floatDiffers is the write guard of a float scalar: the value differs from its
+// default by BIT PATTERN (CORELIB_PLAN §4.6). `-0.0 == 0.0` in Dart, so a plain
+// `!=` would drop a -0.0 at a zero default; for a zero default the sign is read
+// with isNegative, so the common non-zero value costs the one compare it cost
+// before. A non-zero default needs nothing more: `==` already tells every other
+// value apart from it.
+func (g *gen) floatDiffers(fld *ir.Field, acc string) string {
+	neg := false
+	switch v := fld.Default.(type) {
+	case nil:
+	case float64:
+		if v != 0 {
+			return fmt.Sprintf("%s != %s", acc, g.dartDefaultValue(fld))
+		}
+		neg = math.Signbit(v)
+	case int, int64:
+		if fmt.Sprint(v) != "0" {
+			return fmt.Sprintf("%s != %s", acc, g.dartDefaultValue(fld))
+		}
+	default:
+		return fmt.Sprintf("%s != %s", acc, g.dartDefaultValue(fld))
+	}
+	if neg {
+		return fmt.Sprintf("%s != 0.0 || !%s.isNegative", acc, acc)
+	}
+	return fmt.Sprintf("%s != 0.0 || %s.isNegative", acc, acc)
 }
 
 func (g *gen) emitMarshalArray(f *dfile, ind string, fld *ir.Field, acc string, forced bool) {
