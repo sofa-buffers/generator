@@ -78,7 +78,7 @@ func TestRustStructural(t *testing.T) {
 		"impl<'a> sofab::Visitor for _V<'a> {", // the corelib is spelled as a path, never imported
 		"pub struct Myfirstmessage {",
 		"pub fn serialize<_F: sofab::Flush>(&self, os: &mut sofab::OStream<'_, _F>)",
-		"pub fn encode(&self) -> Vec<u8>",
+		"pub fn encode(&self) -> Result<Vec<u8>, sofab::Error>",
 		"pub fn decode(data: &[u8]) -> Self",
 		"pub fn try_decode(data: &[u8]) -> Result<Self, DecodeError>",              // fallible entry point (generator#79)
 		"fed = is.feed(data, &mut v);",                                             // feed's verdict captured, not propagated (generator#190)
@@ -160,7 +160,7 @@ func TestRustStructural(t *testing.T) {
 		"pub someblob: heapless::Vec<u8, 16>,",                                           // bounded blob -> heapless
 		"pub somestringarray: heapless::Vec<heapless::String<16>, 5>,",                   // string array -> inline
 		"pub somemap: heapless::Vec<",                                                    // bounded -> heapless (default no_std storage)
-		"pub fn encode(&self) -> heapless::Vec<u8,",                                      // heap-free encode
+		"pub fn encode(&self) -> Result<heapless::Vec<u8,",                               // heap-free encode
 		"stack: heapless::Vec<_Loc,",                                                     // bounded decode stack
 		"if !self.somestring.is_empty() {",                                               // string omit: empty default -> is_empty
 		"acc: sofab::PayloadAcc<",                                                        // the corelib's accumulator, over storage this crate names (generator#345)
@@ -1490,8 +1490,8 @@ messages:
 	// all-default interior element into an id gap). The field's own wrapper still
 	// always takes the dropping closer.
 	for _, want := range []string{
-		"let _ = os.write_sequence_begin_lazy(_i0 as sofab::Id); _e0.serialize(os);\n            if _i0 + 1 == self.fixed.len() { let _ = os.write_sequence_end_keep(); } else { let _ = os.write_sequence_end(); }\n        }\n        let _ = os.write_sequence_end();",
-		"let _ = os.write_sequence_begin_lazy(_i0 as sofab::Id); _e0.serialize(os);\n            if _i0 + 1 == self.dynamic.len() { let _ = os.write_sequence_end_keep(); } else { let _ = os.write_sequence_end(); }\n        }\n        let _ = os.write_sequence_end();",
+		"os.write_sequence_begin_lazy(_i0 as sofab::Id)?; _e0.serialize(os)?;\n            if _i0 + 1 == self.fixed.len() { os.write_sequence_end_keep()?; } else { os.write_sequence_end()?; }\n        }\n        os.write_sequence_end()?;",
+		"os.write_sequence_begin_lazy(_i0 as sofab::Id)?; _e0.serialize(os)?;\n            if _i0 + 1 == self.dynamic.len() { os.write_sequence_end_keep()?; } else { os.write_sequence_end()?; }\n        }\n        os.write_sequence_end()?;",
 	} {
 		if !strings.Contains(got, want) {
 			t.Errorf("positional closer expected:\n%s", got)
@@ -1500,9 +1500,9 @@ messages:
 	// The leaf elements take the same rule through the same expression, count:N and
 	// count-less alike.
 	for _, want := range []string{
-		"for (_i0, _e0) in self.fstrs.iter().enumerate() { if !_e0.is_empty() || _i0 + 1 == self.fstrs.len() { let _ = os.write_str(_i0 as sofab::Id, _e0); } }",
-		"for (_i0, _e0) in self.dstrs.iter().enumerate() { if !_e0.is_empty() || _i0 + 1 == self.dstrs.len() { let _ = os.write_str(_i0 as sofab::Id, _e0); } }",
-		"for (_i0, _e0) in self.dblobs.iter().enumerate() { if !_e0.is_empty() || _i0 + 1 == self.dblobs.len() { let _ = os.write_blob(_i0 as sofab::Id, _e0); } }",
+		"for (_i0, _e0) in self.fstrs.iter().enumerate() { if !_e0.is_empty() || _i0 + 1 == self.fstrs.len() { os.write_str(_i0 as sofab::Id, _e0)?; } }",
+		"for (_i0, _e0) in self.dstrs.iter().enumerate() { if !_e0.is_empty() || _i0 + 1 == self.dstrs.len() { os.write_str(_i0 as sofab::Id, _e0)?; } }",
+		"for (_i0, _e0) in self.dblobs.iter().enumerate() { if !_e0.is_empty() || _i0 + 1 == self.dblobs.len() { os.write_blob(_i0 as sofab::Id, _e0)?; } }",
 	} {
 		if !strings.Contains(got, want) {
 			t.Errorf("message.rs missing %q:\n%s", want, got)
@@ -1516,7 +1516,7 @@ messages:
 			t.Errorf("message.rs must not contain %q:\n%s", bad, got)
 		}
 	}
-	if !strings.Contains(got, "let _ = os.write_sequence_begin_lazy(0);\n        for (_i0, _e0) in self.fixed") {
+	if !strings.Contains(got, "os.write_sequence_begin_lazy(0)?;\n        for (_i0, _e0) in self.fixed") {
 		t.Errorf("the field wrapper is still opened lazily:\n%s", got)
 	}
 }
@@ -3544,13 +3544,13 @@ func TestRustGuardsDoNotReadAsMissingElse(t *testing.T) {
 // again (clippy::needless_borrow). The top-level field is still borrowed.
 func TestRustNestedNativeRowIsNotReborrowed(t *testing.T) {
 	m := exampleModule(t, map[string]any{"corelib": "rs"})
-	if !strings.Contains(m, "os.write_array_unsigned(_i0 as sofab::Id, _e0);") {
+	if !strings.Contains(m, "os.write_array_unsigned(_i0 as sofab::Id, _e0)?;") {
 		t.Error("the matrix row is not passed as the reference it already is")
 	}
 	if strings.Contains(m, "as sofab::Id, &_e0);") {
 		t.Error("a matrix row is borrowed again")
 	}
-	if !strings.Contains(m, "os.write_array_unsigned(15, &self.someuintarray);") {
+	if !strings.Contains(m, "os.write_array_unsigned(15, &self.someuintarray)?;") {
 		t.Error("a top-level native array is no longer borrowed")
 	}
 }
@@ -3610,6 +3610,56 @@ messages:
 		}
 		if strings.Contains(m, "[][..]") {
 			t.Errorf("cfg %v: an empty default must not become a `[]` slice compare:\n%s", cfg, m)
+		}
+	}
+}
+
+// TestRustEncodeReportsEveryWrite: serialize and encode return a Result and no
+// write status is discarded, so a value filled past its declared bound surfaces
+// as the corelib's BufferFull instead of a short, malformed message (§9.6). It
+// covers each encode branch: heapless, bounded std, and the unbounded sink.
+func TestRustEncodeReportsEveryWrite(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		bounded bool
+		cfg     map[string]any
+		encode  string
+	}{
+		{"std unbounded sink", false, map[string]any{"corelib": "rs"}, "pub fn encode(&self) -> Result<Vec<u8>, sofab::Error> {"},
+		{"std bounded buffer", true, map[string]any{"corelib": "rs"}, "pub fn encode(&self) -> Result<Vec<u8>, sofab::Error> {"},
+		{"std heapless", true, map[string]any{"corelib": "rs", "allow_dynamic": false}, "pub fn encode(&self) -> Result<Vec<u8>, sofab::Error> {"},
+		{"no_std heapless", true, map[string]any{"corelib": "rs-no-std"}, "pub fn encode(&self) -> Result<heapless::Vec<u8,"},
+		{"no_std dynamic", true, map[string]any{"corelib": "rs-no-std", "allow_dynamic": true}, "pub fn encode(&self) -> Result<heapless::Vec<u8,"},
+	} {
+		s := exampleSchema(t)
+		if tc.bounded {
+			s = exampleSchemaBounded(t)
+		}
+		files, err := (&Backend{}).Generate(s, tc.cfg)
+		if err != nil {
+			t.Fatalf("%s: generate: %v", tc.name, err)
+		}
+		for _, f := range files {
+			if strings.HasSuffix(f.Path, ".rs") && strings.Contains(string(f.Content), "let _ = os.") {
+				t.Errorf("%s: %s discards a write status (let _ = os.*)", tc.name, f.Path)
+			}
+			if f.Path != "src/message.rs" {
+				continue
+			}
+			m := string(f.Content)
+			for _, want := range []string{
+				tc.encode,
+				"-> Result<(), sofab::Error> {",
+				"        Ok(())\n    }",
+				"self.serialize(&mut os)?;",
+			} {
+				if !strings.Contains(m, want) {
+					t.Errorf("%s: message.rs missing %q", tc.name, want)
+				}
+			}
+			if strings.Contains(m, "self.serialize(&mut os);") {
+				t.Errorf("%s: encode() ignores serialize's result", tc.name)
+			}
 		}
 	}
 }

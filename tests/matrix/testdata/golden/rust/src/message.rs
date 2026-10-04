@@ -73,24 +73,25 @@ impl Default for Scalars {
 impl Scalars {
     /// Worst-case encoded size of this message, derived from the schema.
     pub const MAX_SIZE: usize = 55;
-    pub fn serialize<_F: sofab::Flush>(&self, os: &mut sofab::OStream<'_, _F>) {
-        if self.u8min != 0 { let _ = os.write_unsigned(0, self.u8min as sofab::Unsigned); }
-        if self.u8max != 255 { let _ = os.write_unsigned(1, self.u8max as sofab::Unsigned); }
-        if self.u64max != 18446744073709551615 { let _ = os.write_unsigned(2, self.u64max as sofab::Unsigned); }
-        if self.i8min != -128 { let _ = os.write_signed(3, self.i8min as sofab::Signed); }
-        if self.i64min != i64::MIN { let _ = os.write_signed(4, self.i64min as sofab::Signed); }
-        if self.f32.to_bits() != 0x4048f5c3 { let _ = os.write_fp32(5, self.f32); }
-        if self.f64.to_bits() != 0xc004000000000000 { let _ = os.write_fp64(6, self.f64); }
-        if !self.flag { let _ = os.write_boolean(7, self.flag); }
+    pub fn serialize<_F: sofab::Flush>(&self, os: &mut sofab::OStream<'_, _F>) -> Result<(), sofab::Error> {
+        if self.u8min != 0 { os.write_unsigned(0, self.u8min as sofab::Unsigned)?; }
+        if self.u8max != 255 { os.write_unsigned(1, self.u8max as sofab::Unsigned)?; }
+        if self.u64max != 18446744073709551615 { os.write_unsigned(2, self.u64max as sofab::Unsigned)?; }
+        if self.i8min != -128 { os.write_signed(3, self.i8min as sofab::Signed)?; }
+        if self.i64min != i64::MIN { os.write_signed(4, self.i64min as sofab::Signed)?; }
+        if self.f32.to_bits() != 0x4048f5c3 { os.write_fp32(5, self.f32)?; }
+        if self.f64.to_bits() != 0xc004000000000000 { os.write_fp64(6, self.f64)?; }
+        if !self.flag { os.write_boolean(7, self.flag)?; }
         if !self.flags.is_empty() {
-            { let _t0: Vec<u8> = self.flags.iter().map(|_v| *_v as u8).collect(); let _ = os.write_array_unsigned(8, &_t0); }
+            { let _t0: Vec<u8> = self.flags.iter().map(|_v| *_v as u8).collect(); os.write_array_unsigned(8, &_t0)?; }
         }
+        Ok(())
     }
-    pub fn encode(&self) -> Vec<u8> {
+    pub fn encode(&self) -> Result<Vec<u8>, sofab::Error> {
         let mut buf = vec![0u8; Self::MAX_SIZE];
-        let used = { let mut os = sofab::OStream::new(&mut buf); self.serialize(&mut os); os.bytes_used() };
+        let used = { let mut os = sofab::OStream::new(&mut buf); self.serialize(&mut os)?; os.bytes_used() };
         buf.truncate(used);
-        buf
+        Ok(buf)
     }
     pub fn decode(data: &[u8]) -> Self {
         _Scalars__Decode::decode(data)

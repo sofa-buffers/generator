@@ -240,14 +240,14 @@ func TestRustUnionEncodeArms(t *testing.T) {
 		m := moduleFromYAML(t, unionSrc, cfg)
 		ser := sliceFn(t, block(t, m, "impl M_U {"), "    pub fn serialize<")
 		wantAll(t, cfg, ser, "an encode arm is wrong",
-			"            Self::Num(v) => { let _ = os.write_unsigned(0, *v as sofab::Unsigned); }",
-			"            Self::S(v) => { let _ = os.write_str(1, v); }",
-			"            Self::Pt(v) => { let _ = os.write_sequence_begin_lazy(2); v.serialize(os); let _ = os.write_sequence_end(); }",
-			"            Self::Arr(v) => {\n                let _ = os.write_array_unsigned(3, v);\n            }",
-			"                let _ = os.write_sequence_begin_lazy(4);",
-			"                let _ = os.write_sequence_end_keep();\n            }",
-			"            Self::Box(v) => { let _ = os.write_sequence_begin_lazy(5); v.serialize(os); let _ = os.write_sequence_end_keep(); }",
-			"            Self::Which(v) => { let _ = os.write_boolean(6, *v); }",
+			"            Self::Num(v) => { os.write_unsigned(0, *v as sofab::Unsigned)?; }",
+			"            Self::S(v) => { os.write_str(1, v)?; }",
+			"            Self::Pt(v) => { os.write_sequence_begin_lazy(2)?; v.serialize(os)?; os.write_sequence_end()?; }",
+			"            Self::Arr(v) => {\n                os.write_array_unsigned(3, v)?;\n            }",
+			"                os.write_sequence_begin_lazy(4)?;",
+			"                os.write_sequence_end_keep()?;\n            }",
+			"            Self::Box(v) => { os.write_sequence_begin_lazy(5)?; v.serialize(os)?; os.write_sequence_end_keep()?; }",
+			"            Self::Which(v) => { os.write_boolean(6, *v)?; }",
 		)
 		for _, bad := range []string{"*v != 5", "if *v {", "if !v.is_empty() { let _ = os.write_str(1"} {
 			if strings.Contains(ser, bad) {
@@ -256,15 +256,15 @@ func TestRustUnionEncodeArms(t *testing.T) {
 		}
 		// default_id at its default is omitted: the guard sits on D alone
 		wantAll(t, cfg, sliceFn(t, block(t, m, "impl Pick__DefaultN {"), "    pub fn serialize<"), "D keeps its guard",
-			"            Self::N(v) => { if *v != 6 { let _ = os.write_unsigned(0, *v as sofab::Unsigned); } }",
-			"            Self::T(v) => { let _ = os.write_sequence_begin_lazy(1); v.serialize(os); let _ = os.write_sequence_end_keep(); }")
+			"            Self::N(v) => { if *v != 6 { os.write_unsigned(0, *v as sofab::Unsigned)?; } }",
+			"            Self::T(v) => { os.write_sequence_begin_lazy(1)?; v.serialize(os)?; os.write_sequence_end_keep()?; }")
 		wantAll(t, cfg, sliceFn(t, block(t, m, "impl M_V {"), "    pub fn serialize<"), "the element union's D is guarded, the other forced",
-			"            Self::I(v) => { let _ = os.write_signed(0, *v as sofab::Signed); }",
-			"            Self::S(v) => { if !v.is_empty() { let _ = os.write_str(1, v); } }")
+			"            Self::I(v) => { os.write_signed(0, *v as sofab::Signed)?; }",
+			"            Self::S(v) => { if !v.is_empty() { os.write_str(1, v)?; } }")
 		// the union FIELD keeps its framing: a union at its default leaves the lazy
 		// frame empty and the dropping end removes it
 		wantAll(t, cfg, m, "the union field keeps its lazy frame",
-			"let _ = os.write_sequence_begin_lazy(0); self.u.serialize(os); let _ = os.write_sequence_end();")
+			"os.write_sequence_begin_lazy(0)?; self.u.serialize(os)?; os.write_sequence_end()?;")
 	}
 }
 

@@ -232,12 +232,13 @@ func (g *gen) emitUnion(f *rfile, name string, nt *ir.NamedType) {
 	// and the enclosing lazy frame drops it); any other option is written even at
 	// its own default, a sequence-framed one as a present frame (end_keep), since
 	// an omitted option would read back as default_id.
-	f.line("    pub fn serialize<_F: sofab::Flush>(&self, os: &mut sofab::OStream<'_, _F>) {")
+	f.line("    pub fn serialize<_F: sofab::Flush>(&self, os: &mut sofab::OStream<'_, _F>) -> Result<(), sofab::Error> {")
 	f.line("        match self {")
 	for _, o := range opts {
 		g.emitUnionArm(f, o)
 	}
 	f.line("        }")
+	f.line("        Ok(())")
 	f.line("    }")
 	f.line("}")
 	f.blank()
@@ -261,27 +262,27 @@ func (g *gen) emitUnionArm(f *rfile, o *unionOpt) {
 	// member of the same kind cannot drift apart.
 	switch fld.Kind {
 	case ir.KindU8, ir.KindU16, ir.KindU32, ir.KindU64, ir.KindBitfield:
-		guarded(g.rustLeafNe("*v", fld), fmt.Sprintf("let _ = os.write_unsigned(%d, *v as sofab::Unsigned);", id))
+		guarded(g.rustLeafNe("*v", fld), fmt.Sprintf("os.write_unsigned(%d, *v as sofab::Unsigned)?;", id))
 	case ir.KindI8, ir.KindI16, ir.KindI32, ir.KindI64, ir.KindEnum:
-		guarded(g.rustLeafNe("*v", fld), fmt.Sprintf("let _ = os.write_signed(%d, *v as sofab::Signed);", id))
+		guarded(g.rustLeafNe("*v", fld), fmt.Sprintf("os.write_signed(%d, *v as sofab::Signed)?;", id))
 	case ir.KindBool:
-		guarded(g.rustLeafNe("*v", fld), fmt.Sprintf("let _ = os.write_boolean(%d, *v);", id))
+		guarded(g.rustLeafNe("*v", fld), fmt.Sprintf("os.write_boolean(%d, *v)?;", id))
 	case ir.KindFP32:
-		guarded(g.rustLeafNe("*v", fld), fmt.Sprintf("let _ = os.write_fp32(%d, *v);", id))
+		guarded(g.rustLeafNe("*v", fld), fmt.Sprintf("os.write_fp32(%d, *v)?;", id))
 	case ir.KindFP64:
-		guarded(g.rustLeafNe("*v", fld), fmt.Sprintf("let _ = os.write_fp64(%d, *v);", id))
+		guarded(g.rustLeafNe("*v", fld), fmt.Sprintf("os.write_fp64(%d, *v)?;", id))
 	case ir.KindString:
 		// `v` is a reference: the test's method call derefs it (`*v.x()` would
 		// deref the call's result).
-		guarded(g.rustLeafNe("v", fld), fmt.Sprintf("let _ = os.write_str(%d, v);", id))
+		guarded(g.rustLeafNe("v", fld), fmt.Sprintf("os.write_str(%d, v)?;", id))
 	case ir.KindBlob:
-		guarded("!v.is_empty()", fmt.Sprintf("let _ = os.write_blob(%d, v);", id))
+		guarded("!v.is_empty()", fmt.Sprintf("os.write_blob(%d, v)?;", id))
 	case ir.KindStruct, ir.KindUnion:
 		closer := "write_sequence_end_keep"
 		if o.isD {
 			closer = "write_sequence_end"
 		}
-		f.line("%s{ let _ = os.write_sequence_begin_lazy(%d); v.serialize(os); let _ = os.%s(); }", head, id, closer)
+		f.line("%s{ os.write_sequence_begin_lazy(%d)?; v.serialize(os)?; os.%s()?; }", head, id, closer)
 	case ir.KindArray:
 		// depth 1: `v` is already a reference, like an element of an outer array.
 		if isNativeArrayElem(fld.Elem) {
