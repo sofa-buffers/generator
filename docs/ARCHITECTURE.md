@@ -6124,8 +6124,9 @@ A reimplementation is **conformant** when it reproduces these gates:
    through `serialize` where it does not), each of which must equal the one-shot
    bytes and decode back as data. c, cpp (both corelibs) and rust (`no_std`
    profiles) run the bounded variant; rust and cpp also run the unbounded schema
-   on their dynamic profile. `tests/matrix/streamencode_test.go` pins the quoted `"streamencode"` dispatch arm (the usage line does not count) into
-   every registered backend's harness.
+   on their dynamic profile. `tests/matrix/streamencode_test.go` pins the quoted
+   `"streamencode"` dispatch arm (the usage line does not count) into every
+   registered backend's harness.
 
    *Tagged unions* (`tests/conformance/lib/check_union.py`, generator#608): a
    union holds exactly one option (MESSAGE_SPEC §4.2, §7.4.1; §11 *Tagged
