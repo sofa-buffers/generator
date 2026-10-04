@@ -3,6 +3,7 @@ package python
 import (
 	"encoding/base64"
 	"fmt"
+	"math"
 	"strings"
 
 	"github.com/sofa-buffers/generator/internal/generator"
@@ -121,6 +122,9 @@ func (g *gen) pyDefault(f *ir.Field) string {
 		}
 		return "False"
 	case ir.KindFP32, ir.KindFP64:
+		if v, ok := f.Default.(float64); ok && v == 0 && math.Signbit(v) {
+			return "-0.0" // "%v" prints -0, which Python reads as the integer 0
+		}
 		if f.Default != nil {
 			return fmt.Sprintf("%v", f.Default)
 		}

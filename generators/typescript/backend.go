@@ -8,6 +8,7 @@ package typescript
 
 import (
 	"fmt"
+	"math"
 	"strconv"
 	"strings"
 
@@ -771,7 +772,47 @@ func (g *gen) fieldIsDefaultExprAt(fld *ir.Field, acc string) string {
 	case ir.KindArray:
 		return g.arrayIsDefaultExpr(fld, acc)
 	}
+	if cmp, ok := g.floatZeroCmp(fld, acc, false); ok {
+		return cmp
+	}
 	return fmt.Sprintf("%s === %s", acc, g.tsDefault(fld))
+}
+
+// floatZeroCmp is the default test of a float scalar whose default is a zero, by
+// BIT PATTERN (CORELIB_PLAN §4.6): `-0 === 0`, so the IEEE test would drop a -0.0
+// at a +0.0 default. The sign is read from 1 / x, which only runs when x is a zero
+// (the right side of `||` / `&&`), so the common non-zero value costs the one
+// compare it cost before; Object.is measured +0.7% encode Ir on the bench row.
+// differs selects the write guard (the negation). ok is false for any other
+// field, whose default is not a zero: there `===` already tells every value apart.
+func (g *gen) floatZeroCmp(fld *ir.Field, acc string, differs bool) (string, bool) {
+	if !isFloatKind(fld.Kind) {
+		return "", false
+	}
+	neg := false
+	switch v := fld.Default.(type) {
+	case nil:
+	case float64:
+		if v != 0 {
+			return "", false
+		}
+		neg = math.Signbit(v)
+	case int, int64, uint64:
+		if fmt.Sprint(v) != "0" {
+			return "", false
+		}
+	default:
+		return "", false
+	}
+	// A value is the default iff it is a zero carrying the default's sign.
+	same, other := ">", "<"
+	if neg {
+		same, other = "<", ">"
+	}
+	if differs {
+		return fmt.Sprintf("%s !== 0 || 1 / %s %s 0", acc, acc, other), true
+	}
+	return fmt.Sprintf("%s === 0 && 1 / %s %s 0", acc, acc, same), true
 }
 
 // arrayIsDefaultExpr mirrors emitMarshalArray. An array's declared `count: N` is a
@@ -840,8 +881,8 @@ func (g *gen) emitMarshalAt(f *tsfile, ind string, fld *ir.Field, acc, rawAcc st
 	case ir.KindBool:
 		write = fmt.Sprintf("os.writeBoolean(%d, %s);", fld.ID, acc)
 	case ir.KindFP32:
-		// The omission test is untouched: emit iff the value differs from its
-		// default (MESSAGE_SPEC §2), decided on the VALUE alone. Carrying wire bytes
+		// The omission test: emit iff the value differs from its default
+		// (MESSAGE_SPEC §2) by bit pattern, decided on the VALUE alone. Carrying wire bytes
 		// says nothing about presence — widening the test to "or the raw slot is
 		// set" would re-emit an explicit +0.0 that §2 requires omitted.
 		//
@@ -856,7 +897,11 @@ func (g *gen) emitMarshalAt(f *tsfile, ind string, fld *ir.Field, acc, rawAcc st
 		// comment on readFp32Raw prescribes this route).
 		in := ind
 		if !forced {
-			f.line("%sif (%s !== %s) {", ind, acc, g.tsDefault(fld))
+			if cmp, ok := g.floatZeroCmp(fld, acc, true); ok {
+				f.line("%sif (%s) {", ind, cmp)
+			} else {
+				f.line("%sif (%s !== %s) {", ind, acc, g.tsDefault(fld))
+			}
 			in = ind + "  "
 		}
 		f.line("%sif (Number.isNaN(%s) && %s !== null && %s.length === 4) {", in, acc, rawAcc, rawAcc)
@@ -925,7 +970,11 @@ func (g *gen) emitMarshalAt(f *tsfile, ind string, fld *ir.Field, acc, rawAcc st
 		f.line("%s}", ind)
 		return
 	}
-	f.line("%sif (%s !== %s) {", ind, acc, g.tsDefault(fld))
+	if cmp, ok := g.floatZeroCmp(fld, acc, true); ok {
+		f.line("%sif (%s) {", ind, cmp)
+	} else {
+		f.line("%sif (%s !== %s) {", ind, acc, g.tsDefault(fld))
+	}
 	f.line("%s  %s", ind, write)
 	f.line("%s}", ind)
 }

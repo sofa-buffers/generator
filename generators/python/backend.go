@@ -7,6 +7,7 @@ package python
 
 import (
 	"fmt"
+	"math"
 	"sort"
 	"strconv"
 	"strings"
@@ -288,6 +289,9 @@ func (g *gen) module(s *ir.Schema) []byte {
 	// destination tables (g.plans) the dataclasses' decode() reads.
 	decodeSection := g.decodeSection(s)
 	typeSection := g.typeSection(s)
+	if strings.Contains(typeSection, "math.copysign(") {
+		f.line("import math")
+	}
 	if imp := stdlibImport("dataclasses", typeSection, dataclassNames); imp != "" {
 		f.line("%s", imp)
 	}
@@ -831,7 +835,46 @@ func (g *gen) fieldIsDefaultExprAt(fld *ir.Field, acc string) string {
 	case ir.KindArray:
 		return g.arrayIsDefaultExpr(fld, acc)
 	}
+	if cmp, ok := floatZeroCmp(fld, acc, false); ok {
+		return cmp
+	}
 	return fmt.Sprintf("%s == %s", acc, g.pyDefault(fld))
+}
+
+// floatZeroCmp is the default test of a float scalar whose default is a zero,
+// by BIT PATTERN (CORELIB_PLAN §4.6): `-0.0 == 0.0`, so an `==` / `!=` alone
+// would drop a -0.0 at a +0.0 default. The sign is read with math.copysign, so
+// the common non-zero value costs the one compare it cost before. differs
+// selects the write guard (the negation). ok is false for every other field,
+// whose default is not a zero: there `==` already tells every value apart.
+func floatZeroCmp(fld *ir.Field, acc string, differs bool) (string, bool) {
+	if fld.Kind != ir.KindFP32 && fld.Kind != ir.KindFP64 {
+		return "", false
+	}
+	neg := false
+	switch v := fld.Default.(type) {
+	case nil:
+	case float64:
+		if v != 0 {
+			return "", false
+		}
+		neg = math.Signbit(v)
+	case int, int64, uint64:
+		if fmt.Sprint(v) != "0" {
+			return "", false
+		}
+	default:
+		return "", false
+	}
+	// The sign the DEFAULT carries: a value is the default iff it is a zero of it.
+	same, other := ">", "<"
+	if neg {
+		same, other = "<", ">"
+	}
+	if differs {
+		return fmt.Sprintf("%s != 0.0 or math.copysign(1.0, %s) %s 0.0", acc, acc, other), true
+	}
+	return fmt.Sprintf("%s == 0.0 and math.copysign(1.0, %s) %s 0.0", acc, acc, same), true
 }
 
 // arrayIsDefaultExpr mirrors emitMarshalArray. An array's declared `count: N` is
@@ -920,7 +963,11 @@ func (g *gen) emitMarshalAt(f *pyfile, fld *ir.Field, acc, ind string, forced bo
 	// Scalar/string/enum/bitfield leaf: always omit when equal to the default;
 	// sparse encoding is canonical (MESSAGE_SPEC S2) and the decoder reconstructs
 	// the omitted field from its default.
-	f.line("%sif %s != %s:", ind, acc, g.pyDefault(fld))
+	if cmp, ok := floatZeroCmp(fld, acc, true); ok {
+		f.line("%sif %s:", ind, cmp)
+	} else {
+		f.line("%sif %s != %s:", ind, acc, g.pyDefault(fld))
+	}
 	f.line("%s    %s", ind, write)
 }
 

@@ -6185,7 +6185,13 @@ A reimplementation is **conformant** when it reproduces these gates:
    initialised with, and the omission test in `serialize` and the equality /
    `isDefault` helper share the one expression. The integer form needs no FPU
    compare, so footprint targets without one drop the soft-float routine behind
-   it. Float ARRAYS keep their element-wise compare (their cells stay in
+   it. The three backends whose float is a double with no integer view (TypeScript
+   in all int64 modes, Python in both engines, Dart) only need the sign of a ZERO
+   told apart, so a non-zero default keeps its plain `!=` and a zero default adds a
+   sign read that runs only when the value is a zero: TypeScript `x !== 0 || 1 / x < 0`
+   (`Object.is` measured +0.7% encode Ir on the bench row), Python
+   `x != 0.0 or math.copysign(1.0, x) < 0.0` (a `-0.0` default is emitted as
+   `-0.0`), Dart `x != 0.0 || x.isNegative`. Float ARRAYS keep their element-wise compare (their cells stay in
    `KNOWN_GAP`) until the corelibs carry a bit-compare helper: it is a static
    helper and belongs there, never emitted per field.
 
