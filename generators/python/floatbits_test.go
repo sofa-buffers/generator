@@ -76,3 +76,27 @@ messages:
 		t.Errorf("float_array_bits_equal is not imported from sofab")
 	}
 }
+
+// A negative zero inside a float array default keeps its sign: "%v" would print
+// -0, the integer 0, and the bit compare would then run against +0.0.
+func TestPyFloatArrayDefaultKeepsNegativeZero(t *testing.T) {
+	s := schema(t, `version: 1
+messages:
+  m:
+    payload:
+      b:
+        id: 1
+        type: array
+        items: { type: fp64 }
+        default: [-0.0, 2.0]
+`)
+	src := string(genPy(t, s, map[string]any{})["message.py"])
+	for _, want := range []string{
+		"lambda: [-0.0, 2]",
+		"float_array_bits_equal(self.b, [-0.0, 2])",
+	} {
+		if !strings.Contains(src, want) {
+			t.Errorf("missing %q in:\n%s", want, src)
+		}
+	}
+}
