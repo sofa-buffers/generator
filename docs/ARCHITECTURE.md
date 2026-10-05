@@ -6238,8 +6238,12 @@ A reimplementation is **conformant** when it reproduces these gates:
    sign read that runs only when the value is a zero: TypeScript `x !== 0 || 1 / x < 0`
    (`Object.is` measured +0.7% encode Ir on the bench row), Python
    `x != 0.0 or math.copysign(1.0, x) < 0.0` (a `-0.0` default is emitted as
-   `-0.0`), Dart `x != 0.0 || x.isNegative`. Float ARRAYS keep their element-wise compare (their cells stay in
-   `KNOWN_GAP`) until the corelibs carry a bit-compare helper: it is a static
+   `-0.0`), Dart `x != 0.0 || x.isNegative`. Rust float ARRAYS are compared by bit pattern too, through the
+   corelib's helper (corelib-rs `sofab::float_bits::bits_equal`, rs-no-std
+   `sofab::floats::bits_equal_f32` / `bits_equal_f64`); the helper is corelib code,
+   never emitted per field, and the Rust array cells are gone from `KNOWN_GAP`.
+   The other backends keep their element-wise array compare (their cells stay in
+   `KNOWN_GAP`) until their corelibs carry a bit-compare helper: it is a static
    helper and belongs there, never emitted per field.
 
    *Chunk invariance* (`tests/conformance/lib/check_chunk_invariance.py`):
