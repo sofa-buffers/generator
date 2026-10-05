@@ -6269,9 +6269,10 @@ A reimplementation is **conformant** when it reproduces these gates:
    calls corelib-ts's `floatArrayBitsEqual` in both the omission guard and
    `isDefault` in all three int64 modes; Dart calls
    `sofab.floatBitsEqual(x.storage, _xDefault, length: x.length)` (an fp32 array's
-   `Float32List` storage holds raw bits). Java and Kotlin compare an array's
-   elements by bits already. Go still keeps its element-wise `slices.Equal` until
-   its own change lands, so Go is the only float-array cell left in `KNOWN_GAP`.
+   `Float32List` storage holds raw bits); Go calls corelib-go's `sofab.BitsEqual`
+   (length first, then the elements by bit pattern) in both the omission guard and
+   `isDefault`, an integer array keeping `slices.Equal`. Java and Kotlin compare an
+   array's elements by bits already. No float-array cell is left in `KNOWN_GAP`.
 
    *Chunk invariance* (`tests/conformance/lib/check_chunk_invariance.py`):
    CORELIB_PLAN §5.2 makes the decode outcome computable at *any* byte boundary,
