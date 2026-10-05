@@ -543,8 +543,7 @@ func (g *gen) fieldIsDefaultExprAt(f *gofile, fld *ir.Field, acc string) string 
 func (g *gen) arrayIsDefaultExpr(f *gofile, fld *ir.Field, acc string) string {
 	if isNativeArrayElem(fld.Elem) {
 		if def, ok := g.defaultLiteral(fld); ok {
-			f.imp("slices")
-			return fmt.Sprintf("slices.Equal(%s, %s)", acc, def)
+			return g.arrayEqualCall(f, fld, acc, def)
 		}
 		return fmt.Sprintf("len(%s) == 0", acc)
 	}
@@ -552,6 +551,18 @@ func (g *gen) arrayIsDefaultExpr(f *gofile, fld *ir.Field, acc string) string {
 	// the LAST element is written whatever its value (§2) -- so "no child is
 	// written" is exactly "the array is empty", and the two cannot drift apart.
 	return fmt.Sprintf("len(%s) == 0", acc)
+}
+
+// arrayEqualCall is the "array equals its default" call. A float array is
+// compared by BIT PATTERN through the corelib (CORELIB_PLAN §4.6): slices.Equal
+// would treat -0.0 as the default 0 and drop the element, and never equal a NaN.
+func (g *gen) arrayEqualCall(f *gofile, fld *ir.Field, acc, def string) string {
+	if fld.Elem == ir.KindFP32 || fld.Elem == ir.KindFP64 {
+		f.imp(corelibImport)
+		return fmt.Sprintf("sofab.BitsEqual(%s, %s)", acc, def)
+	}
+	f.imp("slices")
+	return fmt.Sprintf("slices.Equal(%s, %s)", acc, def)
 }
 
 // ---- per-field marshal/unmarshal ----------------------------------------
@@ -711,8 +722,7 @@ func (g *gen) emitMarshalArray(f *gofile, fld *ir.Field, acc, ind string, forced
 			return
 		}
 		if def, ok := g.defaultLiteral(fld); ok {
-			f.imp("slices")
-			f.line("%sif !slices.Equal(%s, %s) {", ind, acc, def)
+			f.line("%sif !%s {", ind, g.arrayEqualCall(f, fld, acc, def))
 		} else {
 			f.line("%sif len(%s) != 0 {", ind, acc)
 		}
