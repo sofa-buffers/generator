@@ -6238,9 +6238,11 @@ A reimplementation is **conformant** when it reproduces these gates:
    sign read that runs only when the value is a zero: TypeScript `x !== 0 || 1 / x < 0`
    (`Object.is` measured +0.7% encode Ir on the bench row), Python
    `x != 0.0 or math.copysign(1.0, x) < 0.0` (a `-0.0` default is emitted as
-   `-0.0`), Dart `x != 0.0 || x.isNegative`. Float ARRAYS keep their element-wise compare (their cells stay in
-   `KNOWN_GAP`) until the corelibs carry a bit-compare helper: it is a static
-   helper and belongs there, never emitted per field.
+   `-0.0`), Dart `x != 0.0 || x.isNegative`. Float ARRAYS compare bit-for-bit only in Zig, which calls the
+   corelib's `sofab.floats.bitsEqual(T, a, b)` in both the write guard and
+   `isDefault`; the other backends keep their element-wise compare (their cells
+   stay in `KNOWN_GAP`) until their corelibs carry a bit-compare helper: it is a
+   static helper and belongs there, never emitted per field.
 
    *Chunk invariance* (`tests/conformance/lib/check_chunk_invariance.py`):
    CORELIB_PLAN §5.2 makes the decode outcome computable at *any* byte boundary,
