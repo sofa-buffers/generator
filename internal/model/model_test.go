@@ -187,3 +187,108 @@ func TestSchemaPathsKeepTypesApart(t *testing.T) {
 		})
 	}
 }
+
+func build(t *testing.T, src string) *ir.Schema {
+	t.Helper()
+	doc, err := parser.Parse([]byte(src), "t.yaml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	resolved, err := doc.Resolve()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if errs := parser.Validate(resolved); errs != nil {
+		t.Fatalf("validate: %v", errs)
+	}
+	s, err := model.Build(doc)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return s
+}
+
+// A `$ref` may stand for a whole payload (the struct's fields become the
+// message's) and for a single field (a copy of that field definition, id
+// included, under the referencing key's name).
+func TestScopeAndFieldRefsExpandInPlace(t *testing.T) {
+	s := build(t, `version: 1
+$defs:
+  struct:
+    Motor:
+      temperature: { id: 0, type: fp32, unit: degC }
+      rpm:         { id: 1, type: u32, unit: rpm }
+      enabled:     { id: 2, type: boolean }
+      pos:         { id: 3, type: struct, fields: { a: { id: 0, type: u8 } } }
+    Alias:
+      power: { $ref: '#/$defs/struct/Motor/enabled' }
+messages:
+  GetMotor:
+    payload:
+      $ref: '#/$defs/struct/Motor'
+  SetMotorEnabled:
+    payload:
+      on:  { $ref: '#/$defs/struct/Motor/enabled' }
+  Other:
+    payload:
+      speed: { $ref: '#/$defs/struct/Motor/rpm' }
+      via:   { $ref: '#/$defs/struct/Alias/power' }
+`)
+	type fl struct {
+		name string
+		id   uint64
+		kind ir.Kind
+	}
+	got := func(m *ir.Message) (out []fl) {
+		for _, f := range m.Fields {
+			out = append(out, fl{f.Name, uint64(f.ID), f.Kind})
+		}
+		return
+	}
+	var get, set *ir.Message
+	for _, m := range s.Messages {
+		switch m.Name {
+		case "GetMotor":
+			get = m
+		case "SetMotorEnabled":
+			set = m
+		}
+	}
+	if g := got(get); len(g) != 4 || g[0] != (fl{"temperature", 0, ir.KindFP32}) || g[3].kind != ir.KindStruct {
+		t.Fatalf("GetMotor fields = %+v", g)
+	}
+	if get.Fields[0].Unit != "degC" {
+		t.Errorf("unit lost: %q", get.Fields[0].Unit)
+	}
+	if g := got(set); len(g) != 1 || g[0] != (fl{"on", 2, ir.KindBool}) {
+		t.Fatalf("SetMotorEnabled fields = %+v", g)
+	}
+	// A ref to a field that is itself a ref follows the chain.
+	for _, m := range s.Messages {
+		if m.Name == "Other" {
+			if g := got(m); len(g) != 2 || g[0] != (fl{"speed", 1, ir.KindU32}) || g[1] != (fl{"via", 2, ir.KindBool}) {
+				t.Fatalf("Other fields = %+v", g)
+			}
+		}
+	}
+}
+
+// A circular field ref is an error, not a hang.
+func TestCircularFieldRefIsRefused(t *testing.T) {
+	doc, err := parser.Parse([]byte(`version: 1
+$defs:
+  struct:
+    A:
+      x: { $ref: '#/$defs/struct/A/x' }
+messages:
+  M:
+    payload:
+      y: { $ref: '#/$defs/struct/A/x' }
+`), "t.yaml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := doc.Resolve(); err == nil || !strings.Contains(err.Error(), "circular") {
+		t.Fatalf("want circular $ref error, got %v", err)
+	}
+}
