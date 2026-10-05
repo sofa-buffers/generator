@@ -6238,8 +6238,12 @@ A reimplementation is **conformant** when it reproduces these gates:
    sign read that runs only when the value is a zero: TypeScript `x !== 0 || 1 / x < 0`
    (`Object.is` measured +0.7% encode Ir on the bench row), Python
    `x != 0.0 or math.copysign(1.0, x) < 0.0` (a `-0.0` default is emitted as
-   `-0.0`), Dart `x != 0.0 || x.isNegative`. Float ARRAYS keep their element-wise compare (their cells stay in
-   `KNOWN_GAP`) until the corelibs carry a bit-compare helper: it is a static
+   `-0.0`), Dart `x != 0.0 || x.isNegative`. C# float ARRAYS are compared by bit pattern through
+   the corelib helper `sofab.FloatBits.BitsEqual(float[] / double[], default)`
+   (`ReadOnlySpan` overloads), called in both the `Serialize` omission guard and
+   `IsDefault`; their cells are gone from the C# `KNOWN_GAP`. The other backends'
+   float ARRAYS keep their element-wise compare (their cells stay in
+   `KNOWN_GAP`) until their corelibs carry a bit-compare helper: it is a static
    helper and belongs there, never emitted per field.
 
    *Chunk invariance* (`tests/conformance/lib/check_chunk_invariance.py`):
