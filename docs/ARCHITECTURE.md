@@ -6269,10 +6269,23 @@ A reimplementation is **conformant** when it reproduces these gates:
    calls corelib-ts's `floatArrayBitsEqual` in both the omission guard and
    `isDefault` in all three int64 modes; Dart calls
    `sofab.floatBitsEqual(x.storage, _xDefault, length: x.length)` (an fp32 array's
-   `Float32List` storage holds raw bits); Go calls corelib-go's `sofab.BitsEqual`
-   (length first, then the elements by bit pattern) in both the omission guard and
-   `isDefault`, an integer array keeping `slices.Equal`. Java and Kotlin compare an
-   array's elements by bits already. No float-array cell is left in `KNOWN_GAP`.
+   `Float32List` storage holds raw bits). Go compares by bit pattern in both the
+   omission guard and `isDefault`, an integer array keeping `slices.Equal`: a
+   default of up to 16 elements inline (`len(a) != N`, then `math.Float32bits(a[i])`
+   against a constant, one early return per term in `isDefault`, one `||` chain in
+   the guard), a longer one through corelib-go's `sofab.BitsEqual` against a
+   package-level `_<Type>__<Field>Default`. **This is the measured section 8
+   override of the static-helper rule** (maxspeed instructions per call,
+   `tests/bench` method): the inline block's shape is the same for every schema, but
+   `sofab.BitsEqual(m.A, []float32{...})` cost 1.4x to 2.5x the instructions of the
+   `slices.Equal` it replaced on a 1 to 16 element default (a non-leaf call with a
+   loop the compiler does not unroll, the default literal rebuilt on the stack per
+   call) and the inline form costs 0.4x to 0.9x of it. The terms are separate
+   statements over a local copy of the slice header because the same terms joined
+   by `&&` are materialised as bools with a bounds check per element, and read
+   through `m.A` the header is reloaded before every element. Java and Kotlin
+   compare an array's elements by bits already. No float-array cell is left in
+   `KNOWN_GAP`.
 
    *Chunk invariance* (`tests/conformance/lib/check_chunk_invariance.py`):
    CORELIB_PLAN §5.2 makes the decode outcome computable at *any* byte boundary,

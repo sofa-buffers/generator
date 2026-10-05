@@ -86,6 +86,11 @@ type gen struct {
 	// idConsts records the union paths whose option-id constants are emitted:
 	// the variants of a split union share them.
 	idConsts map[string]bool
+	// owner is the type being emitted; defVars/defDecls queue the package-level
+	// copies of long float array defaults it needs (floatDefaultVar).
+	owner    string
+	defVars  map[string]bool
+	defDecls []string
 }
 
 // typesFileName is the shared file holding every named type.
@@ -415,6 +420,7 @@ func (g *gen) emitBitfield(f *gofile, nt *ir.NamedType) {
 //     promotes UTF8Valid onto the object, so the check a generated arm runs is
 //     the one the caller configured rather than the build tag alone.
 func (g *gen) emitObject(f *gofile, typeName string, fields []*ir.Field) {
+	g.owner = typeName
 	f.imp(corelibImport)
 	f.line("// %s is a generated SofaBuffers object.", typeName)
 	f.line("type %s struct {", typeName)
@@ -476,6 +482,7 @@ func (g *gen) emitObject(f *gofile, typeName string, fields []*ir.Field) {
 	f.blank()
 
 	g.emitIsDefault(f, typeName, fields)
+	g.flushDefaultVars(f)
 
 	g.emitVisitorMethods(f, typeName, fields, nil)
 }
@@ -553,16 +560,122 @@ func (g *gen) arrayIsDefaultExpr(f *gofile, fld *ir.Field, acc string) string {
 	return fmt.Sprintf("len(%s) == 0", acc)
 }
 
-// arrayEqualCall is the "array equals its default" call. A float array is
-// compared by BIT PATTERN through the corelib (CORELIB_PLAN §4.6): slices.Equal
-// would treat -0.0 as the default 0 and drop the element, and never equal a NaN.
+// arrayEqualCall is the "array equals its default" expression. A float array
+// is compared by BIT PATTERN (CORELIB_PLAN §4.6): slices.Equal would treat -0.0
+// as the default 0 and drop the element, and never equal a NaN. A default of up
+// to floatArrayUnrollMax elements is compared by a generated function of its own
+// (floatArrayIsDefaultFunc); a longer one by the corelib's sofab.BitsEqual
+// against a package-level copy of the default.
 func (g *gen) arrayEqualCall(f *gofile, fld *ir.Field, acc, def string) string {
 	if fld.Elem == ir.KindFP32 || fld.Elem == ir.KindFP64 {
+		if bits := g.floatArrayBits(fld); bits != nil {
+			return g.floatArrayIsDefaultFunc(f, fld, bits) + "(" + acc + ")"
+		}
 		f.imp(corelibImport)
-		return fmt.Sprintf("sofab.BitsEqual(%s, %s)", acc, def)
+		return fmt.Sprintf("sofab.BitsEqual(%s, %s)", acc, g.floatDefaultVar(fld, def))
 	}
 	f.imp("slices")
 	return fmt.Sprintf("slices.Equal(%s, %s)", acc, def)
+}
+
+// floatArrayUnrollMax is the longest float array default compared inline,
+// element by element, against bit-pattern constants. Longer ones go through
+// sofab.BitsEqual against a package-level copy of the default.
+//
+// This is the measured section-8 override (maxspeed instructions per call,
+// tests/bench): the function's shape is the same for every schema, but
+// sofab.BitsEqual(m.A, []float32{...}) cost 1.2x to 2.5x the instructions of the
+// slices.Equal it replaced on a 1 to 16 element default (the call is not a leaf,
+// the loop is not unrolled, the default literal is rebuilt on the stack per
+// call), and the unrolled function costs 0.4x to 1.0x of it.
+const floatArrayUnrollMax = 16
+
+// floatArrayBits returns the bit-pattern literals of a float array's default,
+// one per element, or nil when the default is too long to compare inline
+// (an empty default is a non-nil empty list).
+func (g *gen) floatArrayBits(fld *ir.Field) []string {
+	vals, _ := fld.Default.([]any)
+	if len(vals) > floatArrayUnrollMax {
+		return nil
+	}
+	bits := make([]string, len(vals))
+	for i, v := range vals {
+		bits[i] = floatBitsLit(fld.Elem, fmt.Sprintf("%v", v))
+	}
+	return bits
+}
+
+// floatArrayIsDefaultFunc names the function that compares a float array with
+// its short default, and queues its declaration for the end of the type being
+// emitted. The length is tested first and every element after it, each in a
+// statement of its own: the same terms joined by && or || in one condition are
+// materialised as bools by the compiler, which keeps a bounds check per element
+// and cannot leave at the first mismatch. The slice is a parameter, so its header
+// is in registers; read through m.A it is reloaded before every element.
+func (g *gen) floatArrayIsDefaultFunc(f *gofile, fld *ir.Field, bits []string) string {
+	f.imp("math")
+	name := "_" + g.owner + "__" + goFieldName(fld.Name) + "IsDefault"
+	if g.defVars == nil {
+		g.defVars = map[string]bool{}
+	}
+	if !g.defVars[name] {
+		g.defVars[name] = true
+		elem := "float32"
+		if fld.Elem == ir.KindFP64 {
+			elem = "float64"
+		}
+		var b strings.Builder
+		fmt.Fprintf(&b, "// %s reports whether a equals the declared default of %s, bit for bit.\n", name, goFieldName(fld.Name))
+		fmt.Fprintf(&b, "func %s(a []%s) bool {\n", name, elem)
+		if len(bits) <= 1 {
+			// One term: a single return inlines into the caller's branch, where
+			// several returns leave a materialised bool behind (+4 instructions).
+			b.WriteString("\treturn " + strings.Join(g.floatArrayEqTerms(fld, bits), " && ") + "\n}")
+		} else {
+			fmt.Fprintf(&b, "\tif len(a) != %d {\n\t\treturn false\n\t}\n", len(bits))
+			for i, c := range bits {
+				fmt.Fprintf(&b, "\tif %s(a[%d]) != %s {\n\t\treturn false\n\t}\n", floatBitsFunc(fld.Elem), i, c)
+			}
+			b.WriteString("\treturn true\n}")
+		}
+		g.defDecls = append(g.defDecls, b.String())
+	}
+	return name
+}
+
+// floatArrayEqTerms are the && terms of the one-return form: the length, then
+// the element's bits, each against its constant.
+func (g *gen) floatArrayEqTerms(fld *ir.Field, bits []string) []string {
+	terms := []string{fmt.Sprintf("len(a) == %d", len(bits))}
+	for i, c := range bits {
+		terms = append(terms, fmt.Sprintf("%s(a[%d]) == %s", floatBitsFunc(fld.Elem), i, c))
+	}
+	return terms
+}
+
+// floatDefaultVar names the package-level copy of a long float array default
+// and queues its declaration for the end of the type being emitted. Building
+// the literal inside the guard would copy the whole default onto the stack on
+// every call.
+func (g *gen) floatDefaultVar(fld *ir.Field, def string) string {
+	name := "_" + g.owner + "__" + goFieldName(fld.Name) + "Default"
+	if g.defVars == nil {
+		g.defVars = map[string]bool{}
+	}
+	if !g.defVars[name] {
+		g.defVars[name] = true
+		g.defDecls = append(g.defDecls, fmt.Sprintf("var %s = %s", name, def))
+	}
+	return name
+}
+
+// flushDefaultVars writes the queued float default declarations after a type.
+func (g *gen) flushDefaultVars(f *gofile) {
+	for _, d := range g.defDecls {
+		f.line("%s", d)
+		f.blank()
+	}
+	g.defDecls = nil
 }
 
 // ---- per-field marshal/unmarshal ----------------------------------------
@@ -672,18 +785,33 @@ func (g *gen) floatBitsCmp(f *gofile, fld *ir.Field, acc, op string) string {
 		lit = l
 	}
 	f.imp("math")
-	if fld.Kind == ir.KindFP32 {
+	return fmt.Sprintf("%s(%s) %s %s", floatBitsFunc(fld.Kind), acc, op, floatBitsLit(fld.Kind, lit))
+}
+
+// floatBitsFunc is the math function that reads a float's bit pattern.
+func floatBitsFunc(k ir.Kind) string {
+	if k == ir.KindFP32 {
+		return "math.Float32bits"
+	}
+	return "math.Float64bits"
+}
+
+// floatBitsLit is the integer literal of the bit pattern of the float constant
+// lit, as the Go compiler reads it: a -0.0 constant is +0.0 in Go, so it is
+// +0.0 here too, which is what the member is initialised with.
+func floatBitsLit(k ir.Kind, lit string) string {
+	if k == ir.KindFP32 {
 		v, _ := strconv.ParseFloat(lit, 32)
 		if v == 0 {
 			v = 0 // -0 parses to -0.0, the member is +0.0
 		}
-		return fmt.Sprintf("math.Float32bits(%s) %s 0x%x", acc, op, math.Float32bits(float32(v)))
+		return fmt.Sprintf("0x%x", math.Float32bits(float32(v)))
 	}
 	v, _ := strconv.ParseFloat(lit, 64)
 	if v == 0 {
 		v = 0
 	}
-	return fmt.Sprintf("math.Float64bits(%s) %s 0x%x", acc, op, math.Float64bits(v))
+	return fmt.Sprintf("0x%x", math.Float64bits(v))
 }
 
 // defaultCompare is the RHS to compare a field against for omission: its schema
