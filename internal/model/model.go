@@ -30,6 +30,7 @@ func Build(doc *parser.Document) (*ir.Schema, error) {
 	b := &builder{
 		schema: &ir.Schema{Named: map[string]*ir.NamedType{}},
 		origin: map[string]string{},
+		root:   root,
 	}
 
 	if ver, ok := asInt(root["version"]); ok {
@@ -79,6 +80,7 @@ func (es Errors) Error() string {
 type builder struct {
 	schema *ir.Schema
 	origin map[string]string // graph key -> location of the element that claimed it
+	root   map[string]any    // the document, for local $ref lookups
 	errs   Errors
 }
 
@@ -169,13 +171,14 @@ func (b *builder) buildMessage(name string, m map[string]any) *ir.Message {
 // returning fields sorted by id then name (ascending-id order, §6.1). loc is
 // the JSON pointer of the scope; a field's is loc + "/" + its name.
 func (b *builder) buildFields(node any, own owner, loc string) []*ir.Field {
+	node = b.deref(node, loc)
 	m, ok := node.(map[string]any)
 	if !ok {
 		return nil
 	}
 	var fields []*ir.Field
 	for _, name := range sortedKeys(m) {
-		fdef, ok := m[name].(map[string]any)
+		fdef, ok := b.deref(m[name], loc+"/"+name).(map[string]any)
 		if !ok {
 			continue
 		}
@@ -394,6 +397,45 @@ func (b *builder) buildBitfield(name, key string, def any) *ir.NamedType {
 }
 
 // ---- helpers ------------------------------------------------------------
+
+// deref follows a lone {$ref:"#/..."} to the node it points at, repeatedly. It
+// serves the two places where a $ref stands for a whole id scope or a whole
+// field rather than for a shared type: a message `payload: {$ref: struct}` is
+// that struct's fields, and a field `{$ref: ".../Motor/enabled"}` is a copy of
+// that field definition (id included; the name is the referencing key's). Both
+// are expanded in place, so the fields belong to the referencing scope. Any
+// other node is returned as it is; a dangling or circular ref was already
+// refused by the parser's dereferencing step.
+func (b *builder) deref(node any, loc string) any {
+	seen := map[string]bool{}
+	for {
+		m, ok := node.(map[string]any)
+		if !ok || len(m) != 1 {
+			return node
+		}
+		ref, ok := m["$ref"].(string)
+		if !ok || !strings.HasPrefix(ref, "#/") {
+			return node
+		}
+		if seen[ref] {
+			b.errs = append(b.errs, Error{Loc: loc, Msg: fmt.Sprintf("circular $ref %q", ref)})
+			return nil
+		}
+		seen[ref] = true
+		var cur any = b.root
+		for _, raw := range strings.Split(strings.TrimPrefix(ref, "#/"), "/") {
+			tok := strings.ReplaceAll(strings.ReplaceAll(raw, "~1", "/"), "~0", "~")
+			cm, ok := cur.(map[string]any)
+			if !ok {
+				return node
+			}
+			if cur, ok = cm[tok]; !ok {
+				return node
+			}
+		}
+		node = cur
+	}
+}
 
 // refKey returns the graph key for a {$ref:"#/$defs/<cat>/<Name>"} object.
 func refKey(def any) (string, bool) {

@@ -73,6 +73,13 @@ rejected rather than ignored.
 | `struct` | nested; `fields:` inline or `{ $ref }`; recursive |
 | `union` | `oneof:` inline or `{ $ref }`, at least one option; optional `default_id` — the option a fresh union holds; **omitted, it is the option with the lowest id**. A `string`/`blob`/`array` option takes no non-empty `default` (see [§7.1](#71-union-options)) |
 
+Besides types, a `$ref` may stand for a whole `payload` (`payload: { $ref:
+'#/$defs/struct/Motor' }` — the message carries that struct's fields) or for a
+single field (`on: { $ref: '#/$defs/struct/Motor/enabled' }` — a copy of that
+field definition, including its `id`, under the key `on`). Both are checked
+after dereferencing, like every `$ref`; the ids of the expanded fields must be
+unique in their scope.
+
 Common optional metadata on every field: `description`, `deprecated`. **`unit`
 is allowed only on the numeric types** (`u8…u64`, `i8…i64`, `fp32`, `fp64`);
 floats also allow `decimals`. An `array` field follows the same rule through its

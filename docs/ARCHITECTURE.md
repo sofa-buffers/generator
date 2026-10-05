@@ -242,6 +242,21 @@ definitions duplicate). Cross-file refs `file.yaml#/$defs/...` are inlined at
 load time and flattened transitively; **recursive refs are rejected** (a
 recursive value member has no finite size).
 
+Two `$ref` forms stand for something other than a type, and the model
+(`builder.deref`) expands them in place while lowering:
+
+- `payload: {$ref: "#/$defs/struct/Motor"}` — the message's payload **is** that
+  struct's fields (same ids, units, defaults); the struct itself is still
+  generated as its own type.
+- `name: {$ref: "#/$defs/struct/Motor/enabled"}` — a field in any id scope is a
+  copy of that field definition, **id included**, under the referencing key's
+  name. A target that is itself a field `$ref` is followed; a cycle is refused.
+  The usual per-scope id uniqueness is checked on the expanded fields.
+
+Both are local-pointer forms; across files only the whole-definition
+`file.yaml#/$defs/<category>/<Name>` form is accepted (so a cross-file payload
+`$ref` works, a cross-file single-field `$ref` does not).
+
 An imported definition keeps its name and joins the importing document's one
 namespace (§8, naming rule 3), and is identified by its file and pointer
 (`internal/parser/external.go`). The same definition reached twice — directly
