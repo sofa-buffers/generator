@@ -233,7 +233,7 @@ func (g *gen) dartInit(f *ir.Field) string {
 	case ir.KindArray:
 		if nativeArrayElem(f.Elem) {
 			ctor := fmt.Sprintf("%s(%d%s)", inlineArrayType(f.Elem), initialCap(f), g.rangeArg(f.Elem, f.ElemRef))
-			if def, ok := g.defaultRef(f); ok {
+			if def, ok := g.defaultList(f); ok {
 				return fmt.Sprintf(" = %s..assign(%s)", ctor, def)
 			}
 			return " = " + ctor
@@ -372,8 +372,41 @@ func (g *gen) defaultRef(f *ir.Field) (string, bool) {
 func (g *gen) defaultDecl(f *ir.Field) string {
 	ref, _ := g.defaultRef(f)
 	lit, _ := g.defaultLit(f)
+	if ct, ok := floatDefaultType(f); ok {
+		return fmt.Sprintf("static final %s %s = %s(%s);", ct, ref, ct, lit)
+	}
 	t := storageType(f)
 	return fmt.Sprintf("static final %s %s = %s.fromList(%s);", t, ref, t, lit)
+}
+
+// floatDefaultType is the corelib class a float array's declared default is held
+// in: the typed list its storage is filled from plus the zero and NaN positions
+// the default test needs, so the test is one `!=` loop instead of a per-element
+// sign check. ("", false) for every other destination.
+func floatDefaultType(f *ir.Field) (string, bool) {
+	if f.Kind != ir.KindArray {
+		return "", false
+	}
+	switch f.Elem {
+	case ir.KindFP32:
+		return "sofab.Float32ArrayDefault", true
+	case ir.KindFP64:
+		return "sofab.Float64ArrayDefault", true
+	}
+	return "", false
+}
+
+// defaultList is the expression of the typed list a destination is filled from:
+// the static itself, or the `.list` of the corelib class that holds it.
+func (g *gen) defaultList(f *ir.Field) (string, bool) {
+	ref, ok := g.defaultRef(f)
+	if !ok {
+		return "", false
+	}
+	if _, wrapped := floatDefaultType(f); wrapped {
+		return ref + ".list", true
+	}
+	return ref, true
 }
 
 // hasDestDefault reports whether a destination field declares a non-empty
