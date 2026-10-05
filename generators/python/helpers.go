@@ -220,6 +220,10 @@ func (g *gen) pyNativeArrayLiteral(f *ir.Field) (string, bool) {
 			}
 			continue
 		}
+		if x, ok := v.(float64); ok && x == 0 && math.Signbit(x) {
+			parts[i] = "-0.0" // "%v" prints -0, which Python reads as the integer 0
+			continue
+		}
 		parts[i] = scalarLit(v)
 	}
 	// Not padded to a declared `count: N`: that is a capacity, not a length
