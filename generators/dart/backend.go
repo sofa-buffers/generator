@@ -683,7 +683,7 @@ func (g *gen) emitResetField(f *dfile, fld *ir.Field) {
 		// CAPACITY, never a length (MESSAGE_SPEC §3), so a fresh count:N array
 		// holds no elements at all -- which is exactly what an absent field
 		// decodes back to.
-		if def, ok := g.defaultRef(fld); ok {
+		if def, ok := g.defaultList(fld); ok {
 			f.line("    %s.assign(%s);", acc, def)
 			return
 		}
@@ -725,7 +725,10 @@ func (g *gen) destDefaultTest(fld *ir.Field, acc string, differs bool) string {
 	}
 	if fld.Kind == ir.KindArray && (fld.Elem == ir.KindFP32 || fld.Elem == ir.KindFP64) {
 		// By BIT PATTERN (CORELIB_PLAN §4.6): `==` on a double says -0.0 is 0.0.
-		return fmt.Sprintf("%ssofab.floatBitsEqual(%s.storage, %s, length: %s.length)", not, acc, def, acc)
+		// The default is held by the corelib's width class, which knows where
+		// its zeros and NaNs are, so the test is one `!=` loop plus a sign read
+		// at those indices.
+		return fmt.Sprintf("%s%s.matches(%s.storage, %s.length)", not, def, acc, acc)
 	}
 	return fmt.Sprintf("%s_prefixEq(%s.storage, %s.length, %s)", not, acc, acc, def)
 }

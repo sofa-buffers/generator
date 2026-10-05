@@ -512,7 +512,7 @@ func (g *gen) scanField(fld *ir.Field, n *needs) {
 		case fld.Kind == ir.KindArray && fld.Elem == ir.KindBool:
 			n.boolDefault = true
 		case fld.Kind == ir.KindArray && (fld.Elem == ir.KindFP32 || fld.Elem == ir.KindFP64):
-			// compared by the corelib's floatBitsEqual: no prelude helper
+			// held and compared by the corelib's Float32ArrayDefault / Float64ArrayDefault: no prelude helper
 		default:
 			n.prefixEq = true
 		}

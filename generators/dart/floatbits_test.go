@@ -25,8 +25,9 @@ func TestDartFloatDiffersComparesSign(t *testing.T) {
 	}
 }
 
-// A float array default is compared by bit pattern through the corelib's
-// floatBitsEqual, never by `_prefixEq` (whose `!=` on a double is IEEE): the
+// A float array default is held by the corelib's Float32ArrayDefault /
+// Float64ArrayDefault and compared by bit pattern through its `matches`, never
+// by `_prefixEq` (whose `!=` on a double is IEEE): the
 // omission test of fp32 and fp64 arrays, at top level and inside a nested struct.
 func TestDartFloatArrayDefaultUsesCorelibBitCompare(t *testing.T) {
 	const def = "version: 1\nmessages:\n  m:\n    payload:\n" +
@@ -36,9 +37,12 @@ func TestDartFloatArrayDefaultUsesCorelibBitCompare(t *testing.T) {
 		"          c: { id: 0, type: array, items: { type: fp32 }, default: [0.0] }\n"
 	out := genFor(t, writeDef(t, def), map[string]any{})
 	for _, want := range []string{
-		"if (!sofab.floatBitsEqual(a.storage, _aDefault, length: a.length)) {",
-		"if (!sofab.floatBitsEqual(b.storage, _bDefault, length: b.length)) {",
-		"if (!sofab.floatBitsEqual(c.storage, _cDefault, length: c.length)) {",
+		"static final sofab.Float32ArrayDefault _aDefault = sofab.Float32ArrayDefault(",
+		"static final sofab.Float64ArrayDefault _bDefault = sofab.Float64ArrayDefault(",
+		"..assign(_aDefault.list)",
+		"if (!_aDefault.matches(a.storage, a.length)) {",
+		"if (!_bDefault.matches(b.storage, b.length)) {",
+		"if (!_cDefault.matches(c.storage, c.length)) {",
 	} {
 		if !strings.Contains(out, want) {
 			t.Errorf("generated Dart missing %q:\n%s", want, out)

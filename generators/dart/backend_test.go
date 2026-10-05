@@ -211,8 +211,8 @@ func TestResetRestoresDefaults(t *testing.T) {
 		"  static final Int64List _someuintarrayDefault = Int64List.fromList(const <int>[0, 1, 1000, 4294967295]);",
 		"    someenumarray.assign(_someenumarrayDefault);",
 		"  static final Int64List _someenumarrayDefault = Int64List.fromList(const <int>[2, 1, 0]);",
-		"    somefloatarray.assign(_somefloatarrayDefault);",
-		"  static final Float32List _somefloatarrayDefault = Float32List.fromList(const <double>[0.0, -1.5, 3.25]);",
+		"    somefloatarray.assign(_somefloatarrayDefault.list);",
+		"  static final sofab.Float32ArrayDefault _somefloatarrayDefault = sofab.Float32ArrayDefault(const <double>[0.0, -1.5, 3.25]);",
 	} {
 		if !strings.Contains(out, want) {
 			t.Errorf("reset() missing %q", want)
