@@ -21,8 +21,8 @@ The generic options apply here too; see the [generic config](README.md).
 | `c-cpp` | the C++ wrapper over `corelib-c-cpp` | footprint; heap-free, fixed capacity |
 
 Both need a C++20 compiler for the generated headers (`std::bit_cast`, which
-compares a float field with its default by bit pattern, so `-0.0` is not the
-default `0`). The two produce **identical wire bytes**. What differs is what the generated
+compares a float field, and each element of a float array, with its default by
+bit pattern, so `-0.0` is not the default `0`). The two produce **identical wire bytes**. What differs is what the generated
 code costs at runtime and what the schema must declare.
 
 **`c-cpp` requires a fully bounded schema.** Every `string`, `blob` and `array`
