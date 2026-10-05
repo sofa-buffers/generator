@@ -1,11 +1,13 @@
 package matrix
 
 import (
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 
 	"github.com/sofa-buffers/generator/internal/generator"
+	"github.com/sofa-buffers/generator/internal/ir"
 )
 
 // TestBoundsReachTheFieldDoc pins generator#308: a field's schema bound has to
@@ -43,13 +45,19 @@ func TestBoundsReachTheFieldDoc(t *testing.T) {
 	for _, lang := range generator.Registered() {
 		t.Run(lang, func(t *testing.T) {
 			b, _ := generator.Lookup(lang)
-			files, err := b.Generate(s, map[string]any{})
-			if err != nil {
+			schema := s
+			if fixedOnlyTarget(lang) {
 				// C is heapless by default and rejects the unbounded field, which
-				// is its own deliberate error (generator#104).
-				if fixedOnlyTarget(lang) {
-					t.Skipf("%s rejects an unbounded field by design: %v", lang, err)
+				// is its own deliberate error (generator#104). Only that field is
+				// invalid for it, so the refusal is asserted and every bounded
+				// field is checked on the schema without `free`.
+				if _, err := b.Generate(s, map[string]any{}); err == nil {
+					t.Fatalf("%s accepted the unbounded field `free`", lang)
 				}
+				schema = boundedOnly(t)
+			}
+			files, err := b.Generate(schema, map[string]any{})
+			if err != nil {
 				t.Fatalf("generate: %v", err)
 			}
 			var sb strings.Builder
@@ -105,6 +113,25 @@ func TestBoundsReachTheFieldDoc(t *testing.T) {
 			}
 		})
 	}
+}
+
+// boundedOnly builds testdata/bounds.yaml without its unbounded field, which is
+// the last one in the file.
+func boundedOnly(t *testing.T) *ir.Schema {
+	t.Helper()
+	src, err := os.ReadFile(filepath.Join("testdata", "bounds.yaml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	head, _, ok := strings.Cut(string(src), "      free:\n")
+	if !ok {
+		t.Fatal("testdata/bounds.yaml has no `free` field to drop")
+	}
+	s, err := buildIRFromSource(t, head)
+	if err != nil {
+		t.Fatalf("bounds.yaml without `free` should validate: %v", err)
+	}
+	return s
 }
 
 // everyOccurrenceIsAComment reports whether every line carrying frag is a

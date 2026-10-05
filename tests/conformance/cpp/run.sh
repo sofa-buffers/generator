@@ -22,6 +22,8 @@ set -eu
 . "$(dirname "$0")/../lib/corpus_roundtrip.sh"
 # shellcheck source=../lib/backend_tests.sh
 . "$(dirname "$0")/../lib/backend_tests.sh"
+# shellcheck source=../lib/assert_unbounded_rejected.sh
+. "$(dirname "$0")/../lib/assert_unbounded_rejected.sh"
 
 ROOT=$(cd "$(dirname "$0")/../../.." && pwd)
 CPP="${1:-${SOFAB_CPP_DIR:-}}"
@@ -994,6 +996,10 @@ YAML
     done
 
     echo "==> [$label] corpus + realworld: every definition compiles"
+    # The embedded profile refuses the three unbounded definitions the loops below
+    # skip; assert that, in both storage modes, rather than only not building them.
+    [ "$corelib" = c-cpp ] && assert_unbounded_rejected cpp "$WORK/cfg-corpus-$label.yaml" "$label"
+    built=0; nosrc=0; refused=0
     for def in "$ROOT"/tests/matrix/corpus/defs/*.yaml "$ROOT"/examples/messages/realworld/*.yaml; do
         # no_maxlen.yaml, seq_elements_dyn.yaml and array_lengths_dyn.yaml exist to
         # exercise genuinely unbounded fields — unbounded string/blob, the
@@ -1005,15 +1011,17 @@ YAML
         # counterparts (seq_elements, nested_rows, array_lengths) do compile here,
         # so this leg keeps its wrapper-element and array-length coverage.
         case "$corelib:$(basename "$def")" in
-        c-cpp:no_maxlen.yaml | c-cpp:seq_elements_dyn.yaml | c-cpp:array_lengths_dyn.yaml) continue ;;
+        c-cpp:no_maxlen.yaml | c-cpp:seq_elements_dyn.yaml | c-cpp:array_lengths_dyn.yaml) refused=$((refused + 1)); continue ;;
         esac
         name=$(basename "$def" .yaml)
         ( cd "$ROOT" && go run ./cmd/sofabgen --config "$WORK/cfg-corpus-$label.yaml" --lang cpp --in "$def" --out "$WORK/corpus-$label/$name" >/dev/null )
+        emitted=0
         for h in "$WORK"/corpus-"$label"/"$name"/*.hpp; do
             # The C++ target emits its headers per message, so a $defs-only file
             # (realworld/common.yaml, diagnostics.yaml) emits none; the project
             # block below builds what it does emit, its harness.
             [ -e "$h" ] || continue
+            emitted=1
             # $WARNFLAGS (-Werror), because the defects this loop exists to catch are
             # DIAGNOSTICS, not hard errors: an unsuffixed decimal literal above
             # INT64_MAX has no type under [lex.icon], and GCC accepts it as an
@@ -1037,8 +1045,9 @@ YAML
             g++ -std=c++20 -O2 $WARNFLAGS -fsyntax-only $include "$tu" \
                 || { echo "FAIL: [$label] corpus def $name did not compile"; exit 1; }
         done
+        if [ "$emitted" -eq 1 ]; then built=$((built + 1)); else nosrc=$((nosrc + 1)); fi
     done
-    echo "==> [$label] corpus compiles ($(ls "$ROOT"/tests/matrix/corpus/defs/*.yaml | wc -l) definitions + $(ls "$ROOT"/examples/messages/realworld/*.yaml | wc -l) realworld)"
+    echo "==> [$label] corpus compiles ($built of $((built + nosrc + refused)) corpus and realworld definitions; $refused refused as unbounded, asserted above; $nosrc emit no source)"
 
     # Every corpus and realworld file as emit:project, harness included, under the
     # exported $WARNFLAGS: the loop above is -fsyntax-only on the headers, so it
@@ -1050,6 +1059,7 @@ YAML
     # (const char *, size_t) -- a constructor FixedString does not have, a hard
     # error, and invisible while only the headers were compiled (generator#583).
     echo "==> [$label] corpus + realworld: every file builds as a project, harness included"
+    built=0; refused=0
     for def in "$ROOT"/tests/matrix/corpus/defs/*.yaml "$ROOT"/examples/messages/realworld/*.yaml; do
         # The same deliberately-unbounded definitions the compile loop above skips
         # on the embedded profile.
@@ -1057,6 +1067,7 @@ YAML
         c-cpp:no_maxlen.yaml | c-cpp:seq_elements_dyn.yaml | c-cpp:array_lengths_dyn.yaml)
             corpus_roundtrip "C++ [$label]" cpp "$def" "$WORK/corpus-$label.tally" \
                 --exclude-all "unbounded fields: the embedded profile rejects them by design"
+            refused=$((refused + 1))
             continue ;;
         esac
         name=$(basename "$def" .yaml)
@@ -1067,8 +1078,9 @@ YAML
         # surfaces (generator#655).
         corpus_roundtrip "C++ [$label]" cpp "$def" "$WORK/corpus-$label.tally" \
             -- "$WORK/rwproj-$label/$name/harness/harness"
+        built=$((built + 1))
     done
-    echo "==> [$label] projects build ($(ls "$ROOT"/tests/matrix/corpus/defs/*.yaml | wc -l) corpus definitions + $(ls "$ROOT"/examples/messages/realworld/*.yaml | wc -l) realworld files)"
+    echo "==> [$label] projects build ($built of $((built + refused)) corpus and realworld files; $refused refused as unbounded, asserted above)"
     corpus_roundtrip_summary "C++ [$label]" "$WORK/corpus-$label.tally"
 
     # Nested rows, DECODED (corelib-cpp#124). The loop above is -fsyntax-only, so

@@ -24,6 +24,8 @@ set -eu
 . "$(dirname "$0")/../lib/tables.sh"
 # Every corpus + realworld message, round-tripped (generator#655).
 . "$(dirname "$0")/../lib/corpus_roundtrip.sh"
+# shellcheck source=../lib/assert_unbounded_rejected.sh
+. "$(dirname "$0")/../lib/assert_unbounded_rejected.sh"
 # Generated code against the canonical formatter (ARCHITECTURE §12).
 . "$(dirname "$0")/../lib/check_format.sh"
 # Every backend Go test, run against the corelib with no unexplained skip.
@@ -1184,6 +1186,10 @@ YAML
     done
 
     echo "==> [$label] corpus + realworld: every definition builds, clippy-clean"
+    # The no_std profile refuses the three unbounded definitions the loop below
+    # skips; assert that, in both storage modes, rather than only not building them.
+    case "$label" in no-std-*) assert_unbounded_rejected rust "$WORK/cfg-$label.yaml" "$label" ;; esac
+    built=0; refused=0
     for def in "$ROOT"/tests/matrix/corpus/defs/*.yaml "$ROOT"/examples/messages/realworld/*.yaml; do
         # no_maxlen.yaml exists to exercise genuinely unbounded string/blob fields.
         # The no_std profile rejects those by design — in both storage modes — so
@@ -1197,6 +1203,7 @@ YAML
         no-std-*:no_maxlen.yaml | no-std-*:seq_elements_dyn.yaml | no-std-*:array_lengths_dyn.yaml)
             corpus_roundtrip "Rust [$label]" rust "$def" "$WORK/corpus-$label.tally" \
                 --exclude-all "unbounded fields: the no_std profile rejects them by design"
+            refused=$((refused + 1))
             continue ;;
         esac
         name=$(basename "$def" .yaml)
@@ -1206,8 +1213,9 @@ YAML
         # surfaces (generator#655).
         corpus_roundtrip "Rust [$label]" rust "$def" "$WORK/corpus-$label.tally" \
             --cwd "$WORK/corpus-$label/$name" -- cargo run -q --
+        built=$((built + 1))
     done
-    echo "==> [$label] corpus builds clippy-clean ($(ls "$ROOT"/tests/matrix/corpus/defs/*.yaml | wc -l) definitions + $(ls "$ROOT"/examples/messages/realworld/*.yaml | wc -l) realworld)"
+    echo "==> [$label] corpus builds clippy-clean ($built of $((built + refused)) corpus and realworld definitions; $refused refused as unbounded, asserted above)"
     corpus_roundtrip_summary "Rust [$label]" "$WORK/corpus-$label.tally"
 
     # The reserved-name collision test (ARCHITECTURE §8): reserved.yaml uses every
