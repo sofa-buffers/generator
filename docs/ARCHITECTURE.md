@@ -6238,13 +6238,25 @@ A reimplementation is **conformant** when it reproduces these gates:
    sign read that runs only when the value is a zero: TypeScript `x !== 0 || 1 / x < 0`
    (`Object.is` measured +0.7% encode Ir on the bench row), Python
    `x != 0.0 or math.copysign(1.0, x) < 0.0` (a `-0.0` default is emitted as
-   `-0.0`), Dart `x != 0.0 || x.isNegative`. Float ARRAYS compare element-wise by value
-   in every backend except Dart (their cells stay in `KNOWN_GAP`) until those
-   corelibs carry a bit-compare helper: it is a static helper and belongs there,
-   never emitted per field. Dart already does: an fp32/fp64 array is compared with
-   its default through the corelib's `sofab.floatBitsEqual(x.storage, _xDefault,
-   length: x.length)` (an fp32 array's `Float32List` storage holds raw bits), so
-   Dart has no `KNOWN_GAP` entry and emits no helper.
+   `-0.0`), Dart `x != 0.0 || x.isNegative`. Scalars are compared by bit pattern in
+   every generated backend. Float ARRAYS are compared by bit pattern too, through a
+   corelib helper that is called, never emitted per field (a static helper
+   belongs in the corelib): C++ (`cpp` and `c-cpp`, both storage modes) calls
+   `sofab::bitsEqual(field, std::initializer_list<float|double>{...})` (corelib-cpp
+   `bits_equal.hpp`, corelib-c-cpp `floats.hpp`) with the default passed as a typed
+   list; Rust calls `sofab::float_bits::bits_equal` (corelib-rs) and
+   `sofab::floats::bits_equal_f32` / `bits_equal_f64` (rs-no-std); Zig calls
+   `sofab.floats.bitsEqual(T, a, b)` in both the write guard and `isDefault`; C#
+   calls `sofab.FloatBits.BitsEqual(float[] / double[], default)` (`ReadOnlySpan`
+   overloads) in both the `Serialize` omission guard and `IsDefault`; Python calls
+   `float_array_bits_equal` (imported from `sofab`) in the write guard and in
+   `_is_default`, and a `-0.0` inside an array default keeps its sign; TypeScript
+   calls corelib-ts's `floatArrayBitsEqual` in both the omission guard and
+   `isDefault` in all three int64 modes; Dart calls
+   `sofab.floatBitsEqual(x.storage, _xDefault, length: x.length)` (an fp32 array's
+   `Float32List` storage holds raw bits). Java and Kotlin compare an array's
+   elements by bits already. Go still keeps its element-wise `slices.Equal` until
+   its own change lands, so Go is the only float-array cell left in `KNOWN_GAP`.
 
    *Chunk invariance* (`tests/conformance/lib/check_chunk_invariance.py`):
    CORELIB_PLAN §5.2 makes the decode outcome computable at *any* byte boundary,

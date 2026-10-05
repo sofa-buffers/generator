@@ -42,8 +42,8 @@ import sys
 MSG = "fdef"
 
 # Cases that fail today, per backend: the generated backends compare a float with
-# an IEEE `!=` (Java, Kotlin and Zig compare an array's elements by bits already,
-# so their array case passes). C compares bytes and has no entry.
+# an IEEE `!=` (every backend but Go now compares a float array by bit pattern, so
+# only Go's array case still fails). C compares bytes and has no entry.
 KNOWN_GAP = {
     "c": (),
     "cpp": (),
@@ -54,9 +54,9 @@ KNOWN_GAP = {
     "java": (),
     "kotlin": (),
     "csharp": (),
-    "typescript": ("a[0] -0.0",),
+    "typescript": (),
     "python": (),
-    "zig": ("a[0] -0.0",),
+    "zig": (),
     "dart": (),
 }
 
