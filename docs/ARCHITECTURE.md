@@ -6256,21 +6256,25 @@ A reimplementation is **conformant** when it reproduces these gates:
    `sofab.floatBitsEqual(x.storage, _xDefault, length: x.length)` (an fp32 array's
    `Float32List` storage holds raw bits). Go compares by bit pattern in both the
    omission guard and `isDefault`, an integer array keeping `slices.Equal`: a
-   default of up to 16 elements inline (`len(a) != N`, then `math.Float32bits(a[i])`
-   against a constant, one early return per term in `isDefault`, one `||` chain in
-   the guard), a longer one through corelib-go's `sofab.BitsEqual` against a
-   package-level `_<Type>__<Field>Default`. **This is the measured section 8
-   override of the static-helper rule** (maxspeed instructions per call,
-   `tests/bench` method): the inline block's shape is the same for every schema, but
-   `sofab.BitsEqual(m.A, []float32{...})` cost 1.4x to 2.5x the instructions of the
-   `slices.Equal` it replaced on a 1 to 16 element default (a non-leaf call with a
-   loop the compiler does not unroll, the default literal rebuilt on the stack per
-   call) and the inline form costs 0.4x to 0.9x of it. The terms are separate
-   statements over a local copy of the slice header because the same terms joined
-   by `&&` are materialised as bools with a bounds check per element, and read
-   through `m.A` the header is reloaded before every element. Java and Kotlin
-   compare an array's elements by bits already. No float-array cell is left in
-   `KNOWN_GAP`.
+   default of up to 16 elements through a generated function of its own
+   (`_<Type>__<Field>IsDefault(a)`: the length, then one statement per element
+   against a bit-pattern constant), a longer one through corelib-go's
+   `sofab.BitsEqual` against a package-level `_<Type>__<Field>Default`.
+   **This is the measured section 8 override of the static-helper rule** (maxspeed
+   instructions per call, Callgrind, 1 to 256 elements, float32 and float64, equal
+   / first-element mismatch / last-element mismatch / length mismatch):
+   `sofab.BitsEqual(m.A, []float32{...})` cost 0.2x to 2.7x the instructions of the
+   `slices.Equal` it replaced, and up to 2.9x its time, on the short defaults (a
+   non-leaf call, a loop the compiler does not unroll, and the default literal
+   rebuilt on the stack per call, even for a length mismatch); the function costs
+   0.09x to 0.99x of it in instructions on every cell, and the Serialize guard
+   is level with it. The terms are separate statements because the same terms
+   joined by `&&` or `||` are materialised as bools with a bounds check per
+   element and cannot leave at the first mismatch; the slice is a parameter
+   because read through `m.A` its header is reloaded before every element; a
+   one-element default is a single `return` because several returns leave a
+   bool behind once inlined. Java and Kotlin compare an array's elements by bits
+   already. No float-array cell is left in `KNOWN_GAP`.
 
    *Chunk invariance* (`tests/conformance/lib/check_chunk_invariance.py`):
    CORELIB_PLAN §5.2 makes the decode outcome computable at *any* byte boundary,
