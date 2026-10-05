@@ -138,6 +138,7 @@ func (g *gen) emitOptReset(f *gofile, ind string, o *unionOpt) {
 func (g *gen) emitUnion(f *gofile, nt *ir.NamedType) {
 	u := g.unionShapeOf(nt)
 	tn := u.typeName
+	g.owner = tn
 	f.imp(corelibImport)
 
 	dname := u.d.f.Name
@@ -234,6 +235,7 @@ func (g *gen) emitUnion(f *gofile, nt *ir.NamedType) {
 	f.line("\treturn m.which == 0 && %s", g.fieldIsDefaultExprAt(f, u.d.f, "m."+u.d.slot))
 	f.line("}")
 	f.blank()
+	g.flushDefaultVars(f)
 
 	g.emitVisitorMethods(f, tn, nt.Fields, u)
 	g.emitUnionJSON(f, u)
