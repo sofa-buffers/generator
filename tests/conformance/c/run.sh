@@ -19,6 +19,8 @@ set -eu
 . "$(dirname "$0")/../lib/corpus_roundtrip.sh"
 # Every backend Go test, run against the corelib with no skips allowed.
 . "$(dirname "$0")/../lib/backend_tests.sh"
+# shellcheck source=../lib/assert_unbounded_rejected.sh
+. "$(dirname "$0")/../lib/assert_unbounded_rejected.sh"
 
 ROOT=$(cd "$(dirname "$0")/../../.." && pwd)
 CORELIB="${1:-${SOFAB_C_CORELIB:-}}"
@@ -677,21 +679,24 @@ run_backend_tests generators/c SOFAB_C_CORELIB "$CORELIB"
 
 echo "==> corpus + realworld: every definition compiles"
 # BIG descriptor profile so wide field ids (up to 2^31-1) fit the descriptor.
+built=0; nosrc=0; refused=0
 for def in "$ROOT"/tests/matrix/corpus/defs/*.yaml "$ROOT"/examples/messages/realworld/*.yaml; do
     name=$(basename "$def" .yaml)
     # no_maxlen, seq_elements_dyn and array_lengths_dyn are deliberately-unbounded
     # schemas (dynamic-path coverage for heap targets); the heapless C target
-    # requires bounds on every field, so none is a valid C input — the negative
-    # test below asserts no_maxlen is rejected. Their bounded counterparts
+    # requires bounds on every field, so none is a valid C input — the refusal is
+    # asserted by assert_unbounded_rejected below. Their bounded counterparts
     # (seq_elements, nested_rows, array_lengths) are compiled here, so the C
     # target keeps its wrapper-element and array-length coverage.
-    case "$name" in no_maxlen | seq_elements_dyn | array_lengths_dyn) continue ;; esac
+    case "$name" in no_maxlen | seq_elements_dyn | array_lengths_dyn) refused=$((refused + 1)); continue ;; esac
     ( cd "$ROOT" && go run ./cmd/sofabgen --lang c --in "$def" --out "$WORK/corpus/$name" >/dev/null )
+    emitted=0
     for c in "$WORK"/corpus/"$name"/*.c; do
         # The C target emits its types per message, so a $defs-only file
         # (realworld/common.yaml, diagnostics.yaml) emits no source at all; the
         # project block below builds what it does emit, its harness.
         [ -e "$c" ] || continue
+        emitted=1
         # $WARNFLAGS (-Werror), because the defects this loop exists to catch are DIAGNOSTICS,
         # not hard errors: an unsuffixed decimal constant above INT64_MAX has no
         # type under C11 6.4.4.1, and GCC accepts it as an extension with a mere
@@ -703,8 +708,9 @@ for def in "$ROOT"/tests/matrix/corpus/defs/*.yaml "$ROOT"/examples/messages/rea
         gcc -std=c99 -O2 $WARNFLAGS -DSOFAB_OBJECT_DESCR_PROFILE=3 -I"$INC" -I"$WORK/corpus/$name" -c "$c" -o /dev/null \
             || { echo "FAIL: corpus def $name did not compile"; exit 1; }
     done
+    if [ "$emitted" -eq 1 ]; then built=$((built + 1)); else nosrc=$((nosrc + 1)); fi
 done
-echo "==> corpus compiles ($(ls "$ROOT"/tests/matrix/corpus/defs/*.yaml | wc -l) definitions + $(ls "$ROOT"/examples/messages/realworld/*.yaml | wc -l) realworld)"
+echo "==> corpus compiles ($built of $((built + nosrc + refused)) corpus and realworld definitions; $refused refused as unbounded, asserted below; $nosrc emit no source)"
 
 # The loop above builds as C99, where the words C23 added (`nullptr`, `typeof`,
 # `constexpr`, ...) are plain identifiers, so a missing entry in cKeywords would
@@ -726,6 +732,7 @@ echo "==> keyword corpus compiles as C23"
 # were built (generator#583).
 echo "==> corpus + realworld: every file builds as a project, harness included"
 rm -f "$WORK/corpus.tally"
+built=0; refused=0
 for def in "$ROOT"/tests/matrix/corpus/defs/*.yaml "$ROOT"/examples/messages/realworld/*.yaml; do
     name=$(basename "$def" .yaml)
     # The same deliberately-unbounded definitions the compile loop above skips:
@@ -735,6 +742,7 @@ for def in "$ROOT"/tests/matrix/corpus/defs/*.yaml "$ROOT"/examples/messages/rea
     no_maxlen | seq_elements_dyn | array_lengths_dyn)
         corpus_roundtrip C c "$def" "$WORK/corpus.tally" \
             --exclude-all "unbounded fields: the heapless C target requires a bound on every field"
+        refused=$((refused + 1))
         continue ;;
     esac
     ( cd "$ROOT" && go run ./cmd/sofabgen --config "$WORK/proj.yaml" --lang c --in "$def" --out "$WORK/rwproj/$name" >/dev/null )
@@ -747,8 +755,9 @@ for def in "$ROOT"/tests/matrix/corpus/defs/*.yaml "$ROOT"/examples/messages/rea
     # ...and run: every message of the definition, encoded and decoded on both
     # surfaces (generator#655).
     corpus_roundtrip C c "$def" "$WORK/corpus.tally" -- "$WORK/rwproj/$name/harness/harness"
+    built=$((built + 1))
 done
-echo "==> projects build ($(ls "$ROOT"/tests/matrix/corpus/defs/*.yaml | wc -l) corpus definitions + $(ls "$ROOT"/examples/messages/realworld/*.yaml | wc -l) realworld files)"
+echo "==> projects build ($built of $((built + refused)) corpus and realworld files; $refused refused as unbounded, asserted below)"
 corpus_roundtrip_summary C "$WORK/corpus.tally"
 
 # corelib feature-subset configs. corelib-c-cpp can be built with SOFAB_DISABLE_*
@@ -817,7 +826,7 @@ neg_reject string       'version: 1
 messages: { m: { payload: { s: { id: 0, type: string } } } }'
 neg_reject nativearray  'version: 1
 messages: { m: { payload: { a: { id: 0, type: array, items: { type: u32 } } } } }'
-neg_reject the_corpus_no_maxlen "$(cat "$ROOT"/tests/matrix/corpus/defs/no_maxlen.yaml)"
+assert_unbounded_rejected c "" C
 echo "==> unbounded fields correctly rejected"
 
 # Declared integer width is a VALIDITY bound (MESSAGE_SPEC S7.1 + documentation#32,
