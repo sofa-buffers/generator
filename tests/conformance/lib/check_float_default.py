@@ -42,15 +42,15 @@ import sys
 MSG = "fdef"
 
 # Cases that fail today, per backend: the generated backends compare a float with
-# an IEEE `!=` (every backend but Go now compares a float array by bit pattern, so
-# only Go's array case still fails). C compares bytes and has no entry.
+# an IEEE `!=` (every backend now compares a float array by bit pattern, so none is
+# left). C compares bytes and has no entry.
 KNOWN_GAP = {
     "c": (),
     "cpp": (),
     "c-cpp": (),
     "rust": (),
     "rs-no-std": (),
-    "go": ("a[0] -0.0",),
+    "go": (),
     "java": (),
     "kotlin": (),
     "csharp": (),

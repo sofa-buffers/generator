@@ -1,6 +1,7 @@
 package golang
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/sofa-buffers/generator/internal/ir"
@@ -27,5 +28,27 @@ func TestGoFloatScalarComparesBits(t *testing.T) {
 	}
 	if got := g.fieldIsDefaultExprAt(f, &ir.Field{Kind: ir.KindFP32}, "x"); got != "math.Float32bits(x) == 0x0" {
 		t.Errorf("isDefault: got %q", got)
+	}
+}
+
+// A float array is compared with its default through the corelib's bit-pattern
+// helper, never an IEEE slices.Equal; an integer array keeps slices.Equal.
+func TestGoFloatArrayComparesBitsThroughCorelib(t *testing.T) {
+	g := &gen{}
+	f := newGoFile("p")
+	for _, c := range []struct {
+		elem        ir.Kind
+		def         []any
+		want, other string
+	}{
+		{ir.KindFP32, []any{0.0, 1.5}, "sofab.BitsEqual(x, []float32{0, 1.5})", "slices.Equal"},
+		{ir.KindFP64, []any{0.0, 1.5}, "sofab.BitsEqual(x, []float64{0, 1.5})", "slices.Equal"},
+		{ir.KindU32, []any{1, 2}, "slices.Equal(x, []uint32{1, 2})", "BitsEqual"},
+	} {
+		fld := &ir.Field{Kind: ir.KindArray, Elem: c.elem, Default: c.def}
+		got := g.fieldIsDefaultExprAt(f, fld, "x")
+		if got != c.want || strings.Contains(got, c.other) {
+			t.Errorf("%d: got %q, want %q", c.elem, got, c.want)
+		}
 	}
 }
