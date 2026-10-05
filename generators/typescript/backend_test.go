@@ -414,7 +414,7 @@ func TestTSMaxlenReject(t *testing.T) {
 func TestTSStructural(t *testing.T) {
 	mod := genTS(t)
 	for _, want := range []string{
-		`import { OStream, FixlenSubtype, ArrayKind, DecodeStatus, SofabError, SofabErrorCode, elementsEqual, floatArrayBitsEqual, fp32RawBytes, Visitor, ArrayTarget, IntegerArrayTarget, FloatArrayTarget, BoolArrayTarget, IStream, PayloadAcc, decodeUtf8, StringSeq, BlobSeq, ElementSeq, FramedSeq, decode as _decode } from "@sofa-buffers/corelib";`, // FixlenSubtype: fixlen §7.3 guard; SofabError: over-count reject (generator#100); ArrayTarget and its two shapes: the array hand-off, the only way elements are delivered (corelib-ts#177); the four collectors and fp32RawBytes: the generated layer's support, owned by the corelib (corelib-ts#151/#161, generator#587)
+		`import { OStream, FixlenSubtype, ArrayKind, DecodeStatus, SofabError, SofabErrorCode, elementsEqual, fp32ArrayBitsEqual, fp32RawBytes, Visitor, ArrayTarget, IntegerArrayTarget, FloatArrayTarget, BoolArrayTarget, IStream, PayloadAcc, decodeUtf8, StringSeq, BlobSeq, ElementSeq, FramedSeq, decode as _decode } from "@sofa-buffers/corelib";`, // FixlenSubtype: fixlen §7.3 guard; SofabError: over-count reject (generator#100); ArrayTarget and its two shapes: the array hand-off, the only way elements are delivered (corelib-ts#177); the four collectors and fp32RawBytes: the generated layer's support, owned by the corelib (corelib-ts#151/#161, generator#587)
 		"export class Myfirstmessage {",
 		"serialize(os: OStream): void {",
 		// decode(bytes) is the corelib's one-shot decode driving THIS type's flat

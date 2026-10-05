@@ -31,31 +31,60 @@ func TestTSFloatZeroDefaultComparesSign(t *testing.T) {
 	}
 }
 
-// A float ARRAY default is compared by bit pattern through the corelib helper,
-// in the omit guard and in isDefault, in every int64 mode; an integer array next
-// to it keeps elementsEqual, and no IEEE array compare is left for the floats.
+// A float ARRAY default is compared by bit pattern through the corelib helper of
+// its width, against a module-level typed constant built once, in the omit guard
+// and in isDefault, in every int64 mode; an integer array next to it keeps
+// elementsEqual against its literal, and no IEEE array compare is left for the
+// floats.
 func TestTSFloatArrayDefaultUsesBitsHelper(t *testing.T) {
 	src := "version: 1\nmessages:\n  M:\n    payload:\n" +
 		"      a: { id: 0, type: array, items: { type: fp32 }, default: [0, 1.5] }\n" +
 		"      d: { id: 1, type: array, items: { type: fp64 }, default: [0, 2.5] }\n" +
-		"      n: { id: 2, type: array, items: { type: u8 }, default: [1, 2] }\n"
+		"      n: { id: 2, type: array, items: { type: u8 }, default: [1, 2] }\n" +
+		"      b: { id: 3, type: array, items: { type: fp32 }, default: [0, 1.5] }\n"
 	for _, mode := range []string{"bigint", "long", "number"} {
 		mod := genTSWith(t, src, map[string]any{"int64": mode})
 		for _, want := range []string{
-			"if (!floatArrayBitsEqual(this.a, [0, 1.5])) {",
-			"if (!floatArrayBitsEqual(this.d, [0, 2.5])) {",
-			"if (!(floatArrayBitsEqual(this.a, [0, 1.5]))) return false;",
+			"const _DEF_0 = new Float32Array([0, 1.5]);",
+			"const _DEF_1 = new Float64Array([0, 2.5]);",
+			"if (!fp32ArrayBitsEqual(this.a, _DEF_0)) {",
+			"if (!fp64ArrayBitsEqual(this.d, _DEF_1)) {",
+			"if (!(fp32ArrayBitsEqual(this.a, _DEF_0))) return false;",
+			"if (!fp32ArrayBitsEqual(this.b, _DEF_0)) {",
 			"if (!elementsEqual(this.n, [1, 2])) {",
 		} {
 			if !strings.Contains(mod, want) {
 				t.Errorf("%s: missing %q", mode, want)
 			}
 		}
-		if strings.Contains(mod, "elementsEqual(this.a,") || strings.Contains(mod, "elementsEqual(this.d,") {
-			t.Errorf("%s: IEEE array compare left for a float array", mode)
+		// Equal defaults of one carrier share one constant, and nothing is built
+		// at the compare site.
+		if strings.Contains(mod, "_DEF_2") {
+			t.Errorf("%s: a third default constant for two equal defaults", mode)
 		}
-		if !strings.Contains(mod, "floatArrayBitsEqual, ") && !strings.Contains(mod, ", floatArrayBitsEqual") {
-			t.Errorf("%s: floatArrayBitsEqual not imported", mode)
+		for _, bad := range []string{"elementsEqual(this.a,", "elementsEqual(this.d,", "floatArrayBitsEqual", "BitsEqual(this.a, [", "BitsEqual(this.d, ["} {
+			if strings.Contains(mod, bad) {
+				t.Errorf("%s: %q left in the output", mode, bad)
+			}
+		}
+		for _, name := range []string{"fp32ArrayBitsEqual", "fp64ArrayBitsEqual"} {
+			if !strings.Contains(mod, name+", ") && !strings.Contains(mod, ", "+name) {
+				t.Errorf("%s: %s not imported", mode, name)
+			}
+		}
+	}
+}
+
+// A schema with no float array default declares no default constants, and an
+// import list that names no float helper.
+func TestTSNoFloatDefaultNoConstants(t *testing.T) {
+	src := "version: 1\nmessages:\n  M:\n    payload:\n" +
+		"      n: { id: 0, type: array, items: { type: u8 }, default: [1, 2] }\n" +
+		"      f: { id: 1, type: array, items: { type: fp32 } }\n"
+	mod := genTSWith(t, src, map[string]any{})
+	for _, bad := range []string{"_DEF_", "ArrayBitsEqual"} {
+		if strings.Contains(mod, bad) {
+			t.Errorf("%q in the output of a schema with no float array default", bad)
 		}
 	}
 }

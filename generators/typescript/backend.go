@@ -68,6 +68,31 @@ type gen struct {
 	// fp32Raw is each struct/message fp32 field's raw-bytes companion member
 	// (fp32RawNames); a union's are on its unionOpt.
 	fp32Raw map[*ir.Field]string
+	// defs are the module-level float array defaults the omit tests compare
+	// against, keyed by their rendered constructor call and kept in first-use
+	// order (see floatDefault).
+	defs    map[string]string
+	defName []string
+}
+
+// floatDefault registers the declared default of a float array as a module-level
+// typed constant and returns its name. The omit test and isDefault compare
+// against it on every encode, so a literal at the call site would build a fresh
+// array each time; the constant is built once and, as the corelib compare only
+// reads its arguments, is never written. The member's own initialiser still
+// builds a fresh array per message, because that one is mutable.
+func (g *gen) floatDefault(carrier, lit string) string {
+	expr := fmt.Sprintf("new %s(%s)", carrier, lit)
+	if g.defs == nil {
+		g.defs = map[string]string{}
+	}
+	name, ok := g.defs[expr]
+	if !ok {
+		name = fmt.Sprintf("_DEF_%d", len(g.defName))
+		g.defs[expr] = name
+		g.defName = append(g.defName, expr)
+	}
+	return name
 }
 
 // mkArr names the one factory every fresh-array gap takes: a wrapper row, a row
@@ -221,6 +246,14 @@ func (g *gen) module(s *ir.Schema) []byte {
 		}
 		f.blank()
 	}
+	if len(g.defName) > 0 {
+		f.line("// Float array defaults, built once: the omit tests compare against these on")
+		f.line("// every encode.")
+		for i, expr := range g.defName {
+			f.line("const _DEF_%d = %s;", i, expr)
+		}
+		f.blank()
+	}
 	f.line("%s", body)
 	return f.bytes()
 }
@@ -265,7 +298,7 @@ func usedEmptyTyped(body string) []string {
 // one call site that needs the free function.
 var corelibNames = []string{
 	"OStream", "WireType", "FixlenSubtype", "ArrayKind", "DecodeStatus",
-	"Long", "SofabError", "SofabErrorCode", "elementsEqual", "longElementsEqual", "floatArrayBitsEqual",
+	"Long", "SofabError", "SofabErrorCode", "elementsEqual", "longElementsEqual", "fp32ArrayBitsEqual", "fp64ArrayBitsEqual",
 	"fp32RawBytes",
 	"Visitor", "ArrayTarget", "IntegerArrayTarget", "FloatArrayTarget", "BoolArrayTarget",
 	"IStream", "PayloadAcc", "decodeUtf8", "StringSeq", "BlobSeq", "ElementSeq", "FramedSeq",
@@ -825,7 +858,7 @@ func (g *gen) floatZeroCmp(fld *ir.Field, acc string, differs bool) (string, boo
 func (g *gen) arrayIsDefaultExpr(fld *ir.Field, acc string) string {
 	if nativeArrayElem(fld.Elem) {
 		if def, ok := g.nativeArrayDefault(fld); ok {
-			return fmt.Sprintf("%s(%s, %s)", g.arrayEqualFn(fld), acc, def)
+			return fmt.Sprintf("%s(%s, %s)", g.arrayEqualFn(fld), acc, g.compareDefault(fld, def))
 		}
 		return fmt.Sprintf("%s.length === 0", acc)
 	}
@@ -838,15 +871,28 @@ func (g *gen) arrayIsDefaultExpr(fld *ir.Field, acc string) string {
 // arrayEqualFn names the corelib compare of a native array against its default.
 // Long elements are object identities, so they go by their (low, high) word pair;
 // float elements go by BIT PATTERN (CORELIB_PLAN §4.6), because IEEE `===` drops a
-// -0.0 at a +0.0 default and never recognises a NaN default.
+// -0.0 at a +0.0 default and never recognises a NaN default. One function per
+// width, because the member and its default are both a Float32Array or both a
+// Float64Array and a compare that only ever sees one container stays monomorphic.
 func (g *gen) arrayEqualFn(fld *ir.Field) string {
 	switch {
 	case g.longBacked(fld):
 		return "longElementsEqual"
-	case isFloatKind(fld.Elem):
-		return "floatArrayBitsEqual"
+	case fld.Elem == ir.KindFP32:
+		return "fp32ArrayBitsEqual"
+	case fld.Elem == ir.KindFP64:
+		return "fp64ArrayBitsEqual"
 	}
 	return "elementsEqual"
+}
+
+// compareDefault is the right-hand side of a native array's compare: the hoisted
+// typed constant for a float array, the literal for every other kind.
+func (g *gen) compareDefault(fld *ir.Field, lit string) string {
+	if isFloatKind(fld.Elem) {
+		return g.floatDefault(g.tsTypedArray(fld.Elem, fld.ElemRef), lit)
+	}
+	return lit
 }
 
 func (g *gen) emitMarshal(f *tsfile, fld *ir.Field) {
@@ -1007,7 +1053,7 @@ func (g *gen) emitMarshalArray(f *tsfile, ind string, fld *ir.Field, acc string,
 			return
 		}
 		if def, ok := g.nativeArrayDefault(fld); ok {
-			f.line("%sif (!%s(%s, %s)) {", ind, g.arrayEqualFn(fld), acc, def)
+			f.line("%sif (!%s(%s, %s)) {", ind, g.arrayEqualFn(fld), acc, g.compareDefault(fld, def))
 		} else {
 			f.line("%sif (%s.length !== 0) {", ind, acc)
 		}
