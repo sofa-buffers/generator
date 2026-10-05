@@ -42,8 +42,8 @@ import sys
 MSG = "fdef"
 
 # Cases that fail today, per backend: the generated backends compare a float with
-# an IEEE `!=` (Java and Kotlin compare an array's elements by bits already, so
-# their array case passes). C compares bytes and has no entry.
+# an IEEE `!=` (Java, Kotlin and Zig compare an array's elements by bits already,
+# so their array case passes). C compares bytes and has no entry.
 KNOWN_GAP = {
     "c": (),
     "cpp": ("a[0] -0.0",),
