@@ -165,7 +165,7 @@ func (g *gen) pyDefault(f *ir.Field) string {
 		// N. That is also what the field's omit test compares against, and what an
 		// absent field decodes back to.
 		if lit, ok := g.pyNativeArrayDefault(f); ok {
-			return fmt.Sprintf("field(default_factory=lambda: %s)", lit)
+			return fmt.Sprintf("field(default_factory=lambda: %s)", g.arrayDefaultValue(f, lit))
 		}
 		return "field(default_factory=list)"
 	}

@@ -270,9 +270,9 @@ func TestTypeReservedCoversImports(t *testing.T) {
 
 	every := sofabImports("raise SofaLimitError(x)\nreserve_elem(a, b, UNBOUNDED, c)\nreserve_leaf(\nreserve_row(\n"+
 		"t = (Binding(closed=True),)\ndef on_field(self, fld: Field):\nWireType.FIXLEN, FixlenSubtype.FP32\n",
-		"if not float_array_bits_equal(a, [0.0]):\n")
-	if want := []string{"Binding", "Decoder", "Encoder", "Field", "FixlenSubtype", "SofaDecodeError", "SofaIncompleteError",
-		"SofaLimitError", "Status", "UNBOUNDED", "Visitor", "WireType", "float_array_bits_equal", "reserve_elem", "reserve_leaf", "reserve_row"}; strings.Join(every, " ") != strings.Join(want, " ") {
+		"_M__Def__a = FloatArrayDefault([0.0])\n")
+	if want := []string{"Binding", "Decoder", "Encoder", "Field", "FixlenSubtype", "FloatArrayDefault", "SofaDecodeError", "SofaIncompleteError",
+		"SofaLimitError", "Status", "UNBOUNDED", "Visitor", "WireType", "reserve_elem", "reserve_leaf", "reserve_row"}; strings.Join(every, " ") != strings.Join(want, " ") {
 		t.Errorf("sofabImports on every trigger = %v, want %v (extend the trigger text with the new branch)", every, want)
 	}
 	checkTypeReservedCovers(t, "every sofab import", "from sofab import "+strings.Join(every, ", ")+"\n")

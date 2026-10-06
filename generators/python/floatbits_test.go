@@ -30,9 +30,10 @@ func TestPyFloatZeroDefaultComparesSign(t *testing.T) {
 	}
 }
 
-// A float array is compared with its default by bit pattern, through the
-// corelib's float_array_bits_equal, in the write guard and in _is_default; the
-// IEEE list compare is gone for it, and the integer array keeps its plain one.
+// A float array is compared with its default by bit pattern: its default is a
+// module-level FloatArrayDefault built once, after the class, and both the write
+// guard and _is_default call its matches(); the IEEE list compare is gone for
+// it, and the integer array keeps its plain one.
 func TestPyFloatArrayDefaultUsesCorelibHelper(t *testing.T) {
 	s := schema(t, `version: 1
 messages:
@@ -56,12 +57,13 @@ messages:
 `)
 	src := string(genPy(t, s, map[string]any{})["message.py"])
 	for _, want := range []string{
-		"if not float_array_bits_equal(self.a, [0, 1.5]):",
-		"if not float_array_bits_equal(self.b, [0]):",
-		"if not (float_array_bits_equal(self.b, [0])):",
-		"if not (float_array_bits_equal(self.a, [0, 1.5])):",
+		"if not _M__Def__a.matches(self.a):",
+		"if not _M__Def__b.matches(self.b):",
+		"if not (_M__Def__b.matches(self.b)):",
+		"if not (_M__Def__a.matches(self.a)):",
 		"if self.c != [1, 2]:",
-		"from sofab import ", "float_array_bits_equal",
+		"\n_M__Def__a = FloatArrayDefault([0, 1.5])\n",
+		"\n_M__Def__b = FloatArrayDefault([0])\n",
 	} {
 		if !strings.Contains(src, want) {
 			t.Errorf("generated module lacks %q", want)
@@ -72,8 +74,16 @@ messages:
 			t.Errorf("generated module still compares a float array with IEEE equality: %q", bad)
 		}
 	}
-	if !strings.Contains(src, "float_array_bits_equal, ") && !strings.Contains(src, ", float_array_bits_equal") {
-		t.Errorf("float_array_bits_equal is not imported from sofab")
+	if !strings.Contains(src, "FloatArrayDefault, ") && !strings.Contains(src, ", FloatArrayDefault") {
+		t.Errorf("FloatArrayDefault is not imported from sofab")
+	}
+	// One constant per field, however many compares read it; none for the
+	// integer array, and the constants come after the class that reads them.
+	if n := strings.Count(src, "= FloatArrayDefault("); n != 2 {
+		t.Errorf("%d FloatArrayDefault constants, want 2", n)
+	}
+	if strings.Contains(src, "_M__Def__c") || strings.Index(src, "_M__Def__a = ") < strings.Index(src, "class M") {
+		t.Errorf("constants misplaced or emitted for an integer array:\n%s", src)
 	}
 }
 
@@ -92,8 +102,8 @@ messages:
 `)
 	src := string(genPy(t, s, map[string]any{})["message.py"])
 	for _, want := range []string{
-		"lambda: [-0.0, 2]",
-		"float_array_bits_equal(self.b, [-0.0, 2])",
+		"lambda: [*_M__Def__b.values]",
+		"_M__Def__b = FloatArrayDefault([-0.0, 2])",
 	} {
 		if !strings.Contains(src, want) {
 			t.Errorf("missing %q in:\n%s", want, src)

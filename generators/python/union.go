@@ -130,7 +130,7 @@ func (g *gen) pyDefaultValue(fld *ir.Field) string {
 		return g.refName(fld.Ref) + "()"
 	case ir.KindArray:
 		if lit, ok := g.pyNativeArrayDefault(fld); ok {
-			return lit
+			return g.arrayDefaultValue(fld, lit)
 		}
 		return "[]"
 	}
