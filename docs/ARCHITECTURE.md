@@ -6263,9 +6263,20 @@ A reimplementation is **conformant** when it reproduces these gates:
    `sofab::floats::bits_equal_f32` / `bits_equal_f64` (rs-no-std); Zig calls
    `sofab.floats.bitsEqual(T, a, b)` in both the write guard and `isDefault`; C#
    calls `sofab.FloatBits.BitsEqual(float[] / double[], default)` (`ReadOnlySpan`
-   overloads) in both the `Serialize` omission guard and `IsDefault`; Python calls
-   `float_array_bits_equal` (imported from `sofab`) in the write guard and in
-   `_is_default`, and a `-0.0` inside an array default keeps its sign; TypeScript
+   overloads) in both the `Serialize` omission guard and `IsDefault`; Python holds
+   each float array default in a corelib-py `FloatArrayDefault`, a module-level
+   `_<Type>__Def__<field>` constant built once after its class, and calls its
+   `matches(field)` in the write guard and in `_is_default` (the corelib decides
+   per default how: the plain list `==` where it has no zero and no NaN, one sign
+   read per zero after the lists compare equal, the element rule for a NaN; under
+   the native engine one C loop over the bit patterns); the field's default list
+   is a copy of that constant's values (`[*_X.values]`), so a field at its default
+   holds the very float objects it is compared against, and a `-0.0` inside an
+   array default keeps its sign. Measured against the plain `==` it replaced
+   (median ns, 1 to 256 elements, both widths, equal / first / last / length):
+   native engine 0.02x to 0.58x on every cell; pure engine 0.05x to 0.9x from 16
+   elements on and 1.05x to 1.75x below, the one Python call the bit semantics
+   cannot avoid there; TypeScript
    calls corelib-ts's `floatArrayBitsEqual` in both the omission guard and
    `isDefault` in all three int64 modes; Dart calls
    `sofab.floatBitsEqual(x.storage, _xDefault, length: x.length)` (an fp32 array's

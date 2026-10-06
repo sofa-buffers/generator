@@ -113,7 +113,7 @@ var pyTypeReserved = map[string]string{
 	"IntEnum": "enum import", "IntFlag": "enum import", "ClassVar": "typing import",
 	// Imported from corelib-py (the `from sofab import` line).
 	"Binding": "sofab import", "Decoder": "sofab import", "Encoder": "sofab import",
-	"Field": "sofab import", "FixlenSubtype": "sofab import",
+	"Field": "sofab import", "FixlenSubtype": "sofab import", "FloatArrayDefault": "sofab import",
 	"SofaDecodeError": "sofab import", "SofaIncompleteError": "sofab import",
 	"SofaLimitError": "sofab import", "Status": "sofab import",
 	"UNBOUNDED": "sofab import", "Visitor": "sofab import", "WireType": "sofab import",

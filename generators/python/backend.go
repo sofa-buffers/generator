@@ -78,7 +78,15 @@ type gen struct {
 	// bases maps a class name to its unescaped type identifier, which its private
 	// names (visitor, locations, tables) are derived from.
 	bases map[string]string
+	// defBase is the unescaped type identifier of the class being emitted, and
+	// defs the float array defaults it has referenced so far, flushed after the
+	// class as module-level constants (floatArrayDefault).
+	defBase string
+	defs    []pyDefConst
 }
+
+// pyDefConst is one module-level constant holding a float array's default.
+type pyDefConst struct{ name, lit string }
 
 // scopesFor returns a class's scope tree, built once and reused: buildBindPlan
 // walks it before emission and emitVisitor walks it again.
@@ -270,9 +278,9 @@ func sofabImports(decodeSection, typeSection string) []string {
 	if needWire {
 		names = append(names, "WireType")
 	}
-	// The default compare of a float array is emitted in the type section.
-	if strings.Contains(typeSection, "float_array_bits_equal(") {
-		names = append(names, "float_array_bits_equal")
+	// The default of a float array is a FloatArrayDefault in the type section.
+	if strings.Contains(typeSection, "FloatArrayDefault(") {
+		names = append(names, "FloatArrayDefault")
 	}
 	sort.Strings(names)
 	return names
@@ -722,6 +730,17 @@ func pyFieldDocLines(fld *ir.Field) []string {
 // emitDataclass writes one generated class. `u` is non-nil for a union type,
 // whose fields are its options and which holds exactly one of them (union.go).
 func (g *gen) emitDataclass(f *pyfile, name, summary string, fields []*ir.Field, u *unionShape) {
+	g.defBase, g.defs = g.bases[name], nil
+	g.emitDataclassBody(f, name, summary, fields, u)
+	// The constants follow the class: its methods read them only when called.
+	for _, d := range g.defs {
+		f.line("%s = FloatArrayDefault(%s)", d.name, d.lit)
+		f.blank()
+	}
+	g.defs = nil
+}
+
+func (g *gen) emitDataclassBody(f *pyfile, name, summary string, fields []*ir.Field, u *unionShape) {
 	f.line("@dataclass")
 	f.line("class %s:", name)
 	// Class docstring (pydoc/Sphinx) as the first statement in the body, when the
@@ -882,15 +901,18 @@ func floatZeroCmp(fld *ir.Field, acc string, differs bool) (string, bool) {
 }
 
 // arrayEqExpr compares a native array with its default literal lit. A float
-// array is compared by BIT PATTERN through the corelib's float_array_bits_equal
-// (CORELIB_PLAN §4.6): `[-0.0, 1.5] == [0.0, 1.5]` is true in Python, which would
-// drop the sign of the zero. differs selects the write guard (the negation).
-func arrayEqExpr(fld *ir.Field, acc, lit string, differs bool) string {
+// array is compared by BIT PATTERN (CORELIB_PLAN §4.6): `[-0.0, 1.5] == [0.0, 1.5]`
+// is true in Python, which would drop the sign of the zero. Its default is held
+// by the corelib's FloatArrayDefault, built once per field (floatArrayDefault),
+// which decides how that one default is told apart; the compare is its
+// matches(). differs selects the write guard (the negation).
+func (g *gen) arrayEqExpr(fld *ir.Field, acc, lit string, differs bool) string {
 	if fld.Elem == ir.KindFP32 || fld.Elem == ir.KindFP64 {
+		def := g.floatArrayDefault(fld, lit)
 		if differs {
-			return fmt.Sprintf("not float_array_bits_equal(%s, %s)", acc, lit)
+			return fmt.Sprintf("not %s.matches(%s)", def, acc)
 		}
-		return fmt.Sprintf("float_array_bits_equal(%s, %s)", acc, lit)
+		return fmt.Sprintf("%s.matches(%s)", def, acc)
 	}
 	if differs {
 		return fmt.Sprintf("%s != %s", acc, lit)
@@ -908,7 +930,7 @@ func arrayEqExpr(fld *ir.Field, acc, lit string, differs bool) string {
 func (g *gen) arrayIsDefaultExpr(fld *ir.Field, acc string) string {
 	if isNativeArrayElem(fld.Elem) {
 		if lit, ok := g.pyNativeArrayDefault(fld); ok {
-			return arrayEqExpr(fld, acc, lit, false)
+			return g.arrayEqExpr(fld, acc, lit, false)
 		}
 		return fmt.Sprintf("len(%s) == 0", acc)
 	}
@@ -1013,7 +1035,7 @@ func (g *gen) emitMarshalArray(f *pyfile, fld *ir.Field, acc, ind string, forced
 			return
 		}
 		if lit, ok := g.pyNativeArrayDefault(fld); ok {
-			f.line("%sif %s:", ind, arrayEqExpr(fld, acc, lit, true))
+			f.line("%sif %s:", ind, g.arrayEqExpr(fld, acc, lit, true))
 		} else {
 			f.line("%sif len(%s) != 0:", ind, acc)
 		}
@@ -1180,4 +1202,33 @@ func capOf(hasCount bool, count int64) int64 {
 		return count
 	}
 	return -1
+}
+
+// floatArrayDefault names the module-level constant holding a float array's
+// declared default: `_` + class + `__Def__` + field (the `__Loc` / `__Bind`
+// naming rule of visitor.go, role word `Def`), registered for emission after the
+// class. Built once at import, it is what every omission test of the field
+// compares against, instead of a list literal Python would rebuild per call.
+func (g *gen) floatArrayDefault(fld *ir.Field, lit string) string {
+	name := "_" + g.defBase + "__Def__" + pyIdent(fld.Name)
+	for _, d := range g.defs {
+		if d.name == name {
+			return name
+		}
+	}
+	g.defs = append(g.defs, pyDefConst{name, lit})
+	return name
+}
+
+// arrayDefaultValue is a fresh list holding a native array's declared default.
+// A float array's is a copy of its FloatArrayDefault's values: a field at its
+// default then holds the very float objects its omission test compares against,
+// so the list compare settles each element by identity, and every element is a
+// float even where the schema spells a whole number. Any other array is its
+// literal.
+func (g *gen) arrayDefaultValue(fld *ir.Field, lit string) string {
+	if fld.Elem != ir.KindFP32 && fld.Elem != ir.KindFP64 {
+		return lit
+	}
+	return "[*" + g.floatArrayDefault(fld, lit) + ".values]"
 }
