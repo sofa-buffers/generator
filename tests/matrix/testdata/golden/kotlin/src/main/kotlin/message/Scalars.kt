@@ -13,6 +13,14 @@ public class Scalars {
     public var i8min: Byte = (-128).toByte()
     public var i64min: Long = Long.MIN_VALUE
     public var f32: Float = 3.14f
+    /**
+     * Wire bits of [f32], kept on decode only when the decoded value is a NaN, so that
+     * a signaling NaN re-encodes bit for bit where a Float is a double (Kotlin/JS).
+     *
+     * Not part of the value: serialize uses them only while the value is still a NaN, so
+     * assigning the field always wins, and they never reach equality or JSON.
+     */
+    public var f32Fp32Bits: Int? = null
     public var f64: Double = -2.5
     public var flag: Boolean = true
     /** Schema bound: count 4 is a CAPACITY, not a length -- starts empty; over 4 elements is INVALID, never truncated. */
@@ -25,7 +33,7 @@ public class Scalars {
         if (this.u64max != 18446744073709551615uL) os.writeUnsigned(2, this.u64max)
         if (this.i8min != (-128).toByte()) os.writeSigned(3, this.i8min.toLong())
         if (this.i64min != Long.MIN_VALUE) os.writeSigned(4, this.i64min)
-        if (this.f32.toRawBits() != 1078523331) os.writeFp32(5, this.f32)
+        if (this.f32.toRawBits() != 1078523331) os.writeFp32(5, this.f32, this.f32Fp32Bits)
         if (this.f64.toRawBits() != -4610560118520545280L) os.writeFp64(6, this.f64)
         if (this.flag != true) os.writeBoolean(7, this.flag)
         if (this.flags.isNotEmpty()) {
@@ -55,6 +63,7 @@ public class Scalars {
         this.i8min = (-128).toByte()
         this.i64min = Long.MIN_VALUE
         this.f32 = 3.14f
+        this.f32Fp32Bits = null
         this.f64 = -2.5
         this.flag = true
         this.flags = Seq.EMPTY_BOOLEANS
@@ -245,13 +254,13 @@ internal class _Scalars__Visitor(private val m: Scalars) : Visitor {
         }
     }
 
-    override fun fp32(id: Int, value: Float) {
+    override fun fp32Bits(id: Int, bits: Int) {
         // Drop an element of an array whose id does not declare one -- armed by
         // arrayBegin, self-terminating on count.
         if (askip > 0) { askip--; return }
         when (cur) {
             0 -> when (id) {
-                5 -> { m.f32 = value }
+                5 -> { m.f32 = Float.fromBits(bits); m.f32Fp32Bits = Seq.fp32NaNBits(bits) }
             }
             else -> {}
         }

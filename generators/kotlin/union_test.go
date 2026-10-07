@@ -154,7 +154,7 @@ func TestKotlinUnionEncodeArms(t *testing.T) {
 		"ARR_ID -> {\n                os.writeArrayUnsigned(3, this._arr.asShortArray())\n            }",
 		"BL_ID -> {\n                os.writeBlob(5, this._bl)\n            }",
 		"os.writeSequenceBeginLazy(6); this._inner!!.serialize(os); os.writeSequenceEndKeep()",
-		"F_ID -> {\n                os.writeFp32(7, this._f)\n            }",
+		"F_ID -> {\n                os.writeFp32(7, this._f, this.fFp32Bits)\n            }",
 		"FLAGS_ID -> {\n                os.writeArrayUnsigned(8, Seq.boolsToBytes(this._flags))\n            }")
 	strs := ser[strings.Index(ser, "STRS_ID ->"):strings.Index(ser, "BL_ID ->")]
 	mustContain(t, "M_U.serialize strs", strs, "= this._strs!!", "os.writeSequenceBeginLazy(4)", "os.writeSequenceEndKeep()")
@@ -178,7 +178,7 @@ func TestKotlinUnionDecodeSwitch(t *testing.T) {
 	vis := m[strings.Index(m, "internal class _M__Visitor"):]
 	mustContain(t, "scalar option", vis,
 		`0 -> { if (value < 0L || value > 65535L) throw SofabException(SofabError.INVALID_MSG, "num: value outside declared width u16"); m.u.num = value.toUShort() }`,
-		"7 -> { m.u.f = value }",
+		"7 -> { m.u.f = Float.fromBits(bits); m.u.fFp32Bits = Seq.fp32NaNBits(bits) }",
 		// A member below a struct/union option goes through the option's mutable
 		// accessor.
 		`throw SofabException(SofabError.INVALID_MSG, "x: value outside declared width i32"); m.u.mutablePt().x = value.toInt() }`,

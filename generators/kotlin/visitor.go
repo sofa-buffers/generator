@@ -434,6 +434,9 @@ func (g *gen) emitVisitor(f *kfile, name, vis string, fields []*ir.Field) {
 	if hasBulk(fs) {
 		f.line("    private var abulk: Any? = null      // destination offered to Visitor.arrayBulk, null when not offered")
 	}
+	if len(fillTargetsFor(fs, "fp32")) > 0 {
+		f.line("    private var afv: IntArray? = null   // raw-bits view of the fp32 array being filled (Seq.fp32BitsView)")
+	}
 	f.line("    private var stk = IntArray(16)      // sequence scope stack")
 	f.line("    private var sp = 0")
 	for _, fr := range fs {
@@ -1005,8 +1008,12 @@ func (g *gen) emitArrayBegin(f *kfile, fs []frame, limArr, hasArray bool) {
 			arrType := primArrayType(fr.innerElem, fr.innerRef)
 			// Sized at exactly the wire count, once: the guard above bounded it
 			// (§9.5, shape A). The wire already said how big the row is.
-			f.line("            %d -> if (kind == ArrayKind.%s) { %s%s = Seq.reserveRow%s(%s, id, count, %s, MAX_DYN_ARRAY_COUNT); %s = id }",
-				fr.idx, arrayWireKind(fr.innerElem), body, rowCursor(arrType), seqSuffix(arrType), fr.listExpr, seqCap(*fr), elemIdxVar(fr.loc))
+			view := ""
+			if fp32ArrayElem(fr.innerElem) {
+				view = fmt.Sprintf("; afv = Seq.fp32BitsView(%s)", rowCursor(arrType))
+			}
+			f.line("            %d -> if (kind == ArrayKind.%s) { %s%s = Seq.reserveRow%s(%s, id, count, %s, MAX_DYN_ARRAY_COUNT)%s; %s = id }",
+				fr.idx, arrayWireKind(fr.innerElem), body, rowCursor(arrType), seqSuffix(arrType), fr.listExpr, seqCap(*fr), view, elemIdxVar(fr.loc))
 			continue
 		}
 		if fr.kind != fkNormal {
@@ -1058,6 +1065,9 @@ func (g *gen) emitArrayBegin(f *kfile, fs []frame, limArr, hasArray bool) {
 				panic("kotlin: native array with neither a schema count nor a cap -- every target has a finite default (§9.5)")
 			}
 			body += fmt.Sprintf("%s = %s(count)", target, arrType)
+			if fp32ArrayElem(fld.Elem) {
+				body += fmt.Sprintf("; afv = Seq.fp32BitsView(%s)", target)
+			}
 			if bulkCapable(fld) {
 				// Its element WIDTH is what tells the decoder the declared width, so
 				// the §7.1 check and the narrowing happen in the pass that decodes.
@@ -1291,7 +1301,16 @@ func (g *gen) emitSequenceCbs(f *kfile, fs []frame) {
 // hang off `atgt` -- one dense when -- ahead of the scalar routing, which the
 // array ids then leave entirely.
 func (g *gen) emitScalarCb(f *kfile, fs []frame, cb, vtype string, want func(*ir.Field) bool) {
-	f.line("    override fun %s(id: Int, value: %s) {", cb, vtype)
+	if cb == "fp32" {
+		// Every fp32 position arrives as its raw wire bits (Visitor.fp32Bits),
+		// and is taken there rather than from the widened value: on Kotlin/JS a
+		// Float is a double, and widening quiets a signaling NaN (generator#670,
+		// CORELIB_PLAN §6.5). A scalar keeps the bits beside its value while it
+		// is a NaN; an array element is stored through the raw-bits view.
+		f.line("    override fun fp32Bits(id: Int, bits: Int) {")
+	} else {
+		f.line("    override fun %s(id: Int, value: %s) {", cb, vtype)
+	}
 	g.emitArrayFillArm(f, fs, cb)
 	// The §7.3 discard guard heads every callback an array shares with a lone
 	// scalar: unsigned/signed for integer arrays, fp32/fp64 for fp arrays.
@@ -1318,6 +1337,11 @@ func (g *gen) emitScalarCb(f *kfile, fs []frame, cb, vtype string, want func(*ir
 			rhs := "value"
 			if cb == "unsigned" || cb == "signed" {
 				rhs = fromWire(fld.Kind, "value")
+			}
+			if cb == "fp32" {
+				raw := fr.path + "." + fp32BitsMember(memberName(fld, fr.uni))
+				arms = append(arms, fmt.Sprintf("%d -> { %s = Float.fromBits(bits); %s = Seq.fp32NaNBits(bits) }", fld.ID, target, raw))
+				continue
 			}
 			arms = append(arms, fmt.Sprintf("%d -> { %s%s = %s }", fld.ID, guard, target, rhs))
 		}
@@ -1423,6 +1447,10 @@ func (g *gen) emitArrayFillArm(f *kfile, fs []frame, cb string) {
 			if cb == "unsigned" || cb == "signed" {
 				guard = widthThrow(fr.innerElem, fr.innerRef, locName(fr.loc)+" element")
 			}
+			if cb == "fp32" {
+				arms = append(arms, arm{ids[-1], fmt.Sprintf("Seq.putFp32Bits(%s, afv, ai, bits); ai++", cur)})
+				continue
+			}
 			arms = append(arms, arm{ids[-1], fmt.Sprintf("%s%s[ai] = %s; ai++",
 				guard, cur, elemStore(fr.innerElem, fr.innerRef, cb))})
 			continue
@@ -1441,6 +1469,10 @@ func (g *gen) emitArrayFillArm(f *kfile, fs []frame, cb string) {
 			// exactly the announced count, having first bounded that count against
 			// the schema capacity or the configured cap (§9.5, shape A), so nothing
 			// here can run past the end and nothing has to grow.
+			if cb == "fp32" {
+				arms = append(arms, arm{code, fmt.Sprintf("Seq.putFp32Bits(%s, afv, ai, bits); ai++", target)})
+				continue
+			}
 			arms = append(arms, arm{code, fmt.Sprintf("%s%s[ai] = %s; ai++",
 				guard, target, elemStore(fld.Elem, fld.ElemRef, cb))})
 		}

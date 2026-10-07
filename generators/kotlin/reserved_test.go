@@ -358,6 +358,11 @@ func TestKotlinNamesInScope(t *testing.T) {
 				if kind == "var" && props[n] {
 					continue
 				}
+				// The raw-bits companion of an fp32 property: field-derived, and kept
+				// clear of every schema name by ktIdent's suffix escape.
+				if kind == "var" && strings.HasSuffix(n, fp32BitsSuffix) && props[strings.TrimSuffix(n, fp32BitsSuffix)] {
+					continue
+				}
 				if strings.HasPrefix(n, "_") || ktOptID.MatchString(n) || ktReservedMembers[n] || unionReserved[n] {
 					continue
 				}

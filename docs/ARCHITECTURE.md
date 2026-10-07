@@ -7148,6 +7148,31 @@ A reimplementation is **conformant** when it reproduces these gates:
    which is the two legs being independent). The eight native-`fp32` targets are
    untested for the same rule; §6.5 says the natural implementation meets it on
    its own, which is an implementation note rather than a coverage exemption.
+
+   **Kotlin is native-`fp32` on two of its three targets and double-only on the
+   third.** On Kotlin/JS a `Float` is a JS number, so the same widening quiets a
+   signaling NaN there (generator#670; found by crucible's JS leg). Generated
+   Kotlin is common code for all three targets, so it takes every `fp32`
+   position from the corelib's raw-bits callback `Visitor.fp32Bits(id, bits)`
+   rather than from the widened value. A **scalar** keeps the wire pattern in a
+   public `<field>Fp32Bits: Int?` beside the value, set through
+   `Seq.fp32NaNBits(bits)` only when the value is a NaN, and serialize hands both
+   to `OStream.writeFp32(id, value, raw)`, which uses the pattern only while the
+   value is still a NaN: the same rule as TypeScript's scalar companion, so an
+   assignment always wins and presence is still decided from the value (§2). A
+   field whose own name ends in `Fp32Bits` is escaped with `_` (`ktIdent`), so
+   it can never meet a companion. An **array** keeps nothing beside it. On
+   Kotlin/JS a `FloatArray` is a `Float32Array`, which already holds every
+   32-bit pattern; only reading an element into a value loses one. So the
+   corelib aliases it: `Seq.fp32BitsView(a)` is an `Int32Array` over the same
+   buffer on JS (and `null` on JVM and Native), taken once at the array's
+   `arrayBegin`; each element is stored with `Seq.putFp32Bits(a, view, i, bits)`,
+   and `OStream.writeArrayFp32` writes through the same view. An element the
+   caller assigns by value is therefore simply part of the array, with no
+   companion to go stale. Measured on the bench row (JVM): encode +0.8 % Ir/op,
+   decode −0.4 %. The Kotlin conformance suite builds the JVM target only, so
+   the JS half is covered by corelib-kotlin-mp's `commonTest`, which runs on
+   JVM, JS and Native (`Fp32BitExactTest`), and end to end by crucible.
 3. **Corpus** (`tests/matrix`) — a corner-case corpus generated across **all**
    backends; invalid defs are rejected; dangling-ref + depth-cap enforced.
    Per-language `run.sh` additionally **compiles/builds every corpus def** against
