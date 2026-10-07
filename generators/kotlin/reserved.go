@@ -141,7 +141,9 @@ func ktTypeIdent(t string) string {
 // when it would collide with a generated declaration, escaped with backticks
 // when it is a hard keyword, and otherwise passed through unchanged.
 func ktIdent(name string) string {
-	if ktReservedMembers[name] || ktQualifiers[name] {
+	// A name ending in `Fp32Bits` takes `_`: the raw-bits companion of an fp32
+	// field `x` is `xFp32Bits` (fp32BitsMember), so no field may end that way.
+	if ktReservedMembers[name] || ktQualifiers[name] || strings.HasSuffix(name, fp32BitsSuffix) {
 		return name + "_"
 	}
 	if ktHardKeywords[name] {
@@ -199,4 +201,14 @@ func jvmSetterRenames(props []string) map[string]string {
 		}
 	}
 	return out
+}
+
+// fp32BitsSuffix ends the name of every fp32 field's raw-bits companion.
+const fp32BitsSuffix = "Fp32Bits"
+
+// fp32BitsMember is the raw-bits companion of the fp32 member prop (generator#670):
+// `<prop>Fp32Bits`, the backticks of an escaped keyword dropped. It cannot meet a
+// schema member, because ktIdent escapes every field name ending in the suffix.
+func fp32BitsMember(prop string) string {
+	return strings.Trim(prop, "`") + fp32BitsSuffix
 }

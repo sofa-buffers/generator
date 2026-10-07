@@ -352,10 +352,15 @@ func (g *gen) emitClass(f *kfile, name, vis string, fields []*ir.Field, summary 
 	}
 	f.line("public class %s {", name)
 	props := make([]string, len(fields))
+	all := []string{}
 	for i, fld := range fields {
 		props[i] = ktIdent(fld.Name)
+		all = append(all, props[i])
+		if fld.Kind == ir.KindFP32 {
+			all = append(all, fp32BitsMember(props[i]))
+		}
 	}
-	setters := jvmSetterRenames(props)
+	setters := jvmSetterRenames(all)
 	for i, fld := range fields {
 		f.kdoc("    ", fieldDoc(fld, generator.BoundNote(fld, generator.StorageDynamic)))
 		if fld.Deprecated {
@@ -365,6 +370,9 @@ func (g *gen) emitClass(f *kfile, name, vis string, fields []*ir.Field, summary 
 			f.line("    %s", s)
 		}
 		f.line("    public var %s: %s = %s", props[i], g.ktType(fld), g.ktDefaultValue(fld))
+		if fld.Kind == ir.KindFP32 {
+			g.emitFp32Bits(f, props[i], setters)
+		}
 	}
 	f.blank()
 
@@ -688,6 +696,9 @@ func (g *gen) emitResetField(f *kfile, fld *ir.Field) {
 			return
 		}
 		f.line("        %s = %s", acc, g.ktDefaultValue(fld))
+	case ir.KindFP32:
+		f.line("        %s = %s", acc, g.ktDefaultValue(fld))
+		f.line("        this.%s = null", fp32BitsMember(ktIdent(fld.Name)))
 	default:
 		f.line("        %s = %s", acc, g.ktDefaultValue(fld))
 	}
@@ -698,7 +709,27 @@ func (g *gen) emitResetField(f *kfile, fld *ir.Field) {
 // ---------------------------------------------------------------------------
 
 func (g *gen) emitMarshal(f *kfile, fld *ir.Field) {
-	g.emitMarshalAt(f, "        ", fld, "this."+ktIdent(fld.Name), false)
+	prop := ktIdent(fld.Name)
+	g.emitMarshalAt(f, "        ", fld, "this."+prop, "this."+fp32BitsMember(prop), false)
+}
+
+// emitFp32Bits declares the raw-bits companion of the fp32 member prop
+// (generator#670, CORELIB_PLAN §6.5). On Kotlin/JS a `Float` is a double, and a
+// signaling NaN reaches it quieted; the decoder keeps the wire pattern here
+// whenever the value is a NaN, and serialize re-emits it while the value still
+// is one (OStream.writeFp32 with both). An fp32 ARRAY needs none: its FloatArray
+// is filled and written through the corelib's raw-bits view.
+func (g *gen) emitFp32Bits(f *kfile, prop string, setters map[string]string) {
+	name := fp32BitsMember(prop)
+	f.kdoc("    ", "Wire bits of ["+strings.Trim(prop, "`")+"], kept on decode only when the decoded value is a NaN, so that\n"+
+		"a signaling NaN re-encodes bit for bit where a Float is a double (Kotlin/JS).\n"+
+		"\n"+
+		"Not part of the value: serialize uses them only while the value is still a NaN, so\n"+
+		"assigning the field always wins, and they never reach equality or JSON.")
+	if s, ok := setters[name]; ok {
+		f.line("    %s", s)
+	}
+	f.line("    public var %s: Int? = null", name)
 }
 
 // emitMarshalAt writes the field fld whose value is acc, at indent ind.
@@ -710,7 +741,10 @@ func (g *gen) emitMarshal(f *kfile, fld *ir.Field) {
 // explicit empty form -- and a struct, union or wrapper-array option is closed
 // with the KEEPING end, so an option at its default still leaves a present,
 // empty frame. Inside the option the ordinary per-field omission applies.
-func (g *gen) emitMarshalAt(f *kfile, ind string, fld *ir.Field, acc string, forced bool) {
+//
+// raw is the fp32 raw-bits companion of acc (fp32BitsMember), read only for an
+// fp32 scalar.
+func (g *gen) emitMarshalAt(f *kfile, ind string, fld *ir.Field, acc, raw string, forced bool) {
 	var write string
 	switch fld.Kind {
 	case ir.KindU8, ir.KindU16, ir.KindU32, ir.KindU64, ir.KindBitfield:
@@ -720,7 +754,7 @@ func (g *gen) emitMarshalAt(f *kfile, ind string, fld *ir.Field, acc string, for
 	case ir.KindBool:
 		write = fmt.Sprintf("os.writeBoolean(%d, %s)", fld.ID, acc)
 	case ir.KindFP32:
-		write = fmt.Sprintf("os.writeFp32(%d, %s)", fld.ID, acc)
+		write = fmt.Sprintf("os.writeFp32(%d, %s, %s)", fld.ID, acc, raw)
 	case ir.KindFP64:
 		write = fmt.Sprintf("os.writeFp64(%d, %s)", fld.ID, acc)
 	case ir.KindString:

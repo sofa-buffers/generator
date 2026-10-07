@@ -199,7 +199,7 @@ func (g *gen) emitUnionClass(f *kfile, key string, nt *ir.NamedType) {
 		f.line("            %s -> {", o.idConst)
 		// default_id is written like an ordinary field of its kind (omitted at its
 		// default); every other option is forced (MESSAGE_SPEC §4.2).
-		g.emitMarshalAt(f, "                ", o.f, unionSlotAcc(o), !o.isD)
+		g.emitMarshalAt(f, "                ", o.f, unionSlotAcc(o), "this."+fp32BitsMember(o.prop), !o.isD)
 		f.line("            }")
 	}
 	f.line("        }")
@@ -273,6 +273,9 @@ func (g *gen) emitUnionAccessors(f *kfile, o *unionOpt) {
 	f.line("    public var %s: %s", o.prop, t)
 	f.line("        get() = if (which == %s) %s else %s", o.idConst, held, g.ktDefaultValue(o.f))
 	f.line("        set(v) { which = %s; %s = v }", o.idConst, o.slot)
+	if o.f.Kind == ir.KindFP32 {
+		g.emitFp32Bits(f, o.prop, nil)
+	}
 	dep()
 	f.line("    public fun has%s(): Boolean = which == %s", o.base, o.idConst)
 	if !unionMutable(o.f) {
