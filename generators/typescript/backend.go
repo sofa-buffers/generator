@@ -663,9 +663,10 @@ func (g *gen) emitEncode(f *tsfile, name string, fields []*ir.Field) {
 		f.line("   * Encode into a buffer this call allocates and owns.")
 		f.line("   *")
 		f.line("   * The buffer is exactly `MAX_SIZE` bytes, the schema's worst case, so every")
-		f.line("   * value the schema permits fits. A value filled PAST a declared count/maxlen")
-		f.line("   * does not: it throws `SofabError` (BUFFER_FULL) rather than coming back")
-		f.line("   * short, because partial output must never pass for a whole message.")
+		f.line("   * value the schema permits fits. A value PAST a declared count, maxlen or")
+		f.line("   * width is refused before it is written: it throws `SofabError` (ARGUMENT)")
+		f.line("   * rather than coming back clamped or short, because partial output must")
+		f.line("   * never pass for a whole message.")
 		f.line("   */")
 		f.line("  encode(): Uint8Array {")
 		f.line("    const _buf = new Uint8Array(%s.MAX_SIZE);", name)
@@ -692,7 +693,8 @@ func (g *gen) emitEncode(f *tsfile, name string, fields []*ir.Field) {
 	f.line("   * A field of this class is unbounded, so there is no worst-case size to hand")
 	f.line("   * the encoder. It writes through a fixed %d-byte scratch buffer that is copied", tsScratchSize)
 	f.line("   * out each time it fills: the message may be any size, and `MAX_SIZE` never")
-	f.line("   * bounds it.")
+	f.line("   * bounds it. A value PAST a declared count, maxlen or width is refused before")
+	f.line("   * it is written: it throws `SofabError` (ARGUMENT).")
 	f.line("   */")
 	f.line("  encode(): Uint8Array {")
 	f.line("    const _out: Uint8Array[] = [];")
@@ -972,13 +974,17 @@ func (g *gen) emitMarshalAt(f *tsfile, ind string, fld *ir.Field, acc, rawAcc st
 	case ir.KindFP64:
 		write = fmt.Sprintf("os.writeFp64(%d, %s);", fld.ID, acc)
 	case ir.KindString:
-		write = fmt.Sprintf("os.writeString(%d, %s);", fld.ID, acc)
+		write = writeStringCall(fmt.Sprintf("%d", fld.ID), acc, fld.HasMaxlen, fld.Maxlen)
 	case ir.KindBlob:
 		// blob is a leaf: omit when equal to its default (empty if none). An empty
 		// default tests emptiness directly (no per-encode `new Uint8Array()` to
 		// compare against); a non-empty default needs an element-wise elementsEqual.
 		// Forced, the empty value is written as the zero-length payload.
+		guard := blobMaxlenGuard(fld.Name, acc, fld.HasMaxlen, fld.Maxlen)
 		if forced {
+			if guard != "" {
+				f.line("%s%s", ind, guard)
+			}
 			f.line("%sos.writeBlob(%d, %s);", ind, fld.ID, acc)
 			return
 		}
@@ -986,6 +992,9 @@ func (g *gen) emitMarshalAt(f *tsfile, ind string, fld *ir.Field, acc, rawAcc st
 			f.line("%sif (!elementsEqual(%s, %s)) {", ind, acc, g.tsDefault(fld))
 		} else {
 			f.line("%sif (%s.length !== 0) {", ind, acc)
+		}
+		if guard != "" {
+			f.line("%s  %s", ind, guard)
 		}
 		f.line("%s  os.writeBlob(%d, %s);", ind, fld.ID, acc)
 		f.line("%s}", ind)
@@ -1010,7 +1019,14 @@ func (g *gen) emitMarshalAt(f *tsfile, ind string, fld *ir.Field, acc, rawAcc st
 		g.emitMarshalArray(f, ind, fld, acc, forced)
 		return
 	}
+	// A narrow integer, enum or bitfield is held in a `number` (a wide bitfield in
+	// a `bigint`), which is wider than its declared width: the value is refused
+	// before it is written (see encodeWidthGuard).
+	guard := g.encodeWidthGuard(fld, acc)
 	if forced {
+		if guard != "" {
+			f.line("%s%s", ind, guard)
+		}
 		f.line("%s%s", ind, write)
 		return
 	}
@@ -1031,8 +1047,86 @@ func (g *gen) emitMarshalAt(f *tsfile, ind string, fld *ir.Field, acc, rawAcc st
 	} else {
 		f.line("%sif (%s !== %s) {", ind, acc, g.tsDefault(fld))
 	}
+	if guard != "" {
+		f.line("%s  %s", ind, guard)
+	}
 	f.line("%s  %s", ind, write)
 	f.line("%s}", ind)
+}
+
+// --- encode bounds -----------------------------------------------------------
+//
+// A value past its schema bound is REFUSED at encode with SofabError(ARGUMENT)
+// before it is written (ARCHITECTURE §9.6): the decoder rejects it as INVALID
+// (MESSAGE_SPEC §7.1), so writing it would produce a message this same stack
+// refuses to read, and clamping it would change the caller's value silently.
+// Only the schema knows the bounds, so each one is a per-field guard here or an
+// argument to the corelib write call that already measures the value:
+//
+//   - a string's bound is in UTF-8 bytes, and a JS string knows only its UTF-16
+//     length. The corelib's writeString computes the UTF-8 length anyway to size
+//     the header, so the maxlen is handed to it and it refuses there, before any
+//     byte and without a second pass (writeStringCall).
+//   - a blob and an array know their length directly: one compare against the
+//     schema literal (blobMaxlenGuard, arrayCountGuard).
+//   - a narrow integer, enum or bitfield is held in a `number` (or a `bigint`),
+//     wider than its declared width: the decoder's own width comparison, on the
+//     member (encodeWidthGuard). An unsigned value below 0 needs no clause of its
+//     own: writeUnsigned already refuses it with ARGUMENT. A typed-array element
+//     (Uint8Array, Int16Array, ...) cannot leave its width, so arrays of these
+//     kinds need nothing.
+
+// argGuard renders one refusal: `if (cond) throw SofabError(ARGUMENT, msg);`.
+func argGuard(cond, msg string) string {
+	return fmt.Sprintf("if (%s) throw new SofabError(SofabErrorCode.Argument, %q);", cond, msg)
+}
+
+// writeStringCall is the string write, carrying the schema's maxlen when the
+// field declares one (the corelib refuses a longer UTF-8 encoding).
+func writeStringCall(idExpr, val string, hasMaxlen bool, maxlen int64) string {
+	if hasMaxlen {
+		return fmt.Sprintf("os.writeString(%s, %s, %d);", idExpr, val, maxlen)
+	}
+	return fmt.Sprintf("os.writeString(%s, %s);", idExpr, val)
+}
+
+// blobMaxlenGuard refuses a blob longer than its maxlen; "" when unbounded.
+func blobMaxlenGuard(what, val string, hasMaxlen bool, maxlen int64) string {
+	if !hasMaxlen {
+		return ""
+	}
+	return argGuard(fmt.Sprintf("%s.length > %d", val, maxlen),
+		fmt.Sprintf("%s: blob byte length above schema maxlen %d", what, maxlen))
+}
+
+// arrayCountGuard refuses an array holding more elements than its count; ""
+// when the schema leaves it uncounted.
+func arrayCountGuard(what, val string, hasCount bool, count int64) string {
+	if !hasCount {
+		return ""
+	}
+	return argGuard(fmt.Sprintf("%s.length > %d", val, count),
+		fmt.Sprintf("%s: array count above schema capacity %d", what, count))
+}
+
+// encodeWidthGuard refuses a scalar outside its declared width, reusing the
+// decoder's comparison (widthCond / declaredWidthCond); "" for a kind whose
+// storage cannot leave its width or that declares none (bool, 64-bit, floats).
+// An enum member is compared as a plain number, for the reason guarded gives.
+func (g *gen) encodeWidthGuard(fld *ir.Field, acc string) string {
+	var cond, what string
+	switch fld.Kind {
+	case ir.KindEnum:
+		cond, what = declaredWidthCond("("+acc+" as number)", fld.Kind, fld.Ref), declaredWidthWhat(fld.Kind)
+	case ir.KindBitfield:
+		cond, what = declaredWidthCond(acc, fld.Kind, fld.Ref), declaredWidthWhat(fld.Kind)
+	default:
+		cond, what = widthCond(acc, fld.Kind), "width "+fld.Kind.String()
+	}
+	if cond == "" {
+		return ""
+	}
+	return argGuard(cond, fmt.Sprintf("%s: value outside declared %s", fld.Name, what))
 }
 
 func (g *gen) emitMarshalArray(f *tsfile, ind string, fld *ir.Field, acc string, forced bool) {
@@ -1049,7 +1143,7 @@ func (g *gen) emitMarshalArray(f *tsfile, ind string, fld *ir.Field, acc string,
 		if forced {
 			// A held union option: the empty array is written too, as count 0 (an
 			// fp array keeps its fixlen_word, which the corelib writer does).
-			g.marshalArray(f, ind, fmt.Sprintf("%d", fld.ID), acc, fld.Elem, fld.ElemRef, fld.ElemItems, 0, "")
+			g.marshalArray(f, ind, fmt.Sprintf("%d", fld.ID), acc, fld.Elem, fld.ElemRef, fld.ElemItems, 0, "", fieldBound(fld))
 			return
 		}
 		if def, ok := g.nativeArrayDefault(fld); ok {
@@ -1063,13 +1157,13 @@ func (g *gen) emitMarshalArray(f *tsfile, ind string, fld *ir.Field, acc string,
 		// signaling NaN (§4.6/§6.5). Bit-exact for every value, with nothing
 		// captured beside the numbers and nothing to re-attach. The SCALAR half
 		// stays: a JS number has nowhere to keep the bits.
-		g.marshalArray(f, ind+"  ", fmt.Sprintf("%d", fld.ID), acc, fld.Elem, fld.ElemRef, fld.ElemItems, 0, "")
+		g.marshalArray(f, ind+"  ", fmt.Sprintf("%d", fld.ID), acc, fld.Elem, fld.ElemRef, fld.ElemItems, 0, "", fieldBound(fld))
 		f.line("%s}", ind)
 		return
 	}
 	if forced {
 		// A held union option: an empty wrapper survives as a present, empty frame.
-		g.marshalArray(f, ind, fmt.Sprintf("%d", fld.ID), acc, fld.Elem, fld.ElemRef, fld.ElemItems, 0, keepAlways)
+		g.marshalArray(f, ind, fmt.Sprintf("%d", fld.ID), acc, fld.Elem, fld.ElemRef, fld.ElemItems, 0, keepAlways, fieldBound(fld))
 		return
 	}
 	// The field-level wrapper frame is dropped when no element is written, and
@@ -1080,7 +1174,7 @@ func (g *gen) emitMarshalArray(f *tsfile, ind string, fld *ir.Field, acc string,
 	// `if (!eq(value, default)) { ... os.writeSequenceEndKeep(); }` -- so that a
 	// value differing from a non-empty default still reaches the wire as the empty
 	// wrapper, the only encoding of "explicitly empty" (MESSAGE_SPEC S2, S3).
-	g.marshalArray(f, ind, fmt.Sprintf("%d", fld.ID), acc, fld.Elem, fld.ElemRef, fld.ElemItems, 0, "")
+	g.marshalArray(f, ind, fmt.Sprintf("%d", fld.ID), acc, fld.Elem, fld.ElemRef, fld.ElemItems, 0, "", fieldBound(fld))
 }
 
 // lastElemExpr is the "this element is the array's last" test, at loop position
@@ -1136,6 +1230,26 @@ func emitSeqEnd(f *tsfile, ind, keepIf string) {
 	f.line("%s}", ind)
 }
 
+// arrBound is what the schema bounds about one array, for the encode guards:
+// its count, its leaf string/blob element maxlen, and the name the refusal
+// message carries.
+type arrBound struct {
+	what       string
+	hasCount   bool
+	count      int64
+	elemMaxHas bool
+	elemMax    int64
+}
+
+func fieldBound(fld *ir.Field) arrBound {
+	return arrBound{fld.Name, fld.HasCount, fld.Count, fld.ElemMaxHas, fld.ElemMax}
+}
+
+// itemsBound is a nested array's bound; its rows are named `<field>[]`.
+func itemsBound(what string, items *ir.ArrayElem) arrBound {
+	return arrBound{what + "[]", items.HasCount, items.Count, items.ElemMaxHas, items.ElemMax}
+}
+
 // marshalArray writes the array `val` as field `idExpr`. Numeric/enum/boolean/
 // bitfield elements use the native array wire type (enum->signed, bool/bitfield->
 // unsigned); string/blob/struct/union/array elements lower to a wrapper sequence
@@ -1149,10 +1263,15 @@ func emitSeqEnd(f *tsfile, ind, keepIf string) {
 //
 // keepIf is the closer this call's own wrapper takes (see emitSeqEnd); the native
 // element kinds open no sequence and ignore it.
-func (g *gen) marshalArray(f *tsfile, ind, idExpr, val string, elem ir.Kind, ref *ir.TypeRef, items *ir.ArrayElem, depth int, keepIf string) {
+func (g *gen) marshalArray(f *tsfile, ind, idExpr, val string, elem ir.Kind, ref *ir.TypeRef, items *ir.ArrayElem, depth int, keepIf string, b arrBound) {
 	ev := fmt.Sprintf("_e%d", depth)
 	iv := fmt.Sprintf("_i%d", depth)
 	av := fmt.Sprintf("_a%d", depth)
+	// The count bound of THIS array, at every depth: a matrix row is checked in
+	// the row loop, before the row is written.
+	if guard := arrayCountGuard(b.what, val, b.hasCount, b.count); guard != "" {
+		f.line("%s%s", ind, guard)
+	}
 	switch elem {
 	case ir.KindU8, ir.KindU16, ir.KindU32:
 		f.line("%sos.writeUnsignedArray(%s, %s);", ind, idExpr, val)
@@ -1194,7 +1313,7 @@ func (g *gen) marshalArray(f *tsfile, ind, idExpr, val string, elem ir.Kind, ref
 		f.line("%sos.writeSequenceBeginLazy(%s);", ind, idExpr)
 		f.line("%sfor (let %s = 0, %s = %s; %s < %s.length; %s++) {", ind, iv, av, val, iv, av, iv)
 		f.line("%s  if (%s[%s]! !== \"\" || %s) {", ind, av, iv, lastElemExpr(iv, av))
-		f.line("%s    os.writeString(%s, %s[%s]!);", ind, iv, av, iv)
+		f.line("%s    %s", ind, writeStringCall(iv, av+"["+iv+"]!", b.elemMaxHas, b.elemMax))
 		f.line("%s  }", ind)
 		f.line("%s}", ind)
 		emitSeqEnd(f, ind, keepIf)
@@ -1203,6 +1322,9 @@ func (g *gen) marshalArray(f *tsfile, ind, idExpr, val string, elem ir.Kind, ref
 		f.line("%sos.writeSequenceBeginLazy(%s);", ind, idExpr)
 		f.line("%sfor (let %s = 0, %s = %s; %s < %s.length; %s++) {", ind, iv, av, val, iv, av, iv)
 		f.line("%s  if (%s[%s]!.length !== 0 || %s) {", ind, av, iv, lastElemExpr(iv, av))
+		if guard := blobMaxlenGuard(b.what+"[]", av+"["+iv+"]!", b.elemMaxHas, b.elemMax); guard != "" {
+			f.line("%s    %s", ind, guard)
+		}
 		f.line("%s    os.writeBlob(%s, %s[%s]!);", ind, iv, av, iv)
 		f.line("%s  }", ind)
 		f.line("%s}", ind)
@@ -1231,13 +1353,13 @@ func (g *gen) marshalArray(f *tsfile, ind, idExpr, val string, elem ir.Kind, ref
 			// equal to the element default (the empty row) is not written at all, and
 			// the last row always is.
 			f.line("%s  if (%s.length !== 0 || %s) {", ind, ev, lastElemExpr(iv, av))
-			g.marshalArray(f, ind+"    ", iv, ev, items.Elem, items.ElemRef, items.ElemItems, depth+1, "")
+			g.marshalArray(f, ind+"    ", iv, ev, items.Elem, items.ElemRef, items.ElemItems, depth+1, "", itemsBound(b.what, items))
 			f.line("%s  }", ind)
 		} else {
 			// A wrapper row has its own frame, so it takes the closer instead — the
 			// same interior/last choice, expressed the same way as for a struct element
 			// above.
-			g.marshalArray(f, ind+"  ", iv, ev, items.Elem, items.ElemRef, items.ElemItems, depth+1, lastElemExpr(iv, av))
+			g.marshalArray(f, ind+"  ", iv, ev, items.Elem, items.ElemRef, items.ElemItems, depth+1, lastElemExpr(iv, av), itemsBound(b.what, items))
 		}
 		f.line("%s});", ind)
 		emitSeqEnd(f, ind, keepIf)

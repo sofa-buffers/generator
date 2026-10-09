@@ -171,11 +171,13 @@ func TestTSUnionEncodeArms(t *testing.T) {
 		// default_id: guarded, dropping end.
 		"      case 2: {\n        os.writeSequenceBeginLazy(2);\n        this._pt!.serialize(os);\n        os.writeSequenceEnd();\n        break;\n      }",
 		// forced scalar, string, array, blob.
-		"      case 0: {\n        os.writeUnsigned(0, this._num);\n        break;\n      }",
-		"      case 1: {\n        os.writeString(1, this._s);\n        break;\n      }",
-		"      case 3: {\n        os.writeUnsignedArray(3, this._arr);\n        break;\n      }",
-		"      case 5: {\n        os.writeBlob(5, this._bl!);\n        break;\n      }",
-		"      case 8: {\n        os.writeFp32Array(8, this._fa);\n        break;\n      }",
+		// Each carries its schema bound (generator#656): refused before the write.
+		"      case 0: {\n        if (this._num > 65535) throw new SofabError(SofabErrorCode.Argument, \"num: value outside declared width u16\");\n        os.writeUnsigned(0, this._num);\n        break;\n      }",
+		"      case 1: {\n        os.writeString(1, this._s, 8);\n        break;\n      }",
+		"      case 3: {\n        if (this._arr.length > 4) throw new SofabError(SofabErrorCode.Argument, \"arr: array count above schema capacity 4\");\n        os.writeUnsignedArray(3, this._arr);\n        break;\n      }",
+		"      case 4: {\n        if (this._strs!.length > 3) throw new SofabError(SofabErrorCode.Argument, \"strs: array count above schema capacity 3\");\n        os.writeSequenceBeginLazy(4);",
+		"      case 5: {\n        if (this._bl!.length > 4) throw new SofabError(SofabErrorCode.Argument, \"bl: blob byte length above schema maxlen 4\");\n        os.writeBlob(5, this._bl!);\n        break;\n      }",
+		"      case 8: {\n        if (this._fa.length > 2) throw new SofabError(SofabErrorCode.Argument, \"fa: array count above schema capacity 2\");\n        os.writeFp32Array(8, this._fa);\n        break;\n      }",
 		"      case 9: {\n        os.writeBoolean(9, this._bo);\n        break;\n      }",
 		// forced fp32: no value guard, the raw bytes still re-emit a NaN.
 		"      case 7: {\n        if (Number.isNaN(this._f) && this._fFp32Raw !== null && this._fFp32Raw.length === 4) {",
@@ -191,8 +193,8 @@ func TestTSUnionEncodeArms(t *testing.T) {
 	// A scalar default_id keeps its guard.
 	z := tsClass(t, genUnionMode(t, "bigint"), "M_Z")
 	mustContain(t, "M_Z serialize", z,
-		"      case 0: {\n        if (this._a !== 0) {\n          os.writeUnsigned(0, this._a);\n        }",
-		"      case 1: {\n        os.writeUnsigned(1, this._b);")
+		"      case 0: {\n        if (this._a !== 0) {\n          if (this._a > 255) throw new SofabError(SofabErrorCode.Argument, \"a: value outside declared width u8\");\n          os.writeUnsigned(0, this._a);\n        }",
+		"      case 1: {\n        if (this._b > 255) throw new SofabError(SofabErrorCode.Argument, \"b: value outside declared width u8\");\n        os.writeUnsigned(1, this._b);")
 	// The union FIELD keeps its lazy frame and dropping end: it vanishes exactly
 	// when serialize wrote nothing.
 	m := tsClass(t, genUnionMode(t, "bigint"), "M")

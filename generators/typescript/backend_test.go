@@ -387,8 +387,9 @@ func TestTSMaxlenReject(t *testing.T) {
 			t.Errorf("message.ts payload arm must carry no maxlen test: missing %q\n%s", want, mod)
 		}
 	}
-	if n := strings.Count(mod, "above schema maxlen"); n != 2 {
-		t.Errorf("expected exactly 2 maxlen comparisons (one per bounded scalar), got %d\n%s", n, mod)
+	if n := strings.Count(mod, "InvalidMsg, \"s: string byte length above schema maxlen") +
+		strings.Count(mod, "InvalidMsg, \"b: blob byte length above schema maxlen"); n != 2 {
+		t.Errorf("expected exactly 2 decode maxlen comparisons (one per bounded scalar), got %d\n%s", n, mod)
 	}
 	// (c) A bounded wrapper-string ELEMENT carries its maxlen into the corelib
 	// collector, which takes the verdict at the element's length word rather
@@ -1323,8 +1324,9 @@ func TestTSCompactArrayKeepsItsTail(t *testing.T) {
 		"os.writeFp64Array(5, this.dfp64);",
 		"os.writeUnsignedArray(7, this.dbool);",
 		// A nested native row is written under the positional guard: an interior
-		// empty row is not written at all, the last one always is.
-		"      if (_e0.length !== 0 || _i0 === _a0.length - 1) {\n        os.writeUnsignedArray(_i0, _e0);\n      }\n",
+		// empty row is not written at all, the last one always is. Its own count
+		// is refused at encode before the row is written (generator#656).
+		"      if (_e0.length !== 0 || _i0 === _a0.length - 1) {\n        if (_e0.length > 3) throw new SofabError(SofabErrorCode.Argument, \"rows[]: array count above schema capacity 3\");\n        os.writeUnsignedArray(_i0, _e0);\n      }\n",
 	} {
 		if !strings.Contains(mod, want) {
 			t.Errorf("fixed-count message.ts missing unchanged dynamic form %q", want)
@@ -1719,10 +1721,12 @@ messages:
 		"    os.writeSequenceBeginLazy(1);\n    this.dynamic.forEach((_e0, _i0, _a0) => {\n      os.writeSequenceBeginLazy(_i0);\n      _e0.serialize(os);\n      if (_i0 === _a0.length - 1) {\n        os.writeSequenceEndKeep();\n      } else {\n        os.writeSequenceEnd();\n      }\n    });\n    os.writeSequenceEnd();\n",
 		// A leaf element gets the same rule as an unconditional `|| last` disjunct,
 		// walking the value whole — nothing is narrowed away first.
-		"    for (let _i0 = 0, _a0 = this.fstrs; _i0 < _a0.length; _i0++) {\n      if (_a0[_i0]! !== \"\" || _i0 === _a0.length - 1) {\n        os.writeString(_i0, _a0[_i0]!);\n      }\n    }\n",
-		"    for (let _i0 = 0, _a0 = this.fblobs; _i0 < _a0.length; _i0++) {\n      if (_a0[_i0]!.length !== 0 || _i0 === _a0.length - 1) {\n        os.writeBlob(_i0, _a0[_i0]!);\n      }\n    }\n",
+		// The bounds ride along (generator#656): the element maxlen is handed to
+		// writeString, a blob element and a row are compared before they are written.
+		"    for (let _i0 = 0, _a0 = this.fstrs; _i0 < _a0.length; _i0++) {\n      if (_a0[_i0]! !== \"\" || _i0 === _a0.length - 1) {\n        os.writeString(_i0, _a0[_i0]!, 8);\n      }\n    }\n",
+		"    for (let _i0 = 0, _a0 = this.fblobs; _i0 < _a0.length; _i0++) {\n      if (_a0[_i0]!.length !== 0 || _i0 === _a0.length - 1) {\n        if (_a0[_i0]!.length > 4) throw new SofabError(SofabErrorCode.Argument, \"fblobs[]: blob byte length above schema maxlen 4\");\n        os.writeBlob(_i0, _a0[_i0]!);\n      }\n    }\n",
 		// A NATIVE nested row has no frame of its own, so the rule lands on the write.
-		"    this.rows.forEach((_e0, _i0, _a0) => {\n      if (_e0.length !== 0 || _i0 === _a0.length - 1) {\n        os.writeUnsignedArray(_i0, _e0);\n      }\n    });\n",
+		"    this.rows.forEach((_e0, _i0, _a0) => {\n      if (_e0.length !== 0 || _i0 === _a0.length - 1) {\n        if (_e0.length > 3) throw new SofabError(SofabErrorCode.Argument, \"rows[]: array count above schema capacity 3\");\n        os.writeUnsignedArray(_i0, _e0);\n      }\n    });\n",
 	} {
 		if !strings.Contains(mod, want) {
 			t.Errorf("message.ts missing positional element rule %q:\n%s", want, mod)
