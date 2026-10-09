@@ -251,12 +251,26 @@ func (g *gen) emitUnionArm(f *rfile, o *unionOpt) {
 	head := fmt.Sprintf("            Self::%s(v) => ", o.variant)
 	// guarded wraps the write in the option's ≠-default test when it is D; any
 	// other option is written unconditionally.
+	// A string/blob option past its maxlen is refused before it is written
+	// (ARCHITECTURE §9.6), like a struct member: boundGuard leads the arm, on a
+	// line of its own (inline, `} if` reads as a missing `else`).
+	guard := ""
+	if (fld.Kind == ir.KindString || fld.Kind == ir.KindBlob) && fld.HasMaxlen && !g.staticStore {
+		guard = g.boundGuard("v", fld.Maxlen)
+	}
 	guarded := func(ne, write string) {
+		stmt := write
 		if o.isD {
-			f.line("%s{ if %s { %s } }", head, ne, write)
-		} else {
-			f.line("%s{ %s }", head, write)
+			stmt = fmt.Sprintf("if %s { %s }", ne, write)
 		}
+		if guard == "" {
+			f.line("%s{ %s }", head, stmt)
+			return
+		}
+		f.line("%s{", head)
+		f.line("                %s", guard)
+		f.line("                %s", stmt)
+		f.line("            }")
 	}
 	// The ≠-default test is an ordinary field's (rustLeafNe), so D and a struct
 	// member of the same kind cannot drift apart.
@@ -292,7 +306,7 @@ func (g *gen) emitUnionArm(f *rfile, o *unionOpt) {
 				f.line("                if !v.is_empty() {")
 				ind += "    "
 			}
-			g.serializeArray(f, ind, fmt.Sprintf("%d", id), "v", fld.Elem, fld.ElemRef, fld.ElemItems, fld.Count, fld.HasCount, 1, "")
+			g.serializeArray(f, ind, fmt.Sprintf("%d", id), "v", fld.Elem, fld.ElemRef, fld.ElemItems, fld.Count, fld.HasCount, fld.ElemMaxHas, fld.ElemMax, 1, "")
 			if o.isD {
 				f.line("                }")
 			}
@@ -304,7 +318,7 @@ func (g *gen) emitUnionArm(f *rfile, o *unionOpt) {
 			keep = ""
 		}
 		f.line("%s{", head)
-		g.serializeArray(f, "                ", fmt.Sprintf("%d", id), "v", fld.Elem, fld.ElemRef, fld.ElemItems, fld.Count, fld.HasCount, 1, keep)
+		g.serializeArray(f, "                ", fmt.Sprintf("%d", id), "v", fld.Elem, fld.ElemRef, fld.ElemItems, fld.Count, fld.HasCount, fld.ElemMaxHas, fld.ElemMax, 1, keep)
 		f.line("            }")
 	}
 }

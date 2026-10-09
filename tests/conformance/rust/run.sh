@@ -633,6 +633,21 @@ run_variant() {
     python3 "$ROOT/tests/conformance/lib/check_encode_bounds.py" "Rust [$label]" $ENCBND_OPTS \
         --backend "$(case "$label" in rs) echo rust ;; rs-static) echo rust-static ;; no-std-dynamic) echo rs-no-std-dynamic ;; no-std-static) echo rs-no-std ;; *) echo rs-no-std-std ;; esac)" \
         --cwd "$WORK/encbnd-$label" -- cargo run -q --
+    # The footprint opt-out: with the crate's `disable_encode_bounds` feature the
+    # guards are compiled out, so the same driver must now find the over-bound
+    # values written. Asserted on the cells a MAX_SIZE buffer still holds -- the
+    # 60-byte ones overflow it and stay refused as BufferFull either way.
+    if [ "$label" = "no-std-dynamic" ]; then
+        echo "==> [$label] disable_encode_bounds compiles the encode guards out"
+        OPTOUT=$(python3 "$ROOT/tests/conformance/lib/check_encode_bounds.py" "Rust [$label opt-out]" $ENCBND_OPTS \
+            --discover --cwd "$WORK/encbnd-$label" -- cargo run -q --features disable_encode_bounds -- | sed -n 's/^DISCOVER //p')
+        for cell in s_over_1 s_over_midchar b_over_1 au_count_plus_1 as_elem_over_maxlen as_count_plus_1 n_arr_count_plus_1; do
+            case "$OPTOUT" in *"\"$cell\""*) ;; *)
+                echo "FAIL: [$label] with disable_encode_bounds, $cell is still refused (got $OPTOUT)"; exit 1 ;;
+            esac
+        done
+        (cd "$WORK/encbnd-$label" && cargo build -q)
+    fi
 
     # Explicit empty is not absent (MESSAGE_SPEC §2; generator#645): an empty array,
     # string or blob whose declared default is non-empty is a value, written as a

@@ -133,11 +133,11 @@ KNOWN_GAP = {
     "cpp-static": STRINGS_AND_ARRAYS + SCALARS,
     "c-cpp": STRINGS_AND_ARRAYS + SCALARS,
     "c-cpp-static": STRINGS_AND_ARRAYS + SCALARS,
-    "rust": STRINGS_AND_ARRAYS + SCALARS,
-    "rust-static": STRINGS_AND_ARRAYS + SCALARS,
-    "rs-no-std": STRINGS_AND_ARRAYS + SCALARS,
-    "rs-no-std-dynamic": STRINGS_AND_ARRAYS + SCALARS,
-    "rs-no-std-std": STRINGS_AND_ARRAYS + SCALARS,
+    "rust": (),
+    "rust-static": (),
+    "rs-no-std": (),
+    "rs-no-std-dynamic": (),
+    "rs-no-std-std": (),
     "go": STRINGS_AND_ARRAYS + SCALARS,
     "java": STRINGS_AND_ARRAYS + SCALARS,
     "kotlin": STRINGS_AND_ARRAYS + SCALARS,
@@ -205,14 +205,20 @@ _block(("csharp",), SCALARS,
        "System.Text.Json throws on the number before encode (unhandled harness exception)")
 _block(("kotlin",), ("u8_over", "i16_over", "i16_under"),
        "the harness narrows the number to UByte/Short before the generated code sees it")
-_SERDE = "serde refuses the number for a u8/i8/i16-backed field before encode (harness panic)"
-_block(("rust",), SCALARS, _SERDE)
-_block(("rs-no-std-dynamic",), SCALARS, _SERDE)
-_HEAPLESS = ("the bounded container (heapless) or serde refuses the value at assignment, so the "
-             "harness panics before encode; the encoder is never reached")
-_block(("rust-static",), STRINGS_AND_ARRAYS + SCALARS, _HEAPLESS)
-_block(("rs-no-std",), STRINGS_AND_ARRAYS + SCALARS, _HEAPLESS)
-_block(("rs-no-std-std",), STRINGS_AND_ARRAYS + SCALARS, _HEAPLESS)
+_RS_WIDTH = ("the storage type guarantees the width: a u8/i16 field, an enum's i8 and a bitfield's "
+             "u8 backing hold exactly the declared width, so no over-width value exists to encode "
+             "(serde refuses the number at assignment, harness panic)")
+_block(("rust",), SCALARS, _RS_WIDTH)
+_block(("rs-no-std-dynamic",), SCALARS, _RS_WIDTH)
+_HEAPLESS = ("the storage type guarantees the bound: a heapless::String<N> / heapless::Vec<T, N> "
+             "cannot hold more than its schema maxlen/count (serde refuses the value at assignment, "
+             "harness panic), so no over-bound value exists to encode")
+_block(("rust-static",), STRINGS_AND_ARRAYS, _HEAPLESS)
+_block(("rust-static",), SCALARS, _RS_WIDTH)
+_block(("rs-no-std",), STRINGS_AND_ARRAYS, _HEAPLESS)
+_block(("rs-no-std",), SCALARS, _RS_WIDTH)
+_block(("rs-no-std-std",), STRINGS_AND_ARRAYS, _HEAPLESS)
+_block(("rs-no-std-std",), SCALARS, _RS_WIDTH)
 
 
 def emit_schema(bounded_only=False) -> int:

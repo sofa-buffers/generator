@@ -73,6 +73,10 @@ impl Default for Scalars {
 impl Scalars {
     /// Worst-case encoded size of this message, derived from the schema.
     pub const MAX_SIZE: usize = 55;
+    /// Write every field into `os`. A value past its schema bound -- a string or
+    /// blob over its `maxlen` in UTF-8 bytes, an array over its `count` -- is
+    /// refused with `sofab::Error::Argument` before any of it is written; a flush
+    /// sink may already hold the fields written ahead of it.
     pub fn serialize<_F: sofab::Flush>(&self, os: &mut sofab::OStream<'_, _F>) -> Result<(), sofab::Error> {
         if self.u8min != 0 { os.write_unsigned(0, self.u8min as sofab::Unsigned)?; }
         if self.u8max != 255 { os.write_unsigned(1, self.u8max as sofab::Unsigned)?; }
@@ -83,10 +87,13 @@ impl Scalars {
         if self.f64.to_bits() != 0xc004000000000000 { os.write_fp64(6, self.f64)?; }
         if !self.flag { os.write_boolean(7, self.flag)?; }
         if !self.flags.is_empty() {
+            if self.flags.len() > 4 { return Err(sofab::Error::Argument); }
             { let _t0: Vec<u8> = self.flags.iter().map(|_v| *_v as u8).collect(); os.write_array_unsigned(8, &_t0)?; }
         }
         Ok(())
     }
+    /// Encode the message. A value past its schema bound is refused with
+    /// `sofab::Error::Argument` (see `serialize`), and no bytes are returned.
     pub fn encode(&self) -> Result<Vec<u8>, sofab::Error> {
         let mut buf = vec![0u8; Self::MAX_SIZE];
         let used = { let mut os = sofab::OStream::new(&mut buf); self.serialize(&mut os)?; os.bytes_used() };

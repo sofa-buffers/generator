@@ -92,15 +92,37 @@ With `corelib: rs-no-std` `encode()` returns `Result<heapless::Vec<u8, N>, sofab
 with `?`, so an encode that fails never returns bytes. Ignoring the result of
 `serialize` is a `#[must_use]` warning.
 
+A value that holds more than its schema allows -- a string or blob over its
+`maxlen` (counted in UTF-8 bytes), an array over its `count`, an array element
+over its element `maxlen`, in the message or in any nested struct or union -- is
+refused: `serialize` and `encode()` return `Err(sofab::Error::Argument)` before
+that field is written, so `encode()` never returns a message a decoder would
+reject. This check exists only for `String`/`Vec` storage (`allow_dynamic: true`,
+the `rs` default); a `heapless` container refuses the over-long value when it is
+built, so an encode never sees one. A narrow integer, enum or bitfield field is
+stored in a Rust type of exactly its declared width, so it cannot hold a value
+past it. `serialize` into a flushing sink may already have handed the fields
+ahead of the refused one to the sink.
+
 `encode()` writes into one buffer of exactly `MAX_SIZE` bytes when the schema
-bounds the message. A value that holds more than its declared `maxlen` or
-`count` allows does not fit and the call returns `Err(sofab::Error::BufferFull)`
-instead of a short message. This can only happen with `String`/`Vec` storage
-(`allow_dynamic: true`, the `rs` default); a `heapless` container refuses the
-over-long value when it is built, so an encode never sees one. A schema with an
-unbounded field drains through a scratch buffer into a `Vec` and has no size to
-overrun; its `Err` can only be a status the corelib reports for an argument it
-refuses, such as an id past the wire limit.
+bounds the message. A schema with an unbounded field drains through a scratch
+buffer into a `Vec` and has no size to overrun.
+
+### `disable_encode_bounds` (`corelib: rs-no-std`, `allow_dynamic: true`)
+
+The generated crate declares a Cargo feature `disable_encode_bounds`, off by
+default. Turning it on compiles the bound checks above out of `serialize`, for
+the smallest `.text`; a value past its bound is then the caller's to avoid -- it
+is written as it is and a decoder rejects the message, or `encode()` returns
+`Err(sofab::Error::BufferFull)` when the message no longer fits `MAX_SIZE`.
+
+```toml
+sofabuffers-generated = { path = "...", default-features = false, features = ["disable_encode_bounds"] }
+```
+
+With `emit: sources` (the default) there is no generated `Cargo.toml`: declare
+`disable_encode_bounds = []` under `[features]` of the crate that includes the
+module (Cargo reports an unknown feature in a `cfg` otherwise).
 
 ## Field names
 

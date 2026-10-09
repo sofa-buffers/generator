@@ -1500,9 +1500,9 @@ messages:
 	// The leaf elements take the same rule through the same expression, count:N and
 	// count-less alike.
 	for _, want := range []string{
-		"for (_i0, _e0) in self.fstrs.iter().enumerate() { if !_e0.is_empty() || _i0 + 1 == self.fstrs.len() { os.write_str(_i0 as sofab::Id, _e0)?; } }",
-		"for (_i0, _e0) in self.dstrs.iter().enumerate() { if !_e0.is_empty() || _i0 + 1 == self.dstrs.len() { os.write_str(_i0 as sofab::Id, _e0)?; } }",
-		"for (_i0, _e0) in self.dblobs.iter().enumerate() { if !_e0.is_empty() || _i0 + 1 == self.dblobs.len() { os.write_blob(_i0 as sofab::Id, _e0)?; } }",
+		"for (_i0, _e0) in self.fstrs.iter().enumerate() {\n            if _e0.len() > 8 { return Err(sofab::Error::Argument); }\n            if !_e0.is_empty() || _i0 + 1 == self.fstrs.len() { os.write_str(_i0 as sofab::Id, _e0)?; }\n        }",
+		"for (_i0, _e0) in self.dstrs.iter().enumerate() {\n            if _e0.len() > 8 { return Err(sofab::Error::Argument); }\n            if !_e0.is_empty() || _i0 + 1 == self.dstrs.len() { os.write_str(_i0 as sofab::Id, _e0)?; }\n        }",
+		"for (_i0, _e0) in self.dblobs.iter().enumerate() {\n            if _e0.len() > 8 { return Err(sofab::Error::Argument); }\n            if !_e0.is_empty() || _i0 + 1 == self.dblobs.len() { os.write_blob(_i0 as sofab::Id, _e0)?; }\n        }",
 	} {
 		if !strings.Contains(got, want) {
 			t.Errorf("message.rs missing %q:\n%s", want, got)
@@ -3537,6 +3537,18 @@ func TestRustGuardsDoNotReadAsMissingElse(t *testing.T) {
 			}
 		}
 	}
+	// The encode-side bound guards, inline in an element loop or a union arm.
+	for _, cfg := range []map[string]any{{"corelib": "rs"}, {"corelib": "rs-no-std", "allow_dynamic": true}} {
+		m := moduleFromYAML(t, encodeBoundSrc, cfg)
+		// Each guard is a line of its own: nothing follows its `}` on the line,
+		// neither a statement (`} if` reads as a missing else) nor a `;` that the
+		// opt-out cfg would leave behind as an empty statement.
+		for _, bad := range []string{"Argument); } ", "Argument); };"} {
+			if strings.Contains(m, bad) {
+				t.Errorf("%v: an encode guard is followed by %q with no statement end", cfg, bad)
+			}
+		}
+	}
 }
 
 // TestRustNestedNativeRowIsNotReborrowed: a row of a matrix is an element of the
@@ -3615,9 +3627,10 @@ messages:
 }
 
 // TestRustEncodeReportsEveryWrite: serialize and encode return a Result and no
-// write status is discarded, so a value filled past its declared bound surfaces
-// as the corelib's BufferFull instead of a short, malformed message (§9.6). It
-// covers each encode branch: heapless, bounded std, and the unbounded sink.
+// write status is discarded, so every status the corelib reports -- an
+// over-bound value's Argument included (TestRustEncodeRefusesOverBound) --
+// surfaces instead of a short, malformed message (§9.6). It covers each encode
+// branch: heapless, bounded std, and the unbounded sink.
 func TestRustEncodeReportsEveryWrite(t *testing.T) {
 	for _, tc := range []struct {
 		name    string
@@ -3660,6 +3673,138 @@ func TestRustEncodeReportsEveryWrite(t *testing.T) {
 			if strings.Contains(m, "self.serialize(&mut os);") {
 				t.Errorf("%s: encode() ignores serialize's result", tc.name)
 			}
+		}
+	}
+}
+
+// encodeBoundSrc carries every bound an encoder can see past: a string and a blob
+// maxlen, a native array count, a string array's count and element maxlen, a
+// nested struct's array, a matrix's outer and inner count, and a union's string
+// option -- beside the same kinds unbounded, which must stay unguarded.
+const encodeBoundSrc = `
+version: 1
+messages:
+  m:
+    payload:
+      s: { id: 0, type: string, maxlen: 4 }
+      b: { id: 1, type: blob, maxlen: 5 }
+      au: { id: 2, type: array, items: { type: u32, count: 3 } }
+      as: { id: 3, type: array, items: { type: string, count: 6, maxlen: 7 } }
+      n:
+        id: 4
+        type: struct
+        fields:
+          arr: { id: 0, type: array, items: { type: u16, count: 2 } }
+      mat: { id: 5, type: array, items: { type: array, count: 8, items: { type: u8, count: 9 } } }
+      ab: { id: 6, type: array, items: { type: blob, count: 10, maxlen: 11 } }
+      un:
+        id: 7
+        type: union
+        default_id: 0
+        oneof:
+          us: { id: 0, type: string, maxlen: 12 }
+          ub: { id: 1, type: blob, maxlen: 13 }
+          ua: { id: 2, type: array, items: { type: i8, count: 14 } }
+`
+
+const encodeUnboundSrc = `
+version: 1
+messages:
+  m:
+    payload:
+      s: { id: 0, type: string }
+      b: { id: 1, type: blob }
+      a: { id: 2, type: array, items: { type: u32 } }
+      as: { id: 3, type: array, items: { type: string } }
+`
+
+// TestRustEncodeRefusesOverBound (ARCHITECTURE §9.6): with String/Vec storage a
+// value past its schema bound is refused with the corelib's Argument before it
+// is written -- one guard per bound, at the field, the element or the union
+// option. With heapless storage the type is the guarantee and nothing is
+// emitted. Under corelib-rs-no-std every guard carries the cfg of the
+// `disable_encode_bounds` opt-out, which the generated crate declares.
+func TestRustEncodeRefusesOverBound(t *testing.T) {
+	guards := []string{
+		"if self.s.len() > 4 { return Err(sofab::Error::Argument); }",
+		"if self.b.len() > 5 { return Err(sofab::Error::Argument); }",
+		"if self.au.len() > 3 { return Err(sofab::Error::Argument); }",
+		"if self.r#as.len() > 6 { return Err(sofab::Error::Argument); }",
+		"if _e0.len() > 7 { return Err(sofab::Error::Argument); }",
+		"if self.arr.len() > 2 { return Err(sofab::Error::Argument); }",
+		"if self.mat.len() > 8 { return Err(sofab::Error::Argument); }",
+		"if _e0.len() > 9 { return Err(sofab::Error::Argument); }",
+		"if self.ab.len() > 10 { return Err(sofab::Error::Argument); }",
+		"if _e0.len() > 11 { return Err(sofab::Error::Argument); }",
+		"if v.len() > 12 { return Err(sofab::Error::Argument); }",
+		"if v.len() > 13 { return Err(sofab::Error::Argument); }",
+		"if v.len() > 14 { return Err(sofab::Error::Argument); }",
+	}
+	const optOut = `#[cfg(not(feature = "disable_encode_bounds"))] `
+	for _, tc := range []struct {
+		name    string
+		cfg     map[string]any
+		guarded bool
+		cfgAttr bool
+	}{
+		{"rs", map[string]any{"corelib": "rs"}, true, false},
+		{"rs static", map[string]any{"corelib": "rs", "allow_dynamic": false}, false, false},
+		{"rs-no-std dynamic", map[string]any{"corelib": "rs-no-std", "allow_dynamic": true}, true, true},
+		{"rs-no-std dynamic std", map[string]any{"corelib": "rs-no-std", "allow_dynamic": true, "no_std": false}, true, true},
+		{"rs-no-std static", map[string]any{"corelib": "rs-no-std"}, false, false},
+		{"rs-no-std static std", map[string]any{"corelib": "rs-no-std", "no_std": false}, false, false},
+	} {
+		cfg := map[string]any{"emit": "project"}
+		for k, v := range tc.cfg {
+			cfg[k] = v
+		}
+		var m, cargo string
+		for _, f := range filesFromYAML(t, encodeBoundSrc, cfg) {
+			switch f.Path {
+			case "src/message.rs":
+				m = string(f.Content)
+			case "Cargo.toml":
+				cargo = string(f.Content)
+			}
+		}
+		if !tc.guarded {
+			if strings.Contains(m, "sofab::Error::Argument") || strings.Contains(m, "disable_encode_bounds") {
+				t.Errorf("%s: heapless storage guarantees the bound, yet a guard is emitted:\n%s", tc.name, m)
+			}
+			if strings.Contains(cargo, "disable_encode_bounds") {
+				t.Errorf("%s: a crate without guards declares the opt-out:\n%s", tc.name, cargo)
+			}
+			continue
+		}
+		for _, g := range guards {
+			want := g
+			if tc.cfgAttr {
+				want = optOut + g
+			}
+			if !strings.Contains(m, want) {
+				t.Errorf("%s: missing guard %q", tc.name, want)
+			}
+		}
+		if n := strings.Count(m, "return Err(sofab::Error::Argument)"); n != len(guards) {
+			t.Errorf("%s: %d guards emitted, want exactly %d (one per bound)", tc.name, n, len(guards))
+		}
+		if got := strings.Count(m, optOut); tc.cfgAttr != (got == len(guards)) || (!tc.cfgAttr && got != 0) {
+			t.Errorf("%s: %d guards carry the opt-out cfg", tc.name, got)
+		}
+		if tc.cfgAttr != strings.Contains(cargo, "\ndisable_encode_bounds = []\n") {
+			t.Errorf("%s: Cargo.toml declares the opt-out feature: %v, want %v:\n%s",
+				tc.name, !tc.cfgAttr, tc.cfgAttr, cargo)
+		}
+		// Each guard leads its write: the string field's guard precedes the write.
+		if gi, wi := strings.Index(m, guards[0]), strings.Index(m, "os.write_str(0, &self.s)?;"); gi < 0 || wi < gi {
+			t.Errorf("%s: the maxlen guard must precede the string write", tc.name)
+		}
+	}
+	// An unbounded field has no bound to refuse at.
+	for _, corelib := range []string{"rs"} {
+		m := moduleFromYAML(t, encodeUnboundSrc, map[string]any{"corelib": corelib})
+		if strings.Contains(m, "return Err(sofab::Error::Argument)") {
+			t.Errorf("[%s] an unbounded field is guarded:\n%s", corelib, m)
 		}
 	}
 }

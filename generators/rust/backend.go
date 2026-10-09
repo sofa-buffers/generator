@@ -631,6 +631,15 @@ func (g *gen) emitStruct(f *rfile, name string, fields []*ir.Field, msg *ir.Mess
 	// into a buffer (NoFlush) or straight into a transport that drains the
 	// buffer as it fills -- the corelib supports both, and pinning the signature
 	// to NoFlush made the streaming half unreachable from generated code.
+	if !g.staticStore {
+		f.line("    /// Write every field into `os`. A value past its schema bound -- a string or")
+		f.line("    /// blob over its `maxlen` in UTF-8 bytes, an array over its `count` -- is")
+		f.line("    /// refused with `sofab::Error::Argument` before any of it is written; a flush")
+		f.line("    /// sink may already hold the fields written ahead of it.")
+		if !g.std() {
+			f.line("    /// The `%s` feature compiles that check out.", encodeBoundsFeature)
+		}
+	}
 	f.line("    pub fn serialize<_F: sofab::Flush>(&self, os: &mut sofab::OStream<'_, _F>) -> Result<(), sofab::Error> {")
 	for _, fld := range fields {
 		g.emitSerialize(f, fld)
@@ -639,6 +648,10 @@ func (g *gen) emitStruct(f *rfile, name string, fields []*ir.Field, msg *ir.Mess
 	f.line("    }")
 
 	if isMessage {
+		if !g.staticStore {
+			f.line("    /// Encode the message. A value past its schema bound is refused with")
+			f.line("    /// `sofab::Error::Argument` (see `serialize`), and no bytes are returned.")
+		}
 		if g.noStd {
 			// Heap-free encode into a fixed-capacity heapless::Vec sized by MAX_SIZE.
 			size := g.messageSize(name, fields).Size
@@ -723,8 +736,10 @@ func (g *gen) emitSerialize(f *rfile, fld *ir.Field) {
 	case ir.KindFP64:
 		write = fmt.Sprintf("os.write_fp64(%d, %s)?;", fld.ID, acc)
 	case ir.KindString:
+		g.emitMaxlenGuard(f, fld, acc)
 		write = fmt.Sprintf("os.write_str(%d, &%s)?;", fld.ID, acc)
 	case ir.KindBlob:
+		g.emitMaxlenGuard(f, fld, acc)
 		// blob is a leaf: omit when equal to its default. Compare as slices so the
 		// same form works for std Vec and no_std heapless/alloc Vec alike.
 		if raw, ok := g.blobBytes(fld); ok {
@@ -752,6 +767,37 @@ func (g *gen) emitSerialize(f *rfile, fld *ir.Field) {
 	f.line("        if %s { %s }", g.rustLeafNe(acc, fld), write)
 }
 
+// encodeBoundsFeature is the Cargo feature of a corelib-rs-no-std crate that
+// compiles every encode-side bound guard out (the footprint opt-out, spelled
+// SOFAB_DISABLE_ENCODE_BOUNDS on the C family). Off by default: the guards are on.
+const encodeBoundsFeature = "disable_encode_bounds"
+
+// boundGuard is the encode-side guard for one schema bound (ARCHITECTURE §9.6):
+// a value the caller filled past its declared maxlen (UTF-8 bytes) or count is
+// refused with the corelib's argument error before any of it is written, never
+// emitted as a message the decoder would reject. It is emitted only where the
+// storage is a growable container: a heapless String<N>/Vec<T, N> cannot hold
+// more than its bound, so the type already guarantees it. Under corelib-rs-no-std
+// the guard carries the cfg that the opt-out feature removes.
+func (g *gen) boundGuard(val string, bound int64) string {
+	guard := fmt.Sprintf("if %s.len() > %d { return Err(sofab::Error::Argument); }", val, bound)
+	if !g.std() {
+		return fmt.Sprintf("#[cfg(not(feature = %q))] %s", encodeBoundsFeature, guard)
+	}
+	return guard
+}
+
+// hasEncodeBoundsFeature reports whether the crate declares encodeBoundsFeature:
+// a corelib-rs-no-std crate whose bounded fields live in growable containers.
+func (g *gen) hasEncodeBoundsFeature() bool { return !g.std() && !g.staticStore }
+
+// emitMaxlenGuard emits the maxlen guard of a string or blob field, if it has one.
+func (g *gen) emitMaxlenGuard(f *rfile, fld *ir.Field, acc string) {
+	if fld.HasMaxlen && !g.staticStore {
+		f.line("        %s", g.boundGuard(acc, fld.Maxlen))
+	}
+}
+
 func (g *gen) emitSerializeArray(f *rfile, fld *ir.Field, acc string) {
 	// A native scalar array is a leaf field: omit it when equal to its default
 	// (materialized in Default), else when empty. A composite/dynamic-element
@@ -767,7 +813,7 @@ func (g *gen) emitSerializeArray(f *rfile, fld *ir.Field, acc string) {
 	// wire.
 	if isNativeArrayElem(fld.Elem) {
 		f.line("        if %s {", g.nativeArrayNe(fld, acc))
-		g.serializeArray(f, "            ", fmt.Sprintf("%d", fld.ID), acc, fld.Elem, fld.ElemRef, fld.ElemItems, fld.Count, fld.HasCount, 0, "")
+		g.serializeArray(f, "            ", fmt.Sprintf("%d", fld.ID), acc, fld.Elem, fld.ElemRef, fld.ElemItems, fld.Count, fld.HasCount, fld.ElemMaxHas, fld.ElemMax, 0, "")
 		f.line("        }")
 		return
 	}
@@ -779,7 +825,7 @@ func (g *gen) emitSerializeArray(f *rfile, fld *ir.Field, acc string) {
 	// `if value != default { ... write_sequence_end_keep() }` -- so that a value
 	// differing from a non-empty default still reaches the wire as the empty
 	// wrapper, the only encoding of "explicitly empty" (MESSAGE_SPEC §2, §3).
-	g.serializeArray(f, "        ", fmt.Sprintf("%d", fld.ID), acc, fld.Elem, fld.ElemRef, fld.ElemItems, fld.Count, fld.HasCount, 0, "")
+	g.serializeArray(f, "        ", fmt.Sprintf("%d", fld.ID), acc, fld.Elem, fld.ElemRef, fld.ElemItems, fld.Count, fld.HasCount, fld.ElemMaxHas, fld.ElemMax, 0, "")
 }
 
 // nativeArrayNe is the `!= default` write guard for a native scalar array field
@@ -878,7 +924,7 @@ func emitSeqEnd(f *rfile, ind, keepIf string) {
 // boolean lowering needs to name its heapless temporary; keepIf is the closer
 // this call's own wrapper takes (see emitSeqEnd), ignored by the native element
 // kinds, which open no sequence.
-func (g *gen) serializeArray(f *rfile, ind, idExpr, val string, elem ir.Kind, ref *ir.TypeRef, items *ir.ArrayElem, count int64, hasCount bool, depth int, keepIf string) {
+func (g *gen) serializeArray(f *rfile, ind, idExpr, val string, elem ir.Kind, ref *ir.TypeRef, items *ir.ArrayElem, count int64, hasCount bool, elemMaxHas bool, elemMax int64, depth int, keepIf string) {
 	iv := fmt.Sprintf("_i%d", depth)
 	ev := fmt.Sprintf("_e%d", depth)
 	tv := fmt.Sprintf("_t%d", depth)
@@ -888,6 +934,25 @@ func (g *gen) serializeArray(f *rfile, ind, idExpr, val string, elem ir.Kind, re
 	borrowed := "&" + val
 	if depth > 0 {
 		borrowed = val
+	}
+	// The count guard (ARCHITECTURE §9.6): an array the caller filled past its
+	// declared capacity is refused before any of it is written.
+	if hasCount && !g.staticStore {
+		f.line("%s%s", ind, g.boundGuard(val, count))
+	}
+	// leafLoop writes a string/blob element loop. An element's maxlen guard leads
+	// the element's write, on a line of its own: inline, `} if` reads as a missing
+	// `else`, and a `};` would leave a stray `;` once the opt-out cfg removes it.
+	leafLoop := func(write string) {
+		body := fmt.Sprintf("if !%s.is_empty() || %s { %s }", ev, lastElemExpr(iv, val), write)
+		if !elemMaxHas || g.staticStore {
+			f.line("%sfor (%s, %s) in %s.iter().enumerate() { %s }", ind, iv, ev, val, body)
+			return
+		}
+		f.line("%sfor (%s, %s) in %s.iter().enumerate() {", ind, iv, ev, val)
+		f.line("%s    %s", ind, g.boundGuard(ev, elemMax))
+		f.line("%s    %s", ind, body)
+		f.line("%s}", ind)
 	}
 	switch elem {
 	case ir.KindU8, ir.KindU16, ir.KindU32, ir.KindU64, ir.KindBitfield:
@@ -914,12 +979,12 @@ func (g *gen) serializeArray(f *rfile, ind, idExpr, val string, elem ir.Kind, re
 		// §2, applied to an element. At the LAST index it is written whatever its
 		// value: see lastElemExpr.
 		f.line("%sos.write_sequence_begin_lazy(%s)?;", ind, idExpr)
-		f.line("%sfor (%s, %s) in %s.iter().enumerate() { if !%s.is_empty() || %s { os.write_str(%s as sofab::Id, %s)?; } }", ind, iv, ev, val, ev, lastElemExpr(iv, val), iv, ev)
+		leafLoop(fmt.Sprintf("os.write_str(%s as sofab::Id, %s)?;", iv, ev))
 		emitSeqEnd(f, ind, keepIf)
 	case ir.KindBlob:
 		// A blob element is a leaf, exactly like the string element above.
 		f.line("%sos.write_sequence_begin_lazy(%s)?;", ind, idExpr)
-		f.line("%sfor (%s, %s) in %s.iter().enumerate() { if !%s.is_empty() || %s { os.write_blob(%s as sofab::Id, %s)?; } }", ind, iv, ev, val, ev, lastElemExpr(iv, val), iv, ev)
+		leafLoop(fmt.Sprintf("os.write_blob(%s as sofab::Id, %s)?;", iv, ev))
 		emitSeqEnd(f, ind, keepIf)
 	case ir.KindStruct, ir.KindUnion:
 		// A sequence-form element obeys the SAME rule as the leaf elements above --
@@ -944,13 +1009,13 @@ func (g *gen) serializeArray(f *rfile, ind, idExpr, val string, elem ir.Kind, re
 			// equal to the element default (the empty row) is not written at all, and
 			// the last row always is.
 			f.line("%s    if !%s.is_empty() || %s {", ind, ev, lastElemExpr(iv, val))
-			g.serializeArray(f, ind+"        ", fmt.Sprintf("%s as sofab::Id", iv), ev, items.Elem, items.ElemRef, items.ElemItems, items.Count, items.HasCount, depth+1, "")
+			g.serializeArray(f, ind+"        ", fmt.Sprintf("%s as sofab::Id", iv), ev, items.Elem, items.ElemRef, items.ElemItems, items.Count, items.HasCount, items.ElemMaxHas, items.ElemMax, depth+1, "")
 			f.line("%s    }", ind)
 		} else {
 			// A wrapper row has its own frame, so it takes the closer instead -- the
 			// same interior/last choice, expressed the same way as for a struct
 			// element above.
-			g.serializeArray(f, ind+"    ", fmt.Sprintf("%s as sofab::Id", iv), ev, items.Elem, items.ElemRef, items.ElemItems, items.Count, items.HasCount, depth+1, lastElemExpr(iv, val))
+			g.serializeArray(f, ind+"    ", fmt.Sprintf("%s as sofab::Id", iv), ev, items.Elem, items.ElemRef, items.ElemItems, items.Count, items.HasCount, items.ElemMaxHas, items.ElemMax, depth+1, lastElemExpr(iv, val))
 		}
 		f.line("%s}", ind)
 		emitSeqEnd(f, ind, keepIf)
