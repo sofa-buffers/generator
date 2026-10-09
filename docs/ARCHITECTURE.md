@@ -5480,11 +5480,14 @@ produce two different generated shapes, and conflating them is a truncation bug:
   `sofab.NewEncoderBuffer`, Python `Encoder.over_buffer(buf, 0)`, TypeScript
   `new OStream(buf)`, Dart `Encoder.overBuffer(buf)`, Kotlin `OStream(buf)`, C#
   `new OStream(buf)`, Zig `sofab.OStream.init(buf)`).
-  A value the caller filled past its own declared bound does not fit, and is **reported** (buffer-full) rather than emitted short —
-  §5.1 forbids returning partial output as if it were complete.
-  Rust reports it in the type: `serialize` and `encode()` return a `Result`, every
-  `write_*` status is propagated with `?`, and the harness `encode` exits non-zero
-  with nothing on stdout. `tests/conformance/lib/maxsize_fill.sh`
+  A value the caller filled past its own declared bound is **refused** at the
+  field, before it is written (§9.6.1), not left for `MAX_SIZE` to catch: a single
+  over-bound value in a small message never overflows the buffer. Whatever does
+  fail a write is reported, never emitted short — §5.1 forbids returning partial
+  output as if it were complete.
+  Rust reports every write failure in the type: `serialize` and `encode()` return a
+  `Result`, every `write_*` status is propagated with `?`, and the harness `encode`
+  exits non-zero with nothing on stdout. `tests/conformance/lib/maxsize_fill.sh`
   (`check_maxsize_overfill`) feeds the max-fill message with `f_str` far past its
   `maxlen` and requires that refusal; a fixed-capacity container refuses the value
   at insert, so the static Rust variants assert instead that no write status is
@@ -5502,8 +5505,9 @@ produce two different generated shapes, and conflating them is a truncation bug:
   and recover most of this, and is the place to look if the footprint rows need it back.
   Zig spells the bounded shape in a few emitted lines in `encode()` (allocate
   `MAX_SIZE` from the caller's allocator with an `errdefer` free, `OStream.init`, `serialize`, `realloc` down
-  to `bytesUsed()`), so the returned slice is owned and exactly the encoded size; an
-  over-bound message returns `error.BufferFull`. Measured (`tests/bench/run.sh
+  to `bytesUsed()`), so the returned slice is owned and exactly the encoded size; a
+  value past its bound returns `error.InvalidArgument` from `serialize` (§9.6.1).
+  Measured (`tests/bench/run.sh
   --rows zig`, same corelib): `zig` encode Ir/op 10118 -> 9135 (-9.7 %), decode
   unchanged.
 - **unbounded** — `MAX_SIZE` is an imposed ceiling, so it must not size a buffer:
@@ -5603,6 +5607,170 @@ of its own: every C++ profile compiles the generated `fill.hpp` under `-Wall
 -Wextra -Werror -fsyntax-only`, so the next literal or attribute defect in the
 one header that carries every wire shape fails the suite rather than a user's
 build.
+
+#### 9.6.1 Encode-side bounds: an over-bound value is refused
+
+**The rule.** A schema bound binds the encoder exactly as it binds the decoder.
+MESSAGE_SPEC §7.1 makes an over-count array, an over-`maxlen` string or blob and
+an over-width integer, enum or bitfield INVALID on the wire. The encoder is the
+other half: a value the caller put past its own declared bound is **refused at
+encode**, before it is written. The encoder never clamps, truncates or masks it.
+The bounds checked are:
+
+- a `string` or `blob` past `maxlen`, counted in UTF-8 bytes;
+- an array past `count`, at every declared level: nested rows, struct and union
+  arrays, union options;
+- the `maxlen` of each `array<string>` / `array<blob>` element;
+- an integer, enum or bitfield past the width its declaration implies (§1:
+  the declared width binds, not the constant set or the mask), wherever the
+  storage type can hold such a value at all.
+
+The refusal uses the corelib's existing bad-argument category: `InvalidArgument`
+/ `ARGUMENT` / `invalidArgument` (CORELIB_PLAN §6.3). `encode()` then returns no
+bytes. A streaming encode into a flushing sink may already have drained the
+fields before the refused one, as with any other write error, and the caller
+discards the message. A scalar, a string, a blob and an array's count are
+refused before any byte of the field. An integer array **element** whose width a
+corelib checks inside its write loop (Python's `write_u8_array` … family) is
+refused where the loop reaches it, after the array header and the elements
+before it: the encoder's output is then a failed message, never a short one
+handed back, and generated `encode()` raises and returns nothing.
+
+Before generator#656 the only guard was accidental: a bounded target whose
+buffer is exactly `MAX_SIZE` refused once the *whole message* overflowed it, and a
+single over-bound value in a small message never gets that far. The same input
+was, per backend, refused, written unchecked (and then rejected by the same
+stack's own decoder), or silently clamped or masked.
+
+**Where the check lives.** Only the generated code knows a schema bound. No
+corelib holds one, defaults one or clamps to one (CORELIB_PLAN §6.2.1: a limit
+is passed, not held). The check takes one of four forms, and each backend picks
+by where the measured quantity exists:
+
+1. **A generated per-field guard**, compared against the schema literal. It sits
+   immediately before the write it protects and, where the field has a write
+   branch (the omit-at-default test, interior-element sparsity), inside it, so a
+   field at its default pays nothing. Its shape is
+   `if (len(x) > N) <refuse>`, or the decode side's own width comparison
+   (`widthCond` / `declaredWidthCond` / `widthTest`) for a narrow scalar held in
+   a wider type, so the two directions cannot drift. It is one comparison per
+   field with that field's literal, which is what differs per schema (CLAUDE.md
+   "Generated code stays thin"), not a static helper.
+2. **A bound passed to a corelib call as an argument**, only where the quantity is
+   known only inside the corelib and computed there anyway:
+   - the UTF-8 byte length of a string on the UTF-16 runtimes. Java, Kotlin, C#
+     and TypeScript call `writeString(id, s, maxlen)`. The corelib compares in the
+     measuring pass it already runs for the `fixlen_word`, first rejecting
+     `chars > maxlen` without a scan, because UTF-8 is never shorter than
+     UTF-16. That costs no second pass and no allocation.
+   - Python's positional-only writers on both engines. A maxlen or count rides
+     as an argument (`write_string_bounded`, `write_bytes_bounded`,
+     `write_{bool,float32,float64}_array_bounded` from corelib-py#175, and the
+     `cap` of `write_u8_array(id, values, cap)`; a negative `cap` is no count
+     bound on every array writer). A declared integer width is a type and
+     goes in the name: `write_u8` … `write_i32`, `write_u8_array` …
+     `write_i64_array` (corelib-py#176). An extra argument costs every native
+     call its unpacking; a constant compare costs nothing. The plain writers
+     are unchanged.
+   - Dart's `writeUnsignedArrayInRange` / `writeSignedArrayInRange(id, values,
+     count, lo, hi)` for a narrow integer, enum or bitfield array held in
+     `Int64` elements. The element compare runs in the varint loop the writer
+     already has.
+3. **A corelib hook that only latches the error and takes no bound**: Go's
+   `Encoder.RejectArgument()`, and C++'s `OStreamImpl::rejectArgument()` in both
+   C++ corelibs. The generated guard decides, and the hook records the sticky
+   error that `Encode`/`encode()`/`ok()` report.
+4. **Descriptor-driven, in the corelib (C only).** C encodes through descriptors,
+   so `sofab_object_encode` in corelib-c-cpp checks with data the generated
+   descriptor already passes (`field->size` of the `char[maxlen + 1]` member),
+   never a schema literal.
+
+**Nothing is emitted where the storage type is the guarantee.** An integer stored
+at exactly its declared width (`uint8_t`, `UByte`, `byte`, `i16`, …), an enum or
+bitfield whose backing is the width its declaration implies, a primitive-array
+element held at its declared width, and a fixed-capacity container all need no
+check. Targets that hold a narrow value in a wider type do emit the width
+comparison: TypeScript, Python and Dart `number`/`int`, Java's `long`-held
+`u8`..`i32`/enum/bitfield, Kotlin's `Int`-held enum and `ULong`-held bitfield.
+
+**The clamp contract** (decision of 2026-10-07). A fixed-capacity container that
+clamps **on assignment**, before any encoder runs, keeps that behaviour as its
+documented contract, and no guard is emitted for it:
+
+- C++ `FixedString` / `FixedBytes` / `InlineVector` (`allow_dynamic: false`)
+  carry the bound as their capacity. `InlineVector::push_back` drops past `N`;
+  `emplace_back` keeps the last-slot reuse the decode binders depend on.
+- Zig `sofab.FixedArray(T, N)`: `set()` / `init()` keep the first `N` elements.
+- C's length and count companions: a blob's `__len` and an array or wrapper
+  count past the capacity are clamped to it at encode, and decode reads the
+  clamped value back.
+
+The UTF-8 boundary rule: a string clamp **never cuts inside a UTF-8 character**.
+C++ `FixedString` cuts at the last character boundary at or below `maxlen`
+(`detail::utf8Prefix`, out of line only for the over-long case so a literal
+still folds). Rust `heapless::String<N>` / `Vec<T, N>` refuse on assignment
+instead of clamping, and a C `char[maxlen + 1]` string that fills its member
+without a terminator is refused (`SOFAB_RET_E_ARGUMENT`). C reads that member
+with a bounded loop instead of `strlen`, which also fixes a read past the
+member. Scalars are never clamped by contract.
+
+**The footprint opt-out.** On the footprint profiles a user who guarantees every
+value fits may compile the encode checks out (a `SOFAB_DISABLE_*` knob is the
+user's call, not a conformance gap):
+
+- `corelib: c-cpp` (C and C++): `SOFAB_DISABLE_ENCODE_BOUNDS`, a CMake option
+  applied `PUBLIC`. The C++ wrapper reads it as `sofab::ENCODE_BOUNDS`
+  (`SOFAB_CPP_HAVE_ENCODE_BOUNDS`), and every generated check reads
+  `if (sofab::ENCODE_BOUNDS && …)`, so the checks fold away. In C it removes the
+  refusal but keeps the bounded read, so an unterminated value is emitted as the
+  whole buffer, which can end inside a UTF-8 character.
+- `corelib: rs-no-std` with `allow_dynamic: true`: the generated `Cargo.toml`
+  declares the feature `disable_encode_bounds`, off by default, and each guard
+  carries `#[cfg(not(feature = "disable_encode_bounds"))]`.
+
+The maxspeed targets have no opt-out. With the checks compiled out, a value past
+its bound is written as it is, and a decoder rejects the message.
+
+**Per language.** Cost is measured with `tests/bench/run.sh --rows <rows>` on
+`vehicle_telemetry`, before -> after. Decode Ir/op is unchanged on every row
+(within the bench's 0.3 % hysteresis), and `.data`/`.bss` are unchanged on every
+footprint row.
+
+| Target | Where the check lives | Measured cost |
+|---|---|---|
+| **C** (`c-cpp`, footprint) | corelib `sofab_object_encode`: bounded string read and refusal, length/count clamp; generated code emits no guard | `.text` ARMv6-m 5594 -> 5606 B (+12), ARMv7-m 5588 -> 5592 (+4), RV32IMC 6134 -> 6158 (+24); `strlen` is no longer linked (92 B in newlib-nano); encode 25974 -> 26491 Ir/op (+2.0 %) |
+| **C++** `corelib: cpp` (maxspeed) | generated `if (x.size() > N) { return _os.rejectArgument(); }` on `std::string`/`std::vector` only | `cpp-cpp` encode 11904 -> 11546 (-3.0 %); `-static` 10588 unchanged; `-unbounded` 8496 -> 8490 |
+| **C++** `corelib: c-cpp` (footprint) | same guards behind `sofab::ENCODE_BOUNDS`; static storage clamps | static `.text` ARMv6-m 8694 / ARMv7-m 8296 unchanged; `-dyn` ARMv6-m 15632 -> 15834 B (+202, 18 guards), ARMv7-m 14370 -> 14602 (+232); opt-out restores both; `-dyn` encode +0.3 % |
+| **Rust** `corelib: rs` (maxspeed) | generated `if x.len() > N { return Err(sofab::Error::Argument); }` on `String`/`Vec`, one per line; none under `heapless` | `rust-rs` encode 9731 -> 9573 (-1.6 %); `-static` 9630 unchanged; `-unbounded` 6850 -> 6856 (+0.09 %) |
+| **Rust** `corelib: rs-no-std` (footprint) | same guards behind `disable_encode_bounds`, only with `allow_dynamic: true` | `heapless` row `.text` 10465 unchanged; `-dyn` `.text` thumbv6m 12135 -> 12455 B (+320, 18 guards), opt-out 12135; one joined condition per struct measured 12463 and was rejected |
+| **Go** | generated `if len(x) > N { e.RejectArgument(); return }`; corelib-go#151 exports the hook | encode 18495 -> 18605 (+0.59 %); `-unbounded` unchanged |
+| **Java** | generated guards (blob, count, width); `writeString(id, s, maxlen)` (corelib-java#127) | encode 17022 -> 17363 (+2.0 %), about 5-6 Ir per guard that runs |
+| **Kotlin** | generated guards (blob, count, enum/bitfield width); `writeString(id, s, maxlen)` (corelib-kotlin-mp#59) | encode 17256 -> 17538 (+1.63 %): bounded strings +57..69 Ir, 22 guards about 10 Ir each |
+| **C#** | generated guards (blob, count); `WriteString(id, s, maxlen)` (corelib-cs#118); no width guard (`byte`/`short`/`enum : sbyte`) | encode 29201 -> 29413 (+0.73 %) |
+| **TypeScript** (all int64 modes) | generated guards (blob, count, width); `writeString(id, s, maxlen)` (corelib-ts#203) | encode `bigint` +0.95 %, `long` +0.93 %, `number` +0.90 % (V8 baseline tier) |
+| **Python** (both engines) | width-typed writers (`write_u8`, `write_i16_array(id, values, cap)`, corelib-py#176) and `*_bounded` writers for maxlen/count (corelib-py#175); a generated count guard for wrapper arrays only | native encode 127486 -> 129129 (+1.3 %), pure 1076634 -> 1087834 (+1.0 %); the width as a writer argument measured +3.7 % native, generated `if`/`raise` guards +8.7 %, both rejected |
+| **Dart** | generated guards (string/blob, count, width); `write{Unsigned,Signed}ArrayInRange` (corelib-dart#105) | encode 24592 -> 24713 (+0.49 %); an optional range argument on the existing writers measured +2.8 % and was rejected |
+| **Zig** | generated `if (x.len > N) return error.InvalidArgument;` on slices; `FixedArray` clamps | encode 9135 -> 9330 (+2.1 %; about 70 Ir of compares, the rest is LLVM no longer inlining four corelib calls); `-unbounded` +0.15 % |
+
+Two maxspeed rows got cheaper (`rust-rs` -1.6 %, `cpp-cpp` -3.0 %). The guards
+only add compares there, so the drop is code layout and inlining in the grown
+`serialize`, not the check itself. C++'s `rejectArgument` is
+`[[gnu::cold, gnu::noinline]]` on purpose: inlined at every site it pushed
+`serialize()` past GCC's inlining budget (`cpp-cpp` encode +4.4 %) and cost 300 B
+instead of 202 B on ARMv6-m.
+
+**Verification.** `tests/conformance/lib/check_encode_bounds.py` (§12) runs every
+cell for every variant that generates different code. Each variant's `KNOWN_GAP`
+is empty. `CLAMP_CONTRACT` lists the cells a container clamps by contract
+(`cpp-static`, `c-cpp-static`: strings and arrays; `zig`: the native array
+counts; `c`: the blob length and the counts) and asserts the clamped value,
+including a cut at a UTF-8 character boundary. A cell the harness cannot hand to
+the encoder (a JSON layer or a fixed-width type refuses or wraps the value first)
+is `STORAGE_BLOCKED` with its reason, and each backend's unit tests assert the
+emitted guard shape. Not yet in the driver: an integer, enum or bitfield **array
+element** past its declared width (`300` in an `array<u8>`). Today only the
+corelib tests of corelib-dart#105, corelib-py#175 and corelib-py#176 and the backend unit tests
+cover it.
 
 ---
 
@@ -6797,7 +6965,7 @@ A reimplementation is **conformant** when it reproduces these gates:
    is nothing left for a post-hoc scan to reach.
    *Encode bounds* (`tests/conformance/lib/check_encode_bounds.py`): an
    over-bound value of a bounded element is refused at encode (generator#656;
-   §9.6). The driver prints a probe schema (a string and a blob at `maxlen: 4`,
+   §9.6.1). The driver prints a probe schema (a string and a blob at `maxlen: 4`,
    native and string arrays at `count: 3`, a nested struct's array, a `u8`, an
    `i16`, an enum and a bitfield) plus an unbounded control, and sends one
    over-bound value per message through the harness `encode` verb: a string over
@@ -6808,11 +6976,12 @@ A reimplementation is **conformant** when it reproduces these gates:
    bound) must encode and decode back. Every suite runs it for every variant that
    generates different code (cpp x4, rust x5, typescript x3, python x2).
 
-   The decoder enforces every bound (MESSAGE_SPEC §7.1) and the encoder, today,
-   enforces none of them per value, so most cells are still open: the driver's
-   `KNOWN_GAP` per variant lists exactly the cells that fail today, a listed cell
-   that starts to pass fails the run, and the backend PR that fixes it removes its
-   entries. A cell the harness cannot reach (its JSON layer or storage type
+   Every backend now refuses each cell (§9.6.1), so every variant's `KNOWN_GAP`
+   is empty; the table stays, because a listed cell that starts to pass fails the
+   run, and a regression has to be listed there to land. A cell a fixed-capacity
+   container clamps at assignment is in `CLAMP_CONTRACT` instead, where the
+   clamped value is asserted and a cut inside a UTF-8 character fails. A cell the
+   harness cannot reach (its JSON layer or storage type
    refuses or wraps the value first, or a `heapless` container refuses at
    assignment) is `STORAGE_BLOCKED` with the reason and is reported, never counted
    as a pass. `--self-test` is the negative control: a model harness that enforces
