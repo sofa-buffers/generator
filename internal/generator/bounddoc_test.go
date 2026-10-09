@@ -23,7 +23,7 @@ func TestBoundNote(t *testing.T) {
 	}{{
 		name: "dynamic array names the capacity, the empty start and the reject",
 		got:  BoundNote(arr, StorageDynamic),
-		want: []string{"count 3", "CAPACITY", "starts empty", "INVALID", "never truncated"},
+		want: []string{"count 3", "CAPACITY", "starts empty", "INVALID", "never truncated", "encode refuses it"},
 	}, {
 		name: "fixed array does not repeat what the type already says",
 		got:  BoundNote(arr, StorageFixed),
@@ -36,11 +36,12 @@ func TestBoundNote(t *testing.T) {
 	}, {
 		name: "dynamic maxlen",
 		got:  BoundNote(str, StorageDynamic),
-		want: []string{"maxlen 8", "INVALID", "never truncated"},
+		want: []string{"maxlen 8", "INVALID", "never truncated", "encode refuses it"},
 	}, {
 		name: "fixed maxlen defers to the type for the capacity",
 		got:  BoundNote(str, StorageFixed),
-		want: []string{"maxlen 8", "capacity is in the type", "never truncated"},
+		want: []string{"maxlen 8", "capacity is in the type", "never holds a longer value", "INVALID"},
+		not:  []string{"never truncated", "encode refuses"},
 	}, {
 		name: "companion blob names the length member",
 		got:  BoundDoc{Storage: StorageCompanion, LenMember: "data_len"}.Note(&ir.Field{Name: "data", Kind: ir.KindBlob, HasMaxlen: true, Maxlen: 8}),

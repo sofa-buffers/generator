@@ -69,7 +69,7 @@ struct Scalars : sofab::Message {
     std::uint64_t u64max = 18446744073709551615ULL;
     std::int64_t i64min = (-9223372036854775807LL - 1);
     double f64 = -2.5;
-    /// Schema bound: count 4 is a CAPACITY, not a length -- starts empty; over 4 elements is INVALID, never truncated.
+    /// Schema bound: count 4 is a CAPACITY, not a length -- starts empty; over 4 elements is INVALID, never truncated: encode refuses it.
     std::vector<std::uint8_t> flags = {};
     float f32 = 3.14f;
     std::uint8_t u8min = 0;
