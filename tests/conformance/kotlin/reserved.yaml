@@ -16,43 +16,44 @@ $defs:
       "MAX_SIZE": { id: 5, type: u8 }
       "MAX_SIZE_LIMIT": { id: 6, type: u8 }
       "Seq": { id: 7, type: u8 }
-      "as": { id: 8, type: u8 }
-      "break": { id: 9, type: u8 }
-      "class": { id: 10, type: u8 }
-      "continue": { id: 11, type: u8 }
-      "decode": { id: 12, type: u8 }
-      "do": { id: 14, type: u8 }
-      "else": { id: 15, type: u8 }
-      "encode": { id: 16, type: u8 }
-      "encodeTo": { id: 17, type: u8 }
-      "false": { id: 18, type: u8 }
-      "for": { id: 19, type: u8 }
-      "fun": { id: 20, type: u8 }
-      "if": { id: 21, type: u8 }
-      "in": { id: 22, type: u8 }
-      "interface": { id: 23, type: u8 }
-      "is": { id: 24, type: u8 }
-      "isDefault": { id: 25, type: u8 }
-      "null": { id: 26, type: u8 }
-      "object": { id: 27, type: u8 }
-      "package": { id: 28, type: u8 }
-      "reset": { id: 29, type: u8 }
-      "return": { id: 30, type: u8 }
-      "serialize": { id: 31, type: u8 }
-      "super": { id: 32, type: u8 }
-      "this": { id: 33, type: u8 }
-      "throw": { id: 34, type: u8 }
-      "true": { id: 35, type: u8 }
-      "try": { id: 36, type: u8 }
-      "tryDecode": { id: 37, type: u8 }
-      "typealias": { id: 38, type: u8 }
-      "typeof": { id: 39, type: u8 }
-      "val": { id: 40, type: u8 }
-      "var": { id: 41, type: u8 }
-      "when": { id: 42, type: u8 }
-      "which": { id: 43, type: u8 }
-      "while": { id: 44, type: u8 }
-      inner2: { id: 45, type: struct, fields: { $ref: '#/$defs/struct/Inner2' } }
+      "SofabError": { id: 8, type: u8 }
+      "as": { id: 9, type: u8 }
+      "break": { id: 10, type: u8 }
+      "class": { id: 11, type: u8 }
+      "continue": { id: 12, type: u8 }
+      "decode": { id: 13, type: u8 }
+      "do": { id: 15, type: u8 }
+      "else": { id: 16, type: u8 }
+      "encode": { id: 17, type: u8 }
+      "encodeTo": { id: 18, type: u8 }
+      "false": { id: 19, type: u8 }
+      "for": { id: 20, type: u8 }
+      "fun": { id: 21, type: u8 }
+      "if": { id: 22, type: u8 }
+      "in": { id: 23, type: u8 }
+      "interface": { id: 24, type: u8 }
+      "is": { id: 25, type: u8 }
+      "isDefault": { id: 26, type: u8 }
+      "null": { id: 27, type: u8 }
+      "object": { id: 28, type: u8 }
+      "package": { id: 29, type: u8 }
+      "reset": { id: 30, type: u8 }
+      "return": { id: 31, type: u8 }
+      "serialize": { id: 32, type: u8 }
+      "super": { id: 33, type: u8 }
+      "this": { id: 34, type: u8 }
+      "throw": { id: 35, type: u8 }
+      "true": { id: 36, type: u8 }
+      "try": { id: 37, type: u8 }
+      "tryDecode": { id: 38, type: u8 }
+      "typealias": { id: 39, type: u8 }
+      "typeof": { id: 40, type: u8 }
+      "val": { id: 41, type: u8 }
+      "var": { id: 42, type: u8 }
+      "when": { id: 43, type: u8 }
+      "which": { id: 44, type: u8 }
+      "while": { id: 45, type: u8 }
+      inner2: { id: 46, type: struct, fields: { $ref: '#/$defs/struct/Inner2' } }
     ArrayKind: { x: { id: 0, type: u8 } }
     BooleanArray: { x: { id: 0, type: u8 } }
     ByteArray: { x: { id: 0, type: u8 } }
@@ -84,53 +85,54 @@ messages:
       "MAX_SIZE": { id: 5, type: u8 }
       "MAX_SIZE_LIMIT": { id: 6, type: u8 }
       "Seq": { id: 7, type: u8 }
-      "as": { id: 8, type: u8 }
-      "break": { id: 9, type: u8 }
-      "class": { id: 10, type: u8 }
-      "continue": { id: 11, type: u8 }
-      "decode": { id: 12, type: u8 }
-      "do": { id: 14, type: u8 }
-      "else": { id: 15, type: u8 }
-      "encode": { id: 16, type: u8 }
-      "encodeTo": { id: 17, type: u8 }
-      "false": { id: 18, type: u8 }
-      "for": { id: 19, type: u8 }
-      "fun": { id: 20, type: u8 }
-      "if": { id: 21, type: u8 }
-      "in": { id: 22, type: u8 }
-      "interface": { id: 23, type: u8 }
-      "is": { id: 24, type: u8 }
-      "isDefault": { id: 25, type: u8 }
-      "null": { id: 26, type: u8 }
-      "object": { id: 27, type: u8 }
-      "package": { id: 28, type: u8 }
-      "reset": { id: 29, type: u8 }
-      "return": { id: 30, type: u8 }
-      "serialize": { id: 31, type: u8 }
-      "super": { id: 32, type: u8 }
-      "this": { id: 33, type: u8 }
-      "throw": { id: 34, type: u8 }
-      "true": { id: 35, type: u8 }
-      "try": { id: 36, type: u8 }
-      "tryDecode": { id: 37, type: u8 }
-      "typealias": { id: 38, type: u8 }
-      "typeof": { id: 39, type: u8 }
-      "val": { id: 40, type: u8 }
-      "var": { id: 41, type: u8 }
-      "when": { id: 42, type: u8 }
-      "which": { id: 43, type: u8 }
-      "while": { id: 44, type: u8 }
-      inner:        { id: 45, type: struct, fields: { $ref: '#/$defs/struct/Inner' } }
-      inner_inner2: { id: 46, type: struct, fields: { $ref: '#/$defs/struct/Inner2' } }
-      u:            { id: 47, type: union, oneof: { "Companion": { id: 0, type: u8 }, "DecodeStatus": { id: 1, type: u8 }, "Decoder": { id: 2, type: u8 }, "ENC_SCRATCH": { id: 3, type: u8 }, "Long": { id: 4, type: u8 }, "MAX_SIZE": { id: 5, type: u8 }, "MAX_SIZE_LIMIT": { id: 6, type: u8 }, "Seq": { id: 7, type: u8 }, "as": { id: 8, type: u8 }, "break": { id: 9, type: u8 }, "class": { id: 10, type: u8 }, "continue": { id: 11, type: u8 }, "decode": { id: 12, type: u8 }, "do": { id: 14, type: u8 }, "else": { id: 15, type: u8 }, "encode": { id: 16, type: u8 }, "encodeTo": { id: 17, type: u8 }, "false": { id: 18, type: u8 }, "for": { id: 19, type: u8 }, "fun": { id: 20, type: u8 }, "if": { id: 21, type: u8 }, "in": { id: 22, type: u8 }, "interface": { id: 23, type: u8 }, "is": { id: 24, type: u8 }, "isDefault": { id: 25, type: u8 }, "null": { id: 26, type: u8 }, "object": { id: 27, type: u8 }, "package": { id: 28, type: u8 }, "reset": { id: 29, type: u8 }, "return": { id: 30, type: u8 }, "serialize": { id: 31, type: u8 }, "super": { id: 32, type: u8 }, "this": { id: 33, type: u8 }, "throw": { id: 34, type: u8 }, "true": { id: 35, type: u8 }, "try": { id: 36, type: u8 }, "tryDecode": { id: 37, type: u8 }, "typealias": { id: 38, type: u8 }, "typeof": { id: 39, type: u8 }, "val": { id: 40, type: u8 }, "var": { id: 41, type: u8 }, "when": { id: 42, type: u8 }, "which": { id: 43, type: u8 }, "while": { id: 44, type: u8 } } }
-      open:         { id: 48, type: u8 }
-      isOpen:       { id: 49, type: u8 }
-      getX:         { id: 50, type: u8 }
-      x:            { id: 51, type: u8 }
-      u2:           { id: 52, type: union, oneof: { a: { id: 0, type: u8 }, A_ID: { id: 1, type: u8 }, foo: { id: 2, type: u8 }, hasFoo: { id: 3, type: u8 }, open: { id: 4, type: u8 }, isOpen: { id: 5, type: u8 } } }
+      "SofabError": { id: 8, type: u8 }
+      "as": { id: 9, type: u8 }
+      "break": { id: 10, type: u8 }
+      "class": { id: 11, type: u8 }
+      "continue": { id: 12, type: u8 }
+      "decode": { id: 13, type: u8 }
+      "do": { id: 15, type: u8 }
+      "else": { id: 16, type: u8 }
+      "encode": { id: 17, type: u8 }
+      "encodeTo": { id: 18, type: u8 }
+      "false": { id: 19, type: u8 }
+      "for": { id: 20, type: u8 }
+      "fun": { id: 21, type: u8 }
+      "if": { id: 22, type: u8 }
+      "in": { id: 23, type: u8 }
+      "interface": { id: 24, type: u8 }
+      "is": { id: 25, type: u8 }
+      "isDefault": { id: 26, type: u8 }
+      "null": { id: 27, type: u8 }
+      "object": { id: 28, type: u8 }
+      "package": { id: 29, type: u8 }
+      "reset": { id: 30, type: u8 }
+      "return": { id: 31, type: u8 }
+      "serialize": { id: 32, type: u8 }
+      "super": { id: 33, type: u8 }
+      "this": { id: 34, type: u8 }
+      "throw": { id: 35, type: u8 }
+      "true": { id: 36, type: u8 }
+      "try": { id: 37, type: u8 }
+      "tryDecode": { id: 38, type: u8 }
+      "typealias": { id: 39, type: u8 }
+      "typeof": { id: 40, type: u8 }
+      "val": { id: 41, type: u8 }
+      "var": { id: 42, type: u8 }
+      "when": { id: 43, type: u8 }
+      "which": { id: 44, type: u8 }
+      "while": { id: 45, type: u8 }
+      inner:        { id: 46, type: struct, fields: { $ref: '#/$defs/struct/Inner' } }
+      inner_inner2: { id: 47, type: struct, fields: { $ref: '#/$defs/struct/Inner2' } }
+      u:            { id: 48, type: union, oneof: { "Companion": { id: 0, type: u8 }, "DecodeStatus": { id: 1, type: u8 }, "Decoder": { id: 2, type: u8 }, "ENC_SCRATCH": { id: 3, type: u8 }, "Long": { id: 4, type: u8 }, "MAX_SIZE": { id: 5, type: u8 }, "MAX_SIZE_LIMIT": { id: 6, type: u8 }, "Seq": { id: 7, type: u8 }, "SofabError": { id: 8, type: u8 }, "as": { id: 9, type: u8 }, "break": { id: 10, type: u8 }, "class": { id: 11, type: u8 }, "continue": { id: 12, type: u8 }, "decode": { id: 13, type: u8 }, "do": { id: 15, type: u8 }, "else": { id: 16, type: u8 }, "encode": { id: 17, type: u8 }, "encodeTo": { id: 18, type: u8 }, "false": { id: 19, type: u8 }, "for": { id: 20, type: u8 }, "fun": { id: 21, type: u8 }, "if": { id: 22, type: u8 }, "in": { id: 23, type: u8 }, "interface": { id: 24, type: u8 }, "is": { id: 25, type: u8 }, "isDefault": { id: 26, type: u8 }, "null": { id: 27, type: u8 }, "object": { id: 28, type: u8 }, "package": { id: 29, type: u8 }, "reset": { id: 30, type: u8 }, "return": { id: 31, type: u8 }, "serialize": { id: 32, type: u8 }, "super": { id: 33, type: u8 }, "this": { id: 34, type: u8 }, "throw": { id: 35, type: u8 }, "true": { id: 36, type: u8 }, "try": { id: 37, type: u8 }, "tryDecode": { id: 38, type: u8 }, "typealias": { id: 39, type: u8 }, "typeof": { id: 40, type: u8 }, "val": { id: 41, type: u8 }, "var": { id: 42, type: u8 }, "when": { id: 43, type: u8 }, "which": { id: 44, type: u8 }, "while": { id: 45, type: u8 } } }
+      open:         { id: 49, type: u8 }
+      isOpen:       { id: 50, type: u8 }
+      getX:         { id: 51, type: u8 }
+      x:            { id: 52, type: u8 }
+      u2:           { id: 53, type: union, oneof: { a: { id: 0, type: u8 }, A_ID: { id: 1, type: u8 }, foo: { id: 2, type: u8 }, hasFoo: { id: 3, type: u8 }, open: { id: 4, type: u8 }, isOpen: { id: 5, type: u8 } } }
   m2:
     payload:
-      "decoder": { id: 13, type: u8 }
+      "decoder": { id: 14, type: u8 }
   outer:
     payload:
       t1: { id: 1, type: struct, fields: { $ref: '#/$defs/struct/ArrayKind' } }

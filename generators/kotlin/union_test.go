@@ -149,17 +149,17 @@ func TestKotlinUnionEncodeArms(t *testing.T) {
 	mustContain(t, "M_U.serialize", ser,
 		"when (which) {",
 		"NUM_ID -> {\n                os.writeUnsigned(0, this._num.toLong())\n            }",
-		"S_ID -> {\n                os.writeString(1, this._s)\n            }",
+		"S_ID -> {\n                os.writeString(1, this._s, 8)\n            }",
 		"PT_ID -> {\n                os.writeSequenceBeginLazy(2); this._pt!!.serialize(os); os.writeSequenceEnd()\n            }",
-		"ARR_ID -> {\n                os.writeArrayUnsigned(3, this._arr.asShortArray())\n            }",
-		"BL_ID -> {\n                os.writeBlob(5, this._bl)\n            }",
+		"ARR_ID -> {\n                if (this._arr.size > 4) throw SofabException(SofabError.ARGUMENT, \"arr: more than count 4 elements\")\n                os.writeArrayUnsigned(3, this._arr.asShortArray())\n            }",
+		"BL_ID -> {\n                if (this._bl.size > 4) throw SofabException(SofabError.ARGUMENT, \"bl: longer than maxlen 4 bytes\")\n                os.writeBlob(5, this._bl)\n            }",
 		"os.writeSequenceBeginLazy(6); this._inner!!.serialize(os); os.writeSequenceEndKeep()",
 		"F_ID -> {\n                os.writeFp32(7, this._f, this.fFp32Bits)\n            }",
-		"FLAGS_ID -> {\n                os.writeArrayUnsigned(8, Seq.boolsToBytes(this._flags))\n            }")
+		"FLAGS_ID -> {\n                if (this._flags.size > 2) throw SofabException(SofabError.ARGUMENT, \"flags: more than count 2 elements\")\n                os.writeArrayUnsigned(8, Seq.boolsToBytes(this._flags))\n            }")
 	strs := ser[strings.Index(ser, "STRS_ID ->"):strings.Index(ser, "BL_ID ->")]
-	mustContain(t, "M_U.serialize strs", strs, "= this._strs!!", "os.writeSequenceBeginLazy(4)", "os.writeSequenceEndKeep()")
-	// No ≠-default guard on any forced option.
-	mustNotContain(t, "M_U.serialize", ser, "if (this._num", "if (this._f", "this._s.isNotEmpty()", "this._arr.isNotEmpty()", "this._bl.isNotEmpty()", "this._flags.isNotEmpty()")
+	mustContain(t, "M_U.serialize strs", strs, "= this._strs!!", "os.writeSequenceBeginLazy(4)", "os.writeSequenceEndKeep()", "os.writeString(_i0, _e0, 4)")
+	// No ≠-default guard on any forced option (the bound guards above are not one).
+	mustNotContain(t, "M_U.serialize", ser, "if (this._num", "if (this._f ", "if (this._f.", "if (!this._f", "this._s.isNotEmpty()", "this._arr.isNotEmpty()", "this._bl.isNotEmpty()", "this._flags.isNotEmpty()")
 	mustContain(t, "M_U.isDefault", u,
 		"internal fun isDefault(): Boolean = which == PT_ID && this._pt!!.isDefault()")
 	z := genUnion(t)[unionDir+"M_Z.kt"]

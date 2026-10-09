@@ -65,8 +65,8 @@ var ktReservedMembers = map[string]bool{
 }
 
 // ktQualifiers are the names a generated class body uses as the qualifier of an
-// expression: corelib types and kotlin.Long's constants.
-var ktQualifiers = map[string]bool{"DecodeStatus": true, "Long": true, "Seq": true}
+// expression: corelib types (SofabError in the encode guards) and kotlin.Long's constants.
+var ktQualifiers = map[string]bool{"DecodeStatus": true, "Long": true, "Seq": true, "SofabError": true}
 
 // unionReserved are the members a union class declares on top of the above.
 var unionReserved = map[string]bool{"which": true}

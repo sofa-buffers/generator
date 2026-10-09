@@ -421,6 +421,24 @@ func (g *gen) emitClass(f *kfile, name, vis string, fields []*ir.Field, summary 
 	}
 }
 
+// encodeRefusalDoc is the generated KDoc block that states what encode
+// refuses: a value past its schema bound (ARCHITECTURE §9.6), the encode half of
+// the bounds the decoder enforces, and the unpaired surrogate the corelib refuses
+// (CORELIB_PLAN §6.4). Both are SofabError.ARGUMENT, a bad encode call.
+var encodeRefusalDoc = []string{
+	"@throws SofabException [SofabError.ARGUMENT] when a value is past its schema",
+	"  bound -- a string or blob over `maxlen` bytes, an array over `count`, an enum",
+	"  or bitfield outside its declared width -- or a string holds an unpaired",
+	"  surrogate. Such a value is refused, never clamped.",
+}
+
+// emitEncodeRefusalDoc writes encodeRefusalDoc as KDoc lines at indent ind.
+func emitEncodeRefusalDoc(f *kfile, ind string) {
+	for _, l := range encodeRefusalDoc {
+		f.line("%s * %s", ind, l)
+	}
+}
+
 // emitMessageAPI writes the closed public entry-point set of CORELIB_PLAN §6.1.1
 // -- encode / encodeTo / decode / tryDecode / decoder -- plus the incremental
 // Decoder and the companion holding the statics.
@@ -434,8 +452,9 @@ func (g *gen) emitMessageAPI(f *kfile, name, vis string, fields []*ir.Field) {
 		f.line("     * The complete message as bytes.")
 		f.line("     *")
 		f.line("     * The schema bounds this message, so one exactly-sized buffer holds it")
-		f.line("     * and no flush can occur: a value filled past its own declared bound")
-		f.line("     * does not fit and is REPORTED (buffer-full) rather than emitted short.")
+		f.line("     * and no flush can occur.")
+		f.line("     *")
+		emitEncodeRefusalDoc(f, "    ")
 		f.line("     */")
 		f.line("    public fun encode(): ByteArray {")
 		f.line("        val buf = ByteArray(MAX_SIZE)")
@@ -452,6 +471,8 @@ func (g *gen) emitMessageAPI(f *kfile, name, vis string, fields []*ir.Field) {
 		f.line("     * a larger message is legal and would be silently refused. What is")
 		f.line("     * used instead is a fixed scratch drained by a flush sink, so memory")
 		f.line("     * is bounded by the scratch and not by the message.")
+		f.line("     *")
+		emitEncodeRefusalDoc(f, "    ")
 		f.line("     */")
 		f.line("    public fun encode(): ByteArray {")
 		f.line("        val out = PayloadAcc()")
@@ -472,6 +493,8 @@ func (g *gen) emitMessageAPI(f *kfile, name, vis string, fields []*ir.Field) {
 	f.line("     * With a [FlushSink] on [os] the buffer may be smaller than the message:")
 	f.line("     * it is drained as it fills, so what bounds memory is the buffer rather")
 	f.line("     * than the message.")
+	f.line("     *")
+	emitEncodeRefusalDoc(f, "    ")
 	f.line("     */")
 	f.line("    public fun encodeTo(os: OStream) {")
 	f.line("        serialize(os)")
@@ -758,7 +781,7 @@ func (g *gen) emitMarshalAt(f *kfile, ind string, fld *ir.Field, acc, raw string
 	case ir.KindFP64:
 		write = fmt.Sprintf("os.writeFp64(%d, %s)", fld.ID, acc)
 	case ir.KindString:
-		write = fmt.Sprintf("os.writeString(%d, %s)", fld.ID, acc)
+		write = stringWriteCall(itoa64(fld.ID), acc, fld.HasMaxlen, fld.Maxlen)
 	case ir.KindBlob:
 		write = fmt.Sprintf("os.writeBlob(%d, %s)", fld.ID, acc)
 	case ir.KindStruct, ir.KindUnion:
@@ -778,6 +801,9 @@ func (g *gen) emitMarshalAt(f *kfile, ind string, fld *ir.Field, acc, raw string
 		g.emitMarshalArray(f, ind, fld, acc, forced)
 		return
 	}
+	if guard := encodeGuard(fld, acc); guard != "" {
+		f.line("%s%s", ind, guard)
+	}
 	if forced {
 		f.line("%s%s", ind, write)
 		return
@@ -789,15 +815,20 @@ func (g *gen) emitMarshalAt(f *kfile, ind string, fld *ir.Field, acc, raw string
 }
 
 func (g *gen) emitMarshalArray(f *kfile, ind string, fld *ir.Field, acc string, forced bool) {
+	bnd := arrBound{name: fld.Name, hasCount: fld.HasCount, count: fld.Count, elemMaxHas: fld.ElemMaxHas, elemMax: fld.ElemMax}
 	if forced {
-		// A union's held non-default option: no guard. A compact array is written
+		// A union's held non-default option: no ≠-default guard (the bound guard
+		// still applies). A compact array is written
 		// as its count even when that is 0 (an fp array keeps its fixlen_word), and
 		// a wrapper array's frame survives empty through the keeping end.
 		if nativeArrayElem(fld.Elem) {
+			if guard := countGuard(bnd, acc); guard != "" {
+				f.line("%s%s", ind, guard)
+			}
 			f.line("%s%s", ind, arrayWriteCall(fld.Elem, fld.ElemRef, itoa64(fld.ID), acc))
 			return
 		}
-		g.marshalArray(f, ind, itoa64(fld.ID), acc, fld.Elem, fld.ElemRef, fld.ElemItems, 0, keepAlways)
+		g.marshalArray(f, ind, itoa64(fld.ID), acc, fld.Elem, fld.ElemRef, fld.ElemItems, bnd, 0, keepAlways)
 		return
 	}
 	// A native array is a leaf field: omit it when equal to its default. A
@@ -811,6 +842,9 @@ func (g *gen) emitMarshalArray(f *kfile, ind string, fld *ir.Field, acc string, 
 	// N -- and against the empty array when no default is declared.
 	if nativeArrayElem(fld.Elem) {
 		f.line("%sif (%s) {", ind, g.ktWritesExpr(fld, acc))
+		if guard := countGuard(bnd, acc); guard != "" {
+			f.line("%s    %s", ind, guard)
+		}
 		f.line("%s    %s", ind, arrayWriteCall(fld.Elem, fld.ElemRef, itoa64(fld.ID), acc))
 		f.line("%s}", ind)
 		return
@@ -820,7 +854,7 @@ func (g *gen) emitMarshalArray(f *kfile, ind string, fld *ir.Field, acc string, 
 	// wrapper array's declared `default` is not materialised (the generated
 	// member is the empty list), so absent and explicitly-empty denote the same
 	// value.
-	g.marshalArray(f, ind, itoa64(fld.ID), acc, fld.Elem, fld.ElemRef, fld.ElemItems, 0, "")
+	g.marshalArray(f, ind, itoa64(fld.ID), acc, fld.Elem, fld.ElemRef, fld.ElemItems, bnd, 0, "")
 }
 
 // lastElemExpr is the "this element is the array's last" test, at loop position
@@ -893,14 +927,22 @@ func (g *gen) elemLoopList(f *kfile, ind, val, typ string) string {
 //
 // keepIf is the closer this call's own wrapper takes (see seqEndStmt); the
 // native element kinds open no sequence and ignore it.
-func (g *gen) marshalArray(f *kfile, ind, idExpr, val string, elem ir.Kind, ref *ir.TypeRef, items *ir.ArrayElem, depth int, keepIf string) {
+func (g *gen) marshalArray(f *kfile, ind, idExpr, val string, elem ir.Kind, ref *ir.TypeRef, items *ir.ArrayElem, bnd arrBound, depth int, keepIf string) {
 	iv := fmt.Sprintf("_i%d", depth)
 	ev := fmt.Sprintf("_e%d", depth)
 	if nativeArrayElem(elem) {
+		if guard := countGuard(bnd, val); guard != "" {
+			f.line("%s%s", ind, guard)
+		}
 		f.line("%s%s", ind, arrayWriteCall(elem, ref, idExpr, val))
 		return
 	}
 	lv := g.elemLoopList(f, ind, val, "MutableList<"+g.ktArrayElemType(elem, ref, items)+">")
+	// The count is judged before the frame opens, so a refused array writes
+	// nothing at all.
+	if guard := countGuard(bnd, lv); guard != "" {
+		f.line("%s%s", ind, guard)
+	}
 	f.line("%sos.writeSequenceBeginLazy(%s)", ind, idExpr)
 	switch elem {
 	case ir.KindString:
@@ -909,11 +951,18 @@ func (g *gen) marshalArray(f *kfile, ind, idExpr, val string, elem ir.Kind, ref 
 		// restores from that same default -- the ordinary sparse-field rule of
 		// MESSAGE_SPEC §2 applied to an element. At the LAST index it is written
 		// whatever its value.
-		f.line("%sfor (%s in 0 until %s.size) { val %s = %s[%s]; if (%s.isNotEmpty() || %s) os.writeString(%s, %s) }",
-			ind, iv, lv, ev, lv, iv, ev, lastElemExpr(iv, lv), iv, ev)
+		f.line("%sfor (%s in 0 until %s.size) { val %s = %s[%s]; if (%s.isNotEmpty() || %s) %s }",
+			ind, iv, lv, ev, lv, iv, ev, lastElemExpr(iv, lv), stringWriteCall(iv, ev, bnd.elemMaxHas, bnd.elemMax))
 	case ir.KindBlob:
-		f.line("%sfor (%s in 0 until %s.size) { val %s = %s[%s]; if (%s.isNotEmpty() || %s) os.writeBlob(%s, %s) }",
-			ind, iv, lv, ev, lv, iv, ev, lastElemExpr(iv, lv), iv, ev)
+		// An element over its maxlen is refused before anything of it is
+		// written; an empty one can never be over, so the guard sits behind the
+		// emptiness test and costs the omitted interior nothing.
+		blobGuard := ""
+		if bnd.elemMaxHas {
+			blobGuard = overThrow(fmt.Sprintf("%s.size > %d", ev, bnd.elemMax), bnd.name+" element", fmt.Sprintf("longer than maxlen %d bytes", bnd.elemMax)) + "; "
+		}
+		f.line("%sfor (%s in 0 until %s.size) { val %s = %s[%s]; if (%s.isNotEmpty() || %s) { %sos.writeBlob(%s, %s) } }",
+			ind, iv, lv, ev, lv, iv, ev, lastElemExpr(iv, lv), blobGuard, iv, ev)
 	case ir.KindStruct, ir.KindUnion:
 		// A sequence-form element obeys the SAME rule as the leaf elements above
 		// -- one rule for both kinds -- and the lazily-held frame is where it is
@@ -933,13 +982,13 @@ func (g *gen) marshalArray(f *kfile, ind, idExpr, val string, elem ir.Kind, ref 
 			// interior row equal to the element default (the empty row) is not
 			// written at all, and the last row always is.
 			f.line("%s    if (%s.isNotEmpty() || %s) {", ind, ev, lastElemExpr(iv, lv))
-			g.marshalArray(f, ind+"        ", iv, ev, items.Elem, items.ElemRef, items.ElemItems, depth+1, "")
+			g.marshalArray(f, ind+"        ", iv, ev, items.Elem, items.ElemRef, items.ElemItems, rowBound(bnd, items), depth+1, "")
 			f.line("%s    }", ind)
 		} else {
 			// A wrapper row has its own frame, so it takes the closer instead --
 			// the same interior/last choice, expressed the same way as for a
 			// struct element above.
-			g.marshalArray(f, ind+"    ", iv, ev, items.Elem, items.ElemRef, items.ElemItems, depth+1, lastElemExpr(iv, lv))
+			g.marshalArray(f, ind+"    ", iv, ev, items.Elem, items.ElemRef, items.ElemItems, rowBound(bnd, items), depth+1, lastElemExpr(iv, lv))
 		}
 		f.line("%s}", ind)
 	}

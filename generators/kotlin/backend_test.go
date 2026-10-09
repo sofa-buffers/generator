@@ -530,8 +530,8 @@ func TestKotlinWrapperElementSparsity(t *testing.T) {
 		"      p: { id: 2, type: array, items: { type: struct, count: 4, fields: { x: { id: 0, type: i32 } } } }\n"
 	m := genFromYAML(t, src, map[string]any{})["src/main/kotlin/message/M.kt"]
 	for _, want := range []string{
-		"if (_e0.isNotEmpty() || _i0 == _t0.size - 1) os.writeString(_i0, _e0)",
-		"if (_e0.isNotEmpty() || _i0 == _t1.size - 1) os.writeBlob(_i0, _e0)",
+		"if (_e0.isNotEmpty() || _i0 == _t0.size - 1) os.writeString(_i0, _e0, 8)",
+		"if (_e0.isNotEmpty() || _i0 == _t1.size - 1) { if (_e0.size > 8) throw SofabException(SofabError.ARGUMENT, \"b element: longer than maxlen 8 bytes\"); os.writeBlob(_i0, _e0) }",
 		// A sequence-form element obeys the same rule through the CLOSER: dropped
 		// in the interior, kept at the last index where its presence is what fixes
 		// the length.
