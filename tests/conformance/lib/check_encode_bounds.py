@@ -142,7 +142,7 @@ KNOWN_GAP = {
     "java": STRINGS_AND_ARRAYS + SCALARS,
     "kotlin": STRINGS_AND_ARRAYS + SCALARS,
     "csharp": STRINGS_AND_ARRAYS + SCALARS,
-    "dart": STRINGS_AND_ARRAYS + SCALARS,
+    "dart": (),
     "zig": (),
     "typescript": STRINGS_AND_ARRAYS + SCALARS,
     "typescript-long": STRINGS_AND_ARRAYS + SCALARS,

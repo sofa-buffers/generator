@@ -181,27 +181,27 @@ func TestDartUnionEncodeArms(t *testing.T) {
 	u := classBody(t, lib, "M_U")
 	mustContain(t, "M_U.serialize", u,
 		"    switch (_which) {",
-		"      case numId:\n        e.writeUnsigned(0, _num_);",
-		"      case sId:\n        final v = _s!;\n        e.writeStringUtf8(1, v.storage, v.length);",
+		"      case numId:\n        if (_num_ < 0 || _num_ > 65535) throw const sofab.SofabException(sofab.SofabError.invalidArgument, 'num: outside its declared width'); e.writeUnsigned(0, _num_);",
+		"      case sId:\n        final v = _s!;\n        if (v.length > 8) throw const sofab.SofabException(sofab.SofabError.invalidArgument, 's: over maxlen 8'); e.writeStringUtf8(1, v.storage, v.length);",
 		"      case ptId:\n        final v = _pt!;\n        e.beginSequenceLazy(2); v.serialize(e); e.endSequence();",
-		"      case arrId:\n        final v = _arr!;\n        e.writeUnsignedArray(3, v.storage, v.length);",
-		"      case blId:\n        final v = _bl!;\n        e.writeBlob(5, v.storage, v.length);",
+		"      case arrId:\n        final v = _arr!;\n        if (v.length > 4) throw const sofab.SofabException(sofab.SofabError.invalidArgument, 'arr: over count 4'); e.writeUnsignedArrayInRange(3, v.storage, v.length, 0, 65535);",
+		"      case blId:\n        final v = _bl!;\n        if (v.length > 4) throw const sofab.SofabException(sofab.SofabError.invalidArgument, 'bl: over maxlen 4'); e.writeBlob(5, v.storage, v.length);",
 		"      case innerId:\n        final v = _inner!;\n        e.beginSequenceLazy(6); v.serialize(e); e.endSequenceKeep();",
 		"      case fId:\n        if (_f.isNaN && _fFp32Bits != null) { e.writeFp32Bits(7, _fFp32Bits!); } else { e.writeFp32(7, _f); }",
-		"      case flagsId:\n        final v = _flags!;\n        e.writeUnsignedArray(8, _bools01(v), v.length);",
+		"      case flagsId:\n        final v = _flags!;\n        if (v.length > 2) throw const sofab.SofabException(sofab.SofabError.invalidArgument, 'flags: over count 2'); e.writeUnsignedArray(8, _bools01(v), v.length);",
 		"      case whichId:\n        e.writeUnsigned(10, _which_);",
 	)
 	// The wrapper-array option: framed, interior elements sparse, kept.
 	strs := u[strings.Index(u, "      case strsId:"):]
 	strs = strs[:strings.Index(strs, "      case blId:")]
 	mustContain(t, "M_U strs arm", strs, "e.beginSequenceLazy(4);", "        e.endSequenceKeep();")
-	mustNotContain(t, "M_U strs arm", strs, "e.endSequence();", "if (v.length")
+	mustNotContain(t, "M_U strs arm", strs, "e.endSequence();", "if (v.length != 0", "if (v.length == 0")
 	// No guard anywhere but default_id's arm (which is a struct here, so none).
 	mustNotContain(t, "M_U.serialize", u, "if (_num_ != 5)", "if (v.length != 0) { e.writeStringUtf8(1", "if (_f != 1.5)")
 	// A scalar default_id keeps its guard.
 	mustContain(t, "M_Z.serialize", classBody(t, lib, "M_Z"),
-		"      case aId:\n        if (_a != 0) { e.writeUnsigned(0, _a); }",
-		"      case bId:\n        e.writeUnsigned(1, _b);",
+		"      case aId:\n        if (_a != 0) { if (_a < 0 || _a > 255) throw const sofab.SofabException(sofab.SofabError.invalidArgument, 'a: outside its declared width'); e.writeUnsigned(0, _a); }",
+		"      case bId:\n        if (_b < 0 || _b > 255) throw const sofab.SofabException(sofab.SofabError.invalidArgument, 'b: outside its declared width'); e.writeUnsigned(1, _b);",
 	)
 	// The union FIELD keeps its lazy frame and dropping closer: a union holding
 	// default_id at its default writes nothing, so the frame vanishes.

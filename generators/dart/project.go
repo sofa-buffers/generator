@@ -106,7 +106,7 @@ func (g *gen) harness(s *ir.Schema) []byte {
 		f.line("    case %s:", dartStringLit(m.Name))
 		f.line("      if (mode == 'encode') {")
 		f.line("        final obj = %s(convert.jsonDecode(convert.utf8.decode(input)) as Map<String, dynamic>);", fromJSONName(raw))
-		f.line("        io.stdout.add(obj.encode());")
+		f.line("        io.stdout.add(_encode(obj.encode));")
 		// The encode twin of streamdecode: the same message through a sink, drained
 		// into a builder the harness owns. Window 0 is the generated one-shot
 		// `encode()`; any other window is an Encoder over a buffer of that size
@@ -117,12 +117,14 @@ func (g *gen) harness(s *ir.Schema) []byte {
 		f.line("        final obj = %s(convert.jsonDecode(convert.utf8.decode(input)) as Map<String, dynamic>);", fromJSONName(raw))
 		f.line("        final win = args.length > 2 ? int.parse(args[2]) : 0;")
 		f.line("        if (win == 0) {")
-		f.line("          io.stdout.add(obj.encode());")
+		f.line("          io.stdout.add(_encode(obj.encode));")
 		f.line("        } else {")
 		f.line("          final sink = typed.BytesBuilder(copy: true);")
-		f.line("          obj.encodeTo(sofab.Encoder(sink.add,")
-		f.line("              buffer: typed.Uint8List(win < sofab.minOutputBuffer ? sofab.minOutputBuffer : win)));")
-		f.line("          io.stdout.add(sink.toBytes());")
+		f.line("          io.stdout.add(_encode(() {")
+		f.line("            obj.encodeTo(sofab.Encoder(sink.add,")
+		f.line("                buffer: typed.Uint8List(win < sofab.minOutputBuffer ? sofab.minOutputBuffer : win)));")
+		f.line("            return sink.toBytes();")
+		f.line("          }));")
 		f.line("        }")
 		f.line("      } else if (mode == 'decode') {")
 		f.line("        final obj = %s();", mt)
@@ -192,7 +194,7 @@ func (g *gen) harness(s *ir.Schema) []byte {
 		f.line("          io.stderr.writeln('decode failed: ${st.name}');")
 		f.line("          io.exit(1);")
 		f.line("        }")
-		f.line("        io.stdout.add(obj.encode());")
+		f.line("        io.stdout.add(_encode(obj.encode));")
 		f.line("      } else {")
 		f.line("        io.stderr.writeln('unknown mode');")
 		f.line("        io.exit(2);")
@@ -205,6 +207,22 @@ func (g *gen) harness(s *ir.Schema) []byte {
 	f.line("  }")
 	f.line("}")
 	f.blank()
+	// A refused encode -- a value past its schema bound, an unpaired surrogate --
+	// is the encoder's SofabException. It is an ANSWER, reported as a plain
+	// non-zero exit like a rejected decode, not an unhandled exception the
+	// conformance drivers would rightly read as a crash. Only the encode work is
+	// wrapped: a SofabException out of a decode verb stays the crash it is.
+	if len(s.Messages) > 0 {
+		f.line("typed.Uint8List _encode(typed.Uint8List Function() run) {")
+		f.line("  try {")
+		f.line("    return run();")
+		f.line("  } on sofab.SofabException catch (ex) {")
+		f.line("    io.stderr.writeln('encode refused: $ex');")
+		f.line("    io.exit(1);")
+		f.line("  }")
+		f.line("}")
+		f.blank()
+	}
 	f.line("typed.Uint8List _readStdin() {")
 	f.line("  final b = typed.BytesBuilder(copy: true);")
 	f.line("  var byte = io.stdin.readByteSync();")

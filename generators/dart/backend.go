@@ -509,18 +509,17 @@ func (g *gen) emitClass(f *dfile, name, raw, summary string, fields []*ir.Field,
 		if ms.Bounded {
 			// One exactly-sized buffer, no sink. maxSize comes from the schema, so
 			// every schema-conformant value fits; a value the caller filled past its
-			// own declared count/maxlen does not, and the corelib's bufferFull
-			// exception propagates instead of a short message being handed back as if
-			// it were whole (§5.1 forbids returning partial output as complete).
+			// own declared count/maxlen/width never reaches the buffer, because
+			// serialize refuses it first (encodeGuard).
 			//
 			// No sink means MIN_OUTPUT_BUFFER does not apply, so a field-less message
 			// legitimately encodes through a 0-byte buffer.
 			f.line("  /// Serializes this message into a buffer this call allocates and owns.")
 			f.line("  ///")
 			f.line("  /// The buffer is exactly [maxSize] bytes -- the schema's worst case -- so any")
-			f.line("  /// conformant value fits. A value filled past a declared count/maxlen does")
-			f.line("  /// not, and throws [sofab.SofabException] (`bufferFull`) rather than being")
-			f.line("  /// handed back truncated.")
+			f.line("  /// conformant value fits.")
+			f.line("  ///")
+			emitEncodeRefusalDoc(f)
 			f.line("  Uint8List encode() {")
 			f.line("    final buf = Uint8List(maxSize);")
 			f.line("    final e = sofab.Encoder.overBuffer(buf%s);", depthArg)
@@ -545,6 +544,8 @@ func (g *gen) emitClass(f *dfile, name, raw, summary string, fields []*ir.Field,
 			f.line("  /// hand the encoder: it writes through a fixed %d-byte scratch buffer that", dartScratchSize)
 			f.line("  /// is copied out each time it fills. The message may be any size, and")
 			f.line("  /// [maxSizeLimit] never bounds it.")
+			f.line("  ///")
+			emitEncodeRefusalDoc(f)
 			f.line("  Uint8List encode() {")
 			f.line("    final out = BytesBuilder(copy: true);")
 			f.line("    // copy: true because the sink is handed a VIEW the encoder overwrites")
@@ -566,6 +567,9 @@ func (g *gen) emitClass(f *dfile, name, raw, summary string, fields []*ir.Field,
 		f.line("  /// The encoder's buffer may be smaller than the message: it is drained")
 		f.line("  /// through the flush callback as it fills, so what bounds memory is the")
 		f.line("  /// buffer, not the message.")
+		f.line("  ///")
+		f.line("  /// A value past a schema bound throws as [encode] does; what the encoder")
+		f.line("  /// had already flushed to its sink by then is not a message.")
 		f.line("  void encodeTo(sofab.Encoder e) {")
 		f.line("    serialize(e);")
 		f.line("    e.flush();")
@@ -750,7 +754,13 @@ func (g *gen) emitMarshal(f *dfile, fld *ir.Field) {
 // travels as a present, empty frame. Inside that frame the normal per-field
 // omission applies. Unforced, this is the ordinary field writer.
 func (g *gen) emitMarshalAt(f *dfile, ind string, fld *ir.Field, acc, bits string, forced bool) {
+	// The encode-side bound (ARCHITECTURE §9.6): a value past what the schema
+	// declares is refused before it is written. It sits INSIDE the write branch,
+	// so a field at its default -- which the schema guarantees is in bounds --
+	// pays nothing for it.
+	guard := g.encodeGuard(fld, acc)
 	guarded := func(cond, write string) {
+		write = guard + write
 		if forced {
 			f.line("%s%s", ind, write)
 			return
@@ -784,7 +794,7 @@ func (g *gen) emitMarshalAt(f *dfile, ind string, fld *ir.Field, acc, bits strin
 		// A leaf: omit when equal to its default (empty if none). The storage and
 		// its length go out as they are -- a string as the UTF-8 bytes it is held
 		// in, which the corelib validates, never transcoded through a String.
-		guarded(g.destDefaultTest(fld, acc, true), g.writeDestStmt(fld.Kind, fld.Elem, fmt.Sprintf("%d", fld.ID), acc))
+		guarded(g.destDefaultTest(fld, acc, true), g.writeDestStmt(fld.Kind, fld.Elem, nil, fmt.Sprintf("%d", fld.ID), acc))
 		return
 	case ir.KindStruct, ir.KindUnion:
 		// MESSAGE_SPEC S2: the != default test is per field and a sequence is no
@@ -857,7 +867,7 @@ func (g *gen) emitMarshalArray(f *dfile, ind string, fld *ir.Field, acc string, 
 	// count (0 when empty; an fp array keeps its fixlen_word), a wrapper array as
 	// a frame closed with the keeping closer.
 	if nativeArrayElem(fld.Elem) {
-		write := g.writeDestStmt(fld.Kind, fld.Elem, fmt.Sprintf("%d", fld.ID), acc)
+		write := g.encodeGuard(fld, acc) + g.writeDestStmt(fld.Kind, fld.Elem, fld.ElemRef, fmt.Sprintf("%d", fld.ID), acc)
 		if forced {
 			f.line("%s%s", ind, write)
 			return
@@ -878,7 +888,92 @@ func (g *gen) emitMarshalArray(f *dfile, ind string, fld *ir.Field, acc string, 
 	if forced {
 		keep = keepAlways
 	}
-	g.marshalWrapperArray(f, ind, fmt.Sprintf("%d", fld.ID), acc, fld.Elem, fld.ElemRef, fld.ElemItems, 0, keep)
+	b := arrBound{fld.Name, fld.HasCount, fld.Count, fld.ElemMaxHas, fld.ElemMax}
+	g.marshalWrapperArray(f, ind, fmt.Sprintf("%d", fld.ID), acc, fld.Elem, fld.ElemRef, fld.ElemItems, b, 0, keep)
+}
+
+// ---- encode-side bounds ------------------------------------------------------
+//
+// A value the caller filled past what the schema declares is REFUSED at encode
+// (ARCHITECTURE §9.6), with the encoder's own InvalidArgument category
+// (CORELIB_PLAN §6.3) -- the SofabException every other bad encode call throws.
+// Nothing about Dart's storage enforces a bound: an Inline* destination grows on
+// assign(), a wrapper array is a plain List, and every integer is a 64-bit int.
+// So each bound is one per-field compare against the schema literal, emitted
+// right before the write it protects: no extra pass over the data, no
+// allocation (the exception is a const), and nothing at all on the path of a
+// field that is omitted at its default.
+
+// encodeRefusal is the statement refusing field `name` at encode for `why`.
+func encodeRefusal(name, why string) string {
+	return fmt.Sprintf("throw const sofab.SofabException(sofab.SofabError.invalidArgument, %s);", dartStringLit(name+": "+why))
+}
+
+// encodeGuard is the bound check written in front of the write of field fld,
+// held in acc: a string's or blob's `maxlen` in bytes (the storage holds the
+// UTF-8 bytes, so its length IS the byte length), a native array's `count`, a
+// narrow integer's declared width and the width an enum or bitfield
+// declaration implies. The width comparison is the one the decode side applies
+// to the same field (widthCond / declaredWidthCond), so both directions agree
+// on what fits. "" when the schema bounds nothing the storage could exceed: a
+// 64-bit integer, a bool, a float, an unbounded string/blob/array.
+func (g *gen) encodeGuard(fld *ir.Field, acc string) string {
+	switch fld.Kind {
+	case ir.KindString, ir.KindBlob:
+		if !fld.HasMaxlen {
+			return ""
+		}
+		return fmt.Sprintf("if (%s.length > %d) %s ", acc, fld.Maxlen, encodeRefusal(fld.Name, fmt.Sprintf("over maxlen %d", fld.Maxlen)))
+	case ir.KindArray:
+		if !fld.HasCount {
+			return ""
+		}
+		return fmt.Sprintf("if (%s.length > %d) %s ", acc, fld.Count, encodeRefusal(fld.Name, fmt.Sprintf("over count %d", fld.Count)))
+	}
+	cond := widthCond(acc, fld.Kind)
+	if cond == "" {
+		cond = declaredWidthCond(acc, fld.Kind, fld.Ref)
+	}
+	if cond == "" {
+		return ""
+	}
+	return fmt.Sprintf("if (%s) %s ", cond, encodeRefusal(fld.Name, "outside its declared width"))
+}
+
+// arrBound is what the schema declares for one level of a wrapper array: its
+// own `count` and its string/blob elements' `maxlen` (a native row's `count`
+// is the next level's count). name is the field, for the refusal message.
+type arrBound struct {
+	name     string
+	hasCount bool
+	count    int64
+	hasEmax  bool
+	emax     int64
+}
+
+// countGuard is the `count` check of a wrapper array level held in val, as a
+// statement of its own line; "" for an unbounded level.
+func (b arrBound) countGuard(val string) string {
+	if !b.hasCount {
+		return ""
+	}
+	return fmt.Sprintf("if (%s.length > %d) %s", val, b.count, encodeRefusal(b.name, fmt.Sprintf("over count %d", b.count)))
+}
+
+// inner is the bound of the next level down, an array element described by items.
+func (b arrBound) inner(items *ir.ArrayElem) arrBound {
+	return arrBound{b.name, items.HasCount, items.Count, items.ElemMaxHas, items.ElemMax}
+}
+
+// emitEncodeRefusalDoc documents, on [encode], what serialize refuses
+// (encodeGuard).
+func emitEncodeRefusalDoc(f *dfile) {
+	f.line("  /// A value past what the schema declares -- a string or blob longer than its")
+	f.line("  /// `maxlen` in UTF-8 bytes, an array longer than its `count`, an integer,")
+	f.line("  /// enum or bitfield (a field or an array element) outside its declared")
+	f.line("  /// width -- throws")
+	f.line("  /// [sofab.SofabException] (`invalidArgument`); nothing is returned, and the")
+	f.line("  /// value is never truncated or masked.")
 }
 
 // wireMaxDepth is the format's MAX_DEPTH (corelib-dart `maxDepth`, §4.9): the
@@ -892,7 +987,14 @@ const wireMaxDepth = 255
 // storage and the length in use, uncopied (enum→signed, bool/bitfield→unsigned).
 // A bool array is normalized to 0/1 in place first, so a decoded non-zero
 // element re-encodes canonically as `true`.
-func (g *gen) writeDestStmt(kind, elem ir.Kind, idExpr, acc string) string {
+//
+// An integer array whose element has a declared width (u8..u32, i8..i32, or
+// the width an enum/bitfield `ref` implies) is written with the corelib's
+// in-range writer, the width as two plain int literals: the Int64 storage is
+// wider than the width, and the corelib refuses an element outside it with
+// invalidArgument in the varint loop it already runs -- no generated
+// per-element pass (arrayWriteCall).
+func (g *gen) writeDestStmt(kind, elem ir.Kind, ref *ir.TypeRef, idExpr, acc string) string {
 	switch {
 	case kind == ir.KindString:
 		return fmt.Sprintf("e.writeStringUtf8(%s, %s.storage, %s.length);", idExpr, acc, acc)
@@ -901,14 +1003,27 @@ func (g *gen) writeDestStmt(kind, elem ir.Kind, idExpr, acc string) string {
 	case elem == ir.KindBool:
 		return fmt.Sprintf("e.writeUnsignedArray(%s, _bools01(%s), %s.length);", idExpr, acc, acc)
 	case unsignedArrayElem(elem):
-		return fmt.Sprintf("e.writeUnsignedArray(%s, %s.storage, %s.length);", idExpr, acc, acc)
+		return arrayWriteCall("writeUnsignedArray", elem, ref, idExpr, acc)
 	case signedArrayElem(elem):
-		return fmt.Sprintf("e.writeSignedArray(%s, %s.storage, %s.length);", idExpr, acc, acc)
+		return arrayWriteCall("writeSignedArray", elem, ref, idExpr, acc)
 	case elem == ir.KindFP32:
 		return fmt.Sprintf("e.writeFp32Array(%s, %s.storage, %s.length);", idExpr, acc, acc)
 	default: // fp64
 		return fmt.Sprintf("e.writeFp64Array(%s, %s.storage, %s.length);", idExpr, acc, acc)
 	}
+}
+
+// arrayWriteCall is the integer array write `writer` of destination `acc`: the
+// corelib's `<writer>InRange` twin with the declared element width -- the same
+// pair the decode side hands the destination (rangeArg) -- as its plain int
+// bounds, or the unchecked writer where the element is 64-bit and nothing
+// narrows it. A writer of its own, not an optional ElemRange argument: the
+// optional argument's null test and field loads measured ~1.6 % of an encode.
+func arrayWriteCall(writer string, elem ir.Kind, ref *ir.TypeRef, idExpr, acc string) string {
+	if lo, hi, ok := elemRange(elem, ref); ok {
+		return fmt.Sprintf("e.%sInRange(%s, %s.storage, %s.length, %d, %d);", writer, idExpr, acc, acc, lo, hi)
+	}
+	return fmt.Sprintf("e.%s(%s, %s.storage, %s.length);", writer, idExpr, acc, acc)
 }
 
 // lastElemExpr is the "this element is the array's last" test, at loop position
@@ -973,8 +1088,12 @@ func emitSeqEnd(f *dfile, ind, keepIf string) {
 // empty frame.
 //
 // keepIf is the closer this call's own wrapper takes (see emitSeqEnd).
-func (g *gen) marshalWrapperArray(f *dfile, ind, idExpr, val string, elem ir.Kind, ref *ir.TypeRef, items *ir.ArrayElem, depth int, keepIf string) {
+func (g *gen) marshalWrapperArray(f *dfile, ind, idExpr, val string, elem ir.Kind, ref *ir.TypeRef, items *ir.ArrayElem, b arrBound, depth int, keepIf string) {
 	iv := fmt.Sprintf("_i%d", depth)
+	// The level's own count, checked before its frame opens (encodeGuard).
+	if c := b.countGuard(val); c != "" {
+		f.line("%s%s", ind, c)
+	}
 	switch elem {
 	case ir.KindString:
 		// A string element is a leaf: in the array's INTERIOR it is omitted when it
@@ -983,12 +1102,12 @@ func (g *gen) marshalWrapperArray(f *dfile, ind, idExpr, val string, elem ir.Kin
 		// §2, applied to an element. At the LAST index it is written whatever its
 		// value: see lastElemExpr.
 		f.line("%se.beginSequenceLazy(%s);", ind, idExpr)
-		g.emitDestElemLoop(f, ind, iv, val, elem, elem)
+		g.emitDestElemLoop(f, ind, iv, val, elem, elem, nil, b.name, b.hasEmax, b.emax, "maxlen")
 		emitSeqEnd(f, ind, keepIf)
 	case ir.KindBlob:
 		// A blob element is a leaf, exactly like the string element above.
 		f.line("%se.beginSequenceLazy(%s);", ind, idExpr)
-		g.emitDestElemLoop(f, ind, iv, val, elem, elem)
+		g.emitDestElemLoop(f, ind, iv, val, elem, elem, nil, b.name, b.hasEmax, b.emax, "maxlen")
 		emitSeqEnd(f, ind, keepIf)
 	case ir.KindStruct, ir.KindUnion:
 		// A sequence-form element obeys the SAME rule as the leaf elements above --
@@ -1011,7 +1130,7 @@ func (g *gen) marshalWrapperArray(f *dfile, ind, idExpr, val string, elem ir.Kin
 			// so the rule lands on the WRITE rather than on a closer: an interior row
 			// equal to the element default (the empty row) is not written at all, and
 			// the last row always is.
-			g.emitDestElemLoop(f, ind, iv, val, ir.KindArray, items.Elem)
+			g.emitDestElemLoop(f, ind, iv, val, ir.KindArray, items.Elem, items.ElemRef, b.name, items.HasCount, items.Count, "count")
 			emitSeqEnd(f, ind, keepIf)
 			return
 		}
@@ -1019,7 +1138,7 @@ func (g *gen) marshalWrapperArray(f *dfile, ind, idExpr, val string, elem ir.Kin
 		// same interior/last choice, expressed the same way as for a struct
 		// element above.
 		f.line("%sfor (var %s = 0; %s < %s.length; %s++) {", ind, iv, iv, val, iv)
-		g.marshalWrapperArray(f, ind+"  ", iv, fmt.Sprintf("%s[%s]", val, iv), items.Elem, items.ElemRef, items.ElemItems, depth+1, lastElemExpr(iv, val))
+		g.marshalWrapperArray(f, ind+"  ", iv, fmt.Sprintf("%s[%s]", val, iv), items.Elem, items.ElemRef, items.ElemItems, b.inner(items), depth+1, lastElemExpr(iv, val))
 		f.line("%s}", ind)
 		emitSeqEnd(f, ind, keepIf)
 	}
@@ -1030,11 +1149,19 @@ func (g *gen) marshalWrapperArray(f *dfile, ind, idExpr, val string, elem ir.Kin
 // interior element at its default (empty) and always writing the last one (see
 // lastElemExpr). The element is read into a local once, so its storage and
 // length are two field loads rather than two list indexings each.
-func (g *gen) emitDestElemLoop(f *dfile, ind, iv, val string, kind, elem ir.Kind) {
+//
+// hasBound/bound is what the schema declares for ONE element -- a string's or
+// blob's `maxlen` (what = "maxlen"), a native row's `count` (what = "count") --
+// and is refused at encode before the element is written (encodeGuard): one
+// compare per element, on the length already loaded for the default test.
+func (g *gen) emitDestElemLoop(f *dfile, ind, iv, val string, kind, elem ir.Kind, ref *ir.TypeRef, name string, hasBound bool, bound int64, what string) {
 	ev := "_e" + strings.TrimPrefix(iv, "_i")
 	f.line("%sfor (var %s = 0; %s < %s.length; %s++) {", ind, iv, iv, val, iv)
 	f.line("%s  final %s = %s[%s];", ind, ev, val, iv)
-	f.line("%s  if (%s.length != 0 || %s) %s", ind, ev, lastElemExpr(iv, val), g.writeDestStmt(kind, elem, iv, ev))
+	if hasBound {
+		f.line("%s  if (%s.length > %d) %s", ind, ev, bound, encodeRefusal(name, fmt.Sprintf("element over %s %d", what, bound)))
+	}
+	f.line("%s  if (%s.length != 0 || %s) %s", ind, ev, lastElemExpr(iv, val), g.writeDestStmt(kind, elem, ref, iv, ev))
 	f.line("%s}", ind)
 }
 
