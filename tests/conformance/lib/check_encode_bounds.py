@@ -144,9 +144,9 @@ KNOWN_GAP = {
     "csharp": STRINGS_AND_ARRAYS + SCALARS,
     "dart": (),
     "zig": (),
-    "typescript": STRINGS_AND_ARRAYS + SCALARS,
-    "typescript-long": STRINGS_AND_ARRAYS + SCALARS,
-    "typescript-number": STRINGS_AND_ARRAYS + SCALARS,
+    "typescript": (),
+    "typescript-long": (),
+    "typescript-number": (),
     "python": STRINGS_AND_ARRAYS + SCALARS,
     "python-pure": STRINGS_AND_ARRAYS + SCALARS,
 }

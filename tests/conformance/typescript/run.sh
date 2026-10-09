@@ -764,8 +764,9 @@ ST=$( (cd "$VW/wlim" && "$TH" status wdyn) < "$WORK/wrap8.bin" | head -n1 )
 printf '%s' '{"w":["abcdefgh"]}' | (cd "$VW/wnolim" && "$TH" encode wbnd) > "$WORK/wrapb8.bin"
 (cd "$VW/wlim" && "$TH" decode wbnd) < "$WORK/wrapb8.bin" >/dev/null \
     || { echo "FAIL: a schema-bounded element must not be capped (S6.2.1)"; exit 1; }
-# ...and over its own bound it is INVALID, not a policy rejection.
-printf '%s' '{"w":["0123456789abcdefg"]}' | (cd "$VW/wnolim" && "$TH" encode wbnd) > "$WORK/wrapb17.bin"
+# ...and over its own bound it is INVALID, not a policy rejection. The bytes come
+# from the unbounded twin (same id, same wire): wbnd's encoder refuses the value.
+printf '%s' '{"w":["0123456789abcdefg"]}' | (cd "$VW/wnolim" && "$TH" encode wdyn) > "$WORK/wrapb17.bin"
 ST=$( (cd "$VW/wlim" && "$TH" status wbnd) < "$WORK/wrapb17.bin" | head -n1 )
 [ "$ST" = "INVALID" ] \
     || { echo "FAIL: over the schema maxlen is INVALID, got $ST"; exit 1; }

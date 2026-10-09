@@ -30,15 +30,18 @@ export class Scalars {
 
   serialize(os: OStream): void {
     if (this.u8min !== 0) {
+      if (this.u8min > 255) throw new SofabError(SofabErrorCode.Argument, "u8min: value outside declared width u8");
       os.writeUnsigned(0, this.u8min);
     }
     if (this.u8max !== 255) {
+      if (this.u8max > 255) throw new SofabError(SofabErrorCode.Argument, "u8max: value outside declared width u8");
       os.writeUnsigned(1, this.u8max);
     }
     if (this.u64max !== 18446744073709551615n) {
       os.writeUnsigned(2, this.u64max);
     }
     if (this.i8min !== -128) {
+      if (this.i8min < -128 || this.i8min > 127) throw new SofabError(SofabErrorCode.Argument, "i8min: value outside declared width i8");
       os.writeSigned(3, this.i8min);
     }
     if (this.i64min !== -9223372036854775808n) {
@@ -58,6 +61,7 @@ export class Scalars {
       os.writeBoolean(7, this.flag);
     }
     if (this.flags.length !== 0) {
+      if (this.flags.length > 4) throw new SofabError(SofabErrorCode.Argument, "flags: array count above schema capacity 4");
       os.writeUnsignedArray(8, this.flags);
     }
   }
@@ -70,9 +74,10 @@ export class Scalars {
    * Encode into a buffer this call allocates and owns.
    *
    * The buffer is exactly `MAX_SIZE` bytes, the schema's worst case, so every
-   * value the schema permits fits. A value filled PAST a declared count/maxlen
-   * does not: it throws `SofabError` (BUFFER_FULL) rather than coming back
-   * short, because partial output must never pass for a whole message.
+   * value the schema permits fits. A value PAST a declared count, maxlen or
+   * width is refused before it is written: it throws `SofabError` (ARGUMENT)
+   * rather than coming back clamped or short, because partial output must
+   * never pass for a whole message.
    */
   encode(): Uint8Array {
     const _buf = new Uint8Array(Scalars.MAX_SIZE);
