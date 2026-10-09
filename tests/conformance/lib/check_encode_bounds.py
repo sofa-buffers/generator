@@ -141,7 +141,7 @@ KNOWN_GAP = {
     "go": (),
     "java": (),
     "kotlin": (),
-    "csharp": STRINGS_AND_ARRAYS + SCALARS,
+    "csharp": (),
     "dart": (),
     "zig": (),
     "typescript": (),
@@ -207,7 +207,9 @@ _block(("zig",), SCALARS,
        "bitfield implies), so no over-width value can be stored; the harness casts the JSON "
        "number into it (300 -> 0x2c) before the generated code sees it")
 _block(("csharp",), SCALARS,
-       "System.Text.Json throws on the number before encode (unhandled harness exception)")
+       "the C# storage type IS the declared width (byte, short, enum : sbyte, [Flags] enum : byte), "
+       "so no over-width value can be assigned and encode needs no width guard; System.Text.Json "
+       "throws on the number before encode")
 _block(("kotlin",), ("u8_over", "i16_over", "i16_under"),
        "the field's Kotlin type (UByte/Short) is exactly the declared width, so no over-width "
        "value can reach the encoder; the harness wraps the number into it (300 -> 0x2c)")

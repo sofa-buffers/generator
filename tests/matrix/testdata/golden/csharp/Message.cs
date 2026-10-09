@@ -27,6 +27,7 @@ public sealed class Scalars {
         if (global::System.BitConverter.DoubleToInt64Bits(this.f64) != -4610560118520545280L) { os.WriteFp64(6, this.f64); }
         if (this.flag != true) { os.WriteBoolean(7, this.flag); }
         if (this.flags.Count != 0) {
+            if (this.flags.Count > 4) throw new global::sofab.SofabException(global::sofab.SofabError.Argument, "flags: array count above schema capacity 4");
             os.WriteArrayUnsigned(8, global::System.Array.ConvertAll(this.flags.ToArray(), _x => _x ? (byte)1 : (byte)0));
         }
     }
@@ -66,6 +67,13 @@ public sealed class Scalars {
     /// smaller than the message: it is drained as it fills, so what bounds
     /// memory is the buffer, not the message.
     /// </summary>
+    /// <exception cref="global::sofab.SofabException">
+    /// <c>SofabError.Argument</c> when a field holds a value past its schema
+    /// bound -- a string or blob over its <c>maxlen</c> (UTF-8 bytes for a
+    /// string), an array over its <c>count</c> -- or a string that is not valid
+    /// UTF-8. Such a value is refused, never truncated; <c>Encode()</c> refuses
+    /// it the same way.
+    /// </exception>
     public void EncodeTo(global::sofab.OStream os) {
         Serialize(os);
         os.Flush();

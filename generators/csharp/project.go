@@ -101,7 +101,13 @@ func (g *gen) harness(s *ir.Schema) []byte {
 		f.line("        case %q: {", m.Name)
 		f.line("            if (mode == \"encode\") {")
 		f.line("                var obj = JsonSerializer.Deserialize<%s>(input, Opts);", mt)
-		f.line("                var bytes = obj.Encode(); stdout.Write(bytes, 0, bytes.Length);")
+		// A refused encode (an over-bound value, invalid UTF-8) is reported and
+		// exits 1, like a refused decode, rather than escaping as an unhandled
+		// exception the conformance drivers would read as a crash.
+		f.line("                byte[] bytes;")
+		f.line("                try { bytes = obj.Encode(); }")
+		f.line("                catch (SofabException e) { Console.Error.WriteLine($\"encode error: {e.Error}: {e.Message}\"); return 1; }")
+		f.line("                stdout.Write(bytes, 0, bytes.Length);")
 		// The encode twin of streamdecode: the same message through a sink, drained
 		// into a buffer the harness owns. Window 0 is the generated one-shot
 		// `Encode()`; any other window is an OStream of that size (raised to the
@@ -112,13 +118,15 @@ func (g *gen) harness(s *ir.Schema) []byte {
 		f.line("                var obj = JsonSerializer.Deserialize<%s>(input, Opts);", mt)
 		f.line("                var win = args.Length > 2 ? int.Parse(args[2]) : 0;")
 		f.line("                byte[] bytes;")
-		f.line("                if (win == 0) {")
-		f.line("                    bytes = obj.Encode();")
-		f.line("                } else {")
-		f.line("                    var sinkStream = new System.IO.MemoryStream();")
-		f.line("                    obj.EncodeTo(new global::sofab.OStream(new byte[Math.Max(win, global::sofab.Sofab.MinOutputBuffer)], 0, sinkStream.Write));")
-		f.line("                    bytes = sinkStream.ToArray();")
-		f.line("                }")
+		f.line("                try {")
+		f.line("                    if (win == 0) {")
+		f.line("                        bytes = obj.Encode();")
+		f.line("                    } else {")
+		f.line("                        var sinkStream = new System.IO.MemoryStream();")
+		f.line("                        obj.EncodeTo(new global::sofab.OStream(new byte[Math.Max(win, global::sofab.Sofab.MinOutputBuffer)], 0, sinkStream.Write));")
+		f.line("                        bytes = sinkStream.ToArray();")
+		f.line("                    }")
+		f.line("                } catch (SofabException e) { Console.Error.WriteLine($\"encode error: {e.Error}: {e.Message}\"); return 1; }")
 		f.line("                stdout.Write(bytes, 0, bytes.Length);")
 		f.line("            } else if (mode == \"decode\") {")
 		f.line("                var obj = %s.Decode(input);", mt)
