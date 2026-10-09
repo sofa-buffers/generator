@@ -160,9 +160,9 @@ func TestGoUnionEncodeArms(t *testing.T) {
 		"\tswitch m.Which() {\n",
 		"\tcase M_U_Pt__ID:\n\t\te.WriteSequenceBeginLazy(2)\n\t\tm.optPt.Serialize(e)\n\t\te.WriteSequenceEnd()\n",
 		"\tcase M_U_Num__ID:\n\t\te.WriteUnsigned(0, uint64(m.optNum))\n",
-		"\tcase M_U_S__ID:\n\t\te.WriteString(1, m.optS)\n",
-		"\tcase M_U_Arr__ID:\n\t\tsofab.WriteUnsignedArray(e, 3, m.optArr)\n",
-		"\tcase M_U_Bl__ID:\n\t\te.WriteBytes(5, m.optBl)\n",
+		"\tcase M_U_S__ID:\n\t\tif len(m.optS) > 8 {\n\t\t\te.RejectArgument()\n\t\t\treturn\n\t\t}\n\t\te.WriteString(1, m.optS)\n",
+		"\tcase M_U_Arr__ID:\n\t\tif len(m.optArr) > 4 {\n\t\t\te.RejectArgument()\n\t\t\treturn\n\t\t}\n\t\tsofab.WriteUnsignedArray(e, 3, m.optArr)\n",
+		"\tcase M_U_Bl__ID:\n\t\tif len(m.optBl) > 4 {\n\t\t\te.RejectArgument()\n\t\t\treturn\n\t\t}\n\t\te.WriteBytes(5, m.optBl)\n",
 		"\tcase M_U_Inner__ID:\n\t\te.WriteSequenceBeginLazy(6)\n\t\tm.optInner.Serialize(e)\n\t\te.WriteSequenceEndKeep()\n",
 		"\tcase M_U_F__ID:\n\t\te.WriteFloat32(7, m.optF)\n",
 	)

@@ -138,7 +138,7 @@ KNOWN_GAP = {
     "rs-no-std": (),
     "rs-no-std-dynamic": (),
     "rs-no-std-std": (),
-    "go": STRINGS_AND_ARRAYS + SCALARS,
+    "go": (),
     "java": STRINGS_AND_ARRAYS + SCALARS,
     "kotlin": STRINGS_AND_ARRAYS + SCALARS,
     "csharp": STRINGS_AND_ARRAYS + SCALARS,
@@ -192,7 +192,9 @@ def _block(variants, cells, reason):
 
 
 _block(("go",), SCALARS,
-       "encoding/json refuses the number for a uint8/int16/int8-backed field before encode")
+       "the Go storage type is exactly the declared width (uint8, int16, enum int8, bitfield "
+       "uint8), so no value past it can reach the encoder; encoding/json refuses the number "
+       "before encode")
 _CAST = ("the harness casts the JSON number to the field's fixed-width type (300 -> 0x2c) "
          "before the generated code sees it")
 _block(("c",), SCALARS, _CAST)

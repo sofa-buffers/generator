@@ -49,6 +49,10 @@ func (m *Scalars) Serialize(e *sofab.Encoder) {
 		e.WriteBool(7, m.Flag)
 	}
 	if len(m.Flags) != 0 {
+		if len(m.Flags) > 4 {
+			e.RejectArgument()
+			return
+		}
 		{
 			_b0 := make([]uint8, len(m.Flags))
 			for _i0, _e0 := range m.Flags {
@@ -194,7 +198,7 @@ var _Scalars__EncOpts = []sofab.Option{sofab.WithMaxDepth(1)}
 //
 // The buffer is exactly Scalars__MaxSize bytes -- the schema's worst case -- so a
 // conformant value always fits. A value filled past a declared count/maxlen
-// does not, and is reported rather than truncated.
+// is refused with sofab.ErrArgument before any byte is returned.
 func (m *Scalars) Encode() ([]byte, error) {
 	buf := make([]byte, Scalars__MaxSize)
 	e, err := sofab.NewEncoderBuffer(buf, 0, _Scalars__EncOpts...)

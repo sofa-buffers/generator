@@ -694,7 +694,7 @@ func (g *gen) emitMarshalField(f *gofile, fld *ir.Field) {
 // the receiver's fresh union holds default_id, so omitting the option would read
 // back as a different option, not as this one at its default.
 func (g *gen) emitMarshalFieldAt(f *gofile, fld *ir.Field, acc, ind string, forced bool) {
-	var write string
+	var write, guard string
 	switch fld.Kind {
 	case ir.KindU8, ir.KindU16, ir.KindU32, ir.KindU64:
 		write = fmt.Sprintf("e.WriteUnsigned(%d, uint64(%s))", fld.ID, acc)
@@ -708,12 +708,14 @@ func (g *gen) emitMarshalFieldAt(f *gofile, fld *ir.Field, acc, ind string, forc
 		write = fmt.Sprintf("e.WriteFloat64(%d, %s)", fld.ID, acc)
 	case ir.KindString:
 		write = fmt.Sprintf("e.WriteString(%d, %s)", fld.ID, acc)
+		guard = maxlenGuard(fld.HasMaxlen, fld.Maxlen, acc)
 	case ir.KindEnum:
 		write = fmt.Sprintf("e.WriteSigned(%d, int64(%s))", fld.ID, acc)
 	case ir.KindBitfield:
 		write = fmt.Sprintf("e.WriteUnsigned(%d, uint64(%s))", fld.ID, acc)
 	case ir.KindBlob:
 		write = fmt.Sprintf("e.WriteBytes(%d, %s)", fld.ID, acc)
+		guard = maxlenGuard(fld.HasMaxlen, fld.Maxlen, acc)
 		if forced {
 			break
 		}
@@ -730,6 +732,7 @@ func (g *gen) emitMarshalFieldAt(f *gofile, fld *ir.Field, acc, ind string, forc
 		} else {
 			f.line("%sif len(%s) != 0 {", ind, acc)
 		}
+		emitBoundGuard(f, ind+"\t", guard)
 		f.line("%s\t%s", ind, write)
 		f.line("%s}", ind)
 		return
@@ -756,6 +759,7 @@ func (g *gen) emitMarshalFieldAt(f *gofile, fld *ir.Field, acc, ind string, forc
 		return
 	}
 	if forced {
+		emitBoundGuard(f, ind, guard)
 		f.line("%s%s", ind, write)
 		return
 	}
@@ -767,6 +771,7 @@ func (g *gen) emitMarshalFieldAt(f *gofile, fld *ir.Field, acc, ind string, forc
 	} else {
 		f.line("%sif %s != %s {", ind, acc, g.defaultCompare(fld))
 	}
+	emitBoundGuard(f, ind+"\t", guard)
 	f.line("%s\t%s", ind, write)
 	f.line("%s}", ind)
 }
@@ -846,7 +851,7 @@ func (g *gen) emitMarshalArray(f *gofile, fld *ir.Field, acc, ind string, forced
 		if forced {
 			// Count + elements with no guard: an empty one is count 0 (an fp array
 			// keeps its fixlen_word), which is how a union option says "held, empty".
-			g.marshalArray(f, ind, fmt.Sprintf("%d", fld.ID), acc, fld.Elem, fld.ElemRef, fld.ElemItems, 0, "")
+			g.marshalArray(f, ind, fmt.Sprintf("%d", fld.ID), acc, fieldArrBounds(fld), fld.Elem, fld.ElemRef, fld.ElemItems, 0, "")
 			return
 		}
 		if def, ok := g.defaultLiteral(fld); ok {
@@ -854,7 +859,7 @@ func (g *gen) emitMarshalArray(f *gofile, fld *ir.Field, acc, ind string, forced
 		} else {
 			f.line("%sif len(%s) != 0 {", ind, acc)
 		}
-		g.marshalArray(f, ind+"\t", fmt.Sprintf("%d", fld.ID), acc, fld.Elem, fld.ElemRef, fld.ElemItems, 0, "")
+		g.marshalArray(f, ind+"\t", fmt.Sprintf("%d", fld.ID), acc, fieldArrBounds(fld), fld.Elem, fld.ElemRef, fld.ElemItems, 0, "")
 		f.line("%s}", ind)
 		return
 	}
@@ -872,7 +877,7 @@ func (g *gen) emitMarshalArray(f *gofile, fld *ir.Field, acc, ind string, forced
 		// when empty (MESSAGE_SPEC §4.2).
 		keep = keepAlways
 	}
-	g.marshalArray(f, ind, fmt.Sprintf("%d", fld.ID), acc, fld.Elem, fld.ElemRef, fld.ElemItems, 0, keep)
+	g.marshalArray(f, ind, fmt.Sprintf("%d", fld.ID), acc, fieldArrBounds(fld), fld.Elem, fld.ElemRef, fld.ElemItems, 0, keep)
 }
 
 // keepAlways is the emitSeqEnd condition that keeps the frame unconditionally.
@@ -941,9 +946,15 @@ func emitSeqEnd(f *gofile, ind, keepIf string) {
 //
 // keepIf is the closer this call's own wrapper takes (see emitSeqEnd); the native
 // element kinds open no sequence and ignore it.
-func (g *gen) marshalArray(f *gofile, ind, idExpr, val string, elem ir.Kind, ref *ir.TypeRef, items *ir.ArrayElem, depth int, keepIf string) {
+func (g *gen) marshalArray(f *gofile, ind, idExpr, val string, bnd arrBounds, elem ir.Kind, ref *ir.TypeRef, items *ir.ArrayElem, depth int, keepIf string) {
 	iv := fmt.Sprintf("_i%d", depth)
 	ev := fmt.Sprintf("_e%d", depth)
+	// The declared count is a capacity (MESSAGE_SPEC §3): a value holding more
+	// elements is refused before a byte of this array is written.
+	if bnd.hasCount {
+		emitBoundGuard(f, ind, fmt.Sprintf("len(%s) > %d", val, bnd.count))
+	}
+	elemGuard := maxlenGuard(bnd.hasElemMax, bnd.elemMax, ev)
 	switch elem {
 	case ir.KindU8, ir.KindU16, ir.KindU32, ir.KindU64, ir.KindBitfield:
 		f.line("%ssofab.WriteUnsignedArray(e, %s, %s)", ind, idExpr, val)
@@ -974,6 +985,7 @@ func (g *gen) marshalArray(f *gofile, ind, idExpr, val string, elem ir.Kind, ref
 		f.line("%se.WriteSequenceBeginLazy(%s)", ind, idExpr)
 		f.line("%sfor %s, %s := range %s {", ind, iv, ev, val)
 		f.line("%s\tif %s != \"\" || %s {", ind, ev, lastElemExpr(iv, val))
+		emitBoundGuard(f, ind+"\t\t", elemGuard)
 		f.line("%s\t\te.WriteString(sofab.ID(%s), %s)", ind, iv, ev)
 		f.line("%s\t}", ind)
 		f.line("%s}", ind)
@@ -983,6 +995,7 @@ func (g *gen) marshalArray(f *gofile, ind, idExpr, val string, elem ir.Kind, ref
 		f.line("%se.WriteSequenceBeginLazy(%s)", ind, idExpr)
 		f.line("%sfor %s, %s := range %s {", ind, iv, ev, val)
 		f.line("%s\tif len(%s) != 0 || %s {", ind, ev, lastElemExpr(iv, val))
+		emitBoundGuard(f, ind+"\t\t", elemGuard)
 		f.line("%s\t\te.WriteBytes(sofab.ID(%s), %s)", ind, iv, ev)
 		f.line("%s\t}", ind)
 		f.line("%s}", ind)
@@ -1011,17 +1024,65 @@ func (g *gen) marshalArray(f *gofile, ind, idExpr, val string, elem ir.Kind, ref
 			// equal to the element default (the empty row) is not written at all, and
 			// the last row always is.
 			f.line("%s\tif len(%s) != 0 || %s {", ind, ev, lastElemExpr(iv, val))
-			g.marshalArray(f, ind+"\t\t", fmt.Sprintf("sofab.ID(%s)", iv), ev, items.Elem, items.ElemRef, items.ElemItems, depth+1, "")
+			g.marshalArray(f, ind+"\t\t", fmt.Sprintf("sofab.ID(%s)", iv), ev, itemArrBounds(items), items.Elem, items.ElemRef, items.ElemItems, depth+1, "")
 			f.line("%s\t}", ind)
 		} else {
 			// A wrapper row has its own frame, so it takes the closer instead -- the
 			// same interior/last choice, expressed the same way as for a struct
 			// element above.
-			g.marshalArray(f, ind+"\t", fmt.Sprintf("sofab.ID(%s)", iv), ev, items.Elem, items.ElemRef, items.ElemItems, depth+1, lastElemExpr(iv, val))
+			g.marshalArray(f, ind+"\t", fmt.Sprintf("sofab.ID(%s)", iv), ev, itemArrBounds(items), items.Elem, items.ElemRef, items.ElemItems, depth+1, lastElemExpr(iv, val))
 		}
 		f.line("%s}", ind)
 		emitSeqEnd(f, ind, keepIf)
 	}
+}
+
+// arrBounds is what the schema declares for one array level: its element
+// capacity (count) and, for string/blob elements, their maxlen. A bound the
+// schema leaves out is not checked.
+type arrBounds struct {
+	hasCount, hasElemMax bool
+	count, elemMax       int64
+}
+
+func fieldArrBounds(fld *ir.Field) arrBounds {
+	return arrBounds{fld.HasCount, fld.ElemMaxHas, fld.Count, fld.ElemMax}
+}
+
+func itemArrBounds(it *ir.ArrayElem) arrBounds {
+	return arrBounds{it.HasCount, it.ElemMaxHas, it.Count, it.ElemMax}
+}
+
+// maxlenGuard is the over-maxlen test of the string or blob acc, or "" when the
+// schema declares no maxlen. len() of a Go string is its UTF-8 byte length,
+// which is what maxlen counts.
+func maxlenGuard(has bool, maxlen int64, acc string) string {
+	if !has {
+		return ""
+	}
+	return fmt.Sprintf("len(%s) > %d", acc, maxlen)
+}
+
+// emitBoundGuard emits the encode-side refusal of a value past a bound only the
+// schema declares (ARCHITECTURE §9.6): a string or blob past its maxlen, an
+// array past its count. The corelib never learns the bound; the generated
+// guard compares, and RejectArgument records the verdict as the encoder's
+// sticky ErrArgument (CORELIB_PLAN §6.3 InvalidArgument), so Encode, EncodeTo
+// and Flush report it and no byte of the message is returned as a success.
+// Serialize stops there: every later write would be a no-op anyway.
+//
+// It is one compare per field on the hot path, placed inside the write branch
+// where there is one, so a field left at its default pays nothing; the refusal
+// is out of line in the corelib. No scalar guard is emitted: the Go storage
+// type of an integer, enum or bitfield is exactly its declared width.
+func emitBoundGuard(f *gofile, ind, cond string) {
+	if cond == "" {
+		return
+	}
+	f.line("%sif %s {", ind, cond)
+	f.line("%s\te.RejectArgument()", ind)
+	f.line("%s\treturn", ind)
+	f.line("%s}", ind)
 }
 
 // widthGuard returns the §7.1 reject clause for a store into a destination the
@@ -1658,14 +1719,15 @@ func (g *gen) messageFile(m *ir.Message) []byte {
 		// One exactly-sized buffer, allocated HERE: the corelib is handed storage
 		// it neither owns nor may grow, so the allocation belongs to the caller,
 		// and generated code is a caller. MaxSize comes from the schema, so it
-		// always holds a schema-conformant value -- a field the caller filled past
-		// its own declared bound does not fit and is reported as ErrBufferFull,
-		// never emitted short (§5.1: partial output is never returned as complete).
+		// always holds a schema-conformant value. A field the caller filled past
+		// its own declared bound never reaches the buffer: Serialize's guard
+		// refuses it with ErrArgument (emitBoundGuard), and Flush reports that
+		// (§5.1: partial output is never returned as complete).
 		f.line("// Encode serializes the message into a buffer this call allocates and owns.")
 		f.line("//")
 		f.line("// The buffer is exactly %s bytes -- the schema's worst case -- so a", maxSize)
 		f.line("// conformant value always fits. A value filled past a declared count/maxlen")
-		f.line("// does not, and is reported rather than truncated.")
+		f.line("// is refused with sofab.ErrArgument before any byte is returned.")
 		f.line("func (m *%s) Encode() ([]byte, error) {", typeName)
 		f.line("\tbuf := make([]byte, %s)", maxSize)
 		f.line("\te, err := sofab.NewEncoderBuffer(buf, 0%s)", encOpts)
