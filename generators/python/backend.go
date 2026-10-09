@@ -224,6 +224,15 @@ func (f *pyfile) line(format string, args ...any) {
 	fmt.Fprintf(&f.b, format, args...)
 	f.b.WriteByte('\n')
 }
+
+// lines writes each of ls verbatim (no formatting), prefixed with ind.
+func (f *pyfile) lines(ind string, ls []string) {
+	for _, l := range ls {
+		f.b.WriteString(ind)
+		f.b.WriteString(l)
+		f.b.WriteByte('\n')
+	}
+}
 func (f *pyfile) blank()        { f.b.WriteByte('\n') }
 func (f *pyfile) bytes() []byte { return []byte(f.b.String()) }
 
@@ -249,6 +258,11 @@ func sofabImports(decodeSection, typeSection string) []string {
 	// over the schema has to agree with the emitter by hand.
 	if usesName(decodeSection, "SofaLimitError", "(") {
 		names = append(names, "SofaLimitError")
+	}
+	// SofaArgumentError is what serialize() raises for a wrapper array past its
+	// schema count (encodeGuard); a schema with none emits and imports none.
+	if usesName(typeSection, "SofaArgumentError", "(") {
+		names = append(names, "SofaArgumentError")
 	}
 	for _, fn := range []string{"reserve_elem", "reserve_leaf", "reserve_row"} {
 		if strings.Contains(decodeSection, fn+"(") {
@@ -957,9 +971,9 @@ func (g *gen) emitMarshalAt(f *pyfile, fld *ir.Field, acc, ind string, forced bo
 	var write string
 	switch fld.Kind {
 	case ir.KindU8, ir.KindU16, ir.KindU32, ir.KindU64, ir.KindBitfield:
-		write = fmt.Sprintf("e.write_unsigned(%d, int(%s))", fld.ID, acc)
+		write = fmt.Sprintf("e.%s(%d, int(%s))", scalarWriter("write_unsigned", fld.Kind, fld.Ref), fld.ID, acc)
 	case ir.KindI8, ir.KindI16, ir.KindI32, ir.KindI64, ir.KindEnum:
-		write = fmt.Sprintf("e.write_signed(%d, int(%s))", fld.ID, acc)
+		write = fmt.Sprintf("e.%s(%d, int(%s))", scalarWriter("write_signed", fld.Kind, fld.Ref), fld.ID, acc)
 	case ir.KindBool:
 		write = fmt.Sprintf("e.write_bool(%d, %s)", fld.ID, acc)
 	case ir.KindFP32:
@@ -967,9 +981,9 @@ func (g *gen) emitMarshalAt(f *pyfile, fld *ir.Field, acc, ind string, forced bo
 	case ir.KindFP64:
 		write = fmt.Sprintf("e.write_float64(%d, %s)", fld.ID, acc)
 	case ir.KindString:
-		write = fmt.Sprintf("e.write_string(%d, %s)", fld.ID, acc)
+		write = "e." + writeCall("write_string", []string{fmt.Sprint(fld.ID), acc}, boundLit(fld.HasMaxlen, fld.Maxlen))
 	case ir.KindBlob:
-		write = fmt.Sprintf("e.write_bytes(%d, bytes(%s))", fld.ID, acc)
+		write = "e." + writeCall("write_bytes", []string{fmt.Sprint(fld.ID), "bytes(" + acc + ")"}, boundLit(fld.HasMaxlen, fld.Maxlen))
 		if forced {
 			break
 		}
@@ -1029,9 +1043,10 @@ func (g *gen) emitMarshalArray(f *pyfile, fld *ir.Field, acc, ind string, forced
 	// count even when empty (an fp array keeps its fixlen_word), and a wrapper
 	// closes with the keeping end, so the empty frame survives.
 	id := fmt.Sprintf("%d", fld.ID)
+	b := arrBound{fld.Name, fld.HasCount, fld.Count, fld.ElemMaxHas, fld.ElemMax}
 	if isNativeArrayElem(fld.Elem) {
 		if forced {
-			g.marshalArray(f, ind, id, acc, fld.Elem, fld.ElemRef, fld.ElemItems, 0, "")
+			g.marshalArray(f, ind, id, acc, fld.Elem, fld.ElemRef, fld.ElemItems, b, 0, "")
 			return
 		}
 		if lit, ok := g.pyNativeArrayDefault(fld); ok {
@@ -1039,11 +1054,11 @@ func (g *gen) emitMarshalArray(f *pyfile, fld *ir.Field, acc, ind string, forced
 		} else {
 			f.line("%sif len(%s) != 0:", ind, acc)
 		}
-		g.marshalArray(f, ind+"    ", id, acc, fld.Elem, fld.ElemRef, fld.ElemItems, 0, "")
+		g.marshalArray(f, ind+"    ", id, acc, fld.Elem, fld.ElemRef, fld.ElemItems, b, 0, "")
 		return
 	}
 	if forced {
-		g.marshalArray(f, ind, id, acc, fld.Elem, fld.ElemRef, fld.ElemItems, 0, keepAlways)
+		g.marshalArray(f, ind, id, acc, fld.Elem, fld.ElemRef, fld.ElemItems, b, 0, keepAlways)
 		return
 	}
 	// The field-level wrapper frame is dropped when no element is written, and
@@ -1054,11 +1069,12 @@ func (g *gen) emitMarshalArray(f *pyfile, fld *ir.Field, acc, ind string, forced
 	// `if value != default: ... e.write_sequence_end_keep()` -- so that a value
 	// differing from a non-empty default still reaches the wire as the empty
 	// wrapper, the only encoding of "explicitly empty" (MESSAGE_SPEC §2, §3).
-	g.marshalArray(f, ind, id, acc, fld.Elem, fld.ElemRef, fld.ElemItems, 0, "")
+	g.marshalArray(f, ind, id, acc, fld.Elem, fld.ElemRef, fld.ElemItems, b, 0, "")
 }
 
 // lastElemExpr is the "this element is the array's last" test, at loop position
-// iv over the value val.
+// iv over a value whose length the local n holds (marshalArray binds it once,
+// before the loop, rather than calling len() per element).
 //
 // It is the whole of the positional half of MESSAGE_SPEC §2's element rule. A
 // wrapper array carries no length field: its decoded length is *highest present
@@ -1071,8 +1087,8 @@ func (g *gen) emitMarshalArray(f *pyfile, fld *ir.Field, acc, ind string, forced
 // A declared `count: N` changes nothing here. N is a capacity, not a length (§3),
 // so it can never restore an elided tail -- the same test applies with or without
 // one.
-func lastElemExpr(iv, val string) string {
-	return fmt.Sprintf("%s == len(%s) - 1", iv, val)
+func lastElemExpr(iv, n string) string {
+	return fmt.Sprintf("%s == %s - 1", iv, n)
 }
 
 // keepAlways is the emitSeqEnd condition that keeps the frame unconditionally.
@@ -1122,27 +1138,47 @@ func emitSeqEnd(f *pyfile, ind, keepIf string) {
 //
 // keepIf is the closer this call's own wrapper takes (see emitSeqEnd); the native
 // element kinds open no sequence and ignore it.
-func (g *gen) marshalArray(f *pyfile, ind, idExpr, val string, elem ir.Kind, ref *ir.TypeRef, items *ir.ArrayElem, depth int, keepIf string) {
+//
+// b is the schema bound of `val` itself: a native array hands its count to the
+// corelib writer as `cap`, a wrapper array checks it here before the frame
+// opens, and a string/blob element hands its maxlen to its own write.
+func (g *gen) marshalArray(f *pyfile, ind, idExpr, val string, elem ir.Kind, ref *ir.TypeRef, items *ir.ArrayElem, b arrBound, depth int, keepIf string) {
 	iv := fmt.Sprintf("_i%d", depth)
 	ev := fmt.Sprintf("_e%d", depth)
+	capLit := boundLit(b.hasCount, b.count)
+	// A wrapper array's length, bound once: the loop's last-element test reads
+	// it, and so does the count guard -- a wrapper array has no writer that takes
+	// it whole, so its count is checked here, before the frame opens.
+	nv := fmt.Sprintf("_n%d", depth)
+	if !isNativeArrayElem(elem) {
+		f.line("%s%s = len(%s)", ind, nv, val)
+		if b.hasCount {
+			f.lines(ind, encodeGuard(fmt.Sprintf("%s > %d", nv, b.count),
+				fmt.Sprintf("%s: array over count %d", b.loc, b.count)))
+		}
+	}
+	// A native integer array's element width is its writer's name and the
+	// schema count rides the call as `cap`: the writer range-checks every
+	// element anyway (intArrayWrite).
 	switch elem {
 	case ir.KindU8, ir.KindU16, ir.KindU32, ir.KindU64:
-		f.line("%se.write_unsigned_array(%s, %s)", ind, idExpr, val)
+		f.line("%se.%s", ind, intArrayWrite("write_unsigned_array", elem, ref, idExpr, val, b))
 	case ir.KindI8, ir.KindI16, ir.KindI32, ir.KindI64:
-		f.line("%se.write_signed_array(%s, %s)", ind, idExpr, val)
+		f.line("%se.%s", ind, intArrayWrite("write_signed_array", elem, ref, idExpr, val, b))
 	case ir.KindEnum:
-		f.line("%se.write_signed_array(%s, [int(_v) for _v in %s])", ind, idExpr, val)
+		f.line("%se.%s", ind, intArrayWrite("write_signed_array", elem, ref, idExpr, "[int(_v) for _v in "+val+"]", b))
 	case ir.KindBool:
 		// The corelib's own canonical writer (corelib-py#158): it tests each
 		// element for truth exactly as `if` would and emits 1/0, which is what the
 		// intermediate list here used to build. Byte-identical, on both engines.
-		f.line("%se.write_bool_array(%s, %s)", ind, idExpr, val)
+		// A boolean has no width (§4.4): the cap is its only bound.
+		f.line("%se.%s", ind, writeCall("write_bool_array", []string{idExpr, val}, capLit))
 	case ir.KindBitfield:
-		f.line("%se.write_unsigned_array(%s, [int(_v) for _v in %s])", ind, idExpr, val)
+		f.line("%se.%s", ind, intArrayWrite("write_unsigned_array", elem, ref, idExpr, "[int(_v) for _v in "+val+"]", b))
 	case ir.KindFP32:
-		f.line("%se.write_float32_array(%s, %s)", ind, idExpr, val)
+		f.line("%se.%s", ind, writeCall("write_float32_array", []string{idExpr, val}, capLit))
 	case ir.KindFP64:
-		f.line("%se.write_float64_array(%s, %s)", ind, idExpr, val)
+		f.line("%se.%s", ind, writeCall("write_float64_array", []string{idExpr, val}, capLit))
 	case ir.KindString:
 		// A string element is a leaf: in the array's INTERIOR it is omitted when it
 		// equals the element default (empty), leaving an id gap the decoder restores
@@ -1151,15 +1187,15 @@ func (g *gen) marshalArray(f *pyfile, ind, idExpr, val string, elem ir.Kind, ref
 		// value: see lastElemExpr.
 		f.line("%se.write_sequence_begin_lazy(%s)", ind, idExpr)
 		f.line("%sfor %s, %s in enumerate(%s):", ind, iv, ev, val)
-		f.line(`%s    if %s != "" or %s:`, ind, ev, lastElemExpr(iv, val))
-		f.line("%s        e.write_string(%s, %s)", ind, iv, ev)
+		f.line(`%s    if %s != "" or %s:`, ind, ev, lastElemExpr(iv, nv))
+		f.line("%s        e.%s", ind, writeCall("write_string", []string{iv, ev}, boundLit(b.hasElemMax, b.elemMax)))
 		emitSeqEnd(f, ind, keepIf)
 	case ir.KindBlob:
 		// A blob element is a leaf, exactly like the string element above.
 		f.line("%se.write_sequence_begin_lazy(%s)", ind, idExpr)
 		f.line("%sfor %s, %s in enumerate(%s):", ind, iv, ev, val)
-		f.line("%s    if len(%s) != 0 or %s:", ind, ev, lastElemExpr(iv, val))
-		f.line("%s        e.write_bytes(%s, bytes(%s))", ind, iv, ev)
+		f.line("%s    if len(%s) != 0 or %s:", ind, ev, lastElemExpr(iv, nv))
+		f.line("%s        e.%s", ind, writeCall("write_bytes", []string{iv, "bytes(" + ev + ")"}, boundLit(b.hasElemMax, b.elemMax)))
 		emitSeqEnd(f, ind, keepIf)
 	case ir.KindStruct, ir.KindUnion:
 		// A sequence-form element obeys the SAME rule as the leaf elements above --
@@ -1173,7 +1209,7 @@ func (g *gen) marshalArray(f *pyfile, ind, idExpr, val string, elem ir.Kind, ref
 		f.line("%sfor %s, %s in enumerate(%s):", ind, iv, ev, val)
 		f.line("%s    e.write_sequence_begin_lazy(%s)", ind, iv)
 		f.line("%s    %s.serialize(e)", ind, ev)
-		emitSeqEnd(f, ind+"    ", lastElemExpr(iv, val))
+		emitSeqEnd(f, ind+"    ", lastElemExpr(iv, nv))
 		emitSeqEnd(f, ind, keepIf)
 	case ir.KindArray:
 		f.line("%se.write_sequence_begin_lazy(%s)", ind, idExpr)
@@ -1183,16 +1219,156 @@ func (g *gen) marshalArray(f *pyfile, ind, idExpr, val string, elem ir.Kind, ref
 			// so the rule lands on the WRITE rather than on a closer: an interior row
 			// equal to the element default (the empty row) is not written at all, and
 			// the last row always is.
-			f.line("%s    if len(%s) != 0 or %s:", ind, ev, lastElemExpr(iv, val))
-			g.marshalArray(f, ind+"        ", iv, ev, items.Elem, items.ElemRef, items.ElemItems, depth+1, "")
+			f.line("%s    if len(%s) != 0 or %s:", ind, ev, lastElemExpr(iv, nv))
+			g.marshalArray(f, ind+"        ", iv, ev, items.Elem, items.ElemRef, items.ElemItems, rowBound(b.loc, items), depth+1, "")
 		} else {
 			// A wrapper row has its own frame, so it takes the closer instead -- the
 			// same interior/last choice, expressed the same way as for a struct
 			// element above.
-			g.marshalArray(f, ind+"    ", iv, ev, items.Elem, items.ElemRef, items.ElemItems, depth+1, lastElemExpr(iv, val))
+			g.marshalArray(f, ind+"    ", iv, ev, items.Elem, items.ElemRef, items.ElemItems, rowBound(b.loc, items), depth+1, lastElemExpr(iv, nv))
 		}
 		emitSeqEnd(f, ind, keepIf)
 	}
+}
+
+// arrBound is the schema bound of one array value: the field's own, or a row's
+// (rowBound). loc names the field in the refusal text.
+type arrBound struct {
+	loc        string
+	hasCount   bool
+	count      int64
+	hasElemMax bool
+	elemMax    int64
+}
+
+// rowBound is the bound of an array-of-arrays row: the inner declaration's.
+func rowBound(loc string, items *ir.ArrayElem) arrBound {
+	return arrBound{loc, items.HasCount, items.Count, items.ElemMaxHas, items.ElemMax}
+}
+
+// Encode-side bounds (ARCHITECTURE §9.6). A value past its schema bound is
+// refused with SofaArgumentError -- the corelib's InvalidArgument (CORELIB_PLAN
+// §6.3), the code it already raises for a value the encoder cannot write -- and
+// encode() returns nothing: the refusal raises out of serialize().
+//
+// The bound is the schema literal, emitted per field; the corelib holds none.
+// A schema maxlen or count is a number only the schema knows, so it rides the
+// call of the writer that already measures the value (writeCall):
+//
+//   - write_string_bounded(id, s, maxlen): the UTF-8 byte length exists only
+//     inside the call, so this is the one place the bound can be checked
+//     without encoding the string twice;
+//   - write_bytes_bounded(id, b, maxlen): the length the writer takes anyway;
+//   - write_{bool,float32,float64}_array_bounded(id, vals, cap).
+//
+// A declared integer width is a TYPE, so it is in the writer's name instead:
+// write_u8 .. write_i32 for a narrow integer, enum or bitfield (scalarWriter;
+// Python's unbounded int carries no width), and write_u8_array .. write_i64_array
+// (id, vals, cap) for an integer array (intArrayWrite), whose writer checks every
+// element in the 64-bit range check it already runs. Measured (tests/bench,
+// vehicle_telemetry encode, native engine): the width as an argument cost +3.7%
+// Ir/op, in the name +1.3%; the same checks as generated `if ...: raise`
+// statements +8.7%. Every extra argument of a native writer is paid on every
+// call.
+//
+// A field with no bound calls the plain writer, whose signature carries none,
+// so an unbounded write costs exactly what it did. A wrapper array (strings,
+// blobs, structs, rows) has no writer that takes it whole, so its count is the
+// one generated guard (encodeGuard), on the length its element loop binds once
+// anyway (lastElemExpr).
+
+// encodeGuard renders `if cond: raise SofaArgumentError(msg)`.
+func encodeGuard(cond, msg string) []string {
+	return []string{
+		fmt.Sprintf("if %s:", cond),
+		fmt.Sprintf("    raise SofaArgumentError(%q)", msg),
+	}
+}
+
+// writeCall renders a corelib write: the plain writer `name(args)` where every
+// bound is None, else its `name_bounded(args, bounds)` twin. A bound is a Python
+// literal, "None" for a side the schema leaves unchecked.
+func writeCall(name string, args []string, bounds ...string) string {
+	for _, b := range bounds {
+		if b != "None" {
+			return fmt.Sprintf("%s_bounded(%s)", name, strings.Join(append(args, bounds...), ", "))
+		}
+	}
+	return fmt.Sprintf("%s(%s)", name, strings.Join(args, ", "))
+}
+
+// boundLit is a maxlen or count as a writer's bound literal, "None" where the
+// schema states none.
+func boundLit(has bool, n int64) string {
+	if !has {
+		return "None"
+	}
+	return fmt.Sprint(n)
+}
+
+// typedWidth names the width-typed writer of the declared width of kind k --
+// "u8", "u16", "u32", "i8", "i16", "i32", or for an array element also "u64" /
+// "i64" -- from the (min, max) declaredWidth gives: an enum's implied signed
+// width and a bitfield's implied unsigned width are one of these by
+// construction. ok is false where the width is the 64-bit range itself.
+func typedWidth(k ir.Kind, ref *ir.TypeRef) (string, bool) {
+	lo, hi := widthBounds(k, ref)
+	switch [2]string{lo, hi} {
+	case [2]string{"None", "255"}:
+		return "u8", true
+	case [2]string{"None", "65535"}:
+		return "u16", true
+	case [2]string{"None", "4294967295"}:
+		return "u32", true
+	case [2]string{"-128", "127"}:
+		return "i8", true
+	case [2]string{"-32768", "32767"}:
+		return "i16", true
+	case [2]string{"-2147483648", "2147483647"}:
+		return "i32", true
+	}
+	return "", false
+}
+
+// scalarWriter is the writer of a narrow integer, enum or bitfield scalar: the
+// width-typed one where the declared width is narrower than 64 bits, else the
+// plain writer, which already checks the 64-bit range.
+func scalarWriter(plain string, k ir.Kind, ref *ir.TypeRef) string {
+	if w, ok := typedWidth(k, ref); ok {
+		return "write_" + w
+	}
+	return plain
+}
+
+// intArrayWrite renders the write of a native integer, enum or bitfield array:
+// write_<width>_array(id, vals, cap), cap the schema count or -1. A 64-bit
+// element takes write_u64_array/write_i64_array when the array has a count, and
+// the plain writer (no bound at all) when it has none.
+func intArrayWrite(plain string, elem ir.Kind, ref *ir.TypeRef, idExpr, val string, b arrBound) string {
+	w, ok := typedWidth(elem, ref)
+	if !ok {
+		if !b.hasCount {
+			return fmt.Sprintf("%s(%s, %s)", plain, idExpr, val)
+		}
+		w = "u64"
+		if plain == "write_signed_array" {
+			w = "i64"
+		}
+	}
+	return fmt.Sprintf("write_%s_array(%s, %s, %d)", w, idExpr, val, capOf(b.hasCount, b.count))
+}
+
+// widthBounds is declaredWidth as (min, max) literals, "None" for a side the
+// width leaves at the 64-bit range.
+func widthBounds(k ir.Kind, ref *ir.TypeRef) (lo, hi string) {
+	min, max, ok := declaredWidth(k, ref)
+	if !ok {
+		return "None", "None"
+	}
+	if min == "" {
+		min = "None"
+	}
+	return min, max
 }
 
 // capOf maps a schema fixed-count bound to a wrapper array's cap: N when the

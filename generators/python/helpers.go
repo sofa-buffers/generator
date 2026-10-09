@@ -302,16 +302,20 @@ func (g *gen) emitCodec(f *pyfile, name string, ms generator.MessageSize) {
 	if ms.Bounded {
 		// One exactly-sized buffer, no sink: MAX_SIZE comes from the schema, so
 		// every schema-conformant value fits. A value the caller filled past its
-		// own declared count/maxlen does not, and SofaBufferError propagates out of
-		// serialize rather than a short message being handed back as if it were
-		// whole (§5.1 forbids returning partial output as complete).
+		// own declared count/maxlen/width never reaches the buffer: serialize()
+		// refuses it with SofaArgumentError (backend.go, "Encode-side bounds"),
+		// which propagates out rather than a short message being handed back as
+		// if it were whole (§5.1 forbids returning partial output as complete).
 		f.line("    def encode(self) -> bytes:")
 		f.line(`        """Encode into a buffer this call allocates and owns.`)
 		f.line("")
 		f.line("        The buffer is exactly ``MAX_SIZE`` bytes -- the schema's worst case --")
-		f.line("        so any conformant value fits. A value filled past a declared")
-		f.line("        count/maxlen raises :class:`sofab.SofaBufferError` instead of being")
-		f.line("        truncated, and nothing is returned.")
+		f.line("        so any conformant value fits. A value past its declared bound -- a")
+		f.line("        string or blob over ``maxlen``, an array over ``count``, an integer,")
+		f.line("        enum or bitfield (a field or an array element) outside its declared")
+		f.line("        width -- raises :class:`sofab.SofaArgumentError` instead of being")
+		f.line("        truncated, and nothing is returned. Should a value still not fit,")
+		f.line("        :class:`sofab.SofaBufferError` is raised, never a short message.")
 		f.line(`        """`)
 		f.line("        buf = bytearray(%s.MAX_SIZE)", name)
 		f.line("        e = Encoder.over_buffer(buf, 0)")
@@ -342,7 +346,8 @@ func (g *gen) emitCodec(f *pyfile, name string, ms generator.MessageSize) {
 		f.line("        A field of this class is unbounded, so there is no worst-case size to")
 		f.line("        hand the encoder. It writes through a fixed %d-byte scratch buffer", pyScratchSize)
 		f.line("        that is copied out each time it fills: the message may be any size,")
-		f.line("        and ``MAX_SIZE`` never bounds it.")
+		f.line("        and ``MAX_SIZE`` never bounds it. A value past its declared bound")
+		f.line("        raises :class:`sofab.SofaArgumentError` and nothing is returned.")
 		f.line(`        """`)
 		f.line("        out: list[bytes] = []")
 		f.line("        scratch = bytearray(%d)", pyScratchSize)

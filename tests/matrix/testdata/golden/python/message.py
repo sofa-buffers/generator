@@ -65,13 +65,13 @@ class Scalars:
 
     def serialize(self, e: Encoder) -> None:
         if self.u8min != 0:
-            e.write_unsigned(0, int(self.u8min))
+            e.write_u8(0, int(self.u8min))
         if self.u8max != 255:
-            e.write_unsigned(1, int(self.u8max))
+            e.write_u8(1, int(self.u8max))
         if self.u64max != 18446744073709551615:
             e.write_unsigned(2, int(self.u64max))
         if self.i8min != -128:
-            e.write_signed(3, int(self.i8min))
+            e.write_i8(3, int(self.i8min))
         if self.i64min != -9223372036854775808:
             e.write_signed(4, int(self.i64min))
         if self.f32 != 3.14:
@@ -81,7 +81,7 @@ class Scalars:
         if self.flag != True:
             e.write_bool(7, self.flag)
         if len(self.flags) != 0:
-            e.write_bool_array(8, self.flags)
+            e.write_bool_array_bounded(8, self.flags, 4)
 
     def to_jsonable(self) -> dict:
         return {
@@ -123,9 +123,12 @@ class Scalars:
         """Encode into a buffer this call allocates and owns.
 
         The buffer is exactly ``MAX_SIZE`` bytes -- the schema's worst case --
-        so any conformant value fits. A value filled past a declared
-        count/maxlen raises :class:`sofab.SofaBufferError` instead of being
-        truncated, and nothing is returned.
+        so any conformant value fits. A value past its declared bound -- a
+        string or blob over ``maxlen``, an array over ``count``, an integer,
+        enum or bitfield (a field or an array element) outside its declared
+        width -- raises :class:`sofab.SofaArgumentError` instead of being
+        truncated, and nothing is returned. Should a value still not fit,
+        :class:`sofab.SofaBufferError` is raised, never a short message.
         """
         buf = bytearray(Scalars.MAX_SIZE)
         e = Encoder.over_buffer(buf, 0)
