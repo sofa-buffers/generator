@@ -37,6 +37,7 @@ public class Scalars {
         if (this.f64.toRawBits() != -4610560118520545280L) os.writeFp64(6, this.f64)
         if (this.flag != true) os.writeBoolean(7, this.flag)
         if (this.flags.isNotEmpty()) {
+            if (this.flags.size > 4) throw SofabException(SofabError.ARGUMENT, "flags: more than count 4 elements")
             os.writeArrayUnsigned(8, Seq.boolsToBytes(this.flags))
         }
     }
@@ -73,8 +74,12 @@ public class Scalars {
      * The complete message as bytes.
      *
      * The schema bounds this message, so one exactly-sized buffer holds it
-     * and no flush can occur: a value filled past its own declared bound
-     * does not fit and is REPORTED (buffer-full) rather than emitted short.
+     * and no flush can occur.
+     *
+     * @throws SofabException [SofabError.ARGUMENT] when a value is past its schema
+     *   bound -- a string or blob over `maxlen` bytes, an array over `count`, an enum
+     *   or bitfield outside its declared width -- or a string holds an unpaired
+     *   surrogate. Such a value is refused, never clamped.
      */
     public fun encode(): ByteArray {
         val buf = ByteArray(MAX_SIZE)
@@ -89,6 +94,11 @@ public class Scalars {
      * With a [FlushSink] on [os] the buffer may be smaller than the message:
      * it is drained as it fills, so what bounds memory is the buffer rather
      * than the message.
+     *
+     * @throws SofabException [SofabError.ARGUMENT] when a value is past its schema
+     *   bound -- a string or blob over `maxlen` bytes, an array over `count`, an enum
+     *   or bitfield outside its declared width -- or a string holds an unpaired
+     *   surrogate. Such a value is refused, never clamped.
      */
     public fun encodeTo(os: OStream) {
         serialize(os)

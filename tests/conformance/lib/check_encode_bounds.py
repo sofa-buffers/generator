@@ -140,7 +140,7 @@ KNOWN_GAP = {
     "rs-no-std-std": (),
     "go": (),
     "java": (),
-    "kotlin": STRINGS_AND_ARRAYS + SCALARS,
+    "kotlin": (),
     "csharp": STRINGS_AND_ARRAYS + SCALARS,
     "dart": (),
     "zig": (),
@@ -209,7 +209,8 @@ _block(("zig",), SCALARS,
 _block(("csharp",), SCALARS,
        "System.Text.Json throws on the number before encode (unhandled harness exception)")
 _block(("kotlin",), ("u8_over", "i16_over", "i16_under"),
-       "the harness narrows the number to UByte/Short before the generated code sees it")
+       "the field's Kotlin type (UByte/Short) is exactly the declared width, so no over-width "
+       "value can reach the encoder; the harness wraps the number into it (300 -> 0x2c)")
 _RS_WIDTH = ("the storage type guarantees the width: a u8/i16 field, an enum's i8 and a bitfield's "
              "u8 backing hold exactly the declared width, so no over-width value exists to encode "
              "(serde refuses the number at assignment, harness panic)")
