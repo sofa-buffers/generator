@@ -305,7 +305,14 @@ func (g *gen) emitStruct(f *zfile, name, vis string, fields []*ir.Field, isMessa
 	// marshal: sparse-canonical (MESSAGE_SPEC S2) -- a leaf equal to its
 	// default is omitted; a sequence is opened lazily and, at field level, closed
 	// with the dropping end (MESSAGE_SPEC §2).
-	f.line("    /// Write this value's fields to `os` (sparse-canonical encoding).")
+	bounded := hasEncodeGuard(fields, map[*ir.NamedType]bool{})
+	if bounded {
+		f.line("    /// Write this value's fields to `os` (sparse-canonical encoding). A value")
+		f.line("    /// past its schema bound fails with error.InvalidArgument before that value")
+		f.line("    /// is written; fields and elements before it may already be in `os`.")
+	} else {
+		f.line("    /// Write this value's fields to `os` (sparse-canonical encoding).")
+	}
 	f.line("    pub fn serialize(self: *const %s, os: *sofab.OStream) sofab.Error!void {", name)
 	needsSelf := len(fields) > 0
 	if !needsSelf {
@@ -322,11 +329,17 @@ func (g *gen) emitStruct(f *zfile, name, vis string, fields []*ir.Field, isMessa
 	if isMessage {
 		f.blank()
 		if ms := g.messageSize(name, fields); ms.Bounded {
-			// One exactly sized buffer (ARCHITECTURE §9.6): a value filled past its
-			// declared bound does not fit and is reported, never emitted.
+			// One exactly sized buffer (ARCHITECTURE §9.6). A value past its own
+			// schema bound is refused by serialize's per-field guards before it is
+			// written, so MAX_SIZE is never the check that catches it.
 			f.line("    /// Encode into a fresh buffer allocated from `alloc`, sized to MAX_SIZE and")
-			f.line("    /// trimmed to the bytes written. A value filled past its declared bound does")
-			f.line("    /// not fit: error.BufferFull, nothing returned.")
+			if bounded {
+				f.line("    /// trimmed to the bytes written. A value past its schema bound (a string or")
+				f.line("    /// blob over maxlen, an array over count) is refused with")
+				f.line("    /// error.InvalidArgument, nothing returned.")
+			} else {
+				f.line("    /// trimmed to the bytes written.")
+			}
 			f.line("    pub fn encode(self: *const %s, alloc: std.mem.Allocator) (sofab.Error || std.mem.Allocator.Error)![]u8 {", name)
 			f.line("        const buf = try alloc.alloc(u8, MAX_SIZE);")
 			f.line("        errdefer alloc.free(buf);")
@@ -334,7 +347,13 @@ func (g *gen) emitStruct(f *zfile, name, vis string, fields []*ir.Field, isMessa
 			f.line("        try self.serialize(&os);")
 			f.line("        return alloc.realloc(buf, os.bytesUsed());")
 		} else {
-			f.line("    /// Encode into a fresh buffer allocated from `alloc`.")
+			if bounded {
+				f.line("    /// Encode into a fresh buffer allocated from `alloc`. A value past its schema")
+				f.line("    /// bound (a string or blob over maxlen, an array over count) is refused with")
+				f.line("    /// error.InvalidArgument, nothing returned.")
+			} else {
+				f.line("    /// Encode into a fresh buffer allocated from `alloc`.")
+			}
 			f.line("    pub fn encode(self: *const %s, alloc: std.mem.Allocator) (sofab.Error || std.mem.Allocator.Error)![]u8 {", name)
 			f.line("        var sink: sofab.CollectingSink = .{ .alloc = alloc };")
 			f.line("        defer sink.deinit();")
@@ -490,8 +509,10 @@ func (g *gen) emitMarshalAt(f *zfile, ind string, fld *ir.Field, acc string, for
 	case ir.KindFP64:
 		write = fmt.Sprintf("try os.writeFp64(%d, %s);", fld.ID, acc)
 	case ir.KindString:
+		emitLenGuard(f, ind, acc, fld.HasMaxlen, fld.Maxlen)
 		write = fmt.Sprintf("try os.writeString(%d, %s);", fld.ID, acc)
 	case ir.KindBlob:
+		emitLenGuard(f, ind, acc, fld.HasMaxlen, fld.Maxlen)
 		write = fmt.Sprintf("try os.writeBlob(%d, %s);", fld.ID, acc)
 	case ir.KindStruct, ir.KindUnion:
 		// MESSAGE_SPEC S2: the != default test is per field and a sequence-typed
@@ -536,14 +557,22 @@ func (g *gen) emitMarshalArray(f *zfile, ind string, fld *ir.Field, acc string, 
 	//
 	// A forced union option (see emitMarshalAt) drops the guard of the native
 	// form -- an empty one is written as count 0 -- and keeps the wrapper frame.
+	//
+	// A native array with a `count` is sofab.FixedArray(T, N): its type cannot
+	// hold more than N elements (set() keeps the first N, a documented clamp at
+	// assignment), so no count guard is emitted for it. Every other bounded
+	// array is a slice and gets one (see marshalArray).
+	a := ir.ArrayElem{Elem: fld.Elem, ElemRef: fld.ElemRef, HasCount: fld.HasCount, Count: fld.Count,
+		ElemMaxHas: fld.ElemMaxHas, ElemMax: fld.ElemMax, ElemItems: fld.ElemItems}
 	if isNativeArrayElem(fld.Elem) {
+		a.HasCount = false // FixedArray (or unbounded): the type is the bound
 		if forced {
-			g.marshalArray(f, ind, fmt.Sprintf("%d", fld.ID), g.arrayValExpr(fld, acc), fld.Elem, fld.ElemRef, fld.ElemItems, 0, "")
+			g.marshalArray(f, ind, fmt.Sprintf("%d", fld.ID), g.arrayValExpr(fld, acc), &a, 0, "")
 			return
 		}
 		// One expression, shared with isDefault (see arrayNeExpr).
 		f.line("%sif (%s) {", ind, g.arrayNeExpr(fld, acc))
-		g.marshalArray(f, ind+"    ", fmt.Sprintf("%d", fld.ID), g.arrayValExpr(fld, acc), fld.Elem, fld.ElemRef, fld.ElemItems, 0, "")
+		g.marshalArray(f, ind+"    ", fmt.Sprintf("%d", fld.ID), g.arrayValExpr(fld, acc), &a, 0, "")
 		f.line("%s}", ind)
 		return
 	}
@@ -561,7 +590,57 @@ func (g *gen) emitMarshalArray(f *zfile, ind string, fld *ir.Field, acc string, 
 	if forced {
 		keep = keepAlways
 	}
-	g.marshalArray(f, ind, fmt.Sprintf("%d", fld.ID), acc, fld.Elem, fld.ElemRef, fld.ElemItems, 0, keep)
+	g.marshalArray(f, ind, fmt.Sprintf("%d", fld.ID), acc, &a, 0, keep)
+}
+
+// hasEncodeGuard reports whether serializing fields can reach an emitted
+// encode bound guard (emitLenGuard), directly or through a nested struct, union
+// or array element -- it decides only whether the doc comments promise
+// error.InvalidArgument. seen stops a recursive type.
+func hasEncodeGuard(fields []*ir.Field, seen map[*ir.NamedType]bool) bool {
+	ref := func(r *ir.TypeRef) bool {
+		if r == nil || r.Target == nil || seen[r.Target] {
+			return false
+		}
+		seen[r.Target] = true
+		return hasEncodeGuard(r.Target.Fields, seen)
+	}
+	for _, fld := range fields {
+		switch fld.Kind {
+		case ir.KindString, ir.KindBlob:
+			if fld.HasMaxlen {
+				return true
+			}
+		case ir.KindStruct, ir.KindUnion:
+			if ref(fld.Ref) {
+				return true
+			}
+		case ir.KindArray:
+			// A native array's count is its FixedArray type, not a guard.
+			if (fld.HasCount && !isNativeArrayElem(fld.Elem)) || fld.ElemMaxHas || ref(fld.ElemRef) {
+				return true
+			}
+			for e := fld.ElemItems; e != nil; e = e.ElemItems {
+				if e.HasCount || e.ElemMaxHas || ref(e.ElemRef) {
+					return true
+				}
+			}
+		}
+	}
+	return false
+}
+
+// emitLenGuard writes the encode-side schema bound of one string/blob value or
+// one slice-backed array (ARCHITECTURE §9.6): a value past it is refused with
+// error.InvalidArgument -- the corelib's code for a bad encode call -- before that
+// value is written, never truncated. The bound is the schema literal and the
+// length is the slice's own `.len` (UTF-8 bytes for a string), so the guard is
+// one comparison, no pass over the data. Nothing is emitted when the schema
+// declares no bound.
+func emitLenGuard(f *zfile, ind, acc string, has bool, bound int64) {
+	if has {
+		f.line("%sif (%s.len > %d) return error.InvalidArgument;", ind, acc, bound)
+	}
 }
 
 // keepAlways is emitSeqEnd's keepIf for a frame that must always survive: a
@@ -636,9 +715,17 @@ func emitSeqEnd(f *zfile, ind, keepIf string) {
 //
 // keepIf is the closer this call's own wrapper takes (see emitSeqEnd); the
 // native element kinds open no sequence and ignore it.
-func (g *gen) marshalArray(f *zfile, ind, idExpr, val string, elem ir.Kind, ref *ir.TypeRef, items *ir.ArrayElem, depth int, keepIf string) {
+//
+// a describes the array: a.HasCount asks for the count guard on val (the caller
+// clears it where the storage type already is the bound), and a.ElemMaxHas for
+// the maxlen guard on each string/blob element. Both refuse the value with
+// error.InvalidArgument before the offending value is written; elements before
+// it (and the array's sequence begin) may already be in os.
+func (g *gen) marshalArray(f *zfile, ind, idExpr, val string, a *ir.ArrayElem, depth int, keepIf string) {
 	iv := fmt.Sprintf("_i%d", depth)
 	ev := fmt.Sprintf("_e%d", depth)
+	elem, items := a.Elem, a.ElemItems
+	emitLenGuard(f, ind, val, a.HasCount, a.Count)
 	switch elem {
 	case ir.KindU8, ir.KindU16, ir.KindU32, ir.KindU64, ir.KindBitfield:
 		// bitfield backing is an unsigned int, so it writes directly.
@@ -663,6 +750,7 @@ func (g *gen) marshalArray(f *zfile, ind, idExpr, val string, elem ir.Kind, ref 
 		// whatever its value: see lastElemExpr.
 		f.line("%stry os.writeSequenceBeginLazy(%s);", ind, idExpr)
 		f.line("%sfor (%s, 0..) |%s, %s| {", ind, val, ev, iv)
+		emitLenGuard(f, ind+"    ", ev, a.ElemMaxHas, a.ElemMax)
 		f.line("%s    if (%s.len != 0 or %s) try os.writeString(@intCast(%s), %s);", ind, ev, lastElemExpr(iv, val), iv, ev)
 		f.line("%s}", ind)
 		emitSeqEnd(f, ind, keepIf)
@@ -670,6 +758,7 @@ func (g *gen) marshalArray(f *zfile, ind, idExpr, val string, elem ir.Kind, ref 
 		// A blob element is a leaf, exactly like the string element above.
 		f.line("%stry os.writeSequenceBeginLazy(%s);", ind, idExpr)
 		f.line("%sfor (%s, 0..) |%s, %s| {", ind, val, ev, iv)
+		emitLenGuard(f, ind+"    ", ev, a.ElemMaxHas, a.ElemMax)
 		f.line("%s    if (%s.len != 0 or %s) try os.writeBlob(@intCast(%s), %s);", ind, ev, lastElemExpr(iv, val), iv, ev)
 		f.line("%s}", ind)
 		emitSeqEnd(f, ind, keepIf)
@@ -697,13 +786,13 @@ func (g *gen) marshalArray(f *zfile, ind, idExpr, val string, elem ir.Kind, ref 
 			// interior row equal to the element default (the empty row) is not
 			// written at all, and the last row always is.
 			f.line("%s    if (%s.len != 0 or %s) {", ind, ev, lastElemExpr(iv, val))
-			g.marshalArray(f, ind+"        ", fmt.Sprintf("@intCast(%s)", iv), ev, items.Elem, items.ElemRef, items.ElemItems, depth+1, "")
+			g.marshalArray(f, ind+"        ", fmt.Sprintf("@intCast(%s)", iv), ev, items, depth+1, "")
 			f.line("%s    }", ind)
 		} else {
 			// A wrapper row has its own frame, so it takes the closer instead -- the
 			// same interior/last choice, expressed the same way as for a struct
 			// element above.
-			g.marshalArray(f, ind+"    ", fmt.Sprintf("@intCast(%s)", iv), ev, items.Elem, items.ElemRef, items.ElemItems, depth+1, lastElemExpr(iv, val))
+			g.marshalArray(f, ind+"    ", fmt.Sprintf("@intCast(%s)", iv), ev, items, depth+1, lastElemExpr(iv, val))
 		}
 		f.line("%s}", ind)
 		emitSeqEnd(f, ind, keepIf)

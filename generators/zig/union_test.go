@@ -172,13 +172,16 @@ func TestZigUnionEncodeArms(t *testing.T) {
 	u := section(t, m, "pub const M_U = union(enum) {")
 	wantCode(t, u, "encode arms",
 		".num => { try os.writeUnsigned(0, self.num); },",
-		".s => { try os.writeString(1, self.s); },",
+		".s => { if (self.s.len > 8) return error.InvalidArgument; try os.writeString(1, self.s); },",
 		".pt => { try os.writeSequenceBeginLazy(2); try self.pt.serialize(os); try os.writeSequenceEnd(); },",
 		".arr => { try os.writeArrayUnsigned(3, self.arr.slice()); },",
 		"try os.writeString(@intCast(_i0), _e0); } try os.writeSequenceEndKeep(); },",
 		".box => { try os.writeSequenceBeginLazy(5); try self.box.serialize(os); try os.writeSequenceEndKeep(); },",
 		".which_ => { try os.writeBoolean(6, self.which_); },",
-		`.@"error" => { try os.writeBlob(7, self.@"error"); },`,
+		`.@"error" => { if (self.@"error".len > 4) return error.InvalidArgument; try os.writeBlob(7, self.@"error"); },`,
+		// The wrapper-array option: its count and each element's maxlen.
+		"if (self.strs.len > 3) return error.InvalidArgument;",
+		"if (_e0.len > 4) return error.InvalidArgument;",
 		".inner => { try os.writeSequenceBeginLazy(8); try self.inner.serialize(os); try os.writeSequenceEndKeep(); },",
 		"pub fn isDefault(self: *const M_U) bool { return self.* == .pt and self.pt.isDefault(); }")
 	// A leaf D keeps the ordinary field's ≠-default guard.
