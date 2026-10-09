@@ -34,7 +34,7 @@ class Scalars:
     f32: float = 3.14
     f64: float = -2.5
     flag: bool = True
-    #: Schema bound: count 4 is a CAPACITY, not a length -- starts empty; over 4 elements is INVALID, never truncated.
+    #: Schema bound: count 4 is a CAPACITY, not a length -- starts empty; over 4 elements is INVALID, never truncated: encode refuses it.
     flags: list[bool] = field(default_factory=list)
 
     # Worst-case encoded size, derived from the schema: no value of this

@@ -14,7 +14,7 @@ type Scalars struct {
 	U64max uint64  `json:"u64max"`
 	I64min int64   `json:"i64min"`
 	F64    float64 `json:"f64"`
-	// Schema bound: count 4 is a CAPACITY, not a length -- starts empty; over 4 elements is INVALID, never truncated.
+	// Schema bound: count 4 is a CAPACITY, not a length -- starts empty; over 4 elements is INVALID, never truncated: encode refuses it.
 	Flags []bool  `json:"flags"`
 	F32   float32 `json:"f32"`
 	U8min uint8   `json:"u8min"`

@@ -25,7 +25,7 @@ export class Scalars {
   f32Fp32Raw: Uint8Array | null = null;
   f64: number = -2.5;
   flag: boolean = true;
-  /** Schema bound: count 4 is a CAPACITY, not a length -- starts empty; over 4 elements is INVALID, never truncated. */
+  /** Schema bound: count 4 is a CAPACITY, not a length -- starts empty; over 4 elements is INVALID, never truncated: encode refuses it. */
   flags: Uint8Array = _E_Uint8Array;
 
   serialize(os: OStream): void {

@@ -14,7 +14,7 @@ public class Scalars {
     public float f32 = 3.14f;
     public double f64 = -2.5;
     public boolean flag = true;
-    /** Schema bound: count 4 is a CAPACITY, not a length -- starts empty; over 4 elements is INVALID, never truncated. */
+    /** Schema bound: count 4 is a CAPACITY, not a length -- starts empty; over 4 elements is INVALID, never truncated: encode refuses it. */
     public List<Boolean> flags = new ArrayList<>();
 
     /**

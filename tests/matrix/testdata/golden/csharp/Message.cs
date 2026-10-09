@@ -13,7 +13,7 @@ public sealed class Scalars {
     public double f64 = -2.5;
     public bool flag = true;
     /// <summary>
-    /// Schema bound: count 4 is a CAPACITY, not a length -- starts empty; over 4 elements is INVALID, never truncated.
+    /// Schema bound: count 4 is a CAPACITY, not a length -- starts empty; over 4 elements is INVALID, never truncated: encode refuses it.
     /// </summary>
     public global::System.Collections.Generic.List<bool> flags = new(4);
 

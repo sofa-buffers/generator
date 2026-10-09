@@ -23,7 +23,7 @@ public class Scalars {
     public var f32Fp32Bits: Int? = null
     public var f64: Double = -2.5
     public var flag: Boolean = true
-    /** Schema bound: count 4 is a CAPACITY, not a length -- starts empty; over 4 elements is INVALID, never truncated. */
+    /** Schema bound: count 4 is a CAPACITY, not a length -- starts empty; over 4 elements is INVALID, never truncated: encode refuses it. */
     public var flags: BooleanArray = Seq.EMPTY_BOOLEANS
 
     /** Write this object's fields into [os]. Streaming out: nothing is flushed -- see [encodeTo]. */

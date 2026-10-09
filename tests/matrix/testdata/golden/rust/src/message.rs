@@ -47,7 +47,7 @@ pub struct Scalars {
     pub f32: f32,
     pub f64: f64,
     pub flag: bool,
-    /// Schema bound: count 4 is a CAPACITY, not a length -- starts empty; over 4 elements is INVALID, never truncated.
+    /// Schema bound: count 4 is a CAPACITY, not a length -- starts empty; over 4 elements is INVALID, never truncated: encode refuses it.
     pub flags: Vec<bool>,
 }
 

@@ -196,8 +196,6 @@ _block(("go",), SCALARS,
        "the Go storage type is exactly the declared width (uint8, int16, enum int8, bitfield "
        "uint8), so no value past it can reach the encoder; encoding/json refuses the number "
        "before encode")
-_CAST = ("the harness casts the JSON number to the field's fixed-width type (300 -> 0x2c) "
-         "before the generated code sees it")
 _block(("c",), SCALARS,
        "the field's fixed-width C type (uint8_t, int16_t, the int8_t enum, the uint8_t "
        "bitfield) guarantees the declared width, so the encoder has no width to check; "

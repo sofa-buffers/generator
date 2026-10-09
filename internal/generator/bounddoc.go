@@ -38,8 +38,11 @@ const (
 //
 // The wording is deliberately about the two things a caller can get wrong —
 // that the container starts EMPTY, and that exceeding the bound is a rejection
-// rather than a truncation (MESSAGE_SPEC §3, §7.1) — and not about the wire
-// format, which the type does not decide.
+// rather than a truncation (MESSAGE_SPEC §3, §7.1; on the encode side
+// ARCHITECTURE §9.6) — and not about the wire format, which the type does not
+// decide. A fixed-capacity container cannot hold an over-bound value at all
+// (it clamps or refuses on assignment, per backend), so its note does not
+// promise an encode-time refusal.
 type BoundDoc struct {
 	// Storage is how this backend lowered THIS field. It varies per field
 	// within one message: on static storage a bounded array is inline while an
@@ -94,7 +97,7 @@ func (d BoundDoc) arrayNote(f *ir.Field) string {
 	case StorageCompanion:
 		fmt.Fprintf(&b, "Schema bound: count %d is a capacity; %s carries the length -- elements set without it encode an EMPTY array. Over %d is INVALID.", f.Count, d.LenMember, f.Count)
 	default:
-		fmt.Fprintf(&b, "Schema bound: count %d is a CAPACITY, not a length -- %s; over %d elements is INVALID, never truncated.", f.Count, start, f.Count)
+		fmt.Fprintf(&b, "Schema bound: count %d is a CAPACITY, not a length -- %s; over %d elements is INVALID, never truncated: encode refuses it.", f.Count, start, f.Count)
 	}
 	if f.ElemMaxHas {
 		fmt.Fprintf(&b, " Element maxlen %d, same rule.", f.ElemMax)
@@ -105,11 +108,11 @@ func (d BoundDoc) arrayNote(f *ir.Field) string {
 func (d BoundDoc) maxlenNote(maxlen int64) string {
 	switch d.Storage {
 	case StorageFixed:
-		return fmt.Sprintf("Schema bound: maxlen %d -- the capacity is in the type; a longer value is INVALID, never truncated.", maxlen)
+		return fmt.Sprintf("Schema bound: maxlen %d -- the capacity is in the type, so the field never holds a longer value; a longer one on the wire is INVALID.", maxlen)
 	case StorageCompanion:
 		return fmt.Sprintf("Schema bound: maxlen %d -- %s carries the length; a longer value is INVALID, never truncated.", maxlen, d.LenMember)
 	default:
-		return fmt.Sprintf("Schema bound: maxlen %d -- a longer value is INVALID, never truncated.", maxlen)
+		return fmt.Sprintf("Schema bound: maxlen %d -- a longer value is INVALID, never truncated: encode refuses it.", maxlen)
 	}
 }
 
