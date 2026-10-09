@@ -1819,7 +1819,7 @@ func TestCppWrapperArrayInteriorIsSparseLastElementKept(t *testing.T) {
 		"const std::size_t _n0 = dynamic.size(); for (std::size_t _i0 = 0; _i0 < _n0; ++_i0) { if (_i0 + 1 == _n0) { (void)_os.write(static_cast<sofab::id>(_i0), dynamic[_i0]); } else { (void)_os.writeLazy(static_cast<sofab::id>(_i0), dynamic[_i0]); } }",
 		// A string element: the same rule on the write itself, since the leaf has
 		// no frame. The counted array gets the same guard as a count-less one.
-		"const std::size_t _n0 = fstrs.size(); for (std::size_t _i0 = 0; _i0 < _n0; ++_i0) { const auto &_e0 = fstrs[_i0]; if (!_e0.empty() || _i0 + 1 == _n0) {",
+		"const std::size_t _n0 = fstrs.size(); for (std::size_t _i0 = 0; _i0 < _n0; ++_i0) { const auto &_e0 = fstrs[_i0]; if (_e0.size() > 8) { return _os.rejectArgument(); } if (!_e0.empty() || _i0 + 1 == _n0) {",
 	} {
 		if !strings.Contains(h, want) {
 			t.Errorf("element rule missing %q:\n%s", want, h)
@@ -1958,10 +1958,12 @@ func TestCppWrapperArrayAlwaysWritesLastElement(t *testing.T) {
 	for _, want := range []string{
 		// Dynamic: the element loop runs over the whole container, and the last
 		// index escapes the omit test.
-		"const std::size_t _n0 = dynstr.size(); for (std::size_t _i0 = 0; _i0 < _n0; ++_i0) { const auto &_e0 = dynstr[_i0]; if (!_e0.empty() || _i0 + 1 == _n0) {",
-		"const std::size_t _n0 = dynblob.size(); for (std::size_t _i0 = 0; _i0 < _n0; ++_i0) { const auto &_e0 = dynblob[_i0]; if (!_e0.empty() || _i0 + 1 == _n0) {",
+		// (The element's maxlen is refused at encode first: a std::string element
+		// can hold more than its bound.)
+		"const std::size_t _n0 = dynstr.size(); for (std::size_t _i0 = 0; _i0 < _n0; ++_i0) { const auto &_e0 = dynstr[_i0]; if (_e0.size() > 8) { return _os.rejectArgument(); } if (!_e0.empty() || _i0 + 1 == _n0) {",
+		"const std::size_t _n0 = dynblob.size(); for (std::size_t _i0 = 0; _i0 < _n0; ++_i0) { const auto &_e0 = dynblob[_i0]; if (_e0.size() > 8) { return _os.rejectArgument(); } if (!_e0.empty() || _i0 + 1 == _n0) {",
 		// Counted: the SAME loop and the same guard -- no carve-out left.
-		"const std::size_t _n0 = fixedstr.size(); for (std::size_t _i0 = 0; _i0 < _n0; ++_i0) { const auto &_e0 = fixedstr[_i0]; if (!_e0.empty() || _i0 + 1 == _n0) {",
+		"const std::size_t _n0 = fixedstr.size(); for (std::size_t _i0 = 0; _i0 < _n0; ++_i0) { const auto &_e0 = fixedstr[_i0]; if (_e0.size() > 8) { return _os.rejectArgument(); } if (!_e0.empty() || _i0 + 1 == _n0) {",
 		// The all-default predicate has to follow the writer: a dynamic [""] now
 		// puts an element on the wire, so the field is NOT default and must not be
 		// omitted. Narrowing it here would drop a field the serialize loop writes.
@@ -3238,7 +3240,7 @@ messages:
 		if strings.Contains(json, "emplace_back(_s, _l)") {
 			t.Errorf("allow_dynamic=%v: harness builds a string element from (ptr, len), which FixedString has no constructor for:\n%s", dynamic, json)
 		}
-		if n := strings.Count(json, "emplace_back().assign(std::string_view{_s, _l})"); n != 3 {
+		if n := strings.Count(json, ".assign(std::string_view{_s, _l});"); n != 3 {
 			t.Errorf("allow_dynamic=%v: want all 3 string arrays assigned through a string_view, got %d:\n%s", dynamic, n, json)
 		}
 	}

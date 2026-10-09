@@ -854,8 +854,9 @@ func (g *gen) emitStruct(f *hfile, name, summary string, fields []*ir.Field, isM
 		f.line("    /**")
 		f.line("     * @brief Encode this message into a new byte vector.")
 		f.line("     * @return The encoded bytes. Empty if the message encodes to nothing,")
-		f.line("     *         and also empty if the encode was refused -- use encodeTo() when")
-		f.line("     *         the two need telling apart.")
+		f.line("     *         and also empty if the encode was refused (a value past its")
+		f.line("     *         schema bound, see @ref serialize) -- use encodeTo() when the")
+		f.line("     *         two need telling apart.")
 		f.line("     */")
 		f.line("    std::vector<std::uint8_t> encode() const {")
 		if ms.Bounded {
@@ -890,8 +891,9 @@ func (g *gen) emitStruct(f *hfile, name, summary string, fields []*ir.Field, isM
 		f.line("     * @brief Encode this message into caller-provided storage (no allocation).")
 		f.line("     * @param _dst Destination buffer.")
 		f.line("     * @param _cap Capacity of @p _dst in bytes.")
-		f.line("     * @return Bytes written, or 0 if the message does not fit in @p _cap;")
-		f.line("     *         in which case @p _dst holds however much was written first.")
+		f.line("     * @return Bytes written, or 0 if the message does not fit in @p _cap or")
+		f.line("     *         was refused (a value past its schema bound, see @ref serialize);")
+		f.line("     *         then @p _dst holds however much was written first.")
 		f.line("     */")
 		f.line("    std::size_t encodeTo(std::uint8_t *_dst, std::size_t _cap) const noexcept {")
 		f.line("        sofab::OStreamView _os{_dst, _cap};")
@@ -1012,6 +1014,15 @@ func (g *gen) emitStruct(f *hfile, name, summary string, fields []*ir.Field, isM
 	f.line("     *")
 	f.line("     * Called by @ref encode / @ref encodeTo, and directly when writing into a")
 	f.line("     * stream you own. Fields equal to their default are omitted.")
+	f.line("     *")
+	f.line("     * A value past its schema bound in a growable member -- a std::string or")
+	f.line("     * std::vector longer than its `maxlen` or `count` -- is refused: the")
+	f.line("     * stream latches InvalidArgument (@c ok() turns false) and this returns")
+	f.line("     * at once. A fixed-capacity member (FixedString, FixedBytes, InlineVector)")
+	f.line("     * carries its bound as its capacity and clamps on assignment instead.")
+	if g.clib {
+		f.line("     * Defining SOFAB_DISABLE_ENCODE_BOUNDS compiles the refusals out.")
+	}
 	f.line("     *")
 	f.line("     * @param _os Stream to write to.")
 	f.line("     * @return The result of the writes.")
@@ -1306,7 +1317,8 @@ func (g *gen) emitSerializeAt(f *hfile, fld *ir.Field, acc, ind string, forced b
 	case ir.KindFP32, ir.KindFP64:
 		write = fmt.Sprintf("(void)_os.write(%d, %s);", fld.ID, acc)
 	case ir.KindString:
-		write = fmt.Sprintf("(void)_os.write(%d, %s);", fld.ID, acc)
+		write = g.withSizeGuard(g.cppType(fld), acc, fld.HasMaxlen, fld.Maxlen,
+			fmt.Sprintf("(void)_os.write(%d, %s);", fld.ID, acc))
 	case ir.KindEnum:
 		write = fmt.Sprintf("(void)_os.write(%d, static_cast<%s>(%s));", fld.ID, enumBacking(fld.Ref.Target), acc)
 	case ir.KindBitfield:
@@ -1315,7 +1327,8 @@ func (g *gen) emitSerializeAt(f *hfile, fld *ir.Field, acc, ind string, forced b
 		// A blob is a leaf: sparse-canonical encoding (MESSAGE_SPEC S2) omits it
 		// when it equals its default (empty if none). The decoder reconstructs the
 		// omitted blob from the member's construction default.
-		blob := fmt.Sprintf("(void)_os.write(%d, %s.data(), static_cast<std::int32_t>(%s.size()));", fld.ID, acc, acc)
+		blob := g.withSizeGuard(g.cppType(fld), acc, fld.HasMaxlen, fld.Maxlen,
+			fmt.Sprintf("(void)_os.write(%d, %s.data(), static_cast<std::int32_t>(%s.size()));", fld.ID, acc, acc))
 		if forced {
 			f.line("%s%s", ind, blob)
 			return
@@ -1447,16 +1460,16 @@ func (g *gen) emitSerializeArrayAt(f *hfile, fld *ir.Field, acc, ind string, for
 			guard = fmt.Sprintf("!%s.empty()", acc)
 		}
 		if forced {
-			g.serializeArray(f, ind, fmt.Sprintf("%d", fld.ID), acc, fld.Elem, fld.ElemRef, fld.ElemItems, fld.Count, 0, "")
+			g.serializeArray(f, ind, fmt.Sprintf("%d", fld.ID), acc, fld.Elem, fld.ElemRef, fld.ElemItems, fld.Count, fld.ElemMaxHas, fld.ElemMax, 0, "")
 			return
 		}
 		f.line("%sif (%s) {", ind, guard)
-		g.serializeArray(f, ind+"    ", fmt.Sprintf("%d", fld.ID), acc, fld.Elem, fld.ElemRef, fld.ElemItems, fld.Count, 0, "")
+		g.serializeArray(f, ind+"    ", fmt.Sprintf("%d", fld.ID), acc, fld.Elem, fld.ElemRef, fld.ElemItems, fld.Count, fld.ElemMaxHas, fld.ElemMax, 0, "")
 		f.line("%s}", ind)
 		return
 	}
 	if forced {
-		g.serializeArray(f, ind, fmt.Sprintf("%d", fld.ID), acc, fld.Elem, fld.ElemRef, fld.ElemItems, fld.Count, 0, keepAlways)
+		g.serializeArray(f, ind, fmt.Sprintf("%d", fld.ID), acc, fld.Elem, fld.ElemRef, fld.ElemItems, fld.Count, fld.ElemMaxHas, fld.ElemMax, 0, keepAlways)
 		return
 	}
 	// The field-level wrapper frame is dropped when no element is written, and
@@ -1466,7 +1479,43 @@ func (g *gen) emitSerializeArrayAt(f *hfile, fld *ir.Field, acc, ind string, for
 	// needs a guard -- `if (value != default) { ... sequenceEndKeep(); }` -- so that
 	// a value differing from a non-empty default still reaches the wire as the empty
 	// wrapper, the only encoding of "explicitly empty" (MESSAGE_SPEC S2, S3).
-	g.serializeArray(f, ind, fmt.Sprintf("%d", fld.ID), acc, fld.Elem, fld.ElemRef, fld.ElemItems, fld.Count, 0, "")
+	g.serializeArray(f, ind, fmt.Sprintf("%d", fld.ID), acc, fld.Elem, fld.ElemRef, fld.ElemItems, fld.Count, fld.ElemMaxHas, fld.ElemMax, 0, "")
+}
+
+// sizeGuard is the per-field encode bound check (ARCHITECTURE §9.6): a string
+// or blob longer than its maxlen, or an array with more elements than its
+// count, is REFUSED -- serialize() returns at once through the corelib's
+// rejectArgument(), which latches InvalidArgument, so the encode reports the
+// failure and returns no bytes as a success. Only the generated code knows the
+// bound; the corelib is handed none.
+//
+// It is emitted only where the storage can hold more than the bound: a
+// std::string / std::vector. A sofab::FixedString / FixedBytes / InlineVector
+// carries the bound as its capacity and clamps at assignment, before any
+// encoder runs -- a documented contract, so there is nothing left to refuse.
+// It returns "" when there is no bound or the storage carries it.
+//
+// On corelib: c-cpp (the footprint profile) the test starts with
+// sofab::ENCODE_BOUNDS, a constant the corelib turns false under
+// SOFAB_DISABLE_ENCODE_BOUNDS, so that switch compiles every check away.
+func (g *gen) sizeGuard(storage, acc string, has bool, bound int64) string {
+	if !has || !strings.HasPrefix(storage, "std::") {
+		return ""
+	}
+	cond := fmt.Sprintf("%s.size() > %d", acc, bound)
+	if g.clib {
+		cond = "sofab::ENCODE_BOUNDS && " + cond
+	}
+	return fmt.Sprintf("if (%s) { return _os.rejectArgument(); }", cond)
+}
+
+// withSizeGuard puts sizeGuard's check in front of write, the one statement
+// that emits the field.
+func (g *gen) withSizeGuard(storage, acc string, has bool, bound int64, write string) string {
+	if guard := g.sizeGuard(storage, acc, has, bound); guard != "" {
+		return guard + " " + write
+	}
+	return write
 }
 
 // lastElemExpr is the "this element is the array's last" test, at loop position
@@ -1536,10 +1585,20 @@ func emitSeqEnd(f *hfile, ind, keepIf string) {
 //
 // keepIf is the closer this call's own wrapper takes (see emitSeqEnd); the
 // native element kinds open no sequence and ignore it.
-func (g *gen) serializeArray(f *hfile, ind, idExpr, val string, elem ir.Kind, ref *ir.TypeRef, items *ir.ArrayElem, count int64, depth int, keepIf string) {
+func (g *gen) serializeArray(f *hfile, ind, idExpr, val string, elem ir.Kind, ref *ir.TypeRef, items *ir.ArrayElem, count int64, elemMaxHas bool, elemMax int64, depth int, keepIf string) {
 	iv := fmt.Sprintf("_i%d", depth)
 	ev := fmt.Sprintf("_e%d", depth)
 	nv := fmt.Sprintf("_n%d", depth)
+	// The array's own count, then (in the element loops below) a string or blob
+	// element's maxlen: both refused before the value is written, wherever the
+	// storage does not already hold the bound (sizeGuard).
+	if guard := g.sizeGuard(g.cppArrayContainer(elem, ref, items, count, elemMaxHas, elemMax), val, count > 0, count); guard != "" {
+		f.line("%s%s", ind, guard)
+	}
+	elemGuard := g.sizeGuard(g.cppArrayElem(elem, ref, items, elemMaxHas, elemMax), ev, elemMaxHas, elemMax)
+	if elemGuard != "" {
+		elemGuard += " "
+	}
 	switch elem {
 	case ir.KindU8, ir.KindU16, ir.KindU32, ir.KindU64,
 		ir.KindI8, ir.KindI16, ir.KindI32, ir.KindI64,
@@ -1563,14 +1622,14 @@ func (g *gen) serializeArray(f *hfile, ind, idExpr, val string, elem ir.Kind, re
 		// omitted element, so the surviving ids stay aligned. At the LAST index it
 		// is written whatever its value: see lastElemExpr.
 		f.line("%s(void)_os.sequenceBeginLazy(%s);", ind, idExpr)
-		f.line("%s{ const std::size_t %s = %s.size(); for (std::size_t %s = 0; %s < %s; ++%s) { const auto &%s = %s[%s]; if (!%s.empty() || %s) { (void)_os.write(static_cast<sofab::id>(%s), %s.data(), static_cast<std::int32_t>(%s.size())); } } }",
-			ind, nv, val, iv, iv, nv, iv, ev, val, iv, ev, lastElemExpr(iv, nv), iv, ev, ev)
+		f.line("%s{ const std::size_t %s = %s.size(); for (std::size_t %s = 0; %s < %s; ++%s) { const auto &%s = %s[%s]; %sif (!%s.empty() || %s) { (void)_os.write(static_cast<sofab::id>(%s), %s.data(), static_cast<std::int32_t>(%s.size())); } } }",
+			ind, nv, val, iv, iv, nv, iv, ev, val, iv, elemGuard, ev, lastElemExpr(iv, nv), iv, ev, ev)
 		emitSeqEnd(f, ind, keepIf)
 	case ir.KindString:
 		// A string element is a leaf, exactly like the blob element above.
 		f.line("%s(void)_os.sequenceBeginLazy(%s);", ind, idExpr)
-		f.line("%s{ const std::size_t %s = %s.size(); for (std::size_t %s = 0; %s < %s; ++%s) { const auto &%s = %s[%s]; if (!%s.empty() || %s) { (void)_os.write(static_cast<sofab::id>(%s), %s); } } }",
-			ind, nv, val, iv, iv, nv, iv, ev, val, iv, ev, lastElemExpr(iv, nv), iv, ev)
+		f.line("%s{ const std::size_t %s = %s.size(); for (std::size_t %s = 0; %s < %s; ++%s) { const auto &%s = %s[%s]; %sif (!%s.empty() || %s) { (void)_os.write(static_cast<sofab::id>(%s), %s); } } }",
+			ind, nv, val, iv, iv, nv, iv, ev, val, iv, elemGuard, ev, lastElemExpr(iv, nv), iv, ev)
 		emitSeqEnd(f, ind, keepIf)
 	case ir.KindStruct, ir.KindUnion:
 		// A sequence-form element obeys the SAME rule as the leaf elements above --
@@ -1600,13 +1659,13 @@ func (g *gen) serializeArray(f *hfile, ind, idExpr, val string, elem ir.Kind, re
 			// declared inner `count: N` sizes the row's capacity and adds nothing.
 			inner := g.cppArrayContainer(items.Elem, items.ElemRef, items.ElemItems, items.Count, items.ElemMaxHas, items.ElemMax)
 			f.line("%s    if (%s != %s{} || %s) {", ind, ev, inner, lastElemExpr(iv, nv))
-			g.serializeArray(f, ind+"        ", fmt.Sprintf("static_cast<sofab::id>(%s)", iv), ev, items.Elem, items.ElemRef, items.ElemItems, items.Count, depth+1, "")
+			g.serializeArray(f, ind+"        ", fmt.Sprintf("static_cast<sofab::id>(%s)", iv), ev, items.Elem, items.ElemRef, items.ElemItems, items.Count, items.ElemMaxHas, items.ElemMax, depth+1, "")
 			f.line("%s    }", ind)
 		} else {
 			// A wrapper row has its own frame, so it takes the closer instead -- the
 			// same interior/last choice, expressed the same way as for a struct
 			// element above.
-			g.serializeArray(f, ind+"    ", fmt.Sprintf("static_cast<sofab::id>(%s)", iv), ev, items.Elem, items.ElemRef, items.ElemItems, items.Count, depth+1, lastElemExpr(iv, nv))
+			g.serializeArray(f, ind+"    ", fmt.Sprintf("static_cast<sofab::id>(%s)", iv), ev, items.Elem, items.ElemRef, items.ElemItems, items.Count, items.ElemMaxHas, items.ElemMax, depth+1, lastElemExpr(iv, nv))
 		}
 		f.line("%s} }", ind)
 		emitSeqEnd(f, ind, keepIf)

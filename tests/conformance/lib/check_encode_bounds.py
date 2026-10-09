@@ -129,10 +129,10 @@ SCALARS = ("u8_over", "i16_over", "i16_under", "e_over", "f_over")
 # One line per variant, so that a backend change edits only its own lines.
 KNOWN_GAP = {
     "c": STRINGS_AND_ARRAYS + SCALARS,
-    "cpp": STRINGS_AND_ARRAYS + SCALARS,
-    "cpp-static": STRINGS_AND_ARRAYS + SCALARS,
-    "c-cpp": STRINGS_AND_ARRAYS + SCALARS,
-    "c-cpp-static": STRINGS_AND_ARRAYS + SCALARS,
+    "cpp": (),
+    "cpp-static": (),
+    "c-cpp": (),
+    "c-cpp-static": (),
     "rust": (),
     "rust-static": (),
     "rs-no-std": (),
@@ -157,9 +157,9 @@ assert set(KNOWN_GAP) == set(VARIANTS)
 CLAMP_CONTRACT = {
     "c": (),
     "cpp": (),
-    "cpp-static": (),
+    "cpp-static": STRINGS_AND_ARRAYS,
     "c-cpp": (),
-    "c-cpp-static": (),
+    "c-cpp-static": STRINGS_AND_ARRAYS,
     "rust": (),
     "rust-static": (),
     "rs-no-std": (),
@@ -198,10 +198,13 @@ _block(("go",), SCALARS,
 _CAST = ("the harness casts the JSON number to the field's fixed-width type (300 -> 0x2c) "
          "before the generated code sees it")
 _block(("c",), SCALARS, _CAST)
-_block(("cpp",), SCALARS, _CAST)
-_block(("cpp-static",), SCALARS, _CAST)
-_block(("c-cpp",), SCALARS, _CAST)
-_block(("c-cpp-static",), SCALARS, _CAST)
+_CPP_WIDTH = ("the member's type guarantees the declared width (std::uint8_t, std::int16_t, an enum "
+              "class over std::int8_t, a std::uint8_t bitfield), so encode needs no check; the "
+              "harness's cast wraps 300 to 0x2c before the generated code sees it")
+_block(("cpp",), SCALARS, _CPP_WIDTH)
+_block(("cpp-static",), SCALARS, _CPP_WIDTH)
+_block(("c-cpp",), SCALARS, _CPP_WIDTH)
+_block(("c-cpp-static",), SCALARS, _CPP_WIDTH)
 _block(("zig",), SCALARS,
        "the field's Zig type is exactly the declared width (u8, i16, and the i8/u8 an enum/"
        "bitfield implies), so no over-width value can be stored; the harness casts the JSON "
