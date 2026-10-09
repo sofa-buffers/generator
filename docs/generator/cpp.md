@@ -71,6 +71,29 @@ Two things worth knowing before switching it on under `corelib: cpp`:
   really does put a megabyte inline. Setting `allow_dynamic: false` makes every
   declared bound a decision about `sizeof`.
 
+### A value past its bound
+
+The two storage modes treat a value longer than its `maxlen` or `count`
+differently, because they see it at different times:
+
+- **`std::string` / `std::vector`** can hold any length, so encode checks
+  it. `encode()` returns no bytes, `encodeTo()` returns 0, and a stream
+  passed to `serialize()` reports `InvalidArgument` (`ok()` is false).
+- **`FixedString<N>` / `FixedBytes<N>` / `InlineVector<T, N>`** cannot
+  hold more than `N`, so they shorten the value when you assign it, and
+  encode then writes the shortened value. A string is cut at `N` bytes and
+  never inside a UTF-8 character. `push_back` past `N` drops the new element
+  and keeps the ones already stored.
+
+Integer, enum and bitfield members already have the declared width as their
+C++ type, so a value past that width cannot be stored in them at all.
+
+**`SOFAB_DISABLE_ENCODE_BOUNDS`** (`corelib: c-cpp` only). Define it when
+you build to remove the encode checks above from the image. Use it only when
+your own code guarantees that every value fits its bound. Without the checks,
+an over-long value is encoded, and a receiver then rejects that message as
+invalid. Decode checks bounds either way.
+
 ## `namespace`
 
 Wraps every generated type; the default is `message`. `generic.namespace` sets

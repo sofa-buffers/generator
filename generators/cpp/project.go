@@ -447,12 +447,16 @@ func (g *gen) fromJSONArray(f *hfile, ind, node, target string, elem ir.Kind, re
 	f.line("%sconst sofab_json_t *%s = sofab_json_array_at(%s, %s);", inner, ev, node, iv)
 	switch elem {
 	case ir.KindString:
-		// Default-construct a slot, then assign. The element type is decided by the
+		// Build the element, then append it. The element type is decided by the
 		// element's own maxlen, not by the container: a count-less array of bounded
 		// strings is a std::vector of sofab::FixedString, which has no (ptr, len)
 		// constructor. .assign(std::string_view) is the one call both element types
-		// -- std::string and sofab::FixedString<N> -- share.
-		f.line("%s{ size_t _l; const char *_s = sofab_json_string(%s, &_l); %s.emplace_back().assign(std::string_view{_s, _l}); }", inner, ev, target)
+		// -- std::string and sofab::FixedString<N> -- share. push_back, not
+		// emplace_back: past its capacity an InlineVector drops what push_back
+		// hands it (the assignment-time clamp), while emplace_back reuses the last
+		// slot and would overwrite the last element kept.
+		f.line("%s{ size_t _l; const char *_s = sofab_json_string(%s, &_l); %s %s{}; %s.assign(std::string_view{_s, _l}); %s.push_back(std::move(%s)); }",
+			inner, ev, g.cppArrayElem(elem, ref, items, elemMaxHas, elemMax), vv, vv, target, vv)
 	case ir.KindBlob:
 		f.line("%s{ %s _b{}; json_to_bytes(%s, _b); %s.push_back(std::move(_b)); }", inner, g.cppArrayElem(elem, ref, items, elemMaxHas, elemMax), ev, target)
 	case ir.KindStruct, ir.KindUnion:
@@ -534,6 +538,10 @@ func (g *gen) harnessMain(s *ir.Schema) []byte {
 		f.line("            if (!root) { std::cerr << \"json: \" << err << \"\\n\"; return 1; }")
 		f.line("            %s obj; from_json(root, obj); sofab_json_free(root);", mt)
 		f.line("            auto bytes = obj.encode();")
+		// encode() answers a refusal with no bytes, and so does a message that
+		// writes nothing; _isDefault() is serialize's exact negation, so an empty
+		// result from a non-default message is the refusal (an over-bound value).
+		f.line("            if (bytes.empty() && !obj._isDefault()) { std::cerr << \"encode refused\\n\"; return 1; }")
 		f.line("            std::cout.write(reinterpret_cast<const char *>(bytes.data()), bytes.size());")
 		// The encode twin of streamdecode: the same message through a sink, drained
 		// into a buffer the harness owns. Window 0 is the generated one-shot
@@ -553,6 +561,7 @@ func (g *gen) harnessMain(s *ir.Schema) []byte {
 		f.line("            std::size_t win = argc > 3 ? std::strtoull(argv[3], nullptr, 10) : 0;")
 		f.line("            if (win == 0) {")
 		f.line("                auto bytes = obj.encode();")
+		f.line("                if (bytes.empty() && !obj._isDefault()) { std::cerr << \"encode refused\\n\"; return 1; }")
 		f.line("                std::cout.write(reinterpret_cast<const char *>(bytes.data()), bytes.size());")
 		f.line("            } else {")
 		f.line("                std::vector<std::uint8_t> buf(std::max<std::size_t>(win, %s));", minBuf)

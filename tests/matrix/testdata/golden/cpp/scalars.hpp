@@ -110,8 +110,9 @@ struct Scalars : sofab::Message {
     /**
      * @brief Encode this message into a new byte vector.
      * @return The encoded bytes. Empty if the message encodes to nothing,
-     *         and also empty if the encode was refused -- use encodeTo() when
-     *         the two need telling apart.
+     *         and also empty if the encode was refused (a value past its
+     *         schema bound, see @ref serialize) -- use encodeTo() when the
+     *         two need telling apart.
      */
     std::vector<std::uint8_t> encode() const {
         std::vector<std::uint8_t> _out(_maxSize);
@@ -125,8 +126,9 @@ struct Scalars : sofab::Message {
      * @brief Encode this message into caller-provided storage (no allocation).
      * @param _dst Destination buffer.
      * @param _cap Capacity of @p _dst in bytes.
-     * @return Bytes written, or 0 if the message does not fit in @p _cap;
-     *         in which case @p _dst holds however much was written first.
+     * @return Bytes written, or 0 if the message does not fit in @p _cap or
+     *         was refused (a value past its schema bound, see @ref serialize);
+     *         then @p _dst holds however much was written first.
      */
     std::size_t encodeTo(std::uint8_t *_dst, std::size_t _cap) const noexcept {
         sofab::OStreamView _os{_dst, _cap};
@@ -201,6 +203,12 @@ struct Scalars : sofab::Message {
      * Called by @ref encode / @ref encodeTo, and directly when writing into a
      * stream you own. Fields equal to their default are omitted.
      *
+     * A value past its schema bound in a growable member -- a std::string or
+     * std::vector longer than its `maxlen` or `count` -- is refused: the
+     * stream latches InvalidArgument (@c ok() turns false) and this returns
+     * at once. A fixed-capacity member (FixedString, FixedBytes, InlineVector)
+     * carries its bound as its capacity and clamps on assignment instead.
+     *
      * @param _os Stream to write to.
      * @return The result of the writes.
      */
@@ -214,6 +222,7 @@ struct Scalars : sofab::Message {
         if (std::bit_cast<std::uint64_t>(f64) != 0xc004000000000000ull) { (void)_os.write(6, f64); }
         if (flag != true) { (void)_os.write(7, flag); }
         if (!flags.empty()) {
+            if (flags.size() > 4) { return _os.rejectArgument(); }
             (void)_os.write(8, flags);
         }
         return _os.writeIf(0, false, false);
