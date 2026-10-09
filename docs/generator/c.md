@@ -83,6 +83,33 @@ the C standard headers (`size_t`, `uint8_t` and the other `<stdint.h>` types,
 and every typedef of the corelib (`sofab_ostream_t`, `sofab_istream_t`,
 `sofab_ret_t`, …).
 
+## Bounds at encode
+
+A field's schema bound is part of its storage, and encode treats the two
+storage shapes differently.
+
+- **String.** A string field is `char[maxlen + 1]`, terminated. Encode reads
+  it no further than the field. A value that fills the whole array without a
+  terminator is longer than `maxlen`: encode refuses the message with
+  `SOFAB_RET_E_ARGUMENT`. This applies to each element of an array of strings
+  too.
+- **Length and count members.** A blob's `<name>__len` and an array's
+  `<name>__len` (or `<name>.len`) past the capacity are clamped to it: encode
+  writes the first `maxlen` bytes or `count` elements. Set them within the
+  capacity; a clamped value reaches the receiver shortened.
+
+Integer, enum and bitfield members are fixed-width C types, so they cannot
+hold a value past their declared width.
+
+**`SOFAB_DISABLE_ENCODE_BOUNDS`.** Define it for the corelib build (CMake
+option `SOFAB_DISABLE_ENCODE_BOUNDS=ON`, or `-DSOFAB_DISABLE_ENCODE_BOUNDS` in
+the project's `CFLAGS`) to remove the string check from the image. Use it only
+when your own code guarantees that every string is terminated within its
+bound. Without the check, a string that fills its array is encoded as the
+whole array, one byte over `maxlen`, and a receiver then rejects that message
+as invalid. The read stays within the field, the clamp of length and count
+members is unchanged, and decode checks bounds either way.
+
 ## Booleans
 
 A `boolean` field, and each element of a `boolean` array, is a `uint8_t`.

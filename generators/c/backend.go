@@ -205,15 +205,57 @@ func memberNote(f *ir.Field) string {
 	case f.Kind == ir.KindString:
 		// char[maxlen+1], NUL-terminated: the capacity IS the type and there is
 		// no companion to forget.
-		return generator.BoundNote(f, generator.StorageFixed)
+		return boundNote(f, "")
 	case f.Kind == ir.KindBlob:
-		return generator.BoundDoc{Storage: generator.StorageCompanion, LenMember: lenMember(f.Name)}.Note(f)
+		return boundNote(f, lenMember(f.Name))
 	case f.Kind == ir.KindArray && isHolderElem(f.Elem):
 		// A wrapper array lowers to a holder struct, so its length lives inside
 		// the member rather than beside it.
-		return generator.BoundDoc{Storage: generator.StorageCompanion, LenMember: name + ".len"}.Note(f)
+		return boundNote(f, name+".len")
 	case f.Kind == ir.KindArray:
-		return generator.BoundDoc{Storage: generator.StorageCompanion, LenMember: lenMember(f.Name)}.Note(f)
+		return boundNote(f, lenMember(f.Name))
+	}
+	return ""
+}
+
+// boundNote renders the C target's bound note. It is written here rather than
+// through generator.BoundDoc because what the C encoder does with an over-bound
+// value depends on the storage shape (generator#656), and the shared wording
+// ("never truncated") is only true of the decoder:
+//
+//   - a string is char[maxlen+1]: a value that fills it without a terminator is
+//     longer than maxlen, and sofab_object_encode refuses it with
+//     SOFAB_RET_E_ARGUMENT (the corelib reads the member bounded by its size);
+//   - a length or count companion past the capacity is CLAMPED to it by the
+//     corelib at encode: the documented clamp contract of the companion shape.
+//
+// Over the bound on the wire is INVALID either way (MESSAGE_SPEC §7.1).
+func boundNote(f *ir.Field, lenMember string) string {
+	switch f.Kind {
+	case ir.KindString:
+		if !f.HasMaxlen {
+			return ""
+		}
+		return fmt.Sprintf("Schema bound: maxlen %d -- the capacity is in the type; a value that fills it without a terminator is longer, and encode refuses it (SOFAB_RET_E_ARGUMENT). Over %d on the wire is INVALID.", f.Maxlen, f.Maxlen)
+	case ir.KindBlob:
+		if !f.HasMaxlen {
+			return ""
+		}
+		return fmt.Sprintf("Schema bound: maxlen %d -- %s carries the length; encode clamps %s to at most %d. Over %d on the wire is INVALID.", f.Maxlen, lenMember, lenMember, f.Maxlen, f.Maxlen)
+	case ir.KindArray:
+		if !f.HasCount {
+			return ""
+		}
+		note := fmt.Sprintf("Schema bound: count %d is a capacity; %s carries the length -- elements set without it encode an EMPTY array; encode clamps %s to at most %d. Over %d on the wire is INVALID.", f.Count, lenMember, lenMember, f.Count, f.Count)
+		if f.ElemMaxHas {
+			switch f.Elem {
+			case ir.KindString:
+				note += fmt.Sprintf(" Element maxlen %d: an element that fills its storage without a terminator is refused at encode.", f.ElemMax)
+			default:
+				note += fmt.Sprintf(" Element maxlen %d: an element length past it is clamped at encode.", f.ElemMax)
+			}
+		}
+		return note
 	}
 	return ""
 }

@@ -745,9 +745,9 @@ messages:
 		"_i0 < (int)(o->a__len)", // compact array renders its length
 		"_i0 < (int)(o->sa.len)", // string holder renders its element count
 		"_i0 < (int)(o->ba.len)", // blob holder does too, now that it has one
-		"o->a__len = (uint32_t)_n0;",
-		"o->sa.len = (uint8_t)_n0;",
-		"o->ba.len = (uint8_t)_n0;",
+		"o->a__len = (uint32_t)json_len(_n0, (uint32_t)-1);",
+		"o->sa.len = (uint8_t)json_len(_n0, (uint8_t)-1);",
+		"o->ba.len = (uint8_t)json_len(_n0, (uint8_t)-1);",
 	} {
 		if !strings.Contains(hs, want) {
 			t.Errorf("harness/main.c missing %q:\n%s", want, hs)

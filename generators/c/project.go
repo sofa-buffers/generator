@@ -181,9 +181,19 @@ func (g *gen) harness(s *ir.Schema) []byte {
 
 	g.emitMain(h, s)
 
+	// A helper may call an earlier one (json_to_bytes calls json_len), so the
+	// set is resolved back to front over the body plus the helpers kept so far.
 	rest := h.b.String()
-	for _, helper := range jsonPrelude {
-		if strings.Contains(rest, helper.name+"(") {
+	used := rest
+	keep := make([]bool, len(jsonPrelude))
+	for i := len(jsonPrelude) - 1; i >= 0; i-- {
+		if strings.Contains(used, jsonPrelude[i].name+"(") {
+			keep[i] = true
+			used += jsonPrelude[i].src
+		}
+	}
+	for i, helper := range jsonPrelude {
+		if keep[i] {
 			body.line("%s", helper.src)
 		}
 	}
@@ -374,9 +384,9 @@ func (g *gen) valueFromJSON(h *cfile, f *ir.Field, acc string, inUnion bool) {
 		// Sized blob: record the parsed used-length into the companion length
 		// member so encode emits exactly those bytes (issue #128).
 		if inUnion {
-			h.line("        %s.len = (%s)json_to_bytes(c, %s.data, sizeof(%s.data));", acc, blobLenC(f.Maxlen), acc, acc)
+			h.line("        %s.len = (%s)json_to_bytes(c, %s.data, sizeof(%s.data), (%s)-1);", acc, blobLenC(f.Maxlen), acc, acc, blobLenC(f.Maxlen))
 		} else {
-			h.line("        %s__len = (%s)json_to_bytes(c, %s, sizeof(%s));", acc, blobLenC(f.Maxlen), acc, acc)
+			h.line("        %s__len = (%s)json_to_bytes(c, %s, sizeof(%s), (%s)-1);", acc, blobLenC(f.Maxlen), acc, acc, blobLenC(f.Maxlen))
 		}
 	case ir.KindStruct, ir.KindUnion:
 		h.line("        %s(c, &%s);", fromJSON(g.ntBase(f.Ref.Target)), acc)
@@ -450,18 +460,23 @@ func (g *gen) emitUnionFromJSON(h *cfile, cType, base string, nt *ir.NamedType) 
 // arrayValueToJSON: native elements land in ref.store[_iN], holder elements in
 // ref.store.items[_iN]. Recurses for nested arrays.
 //
-// The parsed element count is written back to the array's length member, bounded
-// by the capacity: that length is the value (§3/§5.1), so a three-element JSON
-// array in a `count: 5` field must encode as three elements, not five.
+// The parsed element count is written back to the array's length member: that
+// length is the value (§3/§5.1), so a three-element JSON array in a `count: 5`
+// field must encode as three elements, not five. Only the first `count`
+// elements are stored, but the length member gets the JSON count unclamped
+// (saturated only at its C type), the way a caller's over-count length would:
+// encode clamps it to the capacity (the C clamp contract), so the conformance
+// cases exercise the encoder's clamp and not the harness's.
 func (g *gen) arrayValueFromJSON(h *cfile, spec arraySpec, ref arrRef, jnode, ind string, depth int) {
 	iv := fmt.Sprintf("_i%d", depth)
 	ev := fmt.Sprintf("_e%d", depth)
 	nv := fmt.Sprintf("_n%d", depth)
-	h.line("%s{ size_t %s = sofab_json_array_size(%s); if (%s > %d) %s = %d;", ind, nv, jnode, nv, spec.count, nv, spec.count)
+	sv := fmt.Sprintf("_s%d", depth)
+	h.line("%s{ size_t %s = sofab_json_array_size(%s); size_t %s = %s > %d ? %d : %s;", ind, nv, jnode, sv, nv, spec.count, spec.count, nv)
 	if ref.lenType != "" {
-		h.line("%s%s = (%s)%s;", ind, ref.length, ref.lenType, nv)
+		h.line("%s%s = (%s)json_len(%s, (%s)-1);", ind, ref.length, ref.lenType, nv, ref.lenType)
 	}
-	h.line("%sfor (size_t %s = 0; %s < %s; %s++) {", ind, iv, iv, nv, iv)
+	h.line("%sfor (size_t %s = 0; %s < %s; %s++) {", ind, iv, iv, sv, iv)
 	h.line("%s    const sofab_json_t *%s = sofab_json_array_at(%s, %s);", ind, ev, jnode, iv)
 	elem := fmt.Sprintf("%s[%s]", ref.store, iv)
 	slot := fmt.Sprintf("%s.items[%s]", ref.store, iv)
@@ -479,7 +494,7 @@ func (g *gen) arrayValueFromJSON(h *cfile, spec arraySpec, ref arrRef, jnode, in
 	case ir.KindBlob:
 		// Sized-blob element (issue #130): record the parsed used-length in the
 		// slot's companion so encode emits exactly those bytes.
-		h.line("%s    %s.len = (%s)json_to_bytes(%s, %s.buf, sizeof(%s.buf));", ind, slot, blobLenC(spec.max), ev, slot, slot)
+		h.line("%s    %s.len = (%s)json_to_bytes(%s, %s.buf, sizeof(%s.buf), (%s)-1);", ind, slot, blobLenC(spec.max), ev, slot, slot, blobLenC(spec.max))
 	case ir.KindStruct, ir.KindUnion:
 		h.line("%s    %s(%s, &%s);", ind, fromJSON(g.ntBase(spec.ref.Target)), ev, slot)
 	case ir.KindArray:
@@ -787,16 +802,29 @@ var jsonPrelude = []struct{ name, src string }{
     for (size_t i = 0; i < n; i++) { if (i) fputc(',', out); fprintf(out, "%u", b[i]); }
     fputc(']', out);
 }`},
+	// json_to_str stores a string the way a caller's over-long copy would: a
+	// value longer than the member's maxlen (cap - 1) fills all cap bytes with no
+	// terminator. Those cap bytes are a cut of the value (possibly inside a UTF-8
+	// character); encode refuses an unterminated member, so the cut never
+	// reaches the wire unless the refusal is compiled out
+	// (SOFAB_DISABLE_ENCODE_BOUNDS).
 	{"json_to_str", `static void json_to_str(const sofab_json_t *c, char *dst, size_t cap) {
     size_t L = 0; const char *s = sofab_json_string(c, &L);
     if (!s) { dst[0] = 0; return; }
-    if (L >= cap) L = cap - 1;
+    if (L >= cap) { memcpy(dst, s, cap); return; }
     memcpy(dst, s, L); dst[L] = 0;
 }`},
-	{"json_to_bytes", `static size_t json_to_bytes(const sofab_json_t *c, unsigned char *dst, size_t cap) {
+	// json_len saturates a parsed length at the maximum of its companion's C
+	// type, so a length the type cannot hold does not wrap below the capacity.
+	{"json_len", `static size_t json_len(size_t n, size_t max) { return n > max ? max : n; }`},
+	// json_to_bytes stores at most cap bytes but returns the JSON length
+	// unclamped (saturated at lmax, the companion type's maximum): a blob past
+	// its maxlen is handed to encode with an over-long length, the way a
+	// caller's would, and encode clamps it (the C clamp contract).
+	{"json_to_bytes", `static size_t json_to_bytes(const sofab_json_t *c, unsigned char *dst, size_t cap, size_t lmax) {
     size_t n = sofab_json_array_size(c);
-    if (n > cap) n = cap;
-    for (size_t i = 0; i < n; i++) dst[i] = (unsigned char)sofab_json_u64(sofab_json_array_at(c, i));
-    return n;
+    size_t s = n > cap ? cap : n;
+    for (size_t i = 0; i < s; i++) dst[i] = (unsigned char)sofab_json_u64(sofab_json_array_at(c, i));
+    return json_len(n, lmax);
 }`},
 }
