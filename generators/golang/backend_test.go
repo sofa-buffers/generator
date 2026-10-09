@@ -834,7 +834,7 @@ messages:
 	}
 	// A count:N native array is emitted whole, and its omit test compares the value
 	// as it stands -- not a trailing-trimmed image of it.
-	if !strings.Contains(got, "\tif len(m.Fnums) != 0 {\n\t\tsofab.WriteUnsignedArray(e, 3, m.Fnums)\n\t}") {
+	if !strings.Contains(got, "\tif len(m.Fnums) != 0 {\n\t\tif len(m.Fnums) > 4 {\n\t\t\te.RejectArgument()\n\t\t\treturn\n\t\t}\n\t\tsofab.WriteUnsignedArray(e, 3, m.Fnums)\n\t}") {
 		t.Errorf("a count:N native array must be written whole:\n%s", got)
 	}
 	// A `default` shorter than the count stands for itself: it is NOT padded to N,
@@ -917,7 +917,7 @@ messages:
 		// sequence elements: the same rule, applied through the closer
 		"\t\tif _i0 == len(m.Fixedobj)-1 {\n\t\t\te.WriteSequenceEndKeep()\n\t\t} else {\n\t\t\te.WriteSequenceEnd()\n\t\t}",
 		// a native row carries no frame of its own, so the rule lands on the write
-		"\t\tif len(_e0) != 0 || _i0 == len(m.Mat)-1 {\n\t\t\tsofab.WriteUnsignedArray(e, sofab.ID(_i0), _e0)\n\t\t}",
+		"\t\tif len(_e0) != 0 || _i0 == len(m.Mat)-1 {\n\t\t\tif len(_e0) > 3 {\n\t\t\t\te.RejectArgument()\n\t\t\t\treturn\n\t\t\t}\n\t\t\tsofab.WriteUnsignedArray(e, sofab.ID(_i0), _e0)\n\t\t}",
 	} {
 		if !strings.Contains(got, want) {
 			t.Errorf("vec.go missing %q:\n%s", want, got)
