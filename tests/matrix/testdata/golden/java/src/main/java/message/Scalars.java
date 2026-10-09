@@ -17,16 +17,27 @@ public class Scalars {
     /** Schema bound: count 4 is a CAPACITY, not a length -- starts empty; over 4 elements is INVALID, never truncated. */
     public List<Boolean> flags = new ArrayList<>();
 
+    /**
+     * Write every field that differs from its default into {@code os}.
+     *
+     * @throws SofabException with {@code ARGUMENT} when a field holds a value
+     *         past its schema bound (a string or blob over its maxlen in
+     *         UTF-8 bytes, an array over its count, an integer, enum or
+     *         bitfield outside its declared width); the value is never
+     *         written, clamped or masked
+     * @throws IOException on buffer overflow or sink failure
+     */
     public void serialize(OStream os) throws IOException {
-        if (this.u8min != 0L) { os.writeUnsigned(0, this.u8min); }
-        if (this.u8max != 255L) { os.writeUnsigned(1, this.u8max); }
+        if (this.u8min != 0L) { if (this.u8min < 0 || this.u8min > 255L) throw new SofabException(SofabError.ARGUMENT, "u8min: value outside declared width u8"); os.writeUnsigned(0, this.u8min); }
+        if (this.u8max != 255L) { if (this.u8max < 0 || this.u8max > 255L) throw new SofabException(SofabError.ARGUMENT, "u8max: value outside declared width u8"); os.writeUnsigned(1, this.u8max); }
         if (this.u64max != 0xFFFFFFFFFFFFFFFFL) { os.writeUnsigned(2, this.u64max); }
-        if (this.i8min != -128L) { os.writeSigned(3, this.i8min); }
+        if (this.i8min != -128L) { if (this.i8min < -128L || this.i8min > 127L) throw new SofabException(SofabError.ARGUMENT, "i8min: value outside declared width i8"); os.writeSigned(3, this.i8min); }
         if (this.i64min != -9223372036854775808L) { os.writeSigned(4, this.i64min); }
         if (java.lang.Float.floatToRawIntBits(this.f32) != 1078523331) { os.writeFp32(5, this.f32); }
         if (java.lang.Double.doubleToRawLongBits(this.f64) != -4610560118520545280L) { os.writeFp64(6, this.f64); }
         if (this.flag != true) { os.writeBoolean(7, this.flag); }
         if (this.flags != null && !this.flags.isEmpty()) {
+            if (this.flags.size() > 4) throw new SofabException(SofabError.ARGUMENT, "flags: array count above schema capacity 4");
             os.writeArrayUnsigned(8, Seq.boolsToLongs(this.flags));
         }
     }
@@ -56,6 +67,12 @@ public class Scalars {
         this.flags = Seq.reset(this.flags);
     }
     public static final int MAX_SIZE = 55;
+    /**
+     * Encode this message into a new array.
+     *
+     * @throws RuntimeException wrapping the {@link SofabException} that
+     *         {@link #serialize} raises; no bytes are returned then
+     */
     public byte[] encode() {
         try {
             OStream os = OStream.overScratch(MAX_SIZE);
@@ -69,6 +86,9 @@ public class Scalars {
      * <p>With a {@code FlushSink} on {@code os} the buffer may be smaller
      * than the message: it is drained as it fills, so what bounds memory is
      * the buffer, not the message.
+     *
+     * <p>A field past its schema bound makes {@link #serialize} throw; with
+     * a sink, bytes of the fields before it may already have been drained.
      */
     public void encodeTo(OStream os) throws IOException {
         serialize(os);

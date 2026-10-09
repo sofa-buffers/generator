@@ -135,15 +135,16 @@ func TestJavaUnionAccessors(t *testing.T) {
 
 // Encode: one arm per held option. default_id is written like an ordinary field
 // (omitted at its default, a struct closed with the DROPPING end); every other
-// option is forced -- unguarded, a compact array as its count, a struct, union or
+// option is forced -- no ≠-default guard (the encode bound of its declared
+// width/maxlen still applies), a compact array as its count, a struct, union or
 // wrapper-array option closed with the KEEPING end.
 func TestJavaUnionEncodeArms(t *testing.T) {
 	u := genUnion(t)[unionDir+"M_U.java"]
 	ser := methodBody(t, u, "public void serialize(OStream os) throws IOException {")
 	mustContain(t, "MU.serialize", ser,
 		"switch (which) {",
-		"case NUM_ID: {\n            os.writeUnsigned(0, this._num);\n            break;",
-		`os.writeString(1, this._s == null ? "" : this._s);`,
+		"case NUM_ID: {\n            if (this._num < 0 || this._num > 65535L) throw new SofabException(SofabError.ARGUMENT, \"num: value outside declared width u16\"); os.writeUnsigned(0, this._num);\n            break;",
+		`os.writeString(1, this._s == null ? "" : this._s, 8);`,
 		"os.writeSequenceBeginLazy(2); (this._pt == null ? new M_U_Pt() : this._pt).serialize(os); os.writeSequenceEnd();",
 		"os.writeArrayUnsigned(3, (this._arr == null ? Seq.EMPTY_SHORTS : this._arr));",
 		"os.writeBlob(5, this._bl == null ? Seq.EMPTY_BYTES : this._bl);",
@@ -158,8 +159,8 @@ func TestJavaUnionEncodeArms(t *testing.T) {
 		"return which == PT_ID && !(this._pt != null && !this._pt.isDefault());")
 	z := genUnion(t)[unionDir+"M_Z.java"]
 	mustContain(t, "MZ", z,
-		"case A_ID: {\n            if (this._a != 0L) { os.writeUnsigned(0, this._a); }",
-		"case B_ID: {\n            os.writeUnsigned(1, this._b);",
+		"case A_ID: {\n            if (this._a != 0L) { if (this._a < 0 || this._a > 255L) throw new SofabException(SofabError.ARGUMENT, \"a: value outside declared width u8\"); os.writeUnsigned(0, this._a); }",
+		"case B_ID: {\n            if (this._b < 0 || this._b > 255L) throw new SofabException(SofabError.ARGUMENT, \"b: value outside declared width u8\"); os.writeUnsigned(1, this._b);",
 		"return which == A_ID && !(this._a != 0L);")
 }
 

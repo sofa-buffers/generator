@@ -367,7 +367,11 @@ func TestJavaMaxlenReject(t *testing.T) {
 		}
 	}
 	// All three sit in fixlenBegin and only there: three bounded destinations,
-	// three comparisons (#594).
+	// three comparisons (#594). The serialize class body has its own encode-side
+	// guards (#656), so the count is taken over the visitor alone.
+	if vi := strings.Index(m, "class _M__Visitor"); vi > 0 {
+		m = m[vi:]
+	}
 	if n := strings.Count(m, "above schema maxlen"); n != 3 {
 		t.Errorf("expected 3 maxlen comparisons (one per bounded destination), got %d", n)
 	}
@@ -1007,9 +1011,10 @@ func TestJavaWrapperArrayInteriorSparseLastAlwaysWritten(t *testing.T) {
 		"(_t0.get(_i0) == null ? new Vec_Fixed() : _t0.get(_i0)).serialize(os); if (_i0 == _t0.size() - 1) os.writeSequenceEndKeep(); else os.writeSequenceEnd();",
 		"(_t1.get(_i0) == null ? new Vec_Dynamic() : _t1.get(_i0)).serialize(os); if (_i0 == _t1.size() - 1) os.writeSequenceEndKeep(); else os.writeSequenceEnd();",
 		// A leaf element: the same rule, unconditional now rather than count-gated.
-		`String _e0 = _t2.get(_i0); if (_e0 == null) _e0 = ""; if (!_e0.isEmpty() || _i0 == _t2.size() - 1) os.writeString(_i0, _e0);`,
-		`String _e0 = _t3.get(_i0); if (_e0 == null) _e0 = ""; if (!_e0.isEmpty() || _i0 == _t3.size() - 1) os.writeString(_i0, _e0);`,
-		`byte[] _e0 = _t4.get(_i0); if (_e0 == null) _e0 = Seq.EMPTY_BYTES; if (_e0.length != 0 || _i0 == _t4.size() - 1) os.writeBlob(_i0, _e0);`,
+		`String _e0 = _t2.get(_i0); if (_e0 == null) _e0 = ""; if (!_e0.isEmpty() || _i0 == _t2.size() - 1) os.writeString(_i0, _e0, 8);`,
+		`String _e0 = _t3.get(_i0); if (_e0 == null) _e0 = ""; if (!_e0.isEmpty() || _i0 == _t3.size() - 1) os.writeString(_i0, _e0, 8);`,
+		// (the element maxlen guard of #656 sits between the null fill and the write)
+		`byte[] _e0 = _t4.get(_i0); if (_e0 == null) _e0 = Seq.EMPTY_BYTES; if (_e0.length > 8) throw new SofabException(SofabError.ARGUMENT, "dblbs element: blob length above schema maxlen 8"); if (_e0.length != 0 || _i0 == _t4.size() - 1) os.writeBlob(_i0, _e0);`,
 		// A NATIVE row has no frame of its own, so the rule lands on the write; a
 		// primitive one is a long[], written with no box/unbox temporary.
 		"if (_e0.length != 0 || _i0 == _t5.size() - 1) {",

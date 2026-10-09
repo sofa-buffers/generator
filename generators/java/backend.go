@@ -283,6 +283,7 @@ func (g *gen) emitClass(f *jfile, name, vis string, fields []*ir.Field, summary 
 
 	// serialize
 	g.tmpN = 0
+	emitSerializeRefusalDoc(f, fields, "Write every field that differs from its default into {@code os}.", "a field holds")
 	f.line("    public void serialize(OStream os) throws IOException {")
 	for _, fld := range fields {
 		g.emitMarshal(f, fld)
@@ -310,6 +311,17 @@ func (g *gen) emitClass(f *jfile, name, vis string, fields []*ir.Field, summary 
 		// one's bytes. An unbounded one is not sized by MAX_SIZE (an imposed
 		// ceiling, not a bound): a fixed scratch drains into a growing output, so a
 		// message above the ceiling still encodes.
+		// The refusal is documented only where serialize can raise it, as on
+		// serialize itself (emitSerializeRefusalDoc).
+		canRefuse := hasEncodeBound(fields)
+		if canRefuse {
+			f.line("    /**")
+			f.line("     * Encode this message into a new array.")
+			f.line("     *")
+			f.line("     * @throws RuntimeException wrapping the {@link SofabException} that")
+			f.line("     *         {@link #serialize} raises; no bytes are returned then")
+			f.line("     */")
+		}
 		f.line("    public byte[] encode() {")
 		f.line("        try {")
 		if ms.Bounded {
@@ -336,6 +348,11 @@ func (g *gen) emitClass(f *jfile, name, vis string, fields []*ir.Field, summary 
 		f.line("     * <p>With a {@code FlushSink} on {@code os} the buffer may be smaller")
 		f.line("     * than the message: it is drained as it fills, so what bounds memory is")
 		f.line("     * the buffer, not the message.")
+		if canRefuse {
+			f.line("     *")
+			f.line("     * <p>A field past its schema bound makes {@link #serialize} throw; with")
+			f.line("     * a sink, bytes of the fields before it may already have been drained.")
+		}
 		f.line("     */")
 		f.line("    public void encodeTo(OStream os) throws IOException {")
 		f.line("        serialize(os);")
@@ -642,9 +659,9 @@ func (g *gen) emitMarshalAt(f *jfile, ind string, fld *ir.Field, acc string, for
 	var write string
 	switch fld.Kind {
 	case ir.KindU8, ir.KindU16, ir.KindU32, ir.KindU64, ir.KindBitfield:
-		write = fmt.Sprintf("os.writeUnsigned(%d, %s);", fld.ID, acc)
+		write = encodeWidthGuard(fld.Kind, fld.Ref, acc, fld.Name) + fmt.Sprintf("os.writeUnsigned(%d, %s);", fld.ID, acc)
 	case ir.KindI8, ir.KindI16, ir.KindI32, ir.KindI64, ir.KindEnum:
-		write = fmt.Sprintf("os.writeSigned(%d, %s);", fld.ID, acc)
+		write = encodeWidthGuard(fld.Kind, fld.Ref, acc, fld.Name) + fmt.Sprintf("os.writeSigned(%d, %s);", fld.ID, acc)
 	case ir.KindBool:
 		write = fmt.Sprintf("os.writeBoolean(%d, %s);", fld.ID, acc)
 	case ir.KindFP32:
@@ -652,20 +669,24 @@ func (g *gen) emitMarshalAt(f *jfile, ind string, fld *ir.Field, acc string, for
 	case ir.KindFP64:
 		write = fmt.Sprintf("os.writeFp64(%d, %s);", fld.ID, acc)
 	case ir.KindString:
-		write = fmt.Sprintf("os.writeString(%d, %s == null ? \"\" : %s);", fld.ID, acc, acc)
+		write = writeStringCall(fmt.Sprintf("%d", fld.ID), fmt.Sprintf("%s == null ? \"\" : %s", acc, acc), fld.HasMaxlen, fld.Maxlen)
 	case ir.KindBlob:
 		// A blob is a leaf: omit when equal to its default (empty when none).
 		// With an empty default the content compare degenerates to a length
 		// check, sparing an Arrays.equals against a fresh byte[0] per call.
+		guard := ""
+		if fld.HasMaxlen {
+			guard = blobMaxlenGuard(acc, fld.Name, fld.Maxlen)
+		}
 		if forced {
-			f.line("%sos.writeBlob(%d, %s == null ? Seq.EMPTY_BYTES : %s);", ind, fld.ID, acc, acc)
+			f.line("%s%sos.writeBlob(%d, %s == null ? Seq.EMPTY_BYTES : %s);", ind, guard, fld.ID, acc, acc)
 			return
 		}
 		if def := g.javaDefaultValue(fld); def == "new byte[0]" || def == "Seq.EMPTY_BYTES" {
-			f.line("%sif (%s == null || %s.length != 0) { os.writeBlob(%d, %s == null ? new byte[0] : %s); }", ind, acc, acc, fld.ID, acc, acc)
+			f.line("%sif (%s == null || %s.length != 0) { %sos.writeBlob(%d, %s == null ? new byte[0] : %s); }", ind, acc, acc, guard, fld.ID, acc, acc)
 			return
 		}
-		f.line("%sif (!Arrays.equals(%s, %s)) { os.writeBlob(%d, %s == null ? new byte[0] : %s); }", ind, acc, javaArrDefName(fld), fld.ID, acc, acc)
+		f.line("%sif (!Arrays.equals(%s, %s)) { %sos.writeBlob(%d, %s == null ? new byte[0] : %s); }", ind, acc, javaArrDefName(fld), guard, fld.ID, acc, acc)
 		return
 	case ir.KindStruct, ir.KindUnion:
 		// MESSAGE_SPEC S2: the != default test is per field and a sequence-typed
@@ -703,11 +724,11 @@ func (g *gen) emitMarshalArray(f *jfile, ind string, fld *ir.Field, acc string, 
 		switch {
 		case primitiveArrayElem(fld.Elem):
 			v := fmt.Sprintf("(%s == null ? %s : %s)", acc, emptyPrimConst(fld.Elem, fld.ElemRef), acc)
-			g.marshalArray(f, ind, fmt.Sprintf("%d", fld.ID), v, fld.Elem, fld.ElemRef, fld.ElemItems, 0, "")
+			g.marshalArray(f, ind, fmt.Sprintf("%d", fld.ID), v, fld.Elem, fld.ElemRef, fld.ElemItems, fieldArrBound(fld), 0, "")
 		case nativeArrayElem(fld.Elem): // boolean array (boxed List<Boolean>)
-			g.marshalArray(f, ind, fmt.Sprintf("%d", fld.ID), elemListExpr(acc), fld.Elem, fld.ElemRef, fld.ElemItems, 0, "")
+			g.marshalArray(f, ind, fmt.Sprintf("%d", fld.ID), elemListExpr(acc), fld.Elem, fld.ElemRef, fld.ElemItems, fieldArrBound(fld), 0, "")
 		default:
-			g.marshalArray(f, ind, fmt.Sprintf("%d", fld.ID), acc, fld.Elem, fld.ElemRef, fld.ElemItems, 0, keepAlways)
+			g.marshalArray(f, ind, fmt.Sprintf("%d", fld.ID), acc, fld.Elem, fld.ElemRef, fld.ElemItems, fieldArrBound(fld), 0, keepAlways)
 		}
 		return
 	}
@@ -729,7 +750,7 @@ func (g *gen) emitMarshalArray(f *jfile, ind string, fld *ir.Field, acc string, 
 		} else {
 			f.line("%sif (%s != null && %s.length != 0) {", ind, acc, acc)
 		}
-		g.marshalArray(f, ind+"    ", fmt.Sprintf("%d", fld.ID), acc, fld.Elem, fld.ElemRef, fld.ElemItems, 0, "")
+		g.marshalArray(f, ind+"    ", fmt.Sprintf("%d", fld.ID), acc, fld.Elem, fld.ElemRef, fld.ElemItems, fieldArrBound(fld), 0, "")
 		f.line("%s}", ind)
 		return
 	}
@@ -739,7 +760,7 @@ func (g *gen) emitMarshalArray(f *jfile, ind string, fld *ir.Field, acc string, 
 		} else {
 			f.line("%sif (%s != null && !%s.isEmpty()) {", ind, acc, acc)
 		}
-		g.marshalArray(f, ind+"    ", fmt.Sprintf("%d", fld.ID), acc, fld.Elem, fld.ElemRef, fld.ElemItems, 0, "")
+		g.marshalArray(f, ind+"    ", fmt.Sprintf("%d", fld.ID), acc, fld.Elem, fld.ElemRef, fld.ElemItems, fieldArrBound(fld), 0, "")
 		f.line("%s}", ind)
 		return
 	}
@@ -751,7 +772,7 @@ func (g *gen) emitMarshalArray(f *jfile, ind string, fld *ir.Field, acc string, 
 	// `if (value != default) { ... os.writeSequenceEndKeep(); }` -- so that a value
 	// differing from a non-empty default still reaches the wire as the empty
 	// wrapper, the only encoding of "explicitly empty" (MESSAGE_SPEC S2, S3).
-	g.marshalArray(f, ind, fmt.Sprintf("%d", fld.ID), acc, fld.Elem, fld.ElemRef, fld.ElemItems, 0, "")
+	g.marshalArray(f, ind, fmt.Sprintf("%d", fld.ID), acc, fld.Elem, fld.ElemRef, fld.ElemItems, fieldArrBound(fld), 0, "")
 }
 
 // javaArrDefName is the static field holding a native array field's omit-compare
@@ -878,8 +899,27 @@ func (g *gen) elemLoopList(f *jfile, ind, val string, elem ir.Kind, ref *ir.Type
 //
 // keepIf is the closer this call's own wrapper takes (see seqEndStmt); the native
 // element kinds open no sequence and ignore it.
-func (g *gen) marshalArray(f *jfile, ind, idExpr, val string, elem ir.Kind, ref *ir.TypeRef, items *ir.ArrayElem, depth int, keepIf string) {
+func (g *gen) marshalArray(f *jfile, ind, idExpr, val string, elem ir.Kind, ref *ir.TypeRef, items *ir.ArrayElem, b arrBound, depth int, keepIf string) {
 	iv := fmt.Sprintf("_i%d", depth)
+	// The capacity guard of a native array, on the value's own length: its
+	// elements are held in the declared width's primitive (primArrayBase), so the
+	// length is the only bound left to check. A wrapper array checks the list the
+	// loop runs over, right after it is taken (lenGuard below).
+	switch {
+	case primitiveArrayElem(elem):
+		if cg := b.countGuard(val + ".length"); cg != "" {
+			f.line("%s%s", ind, cg)
+		}
+	case elem == ir.KindBool:
+		if cg := b.countGuard(val + ".size()"); cg != "" {
+			f.line("%s%s", ind, cg)
+		}
+	}
+	lenGuard := func(lv string) {
+		if cg := b.countGuard(lv + ".size()"); cg != "" {
+			f.line("%s%s", ind, cg)
+		}
+	}
 	switch elem {
 	case ir.KindU8, ir.KindU16, ir.KindU32, ir.KindU64, ir.KindBitfield:
 		f.line("%sos.writeArrayUnsigned(%s, %s);", ind, idExpr, val)
@@ -900,15 +940,21 @@ func (g *gen) marshalArray(f *jfile, ind, idExpr, val string, elem ir.Kind, ref 
 		// normalized to "" first, and at the last index written rather than skipped.
 		ev := fmt.Sprintf("_e%d", depth)
 		lv := g.elemLoopList(f, ind, val, elem, ref, items)
+		lenGuard(lv)
 		f.line("%sos.writeSequenceBeginLazy(%s);", ind, idExpr)
-		f.line("%sfor (int %s = 0; %s < %s.size(); %s++) { String %s = %s.get(%s); if (%s == null) %s = \"\"; if (!%s.isEmpty() || %s) os.writeString(%s, %s); }", ind, iv, iv, lv, iv, ev, lv, iv, ev, ev, ev, lastElemExpr(iv, lv), iv, ev)
+		f.line("%sfor (int %s = 0; %s < %s.size(); %s++) { String %s = %s.get(%s); if (%s == null) %s = \"\"; if (!%s.isEmpty() || %s) %s }", ind, iv, iv, lv, iv, ev, lv, iv, ev, ev, ev, lastElemExpr(iv, lv), writeStringCall(iv, ev, b.elemMaxHas, b.elemMax))
 		f.line("%s%s", ind, seqEndStmt(keepIf))
 	case ir.KindBlob:
 		// A blob element is a leaf, exactly like the string element above.
 		ev := fmt.Sprintf("_e%d", depth)
 		lv := g.elemLoopList(f, ind, val, elem, ref, items)
+		lenGuard(lv)
+		guard := ""
+		if b.elemMaxHas {
+			guard = fmt.Sprintf("if (%s.length > %d) %s ", ev, b.elemMax, argThrow(b.name+" element", fmt.Sprintf("blob length above schema maxlen %d", b.elemMax)))
+		}
 		f.line("%sos.writeSequenceBeginLazy(%s);", ind, idExpr)
-		f.line("%sfor (int %s = 0; %s < %s.size(); %s++) { byte[] %s = %s.get(%s); if (%s == null) %s = Seq.EMPTY_BYTES; if (%s.length != 0 || %s) os.writeBlob(%s, %s); }", ind, iv, iv, lv, iv, ev, lv, iv, ev, ev, ev, lastElemExpr(iv, lv), iv, ev)
+		f.line("%sfor (int %s = 0; %s < %s.size(); %s++) { byte[] %s = %s.get(%s); if (%s == null) %s = Seq.EMPTY_BYTES; %sif (%s.length != 0 || %s) os.writeBlob(%s, %s); }", ind, iv, iv, lv, iv, ev, lv, iv, ev, ev, guard, ev, lastElemExpr(iv, lv), iv, ev)
 		f.line("%s%s", ind, seqEndStmt(keepIf))
 	case ir.KindStruct, ir.KindUnion:
 		// A sequence-form element obeys the SAME rule as the leaf elements above --
@@ -919,11 +965,13 @@ func (g *gen) marshalArray(f *jfile, ind, idExpr, val string, elem ir.Kind, ref 
 		// one at the last index, where it survives as an empty frame because that
 		// presence is what fixes the array's length.
 		lv := g.elemLoopList(f, ind, val, elem, ref, items)
+		lenGuard(lv)
 		f.line("%sos.writeSequenceBeginLazy(%s);", ind, idExpr)
 		f.line("%sfor (int %s = 0; %s < %s.size(); %s++) { os.writeSequenceBeginLazy(%s); (%s.get(%s) == null ? new %s() : %s.get(%s)).serialize(os); %s }", ind, iv, iv, lv, iv, iv, lv, iv, g.refType(ref), lv, iv, seqEndStmt(lastElemExpr(iv, lv)))
 		f.line("%s%s", ind, seqEndStmt(keepIf))
 	case ir.KindArray:
 		lv := g.elemLoopList(f, ind, val, elem, ref, items)
+		lenGuard(lv)
 		ev := fmt.Sprintf("_e%d", depth)
 		f.line("%sos.writeSequenceBeginLazy(%s);", ind, idExpr)
 		f.line("%sfor (int %s = 0; %s < %s.size(); %s++) {", ind, iv, iv, lv, iv)
@@ -935,7 +983,7 @@ func (g *gen) marshalArray(f *jfile, ind, idExpr, val string, elem ir.Kind, ref 
 			// the interior/last rule lands on the WRITE rather than on a closer.
 			f.line("%s    if (%s == null) %s = %s;", ind, ev, ev, emptyPrimConst(items.Elem, items.ElemRef))
 			f.line("%s    if (%s.length != 0 || %s) {", ind, ev, lastElemExpr(iv, lv))
-			g.marshalArray(f, ind+"        ", iv, ev, items.Elem, items.ElemRef, items.ElemItems, depth+1, "")
+			g.marshalArray(f, ind+"        ", iv, ev, items.Elem, items.ElemRef, items.ElemItems, b.inner(items), depth+1, "")
 			f.line("%s    }", ind)
 		} else if nativeArrayElem(items.Elem) {
 			// A native row is a single count-prefixed value with no frame of its own,
@@ -943,13 +991,13 @@ func (g *gen) marshalArray(f *jfile, ind, idExpr, val string, elem ir.Kind, ref 
 			// equal to the element default (the empty row) is not written at all, and
 			// the last row always is.
 			f.line("%s    if (!%s.isEmpty() || %s) {", ind, ev, lastElemExpr(iv, lv))
-			g.marshalArray(f, ind+"        ", iv, ev, items.Elem, items.ElemRef, items.ElemItems, depth+1, "")
+			g.marshalArray(f, ind+"        ", iv, ev, items.Elem, items.ElemRef, items.ElemItems, b.inner(items), depth+1, "")
 			f.line("%s    }", ind)
 		} else {
 			// A wrapper row has its own frame, so it takes the closer instead -- the
 			// same interior/last choice, expressed the same way as for a struct element
 			// above.
-			g.marshalArray(f, ind+"    ", iv, ev, items.Elem, items.ElemRef, items.ElemItems, depth+1, lastElemExpr(iv, lv))
+			g.marshalArray(f, ind+"    ", iv, ev, items.Elem, items.ElemRef, items.ElemItems, b.inner(items), depth+1, lastElemExpr(iv, lv))
 		}
 		f.line("%s}", ind)
 		f.line("%s%s", ind, seqEndStmt(keepIf))

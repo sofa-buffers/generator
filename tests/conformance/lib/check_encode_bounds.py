@@ -139,7 +139,7 @@ KNOWN_GAP = {
     "rs-no-std-dynamic": (),
     "rs-no-std-std": (),
     "go": (),
-    "java": STRINGS_AND_ARRAYS + SCALARS,
+    "java": (),
     "kotlin": STRINGS_AND_ARRAYS + SCALARS,
     "csharp": STRINGS_AND_ARRAYS + SCALARS,
     "dart": (),

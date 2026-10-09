@@ -58,7 +58,7 @@ var javaStatics = map[string]bool{"MAX_SIZE": true, "MAX_SIZE_LIMIT": true}
 // fully qualified call.
 var javaQualifiers = map[string]bool{
 	"Arrays": true, "DecodeStatus": true, "List": true, "OStream": true, "Seq": true,
-	"System": true, "java": true,
+	"SofabError": true, "System": true, "java": true,
 }
 
 // javaIdent is the field a schema field is reached through: the schema name,

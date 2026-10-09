@@ -154,6 +154,7 @@ func (g *gen) emitUnionClass(f *jfile, key string, nt *ir.NamedType) {
 	f.blank()
 
 	g.tmpN = 0
+	emitSerializeRefusalDoc(f, nt.Fields, "Write the option this union holds into {@code os} (nothing when it holds its default option at that option's default).", "the held option holds")
 	f.line("    public void serialize(OStream os) throws IOException {")
 	f.line("        switch (which) {")
 	for _, o := range u.opts {
