@@ -66,7 +66,7 @@ func TestPythonStructural(t *testing.T) {
 		// fields, so the flat visitor overrides on_field and needs Field/WireType/
 		// FixlenSubtype alongside the always-present decode names -- and it binds
 		// part of the message, which is what pulls Binding in (binding.go).
-		"from sofab import Binding, Decoder, Encoder, Field, FixlenSubtype, FloatArrayDefault, SofaDecodeError, SofaIncompleteError, Status, UNBOUNDED, Visitor, WireType, reserve_elem, reserve_leaf",
+		"from sofab import Binding, Decoder, Encoder, Field, FixlenSubtype, FloatArrayDefault, SofaArgumentError, SofaDecodeError, SofaIncompleteError, Status, UNBOUNDED, Visitor, WireType, reserve_elem, reserve_leaf",
 		"@dataclass",
 		"class Myfirstmessage:",
 		"def serialize(self, e: Encoder)",
@@ -128,26 +128,26 @@ messages:
 		// These two arrays are DYNAMIC, so they are not narrowed and their LAST
 		// element is written whatever its value — its presence is what carries the
 		// recovered length (MESSAGE_SPEC §2/§5.1).
-		"        e.write_sequence_begin_lazy(2)\n        for _i0, _e0 in enumerate(self.strs):\n" +
-			"            if _e0 != \"\" or _i0 == len(self.strs) - 1:\n                e.write_string(_i0, _e0)\n        e.write_sequence_end()\n",
-		"        e.write_sequence_begin_lazy(3)\n        for _i0, _e0 in enumerate(self.blobs):\n" +
-			"            if len(_e0) != 0 or _i0 == len(self.blobs) - 1:\n                e.write_bytes(_i0, bytes(_e0))\n        e.write_sequence_end()\n",
+		"        _n0 = len(self.strs)\n        e.write_sequence_begin_lazy(2)\n        for _i0, _e0 in enumerate(self.strs):\n" +
+			"            if _e0 != \"\" or _i0 == _n0 - 1:\n                e.write_string(_i0, _e0)\n        e.write_sequence_end()\n",
+		"        _n0 = len(self.blobs)\n        e.write_sequence_begin_lazy(3)\n        for _i0, _e0 in enumerate(self.blobs):\n" +
+			"            if len(_e0) != 0 or _i0 == _n0 - 1:\n                e.write_bytes(_i0, bytes(_e0))\n        e.write_sequence_end()\n",
 		// struct ELEMENT inside a wrapper array: the closer is picked from the
 		// element's index in the value; the wrapper FIELD around it still closes
 		// unconditionally with the dropping end.
-		"        e.write_sequence_begin_lazy(4)\n        for _i0, _e0 in enumerate(self.objs):\n" +
+		"        _n0 = len(self.objs)\n        e.write_sequence_begin_lazy(4)\n        for _i0, _e0 in enumerate(self.objs):\n" +
 			"            e.write_sequence_begin_lazy(_i0)\n            _e0.serialize(e)\n" +
-			"            if _i0 == len(self.objs) - 1:\n                e.write_sequence_end_keep()\n" +
+			"            if _i0 == _n0 - 1:\n                e.write_sequence_end_keep()\n" +
 			"            else:\n                e.write_sequence_end()\n        e.write_sequence_end()\n",
 		// array-of-array: the nested ROW is an ELEMENT, as is each struct element
 		// inside it -- both take the positional closer; only the depth-0 wrapper is
 		// decided statically.
-		"        e.write_sequence_begin_lazy(5)\n        for _i0, _e0 in enumerate(self.deep):\n" +
-			"            e.write_sequence_begin_lazy(_i0)\n            for _i1, _e1 in enumerate(_e0):\n" +
+		"        _n0 = len(self.deep)\n        e.write_sequence_begin_lazy(5)\n        for _i0, _e0 in enumerate(self.deep):\n" +
+			"            _n1 = len(_e0)\n            e.write_sequence_begin_lazy(_i0)\n            for _i1, _e1 in enumerate(_e0):\n" +
 			"                e.write_sequence_begin_lazy(_i1)\n                _e1.serialize(e)\n" +
-			"                if _i1 == len(_e0) - 1:\n                    e.write_sequence_end_keep()\n" +
+			"                if _i1 == _n1 - 1:\n                    e.write_sequence_end_keep()\n" +
 			"                else:\n                    e.write_sequence_end()\n" +
-			"            if _i0 == len(self.deep) - 1:\n                e.write_sequence_end_keep()\n" +
+			"            if _i0 == _n0 - 1:\n                e.write_sequence_end_keep()\n" +
 			"            else:\n                e.write_sequence_end()\n" +
 			"        e.write_sequence_end()\n",
 	} {
@@ -276,7 +276,7 @@ messages:
 	// SofaLimitError: the receiver cap is judged inside the corelib now. And no
 	// Binding: every field here is a wrapper array, which no destination table
 	// can carry, so this module emits none.
-	const imports = "from sofab import Decoder, Encoder, Field, FixlenSubtype, SofaDecodeError, SofaIncompleteError, Status, UNBOUNDED, Visitor, WireType, reserve_elem, reserve_leaf\n"
+	const imports = "from sofab import Decoder, Encoder, Field, FixlenSubtype, SofaArgumentError, SofaDecodeError, SofaIncompleteError, Status, UNBOUNDED, Visitor, WireType, reserve_elem, reserve_leaf\n"
 	if !strings.Contains(mod, imports) {
 		t.Errorf("message.py needs every reserve_* helper it calls imported, else NameError at decode:\n%s", mod)
 	}
@@ -563,14 +563,15 @@ messages:
 	mod := string(genPy(t, schema(t, src), map[string]any{})["message.py"])
 
 	for _, want := range []string{
-		// Encode writes the value whole: no trim wrapper anywhere.
-		"e.write_unsigned_array(0, self.fixedU32)",
-		"e.write_float32_array(1, self.fixedF32)",
+		// Encode writes the value whole: no trim wrapper anywhere. The count rides
+		// the writer as its `cap`, refused past it at encode.
+		"e.write_u32_array(0, self.fixedU32, 5)",
+		"e.write_float32_array_bounded(1, self.fixedF32, 2)",
 		// A boolean array goes out through the corelib's own canonical writer
 		// (corelib-py#158, generator#590): §4.4's "true is written as 1" is the
 		// corelib's rule to apply, and generated code builds no 0/1 list for it.
-		"e.write_bool_array(2, self.fixedBool)",
-		"e.write_signed_array(3, [int(_v) for _v in self.fixedEnum])",
+		"e.write_bool_array_bounded(2, self.fixedBool, 4)",
+		"e.write_i8_array(3, [int(_v) for _v in self.fixedEnum], 2)",
 		// The omit test is the ordinary != default, against the value as it stands:
 		// the EMPTY list when nothing is declared, the declared literal otherwise.
 		"if len(self.fixedU32) != 0:",
@@ -819,7 +820,7 @@ messages:
 	// No SofaLimitError and no UNBOUNDED: every field in this schema is bounded,
 	// so no receiver cap is live and the names would be dead (§9.5,
 	// generator#385). reserve_leaf is `l`'s element index bound.
-	if !strings.Contains(mod, "from sofab import Binding, Decoder, Encoder, Field, FixlenSubtype, SofaDecodeError, SofaIncompleteError, Status, Visitor, WireType, reserve_leaf\n") {
+	if !strings.Contains(mod, "from sofab import Binding, Decoder, Encoder, Field, FixlenSubtype, SofaArgumentError, SofaDecodeError, SofaIncompleteError, Status, Visitor, WireType, reserve_leaf\n") {
 		t.Errorf("message.py missing the full decode import line:\n%s", mod)
 	}
 	for _, want := range []string{
@@ -1096,16 +1097,18 @@ messages:
 
 	for _, want := range []string{
 		// leaf elements: the last index escapes the omit test -- count or no count
-		`            if _e0 != "" or _i0 == len(self.dynstr) - 1:`,
-		"            if len(_e0) != 0 or _i0 == len(self.dynblob) - 1:",
-		`            if _e0 != "" or _i0 == len(self.fixedstr) - 1:`,
+		`            if _e0 != "" or _i0 == _n0 - 1:`,
+		"        _n0 = len(self.dynblob)\n",
+		"            if len(_e0) != 0 or _i0 == _n0 - 1:",
+		"        _n0 = len(self.fixedstr)\n        if _n0 > 3:\n",
+		`            if _e0 != "" or _i0 == _n0 - 1:`,
 		// sequence elements: the same rule, applied through the closer
-		"            if _i0 == len(self.fixedobj) - 1:\n                e.write_sequence_end_keep()\n" +
+		"            if _i0 == _n0 - 1:\n                e.write_sequence_end_keep()\n" +
 			"            else:\n                e.write_sequence_end()\n",
 		// a native row carries no frame of its own, so the rule lands on the write
-		"            if len(_e0) != 0 or _i0 == len(self.mat) - 1:\n                e.write_unsigned_array(_i0, _e0)\n",
+		"            if len(_e0) != 0 or _i0 == _n0 - 1:\n                e.write_u32_array(_i0, _e0, 3)\n",
 		// a wrapper row has a frame, so it takes the closer
-		"            if _i0 == len(self.rows) - 1:\n                e.write_sequence_end_keep()\n" +
+		"            if _i0 == _n0 - 1:\n                e.write_sequence_end_keep()\n" +
 			"            else:\n                e.write_sequence_end()\n",
 		// every array loops over the value itself: there is no M to narrow to
 		"for _i0, _e0 in enumerate(self.fixedstr):",

@@ -147,8 +147,8 @@ KNOWN_GAP = {
     "typescript": (),
     "typescript-long": (),
     "typescript-number": (),
-    "python": STRINGS_AND_ARRAYS + SCALARS,
-    "python-pure": STRINGS_AND_ARRAYS + SCALARS,
+    "python": (),
+    "python-pure": (),
 }
 assert set(KNOWN_GAP) == set(VARIANTS)
 

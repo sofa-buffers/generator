@@ -602,34 +602,56 @@ func pyFloatLit(v any) string {
 // `pos`. Empty where the implied width IS the 64-bit slot the value lands in,
 // and for a boolean, which §4.4 gives no width at all, and for the floats.
 func bindScalarWidth(fld *ir.Field) string {
-	switch fld.Kind {
-	case ir.KindBool, ir.KindFP32, ir.KindFP64:
+	min, max, ok := declaredWidth(fld.Kind, fld.Ref)
+	switch {
+	case !ok:
 		return ""
-	case ir.KindEnum:
-		lo, hi, ok := ir.EnumWidthRange(fld.Ref)
-		if !ok {
-			return ""
-		}
-		return fmt.Sprintf(", min_value=%d, max_value=%d", lo, hi)
-	case ir.KindBitfield:
-		// One-sided: a bitfield rides the unsigned wire type, whose floor is 0.
-		// Stated as the width's maximum rather than as the mask the hook used --
-		// the two refuse exactly the same values, since a mask of a width IS the
-		// range [0, width max].
-		hi, ok := ir.BitfieldWidthMax(fld.Ref)
-		if !ok {
-			return ""
-		}
-		return fmt.Sprintf(", max_value=%d", hi)
+	case min != "":
+		return fmt.Sprintf(", min_value=%s, max_value=%s", min, max)
 	}
-	lo, hi, ok := ir.NarrowRange(fld.Kind)
+	return fmt.Sprintf(", max_value=%s", max)
+}
+
+// declaredWidth is the range a value of kind k is bound to by its declared
+// width, as Python literals: the declared width for an integer, the one the
+// declaration IMPLIES for an `enum` (the smallest signed type holding every
+// constant: two-sided) or a `bitfield` (the smallest unsigned type holding the
+// highest `pos`: one-sided, its floor is the unsigned wire type's 0) --
+// MESSAGE_SPEC §1. min is "" for a one-sided (unsigned) width. ok is false
+// where the width IS the 64-bit slot the value lands in (u64, i64, an enum
+// needing i64, a bitfield whose highest `pos` is 32 or above), for a boolean,
+// which §4.4 gives no width, and for the floats.
+//
+// The one source of these numbers for both directions: the decode side hands
+// them to the destination table (bindScalarWidth, bindElemWidth), the encode
+// side to the corelib writer (widthBounds), so the two cannot drift.
+func declaredWidth(k ir.Kind, ref *ir.TypeRef) (min, max string, ok bool) {
+	switch k {
+	case ir.KindBool, ir.KindFP32, ir.KindFP64:
+		return "", "", false
+	case ir.KindEnum:
+		lo, hi, ok := ir.EnumWidthRange(ref)
+		if !ok {
+			return "", "", false
+		}
+		return fmt.Sprint(lo), fmt.Sprint(hi), true
+	case ir.KindBitfield:
+		// Stated as the width's maximum rather than as a mask: the two refuse
+		// exactly the same values, since a mask of a width IS [0, width max].
+		hi, ok := ir.BitfieldWidthMax(ref)
+		if !ok {
+			return "", "", false
+		}
+		return "", fmt.Sprint(hi), true
+	}
+	lo, hi, ok := ir.NarrowRange(k)
 	if !ok {
-		return "" // u64 / i64: the slot IS the declared width
+		return "", "", false
 	}
 	if lo < 0 {
-		return fmt.Sprintf(", min_value=%d, max_value=%d", lo, hi)
+		return fmt.Sprint(lo), fmt.Sprint(hi), true
 	}
-	return fmt.Sprintf(", max_value=%d", hi)
+	return "", fmt.Sprint(hi), true
 }
 
 // pyBindArrayMethod names the binder for a native array of `elem` -- the same
@@ -667,30 +689,14 @@ func pyBindArrayMethod(elem ir.Kind) string {
 // `bitfield` (MESSAGE_SPEC §1), and nothing for a boolean, which has no width,
 // or for a float, whose binder takes none.
 func bindElemWidth(elem ir.Kind, ref *ir.TypeRef) string {
-	switch elem {
-	case ir.KindBool, ir.KindFP32, ir.KindFP64:
+	min, max, ok := declaredWidth(elem, ref)
+	switch {
+	case !ok:
 		return ""
-	case ir.KindEnum:
-		lo, hi, ok := ir.EnumWidthRange(ref)
-		if !ok {
-			return ""
-		}
-		return fmt.Sprintf(", elem_min=%d, elem_max=%d", lo, hi)
-	case ir.KindBitfield:
-		hi, ok := ir.BitfieldWidthMax(ref)
-		if !ok {
-			return ""
-		}
-		return fmt.Sprintf(", elem_max=%d", hi)
+	case min != "":
+		return fmt.Sprintf(", elem_min=%s, elem_max=%s", min, max)
 	}
-	lo, hi, ok := ir.NarrowRange(elem)
-	if !ok {
-		return ""
-	}
-	if lo < 0 {
-		return fmt.Sprintf(", elem_min=%d, elem_max=%d", lo, hi)
-	}
-	return fmt.Sprintf(", elem_max=%d", hi)
+	return fmt.Sprintf(", elem_max=%s", max)
 }
 
 // bindArrayExpr renders the scatter's list for a native array: the WIRE's own

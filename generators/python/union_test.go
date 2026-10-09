@@ -151,15 +151,15 @@ func TestPythonUnionEncodeArms(t *testing.T) {
 	u := classBody(t, unionModule(t), "M_U")
 	for _, want := range []string{
 		"        _w = self._which\n        _v = self._value\n",
-		"        if _w == 0:\n            e.write_unsigned(0, int(_v))\n",
-		"        elif _w == 1:\n            e.write_string(1, _v)\n",
+		"        if _w == 0:\n            e.write_u16(0, int(_v))\n",
+		"        elif _w == 1:\n            e.write_string_bounded(1, _v, 8)\n",
 		"        elif _w == 2:\n            e.write_sequence_begin_lazy(2)\n            _v.serialize(e)\n            e.write_sequence_end()\n",
-		"        elif _w == 3:\n            e.write_unsigned_array(3, _v)\n",
-		"        elif _w == 4:\n            e.write_sequence_begin_lazy(4)\n",
-		"                    e.write_string(_i0, _e0)\n            e.write_sequence_end_keep()\n",
-		"        elif _w == 5:\n            e.write_bytes(5, bytes(_v))\n",
+		"        elif _w == 3:\n            e.write_u16_array(3, _v, 4)\n",
+		"        elif _w == 4:\n            _n0 = len(_v)\n            if _n0 > 3:\n                raise SofaArgumentError(\"strs: array over count 3\")\n            e.write_sequence_begin_lazy(4)\n",
+		"                    e.write_string_bounded(_i0, _e0, 4)\n            e.write_sequence_end_keep()\n",
+		"        elif _w == 5:\n            e.write_bytes_bounded(5, bytes(_v), 4)\n",
 		"        elif _w == 6:\n            e.write_sequence_begin_lazy(6)\n            _v.serialize(e)\n            e.write_sequence_end_keep()\n",
-		"        elif _w == 7:\n            e.write_float32_array(7, _v)\n",
+		"        elif _w == 7:\n            e.write_float32_array_bounded(7, _v, 2)\n",
 		"        elif _w == 8:\n            e.write_bool(8, _v)\n",
 		// isDefault agrees with the writer: only default_id at its default.
 		"    def _is_default(self) -> bool:\n        return self._which == 2 and self._value._is_default()\n",

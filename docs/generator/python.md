@@ -156,8 +156,9 @@ underscore, so the module keeps its own meaning of it: a message `status` is
 `Status_` (`Status` stays `sofab.Status`), a message `none` is `None_`. Those
 names are the keywords `False`, `None`, `True`; the names the module imports
 (`Binding`, `ClassVar`, `Decoder`, `Encoder`, `Field`, `FixlenSubtype`,
-`IntEnum`, `IntFlag`, `SofaDecodeError`, `SofaIncompleteError`,
-`SofaLimitError`, `Status`, `UNBOUNDED`, `Visitor`, `WireType`); and the
+`FloatArrayDefault`, `IntEnum`, `IntFlag`, `SofaArgumentError`,
+`SofaDecodeError`, `SofaIncompleteError`, `SofaLimitError`, `Status`,
+`UNBOUNDED`, `Visitor`, `WireType`); and the
 module's own constants (`MAX_DYN_ARRAY_COUNT`, `MAX_DYN_STRING_LEN`,
 `MAX_DYN_BLOB_LEN`, `MAX_FIELD_SPAN`, `REASSEMBLY`).
 
