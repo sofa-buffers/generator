@@ -738,7 +738,10 @@ HPD="java -jar $WORK/plennolim/target/harness.jar"
 printf '{"ds":"abcdefghijklmnop"}'                    | $HPD encode pl > "$WORK/pl_ds16.bin"
 printf '{"ds":"abcdefgh"}'                            | $HPD encode pl > "$WORK/pl_ds8.bin"
 printf '{"bs":"abcdefghijklmnop"}'                    | $HPD encode pl > "$WORK/pl_bs16.bin"
-printf '{"bs":"0123456789012345678901234567890123"}'  | $HPD encode pl > "$WORK/pl_bs34.bin"
+# 34 bytes above maxlen 32 cannot come from the generated encoder, which refuses
+# an over-bound value (ARCHITECTURE S9.6), so the bytes are written out:
+# 0a = id 1 fixlen, 92 02 = fixlen word (34 << 3) | 2 (string), then the payload.
+printf '\012\222\002%s' "0123456789012345678901234567890123"   > "$WORK/pl_bs34.bin"
 printf '{"db":[1,2,3,4,5,6,7,8,9,10,11,12]}'          | $HPD encode pl > "$WORK/pl_db12.bin"
 
 if $HPC decode pl < "$WORK/pl_ds16.bin" >/dev/null 2>"$WORK/plerr.txt"; then

@@ -381,14 +381,26 @@ func maxlenThrow(name, noun string, max int64) string {
 // its test is a mask on the raw bits, and a value with bit 63 set is refused by
 // exactly the same expression unless position 63 is declared.
 func widthThrow(k ir.Kind, ref *ir.TypeRef, name string) string {
-	cond, what := widthCond(k), "width "+k.String()
-	if cond == "" {
-		cond, what = declaredWidthCond(k, ref), declaredWidthWhat(k)
-	}
+	cond, what := widthTest(k, ref, "value")
 	if cond == "" {
 		return ""
 	}
 	return fmt.Sprintf("if (%s) throw Sofab.invalid(\"%s: value outside declared %s\"); ", cond, name, what)
+}
+
+// widthTest is the out-of-width comparison on the expression v, and the name of
+// the declaration it breaches; ("", "") when the kind's range IS the long it is
+// held in. The decode store (widthThrow, on the delivered `value`) and the encode
+// guard (encodeWidthGuard, on the field itself) share it, so a value the decoder
+// refuses is exactly a value the encoder refuses.
+func widthTest(k ir.Kind, ref *ir.TypeRef, v string) (cond, what string) {
+	if cond = widthCond(k, v); cond != "" {
+		return cond, "width " + k.String()
+	}
+	if cond = declaredWidthCond(k, ref, v); cond != "" {
+		return cond, declaredWidthWhat(k)
+	}
+	return "", ""
 }
 
 // widthCond is the declared-integer-width half of widthThrow's comparison.
@@ -398,15 +410,15 @@ func widthThrow(k ir.Kind, ref *ir.TypeRef, name string) string {
 // (byte) value != value for a signed one). Those were tried: worth 42 Ir on
 // the arena's fifty elements and −40 on vehicle_telemetry, i.e. nothing, and
 // generated code is read by people who have the schema and nothing else.
-func widthCond(k ir.Kind) string {
+func widthCond(k ir.Kind, v string) string {
 	lo, hi, ok := ir.NarrowRange(k)
 	if !ok {
 		return ""
 	}
 	if lo < 0 {
-		return fmt.Sprintf("value < %dL || value > %dL", lo, hi)
+		return fmt.Sprintf("%s < %dL || %s > %dL", v, lo, v, hi)
 	}
-	return fmt.Sprintf("value < 0 || value > %dL", hi)
+	return fmt.Sprintf("%s < 0 || %s > %dL", v, v, hi)
 }
 
 // declaredWidthCond is the reject comparison for an `enum` and a `bitfield`,
@@ -438,14 +450,14 @@ func widthCond(k ir.Kind) string {
 // names this case directly: a receiver that cannot hold the field at exactly the
 // declared width holds it wider and MUST then enforce the width as an explicit
 // check, because nothing about its storage will.
-func declaredWidthCond(k ir.Kind, ref *ir.TypeRef) string {
+func declaredWidthCond(k ir.Kind, ref *ir.TypeRef, v string) string {
 	switch k {
 	case ir.KindEnum:
 		lo, hi, ok := ir.EnumWidthRange(ref)
 		if !ok {
 			return ""
 		}
-		return fmt.Sprintf("value < %dL || value > %dL", lo, hi)
+		return fmt.Sprintf("%s < %dL || %s > %dL", v, lo, v, hi)
 	case ir.KindBitfield:
 		// Spelled as a mask rather than `value < 0 || value > hi`: the corelib
 		// delivers an unsigned wire value as a Java `long`, so a u64 at or above
@@ -456,7 +468,7 @@ func declaredWidthCond(k ir.Kind, ref *ir.TypeRef) string {
 		if !ok {
 			return ""
 		}
-		return fmt.Sprintf("(value & ~0x%xL) != 0", hi)
+		return fmt.Sprintf("(%s & ~0x%xL) != 0", v, hi)
 	}
 	return ""
 }
