@@ -21,8 +21,11 @@ value in a small message never does.
 
 So the same input is, per backend, either refused, written unchecked (and then
 refused by the same stack's own decoder), or silently clamped, truncated or masked.
-Refused is the only acceptable answer: an over-bound value is neither emitted nor
-clamped.
+Refused is the answer wherever the encoder sees the over-bound value. The one
+exception is a bounded container that clamps on ASSIGNMENT, before any encoder
+runs (C++ FixedString/InlineVector, Zig FixedArray, C's length/count companions):
+there the clamp is the documented contract (CLAMP_CONTRACT below), and what it
+must never do is cut a string inside a UTF-8 character.
 
 ## What is asserted
 
@@ -54,6 +57,15 @@ land before the backend fixes. A listed case that fails is reported as a known g
 and the run stays green; a listed case that PASSES fails the run, so the entry has
 to be removed together with the fix. Each backend fix removes its entries; the list
 is empty when the last one lands. The case count and the gap list are printed.
+
+## CLAMP_CONTRACT
+
+Per backend variant, the REFUSE cases whose value a bounded container clamps at
+assignment by contract (generator#656, decision of 2026-10-07). Such a case must
+ENCODE, and `decode` must hand back exactly the clamped value (`clamped()`): a
+string cut to its maxlen in bytes at a UTF-8 character boundary, a blob and an
+array cut to their bound. Emitting the value unclamped, refusing it, or cutting
+inside a character all fail the case. Scalars are never clamped by contract.
 
 ## STORAGE_BLOCKED
 
@@ -114,7 +126,58 @@ STRINGS_AND_ARRAYS = (
 )
 SCALARS = ("u8_over", "i16_over", "i16_under", "e_over", "f_over")
 
-KNOWN_GAP = {v: STRINGS_AND_ARRAYS + SCALARS for v in VARIANTS}
+# One line per variant, so that a backend change edits only its own lines.
+KNOWN_GAP = {
+    "c": STRINGS_AND_ARRAYS + SCALARS,
+    "cpp": STRINGS_AND_ARRAYS + SCALARS,
+    "cpp-static": STRINGS_AND_ARRAYS + SCALARS,
+    "c-cpp": STRINGS_AND_ARRAYS + SCALARS,
+    "c-cpp-static": STRINGS_AND_ARRAYS + SCALARS,
+    "rust": STRINGS_AND_ARRAYS + SCALARS,
+    "rust-static": STRINGS_AND_ARRAYS + SCALARS,
+    "rs-no-std": STRINGS_AND_ARRAYS + SCALARS,
+    "rs-no-std-dynamic": STRINGS_AND_ARRAYS + SCALARS,
+    "rs-no-std-std": STRINGS_AND_ARRAYS + SCALARS,
+    "go": STRINGS_AND_ARRAYS + SCALARS,
+    "java": STRINGS_AND_ARRAYS + SCALARS,
+    "kotlin": STRINGS_AND_ARRAYS + SCALARS,
+    "csharp": STRINGS_AND_ARRAYS + SCALARS,
+    "dart": STRINGS_AND_ARRAYS + SCALARS,
+    "zig": STRINGS_AND_ARRAYS + SCALARS,
+    "typescript": STRINGS_AND_ARRAYS + SCALARS,
+    "typescript-long": STRINGS_AND_ARRAYS + SCALARS,
+    "typescript-number": STRINGS_AND_ARRAYS + SCALARS,
+    "python": STRINGS_AND_ARRAYS + SCALARS,
+    "python-pure": STRINGS_AND_ARRAYS + SCALARS,
+}
+assert set(KNOWN_GAP) == set(VARIANTS)
+
+# Cells clamped at assignment by contract (see CLAMP_CONTRACT in the docstring).
+# One line per variant; a cell here is asserted as clamped, never as refused.
+CLAMP_CONTRACT = {
+    "c": (),
+    "cpp": (),
+    "cpp-static": (),
+    "c-cpp": (),
+    "c-cpp-static": (),
+    "rust": (),
+    "rust-static": (),
+    "rs-no-std": (),
+    "rs-no-std-dynamic": (),
+    "rs-no-std-std": (),
+    "go": (),
+    "java": (),
+    "kotlin": (),
+    "csharp": (),
+    "dart": (),
+    "zig": (),
+    "typescript": (),
+    "typescript-long": (),
+    "typescript-number": (),
+    "python": (),
+    "python-pure": (),
+}
+assert set(CLAMP_CONTRACT) == set(VARIANTS)
 
 # Cells whose value the harness (or the storage type) cannot carry to the encoder:
 # {variant: {case: reason}}.
@@ -130,18 +193,26 @@ def _block(variants, cells, reason):
 
 _block(("go",), SCALARS,
        "encoding/json refuses the number for a uint8/int16/int8-backed field before encode")
-_block(("c", "cpp", "cpp-static", "c-cpp", "c-cpp-static", "zig"), SCALARS,
-       "the harness casts the JSON number to the field's fixed-width type (300 -> 0x2c) "
-       "before the generated code sees it")
+_CAST = ("the harness casts the JSON number to the field's fixed-width type (300 -> 0x2c) "
+         "before the generated code sees it")
+_block(("c",), SCALARS, _CAST)
+_block(("cpp",), SCALARS, _CAST)
+_block(("cpp-static",), SCALARS, _CAST)
+_block(("c-cpp",), SCALARS, _CAST)
+_block(("c-cpp-static",), SCALARS, _CAST)
+_block(("zig",), SCALARS, _CAST)
 _block(("csharp",), SCALARS,
        "System.Text.Json throws on the number before encode (unhandled harness exception)")
 _block(("kotlin",), ("u8_over", "i16_over", "i16_under"),
        "the harness narrows the number to UByte/Short before the generated code sees it")
-_block(("rust", "rs-no-std-dynamic"), SCALARS,
-       "serde refuses the number for a u8/i8/i16-backed field before encode (harness panic)")
-_block(("rust-static", "rs-no-std", "rs-no-std-std"), STRINGS_AND_ARRAYS + SCALARS,
-       "the bounded container (heapless) or serde refuses the value at assignment, so the "
-       "harness panics before encode; the encoder is never reached")
+_SERDE = "serde refuses the number for a u8/i8/i16-backed field before encode (harness panic)"
+_block(("rust",), SCALARS, _SERDE)
+_block(("rs-no-std-dynamic",), SCALARS, _SERDE)
+_HEAPLESS = ("the bounded container (heapless) or serde refuses the value at assignment, so the "
+             "harness panics before encode; the encoder is never reached")
+_block(("rust-static",), STRINGS_AND_ARRAYS + SCALARS, _HEAPLESS)
+_block(("rs-no-std",), STRINGS_AND_ARRAYS + SCALARS, _HEAPLESS)
+_block(("rs-no-std-std",), STRINGS_AND_ARRAYS + SCALARS, _HEAPLESS)
 
 
 def emit_schema(bounded_only=False) -> int:
@@ -213,6 +284,36 @@ def cases(blob_json: str, bounded_only: bool):
     return out
 
 
+def _cut_utf8(text: str, limit: int) -> str:
+    """text cut to at most `limit` UTF-8 bytes, never inside a character."""
+    raw = text.encode()[:limit]
+    while raw:
+        try:
+            return raw.decode()
+        except UnicodeDecodeError:
+            raw = raw[:-1]
+    return ""
+
+
+def clamped(sent: dict, b64: str) -> dict:
+    """What a clamping container holds after `sent` is assigned (CLAMP_CONTRACT)."""
+    out = {}
+    for k, v in sent.items():
+        if k == "s":
+            out[k] = _cut_utf8(v, 4)
+        elif k == "b":
+            out[k] = blob(hd.bytes_of(v)[:4] if not isinstance(v, list) else bytes(v[:4]), b64)
+        elif k == "au":
+            out[k] = v[:3]
+        elif k == "as":
+            out[k] = [_cut_utf8(x, 4) for x in v[:3]]
+        elif k == "n":
+            out[k] = {"arr": v.get("arr", [])[:2]}
+        else:
+            raise ValueError(f"{k} is never clamped by contract")
+    return out
+
+
 def same(want, got) -> bool:
     if isinstance(want, list):
         if got is None:
@@ -252,9 +353,25 @@ def crashed(p) -> bool:
 REFUSALS = {}  # case -> the diagnostic of a refusal, printed by --discover
 
 
-def verdict(cmd, cwd, name, msg, sent, kind, b64):
-    """None when the case behaves as the rule wants, else the problem."""
+def verdict(cmd, cwd, name, msg, sent, kind, b64, clamp=False):
+    """None when the case behaves as the rule wants, else the problem. With clamp,
+    a refuse case is held to the clamp contract instead (CLAMP_CONTRACT)."""
     p = run(cmd, ["encode", msg], json.dumps(sent).encode(), cwd)
+    if kind == "refuse" and clamp:
+        if p.returncode != 0:
+            return f"{name}: clamp contract: encode must succeed, harness exited {p.returncode}: {tail(p.stderr)}"
+        d = run(cmd, ["decode", msg], p.stdout, cwd)
+        if d.returncode != 0:
+            return f"{name}: clamp contract: the clamped bytes do not decode: {tail(d.stderr)}"
+        try:
+            got = hd.loads_out(d.stdout.decode())
+        except ValueError:
+            return f"{name}: decode printed no JSON: {d.stdout[:120]!r}"
+        for k, v in clamped(sent, b64).items():
+            if not same_field(k, v, got.get(k)):
+                return (f"{name}: clamp contract: {k} should read back as {json.dumps(v)[:60]}, "
+                        f"got {json.dumps(got.get(k))[:60]}")
+        return None
     if kind == "refuse":
         if crashed(p):
             return f"{name}: CRASHED instead of refusing (rc {p.returncode}): {tail(p.stderr)}"
@@ -288,6 +405,17 @@ def model_harness(argv) -> int:
         sys.stdout.buffer.write(data)
         return 0
     obj = json.loads(data)
+    if "--clamp" in argv and argv[argv.index("encode") + 1] != CTRL:
+        # A clamping container: strings, blobs and arrays are cut at assignment
+        # (--cut-midchar cuts a string at its byte bound, ignoring characters).
+        clampable = {k: v for k, v in obj.items() if k in ("s", "b", "au", "as", "n")}
+        cut = clamped(clampable, "array")
+        if "--cut-midchar" in argv and "s" in obj:
+            cut["s"] = obj["s"].encode()[:4].decode(errors="replace")
+        if defect in cut:
+            del cut[defect]
+        obj.update(cut)
+        data = json.dumps(obj).encode()
     bad = []
     for k, v in obj.items():
         if k == defect or argv[argv.index("encode") + 1] == CTRL:
@@ -329,11 +457,24 @@ def self_test() -> int:
             {n for n, _, sent, k in table if k == "refuse" and defect in sent}
         if got != want:
             bad.append(f"defect {defect}: failing cells {sorted(got)}, want {sorted(want)}")
+    # The clamp contract: a clamping model passes every clampable case held to it,
+    # and one that cuts mid-character or skips a field's clamp turns exactly those red.
+    clampable = [(n, m, sent, k) for n, m, sent, k in table
+                 if k == "refuse" and set(sent) <= {"s", "b", "au", "as", "n"}]
+    base = [sys.executable, os.path.abspath(__file__), "--model-harness", "--clamp"]
+    for extra, want in (([], set()),
+                        (["--cut-midchar"], {"s_over_midchar"}),
+                        (["--defect", "au"], {"au_count_plus_1", "au_count_plus_2"})):
+        got = {n for n, m, sent, k in clampable
+               if verdict(base + extra, None, n, m, sent, k, "array", clamp=True) is not None}
+        if got != want:
+            bad.append(f"clamp {extra}: failing cells {sorted(got)}, want {sorted(want)}")
     for b in bad:
         print("FAIL self-test " + b)
     if not bad:
         print(f"self-test: the model harness passes {len(table)} cases and each of 9 removed "
-              "guards turns exactly its own refuse cases red")
+              f"guards turns exactly its own refuse cases red; the clamp contract holds "
+              f"{len(clampable)} cases and catches a mid-character cut and a missing clamp")
     return 1 if bad else 0
 
 
@@ -367,6 +508,9 @@ def main() -> int:
     names = {c[0] for c in table} | {c[0] for c in cases(blob_json, False)}
     for b in VARIANTS:
         assert not set(KNOWN_GAP[b]) & set(STORAGE_BLOCKED[b]), f"{b}: a cell is both a gap and blocked"
+        assert not set(CLAMP_CONTRACT[b]) & set(STORAGE_BLOCKED[b]), f"{b}: a cell is both clamped and blocked"
+        for n in CLAMP_CONTRACT[b]:
+            assert n in names, f"CLAMP_CONTRACT[{b!r}] names an unknown case {n!r}"
         for n in KNOWN_GAP[b]:
             assert n in names, f"KNOWN_GAP[{b!r}] names an unknown case {n!r}"
         for n in STORAGE_BLOCKED[b]:
@@ -374,9 +518,10 @@ def main() -> int:
 
     gap = set() if discover else set(KNOWN_GAP[backend])
     blocked = {} if discover else STORAGE_BLOCKED[backend]
+    clamp = set() if discover else set(CLAMP_CONTRACT[backend])
     failures, open_gaps, stale, blk = [], [], [], []
     for name, msg, sent, kind in table:
-        problem = verdict(cmd, cwd, name, msg, sent, kind, blob_json)
+        problem = verdict(cmd, cwd, name, msg, sent, kind, blob_json, clamp=name in clamp)
         if name in blocked:
             blk.append(name)
         elif name in gap:
@@ -402,9 +547,10 @@ def main() -> int:
         for f in failures:
             print(f"  - {f}", file=sys.stderr)
         return 1
+    held = sorted(clamp & {c[0] for c in table})
     print(f"==> [{label}] encode bounds (generator#656): {len(table)} case(s),"
-          f" {len(table) - len(open_gaps) - len(blk)} pass, {len(blk)} storage-blocked"
-          f" {sorted(blk)}, KNOWN_GAP[{backend}] = {sorted(open_gaps)}")
+          f" {len(table) - len(open_gaps) - len(blk)} pass ({len(held)} by clamp contract),"
+          f" {len(blk)} storage-blocked {sorted(blk)}, KNOWN_GAP[{backend}] = {sorted(open_gaps)}")
     return 0
 
 
