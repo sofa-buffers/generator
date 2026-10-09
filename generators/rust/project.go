@@ -194,7 +194,7 @@ default = ["std"]
 # uses --no-default-features for a genuinely #![no_std], heap-free lib.
 std = ["serde", "dep:serde_json"]
 serde = ["dep:serde", "heapless/serde"]
-`
+` + g.encodeBoundsFeatureDecl()
 	}
 	// heapless is pulled in ONLY when static storage is actually selected, so a
 	// default std crate keeps depending on the corelib and serde alone -- adding a
@@ -218,7 +218,27 @@ serde_json = "1"
 [[bin]]
 name = "harness"
 path = "src/main.rs"
-`
+` + g.encodeBoundsFeatureSection()
+}
+
+// encodeBoundsFeatureDecl declares the footprint opt-out that compiles the
+// encode-side bound guards out (encodeBoundsFeature), in a crate that has them.
+func (g *gen) encodeBoundsFeatureDecl() string {
+	if !g.hasEncodeBoundsFeature() {
+		return ""
+	}
+	return "# Off by default: encode refuses a value past its schema bound. On, the\n" +
+		"# guards are compiled out (smaller .text) and such a value is the caller's to avoid.\n" +
+		encodeBoundsFeature + " = []\n"
+}
+
+// encodeBoundsFeatureSection is encodeBoundsFeatureDecl for a crate that has no
+// [features] table of its own (corelib-rs-no-std with no_std: false).
+func (g *gen) encodeBoundsFeatureSection() string {
+	if d := g.encodeBoundsFeatureDecl(); d != "" {
+		return "\n[features]\n" + d
+	}
+	return ""
 }
 
 func (g *gen) harness(s *ir.Schema) []byte {

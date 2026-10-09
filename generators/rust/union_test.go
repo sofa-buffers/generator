@@ -1,6 +1,7 @@
 package rust
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 
@@ -70,6 +71,28 @@ var unionCfgs = []map[string]any{
 	{"corelib": "rs", "allow_dynamic": false},
 	{"corelib": "rs-no-std"},
 	{"corelib": "rs-no-std", "allow_dynamic": true},
+}
+
+// encGuard is the encode-side bound guard cfg emits ahead of a write of val,
+// or "" where heapless storage carries the bound.
+func encGuard(cfg map[string]any, val string, bound int) string {
+	dynamic := cfg["allow_dynamic"] == true || (cfg["corelib"] == "rs" && cfg["allow_dynamic"] == nil)
+	if !dynamic {
+		return ""
+	}
+	g := fmt.Sprintf("if %s.len() > %d { return Err(sofab::Error::Argument); }", val, bound)
+	if cfg["corelib"] == "rs-no-std" {
+		g = `#[cfg(not(feature = "disable_encode_bounds"))] ` + g
+	}
+	return g
+}
+
+// encArm is a one-statement union arm, led by its encode guard where cfg has one.
+func encArm(head, guard, stmt string) string {
+	if guard == "" {
+		return head + "{ " + stmt + " }"
+	}
+	return head + "{\n                " + guard + "\n                " + stmt + "\n            }"
 }
 
 func wantAll(t *testing.T, cfg map[string]any, got, why string, wants ...string) {
@@ -239,11 +262,18 @@ func TestRustUnionEncodeArms(t *testing.T) {
 	for _, cfg := range unionCfgs {
 		m := moduleFromYAML(t, unionSrc, cfg)
 		ser := sliceFn(t, block(t, m, "impl M_U {"), "    pub fn serialize<")
+		// String/Vec storage leads a bounded option with its encode guard
+		// (TestRustEncodeRefusesOverBound); heapless storage has none.
+		g8, g4 := encGuard(cfg, "v", 8), encGuard(cfg, "v", 4)
+		arrHead := ""
+		if g4 != "" {
+			arrHead = "\n                " + g4
+		}
 		wantAll(t, cfg, ser, "an encode arm is wrong",
 			"            Self::Num(v) => { os.write_unsigned(0, *v as sofab::Unsigned)?; }",
-			"            Self::S(v) => { os.write_str(1, v)?; }",
+			encArm("            Self::S(v) => ", g8, "os.write_str(1, v)?;"),
 			"            Self::Pt(v) => { os.write_sequence_begin_lazy(2)?; v.serialize(os)?; os.write_sequence_end()?; }",
-			"            Self::Arr(v) => {\n                os.write_array_unsigned(3, v)?;\n            }",
+			"            Self::Arr(v) => {"+arrHead+"\n                os.write_array_unsigned(3, v)?;\n            }",
 			"                os.write_sequence_begin_lazy(4)?;",
 			"                os.write_sequence_end_keep()?;\n            }",
 			"            Self::Box(v) => { os.write_sequence_begin_lazy(5)?; v.serialize(os)?; os.write_sequence_end_keep()?; }",
@@ -260,7 +290,7 @@ func TestRustUnionEncodeArms(t *testing.T) {
 			"            Self::T(v) => { os.write_sequence_begin_lazy(1)?; v.serialize(os)?; os.write_sequence_end_keep()?; }")
 		wantAll(t, cfg, sliceFn(t, block(t, m, "impl M_V {"), "    pub fn serialize<"), "the element union's D is guarded, the other forced",
 			"            Self::I(v) => { os.write_signed(0, *v as sofab::Signed)?; }",
-			"            Self::S(v) => { if !v.is_empty() { os.write_str(1, v)?; } }")
+			encArm("            Self::S(v) => ", g8, "if !v.is_empty() { os.write_str(1, v)?; }"))
 		// the union FIELD keeps its framing: a union at its default leaves the lazy
 		// frame empty and the dropping end removes it
 		wantAll(t, cfg, m, "the union field keeps its lazy frame",
