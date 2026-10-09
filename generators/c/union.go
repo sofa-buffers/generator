@@ -4,7 +4,6 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/sofa-buffers/generator/internal/generator"
 	"github.com/sofa-buffers/generator/internal/ir"
 )
 
@@ -56,7 +55,7 @@ func (g *gen) unionLeafMember(cType string, f *ir.Field) (decl, entry string, er
 func unionMemberNote(f *ir.Field) string {
 	switch f.Kind {
 	case ir.KindBlob, ir.KindArray:
-		return generator.BoundDoc{Storage: generator.StorageCompanion, LenMember: cIdent(f.Name) + ".len"}.Note(f)
+		return boundNote(f, cIdent(f.Name)+".len")
 	}
 	return memberNote(f)
 }

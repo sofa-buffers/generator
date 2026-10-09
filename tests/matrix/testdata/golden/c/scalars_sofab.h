@@ -42,7 +42,7 @@ typedef struct {
     int64_t i64min;
     double f64;
     /**
-     * Schema bound: count 4 is a capacity; flags__len carries the length -- elements set without it encode an EMPTY array. Over 4 is INVALID.
+     * Schema bound: count 4 is a capacity; flags__len carries the length -- elements set without it encode an EMPTY array; encode clamps flags__len to at most 4. Over 4 on the wire is INVALID.
      */
     uint8_t flags__len; uint8_t flags[4];
     float f32;

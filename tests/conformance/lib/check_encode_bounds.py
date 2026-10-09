@@ -128,7 +128,7 @@ SCALARS = ("u8_over", "i16_over", "i16_under", "e_over", "f_over")
 
 # One line per variant, so that a backend change edits only its own lines.
 KNOWN_GAP = {
-    "c": STRINGS_AND_ARRAYS + SCALARS,
+    "c": (),
     "cpp": (),
     "cpp-static": (),
     "c-cpp": (),
@@ -155,7 +155,8 @@ assert set(KNOWN_GAP) == set(VARIANTS)
 # Cells clamped at assignment by contract (see CLAMP_CONTRACT in the docstring).
 # One line per variant; a cell here is asserted as clamped, never as refused.
 CLAMP_CONTRACT = {
-    "c": (),
+    "c": ("b_over_1", "b_over_60", "au_count_plus_1", "au_count_plus_2", "as_count_plus_1",
+          "n_arr_count_plus_1"),
     "cpp": (),
     "cpp-static": STRINGS_AND_ARRAYS,
     "c-cpp": (),
@@ -197,7 +198,10 @@ _block(("go",), SCALARS,
        "before encode")
 _CAST = ("the harness casts the JSON number to the field's fixed-width type (300 -> 0x2c) "
          "before the generated code sees it")
-_block(("c",), SCALARS, _CAST)
+_block(("c",), SCALARS,
+       "the field's fixed-width C type (uint8_t, int16_t, the int8_t enum, the uint8_t "
+       "bitfield) guarantees the declared width, so the encoder has no width to check; "
+       "the harness's cast to it wraps 300 -> 0x2c before encode")
 _CPP_WIDTH = ("the member's type guarantees the declared width (std::uint8_t, std::int16_t, an enum "
               "class over std::int8_t, a std::uint8_t bitfield), so encode needs no check; the "
               "harness's cast wraps 300 to 0x2c before the generated code sees it")

@@ -296,8 +296,8 @@ func TestUnionHarnessJSONHoldsOneOption(t *testing.T) {
 		"        json_bytes(out, o->u.bl.data, o->u.bl.len);",
 		"        o->which = MESSAGE_M___U___PT__ID;\n        sofab_object_init(&message_m___u___pt__descr, &o->u.pt);",
 		"        o->which = MESSAGE_M___U___STRS__ID;\n        sofab_object_init(&message_m___u___strs__elems__descr, &o->u.strs);",
-		"        o->u.bl.len = (uint8_t)json_to_bytes(c, o->u.bl.data, sizeof(o->u.bl.data));",
-		"        o->u.arr.len = (uint16_t)_n0;",
+		"        o->u.bl.len = (uint8_t)json_to_bytes(c, o->u.bl.data, sizeof(o->u.bl.data), (uint8_t)-1);",
+		"        o->u.arr.len = (uint16_t)json_len(_n0, (uint16_t)-1);",
 	} {
 		if !strings.Contains(main, want) {
 			t.Errorf("harness missing %q:\n%s", want, main)
