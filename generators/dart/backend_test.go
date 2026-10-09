@@ -117,7 +117,7 @@ func TestU64DefaultLiteral(t *testing.T) {
 func TestSparseOmitGuards(t *testing.T) {
 	out := genFor(t, "../../tests/matrix/corpus/defs/scalars.yaml", map[string]any{})
 	// Every leaf write is guarded by a != default omit test (sparse canonical).
-	if !strings.Contains(out, "if (u8max != 255) { e.writeUnsigned(1, u8max); }") {
+	if !strings.Contains(out, "if (u8max != 255) { if (u8max < 0 || u8max > 255) throw const sofab.SofabException(sofab.SofabError.invalidArgument, 'u8max: outside its declared width'); e.writeUnsigned(1, u8max); }") {
 		t.Error("scalar field not guarded by its != default omit test")
 	}
 }
@@ -639,8 +639,8 @@ func TestDartCountIsACapacityNotALength(t *testing.T) {
 		"    withdef.assign(_withdefDefault);",
 		// The field omit test: emptiness, or an exact compare against the declared
 		// default -- neither side padded to N, and only the `length` in use read.
-		"    if (fnums.length != 0) { e.writeUnsignedArray(4, fnums.storage, fnums.length); }",
-		"    if (!_prefixEq(withdef.storage, withdef.length, _withdefDefault)) { e.writeUnsignedArray(5, withdef.storage, withdef.length); }",
+		"    if (fnums.length != 0) { if (fnums.length > 4) throw const sofab.SofabException(sofab.SofabError.invalidArgument, 'fnums: over count 4'); e.writeUnsignedArrayInRange(4, fnums.storage, fnums.length, 0, 4294967295); }",
+		"    if (!_prefixEq(withdef.storage, withdef.length, _withdefDefault)) { if (withdef.length > 4) throw const sofab.SofabException(sofab.SofabError.invalidArgument, 'withdef: over count 4'); e.writeUnsignedArrayInRange(5, withdef.storage, withdef.length, 0, 4294967295); }",
 	} {
 		if !strings.Contains(out, want) {
 			t.Errorf("generated Dart missing %q:\n%s", want, out)
@@ -681,10 +681,12 @@ func TestDartArrayElementSparsityIsPositional(t *testing.T) {
 		// gone, so fstrs/fblobs carry the very same guard a count-less array does.
 		"    for (var _i0 = 0; _i0 < fstrs.length; _i0++) {\n" +
 			"      final _e0 = fstrs[_i0];\n" +
+			"      if (_e0.length > 8) throw const sofab.SofabException(sofab.SofabError.invalidArgument, 'fstrs: element over maxlen 8');\n" +
 			"      if (_e0.length != 0 || _i0 == fstrs.length - 1) e.writeStringUtf8(_i0, _e0.storage, _e0.length);\n" +
 			"    }",
 		"    for (var _i0 = 0; _i0 < fblobs.length; _i0++) {\n" +
 			"      final _e0 = fblobs[_i0];\n" +
+			"      if (_e0.length > 8) throw const sofab.SofabException(sofab.SofabError.invalidArgument, 'fblobs: element over maxlen 8');\n" +
 			"      if (_e0.length != 0 || _i0 == fblobs.length - 1) e.writeBlob(_i0, _e0.storage, _e0.length);\n" +
 			"    }",
 		// Sequence-form elements: the loop runs to length (no trailing elision) and
@@ -698,11 +700,12 @@ func TestDartArrayElementSparsityIsPositional(t *testing.T) {
 			"      if (_i0 == dynamic_.length - 1) { e.endSequenceKeep(); } else { e.endSequence(); }\n" +
 			"    }",
 		// A NATIVE row has no frame of its own, so the rule lands on the write.
-		"      if (_e0.length != 0 || _i0 == rows.length - 1) e.writeUnsignedArray(_i0, _e0.storage, _e0.length);",
+		"      if (_e0.length != 0 || _i0 == rows.length - 1) e.writeUnsignedArrayInRange(_i0, _e0.storage, _e0.length, 0, 4294967295);",
 		// A WRAPPER row has one, so it takes the closer -- and its own elements obey
 		// the same rule one level down.
 		"      if (_i0 == srows.length - 1) { e.endSequenceKeep(); } else { e.endSequence(); }",
 		"        final _e1 = srows[_i0][_i1];\n" +
+			"        if (_e1.length > 4) throw const sofab.SofabException(sofab.SofabError.invalidArgument, 'srows: element over maxlen 4');\n" +
 			"        if (_e1.length != 0 || _i1 == srows[_i0].length - 1) e.writeStringUtf8(_i1, _e1.storage, _e1.length);",
 		// A sequence-typed FIELD still always drops.
 		"    e.endSequence();",
@@ -796,7 +799,7 @@ func TestDartFp32ArrayTakesTheWireLength(t *testing.T) {
 		"  final sofab.InlineFloat64Array f64s = sofab.InlineFloat64Array(3);",
 		"      case 0:\n        if (count > 3) invalidate();\n        return o.f32s;",
 		"      case 1:\n        if (count > 3) invalidate();\n        return o.f64s;",
-		"    if (f32s.length != 0) { e.writeFp32Array(0, f32s.storage, f32s.length); }",
+		"    if (f32s.length != 0) { if (f32s.length > 3) throw const sofab.SofabException(sofab.SofabError.invalidArgument, 'f32s: over count 3'); e.writeFp32Array(0, f32s.storage, f32s.length); }",
 	} {
 		if !strings.Contains(out, want) {
 			t.Errorf("generated Dart missing %q:\n%s", want, out)
@@ -1682,7 +1685,7 @@ func TestDartCodeStripsLineComments(t *testing.T) {
 func TestDartFieldNamedEIsMangled(t *testing.T) {
 	out := genFor(t, writeDef(t, "version: 1\nmessages:\n  m:\n    payload:\n"+
 		"      e: { id: 0, type: u8, default: 1 }\n"), map[string]any{})
-	if !strings.Contains(out, "if (e_ != 1) { e.writeUnsigned(0, e_); }") {
+	if !strings.Contains(out, "if (e_ != 1) { if (e_ < 0 || e_ > 255) throw const sofab.SofabException(sofab.SofabError.invalidArgument, 'e: outside its declared width'); e.writeUnsigned(0, e_); }") {
 		t.Errorf("field `e` must be mangled to `e_` so the encoder parameter stays reachable:\n%s", out)
 	}
 }

@@ -33,7 +33,7 @@ func TestDartInlineDestinationShapes(t *testing.T) {
 		"final sofab.InlineInt64Array flags = sofab.InlineInt64Array(4, range: sofab.ElemRange.boolean)..assign(_flagsDefault);",
 		"sofab.IntMatrixSeq(o.brows, 3, false, 0, 0, rcap: maxDynArrayCount, rowCount: 2, rowCap: maxDynArrayCount, boolean: true)",
 		// A bool array is compared as booleans and written as canonical 0/1.
-		"if (!_boolsEq(flags.storage, flags.length, _flagsDefault)) { e.writeUnsignedArray(0, _bools01(flags), flags.length); }",
+		"if (!_boolsEq(flags.storage, flags.length, _flagsDefault)) { if (flags.length > 4) throw const sofab.SofabException(sofab.SofabError.invalidArgument, 'flags: over count 4'); e.writeUnsignedArray(0, _bools01(flags), flags.length); }",
 		"static final Int64List _flagsDefault = Int64List.fromList(const <int>[1, 0]);",
 		"if (_e0.length != 0 || _i0 == brows.length - 1) e.writeUnsignedArray(_i0, _bools01(_e0), _e0.length);",
 		// An fp32 default is emitted already rounded to fp32, so the stored

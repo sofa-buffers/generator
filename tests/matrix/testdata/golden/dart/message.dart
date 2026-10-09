@@ -31,17 +31,17 @@ class Scalars {
   final sofab.InlineInt64Array flags = sofab.InlineInt64Array(4, range: sofab.ElemRange.boolean);
 
   void serialize(sofab.Encoder e) {
-    if (u8min != 0) { e.writeUnsigned(0, u8min); }
-    if (u8max != 255) { e.writeUnsigned(1, u8max); }
+    if (u8min != 0) { if (u8min < 0 || u8min > 255) throw const sofab.SofabException(sofab.SofabError.invalidArgument, 'u8min: outside its declared width'); e.writeUnsigned(0, u8min); }
+    if (u8max != 255) { if (u8max < 0 || u8max > 255) throw const sofab.SofabException(sofab.SofabError.invalidArgument, 'u8max: outside its declared width'); e.writeUnsigned(1, u8max); }
     if (u64max != -1) { e.writeUnsigned(2, u64max); }
-    if (i8min != -128) { e.writeSigned(3, i8min); }
+    if (i8min != -128) { if (i8min < -128 || i8min > 127) throw const sofab.SofabException(sofab.SofabError.invalidArgument, 'i8min: outside its declared width'); e.writeSigned(3, i8min); }
     if (i64min != 0x8000000000000000) { e.writeSigned(4, i64min); }
     if (f32 != 3.14) {
       if (f32.isNaN && f32Fp32Bits != null) { e.writeFp32Bits(5, f32Fp32Bits!); } else { e.writeFp32(5, f32); }
     }
     if (f64 != -2.5) { e.writeFp64(6, f64); }
     if (flag != true) { e.writeBool(7, flag); }
-    if (flags.length != 0) { e.writeUnsignedArray(8, _bools01(flags), flags.length); }
+    if (flags.length != 0) { if (flags.length > 4) throw const sofab.SofabException(sofab.SofabError.invalidArgument, 'flags: over count 4'); e.writeUnsignedArray(8, _bools01(flags), flags.length); }
   }
 
   /// Restores every field to its declared default, in place.
@@ -78,9 +78,14 @@ class Scalars {
   /// Serializes this message into a buffer this call allocates and owns.
   ///
   /// The buffer is exactly [maxSize] bytes -- the schema's worst case -- so any
-  /// conformant value fits. A value filled past a declared count/maxlen does
-  /// not, and throws [sofab.SofabException] (`bufferFull`) rather than being
-  /// handed back truncated.
+  /// conformant value fits.
+  ///
+  /// A value past what the schema declares -- a string or blob longer than its
+  /// `maxlen` in UTF-8 bytes, an array longer than its `count`, an integer,
+  /// enum or bitfield (a field or an array element) outside its declared
+  /// width -- throws
+  /// [sofab.SofabException] (`invalidArgument`); nothing is returned, and the
+  /// value is never truncated or masked.
   Uint8List encode() {
     final buf = Uint8List(maxSize);
     final e = sofab.Encoder.overBuffer(buf, depth: 1);
@@ -94,6 +99,9 @@ class Scalars {
   /// The encoder's buffer may be smaller than the message: it is drained
   /// through the flush callback as it fills, so what bounds memory is the
   /// buffer, not the message.
+  ///
+  /// A value past a schema bound throws as [encode] does; what the encoder
+  /// had already flushed to its sink by then is not a message.
   void encodeTo(sofab.Encoder e) {
     serialize(e);
     e.flush();
