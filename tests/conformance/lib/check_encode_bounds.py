@@ -143,7 +143,7 @@ KNOWN_GAP = {
     "kotlin": STRINGS_AND_ARRAYS + SCALARS,
     "csharp": STRINGS_AND_ARRAYS + SCALARS,
     "dart": STRINGS_AND_ARRAYS + SCALARS,
-    "zig": STRINGS_AND_ARRAYS + SCALARS,
+    "zig": (),
     "typescript": STRINGS_AND_ARRAYS + SCALARS,
     "typescript-long": STRINGS_AND_ARRAYS + SCALARS,
     "typescript-number": STRINGS_AND_ARRAYS + SCALARS,
@@ -170,7 +170,7 @@ CLAMP_CONTRACT = {
     "kotlin": (),
     "csharp": (),
     "dart": (),
-    "zig": (),
+    "zig": ("au_count_plus_1", "au_count_plus_2", "n_arr_count_plus_1"),
     "typescript": (),
     "typescript-long": (),
     "typescript-number": (),
@@ -200,7 +200,10 @@ _block(("cpp",), SCALARS, _CAST)
 _block(("cpp-static",), SCALARS, _CAST)
 _block(("c-cpp",), SCALARS, _CAST)
 _block(("c-cpp-static",), SCALARS, _CAST)
-_block(("zig",), SCALARS, _CAST)
+_block(("zig",), SCALARS,
+       "the field's Zig type is exactly the declared width (u8, i16, and the i8/u8 an enum/"
+       "bitfield implies), so no over-width value can be stored; the harness casts the JSON "
+       "number into it (300 -> 0x2c) before the generated code sees it")
 _block(("csharp",), SCALARS,
        "System.Text.Json throws on the number before encode (unhandled harness exception)")
 _block(("kotlin",), ("u8_over", "i16_over", "i16_under"),

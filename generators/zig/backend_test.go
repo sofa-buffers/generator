@@ -1063,7 +1063,7 @@ messages:
 		"                try os.writeSequenceBeginLazy(@intCast(_i1));\n                try _e1.serialize(os);\n                if (_i1 == _e0.len - 1) {\n                    try os.writeSequenceEndKeep();\n                } else {\n                    try os.writeSequenceEnd();\n                }\n            }\n            if (_i0 == self.nst.len - 1) {",
 		// A NATIVE row has no frame of its own, so the rule lands on the write: an
 		// interior empty row is not written at all, the last one always is.
-		"        for (self.mat, 0..) |_e0, _i0| {\n            if (_e0.len != 0 or _i0 == self.mat.len - 1) {\n                try os.writeArrayUnsigned(@intCast(_i0), _e0);\n            }\n        }",
+		"        for (self.mat, 0..) |_e0, _i0| {\n            if (_e0.len != 0 or _i0 == self.mat.len - 1) {\n                if (_e0.len > 4) return error.InvalidArgument;\n                try os.writeArrayUnsigned(@intCast(_i0), _e0);\n            }\n        }",
 	} {
 		if !containsCode(m, want) {
 			t.Errorf("message.zig missing lazy-framing shape %q:\n%s", want, m)
@@ -1401,10 +1401,10 @@ messages:
 	m := string(files[0].Content)
 
 	for _, want := range []string{
-		"for (self.dynstr, 0..) |_e0, _i0| {\n            if (_e0.len != 0 or _i0 == self.dynstr.len - 1) try os.writeString(@intCast(_i0), _e0);",
-		"for (self.dynblob, 0..) |_e0, _i0| {\n            if (_e0.len != 0 or _i0 == self.dynblob.len - 1) try os.writeBlob(@intCast(_i0), _e0);",
+		"for (self.dynstr, 0..) |_e0, _i0| {\n            if (_e0.len > 8) return error.InvalidArgument;\n            if (_e0.len != 0 or _i0 == self.dynstr.len - 1) try os.writeString(@intCast(_i0), _e0);",
+		"for (self.dynblob, 0..) |_e0, _i0| {\n            if (_e0.len > 8) return error.InvalidArgument;\n            if (_e0.len != 0 or _i0 == self.dynblob.len - 1) try os.writeBlob(@intCast(_i0), _e0);",
 		// the count:N array takes the very same guard -- one rule, one shape
-		"for (self.fixedstr, 0..) |_e0, _i0| {\n            if (_e0.len != 0 or _i0 == self.fixedstr.len - 1) try os.writeString(@intCast(_i0), _e0);",
+		"for (self.fixedstr, 0..) |_e0, _i0| {\n            if (_e0.len > 8) return error.InvalidArgument;\n            if (_e0.len != 0 or _i0 == self.fixedstr.len - 1) try os.writeString(@intCast(_i0), _e0);",
 	} {
 		if !containsCode(m, want) {
 			t.Errorf("message.zig missing %q:\n%s", want, m)
@@ -2204,5 +2204,90 @@ messages:
 	}
 	if strings.Contains(unbounded, "alloc.alloc(u8, MAX_SIZE)") {
 		t.Error("unbounded message: MAX_SIZE is a ceiling and must not size a buffer")
+	}
+}
+
+// TestZigEncodeRefusesOverBound: a value past its schema bound is refused at
+// ENCODE with error.InvalidArgument, before that value is written (ARCHITECTURE
+// §9.6); an element guard runs inside the element loop, so the elements before it
+// may already be in the stream, but encode() returns no bytes. Each guard is one per-field comparison of the slice's own `.len` with the
+// schema literal: string/blob maxlen, a slice-backed array's count, a string/blob
+// element's maxlen, a nested row's count -- inside a union option too. A native
+// count:N array is sofab.FixedArray(T, N), whose type is the bound (set() keeps
+// the first N), so it gets no guard; neither does an unbounded field.
+func TestZigEncodeRefusesOverBound(t *testing.T) {
+	src := `
+version: 1
+messages:
+  m:
+    payload:
+      s: { id: 0, type: string, maxlen: 4 }
+      ws: { id: 1, type: array, items: { type: blob, count: 5, maxlen: 9 } }
+      st: { id: 2, type: array, items: { type: struct, count: 2, fields: { x: { id: 0, type: u8 } } } }
+      rows: { id: 3, type: array, items: { type: array, count: 3, items: { type: u16, count: 4 } } }
+      srows: { id: 4, type: array, items: { type: array, items: { type: string, count: 2, maxlen: 3 } } }
+      nat: { id: 5, type: array, items: { type: u32, count: 13 } }
+      us: { id: 6, type: string }
+      ua: { id: 7, type: array, items: { type: u32 } }
+      un:
+        id: 8
+        type: union
+        oneof:
+          a: { id: 0, type: string, maxlen: 6 }
+          b: { id: 1, type: blob, maxlen: 7 }
+`
+	files, err := (&Backend{}).Generate(buildSchema(t, src), map[string]any{})
+	if err != nil {
+		t.Fatalf("generate: %v", err)
+	}
+	m := string(files[0].Content)
+	for _, want := range []string{
+		"if (self.s.len > 4) return error.InvalidArgument;\n        if (self.s.len != 0) try os.writeString(0, self.s);",
+		"if (self.ws.len > 5) return error.InvalidArgument;\n        try os.writeSequenceBeginLazy(1);",
+		"if (_e0.len > 9) return error.InvalidArgument;\n            if (_e0.len != 0 or _i0 == self.ws.len - 1) try os.writeBlob(@intCast(_i0), _e0);",
+		"if (self.st.len > 2) return error.InvalidArgument;\n        try os.writeSequenceBeginLazy(2);",
+		"if (self.rows.len > 3) return error.InvalidArgument;",
+		"if (_e0.len > 4) return error.InvalidArgument;\n                try os.writeArrayUnsigned(@intCast(_i0), _e0);",
+		"if (_e0.len > 2) return error.InvalidArgument;\n            try os.writeSequenceBeginLazy(@intCast(_i0));",
+		"if (_e1.len > 3) return error.InvalidArgument;",
+		"if (self.a.len > 6) return error.InvalidArgument;",
+		"if (self.b.len > 7) return error.InvalidArgument;\n                try os.writeBlob(1, self.b);",
+		"A value\n    /// past its schema bound fails with error.InvalidArgument",
+		"is refused with\n    /// error.InvalidArgument, nothing returned.",
+	} {
+		if !strings.Contains(m, want) {
+			t.Errorf("message.zig missing encode bound guard %q:\n%s", want, m)
+		}
+	}
+	for _, bad := range []string{
+		"self.nat.len() > 13", "self.nat.len > 13", // FixedArray: the type is the bound
+		"self.us.len >", "self.ua.len >", // unbounded: nothing to compare with
+		"self.srows.len >", // the outer array declares no count
+	} {
+		if strings.Contains(m, bad) {
+			t.Errorf("message.zig must not carry %q:\n%s", bad, m)
+		}
+	}
+	// Exactly one guard per bound: s, ws, ws elem, st, rows, rows elem, srows row,
+	// srows elem, un.a, un.b. No scalar width guard: every Zig scalar type is the
+	// declared width.
+	if n := strings.Count(m, "return error.InvalidArgument;"); n != 10 {
+		t.Errorf("want 10 encode bound guards, got %d:\n%s", n, m)
+	}
+
+	// No bound reachable: neither guards nor the promise in the doc comments.
+	files, err = (&Backend{}).Generate(buildSchema(t, `
+version: 1
+messages:
+  m:
+    payload:
+      s: { id: 0, type: string }
+      a: { id: 1, type: array, items: { type: u8, count: 4 } }
+`), map[string]any{})
+	if err != nil {
+		t.Fatalf("generate: %v", err)
+	}
+	if m := string(files[0].Content); strings.Contains(m, "InvalidArgument") {
+		t.Errorf("unbounded message must not mention InvalidArgument:\n%s", m)
 	}
 }

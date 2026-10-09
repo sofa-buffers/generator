@@ -62,8 +62,7 @@ pub const Scalars = struct {
     }
 
     /// Encode into a fresh buffer allocated from `alloc`, sized to MAX_SIZE and
-    /// trimmed to the bytes written. A value filled past its declared bound does
-    /// not fit: error.BufferFull, nothing returned.
+    /// trimmed to the bytes written.
     pub fn encode(self: *const Scalars, alloc: std.mem.Allocator) (sofab.Error || std.mem.Allocator.Error)![]u8 {
         const buf = try alloc.alloc(u8, MAX_SIZE);
         errdefer alloc.free(buf);
