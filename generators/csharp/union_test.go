@@ -198,13 +198,15 @@ func TestCsUnionEncodeArms(t *testing.T) {
 	mustContain(t, "M_U.Serialize", ser,
 		"switch (_which) {",
 		"case Id_Num: {\n            os.WriteUnsigned(0, (ulong)this._num);\n            break;",
-		`os.WriteString(1, this._s ?? "");`,
+		`os.WriteString(1, this._s ?? "", 8);`,
 		"os.WriteSequenceBeginLazy(2); (this._pt ?? new M_U_Pt()).Serialize(os); os.WriteSequenceEnd();",
 		"os.WriteArrayUnsigned(3, (this._arr ?? global::System.Array.Empty<ushort>()));",
 		"os.WriteBlob(5, this._bl ?? global::System.Array.Empty<byte>());",
 		"os.WriteSequenceBeginLazy(6); (this._inner ?? new M_U_Inner()).Serialize(os); os.WriteSequenceEndKeep();",
 		"case Id_F: {\n            os.WriteFp32(7, this._f);",
-		"var _o = this._flags ?? new global::System.Collections.Generic.List<bool>();\n            os.WriteArrayUnsigned(8, global::System.Array.ConvertAll(_o.ToArray(), _x => _x ? (byte)1 : (byte)0));")
+		"var _o = this._flags ?? new global::System.Collections.Generic.List<bool>();\n"+
+			"            if (_o.Count > 2) throw new global::sofab.SofabException(global::sofab.SofabError.Argument, \"flags: array count above schema capacity 2\");\n"+
+			"            os.WriteArrayUnsigned(8, global::System.Array.ConvertAll(_o.ToArray(), _x => _x ? (byte)1 : (byte)0));")
 	strs := ser[strings.Index(ser, "case Id_Strs:"):strings.Index(ser, "case Id_Bl:")]
 	mustContain(t, "M_U.Serialize strs", strs, "var _o = this._strs ?? new global::System.Collections.Generic.List<string>();", "os.WriteSequenceBeginLazy(4);", "os.WriteSequenceEndKeep();")
 	// No ≠-default guard on any forced option.

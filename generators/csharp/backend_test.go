@@ -133,7 +133,10 @@ func TestCsMaxlenReject(t *testing.T) {
 	// Exactly one comparison per bounded destination (#594): the length word's.
 	// Three bounded destinations here, so three -- the payload callbacks restate
 	// none of them.
-	if n := strings.Count(m, "above schema maxlen"); n != 3 {
+	// (The encode side's blob guard in Serialize is the other half, §9.6, and is
+	// pinned by TestCsEncodeRefusesOverBound.)
+	vis := m[strings.Index(m, "internal sealed class"):]
+	if n := strings.Count(vis, "above schema maxlen"); n != 3 {
 		t.Errorf("expected 3 maxlen comparisons (one per bounded destination), got %d:\n%s", n, m)
 	}
 	if n := strings.Count(m, "total > 5"); n != 1 {
@@ -751,9 +754,9 @@ messages:
 	for _, want := range []string{
 		// LEAF elements: the omit test is `!= default || last`, unconditionally —
 		// the count:N array is written exactly like the count-less one beside it.
-		`for (int _i0 = 0, _n0 = this.dynstr.Count; _i0 < _n0; _i0++) { if ((this.dynstr[_i0] ?? "") != "" || _i0 == _n0 - 1) os.WriteString(_i0, this.dynstr[_i0] ?? ""); }`,
-		`for (int _i0 = 0, _n0 = this.dynblob.Count; _i0 < _n0; _i0++) { if ((this.dynblob[_i0] ?? global::System.Array.Empty<byte>()).Length != 0 || _i0 == _n0 - 1) os.WriteBlob(_i0, this.dynblob[_i0] ?? global::System.Array.Empty<byte>()); }`,
-		`for (int _i0 = 0, _n0 = this.fixedstr.Count; _i0 < _n0; _i0++) { if ((this.fixedstr[_i0] ?? "") != "" || _i0 == _n0 - 1) os.WriteString(_i0, this.fixedstr[_i0] ?? ""); }`,
+		`for (int _i0 = 0, _n0 = this.dynstr.Count; _i0 < _n0; _i0++) { if ((this.dynstr[_i0] ?? "") != "" || _i0 == _n0 - 1) os.WriteString(_i0, this.dynstr[_i0] ?? "", 8); }`,
+		`for (int _i0 = 0, _n0 = this.dynblob.Count; _i0 < _n0; _i0++) { var _b0 = this.dynblob[_i0] ?? global::System.Array.Empty<byte>(); if (_b0.Length > 8) throw new global::sofab.SofabException(global::sofab.SofabError.Argument, "dynblob element: blob length above schema maxlen 8"); if (_b0.Length != 0 || _i0 == _n0 - 1) os.WriteBlob(_i0, _b0); }`,
+		`for (int _i0 = 0, _n0 = this.fixedstr.Count; _i0 < _n0; _i0++) { if ((this.fixedstr[_i0] ?? "") != "" || _i0 == _n0 - 1) os.WriteString(_i0, this.fixedstr[_i0] ?? "", 8); }`,
 
 		// SEQUENCE elements: the same rule, applied to the lazily-held frame. The
 		// dropping closer in the interior (an all-default element writes no child, so
@@ -768,7 +771,7 @@ messages:
 			"                os.WriteArrayUnsigned(_i0, this.rows[_i0].ToArray());\n" +
 			"            }",
 		// A WRAPPER nested row does have one, so it takes the closer instead.
-		"            for (int _i1 = 0, _n1 = this.srows[_i0].Count; _i1 < _n1; _i1++) { if ((this.srows[_i0][_i1] ?? \"\") != \"\" || _i1 == _n1 - 1) os.WriteString(_i1, this.srows[_i0][_i1] ?? \"\"); }\n" +
+		"            for (int _i1 = 0, _n1 = this.srows[_i0].Count; _i1 < _n1; _i1++) { if ((this.srows[_i0][_i1] ?? \"\") != \"\" || _i1 == _n1 - 1) os.WriteString(_i1, this.srows[_i0][_i1] ?? \"\", 8); }\n" +
 			"            if (_i0 == _n0 - 1) os.WriteSequenceEndKeep(); else os.WriteSequenceEnd();",
 	} {
 		if !strings.Contains(m, want) {
@@ -850,14 +853,14 @@ messages:
 		// FIELD: the wrapper of a string array — an EMPTY array drops the wrapper too
 		// (the last element is always written, so a non-empty one never vanishes, §2).
 		"        os.WriteSequenceBeginLazy(2);\n" +
-			"        for (int _i0 = 0, _n0 = this.names.Count; _i0 < _n0; _i0++) { if ((this.names[_i0] ?? \"\") != \"\" || _i0 == _n0 - 1) os.WriteString(_i0, this.names[_i0] ?? \"\"); }\n" +
+			"        for (int _i0 = 0, _n0 = this.names.Count; _i0 < _n0; _i0++) { if ((this.names[_i0] ?? \"\") != \"\" || _i0 == _n0 - 1) os.WriteString(_i0, this.names[_i0] ?? \"\", 8); }\n" +
 			"        os.WriteSequenceEnd();",
 		// FIELD: the wrapper of an array-of-array, whose ROWS are elements and so take
 		// the positional closer one level in.
 		"        os.WriteSequenceBeginLazy(3);\n" +
 			"        for (int _i0 = 0, _n0 = this.grid.Count; _i0 < _n0; _i0++) {\n" +
 			"            os.WriteSequenceBeginLazy(_i0);\n" +
-			"            for (int _i1 = 0, _n1 = this.grid[_i0].Count; _i1 < _n1; _i1++) { if ((this.grid[_i0][_i1] ?? \"\") != \"\" || _i1 == _n1 - 1) os.WriteString(_i1, this.grid[_i0][_i1] ?? \"\"); }\n" +
+			"            for (int _i1 = 0, _n1 = this.grid[_i0].Count; _i1 < _n1; _i1++) { if ((this.grid[_i0][_i1] ?? \"\") != \"\" || _i1 == _n1 - 1) os.WriteString(_i1, this.grid[_i0][_i1] ?? \"\", 8); }\n" +
 			"            if (_i0 == _n0 - 1) os.WriteSequenceEndKeep(); else os.WriteSequenceEnd();\n" +
 			"        }\n" +
 			"        os.WriteSequenceEnd();",
@@ -2065,5 +2068,83 @@ messages:
 		if !strings.Contains(probe, want) {
 			t.Errorf("uncounted rows: missing %q:\n%s", want, probe)
 		}
+	}
+}
+
+// TestCsEncodeRefusesOverBound pins the encode-side schema bounds (ARCHITECTURE
+// §9.6): a string's maxlen rides corelib-cs's bounded WriteString overload (its
+// UTF-8 length is only known inside the transcoder), a blob's maxlen and an
+// array's count -- at every nesting level, and the maxlen of a string or blob
+// element -- are a per-field compare that throws SofabError.Argument before the
+// write. An unbounded field gets neither, and no scalar gets a width guard: the
+// C# storage type of an integer, enum or bitfield already is its declared width.
+func TestCsEncodeRefusesOverBound(t *testing.T) {
+	src := []byte(`version: 1
+messages:
+  m:
+    payload:
+      s: { id: 0, type: string, maxlen: 4 }
+      b: { id: 1, type: blob, maxlen: 5 }
+      bd: { id: 2, type: blob, maxlen: 6, default: "AQI=" }
+      au: { id: 3, type: array, items: { type: u32, count: 3 } }
+      as: { id: 4, type: array, items: { type: string, count: 7, maxlen: 8 } }
+      ab: { id: 5, type: array, items: { type: blob, count: 2, maxlen: 9 } }
+      mx: { id: 6, type: array, items: { type: array, count: 2, items: { type: i16, count: 11 } } }
+      bl: { id: 7, type: array, items: { type: boolean, count: 12 } }
+      u8: { id: 8, type: u8 }
+      i16: { id: 9, type: i16 }
+      us: { id: 10, type: string }
+      ub: { id: 11, type: blob }
+      ua: { id: 12, type: array, items: { type: u32 } }
+      uas: { id: 13, type: array, items: { type: string } }
+`)
+	got := buildModule(t, src, "bounds.yaml", map[string]any{"namespace": "T"})
+	arg := "throw new global::sofab.SofabException(global::sofab.SofabError.Argument, "
+	for _, want := range []string{
+		`os.WriteString(0, this.s ?? "", 4);`,
+		`if (this.b != null && this.b.Length != 0) { if (this.b.Length > 5) ` + arg + `"b: blob length above schema maxlen 5"); os.WriteBlob(1, this.b); }`,
+		`{ if ((this.bd?.Length ?? 0) > 6) ` + arg + `"bd: blob length above schema maxlen 6"); os.WriteBlob(2,`,
+		`if (this.au.Length > 3) ` + arg + `"au: array count above schema capacity 3");`,
+		`if (this.@as.Count > 7) ` + arg + `"as: array count above schema capacity 7");`,
+		`os.WriteString(_i0, this.@as[_i0] ?? "", 8);`,
+		`if (this.ab.Count > 2) ` + arg + `"ab: array count above schema capacity 2");`,
+		`var _b0 = this.ab[_i0] ?? global::System.Array.Empty<byte>(); if (_b0.Length > 9) ` + arg + `"ab element: blob length above schema maxlen 9");`,
+		`if (this.mx.Count > 2) ` + arg + `"mx: array count above schema capacity 2");`,
+		`if (this.mx[_i0].Count > 11) ` + arg + `"mx row: array count above schema capacity 11");`,
+		`if (this.bl.Count > 12) ` + arg + `"bl: array count above schema capacity 12");`,
+		`os.WriteString(10, this.us ?? "");`,
+		`os.WriteString(_i0, this.uas[_i0] ?? "");`,
+		`if (this.ub != null && this.ub.Length != 0) { os.WriteBlob(11, this.ub); }`,
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("missing encode bound:\n  %s", want)
+		}
+	}
+	// No guard for an unbounded field, and none for a scalar: byte/short hold
+	// exactly the declared width.
+	ser := got[strings.Index(got, "public void Serialize("):strings.Index(got, "public bool IsDefault()")]
+	for _, bad := range []string{"this.ua.Length >", "this.uas.Count >", "this.u8 >", "this.i16 >", "this.i16 <"} {
+		if strings.Contains(ser, bad) {
+			t.Errorf("unexpected encode guard %q in Serialize", bad)
+		}
+	}
+	if n := strings.Count(ser, "SofabError.Argument"); n != 9 {
+		t.Errorf("Serialize carries %d Argument refusals, want 9 (b, bd, au, as, ab, ab element, mx, mx row, bl)", n)
+	}
+	for _, typ := range []string{"public byte u8;", "public short i16;"} {
+		if !strings.Contains(got, typ) {
+			t.Errorf("a scalar is no longer stored at its declared width (%s): it would need an encode width guard", typ)
+		}
+	}
+}
+
+// TestCsHarnessReportsARefusedEncode: the generated harness turns an encode
+// refusal into "encode error" and exit 1 on both encode verbs, as it does for a
+// refused decode, so a conformance driver reads it as a refusal, not a crash.
+func TestCsHarnessReportsARefusedEncode(t *testing.T) {
+	prog := genCs(t, "version: 1\nmessages:\n  m: { payload: { s: { id: 0, type: string, maxlen: 2 } } }\n")["Program.cs"]
+	catch := `catch (SofabException e) { Console.Error.WriteLine($"encode error: {e.Error}: {e.Message}"); return 1; }`
+	if n := strings.Count(prog, catch); n != 2 {
+		t.Errorf("harness catches an encode refusal %d time(s), want 2 (encode, streamencode):\n%s", n, prog)
 	}
 }

@@ -7,6 +7,7 @@ package csharp
 
 import (
 	"fmt"
+	"math"
 	"strings"
 
 	"github.com/sofa-buffers/generator/internal/generator"
@@ -271,6 +272,15 @@ func (g *gen) emitClass(f *cfile, name, vis, summary string, fields []*ir.Field,
 		f.line("    /// smaller than the message: it is drained as it fills, so what bounds")
 		f.line("    /// memory is the buffer, not the message.")
 		f.line("    /// </summary>")
+		// What encode refuses (ARCHITECTURE §9.6): the same holds for Encode(),
+		// which runs the same Serialize.
+		f.line("    /// <exception cref=\"global::sofab.SofabException\">")
+		f.line("    /// <c>SofabError.Argument</c> when a field holds a value past its schema")
+		f.line("    /// bound -- a string or blob over its <c>maxlen</c> (UTF-8 bytes for a")
+		f.line("    /// string), an array over its <c>count</c> -- or a string that is not valid")
+		f.line("    /// UTF-8. Such a value is refused, never truncated; <c>Encode()</c> refuses")
+		f.line("    /// it the same way.")
+		f.line("    /// </exception>")
 		f.line("    public void EncodeTo(global::sofab.OStream os) {")
 		f.line("        Serialize(os);")
 		f.line("        os.Flush();")
@@ -529,21 +539,27 @@ func (g *gen) emitMarshalAt(f *cfile, ind string, fld *ir.Field, acc string, for
 	case ir.KindFP64:
 		write = fmt.Sprintf("os.WriteFp64(%d, %s);", fld.ID, acc)
 	case ir.KindString:
-		write = fmt.Sprintf("os.WriteString(%d, %s ?? \"\");", fld.ID, acc)
+		write = fmt.Sprintf("os.WriteString(%d, %s ?? \"\"%s);", fld.ID, acc, maxlenArg(fld.HasMaxlen, fld.Maxlen))
 	case ir.KindBlob:
 		// A blob is a leaf: omit when equal to its default (empty if none). The
 		// decoder reconstructs the omitted field from its materialized default.
 		// With an empty default the content compare degenerates to a length
 		// check, sparing the LINQ SequenceEqual enumeration per call.
+		//
+		// A declared maxlen is checked before the write (ARCHITECTURE §9.6): a
+		// blob's length is its byte count, so the guard is a plain compare here.
 		if forced {
+			if guard := blobMaxlenGuard(fld, "("+acc+"?.Length ?? 0)"); guard != "" {
+				f.line("%s%s", ind, guard)
+			}
 			f.line("%sos.WriteBlob(%d, %s ?? global::System.Array.Empty<byte>());", ind, fld.ID, acc)
 			return
 		}
 		if g.csDefaultValue(fld) == "global::System.Array.Empty<byte>()" {
-			f.line("%sif (%s != null && %s.Length != 0) { os.WriteBlob(%d, %s); }", ind, acc, acc, fld.ID, acc)
+			f.line("%sif (%s != null && %s.Length != 0) { %sos.WriteBlob(%d, %s); }", ind, acc, acc, spaced(blobMaxlenGuard(fld, acc+".Length")), fld.ID, acc)
 			return
 		}
-		f.line("%sif (!global::System.Linq.Enumerable.SequenceEqual(%s ?? global::System.Array.Empty<byte>(), %s)) { os.WriteBlob(%d, %s ?? global::System.Array.Empty<byte>()); }", ind, acc, g.csDefaultValue(fld), fld.ID, acc)
+		f.line("%sif (!global::System.Linq.Enumerable.SequenceEqual(%s ?? global::System.Array.Empty<byte>(), %s)) { %sos.WriteBlob(%d, %s ?? global::System.Array.Empty<byte>()); }", ind, acc, g.csDefaultValue(fld), spaced(blobMaxlenGuard(fld, "("+acc+"?.Length ?? 0)")), fld.ID, acc)
 		return
 	case ir.KindStruct, ir.KindUnion:
 		// MESSAGE_SPEC S2: the != default test is per field and a sequence-typed
@@ -616,7 +632,7 @@ func (g *gen) emitMarshalArray(f *cfile, ind string, fld *ir.Field, acc string, 
 		switch {
 		case primArrayElem(fld.Elem):
 			v := fmt.Sprintf("(%s ?? global::System.Array.Empty<%s>())", acc, primArrayBase(fld.Elem, fld.ElemRef))
-			g.marshalArray(f, ind, id, v, fld.Elem, fld.ElemRef, fld.ElemItems, 0, true, "")
+			g.marshalArray(f, ind, id, v, fld.Elem, fld.ElemRef, fld.ElemItems, fieldBound(fld), 0, true, "")
 		default:
 			// A List: the boolean array, or a wrapper array. Read once into a
 			// local, since the element loop reads it per element.
@@ -625,7 +641,7 @@ func (g *gen) emitMarshalArray(f *cfile, ind string, fld *ir.Field, acc string, 
 			if nativeArrayElem(fld.Elem) {
 				keep = "" // a compact array opens no frame
 			}
-			g.marshalArray(f, ind, id, "_o", fld.Elem, fld.ElemRef, fld.ElemItems, 0, false, keep)
+			g.marshalArray(f, ind, id, "_o", fld.Elem, fld.ElemRef, fld.ElemItems, fieldBound(fld), 0, false, keep)
 		}
 		return
 	}
@@ -646,7 +662,7 @@ func (g *gen) emitMarshalArray(f *cfile, ind string, fld *ir.Field, acc string, 
 		} else {
 			f.line("%sif (%s != null && %s.Length != 0) {", ind, acc, acc)
 		}
-		g.marshalArray(f, ind+"    ", fmt.Sprintf("%d", fld.ID), acc, fld.Elem, fld.ElemRef, fld.ElemItems, 0, true, "")
+		g.marshalArray(f, ind+"    ", fmt.Sprintf("%d", fld.ID), acc, fld.Elem, fld.ElemRef, fld.ElemItems, fieldBound(fld), 0, true, "")
 		f.line("%s}", ind)
 		return
 	}
@@ -656,7 +672,7 @@ func (g *gen) emitMarshalArray(f *cfile, ind string, fld *ir.Field, acc string, 
 		} else {
 			f.line("%sif (%s.Count != 0) {", ind, acc)
 		}
-		g.marshalArray(f, ind+"    ", fmt.Sprintf("%d", fld.ID), acc, fld.Elem, fld.ElemRef, fld.ElemItems, 0, false, "")
+		g.marshalArray(f, ind+"    ", fmt.Sprintf("%d", fld.ID), acc, fld.Elem, fld.ElemRef, fld.ElemItems, fieldBound(fld), 0, false, "")
 		f.line("%s}", ind)
 		return
 	}
@@ -668,7 +684,7 @@ func (g *gen) emitMarshalArray(f *cfile, ind string, fld *ir.Field, acc string, 
 	// `if (value != default) { ... WriteSequenceEndKeep(); }` -- so that a value
 	// differing from a non-empty default still reaches the wire as the empty
 	// wrapper, the only encoding of "explicitly empty" (MESSAGE_SPEC §2, §3).
-	g.marshalArray(f, ind, fmt.Sprintf("%d", fld.ID), acc, fld.Elem, fld.ElemRef, fld.ElemItems, 0, false, "")
+	g.marshalArray(f, ind, fmt.Sprintf("%d", fld.ID), acc, fld.Elem, fld.ElemRef, fld.ElemItems, fieldBound(fld), 0, false, "")
 }
 
 // lastElemExpr is the "this element is the array's last" test, at loop position
@@ -737,7 +753,11 @@ func emitSeqEnd(f *cfile, ind, keepIf string) {
 //
 // keepIf is the closer this call's own wrapper takes (see emitSeqEnd); the native
 // element kinds open no sequence and ignore it.
-func (g *gen) marshalArray(f *cfile, ind, idExpr, val string, elem ir.Kind, ref *ir.TypeRef, items *ir.ArrayElem, depth int, isPrim bool, keepIf string) {
+//
+// bnd is the array's own schema bound (its count, and its string/blob elements'
+// maxlen): a value past it is refused before anything of the array is written
+// (ARCHITECTURE §9.6), the count here and an element's maxlen at its write.
+func (g *gen) marshalArray(f *cfile, ind, idExpr, val string, elem ir.Kind, ref *ir.TypeRef, items *ir.ArrayElem, bnd arrBound, depth int, isPrim bool, keepIf string) {
 	iv := fmt.Sprintf("_i%d", depth)
 	// `nv` is declared in the for-statement's own scope, so two array fields in one
 	// Serialize never collide and the length is evaluated exactly once per field.
@@ -745,8 +765,14 @@ func (g *gen) marshalArray(f *cfile, ind, idExpr, val string, elem ir.Kind, ref 
 	loop := fmt.Sprintf("for (int %s = 0, %s = %s.Count; %s < %s; %s++)", iv, nv, val, iv, nv, iv)
 	last := lastElemExpr(iv, nv)
 	arr := val + ".ToArray()"
+	length := val + ".Count"
 	if isPrim {
 		arr = val
+		length = val + ".Length"
+	}
+	if bnd.hasCount && bnd.count < math.MaxInt32 {
+		f.line("%s%s", ind, argThrow(fmt.Sprintf("%s > %d", length, bnd.count),
+			fmt.Sprintf("%s: array count above schema capacity %d", bnd.what, bnd.count)))
 	}
 	switch elem {
 	case ir.KindU8, ir.KindU16, ir.KindU32, ir.KindU64:
@@ -783,12 +809,19 @@ func (g *gen) marshalArray(f *cfile, ind, idExpr, val string, elem ir.Kind, ref 
 		// applied to an element. At the LAST index it is written whatever its value:
 		// see lastElemExpr.
 		f.line("%sos.WriteSequenceBeginLazy(%s);", ind, idExpr)
-		f.line("%s%s { if ((%s[%s] ?? \"\") != \"\" || %s) os.WriteString(%s, %s[%s] ?? \"\"); }", ind, loop, val, iv, last, iv, val, iv)
+		f.line("%s%s { if ((%s[%s] ?? \"\") != \"\" || %s) os.WriteString(%s, %s[%s] ?? \"\"%s); }", ind, loop, val, iv, last, iv, val, iv, maxlenArg(bnd.hasElemMax, bnd.elemMax))
 		emitSeqEnd(f, ind, keepIf)
 	case ir.KindBlob:
-		// A blob element is a leaf, exactly like the string element above.
+		// A blob element is a leaf, exactly like the string element above. Its
+		// declared maxlen is checked on the element the write reads.
 		f.line("%sos.WriteSequenceBeginLazy(%s);", ind, idExpr)
-		f.line("%s%s { if ((%s[%s] ?? global::System.Array.Empty<byte>()).Length != 0 || %s) os.WriteBlob(%s, %s[%s] ?? global::System.Array.Empty<byte>()); }", ind, loop, val, iv, last, iv, val, iv)
+		if bnd.hasElemMax && bnd.elemMax < math.MaxInt32 {
+			e := fmt.Sprintf("_b%d", depth)
+			f.line("%s%s { var %s = %s[%s] ?? global::System.Array.Empty<byte>(); %s if (%s.Length != 0 || %s) os.WriteBlob(%s, %s); }", ind, loop, e, val, iv,
+				argThrow(fmt.Sprintf("%s.Length > %d", e, bnd.elemMax), fmt.Sprintf("%s element: blob length above schema maxlen %d", bnd.what, bnd.elemMax)), e, last, iv, e)
+		} else {
+			f.line("%s%s { if ((%s[%s] ?? global::System.Array.Empty<byte>()).Length != 0 || %s) os.WriteBlob(%s, %s[%s] ?? global::System.Array.Empty<byte>()); }", ind, loop, val, iv, last, iv, val, iv)
+		}
 		emitSeqEnd(f, ind, keepIf)
 	case ir.KindStruct, ir.KindUnion:
 		// A sequence-form element obeys the SAME rule as the leaf elements above --
@@ -813,15 +846,82 @@ func (g *gen) marshalArray(f *cfile, ind, idExpr, val string, elem ir.Kind, ref 
 			// equal to the element default (the empty row) is not written at all, and
 			// the last row always is.
 			f.line("%s    if (%s[%s].Count != 0 || %s) {", ind, val, iv, last)
-			g.marshalArray(f, ind+"        ", iv, fmt.Sprintf("%s[%s]", val, iv), items.Elem, items.ElemRef, items.ElemItems, depth+1, false, "")
+			g.marshalArray(f, ind+"        ", iv, fmt.Sprintf("%s[%s]", val, iv), items.Elem, items.ElemRef, items.ElemItems, rowBound(bnd, items), depth+1, false, "")
 			f.line("%s    }", ind)
 		} else {
 			// A wrapper row has its own frame, so it takes the closer instead -- the
 			// same interior/last choice, expressed the same way as for a struct element
 			// above.
-			g.marshalArray(f, ind+"    ", iv, fmt.Sprintf("%s[%s]", val, iv), items.Elem, items.ElemRef, items.ElemItems, depth+1, false, last)
+			g.marshalArray(f, ind+"    ", iv, fmt.Sprintf("%s[%s]", val, iv), items.Elem, items.ElemRef, items.ElemItems, rowBound(bnd, items), depth+1, false, last)
 		}
 		f.line("%s}", ind)
 		emitSeqEnd(f, ind, keepIf)
 	}
+}
+
+// ---- encode-side schema bounds (ARCHITECTURE §9.6) ----------------------------
+//
+// A value past its own schema bound is refused at encode with the corelib's
+// Argument category, before the message is returned. Each guard is a per-field
+// compare against the schema literal; nothing here is shared code.
+//
+// Two bounds need no guard at all, because the C# storage type already holds
+// them: an integer field is stored in exactly its declared width (byte, short,
+// ...), and an enum or bitfield in the integer its declared width implies
+// (enumBacking, bitfieldBacking), so no value past that width can be assigned.
+// A string's maxlen counts UTF-8 bytes, which only the transcoder knows: it is
+// passed to corelib-cs's WriteString(id, text, maxlen), which refuses in the
+// pass that already measures the value. A blob's and an array's length is their
+// .Length/.Count, so those are compared here. A bound at or above int.MaxValue
+// cannot be exceeded by a C# array, list or string and gets no guard.
+
+// arrBound is one array level's schema bound, with the name its refusal reports.
+type arrBound struct {
+	what       string
+	hasCount   bool
+	count      int64
+	hasElemMax bool
+	elemMax    int64
+}
+
+func fieldBound(fld *ir.Field) arrBound {
+	return arrBound{what: fld.Name, hasCount: fld.HasCount, count: fld.Count, hasElemMax: fld.ElemMaxHas, elemMax: fld.ElemMax}
+}
+
+// rowBound is the bound of one row of an array-of-arrays: the inner array's own.
+func rowBound(outer arrBound, items *ir.ArrayElem) arrBound {
+	return arrBound{what: outer.what + " row", hasCount: items.HasCount, count: items.Count, hasElemMax: items.ElemMaxHas, elemMax: items.ElemMax}
+}
+
+// argThrow is the refusal statement: `if (cond) throw` with SofabError.Argument,
+// the category corelib-cs raises for a bad encode call.
+func argThrow(cond, msg string) string {
+	return fmt.Sprintf("if (%s) throw new global::sofab.SofabException(global::sofab.SofabError.Argument, \"%s\");", cond, msg)
+}
+
+// maxlenArg is the bound argument of a string write: ", N" for a declared maxlen,
+// selecting the bounded WriteString overload, and nothing otherwise.
+func maxlenArg(has bool, maxlen int64) string {
+	if !has || maxlen >= math.MaxInt32 {
+		return ""
+	}
+	return fmt.Sprintf(", %d", maxlen)
+}
+
+// blobMaxlenGuard is a blob field's maxlen refusal on the length expression n,
+// or "" when the field declares no maxlen.
+func blobMaxlenGuard(fld *ir.Field, n string) string {
+	if !fld.HasMaxlen || fld.Maxlen >= math.MaxInt32 {
+		return ""
+	}
+	return argThrow(fmt.Sprintf("%s > %d", n, fld.Maxlen),
+		fmt.Sprintf("%s: blob length above schema maxlen %d", fld.Name, fld.Maxlen))
+}
+
+// spaced is guard followed by a space, or "" for no guard.
+func spaced(guard string) string {
+	if guard == "" {
+		return ""
+	}
+	return guard + " "
 }
