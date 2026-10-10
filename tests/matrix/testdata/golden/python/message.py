@@ -65,15 +65,15 @@ class Scalars:
 
     def serialize(self, e: Encoder) -> None:
         if self.u8min != 0:
-            e.write_u8(0, int(self.u8min))
+            e.write_u8(0, self.u8min)
         if self.u8max != 255:
-            e.write_u8(1, int(self.u8max))
+            e.write_u8(1, self.u8max)
         if self.u64max != 18446744073709551615:
-            e.write_unsigned(2, int(self.u64max))
+            e.write_unsigned(2, self.u64max)
         if self.i8min != -128:
-            e.write_i8(3, int(self.i8min))
+            e.write_i8(3, self.i8min)
         if self.i64min != -9223372036854775808:
-            e.write_signed(4, int(self.i64min))
+            e.write_signed(4, self.i64min)
         if self.f32 != 3.14:
             e.write_float32(5, self.f32)
         if self.f64 != -2.5:

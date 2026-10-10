@@ -5671,7 +5671,34 @@ by where the measured quantity exists:
      goes in the name: `write_u8` … `write_i32`, `write_u8_array` …
      `write_i64_array` (corelib-py#176). An extra argument costs every native
      call its unpacking; a constant compare costs nothing. The plain writers
-     are unchanged.
+     are unchanged. Generated code hands every value over as it is held, with
+     no `int(...)` or `bytes(...)` in front (generator#718): each integer
+     writer takes exactly what Python takes as an integer (`__index__`: `int`,
+     `bool`, `IntEnum`, `IntFlag`) and refuses a `float` with
+     `SofaArgumentError`, and `write_bytes` makes its own copy. A coercion
+     there would truncate `3.7` to `3` or turn an `int` n into n zero bytes
+     — the misuse this check exists to surface — and cost a call per field.
+     A blob's value contract is a byte string: `bytes`, `bytearray` or a
+     one-dimensional `memoryview` of format `'B'`, and the corelib's blob
+     writers refuse anything else with `SofaArgumentError`. That one set does
+     two jobs without a `bytes(...)` copy: its `len()` is the byte count, so
+     `maxlen` is checked in the unit the wire carries (a buffer of wider items
+     such as `array('H')` would be measured in items), and for every value in
+     it `==` against a `bytes` compares byte content, which is what the
+     generated omission tests (`self.b != <default>`, a blob element's
+     `!= b""`) do — so the writer and the omission test agree on every value
+     the writer takes. The omission test makes no type test (it would cost
+     every field one on a maxspeed target), so the one value outside the set
+     it can still match is a `memoryview` of another format: that compares
+     ITEMS, and one whose items equal the default's bytes is omitted as the
+     default (`memoryview(b"\x01\x00\x02\x00").cast("H")` at a default of
+     `01 02`), even past `maxlen`; any other value outside the set reaches the
+     writer and is refused. An enum's omission test compares with the
+     default's integer value (`self.gear != 0`), not a member built per call:
+     an `IntEnum` equals its `int`, and `Gear(0)` would run
+     `EnumType.__call__` on every encode. Both engines take an `int` subclass on their fast path as
+     the plain `int` it is, so a held `IntEnum` / `IntFlag` costs what an
+     `int` does.
    - Dart's `writeUnsignedArrayInRange` / `writeSignedArrayInRange(id, values,
      count, lo, hi)` for a narrow integer, enum or bitfield array held in
      `Int64` elements. The element compare runs in the varint loop the writer
