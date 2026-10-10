@@ -131,7 +131,7 @@ messages:
 		"        _n0 = len(self.strs)\n        e.write_sequence_begin_lazy(2)\n        for _i0, _e0 in enumerate(self.strs):\n" +
 			"            if _e0 != \"\" or _i0 == _n0 - 1:\n                e.write_string(_i0, _e0)\n        e.write_sequence_end()\n",
 		"        _n0 = len(self.blobs)\n        e.write_sequence_begin_lazy(3)\n        for _i0, _e0 in enumerate(self.blobs):\n" +
-			"            if len(_e0) != 0 or _i0 == _n0 - 1:\n                e.write_bytes(_i0, bytes(_e0))\n        e.write_sequence_end()\n",
+			"            if _e0 != b\"\" or _i0 == _n0 - 1:\n                e.write_bytes(_i0, _e0)\n        e.write_sequence_end()\n",
 		// struct ELEMENT inside a wrapper array: the closer is picked from the
 		// element's index in the value; the wrapper FIELD around it still closes
 		// unconditionally with the dropping end.
@@ -571,7 +571,7 @@ messages:
 		// (corelib-py#158, generator#590): §4.4's "true is written as 1" is the
 		// corelib's rule to apply, and generated code builds no 0/1 list for it.
 		"e.write_bool_array_bounded(2, self.fixedBool, 4)",
-		"e.write_i8_array(3, [int(_v) for _v in self.fixedEnum], 2)",
+		"e.write_i8_array(3, self.fixedEnum, 2)",
 		// The omit test is the ordinary != default, against the value as it stands:
 		// the EMPTY list when nothing is declared, the declared literal otherwise.
 		"if len(self.fixedU32) != 0:",
@@ -1099,7 +1099,7 @@ messages:
 		// leaf elements: the last index escapes the omit test -- count or no count
 		`            if _e0 != "" or _i0 == _n0 - 1:`,
 		"        _n0 = len(self.dynblob)\n",
-		"            if len(_e0) != 0 or _i0 == _n0 - 1:",
+		"            if _e0 != b\"\" or _i0 == _n0 - 1:",
 		"        _n0 = len(self.fixedstr)\n        if _n0 > 3:\n",
 		`            if _e0 != "" or _i0 == _n0 - 1:`,
 		// sequence elements: the same rule, applied through the closer

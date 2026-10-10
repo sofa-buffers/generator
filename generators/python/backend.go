@@ -862,9 +862,8 @@ func (g *gen) fieldIsDefaultExpr(fld *ir.Field) string {
 func (g *gen) fieldIsDefaultExprAt(fld *ir.Field, acc string) string {
 	switch fld.Kind {
 	case ir.KindBlob:
-		// emitMarshal compares bytes(acc) so a bytearray/memoryview value still
-		// matches the literal default.
-		return fmt.Sprintf("bytes(%s) == %s", acc, g.pyDefault(fld))
+		// emitMarshal's own compare, negated (see there for what it compares).
+		return fmt.Sprintf("%s == %s", acc, g.pyDefault(fld))
 	case ir.KindStruct, ir.KindUnion:
 		// Lazily framed: the frame survives iff the nested _marshal wrote a child,
 		// which is exactly "the nested object is not default".
@@ -875,7 +874,22 @@ func (g *gen) fieldIsDefaultExprAt(fld *ir.Field, acc string) string {
 	if cmp, ok := floatZeroCmp(fld, acc, false); ok {
 		return cmp
 	}
-	return fmt.Sprintf("%s == %s", acc, g.pyDefault(fld))
+	return fmt.Sprintf("%s == %s", acc, g.cmpDefault(fld))
+}
+
+// cmpDefault is the default a scalar leaf's omission test compares with. It is
+// pyDefault except for an enum, which compares with its integer value: an
+// IntEnum member equals its int, and the literal costs nothing per call where
+// `_E__Enum(v)` runs EnumType.__call__ on every encode (about 12x the compare).
+// The dataclass default stays the member, so a fresh field still holds one.
+func (g *gen) cmpDefault(fld *ir.Field) string {
+	if fld.Kind == ir.KindEnum {
+		if fld.Default != nil {
+			return scalarLit(fld.Default)
+		}
+		return "0"
+	}
+	return g.pyDefault(fld)
 }
 
 // floatZeroCmp is the default test of a float scalar whose default is a zero,
@@ -969,11 +983,20 @@ func (g *gen) emitMarshal(f *pyfile, fld *ir.Field) {
 // per-field omission still applies.
 func (g *gen) emitMarshalAt(f *pyfile, fld *ir.Field, acc, ind string, forced bool) {
 	var write string
+	// Every value is handed to its writer as it is held, with no coercion: each
+	// integer writer takes what Python itself takes as an integer (`__index__`:
+	// int, bool, an IntEnum or IntFlag member) and refuses anything else -- a
+	// float included -- with SofaArgumentError, on both engines; write_bytes
+	// takes a byte string (bytes, bytearray, a 1-D memoryview of format 'B')
+	// and refuses anything else the same way. An
+	// int(...) or bytes(...) here would turn a 3.7 into 3 or an int n into n
+	// zero bytes, hiding exactly the misuse the writer refuses, at the price of
+	// one more call per field.
 	switch fld.Kind {
 	case ir.KindU8, ir.KindU16, ir.KindU32, ir.KindU64, ir.KindBitfield:
-		write = fmt.Sprintf("e.%s(%d, int(%s))", scalarWriter("write_unsigned", fld.Kind, fld.Ref), fld.ID, acc)
+		write = fmt.Sprintf("e.%s(%d, %s)", scalarWriter("write_unsigned", fld.Kind, fld.Ref), fld.ID, acc)
 	case ir.KindI8, ir.KindI16, ir.KindI32, ir.KindI64, ir.KindEnum:
-		write = fmt.Sprintf("e.%s(%d, int(%s))", scalarWriter("write_signed", fld.Kind, fld.Ref), fld.ID, acc)
+		write = fmt.Sprintf("e.%s(%d, %s)", scalarWriter("write_signed", fld.Kind, fld.Ref), fld.ID, acc)
 	case ir.KindBool:
 		write = fmt.Sprintf("e.write_bool(%d, %s)", fld.ID, acc)
 	case ir.KindFP32:
@@ -983,12 +1006,17 @@ func (g *gen) emitMarshalAt(f *pyfile, fld *ir.Field, acc, ind string, forced bo
 	case ir.KindString:
 		write = "e." + writeCall("write_string", []string{fmt.Sprint(fld.ID), acc}, boundLit(fld.HasMaxlen, fld.Maxlen))
 	case ir.KindBlob:
-		write = "e." + writeCall("write_bytes", []string{fmt.Sprint(fld.ID), "bytes(" + acc + ")"}, boundLit(fld.HasMaxlen, fld.Maxlen))
+		write = "e." + writeCall("write_bytes", []string{fmt.Sprint(fld.ID), acc}, boundLit(fld.HasMaxlen, fld.Maxlen))
 		if forced {
 			break
 		}
-		// blob is a leaf: omit when equal to its default (empty if none).
-		f.line("%sif bytes(%s) != %s:", ind, acc, g.pyDefault(fld))
+		// blob is a leaf: omit when equal to its default (empty if none). For
+		// bytes, bytearray and a format-'B' memoryview -- the values the writer
+		// takes -- the compare is by byte content, so it agrees with the writer.
+		// A memoryview of another format compares ITEMS: one whose items equal
+		// the default's bytes is omitted as the default, without a type test
+		// per field (every other one reaches the writer and is refused).
+		f.line("%sif %s != %s:", ind, acc, g.pyDefault(fld))
 		f.line("%s    %s", ind, write)
 		return
 	case ir.KindStruct, ir.KindUnion:
@@ -1023,7 +1051,7 @@ func (g *gen) emitMarshalAt(f *pyfile, fld *ir.Field, acc, ind string, forced bo
 	if cmp, ok := floatZeroCmp(fld, acc, true); ok {
 		f.line("%sif %s:", ind, cmp)
 	} else {
-		f.line("%sif %s != %s:", ind, acc, g.pyDefault(fld))
+		f.line("%sif %s != %s:", ind, acc, g.cmpDefault(fld))
 	}
 	f.line("%s    %s", ind, write)
 }
@@ -1159,22 +1187,20 @@ func (g *gen) marshalArray(f *pyfile, ind, idExpr, val string, elem ir.Kind, ref
 	}
 	// A native integer array's element width is its writer's name and the
 	// schema count rides the call as `cap`: the writer range-checks every
-	// element anyway (intArrayWrite).
+	// element anyway (intArrayWrite). An enum or bitfield array is handed over
+	// as held, like an integer one: the writer takes IntEnum / IntFlag members
+	// as the integers they are and refuses a float element (emitMarshalAt).
 	switch elem {
-	case ir.KindU8, ir.KindU16, ir.KindU32, ir.KindU64:
+	case ir.KindU8, ir.KindU16, ir.KindU32, ir.KindU64, ir.KindBitfield:
 		f.line("%se.%s", ind, intArrayWrite("write_unsigned_array", elem, ref, idExpr, val, b))
-	case ir.KindI8, ir.KindI16, ir.KindI32, ir.KindI64:
+	case ir.KindI8, ir.KindI16, ir.KindI32, ir.KindI64, ir.KindEnum:
 		f.line("%se.%s", ind, intArrayWrite("write_signed_array", elem, ref, idExpr, val, b))
-	case ir.KindEnum:
-		f.line("%se.%s", ind, intArrayWrite("write_signed_array", elem, ref, idExpr, "[int(_v) for _v in "+val+"]", b))
 	case ir.KindBool:
 		// The corelib's own canonical writer (corelib-py#158): it tests each
 		// element for truth exactly as `if` would and emits 1/0, which is what the
 		// intermediate list here used to build. Byte-identical, on both engines.
 		// A boolean has no width (§4.4): the cap is its only bound.
 		f.line("%se.%s", ind, writeCall("write_bool_array", []string{idExpr, val}, capLit))
-	case ir.KindBitfield:
-		f.line("%se.%s", ind, intArrayWrite("write_unsigned_array", elem, ref, idExpr, "[int(_v) for _v in "+val+"]", b))
 	case ir.KindFP32:
 		f.line("%se.%s", ind, writeCall("write_float32_array", []string{idExpr, val}, capLit))
 	case ir.KindFP64:
@@ -1191,11 +1217,16 @@ func (g *gen) marshalArray(f *pyfile, ind, idExpr, val string, elem ir.Kind, ref
 		f.line("%s        e.%s", ind, writeCall("write_string", []string{iv, ev}, boundLit(b.hasElemMax, b.elemMax)))
 		emitSeqEnd(f, ind, keepIf)
 	case ir.KindBlob:
-		// A blob element is a leaf, exactly like the string element above.
+		// A blob element is a leaf, exactly like the string element above, and is
+		// compared with the empty default as a blob field is: by byte content for
+		// every value the writer takes. An empty memoryview of another format
+		// equals b"" too, so in the interior it is omitted as the empty element
+		// (at the last index the writer refuses it); any other value the writer
+		// refuses is never mistaken for an empty element.
 		f.line("%se.write_sequence_begin_lazy(%s)", ind, idExpr)
 		f.line("%sfor %s, %s in enumerate(%s):", ind, iv, ev, val)
-		f.line("%s    if len(%s) != 0 or %s:", ind, ev, lastElemExpr(iv, nv))
-		f.line("%s        e.%s", ind, writeCall("write_bytes", []string{iv, "bytes(" + ev + ")"}, boundLit(b.hasElemMax, b.elemMax)))
+		f.line(`%s    if %s != b"" or %s:`, ind, ev, lastElemExpr(iv, nv))
+		f.line("%s        e.%s", ind, writeCall("write_bytes", []string{iv, ev}, boundLit(b.hasElemMax, b.elemMax)))
 		emitSeqEnd(f, ind, keepIf)
 	case ir.KindStruct, ir.KindUnion:
 		// A sequence-form element obeys the SAME rule as the leaf elements above --

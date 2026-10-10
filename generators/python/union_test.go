@@ -151,13 +151,13 @@ func TestPythonUnionEncodeArms(t *testing.T) {
 	u := classBody(t, unionModule(t), "M_U")
 	for _, want := range []string{
 		"        _w = self._which\n        _v = self._value\n",
-		"        if _w == 0:\n            e.write_u16(0, int(_v))\n",
+		"        if _w == 0:\n            e.write_u16(0, _v)\n",
 		"        elif _w == 1:\n            e.write_string_bounded(1, _v, 8)\n",
 		"        elif _w == 2:\n            e.write_sequence_begin_lazy(2)\n            _v.serialize(e)\n            e.write_sequence_end()\n",
 		"        elif _w == 3:\n            e.write_u16_array(3, _v, 4)\n",
 		"        elif _w == 4:\n            _n0 = len(_v)\n            if _n0 > 3:\n                raise SofaArgumentError(\"strs: array over count 3\")\n            e.write_sequence_begin_lazy(4)\n",
 		"                    e.write_string_bounded(_i0, _e0, 4)\n            e.write_sequence_end_keep()\n",
-		"        elif _w == 5:\n            e.write_bytes_bounded(5, bytes(_v), 4)\n",
+		"        elif _w == 5:\n            e.write_bytes_bounded(5, _v, 4)\n",
 		"        elif _w == 6:\n            e.write_sequence_begin_lazy(6)\n            _v.serialize(e)\n            e.write_sequence_end_keep()\n",
 		"        elif _w == 7:\n            e.write_float32_array_bounded(7, _v, 2)\n",
 		"        elif _w == 8:\n            e.write_bool(8, _v)\n",
@@ -170,7 +170,7 @@ func TestPythonUnionEncodeArms(t *testing.T) {
 	}
 	// The product-type guards must not come back: a non-D option at its own
 	// default would be omitted and read back as default_id.
-	for _, bad := range []string{"if _v != 5:", "if _v != \"\":", "if len(_v) != 0:", "if bytes(_v) != ", "if _v != True:"} {
+	for _, bad := range []string{"if _v != 5:", "if _v != \"\":", "if len(_v) != 0:", "if _v != b\"", "if _v != True:"} {
 		if strings.Contains(u, bad) {
 			t.Errorf("a non-default_id option is guarded (%q): it would vanish at its own default", bad)
 		}
@@ -193,8 +193,8 @@ messages:
 `
 	u := classBody(t, string(genPy(t, schema(t, src), map[string]any{})["message.py"]), "M_Q")
 	for _, want := range []string{
-		"        if _w == 0:\n            e.write_unsigned(0, int(_v))\n",
-		"        elif _w == 1:\n            if _v != 0:\n                e.write_signed(1, int(_v))\n",
+		"        if _w == 0:\n            e.write_unsigned(0, _v)\n",
+		"        elif _w == 1:\n            if _v != 0:\n                e.write_signed(1, _v)\n",
 		"        return self._which == 1 and self._value == 0\n",
 	} {
 		if !strings.Contains(u, want) {
