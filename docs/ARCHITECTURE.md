@@ -5814,10 +5814,17 @@ counts; `c`: the blob length and the counts) and asserts the clamped value,
 including a cut at a UTF-8 character boundary. A cell the harness cannot hand to
 the encoder (a JSON layer or a fixed-width type refuses or wraps the value first)
 is `STORAGE_BLOCKED` with its reason, and each backend's unit tests assert the
-emitted guard shape. Not yet in the driver: an integer, enum or bitfield **array
-element** past its declared width (`300` in an `array<u8>`). Today only the
-corelib tests of corelib-dart#105, corelib-py#175 and corelib-py#176 and the backend unit tests
-cover it.
+emitted guard shape. An integer **array element** past its declared width, on
+either side (`300` and `-1` in a `u8[]`, `±32768` in an `i16[]`, with and without
+a count, after valid elements) has cells too (generator#721), and so has an
+**enum or bitfield array element** past its declared width (`200` and `-129` in
+an `i8`-wide enum array, `256` and `-1` in a `u8`-wide bitfield array; the width
+binds, not the constant set or the mask). They are asserted where the array's storage is wider than its element
+(Python's `list[int]`, Dart's `Int64` storage, both refused by the corelib's
+ranged array writers) and storage-blocked wherever the element type is the
+declared width (`byte[]`, `Int8Array`, `Uint8Array`, `Vec<u8>`, `[]uint8`,
+`std::uint8_t`, an enum class over `std::int8_t`, ...). An over-width element past
+the count is the clamping containers' cell: they cut it away with the count.
 
 ---
 
@@ -7018,7 +7025,11 @@ A reimplementation is **conformant** when it reproduces these gates:
    over-bound value per message through the harness `encode` verb: a string over
    `maxlen` by one byte, 60 bytes, 40 x U+00E9 and a cut inside a UTF-8 character,
    a blob, an array at `count + 1` and `count + 2`, an array of strings with a long
-   element, and a scalar past its declared width. Each must exit non-zero; the
+   element, a scalar past its declared width, and an array element past its
+   width on either side (a `u8[]` and an `i16[]`, with and without a count, an
+   enum array and a bitfield array, an unsigned element below 0 as well as one
+   above the top, the over-width element after valid ones so the refusal lands
+   mid-field; generator#721). Each must exit non-zero; the
    controls (every field exactly at its bound, an unbounded field far past any
    bound) must encode and decode back. Every suite runs it for every variant that
    generates different code (cpp x4, rust x5, typescript x3, python x2).
