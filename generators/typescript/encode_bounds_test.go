@@ -31,6 +31,7 @@ messages:
       as:  { id: 12, type: array, items: { type: string, count: 6, maxlen: 7 } }
       ab:  { id: 13, type: array, items: { type: blob, count: 2, maxlen: 8 } }
       rows: { id: 14, type: array, items: { type: array, count: 2, items: { type: u16, count: 9 } } }
+      deep: { id: 16, type: array, items: { type: array, count: 2, items: { type: array, count: 3, items: { type: blob, count: 2, maxlen: 2 } } } }
       n:
         id: 15
         type: struct
@@ -51,6 +52,12 @@ messages:
 
 func argThrow(cond, msg string) string {
 	return "if (" + cond + ") throw new SofabError(SofabErrorCode.Argument, \"" + msg + "\");"
+}
+
+// argThrowAt is argThrow for a row of a nested array: its text is a template
+// literal naming the row indices, formatted only in the throw.
+func argThrowAt(cond, msg string) string {
+	return "if (" + cond + ") throw new SofabError(SofabErrorCode.Argument, `" + msg + "`);"
 }
 
 // TestTSEncodeRefusesOverBound pins generator#656: a value past its schema bound
@@ -89,7 +96,13 @@ func TestTSEncodeRefusesOverBound(t *testing.T) {
 				"        "+argThrow("_a0[_i0]!.length > 8", "ab[]: blob byte length above schema maxlen 8")+"\n        os.writeBlob(_i0, _a0[_i0]!);",
 				// A nested array: the outer count, and each row's own.
 				"    "+argThrow("this.rows.length > 2", "rows: array count above schema capacity 2")+"\n    os.writeSequenceBeginLazy(14);",
-				"        "+argThrow("_e0.length > 9", "rows[]: array count above schema capacity 9")+"\n        os.writeUnsignedArray(_i0, _e0);",
+				// A row's refusal names the row: the field, then the index of every
+				// enclosing row.
+				"        "+argThrowAt("_e0.length > 9", "rows[${_i0}]: array count above schema capacity 9")+"\n        os.writeUnsignedArray(_i0, _e0);",
+				"    "+argThrow("this.deep.length > 2", "deep: array count above schema capacity 2")+"\n    os.writeSequenceBeginLazy(16);",
+				"      "+argThrowAt("_e0.length > 3", "deep[${_i0}]: array count above schema capacity 3"),
+				"        "+argThrowAt("_e1.length > 2", "deep[${_i0}][${_i1}]: array count above schema capacity 2"),
+				"            "+argThrowAt("_a2[_i2]!.length > 2", "deep[${_i0}][${_i1}][]: blob byte length above schema maxlen 2")+"\n            os.writeBlob(_i2, _a2[_i2]!);",
 			)
 			// The nested struct's array is guarded in that struct's own serialize.
 			mustContain(t, "M_N serialize", tsClass(t, mod, "M_N"),

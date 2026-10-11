@@ -1068,7 +1068,7 @@ func (g *gen) emitMarshalAt(f *tsfile, ind string, fld *ir.Field, acc, rawAcc st
 //     the header, so the maxlen is handed to it and it refuses there, before any
 //     byte and without a second pass (writeStringCall).
 //   - a blob and an array know their length directly: one compare against the
-//     schema literal (blobMaxlenGuard, arrayCountGuard).
+//     schema literal (blobMaxlenGuard, arrBound.refusal).
 //   - a narrow integer, enum or bitfield is held in a `number` (or a `bigint`),
 //     wider than its declared width: the decoder's own width comparison, on the
 //     member (encodeWidthGuard). An unsigned value below 0 needs no clause of its
@@ -1078,7 +1078,12 @@ func (g *gen) emitMarshalAt(f *tsfile, ind string, fld *ir.Field, acc, rawAcc st
 
 // argGuard renders one refusal: `if (cond) throw SofabError(ARGUMENT, msg);`.
 func argGuard(cond, msg string) string {
-	return fmt.Sprintf("if (%s) throw new SofabError(SofabErrorCode.Argument, %q);", cond, msg)
+	return argGuardLit(cond, fmt.Sprintf("%q", msg))
+}
+
+// argGuardLit is argGuard with the message as a ready TypeScript expression.
+func argGuardLit(cond, lit string) string {
+	return fmt.Sprintf("if (%s) throw new SofabError(SofabErrorCode.Argument, %s);", cond, lit)
 }
 
 // writeStringCall is the string write, carrying the schema's maxlen when the
@@ -1097,16 +1102,6 @@ func blobMaxlenGuard(what, val string, hasMaxlen bool, maxlen int64) string {
 	}
 	return argGuard(fmt.Sprintf("%s.length > %d", val, maxlen),
 		fmt.Sprintf("%s: blob byte length above schema maxlen %d", what, maxlen))
-}
-
-// arrayCountGuard refuses an array holding more elements than its count; ""
-// when the schema leaves it uncounted.
-func arrayCountGuard(what, val string, hasCount bool, count int64) string {
-	if !hasCount {
-		return ""
-	}
-	return argGuard(fmt.Sprintf("%s.length > %d", val, count),
-		fmt.Sprintf("%s: array count above schema capacity %d", what, count))
 }
 
 // encodeWidthGuard refuses a scalar outside its declared width, reusing the
@@ -1232,9 +1227,12 @@ func emitSeqEnd(f *tsfile, ind, keepIf string) {
 
 // arrBound is what the schema bounds about one array, for the encode guards:
 // its count, its leaf string/blob element maxlen, and the name the refusal
-// message carries.
+// message carries: the field, and the index variables of the enclosing row
+// loops, outermost first, when the array is a row of a nested array
+// (ARCHITECTURE §9.6.1).
 type arrBound struct {
 	what       string
+	rows       []string
 	hasCount   bool
 	count      int64
 	elemMaxHas bool
@@ -1242,12 +1240,32 @@ type arrBound struct {
 }
 
 func fieldBound(fld *ir.Field) arrBound {
-	return arrBound{fld.Name, fld.HasCount, fld.Count, fld.ElemMaxHas, fld.ElemMax}
+	return arrBound{what: fld.Name, hasCount: fld.HasCount, count: fld.Count, elemMaxHas: fld.ElemMaxHas, elemMax: fld.ElemMax}
 }
 
-// itemsBound is a nested array's bound; its rows are named `<field>[]`.
-func itemsBound(what string, items *ir.ArrayElem) arrBound {
-	return arrBound{what + "[]", items.HasCount, items.Count, items.ElemMaxHas, items.ElemMax}
+// itemsBound is the bound of row iv of a nested array: the outer path with that
+// index appended, so the row is named `<field>[${_i0}]`.
+func itemsBound(outer arrBound, iv string, items *ir.ArrayElem) arrBound {
+	rows := append(append([]string(nil), outer.rows...), iv)
+	return arrBound{what: outer.what, rows: rows, hasCount: items.HasCount, count: items.Count, elemMaxHas: items.ElemMaxHas, elemMax: items.ElemMax}
+}
+
+// refusal is the TypeScript string expression of this level's refusal text: the
+// field, the index of every enclosing row (`deep[1][0]`), suffix ("[]" for a
+// leaf element of the level), then detail. A row's text is a template literal,
+// so the indices are formatted only in the throw; a field's stays a constant.
+func (b arrBound) refusal(suffix, detail string) string {
+	if len(b.rows) == 0 {
+		return fmt.Sprintf("%q", b.what+suffix+": "+detail)
+	}
+	esc := strings.NewReplacer("\\", "\\\\", "`", "\\`", "${", "\\${")
+	var lit strings.Builder
+	lit.WriteString("`" + esc.Replace(b.what))
+	for _, iv := range b.rows {
+		lit.WriteString("[${" + iv + "}]")
+	}
+	lit.WriteString(esc.Replace(suffix+": "+detail) + "`")
+	return lit.String()
 }
 
 // marshalArray writes the array `val` as field `idExpr`. Numeric/enum/boolean/
@@ -1269,8 +1287,9 @@ func (g *gen) marshalArray(f *tsfile, ind, idExpr, val string, elem ir.Kind, ref
 	av := fmt.Sprintf("_a%d", depth)
 	// The count bound of THIS array, at every depth: a matrix row is checked in
 	// the row loop, before the row is written.
-	if guard := arrayCountGuard(b.what, val, b.hasCount, b.count); guard != "" {
-		f.line("%s%s", ind, guard)
+	if b.hasCount {
+		f.line("%s%s", ind, argGuardLit(fmt.Sprintf("%s.length > %d", val, b.count),
+			b.refusal("", fmt.Sprintf("array count above schema capacity %d", b.count))))
 	}
 	switch elem {
 	case ir.KindU8, ir.KindU16, ir.KindU32:
@@ -1322,8 +1341,9 @@ func (g *gen) marshalArray(f *tsfile, ind, idExpr, val string, elem ir.Kind, ref
 		f.line("%sos.writeSequenceBeginLazy(%s);", ind, idExpr)
 		f.line("%sfor (let %s = 0, %s = %s; %s < %s.length; %s++) {", ind, iv, av, val, iv, av, iv)
 		f.line("%s  if (%s[%s]!.length !== 0 || %s) {", ind, av, iv, lastElemExpr(iv, av))
-		if guard := blobMaxlenGuard(b.what+"[]", av+"["+iv+"]!", b.elemMaxHas, b.elemMax); guard != "" {
-			f.line("%s    %s", ind, guard)
+		if b.elemMaxHas {
+			f.line("%s    %s", ind, argGuardLit(fmt.Sprintf("%s[%s]!.length > %d", av, iv, b.elemMax),
+				b.refusal("[]", fmt.Sprintf("blob byte length above schema maxlen %d", b.elemMax))))
 		}
 		f.line("%s    os.writeBlob(%s, %s[%s]!);", ind, iv, av, iv)
 		f.line("%s  }", ind)
@@ -1353,13 +1373,13 @@ func (g *gen) marshalArray(f *tsfile, ind, idExpr, val string, elem ir.Kind, ref
 			// equal to the element default (the empty row) is not written at all, and
 			// the last row always is.
 			f.line("%s  if (%s.length !== 0 || %s) {", ind, ev, lastElemExpr(iv, av))
-			g.marshalArray(f, ind+"    ", iv, ev, items.Elem, items.ElemRef, items.ElemItems, depth+1, "", itemsBound(b.what, items))
+			g.marshalArray(f, ind+"    ", iv, ev, items.Elem, items.ElemRef, items.ElemItems, depth+1, "", itemsBound(b, iv, items))
 			f.line("%s  }", ind)
 		} else {
 			// A wrapper row has its own frame, so it takes the closer instead — the
 			// same interior/last choice, expressed the same way as for a struct element
 			// above.
-			g.marshalArray(f, ind+"  ", iv, ev, items.Elem, items.ElemRef, items.ElemItems, depth+1, lastElemExpr(iv, av), itemsBound(b.what, items))
+			g.marshalArray(f, ind+"  ", iv, ev, items.Elem, items.ElemRef, items.ElemItems, depth+1, lastElemExpr(iv, av), itemsBound(b, iv, items))
 		}
 		f.line("%s});", ind)
 		emitSeqEnd(f, ind, keepIf)
