@@ -17,6 +17,32 @@ func cfgString(cfg map[string]any, key, dflt string) string {
 	return dflt
 }
 
+// cfgEnum reads a string option that must name one of allowed. An absent key
+// yields dflt; any other value -- a non-string (an unquoted YAML 0.9 arrives as a
+// float), an empty string or a string outside allowed -- is a config error,
+// never a silent fallback to the default.
+func cfgEnum(cfg map[string]any, key, dflt string, allowed ...string) (string, error) {
+	raw, present := cfg[key]
+	if !present || raw == nil {
+		return dflt, nil
+	}
+	quoted := make([]string, len(allowed))
+	for i, a := range allowed {
+		quoted[i] = strconv.Quote(a)
+	}
+	want := strings.Join(quoted, " or ")
+	v, ok := raw.(string)
+	if !ok {
+		return "", fmt.Errorf("rust: %s must be the string %s, got %v (%T); quote the value in YAML", key, want, raw, raw)
+	}
+	for _, a := range allowed {
+		if v == a {
+			return v, nil
+		}
+	}
+	return "", fmt.Errorf("rust: %s must be %s, got %q", key, want, v)
+}
+
 func cfgBool(cfg map[string]any, key string) bool {
 	b, _ := cfg[key].(bool)
 	return b

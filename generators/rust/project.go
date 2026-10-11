@@ -184,7 +184,7 @@ func (g *gen) cargoToml(s *ir.Schema) string {
 name = "sofabuffers-generated"
 version = "0.0.0"
 edition = "2021"
-
+` + g.rustVersionLine() + `
 [lib]
 name = "sofabuffers_generated"
 path = "src/lib.rs"
@@ -221,7 +221,7 @@ serde = ["dep:serde", ` + serdeAlloc + `"heapless/serde"]
 name = "sofabuffers-generated"
 version = "0.0.0"
 edition = "2021"
-
+` + g.rustVersionLine() + `
 [dependencies]
 ` + dep + heap + `
 serde = { version = "1", features = ["derive"] }
@@ -238,6 +238,21 @@ const (
 	heapless08 = "0.8"
 	heapless09 = "0.9"
 )
+
+// heapless09MSRV is the oldest rustc heapless 0.9 builds with.
+const heapless09MSRV = "1.87"
+
+// rustVersionLine declares the crate's minimum rustc when the heapless major it
+// depends on raises it past the corelibs' own: a crate holding heapless 0.9
+// containers needs rustc 1.87, and saying so lets cargo name the cause instead
+// of failing inside heapless. A heapless 0.8 crate, or one with no heapless
+// dependency, keeps the corelib's MSRV and declares nothing.
+func (g *gen) rustVersionLine() string {
+	if g.heapless != heapless09 || (!g.noStd && !g.staticStore) {
+		return ""
+	}
+	return "rust-version = \"" + heapless09MSRV + "\"\n"
+}
 
 // heaplessFeature is the corelib feature that implements sofab::seq::SeqVec for
 // the heapless major this crate depends on. Both corelibs name them alike:
