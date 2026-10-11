@@ -705,7 +705,7 @@ func TestDartArrayElementSparsityIsPositional(t *testing.T) {
 		// the same rule one level down.
 		"      if (_i0 == srows.length - 1) { e.endSequenceKeep(); } else { e.endSequence(); }",
 		"        final _e1 = srows[_i0][_i1];\n" +
-			"        if (_e1.length > 4) throw const sofab.SofabException(sofab.SofabError.invalidArgument, 'srows: element over maxlen 4');\n" +
+			"        if (_e1.length > 4) throw sofab.SofabException(sofab.SofabError.invalidArgument, 'srows[$_i0]: element over maxlen 4');\n" +
 			"        if (_e1.length != 0 || _i1 == srows[_i0].length - 1) e.writeStringUtf8(_i1, _e1.storage, _e1.length);",
 		// A sequence-typed FIELD still always drops.
 		"    e.endSequence();",
