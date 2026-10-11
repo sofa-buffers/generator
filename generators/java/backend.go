@@ -951,7 +951,7 @@ func (g *gen) marshalArray(f *jfile, ind, idExpr, val string, elem ir.Kind, ref 
 		lenGuard(lv)
 		guard := ""
 		if b.elemMaxHas {
-			guard = fmt.Sprintf("if (%s.length > %d) %s ", ev, b.elemMax, argThrow(b.name+" element", fmt.Sprintf("blob length above schema maxlen %d", b.elemMax)))
+			guard = fmt.Sprintf("if (%s.length > %d) %s ", ev, b.elemMax, argThrowAt(b.name, b.rows, " element", fmt.Sprintf("blob length above schema maxlen %d", b.elemMax)))
 		}
 		f.line("%sos.writeSequenceBeginLazy(%s);", ind, idExpr)
 		f.line("%sfor (int %s = 0; %s < %s.size(); %s++) { byte[] %s = %s.get(%s); if (%s == null) %s = Seq.EMPTY_BYTES; %sif (%s.length != 0 || %s) os.writeBlob(%s, %s); }", ind, iv, iv, lv, iv, ev, lv, iv, ev, ev, guard, ev, lastElemExpr(iv, lv), iv, ev)
@@ -983,7 +983,7 @@ func (g *gen) marshalArray(f *jfile, ind, idExpr, val string, elem ir.Kind, ref 
 			// the interior/last rule lands on the WRITE rather than on a closer.
 			f.line("%s    if (%s == null) %s = %s;", ind, ev, ev, emptyPrimConst(items.Elem, items.ElemRef))
 			f.line("%s    if (%s.length != 0 || %s) {", ind, ev, lastElemExpr(iv, lv))
-			g.marshalArray(f, ind+"        ", iv, ev, items.Elem, items.ElemRef, items.ElemItems, b.inner(items), depth+1, "")
+			g.marshalArray(f, ind+"        ", iv, ev, items.Elem, items.ElemRef, items.ElemItems, b.inner(items, iv), depth+1, "")
 			f.line("%s    }", ind)
 		} else if nativeArrayElem(items.Elem) {
 			// A native row is a single count-prefixed value with no frame of its own,
@@ -991,13 +991,13 @@ func (g *gen) marshalArray(f *jfile, ind, idExpr, val string, elem ir.Kind, ref 
 			// equal to the element default (the empty row) is not written at all, and
 			// the last row always is.
 			f.line("%s    if (!%s.isEmpty() || %s) {", ind, ev, lastElemExpr(iv, lv))
-			g.marshalArray(f, ind+"        ", iv, ev, items.Elem, items.ElemRef, items.ElemItems, b.inner(items), depth+1, "")
+			g.marshalArray(f, ind+"        ", iv, ev, items.Elem, items.ElemRef, items.ElemItems, b.inner(items, iv), depth+1, "")
 			f.line("%s    }", ind)
 		} else {
 			// A wrapper row has its own frame, so it takes the closer instead -- the
 			// same interior/last choice, expressed the same way as for a struct element
 			// above.
-			g.marshalArray(f, ind+"    ", iv, ev, items.Elem, items.ElemRef, items.ElemItems, b.inner(items), depth+1, lastElemExpr(iv, lv))
+			g.marshalArray(f, ind+"    ", iv, ev, items.Elem, items.ElemRef, items.ElemItems, b.inner(items, iv), depth+1, lastElemExpr(iv, lv))
 		}
 		f.line("%s}", ind)
 		f.line("%s%s", ind, seqEndStmt(keepIf))
