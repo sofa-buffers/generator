@@ -66,6 +66,10 @@ messages:
       ua64: { id: 30, type: array, items: { type: u64 } }
       bd:   { id: 31, type: blob, maxlen: 3, default: "AQI=" }
       cd:   { id: 32, type: enum, enum: { X: 0, Y: -2 }, default: -2 }
+      deep:
+        id: 33
+        type: array
+        items: { type: array, count: 2, items: { type: array, count: 3, items: { type: string, count: 2, maxlen: 2 } } }
 `
 
 // TestPythonEncodeBoundGuards pins the shape of every encode-side refusal. The
@@ -112,7 +116,12 @@ func TestPythonEncodeBoundGuards(t *testing.T) {
 		// its writer's cap, a string row as a guard plus its elements' maxlen.
 		"        _n0 = len(self.rows)\n        if _n0 > 2:\n            raise _SofaArgumentError(\"rows: array over count 2\")\n",
 		"            if len(_e0) != 0 or _i0 == _n0 - 1:\n                e.write_u16_array(_i0, _e0, 3)\n",
-		"            _n1 = len(_e0)\n            if _n1 > 2:\n                raise _SofaArgumentError(\"srows: array over count 2\")\n",
+		// A row's refusal names the row: the field, then the index of every
+		// enclosing row, formatted only on the raise (an f-string).
+		"            _n1 = len(_e0)\n            if _n1 > 2:\n                raise _SofaArgumentError(f\"srows[{_i0}]: array over count 2\")\n",
+		"        _n0 = len(self.deep)\n        if _n0 > 2:\n            raise _SofaArgumentError(\"deep: array over count 2\")\n",
+		"            _n1 = len(_e0)\n            if _n1 > 3:\n                raise _SofaArgumentError(f\"deep[{_i0}]: array over count 3\")\n",
+		"                _n2 = len(_e1)\n                if _n2 > 2:\n                    raise _SofaArgumentError(f\"deep[{_i0}][{_i1}]: array over count 2\")\n",
 		"                    e.write_string_bounded(_i1, _e1, 2)\n",
 		// Native arrays of integers, enums and bitfields: the element's width
 		// next to the cap ("None" where the schema states no count) -- the same
@@ -252,6 +261,10 @@ def over():
         "row count interior": dict(rows=[[1, 2, 3, 4], []]),
         "string rows count": dict(srows=[["a", "b", "c"]]),
         "string row element": dict(srows=[["abc"]]),
+        "string row count second row": dict(srows=[["a"], ["a", "b", "c"]]),
+        "deep count": dict(deep=[[], [], []]),
+        "deep row count": dict(deep=[[], [[], [], [], []]]),
+        "deep row row count": dict(deep=[[[], ["a", "b", "c"]]]),
         "nested": dict(n=M_N(arr=[1, 2, 3])),
         "u8 array element": dict(au8=[1, 300]),
         "i8 array element": dict(ai8=[-129]),
@@ -281,11 +294,23 @@ m = at_bound()
 again = M.decode(m.encode())
 if again != m:
     sys.exit("[%s] at-bound value does not round-trip:\n%r\n%r" % (sofab.IMPL, m, again))
+# The text of a count guard names the level that overflowed: the field, then
+# the index of every enclosing row.
+TEXT = {
+    "rows count": "rows: array over count 2",
+    "string rows count": "srows[0]: array over count 2",
+    "string row count second row": "srows[1]: array over count 2",
+    "deep count": "deep: array over count 2",
+    "deep row count": "deep[1]: array over count 3",
+    "deep row row count": "deep[0][1]: array over count 2",
+}
 bad = []
 for name, m in over():
     try:
         out = m.encode()
-    except SofaArgumentError:
+    except SofaArgumentError as exc:
+        if name in TEXT and str(exc) != TEXT[name]:
+            bad.append("%s: refused with %r, want %r" % (name, str(exc), TEXT[name]))
         continue
     bad.append("%s: encoded %s" % (name, out.hex()))
 if bad:

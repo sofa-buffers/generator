@@ -1105,7 +1105,7 @@ func (g *gen) emitMarshalArray(f *pyfile, fld *ir.Field, acc, ind string, forced
 	// count even when empty (an fp array keeps its fixlen_word), and a wrapper
 	// closes with the keeping end, so the empty frame survives.
 	id := fmt.Sprintf("%d", fld.ID)
-	b := arrBound{fld.Name, fld.HasCount, fld.Count, fld.ElemMaxHas, fld.ElemMax}
+	b := arrBound{loc: fld.Name, hasCount: fld.HasCount, count: fld.Count, hasElemMax: fld.ElemMaxHas, elemMax: fld.ElemMax}
 	if isNativeArrayElem(fld.Elem) {
 		if forced {
 			g.marshalArray(f, ind, id, acc, fld.Elem, fld.ElemRef, fld.ElemItems, b, 0, "")
@@ -1216,7 +1216,7 @@ func (g *gen) marshalArray(f *pyfile, ind, idExpr, val string, elem ir.Kind, ref
 		f.line("%s%s = len(%s)", ind, nv, val)
 		if b.hasCount {
 			f.lines(ind, encodeGuard(fmt.Sprintf("%s > %d", nv, b.count),
-				fmt.Sprintf("%s: array over count %d", b.loc, b.count)))
+				b.refusal(fmt.Sprintf("array over count %d", b.count))))
 		}
 	}
 	// A native integer array's element width is its writer's name and the
@@ -1285,30 +1285,52 @@ func (g *gen) marshalArray(f *pyfile, ind, idExpr, val string, elem ir.Kind, ref
 			// equal to the element default (the empty row) is not written at all, and
 			// the last row always is.
 			f.line("%s    if len(%s) != 0 or %s:", ind, ev, lastElemExpr(iv, nv))
-			g.marshalArray(f, ind+"        ", iv, ev, items.Elem, items.ElemRef, items.ElemItems, rowBound(b.loc, items), depth+1, "")
+			g.marshalArray(f, ind+"        ", iv, ev, items.Elem, items.ElemRef, items.ElemItems, rowBound(b, iv, items), depth+1, "")
 		} else {
 			// A wrapper row has its own frame, so it takes the closer instead -- the
 			// same interior/last choice, expressed the same way as for a struct
 			// element above.
-			g.marshalArray(f, ind+"    ", iv, ev, items.Elem, items.ElemRef, items.ElemItems, rowBound(b.loc, items), depth+1, lastElemExpr(iv, nv))
+			g.marshalArray(f, ind+"    ", iv, ev, items.Elem, items.ElemRef, items.ElemItems, rowBound(b, iv, items), depth+1, lastElemExpr(iv, nv))
 		}
 		emitSeqEnd(f, ind, keepIf)
 	}
 }
 
 // arrBound is the schema bound of one array value: the field's own, or a row's
-// (rowBound). loc names the field in the refusal text.
+// (rowBound). loc names the field in the refusal text, and rows the index
+// variables of the enclosing loops, outermost first, when the value is a row.
 type arrBound struct {
 	loc        string
+	rows       []string
 	hasCount   bool
 	count      int64
 	hasElemMax bool
 	elemMax    int64
 }
 
-// rowBound is the bound of an array-of-arrays row: the inner declaration's.
-func rowBound(loc string, items *ir.ArrayElem) arrBound {
-	return arrBound{loc, items.HasCount, items.Count, items.ElemMaxHas, items.ElemMax}
+// rowBound is the bound of an array-of-arrays row: the inner declaration's. The
+// row is element iv of the array parent bounds, so it inherits parent's path
+// with that index appended.
+func rowBound(parent arrBound, iv string, items *ir.ArrayElem) arrBound {
+	rows := append(append([]string(nil), parent.rows...), iv)
+	return arrBound{loc: parent.loc, rows: rows, hasCount: items.HasCount, count: items.Count, hasElemMax: items.ElemMaxHas, elemMax: items.ElemMax}
+}
+
+// refusal is the Python literal of the refusal text for this value: the field
+// name, the index of every enclosing row (`srows[1]`, `deep[1][0]`), then what.
+// A row's text is an f-string, so the indices are formatted only on the raise
+// -- the guard that does not fire builds no string.
+func (b arrBound) refusal(what string) string {
+	if len(b.rows) == 0 {
+		return fmt.Sprintf("%q", b.loc+": "+what)
+	}
+	esc := strings.NewReplacer("{", "{{", "}", "}}")
+	var path strings.Builder
+	path.WriteString(esc.Replace(b.loc))
+	for _, iv := range b.rows {
+		path.WriteString("[{" + iv + "}]")
+	}
+	return fmt.Sprintf("f%q", path.String()+": "+esc.Replace(what))
 }
 
 // Encode-side bounds (ARCHITECTURE §9.6). A value past its schema bound is
@@ -1342,11 +1364,12 @@ func rowBound(loc string, items *ir.ArrayElem) arrBound {
 // one generated guard (encodeGuard), on the length its element loop binds once
 // anyway (lastElemExpr).
 
-// encodeGuard renders `if cond: raise SofaArgumentError(msg)`.
+// encodeGuard renders `if cond: raise SofaArgumentError(msg)`; msg is the
+// Python string literal (arrBound.refusal).
 func encodeGuard(cond, msg string) []string {
 	return []string{
 		fmt.Sprintf("if %s:", cond),
-		fmt.Sprintf("    raise _SofaArgumentError(%q)", msg),
+		fmt.Sprintf("    raise _SofaArgumentError(%s)", msg),
 	}
 }
 
