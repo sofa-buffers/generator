@@ -136,15 +136,15 @@ messages:
 	for _, want := range []string{
 		// Two subtrees are bindable whole, so both are entered and both tables are
 		// closed -- which is the promise that nothing inside them needs a visitor.
-		"_M__Bind__when = (Binding(closed=True)",
-		"_M__Bind__where = (Binding(closed=True)",
+		"_M__Bind__when = (_Binding(closed=True)",
+		"_M__Bind__where = (_Binding(closed=True)",
 		"    .sequence(0, child=_M__Bind__when)",
 		"    .sequence(1, child=_M__Bind__where)",
 		"        if U[1] != _ABSENT: m.when.sec = U[0]",
 		// The message's own table is NOT closed: it still has fields of its own
 		// that only the visitor can handle, so an id it does not name has to reach
 		// the visitor as before.
-		"_M__Bind = (Binding()",
+		"_M__Bind = (_Binding()",
 	} {
 		if !strings.Contains(mod, want) {
 			t.Errorf("a bindable subtree must be entered and closed, missing %q:\n%s", want, mod)
@@ -185,13 +185,13 @@ messages:
       n:    { id: 2, type: u8 }
 `
 	mod := string(genPy(t, schema(t, src), map[string]any{})["message.py"])
-	if !strings.Contains(mod, "_M__Bind = (Binding(closed=True)") {
+	if !strings.Contains(mod, "_M__Bind = (_Binding(closed=True)") {
 		t.Errorf("a class the table covers whole must close its root table:\n%s", mod)
 	}
 	// Every table in this module is closed, so no `Binding()` appears anywhere --
 	// which is exactly the module the import used to be dropped from.
-	if !strings.Contains(mod, "from sofab import Binding, ") {
-		t.Errorf("a module whose every table is closed must still import Binding:\n%s", mod)
+	if !strings.Contains(mod, "from sofab import Binding as _Binding, ") {
+		t.Errorf("a module whose every table is closed must still import _Binding:\n%s", mod)
 	}
 	vis := mod[strings.Index(mod, "class _M__Visitor("):]
 	for _, gone := range []string{
@@ -240,11 +240,11 @@ func TestPythonScatterRunsOnlyOnAComplete(t *testing.T) {
 	mod := string(genPy(t, schemaFile(t, "../../examples/messages/example.yaml"), map[string]any{})["message.py"])
 	for _, want := range []string{
 		// one-shot: after both refusals
-		`        if st is Status.INCOMPLETE:
-            raise SofaIncompleteError(d.error or "truncated message")`,
+		`        if st is _Status.INCOMPLETE:
+            raise _SofaIncompleteError(d.error or "truncated message")`,
 		"        v.scatter()\n        return o",
 		// streaming: per feed, gated on the outcome of that feed
-		"        st = self._d.feed(chunk)\n        if st is Status.COMPLETE:",
+		"        st = self._d.feed(chunk)\n        if st is _Status.COMPLETE:",
 		// the arrival test, and the prefill that makes it mean something
 		"_ABSENT = 0xFFFFFFFFFFFFFFFF",
 		`_Myfirstmessage__Fill = bytearray(b"\xff" * (_Myfirstmessage__Words * 8))`,

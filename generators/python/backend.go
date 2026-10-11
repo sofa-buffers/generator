@@ -236,10 +236,12 @@ func (f *pyfile) lines(ind string, ls []string) {
 func (f *pyfile) blank()        { f.b.WriteByte('\n') }
 func (f *pyfile) bytes() []byte { return []byte(f.b.String()) }
 
-// sofabImports is the `from sofab import` list of a module whose decode section
-// is decodeSection, sorted. Every name is read off the emitted text (see below);
-// TestTypeReservedCoversImports feeds it a text that reaches every branch, so
-// each upper-case name it can return is checked against pyTypeReserved.
+// sofabImports is the list of sofab names a module whose decode section is
+// decodeSection uses, sorted. Every name is read off the emitted text (see
+// below), where an upper-case one is spelled through its private binding
+// (sofabBindings: `_Decoder`, `_Status`); TestTypeReservedCoversImports feeds it
+// a text that reaches every branch, so each binding it can produce is checked to
+// be one no type identifier can spell.
 func sofabImports(decodeSection, typeSection string) []string {
 	// SofaDecodeError and SofaIncompleteError are unconditional: every class's
 	// decode() surfaces the three-valued outcome through them (MESSAGE_SPEC §7).
@@ -256,12 +258,12 @@ func sofabImports(decodeSection, typeSection string) []string {
 	// sentinel, is imported exactly where a call names it. Read off the emitted
 	// text rather than re-derived, for the reason visitorNeeds is: a second walk
 	// over the schema has to agree with the emitter by hand.
-	if usesName(decodeSection, "SofaLimitError", "(") {
+	if usesName(decodeSection, "_SofaLimitError", "(") {
 		names = append(names, "SofaLimitError")
 	}
 	// SofaArgumentError is what serialize() raises for a wrapper array past its
 	// schema count (encodeGuard); a schema with none emits and imports none.
-	if usesName(typeSection, "SofaArgumentError", "(") {
+	if usesName(typeSection, "_SofaArgumentError", "(") {
 		names = append(names, "SofaArgumentError")
 	}
 	for _, fn := range []string{"reserve_elem", "reserve_leaf", "reserve_row"} {
@@ -269,7 +271,7 @@ func sofabImports(decodeSection, typeSection string) []string {
 			names = append(names, fn)
 		}
 	}
-	if strings.Contains(decodeSection, ", UNBOUNDED, ") {
+	if strings.Contains(decodeSection, ", _UNBOUNDED, ") {
 		names = append(names, "UNBOUNDED")
 	}
 	// Binding is the destination table (binding.go); a schema whose fields the
@@ -277,7 +279,7 @@ func sofabImports(decodeSection, typeSection string) []string {
 	// opening parenthesis, not on `Binding()`: a module whose every table is
 	// closed spells each one `Binding(closed=True)`, and matching the empty call
 	// left exactly those modules without the import -- a NameError at import.
-	if strings.Contains(decodeSection, "(Binding(") {
+	if strings.Contains(decodeSection, "(_Binding(") {
 		names = append(names, "Binding")
 	}
 	// Field is the on_field argument, and WireType / FixlenSubtype are the tags
@@ -293,11 +295,41 @@ func sofabImports(decodeSection, typeSection string) []string {
 		names = append(names, "WireType")
 	}
 	// The default of a float array is a FloatArrayDefault in the type section.
-	if strings.Contains(typeSection, "FloatArrayDefault(") {
+	if strings.Contains(typeSection, " = _FloatArrayDefault(") {
 		names = append(names, "FloatArrayDefault")
 	}
 	sort.Strings(names)
 	return names
+}
+
+// sofabBindings renders the `from sofab import` list: every upper-case name
+// under a private binding, `Decoder as _Decoder`, and a lower-case one
+// (reserve_elem) as itself.
+//
+// A generated class or enum is declared at module level, beside what the module
+// imports, and a type identifier always starts with an upper-case letter. Bound
+// under its own name, every upper-case import would be a name no type may take,
+// so the list of escaped type names would grow with every name the corelib
+// adds -- and a generator upgrade that starts importing one renames a user's
+// type that was spelled like it (generator#719). Bound with a leading `_`, which
+// no schema name has, it is out of every type identifier's reach, and the
+// type-level list (pyTypeReserved) holds only what the module itself declares.
+// A lower-case name cannot be a type identifier, and no class body evaluates a
+// reserve_* call, so it needs no binding. A module-global lookup costs the same
+// under either name: the hot paths are unchanged.
+//
+// The module therefore does not re-export sofab: a caller reads `sofab.Status`,
+// not `message.Status`.
+func sofabBindings(names []string) []string {
+	out := make([]string, len(names))
+	for i, n := range names {
+		if n[0] >= 'A' && n[0] <= 'Z' {
+			out[i] = n + " as _" + n
+		} else {
+			out[i] = n
+		}
+	}
+	return out
 }
 
 func (g *gen) module(s *ir.Schema) []byte {
@@ -327,7 +359,7 @@ func (g *gen) module(s *ir.Schema) []byte {
 	if imp := stdlibImport("typing", typeSection, typingNames); imp != "" {
 		f.line("%s", imp)
 	}
-	f.line("from sofab import %s", strings.Join(sofabImports(decodeSection, typeSection), ", "))
+	f.line("from sofab import %s", strings.Join(sofabBindings(sofabImports(decodeSection, typeSection)), ", "))
 	f.blank()
 
 	if g.limits.any() {
@@ -427,13 +459,15 @@ type stdlibName struct{ name, use string }
 // dataclassNames and enumNames are matched against the rendered type section,
 // the only place the module uses them: `@dataclass` heads every class,
 // `field(...)` is pyDefault's mutable default, and the two enum bases are what
-// emitEnum and emitBitfieldConsts derive from.
+// emitEnum and emitBitfieldConsts derive from. The upper-case ones are bound
+// under a leading `_` for the reason sofabBindings gives: a type identifier
+// could spell them, and no type identifier starts with `_`.
 var (
 	dataclassNames = []stdlibName{{"dataclass", "@dataclass\n"}, {"field", "field(default_factory="}}
-	enumNames      = []stdlibName{{"IntEnum", "(IntEnum):\n"}, {"IntFlag", "(IntFlag):\n"}}
+	enumNames      = []stdlibName{{"IntEnum as _IntEnum", "(_IntEnum):\n"}, {"IntFlag as _IntFlag", "(_IntFlag):\n"}}
 	// ClassVar keeps a union's option-id constants out of the dataclass fields;
 	// dataclasses recognises the string annotation only through this import.
-	typingNames = []stdlibName{{"ClassVar", ": ClassVar[int] = "}}
+	typingNames = []stdlibName{{"ClassVar as _ClassVar", ": _ClassVar[int] = "}}
 )
 
 // stdlibImport returns `from <mod> import <names>` for the names the text uses,
@@ -553,16 +587,16 @@ func (g *gen) emitStreamDecoder(f *pyfile) {
 	f.line("        self.message = msg_cls()")
 	if g.anyBind() {
 		f.line("        self._v = vis_cls(self.message)")
-		f.line("        self._d = Decoder(visitor=self._v, %s,", g.capsArgs())
+		f.line("        self._d = _Decoder(visitor=self._v, %s,", g.capsArgs())
 	} else {
-		f.line("        self._d = Decoder(visitor=vis_cls(self.message), %s,", g.capsArgs())
+		f.line("        self._d = _Decoder(visitor=vis_cls(self.message), %s,", g.capsArgs())
 	}
 	f.line("                          reassembly=reassembly)")
 	f.line("")
-	f.line("    def feed(self, chunk) -> Status:")
+	f.line("    def feed(self, chunk) -> _Status:")
 	if g.anyBind() {
 		f.line("        st = self._d.feed(chunk)")
-		f.line("        if st is Status.COMPLETE:")
+		f.line("        if st is _Status.COMPLETE:")
 		f.line("            # The fields the destination table carries land on the message")
 		f.line("            # here, in one pass, rather than one callback at a time during")
 		f.line("            # the walk. Everything the visitor handles is already on it.")
@@ -583,13 +617,13 @@ func (g *gen) emitStreamDecoder(f *pyfile) {
 func pyFixlenSubtype(k ir.Kind) string {
 	switch k {
 	case ir.KindFP32:
-		return "FixlenSubtype.FP32"
+		return "_FixlenSubtype.FP32"
 	case ir.KindFP64:
-		return "FixlenSubtype.FP64"
+		return "_FixlenSubtype.FP64"
 	case ir.KindString:
-		return "FixlenSubtype.STRING"
+		return "_FixlenSubtype.STRING"
 	case ir.KindBlob:
-		return "FixlenSubtype.BLOB"
+		return "_FixlenSubtype.BLOB"
 	}
 	return ""
 }
@@ -603,31 +637,31 @@ func pyFixlenSubtype(k ir.Kind) string {
 func pyExpectedWire(fld *ir.Field) string {
 	switch fld.Kind {
 	case ir.KindU8, ir.KindU16, ir.KindU32, ir.KindU64, ir.KindBool, ir.KindBitfield:
-		return "WireType.UNSIGNED"
+		return "_WireType.UNSIGNED"
 	case ir.KindI8, ir.KindI16, ir.KindI32, ir.KindI64, ir.KindEnum:
-		return "WireType.SIGNED"
+		return "_WireType.SIGNED"
 	case ir.KindFP32, ir.KindFP64, ir.KindString, ir.KindBlob:
-		return "WireType.FIXLEN"
+		return "_WireType.FIXLEN"
 	case ir.KindStruct, ir.KindUnion:
-		return "WireType.SEQUENCE_START"
+		return "_WireType.SEQUENCE_START"
 	case ir.KindArray:
 		if !isNativeArrayElem(fld.Elem) {
-			return "WireType.SEQUENCE_START"
+			return "_WireType.SEQUENCE_START"
 		}
 		switch fld.Elem {
 		case ir.KindI8, ir.KindI16, ir.KindI32, ir.KindI64, ir.KindEnum:
-			return "WireType.ARRAY_SIGNED"
+			return "_WireType.ARRAY_SIGNED"
 		case ir.KindFP32, ir.KindFP64:
-			return "WireType.ARRAY_FIXLEN"
+			return "_WireType.ARRAY_FIXLEN"
 		default: // u8/u16/u32/u64, bool, bitfield
-			return "WireType.ARRAY_UNSIGNED"
+			return "_WireType.ARRAY_UNSIGNED"
 		}
 	}
-	return "WireType.SEQUENCE_START" // unreachable: keeps the switch total
+	return "_WireType.SEQUENCE_START" // unreachable: keeps the switch total
 }
 
 func (g *gen) emitEnum(f *pyfile, nt *ir.NamedType) {
-	f.line("class %s(IntEnum):", typeIdent(nt))
+	f.line("class %s(_IntEnum):", typeIdent(nt))
 	for _, c := range nt.Consts {
 		// Sphinx attribute comment(s) carrying the constant's description, above
 		// the member so pydoc/Sphinx attaches it to the enum value.
@@ -657,7 +691,7 @@ func (g *gen) emitEnum(f *pyfile, nt *ir.NamedType) {
 // requires-python >= 3.9. Rejecting an UNDECLARED bit is the decoder's job in any
 // case (MESSAGE_SPEC S1, enforced in on_field), not the type's.
 func (g *gen) emitBitfieldConsts(f *pyfile, nt *ir.NamedType) {
-	f.line("class %s(IntFlag):", typeIdent(nt))
+	f.line("class %s(_IntFlag):", typeIdent(nt))
 	for _, fl := range nt.Flags {
 		// Sphinx attribute comment(s): the flag description, with the schema
 		// default appended as "(default: true/false)" when the flag has one.
@@ -748,7 +782,7 @@ func (g *gen) emitDataclass(f *pyfile, name, summary string, fields []*ir.Field,
 	g.emitDataclassBody(f, name, summary, fields, u)
 	// The constants follow the class: its methods read them only when called.
 	for _, d := range g.defs {
-		f.line("%s = FloatArrayDefault(%s)", d.name, d.lit)
+		f.line("%s = _FloatArrayDefault(%s)", d.name, d.lit)
 		f.blank()
 	}
 	g.defs = nil
@@ -810,7 +844,7 @@ func (g *gen) emitDataclassBody(f *pyfile, name, summary string, fields []*ir.Fi
 	g.emitIsDefault(f, fields)
 
 	// _marshal
-	f.line("    def serialize(self, e: Encoder) -> None:")
+	f.line("    def serialize(self, e: _Encoder) -> None:")
 	if len(fields) == 0 {
 		f.line("        pass")
 	}
@@ -1312,7 +1346,7 @@ func rowBound(loc string, items *ir.ArrayElem) arrBound {
 func encodeGuard(cond, msg string) []string {
 	return []string{
 		fmt.Sprintf("if %s:", cond),
-		fmt.Sprintf("    raise SofaArgumentError(%q)", msg),
+		fmt.Sprintf("    raise _SofaArgumentError(%q)", msg),
 	}
 }
 

@@ -84,15 +84,15 @@ func TestPythonUnionStorage(t *testing.T) {
 		"@dataclass\nclass M_U:\n",
 		"    _which: int = 2\n",
 		"    _value: object = field(default_factory=lambda: M_U_Pt())\n",
-		"    NUM_ID: ClassVar[int] = 0\n",
-		"    PT_ID: ClassVar[int] = 2\n",
-		"    BO_ID: ClassVar[int] = 8\n",
+		"    NUM_ID: _ClassVar[int] = 0\n",
+		"    PT_ID: _ClassVar[int] = 2\n",
+		"    BO_ID: _ClassVar[int] = 8\n",
 	} {
 		if !strings.Contains(mod, want) {
 			t.Errorf("union storage missing %q", want)
 		}
 	}
-	if !strings.Contains(mod, "from typing import ClassVar\n") {
+	if !strings.Contains(mod, "from typing import ClassVar as _ClassVar\n") {
 		t.Error("ClassVar is used but not imported: dataclasses would make every id constant a field")
 	}
 	// No product type: no option is a dataclass field of its own.
@@ -155,7 +155,7 @@ func TestPythonUnionEncodeArms(t *testing.T) {
 		"        elif _w == 1:\n            e.write_string_bounded(1, _v, 8)\n",
 		"        elif _w == 2:\n            e.write_sequence_begin_lazy(2)\n            _v.serialize(e)\n            e.write_sequence_end()\n",
 		"        elif _w == 3:\n            e.write_u16_array(3, _v, 4)\n",
-		"        elif _w == 4:\n            _n0 = len(_v)\n            if _n0 > 3:\n                raise SofaArgumentError(\"strs: array over count 3\")\n            e.write_sequence_begin_lazy(4)\n",
+		"        elif _w == 4:\n            _n0 = len(_v)\n            if _n0 > 3:\n                raise _SofaArgumentError(\"strs: array over count 3\")\n            e.write_sequence_begin_lazy(4)\n",
 		"                    e.write_string_bounded(_i0, _e0, 4)\n            e.write_sequence_end_keep()\n",
 		"        elif _w == 5:\n            e.write_bytes_bounded(5, _v, 4)\n",
 		"        elif _w == 6:\n            e.write_sequence_begin_lazy(6)\n            _v.serialize(e)\n            e.write_sequence_end_keep()\n",
@@ -212,10 +212,10 @@ messages:
 // one `_value` slot.
 func TestPythonUnionDecodeSwitch(t *testing.T) {
 	mod := unionModule(t)
-	vis := mod[strings.Index(mod, "class _M__Visitor(Visitor):"):]
+	vis := mod[strings.Index(mod, "class _M__Visitor(_Visitor):"):]
 	for _, want := range []string{
 		" c == _M__Loc__u:\n            if fid == 0:\n                if value > 65535:\n" +
-			"                    raise SofaDecodeError(\"num: value outside declared width u16\")\n" +
+			"                    raise _SofaDecodeError(\"num: value outside declared width u16\")\n" +
 			"                _u = self._o.u\n                _u._which = 0\n                _u._value = value\n",
 		"            elif fid == 8:\n                _u = self._o.u\n                _u._which = 8\n                _u._value = bool(value)\n",
 		// on_sequence_begin: select if not held / select and replace.
@@ -275,7 +275,7 @@ messages:
 `
 	mod := string(genPy(t, schema(t, src), map[string]any{})["message.py"])
 	for _, want := range []string{
-		"_M__Bind__u = (Binding(closed=True, which_at=4)\n" +
+		"_M__Bind__u = (_Binding(closed=True, which_at=4)\n" +
 			"    .unsigned(0, at=5, count_at=6, max_value=65535)\n" +
 			"    .string(1, at=0, maxlen=8, count_at=7)\n" +
 			"    .bytes(2, at=1, maxlen=4, count_at=8)\n" +
@@ -294,7 +294,7 @@ messages:
 	// Every id of M is now on a closed table, so M is table-only: no hook at all,
 	// which is also what lets the decoder skip on_sequence_begin for the whole
 	// message type (corelib-py's _wants_seq_begin is false for it).
-	vis := mod[strings.Index(mod, "class _M__Visitor(Visitor):"):]
+	vis := mod[strings.Index(mod, "class _M__Visitor(_Visitor):"):]
 	if !strings.Contains(vis, "a destination table and nothing else") {
 		t.Errorf("M should be table-only once its union is bound:\n%s", vis)
 	}
@@ -371,7 +371,7 @@ messages:
       ua: { id: 8, type: union, oneof: { x: { id: 0, type: u64 }, p: { id: 1, type: struct, fields: { r: { id: 0, type: array, items: { type: u8, count: 2 }, default: [1] } } } } }
 `
 	mod := string(genPy(t, schema(t, src), map[string]any{})["message.py"])
-	if !strings.Contains(mod, "_M__Bind = (Binding()\n    .unsigned(0, at=0, count_at=1)") {
+	if !strings.Contains(mod, "_M__Bind = (_Binding()\n    .unsigned(0, at=0, count_at=1)") {
 		t.Fatalf("the message's scalars should still be on its (open) table:\n%s", mod)
 	}
 	for _, bad := range []string{"which_at=", ".sequence(", "_M__Bind__u", "_M__Bind__st"} {
@@ -450,8 +450,8 @@ messages:
 `
 	mod := string(genPy(t, schema(t, src), map[string]any{})["message.py"])
 	for _, want := range []string{
-		"_M__Bind__u__pt__in = (Binding(closed=True)\n    .unsigned(0, at=21, count_at=22, max_value=255, default=9)\n)\n",
-		"_M__Bind__u__pt = (Binding(closed=True)\n" +
+		"_M__Bind__u__pt__in = (_Binding(closed=True)\n    .unsigned(0, at=21, count_at=22, max_value=255, default=9)\n)\n",
+		"_M__Bind__u__pt = (_Binding(closed=True)\n" +
 			"    .signed(0, at=7, count_at=8, min_value=-2147483648, max_value=2147483647, default=-7)\n" +
 			"    .signed(1, at=9, count_at=10, min_value=-2147483648, max_value=2147483647)\n" +
 			"    .boolean(2, at=11, count_at=12, default=1)\n" +
@@ -462,16 +462,16 @@ messages:
 			"    .sequence(7, child=_M__Bind__u__pt__in)\n)\n",
 		// A nested union states its default_id, and its own options their
 		// defaults: the corelib resets it to that option at that default.
-		"_M__Bind__u__nu = (Binding(closed=True, which_at=23, default_id=1)\n" +
+		"_M__Bind__u__nu = (_Binding(closed=True, which_at=23, default_id=1)\n" +
 			"    .unsigned(0, at=24, count_at=25, max_value=255)\n" +
 			"    .unsigned(1, at=26, count_at=27, max_value=255, default=4)\n)\n",
 		// The top-level union: its leaf option has no default= (its own arrival
 		// writes it whole), and no default_id= (the prefill seeds it).
-		"_M__Bind__u = (Binding(closed=True, which_at=4)\n" +
+		"_M__Bind__u = (_Binding(closed=True, which_at=4)\n" +
 			"    .unsigned(0, at=5, count_at=6, max_value=65535)\n" +
 			"    .sequence(1, child=_M__Bind__u__pt)\n" +
 			"    .sequence(2, child=_M__Bind__u__nu)\n)\n",
-		"_M__Bind = (Binding(closed=True)\n    .unsigned(0, at=0, count_at=1)\n",
+		"_M__Bind = (_Binding(closed=True)\n    .unsigned(0, at=0, count_at=1)\n",
 		"memoryview(_M__Fill).cast(\"Q\")[4] = 1  # m.u\n",
 		"memoryview(_M__Fill).cast(\"Q\")[23] = 1  # m.u.nu\n",
 	} {
@@ -485,7 +485,7 @@ messages:
 		t.Error("a top-level member states default=: only a union option's subtree reads it")
 	}
 	// Everything is on the table, so M is table-only.
-	vis := mod[strings.Index(mod, "class _M__Visitor(Visitor):"):]
+	vis := mod[strings.Index(mod, "class _M__Visitor(_Visitor):"):]
 	if !strings.Contains(vis, "a destination table and nothing else") {
 		t.Errorf("M should be table-only once its union is bound:\n%s", vis)
 	}
@@ -519,7 +519,7 @@ messages:
           nu: { id: 2, type: union, default_id: 1, oneof: { p: { id: 0, type: u8 }, q: { id: 1, type: u8, default: 4 } } }
 `
 	mod := string(genPy(t, schema(t, src), map[string]any{})["message.py"])
-	sc := mod[strings.Index(mod, "class _M__Visitor(Visitor):"):]
+	sc := mod[strings.Index(mod, "class _M__Visitor(_Visitor):"):]
 	sc = sc[strings.Index(sc, "        m = self._o\n"):]
 	sc = sc[:strings.Index(sc, "\n\n")]
 	const want = "        _u = m.u\n" +
@@ -577,9 +577,9 @@ messages:
 `
 	mod := string(genPy(t, schema(t, src), map[string]any{})["message.py"])
 	for _, want := range []string{
-		"_M__Bind__lf = (Binding(closed=True, which_at=",
+		"_M__Bind__lf = (_Binding(closed=True, which_at=",
 		"    .sequence(1, child=_M__Bind__lf)\n",
-		"_M__Bind = (Binding()\n",
+		"_M__Bind = (_Binding()\n",
 		"        _u = m.lf\n",
 		"            _v = _u.mutable_p()\n",
 		"            if fid == 2:\n                self._s.append(c)\n                self._c = _M__Loc__sq\n",
@@ -613,13 +613,13 @@ messages:
 `
 	mod := string(genPy(t, schema(t, src), map[string]any{})["message.py"])
 	for _, want := range []string{
-		"_M__Bind__st__w = (Binding(closed=True, which_at=",
-		"_M__Bind__st = (Binding(closed=True)\n",
+		"_M__Bind__st__w = (_Binding(closed=True, which_at=",
+		"_M__Bind__st = (_Binding(closed=True)\n",
 		"    .sequence(1, child=_M__Bind__st__w)\n",
 		"    .sequence(2, child=_M__Bind__st)\n",
 		// The wrapper array keeps the root open, so the visitor still exists and
 		// declines what it does not enter.
-		"_M__Bind = (Binding()\n",
+		"_M__Bind = (_Binding()\n",
 		"    def on_sequence_begin(self, fid: int) -> bool:\n",
 	} {
 		if !strings.Contains(mod, want) {
@@ -704,7 +704,7 @@ messages:
 		"    def clear_(self) -> int:\n",
 		"    def class_(self) -> int:\n",
 		"    def has_which(self) -> bool:\n",
-		"    WHICH_ID: ClassVar[int] = 0\n",
+		"    WHICH_ID: _ClassVar[int] = 0\n",
 		"        if \"which\" in d:\n            o.which_ = d[\"which\"]\n",
 	} {
 		if !strings.Contains(u, want) {
@@ -719,13 +719,13 @@ messages:
 		want      []string
 	}{
 		{"id constant vs option", `{ a: { id: 0, type: u8 }, A_ID: { id: 1, type: u8 } }`,
-			[]string{"    A_ID: ClassVar[int] = 0\n", "    def A_ID_(self) -> int:\n", "    def has_A_ID(self) -> bool:\n"}},
+			[]string{"    A_ID: _ClassVar[int] = 0\n", "    def A_ID_(self) -> int:\n", "    def has_A_ID(self) -> bool:\n"}},
 		{"has_ vs option", `{ x: { id: 0, type: u8 }, has_x: { id: 1, type: u8 } }`,
 			[]string{"    def has_x(self) -> bool:\n", "    def has_x_(self) -> int:\n", "    def has_has_x(self) -> bool:\n"}},
 		{"mutable_ vs option", `{ y: { id: 0, type: struct, fields: { z: { id: 0, type: u8 } } }, mutable_y: { id: 1, type: u8 } }`,
 			[]string{"    def mutable_y(self) -> M_U_Y:\n", "    def mutable_y_(self) -> int:\n"}},
 		{"id constant vs fixed member", `{ MAX_SIZE_ID: { id: 0, type: u8 }, max_size: { id: 1, type: u8 } }`,
-			[]string{"    MAX_SIZE_ID: ClassVar[int] = 1\n", "    def MAX_SIZE_ID_(self) -> int:\n"}},
+			[]string{"    MAX_SIZE_ID: _ClassVar[int] = 1\n", "    def MAX_SIZE_ID_(self) -> int:\n"}},
 	} {
 		src := "version: 1\nmessages:\n  M:\n    payload:\n      u: { id: 0, type: union, oneof: " + c.src + " }\n"
 		files, err := (&Backend{}).Generate(schema(t, src), map[string]any{})
@@ -764,8 +764,8 @@ messages:
 		"    @property_.setter\n",
 		"    def classmethod_(self) -> int:\n",
 		"    def has_property(self) -> bool:\n",
-		"    PROPERTY_ID: ClassVar[int] = 0\n",
-		"    CLASSMETHOD_ID: ClassVar[int] = 2\n",
+		"    PROPERTY_ID: _ClassVar[int] = 0\n",
+		"    CLASSMETHOD_ID: _ClassVar[int] = 2\n",
 	} {
 		if !strings.Contains(u, want) {
 			t.Errorf("builtin-named option not mangled, missing %q\n%s", want, u)

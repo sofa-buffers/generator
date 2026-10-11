@@ -1044,6 +1044,26 @@ Two targets deviate where the language forbids a spelling:
   redefine the corelib's, and a component `std`/`sofab` further down would capture
   the qualified references.
 
+**Imports bound privately (Python).** A name the module imports is a name it
+uses unqualified, so it would take the **escape** — and every name the corelib
+line gains would then join the escape list, renaming a user type spelled like it
+on a generator upgrade (generator#719: the encode refusal of #656 imported
+`SofaArgumentError`, and a message `sofa_argument_error` became
+`SofaArgumentError_`). Python binds every upper-case import in the **private**
+channel instead — `from sofab import Decoder as _Decoder`, `from enum import
+IntEnum as _IntEnum`, `from typing import ClassVar as _ClassVar` (dataclasses
+still recognises the string annotation `_ClassVar[int]`: it resolves the name in
+the module) — so its escape list (`pyTypeReserved`) is closed: the keywords and
+the module's own public constants, never an import. Lower-case imports
+(`reserve_elem`, `dataclass`, `field`) stay unaliased: no type identifier can
+spell them, and a field spelled like one is the member list's business. A
+module-global lookup costs the same under either name, so no hot path changes
+(measured, `tests/bench/run.sh --rows python,python-native`, same corelib-py 255bdf6: Ir/op `python` encode 1068273 → 1068374 (+0.01 %), decode 1982946 → 1980446 (−0.13 %); `python-native` encode 111566 → 111568 (±0.00 %), decode 431755 → 432107 (+0.08 %)). The cost is that the module no longer re-exports sofab: a caller
+reads `sofab.Status`, not `message.Status`. `TestTypeReservedCoversImports`
+fails on any upper-case import bound under its own name, and
+`TestImportedNamesAreFreeTypeNames` generates a type spelled like every name
+the module can import and round-trips it on both engines.
+
 Parameters and locals that share a scope with schema-derived members (C++
 methods) are `_`-prefixed for the same reason, or — where every generated local
 is a fixed lower-case word and every schema-derived declaration in reach starts

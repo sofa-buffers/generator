@@ -243,7 +243,7 @@ func (g *gen) emitVisitor(f *pyfile, c decodeClass) {
 	}
 	f.blank()
 
-	f.line("class %s(Visitor):", visitorIdent(c.base))
+	f.line("class %s(_Visitor):", visitorIdent(c.base))
 	f.line(`    """Flat decode visitor for :class:`+"`"+`%s`+"`"+`.`, name)
 	f.line("")
 	f.line("    corelib-py's visitor is flat -- one object receives every callback at every")
@@ -293,7 +293,7 @@ func (g *gen) emitVisitor(f *pyfile, c decodeClass) {
 // nothing left for a hook to decide.
 func (g *gen) emitTableOnlyVisitor(f *pyfile, c decodeClass) {
 	name := c.name
-	f.line("class %s(Visitor):", visitorIdent(c.base))
+	f.line("class %s(_Visitor):", visitorIdent(c.base))
 	f.line(`    """Decode handler for :class:`+"`"+`%s`+"`"+`: a destination table and nothing else.`, name)
 	f.line("")
 	f.line("    Every id this schema declares is on the table, so the decoder writes each")
@@ -423,7 +423,7 @@ func (g *gen) objSeqArm(sc *pyScope, scopes []*pyScope) []string {
 // its immutable default, a struct/union element or a native row gets a fresh
 // object per slot, and a wrapper row is REPLACED at its id (§7.4).
 func (g *gen) reserveCall(sc *pyScope, idExpr string) string {
-	bound := "UNBOUNDED"
+	bound := "_UNBOUNDED"
 	if sc.cap >= 0 {
 		bound = strconv.FormatInt(sc.cap, 10)
 	}
@@ -615,7 +615,7 @@ func (g *gen) storeValue(acc, loc string, fld *ir.Field) []string {
 	if cond != "" {
 		out = append(out,
 			fmt.Sprintf("if %s:", cond),
-			fmt.Sprintf("    raise SofaDecodeError(%q)",
+			fmt.Sprintf("    raise _SofaDecodeError(%q)",
 				fmt.Sprintf("%s: value outside declared %s", loc, what)))
 	}
 	return append(out, fmt.Sprintf("%s = value", acc))
@@ -799,7 +799,7 @@ func (g *gen) emitOnField(f *pyfile, scopes []*pyScope) {
 	if len(arms) == 0 {
 		return
 	}
-	f.line("    def on_field(self, fld: Field) -> bool:")
+	f.line("    def on_field(self, fld: _Field) -> bool:")
 	f.line(`        """Accept or decline a field at its HEADER, before its value is read.`)
 	f.line("")
 	f.line("        An id is declined when the header's wire type -- or, for a fixlen one,")
@@ -1184,8 +1184,8 @@ func visitorNeeds(section string) (field, wire, fixlen bool) {
 	// Substring, not "WireType.": on_array_begin names the type as a bare
 	// parameter annotation, with no member access after it.
 	return strings.Contains(section, "def on_field("),
-		usesName(section, "WireType", ".", ","),
-		usesName(section, "FixlenSubtype", ".")
+		usesName(section, "_WireType", ".", ","),
+		usesName(section, "_FixlenSubtype", ".")
 }
 
 // usesName reports whether `text` uses the module-level `name` the way the
@@ -1268,7 +1268,7 @@ func (g *gen) emitOnArrayBegin(f *pyfile, scopes []*pyScope) {
 	if len(arms) == 0 {
 		return
 	}
-	f.line("    def on_array_begin(self, fid: int, wtype: WireType, count: int):")
+	f.line("    def on_array_begin(self, fid: int, wtype: _WireType, count: int):")
 	f.line("        \"\"\"An integer array's header, before any element is decoded.")
 	f.line("")
 	f.line("        Returns the element bound as the INTERVAL this hook carries, for the")
