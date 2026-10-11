@@ -1929,12 +1929,13 @@ crate_bin_name "$WORK/no-std-static"
 echo "==> [no-std-static] lib builds (pure heapless, no alloc)"
 
 # And both firmware shapes over heapless 0.9: the bare #![no_std] lib with and
-# without the allocator, and serde without std. heapless 0.9 has its own
-# no_std/serde feature wiring, so the hosted runs above do not cover it.
+# without the allocator, and serde without std on the heapless one (the same
+# pair the 0.8 legs below build). heapless 0.9 has its own no_std/serde feature
+# wiring, so the hosted runs above do not cover it.
 for HLDIR in ex-no-std-dynamic-hl09 ex-no-std-static-hl09; do
-    ( cd "$WORK/$HLDIR" && cargo build -q --lib --no-default-features \
-        && cargo build -q --lib --no-default-features --features serde )
+    ( cd "$WORK/$HLDIR" && cargo build -q --lib --no-default-features )
 done
+( cd "$WORK/ex-no-std-static-hl09" && cargo build -q --lib --no-default-features --features serde )
 if grep -q 'extern crate alloc' "$WORK/ex-no-std-static-hl09/src/lib.rs"; then echo "FAIL: no-std-static-hl09 crate must not pull alloc"; exit 1; fi
 echo "==> [no-std-*-hl09] lib builds heap-free over heapless 0.9 (with and without serde)"
 
