@@ -5701,14 +5701,19 @@ index of every enclosing row (`srows: array over count 2` for the field itself,
 `srows[1]: array over count 2` for its second row, `deep[1][0]: …` one level
 further down). A row guard's text interpolates the loop indices the encode
 already holds, and is formatted only on the failure path: a Python f-string in
-the `raise`, a Dart non-`const` `SofabException` built in the `throw`. The
-guard that does not fire builds no string and allocates nothing, and a
-top-level guard keeps its constant text. Backends whose refusal carries no
-generated text (Go `RejectArgument()`, C++ `rejectArgument()`, Rust and Zig
-`Error::Argument` / `error.InvalidArgument`, C's descriptor-driven refusal)
-emit none, so the footprint profiles gain no `.rodata`. Java, Kotlin, C# and
-TypeScript name the level by a constant word (`srows element`, `srows row`,
-`srows[]`) but not the row index.
+the `raise`, a Dart non-`const` `SofabException` built in the `throw`, a Java
+string concatenation (`"deep[" + _i0 + "]: …"`), a Kotlin string template
+(`"deep[$_i0]: …"`), a C# interpolated string (`$"deep[{_i0}]: …"`) and a
+TypeScript template literal (`` `deep[${_i0}]: …` ``), each in the `throw`
+statement itself. The guard that does not fire builds no string and allocates
+nothing, and a top-level guard keeps its constant text. A string or blob
+element's maxlen refusal names the row that holds it the same way, followed by
+the backend's own element marker (`deep[1][0] element: …` in Java, Kotlin and
+C#, `deep[1][0][]: …` in TypeScript, `deep[1][0]: element over maxlen …` in
+Dart). Backends whose refusal carries no generated text (Go `RejectArgument()`,
+C++ `rejectArgument()`, Rust and Zig `Error::Argument` /
+`error.InvalidArgument`, C's descriptor-driven refusal) emit none, so the
+footprint profiles gain no `.rodata`.
 
 Before generator#656 the only guard was accidental: a bounded target whose
 buffer is exactly `MAX_SIZE` refused once the *whole message* overflowed it, and a
