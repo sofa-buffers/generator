@@ -2693,6 +2693,95 @@ func TestRustStaticStorageCargoDep(t *testing.T) {
 	}
 }
 
+// TestRustHeaplessMajor: the `heapless` option picks the heapless major the
+// generated crate depends on (generator#727). It moves exactly two things in
+// Cargo.toml -- the crate's own heapless dependency and the corelib feature
+// that implements sofab::seq::SeqVec for that major -- and nothing in src/: a
+// heapless::Vec of 0.9 has a defaulted length-type parameter, so the generated
+// code spells it the same way under both.
+func TestRustHeaplessMajor(t *testing.T) {
+	gen := func(cfg map[string]any) map[string]string {
+		t.Helper()
+		cfg["emit"] = "project"
+		files, err := (&Backend{}).Generate(exampleSchemaBounded(t), cfg)
+		if err != nil {
+			t.Fatalf("generate %v: %v", cfg, err)
+		}
+		out := map[string]string{}
+		for _, f := range files {
+			out[f.Path] = string(f.Content)
+		}
+		return out
+	}
+	for _, tc := range []struct {
+		name string
+		cfg  func() map[string]any
+		// The corelib feature this profile enables for its wrapper-array
+		// destination under each major ("" = no heapless feature at all).
+		feat08, feat09 string
+		dep08, dep09   string
+	}{
+		{"rs-static", func() map[string]any { return map[string]any{"allow_dynamic": false} },
+			`features = ["heapless"]`, `features = ["heapless09"]`,
+			`heapless = { version = "0.8", features = ["serde"] }`, `heapless = { version = "0.9", features = ["serde"] }`},
+		{"no-std-static", func() map[string]any { return map[string]any{"corelib": "rs-no-std"} },
+			`"value64", "heapless"]`, `"value64", "heapless09"]`,
+			`heapless = { version = "0.8", default-features = false }`, `heapless = { version = "0.9", default-features = false }`},
+		// allow_dynamic: alloc::Vec destinations, so no corelib heapless feature;
+		// the crate still depends on heapless for its decode stack and encode buffer.
+		{"no-std-dynamic", func() map[string]any { return map[string]any{"corelib": "rs-no-std", "allow_dynamic": true} },
+			`"value64", "alloc"]`, `"value64", "alloc"]`,
+			`heapless = { version = "0.8", default-features = false }`, `heapless = { version = "0.9", default-features = false }`},
+		{"no-std-std", func() map[string]any { return map[string]any{"corelib": "rs-no-std", "no_std": false} },
+			`"value64", "heapless"]`, `"value64", "heapless09"]`,
+			`heapless = { version = "0.8", features = ["serde"] }`, `heapless = { version = "0.9", features = ["serde"] }`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			def := gen(tc.cfg())
+			c08 := tc.cfg()
+			c08["heapless"] = "0.8"
+			v08 := gen(c08)
+			c09 := tc.cfg()
+			c09["heapless"] = "0.9"
+			v09 := gen(c09)
+			if def["Cargo.toml"] != v08["Cargo.toml"] {
+				t.Error(`heapless: "0.8" must be the default`)
+			}
+			for _, w := range []string{tc.feat08, tc.dep08} {
+				if !strings.Contains(v08["Cargo.toml"], w) {
+					t.Errorf("0.8 Cargo.toml missing %q:\n%s", w, v08["Cargo.toml"])
+				}
+			}
+			for _, w := range []string{tc.feat09, tc.dep09} {
+				if !strings.Contains(v09["Cargo.toml"], w) {
+					t.Errorf("0.9 Cargo.toml missing %q:\n%s", w, v09["Cargo.toml"])
+				}
+			}
+			if strings.Contains(v09["Cargo.toml"], `"0.8"`) || strings.Contains(v09["Cargo.toml"], `"heapless"]`) {
+				t.Errorf("0.9 Cargo.toml still names heapless 0.8:\n%s", v09["Cargo.toml"])
+			}
+			for path, src := range v08 {
+				if path == "Cargo.toml" {
+					continue
+				}
+				if v09[path] != src {
+					t.Errorf("%s differs between heapless 0.8 and 0.9; the generated code must not depend on the major", path)
+				}
+			}
+		})
+	}
+
+	// Inert where the crate holds no heapless container at all.
+	dyn := gen(map[string]any{"heapless": "0.9"})["Cargo.toml"]
+	if strings.Contains(dyn, "heapless") {
+		t.Errorf("corelib-rs with dynamic storage must not pull in heapless, whatever the major:\n%s", dyn)
+	}
+
+	if _, err := (&Backend{}).Generate(exampleSchemaBounded(t), map[string]any{"heapless": "1.0"}); err == nil {
+		t.Error("an unknown heapless major must be refused")
+	}
+}
+
 // A schema bound that the fixlen LENGTH WORD already decides must be latched at
 // that word, not once payload bytes arrive (CORELIB_PLAN §5.2, generator#267).
 //

@@ -201,6 +201,15 @@
         "emit": {
           "$ref": "#/$defs/emit"
         },
+        "heapless": {
+          "type": "string",
+          "enum": [
+            "0.8",
+            "0.9"
+          ],
+          "default": "0.8",
+          "description": "Which major of the heapless crate the generated crate depends on, wherever it holds heapless containers (static storage, and every no_std crate). A heapless::Vec of 0.8 and one of 0.9 are different types, so pick the major the rest of your project uses. 0.8 (default) keeps the corelib's MSRV of rustc 1.70; 0.9 needs rustc 1.87. Project mode emits the matching heapless dependency and corelib feature (heapless / heapless09); the generated source is identical for both. Write the value quoted: an unquoted 0.9 is a YAML number."
+        },
         "max_dyn_array_count": {
           "$ref": "#/$defs/max_dyn_array_count"
         },

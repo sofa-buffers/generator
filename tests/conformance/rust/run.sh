@@ -133,8 +133,12 @@ IN='{"someu8":200,"someu16":4242,"someu32":3000000,"someu64":1844674407370955161
 
 # run_variant LABEL CFGBODY CORELIB_PATH
 #   CFGBODY - the targets.rust config block contents (e.g. "" or "corelib: rs").
+#   A LABEL ending in -hl09 is the same leg with `heapless: "0.9"` (generator#727):
+#   every per-profile decision below keys on $kind, the label without the suffix,
+#   while $label keeps each leg's crates in directories of their own.
 run_variant() {
     label=$1; cfgbody=$2; corelib=$3
+    kind=${label%-hl09}
     printf 'generic: { emit: project }\ntargets: { rust: { %s } }\n' "$cfgbody" > "$WORK/cfg-$label.yaml"
 
     rust_build() {  # def-or-yaml out-dir
@@ -157,7 +161,7 @@ run_variant() {
     # `count` never reaches the wire, so the round-trip and the shared vectors are
     # unchanged.
     EXAMPLE="$ROOT/examples/messages/example.yaml"
-    case "$label" in no-std-*)
+    case "$kind" in no-std-*)
         EXAMPLE="$WORK/example-$label.yaml"
         awk '
           /^      somemap:/ { inmap=1 }
@@ -169,6 +173,27 @@ run_variant() {
     echo "==> [$label] generating + building example + conformance crates"
     rust_build "$EXAMPLE" "$WORK/ex-$label"
     rust_build "$WORK/conf.yaml" "$WORK/conf-$label"
+
+    # A -hl09 leg has to have built against heapless 0.9, or it proved nothing the
+    # 0.8 leg did not: the crate's own dependency and, where the profile holds
+    # heapless wrapper arrays, the corelib feature with the 0.9 SeqVec impl.
+    case "$label" in *-hl09)
+        grep -q '^heapless = { version = "0.9"' "$WORK/ex-$label/Cargo.toml" || {
+            echo "FAIL: [$label] the generated crate does not depend on heapless 0.9"; exit 1; }
+        if grep '^sofab = ' "$WORK/ex-$label/Cargo.toml" | grep -q '"heapless"'; then
+            echo "FAIL: [$label] the generated crate enables the corelib's heapless 0.8 impl"; exit 1
+        fi
+        case "$kind" in no-std-dynamic) ;; *)
+            grep '^sofab = ' "$WORK/ex-$label/Cargo.toml" | grep -q '"heapless09"' || {
+                echo "FAIL: [$label] the generated crate does not enable the corelib's heapless09 feature"; exit 1; } ;;
+        esac
+        ( cd "$WORK/ex-$label" && cargo tree -q -i heapless@0.9 >/dev/null ) || {
+            echo "FAIL: [$label] heapless 0.9 is not in the built dependency graph"; exit 1; }
+        if ( cd "$WORK/ex-$label" && cargo tree -q -i heapless@0.8 >/dev/null 2>&1 ); then
+            echo "FAIL: [$label] heapless 0.8 is still in the dependency graph"; exit 1
+        fi
+        echo "==> [$label] built against heapless 0.9 only" ;;
+    esac
 
     # clippy with every lint it warns on denied, on the example and conformance
     # crates here and on every corpus/realworld crate below: a user's
@@ -192,7 +217,7 @@ run_variant() {
     # dynamic container can hold one; a heapless container refuses it at insert,
     # before any encode runs, so there the leg cannot be built and the thing to
     # assert is that the generated serialize propagates every write status.
-    case "$label" in
+    case "$kind" in
         rs|no-std-dynamic)
             ( cd "$WORK/fill-$label" && check_maxsize_overfill "$label" cargo run -q -- encode fill ) ;;
         *)
@@ -243,7 +268,7 @@ run_variant() {
     # against the example (Myfirstmessage), streaming_check_nostd.rs against
     # conf.yaml (Vecs/Vecsa, whose maxlen/count give the heapless types their
     # capacities). So the schema travels with the check, not with the leg.
-    case "$label" in
+    case "$kind" in
         no-std-static) STREAM_CHECK="" ;;
         # An std crate over the no-std corelib still holds heapless fields
         # (allow_dynamic defaults off there), so it takes the heapless check.
@@ -255,13 +280,13 @@ run_variant() {
     echo "==> [$label] streaming: serialize through a sink, feed the decoder in chunks ($STREAM_CHECK)"
     rm -rf "$WORK/stream-$label"
     rust_build "$STREAM_DEF" "$WORK/stream-$label"
-    case "$label" in
+    case "$kind" in
         no-std-dynamic|no-std-static) printf 'use sofabuffers_generated::*;\n' > "$WORK/stream-$label/src/main.rs" ;;
         *)        printf 'pub mod message;\nuse message::*;\n' > "$WORK/stream-$label/src/main.rs" ;;
     esac
     sed '/^\/\/SOFAB_IMPORT$/d' "$ROOT/tests/conformance/rust/$STREAM_CHECK" \
         >> "$WORK/stream-$label/src/main.rs"
-    case "$label" in
+    case "$kind" in
         # The lib is #![no_std] without this; the binary above needs it linked
         # for println!/Vec in the check itself.
         no-std-dynamic|no-std-static) ( cd "$WORK/stream-$label" && cargo run -q --features std ) ;;
@@ -473,13 +498,13 @@ run_variant() {
     echo "==> [$label] repeated id: wrappers replace, scopes merge (MESSAGE_SPEC S7.4)"
     rm -rf "$WORK/rep-$label"
     rust_build "$EXAMPLE" "$WORK/rep-$label"
-    case "$label" in
+    case "$kind" in
         no-std-dynamic|no-std-static) printf 'use sofabuffers_generated::*;\n' > "$WORK/rep-$label/src/main.rs" ;;
         *)        printf 'pub mod message;\nuse message::*;\n' > "$WORK/rep-$label/src/main.rs" ;;
     esac
     sed '/^\/\/SOFAB_IMPORT$/d' "$ROOT/tests/conformance/rust/repeated_id.rs" \
         >> "$WORK/rep-$label/src/main.rs"
-    case "$label" in
+    case "$kind" in
         # The lib is #![no_std] without this; the check itself uses Vec/format!.
         no-std-dynamic|no-std-static) ( cd "$WORK/rep-$label" && cargo run -q --features std ) ;;
         *)        ( cd "$WORK/rep-$label" && cargo run -q ) ;;
@@ -584,7 +609,7 @@ run_variant() {
     python3 "$ROOT/tests/conformance/lib/check_float_default.py" --emit-schema >> "$WORK/fdef.yaml"
     rust_build "$WORK/fdef.yaml" "$WORK/fdef-$label"
     python3 "$ROOT/tests/conformance/lib/check_float_default.py" "Rust [$label]" \
-        --backend "$(case "$label" in no-std-*) echo rs-no-std ;; *) echo rust ;; esac)" \
+        --backend "$(case "$kind" in no-std-*) echo rs-no-std ;; *) echo rust ;; esac)" \
         --cwd "$WORK/fdef-$label" -- cargo run -q --
 
     # A native array round-trips at every length, for every element kind
@@ -595,7 +620,7 @@ run_variant() {
     # Every rs-no-std profile (heapless, allow_dynamic, std crate) rejects an
     # unbounded array at generate time, so those labels run the bounded half only.
     ARRLEN_OPTS=""
-    case "$label" in no-std-*) ARRLEN_OPTS="--bounded-only" ;; esac
+    case "$kind" in no-std-*) ARRLEN_OPTS="--bounded-only" ;; esac
     echo "==> [$label] native arrays round-trip at every length, for every element kind (generator#643)"
     printf 'version: 1\nmessages:\n' > "$WORK/arrlen.yaml"
     python3 "$ROOT/tests/conformance/lib/check_array_lengths.py" --emit-schema $ARRLEN_OPTS >> "$WORK/arrlen.yaml"
@@ -610,7 +635,7 @@ run_variant() {
     # The rs-no-std labels take no receiver cap (every field is statically bounded),
     # so they run the driver's --bounded table; the std corelib labels run the full
     # one, over the capped project of the refusal leg below.
-    case "$label" in no-std-*)
+    case "$kind" in no-std-*)
         echo "==> [$label] a refusal is terminal: asking again repeats it (generator#647)"
         printf 'version: 1\nmessages:\n' > "$WORK/terminal.yaml"
         python3 "$ROOT/tests/conformance/lib/check_terminal_refusal.py" --emit-schema --bounded >> "$WORK/terminal.yaml"
@@ -624,19 +649,19 @@ run_variant() {
     # string or blob past `maxlen`, an array past `count`, a scalar past its width.
     # The shared driver prints its own schema; its KNOWN_GAP lists what still fails.
     ENCBND_OPTS=""
-    case "$label" in no-std-*) ENCBND_OPTS="--bounded-only" ;; esac
+    case "$kind" in no-std-*) ENCBND_OPTS="--bounded-only" ;; esac
     echo "==> [$label] an over-bound value is refused at encode (generator#656)"
     printf 'version: 1\nmessages:\n' > "$WORK/encbnd.yaml"
     python3 "$ROOT/tests/conformance/lib/check_encode_bounds.py" --emit-schema $ENCBND_OPTS >> "$WORK/encbnd.yaml"
     rust_build "$WORK/encbnd.yaml" "$WORK/encbnd-$label"
     python3 "$ROOT/tests/conformance/lib/check_encode_bounds.py" "Rust [$label]" $ENCBND_OPTS \
-        --backend "$(case "$label" in rs) echo rust ;; rs-static) echo rust-static ;; no-std-dynamic) echo rs-no-std-dynamic ;; no-std-static) echo rs-no-std ;; *) echo rs-no-std-std ;; esac)" \
+        --backend "$(case "$kind" in rs) echo rust ;; rs-static) echo rust-static ;; no-std-dynamic) echo rs-no-std-dynamic ;; no-std-static) echo rs-no-std ;; *) echo rs-no-std-std ;; esac)" \
         --cwd "$WORK/encbnd-$label" -- cargo run -q --
     # The footprint opt-out: with the crate's `disable_encode_bounds` feature the
     # guards are compiled out, so the same driver must now find the over-bound
     # values written. Asserted on the cells a MAX_SIZE buffer still holds -- the
     # 60-byte ones overflow it and stay refused as BufferFull either way.
-    if [ "$label" = "no-std-dynamic" ]; then
+    if [ "$kind" = "no-std-dynamic" ]; then
         echo "==> [$label] disable_encode_bounds compiles the encode guards out"
         OPTOUT=$(python3 "$ROOT/tests/conformance/lib/check_encode_bounds.py" "Rust [$label opt-out]" $ENCBND_OPTS \
             --discover --cwd "$WORK/encbnd-$label" -- cargo run -q --features disable_encode_bounds -- | sed -n 's/^DISCOVER //p')
@@ -1178,7 +1203,7 @@ YAML
     echo "==> [$label] header ceilings and invalid UTF-8, from the shared vector tables (generator#651)"
     TABLES="$corelib/assets/test_vectors.json"
     WITHOUT=""
-    case "$label" in no-std-*) WITHOUT="--without receiver_caps" ;; esac
+    case "$kind" in no-std-*) WITHOUT="--without receiver_caps" ;; esac
     tables_schema "$TABLES" "$WORK/tables-$label.yaml" $WITHOUT
     printf 'generic: %s\ntargets: { rust: { %s } }\n' "$TABLES_GENERIC" "$cfgbody" > "$WORK/cfg-tables-$label.yaml"
     ( cd "$ROOT" && go run ./cmd/sofabgen --format=off --config "$WORK/cfg-tables-$label.yaml" --lang rust \
@@ -1202,7 +1227,7 @@ YAML
     echo "==> [$label] corpus + realworld: every definition builds, clippy-clean"
     # The no_std profile refuses the three unbounded definitions the loop below
     # skips; assert that, in both storage modes, rather than only not building them.
-    case "$label" in no-std-*) assert_unbounded_rejected rust "$WORK/cfg-$label.yaml" "$label" ;; esac
+    case "$kind" in no-std-*) assert_unbounded_rejected rust "$WORK/cfg-$label.yaml" "$label" ;; esac
     built=0; refused=0
     for def in "$ROOT"/tests/matrix/corpus/defs/*.yaml "$ROOT"/examples/messages/realworld/*.yaml; do
         # no_maxlen.yaml exists to exercise genuinely unbounded string/blob fields.
@@ -1213,7 +1238,7 @@ YAML
         # count-less arrays — wrapper and native — which the no_std profile rejects
         # for the same reason. Their bounded counterparts (seq_elements,
         # nested_rows, array_lengths) do compile here.
-        case "$label:$(basename "$def")" in
+        case "$kind:$(basename "$def")" in
         no-std-*:no_maxlen.yaml | no-std-*:seq_elements_dyn.yaml | no-std-*:array_lengths_dyn.yaml)
             corpus_roundtrip "Rust [$label]" rust "$def" "$WORK/corpus-$label.tally" \
                 --exclude-all "unbounded fields: the no_std profile rejects them by design"
@@ -1297,7 +1322,7 @@ PY
     format_gen rust "$WORK/fmt-$label/fill" --config "$WORK/cfg-$label.yaml" \
         --in "$ROOT/tests/conformance/lib/maxsize_fill.yaml"
     FMT_SKIP_DEFS=""
-    case "$label" in no-std-*)
+    case "$kind" in no-std-*)
         FMT_SKIP_DEFS="no_maxlen.yaml seq_elements_dyn.yaml array_lengths_dyn.yaml" ;;
     esac
     format_gen_corpus rust "$WORK/fmt-$label" --config "$WORK/cfg-$label.yaml"
@@ -1865,6 +1890,18 @@ run_variant no-std-static "corelib: rs-no-std" "$NOSTD"
 # apply to it; the bounded-schema skips (label prefix no-std-) do.
 run_variant no-std-std "corelib: rs-no-std, no_std: false" "$NOSTD"
 
+# The same four heapless-holding legs over heapless 0.9 (generator#727). The
+# option changes the generated Cargo.toml only -- the crate's heapless
+# dependency and the corelib feature carrying the matching SeqVec impl -- but a
+# heapless::Vec of 0.9 is a different type with a different API underneath, so
+# every leg that stores one runs the whole matrix again rather than a build.
+# `rs` is not here: with dynamic storage it holds no heapless at all.
+HL09='heapless: "0.9"'
+run_variant rs-static-hl09 "corelib: rs, allow_dynamic: false, $HL09" "$STD"
+run_variant no-std-dynamic-hl09 "corelib: rs-no-std, allow_dynamic: true, $HL09" "$NOSTD"
+run_variant no-std-static-hl09 "corelib: rs-no-std, $HL09" "$NOSTD"
+run_variant no-std-std-hl09 "corelib: rs-no-std, no_std: false, $HL09" "$NOSTD"
+
 # The point of the no_std profile is a crate that builds as #![no_std] and
 # heap-free. A bin cannot be no_std on a hosted target, so prove it on the lib
 # target: `cargo build --lib --no-default-features` drops serde/std and compiles
@@ -1890,6 +1927,16 @@ sed -i "s#\${SOFAB_RS_CORELIB}#$NOSTD#" "$WORK/no-std-static/Cargo.toml"
 crate_bin_name "$WORK/no-std-static"
 ( cd "$WORK/no-std-static" && cargo build -q --lib --no-default-features )
 echo "==> [no-std-static] lib builds (pure heapless, no alloc)"
+
+# And both firmware shapes over heapless 0.9: the bare #![no_std] lib with and
+# without the allocator, and serde without std. heapless 0.9 has its own
+# no_std/serde feature wiring, so the hosted runs above do not cover it.
+for HLDIR in ex-no-std-dynamic-hl09 ex-no-std-static-hl09; do
+    ( cd "$WORK/$HLDIR" && cargo build -q --lib --no-default-features \
+        && cargo build -q --lib --no-default-features --features serde )
+done
+if grep -q 'extern crate alloc' "$WORK/ex-no-std-static-hl09/src/lib.rs"; then echo "FAIL: no-std-static-hl09 crate must not pull alloc"; exit 1; fi
+echo "==> [no-std-*-hl09] lib builds heap-free over heapless 0.9 (with and without serde)"
 
 # Building the no-std-static crate is not the same as running it. The heapless profile
 # has its own `acc` -- the buffer that reassembles a string/blob split across

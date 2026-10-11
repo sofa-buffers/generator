@@ -41,6 +41,10 @@ func (*Backend) Generate(s *ir.Schema, cfg map[string]any) ([]generator.File, er
 	// no heap to spare, a server target would rather hold what a message carries
 	// than its declared worst case.
 	allowDynamic := cfgBoolDefault(cfg, "allow_dynamic", corelib != "rs-no-std")
+	heapless := cfgString(cfg, "heapless", heapless08)
+	if heapless != heapless08 && heapless != heapless09 {
+		return nil, fmt.Errorf("rust: heapless must be %q or %q, got %q", heapless08, heapless09, heapless)
+	}
 	g := &gen{
 		schema:       s,
 		banner:       cfgString(cfg, "tool_banner", "sofabgen"),
@@ -49,6 +53,7 @@ func (*Backend) Generate(s *ir.Schema, cfg map[string]any) ([]generator.File, er
 		noStd:        noStd,
 		allowDynamic: allowDynamic,
 		staticStore:  !allowDynamic,
+		heapless:     heapless,
 		size:         generator.NewSizePolicy(cfg),
 		reserveCap:   generator.ServerDynLimits.Resolve(cfg).ArrayCount,
 	}
@@ -112,6 +117,13 @@ type gen struct {
 	// be turned on against corelib-rs without touching a schema. (The firmware
 	// profile is stricter for its own reason: checkBounded requires the bound.)
 	staticStore bool
+	// heapless is the heapless major the generated crate depends on: heapless08
+	// (default) or heapless09. It changes the generated Cargo.toml only -- the
+	// crate's own `heapless` dependency and the corelib feature carrying the
+	// matching sofab::seq::SeqVec impl. The generated code spells heapless::Vec /
+	// heapless::String the same way under both majors (0.9's extra length-type
+	// parameter defaults to usize), so src/ is byte-identical between them.
+	heapless string
 	// limits are the receiver-side decode limits (generator#102); resolved only
 	// for the std corelib-rs (empty — all inert — under corelib-rs-no-std).
 	limits limitSet
