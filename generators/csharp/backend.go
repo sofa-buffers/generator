@@ -771,8 +771,8 @@ func (g *gen) marshalArray(f *cfile, ind, idExpr, val string, elem ir.Kind, ref 
 		length = val + ".Length"
 	}
 	if bnd.hasCount && bnd.count < math.MaxInt32 {
-		f.line("%s%s", ind, argThrow(fmt.Sprintf("%s > %d", length, bnd.count),
-			fmt.Sprintf("%s: array count above schema capacity %d", bnd.what, bnd.count)))
+		f.line("%s%s", ind, argThrowLit(fmt.Sprintf("%s > %d", length, bnd.count),
+			bnd.refusal("", fmt.Sprintf("array count above schema capacity %d", bnd.count))))
 	}
 	switch elem {
 	case ir.KindU8, ir.KindU16, ir.KindU32, ir.KindU64:
@@ -818,7 +818,7 @@ func (g *gen) marshalArray(f *cfile, ind, idExpr, val string, elem ir.Kind, ref 
 		if bnd.hasElemMax && bnd.elemMax < math.MaxInt32 {
 			e := fmt.Sprintf("_b%d", depth)
 			f.line("%s%s { var %s = %s[%s] ?? global::System.Array.Empty<byte>(); %s if (%s.Length != 0 || %s) os.WriteBlob(%s, %s); }", ind, loop, e, val, iv,
-				argThrow(fmt.Sprintf("%s.Length > %d", e, bnd.elemMax), fmt.Sprintf("%s element: blob length above schema maxlen %d", bnd.what, bnd.elemMax)), e, last, iv, e)
+				argThrowLit(fmt.Sprintf("%s.Length > %d", e, bnd.elemMax), bnd.refusal(" element", fmt.Sprintf("blob length above schema maxlen %d", bnd.elemMax))), e, last, iv, e)
 		} else {
 			f.line("%s%s { if ((%s[%s] ?? global::System.Array.Empty<byte>()).Length != 0 || %s) os.WriteBlob(%s, %s[%s] ?? global::System.Array.Empty<byte>()); }", ind, loop, val, iv, last, iv, val, iv)
 		}
@@ -846,13 +846,13 @@ func (g *gen) marshalArray(f *cfile, ind, idExpr, val string, elem ir.Kind, ref 
 			// equal to the element default (the empty row) is not written at all, and
 			// the last row always is.
 			f.line("%s    if (%s[%s].Count != 0 || %s) {", ind, val, iv, last)
-			g.marshalArray(f, ind+"        ", iv, fmt.Sprintf("%s[%s]", val, iv), items.Elem, items.ElemRef, items.ElemItems, rowBound(bnd, items), depth+1, false, "")
+			g.marshalArray(f, ind+"        ", iv, fmt.Sprintf("%s[%s]", val, iv), items.Elem, items.ElemRef, items.ElemItems, rowBound(bnd, iv, items), depth+1, false, "")
 			f.line("%s    }", ind)
 		} else {
 			// A wrapper row has its own frame, so it takes the closer instead -- the
 			// same interior/last choice, expressed the same way as for a struct element
 			// above.
-			g.marshalArray(f, ind+"    ", iv, fmt.Sprintf("%s[%s]", val, iv), items.Elem, items.ElemRef, items.ElemItems, rowBound(bnd, items), depth+1, false, last)
+			g.marshalArray(f, ind+"    ", iv, fmt.Sprintf("%s[%s]", val, iv), items.Elem, items.ElemRef, items.ElemItems, rowBound(bnd, iv, items), depth+1, false, last)
 		}
 		f.line("%s}", ind)
 		emitSeqEnd(f, ind, keepIf)
@@ -875,9 +875,12 @@ func (g *gen) marshalArray(f *cfile, ind, idExpr, val string, elem ir.Kind, ref 
 // .Length/.Count, so those are compared here. A bound at or above int.MaxValue
 // cannot be exceeded by a C# array, list or string and gets no guard.
 
-// arrBound is one array level's schema bound, with the name its refusal reports.
+// arrBound is one array level's schema bound, with the name its refusal reports;
+// rows are the index variables of the enclosing row loops, outermost first, when
+// the level is a row of a nested array (ARCHITECTURE §9.6.1).
 type arrBound struct {
 	what       string
+	rows       []string
 	hasCount   bool
 	count      int64
 	hasElemMax bool
@@ -888,15 +891,39 @@ func fieldBound(fld *ir.Field) arrBound {
 	return arrBound{what: fld.Name, hasCount: fld.HasCount, count: fld.Count, hasElemMax: fld.ElemMaxHas, elemMax: fld.ElemMax}
 }
 
-// rowBound is the bound of one row of an array-of-arrays: the inner array's own.
-func rowBound(outer arrBound, items *ir.ArrayElem) arrBound {
-	return arrBound{what: outer.what + " row", hasCount: items.HasCount, count: items.Count, hasElemMax: items.ElemMaxHas, elemMax: items.ElemMax}
+// rowBound is the bound of row iv of an array-of-arrays: the inner array's own,
+// named by the outer path with that index appended.
+func rowBound(outer arrBound, iv string, items *ir.ArrayElem) arrBound {
+	rows := append(append([]string(nil), outer.rows...), iv)
+	return arrBound{what: outer.what, rows: rows, hasCount: items.HasCount, count: items.Count, hasElemMax: items.ElemMaxHas, elemMax: items.ElemMax}
+}
+
+// refusal is the C# string literal of this level's refusal text: the field, the
+// index of every enclosing row (`deep[1][0]`), suffix (" element" for a leaf
+// element of the level), then detail. A row's text is an interpolated string, so
+// the indices are formatted only in the throw; a field's stays a constant.
+func (b arrBound) refusal(suffix, detail string) string {
+	if len(b.rows) == 0 {
+		return `"` + b.what + suffix + ": " + detail + `"`
+	}
+	var lit strings.Builder
+	lit.WriteString(`$"` + b.what)
+	for _, iv := range b.rows {
+		lit.WriteString("[{" + iv + "}]")
+	}
+	lit.WriteString(suffix + ": " + detail + `"`)
+	return lit.String()
 }
 
 // argThrow is the refusal statement: `if (cond) throw` with SofabError.Argument,
 // the category corelib-cs raises for a bad encode call.
 func argThrow(cond, msg string) string {
-	return fmt.Sprintf("if (%s) throw new global::sofab.SofabException(global::sofab.SofabError.Argument, \"%s\");", cond, msg)
+	return argThrowLit(cond, `"`+msg+`"`)
+}
+
+// argThrowLit is argThrow with the message as a ready C# string expression.
+func argThrowLit(cond, lit string) string {
+	return fmt.Sprintf("if (%s) throw new global::sofab.SofabException(global::sofab.SofabError.Argument, %s);", cond, lit)
 }
 
 // maxlenArg is the bound argument of a string write: ", N" for a declared maxlen,
