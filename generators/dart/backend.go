@@ -888,7 +888,7 @@ func (g *gen) emitMarshalArray(f *dfile, ind string, fld *ir.Field, acc string, 
 	if forced {
 		keep = keepAlways
 	}
-	b := arrBound{fld.Name, fld.HasCount, fld.Count, fld.ElemMaxHas, fld.ElemMax}
+	b := arrBound{name: fld.Name, hasCount: fld.HasCount, count: fld.Count, hasEmax: fld.ElemMaxHas, emax: fld.ElemMax}
 	g.marshalWrapperArray(f, ind, fmt.Sprintf("%d", fld.ID), acc, fld.Elem, fld.ElemRef, fld.ElemItems, b, 0, keep)
 }
 
@@ -906,7 +906,26 @@ func (g *gen) emitMarshalArray(f *dfile, ind string, fld *ir.Field, acc string, 
 
 // encodeRefusal is the statement refusing field `name` at encode for `why`.
 func encodeRefusal(name, why string) string {
-	return fmt.Sprintf("throw const sofab.SofabException(sofab.SofabError.invalidArgument, %s);", dartStringLit(name+": "+why))
+	return encodeRefusalAt(name, nil, why)
+}
+
+// encodeRefusalAt is encodeRefusal for a value inside the rows of a nested
+// array: rows are the index variables of the enclosing row loops, outermost
+// first, and the text names each (`srows[1]: over count 2`). Such a text is an
+// interpolated string, so it is not const: the exception and its message are
+// built only on the throw, and the guard that does not fire costs nothing more.
+func encodeRefusalAt(name string, rows []string, why string) string {
+	if len(rows) == 0 {
+		return fmt.Sprintf("throw const sofab.SofabException(sofab.SofabError.invalidArgument, %s);", dartStringLit(name+": "+why))
+	}
+	head := dartStringLit(name)
+	var lit strings.Builder
+	lit.WriteString(head[:len(head)-1])
+	for _, iv := range rows {
+		lit.WriteString("[$" + iv + "]")
+	}
+	lit.WriteString(dartStringLit(": " + why)[1:])
+	return fmt.Sprintf("throw sofab.SofabException(sofab.SofabError.invalidArgument, %s);", lit.String())
 }
 
 // encodeGuard is the bound check written in front of the write of field fld,
@@ -942,9 +961,11 @@ func (g *gen) encodeGuard(fld *ir.Field, acc string) string {
 
 // arrBound is what the schema declares for one level of a wrapper array: its
 // own `count` and its string/blob elements' `maxlen` (a native row's `count`
-// is the next level's count). name is the field, for the refusal message.
+// is the next level's count). name is the field and rows the index variables of
+// the enclosing row loops, outermost first, for the refusal message.
 type arrBound struct {
 	name     string
+	rows     []string
 	hasCount bool
 	count    int64
 	hasEmax  bool
@@ -957,12 +978,14 @@ func (b arrBound) countGuard(val string) string {
 	if !b.hasCount {
 		return ""
 	}
-	return fmt.Sprintf("if (%s.length > %d) %s", val, b.count, encodeRefusal(b.name, fmt.Sprintf("over count %d", b.count)))
+	return fmt.Sprintf("if (%s.length > %d) %s", val, b.count, encodeRefusalAt(b.name, b.rows, fmt.Sprintf("over count %d", b.count)))
 }
 
-// inner is the bound of the next level down, an array element described by items.
-func (b arrBound) inner(items *ir.ArrayElem) arrBound {
-	return arrBound{b.name, items.HasCount, items.Count, items.ElemMaxHas, items.ElemMax}
+// inner is the bound of the next level down, an array element described by
+// items: row iv of this level.
+func (b arrBound) inner(items *ir.ArrayElem, iv string) arrBound {
+	rows := append(append([]string(nil), b.rows...), iv)
+	return arrBound{name: b.name, rows: rows, hasCount: items.HasCount, count: items.Count, hasEmax: items.ElemMaxHas, emax: items.ElemMax}
 }
 
 // emitEncodeRefusalDoc documents, on [encode], what serialize refuses
@@ -1102,12 +1125,12 @@ func (g *gen) marshalWrapperArray(f *dfile, ind, idExpr, val string, elem ir.Kin
 		// §2, applied to an element. At the LAST index it is written whatever its
 		// value: see lastElemExpr.
 		f.line("%se.beginSequenceLazy(%s);", ind, idExpr)
-		g.emitDestElemLoop(f, ind, iv, val, elem, elem, nil, b.name, b.hasEmax, b.emax, "maxlen")
+		g.emitDestElemLoop(f, ind, iv, val, elem, elem, nil, b, b.hasEmax, b.emax, "maxlen")
 		emitSeqEnd(f, ind, keepIf)
 	case ir.KindBlob:
 		// A blob element is a leaf, exactly like the string element above.
 		f.line("%se.beginSequenceLazy(%s);", ind, idExpr)
-		g.emitDestElemLoop(f, ind, iv, val, elem, elem, nil, b.name, b.hasEmax, b.emax, "maxlen")
+		g.emitDestElemLoop(f, ind, iv, val, elem, elem, nil, b, b.hasEmax, b.emax, "maxlen")
 		emitSeqEnd(f, ind, keepIf)
 	case ir.KindStruct, ir.KindUnion:
 		// A sequence-form element obeys the SAME rule as the leaf elements above --
@@ -1130,7 +1153,7 @@ func (g *gen) marshalWrapperArray(f *dfile, ind, idExpr, val string, elem ir.Kin
 			// so the rule lands on the WRITE rather than on a closer: an interior row
 			// equal to the element default (the empty row) is not written at all, and
 			// the last row always is.
-			g.emitDestElemLoop(f, ind, iv, val, ir.KindArray, items.Elem, items.ElemRef, b.name, items.HasCount, items.Count, "count")
+			g.emitDestElemLoop(f, ind, iv, val, ir.KindArray, items.Elem, items.ElemRef, b, items.HasCount, items.Count, "count")
 			emitSeqEnd(f, ind, keepIf)
 			return
 		}
@@ -1138,7 +1161,7 @@ func (g *gen) marshalWrapperArray(f *dfile, ind, idExpr, val string, elem ir.Kin
 		// same interior/last choice, expressed the same way as for a struct
 		// element above.
 		f.line("%sfor (var %s = 0; %s < %s.length; %s++) {", ind, iv, iv, val, iv)
-		g.marshalWrapperArray(f, ind+"  ", iv, fmt.Sprintf("%s[%s]", val, iv), items.Elem, items.ElemRef, items.ElemItems, b.inner(items), depth+1, lastElemExpr(iv, val))
+		g.marshalWrapperArray(f, ind+"  ", iv, fmt.Sprintf("%s[%s]", val, iv), items.Elem, items.ElemRef, items.ElemItems, b.inner(items, iv), depth+1, lastElemExpr(iv, val))
 		f.line("%s}", ind)
 		emitSeqEnd(f, ind, keepIf)
 	}
@@ -1154,12 +1177,12 @@ func (g *gen) marshalWrapperArray(f *dfile, ind, idExpr, val string, elem ir.Kin
 // blob's `maxlen` (what = "maxlen"), a native row's `count` (what = "count") --
 // and is refused at encode before the element is written (encodeGuard): one
 // compare per element, on the length already loaded for the default test.
-func (g *gen) emitDestElemLoop(f *dfile, ind, iv, val string, kind, elem ir.Kind, ref *ir.TypeRef, name string, hasBound bool, bound int64, what string) {
+func (g *gen) emitDestElemLoop(f *dfile, ind, iv, val string, kind, elem ir.Kind, ref *ir.TypeRef, b arrBound, hasBound bool, bound int64, what string) {
 	ev := "_e" + strings.TrimPrefix(iv, "_i")
 	f.line("%sfor (var %s = 0; %s < %s.length; %s++) {", ind, iv, iv, val, iv)
 	f.line("%s  final %s = %s[%s];", ind, ev, val, iv)
 	if hasBound {
-		f.line("%s  if (%s.length > %d) %s", ind, ev, bound, encodeRefusal(name, fmt.Sprintf("element over %s %d", what, bound)))
+		f.line("%s  if (%s.length > %d) %s", ind, ev, bound, encodeRefusalAt(b.name, b.rows, fmt.Sprintf("element over %s %d", what, bound)))
 	}
 	f.line("%s  if (%s.length != 0 || %s) %s", ind, ev, lastElemExpr(iv, val), g.writeDestStmt(kind, elem, ref, iv, ev))
 	f.line("%s}", ind)

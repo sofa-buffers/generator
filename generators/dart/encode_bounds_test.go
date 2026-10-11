@@ -38,9 +38,14 @@ messages:
       ai8: { id: 20, type: array, items: { type: i8 } }
       a64: { id: 21, type: array, items: { type: u64 } }
       mbo: { id: 22, type: array, items: { type: boolean } }
+      deep: { id: 23, type: array, items: { type: array, count: 2, items: { type: array, count: 3, items: { type: string, count: 2, maxlen: 2 } } } }
 `
 
 const refuse = "throw const sofab.SofabException(sofab.SofabError.invalidArgument, "
+
+// refuseAt is the refusal of a value inside a nested array's rows: its text
+// interpolates the row indices, so it is built only on the throw and is not const.
+const refuseAt = "throw sofab.SofabException(sofab.SofabError.invalidArgument, "
 
 func TestDartEncodeRefusesOverBoundValues(t *testing.T) {
 	lib := dartFiles(t, encodeBoundsSrc, map[string]any{})["message.dart"]
@@ -71,8 +76,13 @@ func TestDartEncodeRefusesOverBoundValues(t *testing.T) {
 		"if (mat.length > 2) "+refuse+"'mat: over count 2');",
 		"if (_e0.length > 3) "+refuse+"'mat: element over count 3');",
 		"if (nest.length > 2) "+refuse+"'nest: over count 2');",
-		"if (nest[_i0].length > 3) "+refuse+"'nest: over count 3');",
-		"if (_e1.length > 4) "+refuse+"'nest: element over maxlen 4');",
+		// a row's refusal names the row: the field, then every enclosing index
+		"if (nest[_i0].length > 3) "+refuseAt+"'nest[$_i0]: over count 3');",
+		"if (_e1.length > 4) "+refuseAt+"'nest[$_i0]: element over maxlen 4');",
+		"if (deep.length > 2) "+refuse+"'deep: over count 2');",
+		"if (deep[_i0].length > 3) "+refuseAt+"'deep[$_i0]: over count 3');",
+		"if (deep[_i0][_i1].length > 2) "+refuseAt+"'deep[$_i0][$_i1]: over count 2');",
+		"if (_e2.length > 2) "+refuseAt+"'deep[$_i0][$_i1]: element over maxlen 2');",
 		"if (bl.length > 2) "+refuse+"'bl: over count 2');",
 		"if (_e0.length > 3) "+refuse+"'bl: element over maxlen 3');",
 		// union options: the default one inside its omission test, a forced one
@@ -93,8 +103,11 @@ func TestDartEncodeRefusesOverBoundValues(t *testing.T) {
 		"e.writeUnsignedArray(22, _bools01(mbo), mbo.length);",
 	)
 	// The guard is one compare per bound: no helper, no copy, no extra pass.
-	if n := strings.Count(lib, refuse); n != 20 {
-		t.Errorf("want 20 encode refusals, got %d:\n%s", n, lib)
+	if n := strings.Count(lib, refuse); n != 19 {
+		t.Errorf("want 19 const encode refusals, got %d:\n%s", n, lib)
+	}
+	if n := strings.Count(lib, refuseAt); n != 5 {
+		t.Errorf("want 5 row encode refusals, got %d:\n%s", n, lib)
 	}
 	mustNotContain(t, "bufferFull doc", lib, "(`bufferFull`) rather than being")
 }
@@ -130,15 +143,21 @@ const dartEncodeBoundsDriver = `import 'dart:io';
 import 'package:rt/message.dart';
 import 'package:sofa_buffers_corelib/sofa_buffers_corelib.dart' as sofab;
 
-void refused(String what, void Function(M m) fill) {
+void refused(String what, void Function(M m) fill, [String? text]) {
   final m = M();
   fill(m);
   try {
     m.encode();
   } on sofab.SofabException catch (e) {
-    if (e.code == sofab.SofabError.invalidArgument) return;
-    stderr.writeln('FAIL: $what: wrong category ${e.code}');
-    exit(1);
+    if (e.code != sofab.SofabError.invalidArgument) {
+      stderr.writeln('FAIL: $what: wrong category ${e.code}');
+      exit(1);
+    }
+    if (text != null && e.message != text) {
+      stderr.writeln('FAIL: $what: refused with "${e.message}", want "$text"');
+      exit(1);
+    }
+    return;
   }
   stderr.writeln('FAIL: $what: encoded');
   exit(1);
@@ -171,9 +190,14 @@ void main() {
   refused('struct array count', (m) => m.pts.addAll([M_Pts(), M_Pts(), M_Pts()]));
   refused('matrix count', (m) => m.mat.addAll([for (var i = 0; i < 3; i++) sofab.InlineInt64Array.of([1])]));
   refused('matrix row count', (m) => m.mat.add(sofab.InlineInt64Array.of([1, 2, 3, 4])));
-  refused('nested count', (m) => m.nest.addAll([[], [], []]));
-  refused('nested row count', (m) => m.nest.add([str('a'), str('b'), str('c'), str('d')]));
-  refused('nested element maxlen', (m) => m.nest.add([str('abcde')]));
+  refused('nested count', (m) => m.nest.addAll([[], [], []]), 'nest: over count 2');
+  refused('nested row count', (m) => m.nest.add([str('a'), str('b'), str('c'), str('d')]), 'nest[0]: over count 3');
+  refused('nested second row count', (m) => m.nest.addAll([[], [str('a'), str('b'), str('c'), str('d')]]), 'nest[1]: over count 3');
+  refused('nested element maxlen', (m) => m.nest.addAll([[], [str('abcde')]]), 'nest[1]: element over maxlen 4');
+  refused('deep count', (m) => m.deep.addAll([[], [], []]), 'deep: over count 2');
+  refused('deep row count', (m) => m.deep.addAll([[], [[], [], [], []]]), 'deep[1]: over count 3');
+  refused('deep row row count', (m) => m.deep.addAll([[[]], [[], [str('a'), str('b'), str('c')]]]), 'deep[1][1]: over count 2');
+  refused('deep element maxlen', (m) => m.deep.add([[], [], [str('abc')]]), 'deep[0][2]: element over maxlen 2');
   refused('blob array element maxlen', (m) => m.bl.add(sofab.InlineBytes.of([1, 2, 3, 4])));
   refused('union default option width', (m) => m.un.a = 256);
   refused('union forced option maxlen', (m) => m.un.mutableT().assignString('abc'));
