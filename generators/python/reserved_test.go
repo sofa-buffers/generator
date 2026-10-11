@@ -196,7 +196,7 @@ for cls in json.loads(sys.argv[3]):
     d = c.decoder()
     assert d.feed(o.encode()) is sofab.Status.COMPLETE, cls
 for n in ("Decoder", "Encoder", "Status", "Visitor", "SofaDecodeError", "SofaIncompleteError"):
-    assert getattr(message, n) is getattr(sofab, n), n
+    assert getattr(message, "_" + n) is getattr(sofab, n), n
 assert message.REASSEMBLY > message.MAX_FIELD_SPAN > 0
 print("ok")
 `
@@ -247,14 +247,34 @@ var (
 	upperConst = regexp.MustCompile(`(?m)^([A-Z][A-Z0-9_]*) = `)
 )
 
+// importBindings is every name the `from ... import` lines of a module bind:
+// the alias of `Decoder as _Decoder`, else the name itself.
+func importBindings(mod string) []string {
+	var names []string
+	for _, m := range importStmt.FindAllStringSubmatch(mod, -1) {
+		for _, n := range strings.Split(m[1], ",") {
+			n = strings.TrimSpace(n)
+			if i := strings.Index(n, " as "); i >= 0 {
+				n = strings.TrimSpace(n[i+len(" as "):])
+			}
+			names = append(names, n)
+		}
+	}
+	return names
+}
+
 // TestTypeReservedCoversImports: the type-level list is complete -- every
-// upper-case name a generated module imports or states as a module constant is
-// on it, so no type can be spelled like one and rebind it. Swept over the
-// example, the shared names schema, the reserved schema and a schema with an
-// unbounded string, blob and wrapper array (the three MAX_DYN_* constants are
-// emitted only for an unbounded field of their kind). The `from sofab import`
-// line is also checked through sofabImports on a decode text that takes every
-// branch, so a name no schema reaches today (SofaLimitError) is held too.
+// upper-case name a generated module binds, by an import or as a module
+// constant, is on it, so no type can be spelled like one and rebind it. An
+// import binds a `_` name (sofabBindings), which no type identifier can spell,
+// so what the list has to hold is the module's own constants; a new import
+// bound under its own upper-case name fails here instead of quietly joining
+// the list (generator#719). Swept over the example, the shared names schema,
+// the reserved schema and a schema with an unbounded string, blob and wrapper
+// array (the three MAX_DYN_* constants are emitted only for an unbounded field
+// of their kind). The `from sofab import` line is also checked through
+// sofabImports on a decode text that takes every branch, so a name no schema
+// reaches today (SofaLimitError) is held too.
 func TestTypeReservedCoversImports(t *testing.T) {
 	for _, s := range []string{"../../examples/messages/example.yaml", "../../tests/conformance/lib/names.yaml"} {
 		checkTypeReservedCovers(t, s, string(genPy(t, schemaFile(t, s), map[string]any{})["message.py"]))
@@ -268,14 +288,14 @@ func TestTypeReservedCoversImports(t *testing.T) {
 	}
 	checkTypeReservedCovers(t, "unbounded", unbounded)
 
-	every := sofabImports("raise SofaLimitError(x)\nreserve_elem(a, b, UNBOUNDED, c)\nreserve_leaf(\nreserve_row(\n"+
-		"t = (Binding(closed=True),)\ndef on_field(self, fld: Field):\nWireType.FIXLEN, FixlenSubtype.FP32\n",
-		"_M__Def__a = FloatArrayDefault([0.0])\n")
+	every := sofabImports("raise _SofaLimitError(x)\nreserve_elem(a, b, _UNBOUNDED, c)\nreserve_leaf(\nreserve_row(\n"+
+		"t = (_Binding(closed=True),)\ndef on_field(self, fld: _Field):\n_WireType.FIXLEN, _FixlenSubtype.FP32\n",
+		"_M__Def__a = _FloatArrayDefault([0.0])\n")
 	if want := []string{"Binding", "Decoder", "Encoder", "Field", "FixlenSubtype", "FloatArrayDefault", "SofaDecodeError", "SofaIncompleteError",
 		"SofaLimitError", "Status", "UNBOUNDED", "Visitor", "WireType", "reserve_elem", "reserve_leaf", "reserve_row"}; strings.Join(every, " ") != strings.Join(want, " ") {
 		t.Errorf("sofabImports on every trigger = %v, want %v (extend the trigger text with the new branch)", every, want)
 	}
-	checkTypeReservedCovers(t, "every sofab import", "from sofab import "+strings.Join(every, ", ")+"\n")
+	checkTypeReservedCovers(t, "every sofab import", "from sofab import "+strings.Join(sofabBindings(every), ", ")+"\n")
 }
 
 // unboundedYAML has one unbounded field of each receiver-capped kind.
@@ -290,12 +310,7 @@ messages:
 
 func checkTypeReservedCovers(t *testing.T, label, mod string) {
 	t.Helper()
-	var names []string
-	for _, m := range importStmt.FindAllStringSubmatch(mod, -1) {
-		for _, n := range strings.Split(m[1], ",") {
-			names = append(names, strings.TrimSpace(n))
-		}
-	}
+	names := importBindings(mod)
 	for _, m := range upperConst.FindAllStringSubmatch(mod, -1) {
 		names = append(names, m[1])
 	}
@@ -321,10 +336,8 @@ var (
 // steps (`_M__Fill = bytearray(...)`, then `_M__Fill = bytes(_M__Fill)`).
 func moduleDecls(mod string) map[string]int {
 	n := map[string]int{}
-	for _, m := range importStmt.FindAllStringSubmatch(mod, -1) {
-		for _, x := range strings.Split(m[1], ",") {
-			n[strings.TrimSpace(x)]++
-		}
+	for _, x := range importBindings(mod) {
+		n[x]++
 	}
 	for _, re := range []*regexp.Regexp{classDecl, defDecl} {
 		for _, m := range re.FindAllStringSubmatch(mod, -1) {
@@ -377,5 +390,151 @@ func TestNamesSchemaDeclaresOnce(t *testing.T) {
 		if len(seen) != len(s.Messages) {
 			t.Errorf("harness.py: %d keys for %d messages (%s)", len(seen), len(s.Messages), re)
 		}
+	}
+}
+
+// importedTypeNames is every upper-case name a generated module can import --
+// each sofab name sofabImports can return (on the trigger text that reaches
+// every branch) and the standard library's -- so a name the corelib line gains
+// is swept here without editing the list.
+func importedTypeNames() []string {
+	every := sofabImports("raise _SofaLimitError(x)\nreserve_elem(a, b, _UNBOUNDED, c)\n"+
+		"t = (_Binding(closed=True),)\ndef on_field(self, fld: _Field):\n_WireType.FIXLEN, _FixlenSubtype.FP32\n",
+		"_M__Def__a = _FloatArrayDefault([0.0])\nraise _SofaArgumentError(\"x\")\n")
+	names := []string{"ClassVar", "IntEnum", "IntFlag"}
+	for _, n := range every {
+		if n[0] >= 'A' && n[0] <= 'Z' {
+			names = append(names, n)
+		}
+	}
+	sort.Strings(names)
+	return names
+}
+
+// importNamesYAML has one message per imported name, each with a payload that
+// makes the module import and USE every one of them: an enum (IntEnum), a
+// bitfield (IntFlag), a union (ClassVar), a float array with a default
+// (FloatArrayDefault), a bounded wrapper array (SofaArgumentError at encode,
+// reserve_leaf), an unbounded one (UNBOUNDED), a bounded string (FixlenSubtype,
+// WireType, Field) and the destination table (Binding).
+func importNamesYAML(names []string) string {
+	var b strings.Builder
+	b.WriteString("version: 1\nmessages:\n")
+	for _, n := range names {
+		fmt.Fprintf(&b, `  %s:
+    payload:
+      e:  { id: 0, type: enum, enum: { a: 0, b: 1 } }
+      bf: { id: 1, type: bitfield, bits: { x: { pos: 0 }, y: { pos: 3 } } }
+      u:  { id: 2, type: union, oneof: { n: { id: 0, type: u8 }, s: { id: 1, type: string, maxlen: 8 } } }
+      fa: { id: 3, type: array, items: { type: fp32, count: 3 }, default: [0.0, 1.5] }
+      ws: { id: 4, type: array, items: { type: string, maxlen: 4, count: 2 } }
+      wu: { id: 5, type: array, items: { type: string } }
+      s:  { id: 6, type: string, maxlen: 8 }
+      x:  { id: 7, type: u16 }
+`, n)
+	}
+	return b.String()
+}
+
+// TestImportedNamesAreFreeTypeNames (generator#719): a type spelled like a name
+// the module imports keeps its name. The module binds every upper-case import
+// under a leading `_` (sofabBindings), so no import takes a type name, and a
+// generator that starts importing a corelib name renames no user type -- which
+// is what reserving SofaArgumentError for the encode guard did.
+func TestImportedNamesAreFreeTypeNames(t *testing.T) {
+	names := importedTypeNames()
+	mod := string(genPy(t, schema(t, importNamesYAML(names)), map[string]any{})["message.py"])
+	line := importLine(t, mod)
+	for _, n := range names {
+		if !strings.Contains(mod, "\nclass "+n+":\n") {
+			t.Errorf("type %s is not the class %s", n, n)
+		}
+		if strings.Contains(mod, "\nclass "+n+"_:\n") {
+			t.Errorf("type %s was escaped to %s_ although the module binds the import as _%s", n, n, n)
+		}
+		// No emitter raises SofaLimitError today (sofabImports), so no schema
+		// imports it; TestTypeReservedCoversImports holds its binding.
+		stdlib := n == "ClassVar" || n == "IntEnum" || n == "IntFlag"
+		if !stdlib && n != "SofaLimitError" && !strings.Contains(line, n+" as _"+n) {
+			t.Errorf("the schema uses every sofab import, but %s is not bound as _%s: %s", n, n, line)
+		}
+	}
+	for _, want := range []string{"from enum import IntEnum as _IntEnum, IntFlag as _IntFlag\n", "from typing import ClassVar as _ClassVar\n"} {
+		if !strings.Contains(mod, want) {
+			t.Errorf("missing %q", want)
+		}
+	}
+	for name, n := range moduleDecls(mod) {
+		if n != 1 {
+			t.Errorf("%s is declared %d times", name, n)
+		}
+	}
+}
+
+// importNamesDriver round-trips every message of importNamesYAML one-shot and
+// streamed byte by byte, and checks that each class is the schema's type while
+// the corelib's names still work behind their private bindings: an over-count
+// array raises sofab.SofaArgumentError, a truncated message
+// sofab.SofaIncompleteError.
+const importNamesDriver = `
+import json, sys
+sys.path.insert(0, sys.argv[1])
+import message, sofab
+for n in json.loads(sys.argv[2]):
+    cls = getattr(message, n)
+    assert isinstance(cls, type) and cls.__module__ == "message" and cls.__name__ == n, n
+    e = getattr(message, n + "_E")
+    bf = getattr(message, n + "_Bf")
+    m = cls(e=e.B, bf=bf.X | bf.Y, fa=[2.5], ws=["ab", "c"], wu=["xyz"], s="hi", x=300)
+    m.u.s = "opt"
+    wire = m.encode()
+    back = cls.decode(wire)
+    assert back.to_jsonable() == m.to_jsonable(), (n, back.to_jsonable(), m.to_jsonable())
+    d = cls.decoder()
+    st = sofab.Status.COMPLETE
+    for i in range(len(wire)):
+        st = d.feed(wire[i:i + 1])
+    assert st is sofab.Status.COMPLETE, (n, st)
+    assert d.message.to_jsonable() == m.to_jsonable(), n
+    try:
+        cls(ws=["a", "b", "c"]).encode()
+        raise AssertionError(n + ": over-count array encoded")
+    except sofab.SofaArgumentError:
+        pass
+    try:
+        cls.decode(wire[:-1])
+        raise AssertionError(n + ": truncated message decoded")
+    except sofab.SofaIncompleteError:
+        pass
+print("ok %s" % sofab.IMPL)
+`
+
+// TestImportedNamesAsTypesImport runs the module of
+// TestImportedNamesAreFreeTypeNames on the corelib engine the run selects
+// (tests/conformance/python/run.sh runs it once per engine). Gated on
+// SOFAB_PY_CORELIB.
+func TestImportedNamesAsTypesImport(t *testing.T) {
+	corelib := os.Getenv("SOFAB_PY_CORELIB")
+	if corelib == "" {
+		t.Skip("set SOFAB_PY_CORELIB to a corelib-py checkout")
+	}
+	py, err := exec.LookPath("python3")
+	if err != nil {
+		t.Skip("python3 not found")
+	}
+	engine := pyEngine(t, corelib)
+	names := importedTypeNames()
+	dir := t.TempDir()
+	for path, content := range genPy(t, schema(t, importNamesYAML(names)), map[string]any{}) {
+		if err := os.WriteFile(filepath.Join(dir, path), content, 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	js, _ := json.Marshal(names)
+	cmd := exec.Command(py, "-W", "error", "-c", importNamesDriver, dir, string(js))
+	cmd.Env = append(os.Environ(), "PYTHONPATH="+filepath.Join(corelib, "src"))
+	out, err := cmd.CombinedOutput()
+	if err != nil || strings.TrimSpace(string(out)) != "ok "+engine {
+		t.Fatalf("a module whose types are spelled like its imports does not import/round-trip on %s: %v\n%s", engine, err, out)
 	}
 }

@@ -152,15 +152,18 @@ PascalCase segment per name, joined with `_`: the inline struct of field
 element struct of an array field `rows` is `M_Rows`.
 
 A class name the module already uses for something else gets a trailing
-underscore, so the module keeps its own meaning of it: a message `status` is
-`Status_` (`Status` stays `sofab.Status`), a message `none` is `None_`. Those
-names are the keywords `False`, `None`, `True`; the names the module imports
-(`Binding`, `ClassVar`, `Decoder`, `Encoder`, `Field`, `FixlenSubtype`,
-`FloatArrayDefault`, `IntEnum`, `IntFlag`, `SofaArgumentError`,
-`SofaDecodeError`, `SofaIncompleteError`, `SofaLimitError`, `Status`,
-`UNBOUNDED`, `Visitor`, `WireType`); and the
-module's own constants (`MAX_DYN_ARRAY_COUNT`, `MAX_DYN_STRING_LEN`,
-`MAX_DYN_BLOB_LEN`, `MAX_FIELD_SPAN`, `REASSEMBLY`).
+underscore, so the module keeps its own meaning of it: a message `none` is
+`None_`, a message `REASSEMBLY` is `REASSEMBLY_`. Those
+names are the keywords `False`, `None`, `True`, and the module's own constants
+(`MAX_DYN_ARRAY_COUNT`, `MAX_DYN_STRING_LEN`, `MAX_DYN_BLOB_LEN`,
+`MAX_FIELD_SPAN`, `REASSEMBLY`).
+
+What the module imports takes no type name: every upper-case name it imports
+is bound privately (`from sofab import Status as _Status`, `from enum import
+IntEnum as _IntEnum`), so a message `status` is the class `Status` and a
+message `sofa_argument_error` the class `SofaArgumentError`. The generated
+module therefore does not re-export the corelib's names; read them from
+`sofab` itself (`sofab.Status`, `sofab.SofaDecodeError`).
 
 Everything else the module declares for its own use starts with `_` — the
 decode visitor of a class `M` is `_M__Visitor` — so no schema name can reach

@@ -784,16 +784,16 @@ func emitOneTable(f *pyfile, t *bindTable) {
 			// A union inside an option: when that option is re-selected the
 			// corelib resets this which slot too, to the default_id stated here
 			// (corelib-py#167, rule 4).
-			f.line("%s = (Binding(closed=True, which_at=%d, default_id=%d)", t.name, t.which, t.whichDef)
+			f.line("%s = (_Binding(closed=True, which_at=%d, default_id=%d)", t.name, t.which, t.whichDef)
 		case t.which >= 0:
 			// A one-of table: its rows are alternatives, and the decoder writes
 			// the arriving option's id into words[which] (corelib-py#165).
-			f.line("%s = (Binding(closed=True, which_at=%d)", t.name, t.which)
+			f.line("%s = (_Binding(closed=True, which_at=%d)", t.name, t.which)
 		default:
-			f.line("%s = (Binding(closed=True)", t.name)
+			f.line("%s = (_Binding(closed=True)", t.name)
 		}
 	} else {
-		f.line("%s = (Binding()", t.name)
+		f.line("%s = (_Binding()", t.name)
 	}
 	for _, r := range t.rows {
 		f.line("    .%s(%s)", r.method, r.args)

@@ -103,16 +103,16 @@ func TestPythonEncodeBoundGuards(t *testing.T) {
 		"        if len(self.au) != 0:\n            e.write_u32_array(14, self.au, 3)\n",
 		// Wrapper arrays: the count before the frame opens, each element's maxlen
 		// at its write.
-		"        _n0 = len(self.as_)\n        if _n0 > 2:\n            raise SofaArgumentError(\"as: array over count 2\")\n        e.write_sequence_begin_lazy(16)",
+		"        _n0 = len(self.as_)\n        if _n0 > 2:\n            raise _SofaArgumentError(\"as: array over count 2\")\n        e.write_sequence_begin_lazy(16)",
 		"                e.write_string_bounded(_i0, _e0, 3)\n",
-		"        _n0 = len(self.ab)\n        if _n0 > 2:\n            raise SofaArgumentError(\"ab: array over count 2\")\n",
+		"        _n0 = len(self.ab)\n        if _n0 > 2:\n            raise _SofaArgumentError(\"ab: array over count 2\")\n",
 		"                e.write_bytes_bounded(_i0, _e0, 4)\n",
-		"        _n0 = len(self.ast)\n        if _n0 > 2:\n            raise SofaArgumentError(\"ast: array over count 2\")\n",
+		"        _n0 = len(self.ast)\n        if _n0 > 2:\n            raise _SofaArgumentError(\"ast: array over count 2\")\n",
 		// Array of arrays: the outer count, then each row's own -- a native row as
 		// its writer's cap, a string row as a guard plus its elements' maxlen.
-		"        _n0 = len(self.rows)\n        if _n0 > 2:\n            raise SofaArgumentError(\"rows: array over count 2\")\n",
+		"        _n0 = len(self.rows)\n        if _n0 > 2:\n            raise _SofaArgumentError(\"rows: array over count 2\")\n",
 		"            if len(_e0) != 0 or _i0 == _n0 - 1:\n                e.write_u16_array(_i0, _e0, 3)\n",
-		"            _n1 = len(_e0)\n            if _n1 > 2:\n                raise SofaArgumentError(\"srows: array over count 2\")\n",
+		"            _n1 = len(_e0)\n            if _n1 > 2:\n                raise _SofaArgumentError(\"srows: array over count 2\")\n",
 		"                    e.write_string_bounded(_i1, _e1, 2)\n",
 		// Native arrays of integers, enums and bitfields: the element's width
 		// next to the cap ("None" where the schema states no count) -- the same
@@ -166,7 +166,7 @@ func TestPythonEncodeBoundGuards(t *testing.T) {
 			t.Errorf("union M_U missing encode bound:\n%s\n--- in ---\n%s", want, u)
 		}
 	}
-	if !strings.Contains(mod, "SofaArgumentError, SofaDecodeError,") {
+	if !strings.Contains(mod, "SofaArgumentError as _SofaArgumentError, SofaDecodeError as _SofaDecodeError,") {
 		t.Errorf("a module that raises SofaArgumentError must import it:\n%s", mod[:400])
 	}
 }
@@ -190,8 +190,7 @@ messages:
       w: { id: 5, type: array, items: { type: string } }
 `
 	mod := string(genPy(t, schema(t, src), map[string]any{})["message.py"])
-	if strings.Contains(mod, "raise SofaArgumentError(") || strings.Contains(mod, "SofaArgumentError,") ||
-		strings.Contains(mod, ", SofaArgumentError\n") {
+	if strings.Contains(mod, "raise _SofaArgumentError(") || strings.Contains(mod, "SofaArgumentError as _SofaArgumentError") {
 		t.Errorf("nothing to guard, yet SofaArgumentError is raised or imported:\n%s", mod)
 	}
 }

@@ -145,7 +145,7 @@ func (g *gen) emitUnionFields(f *pyfile, u *unionShape) {
 	f.line("    _value: object = %s", g.pyDefault(u.d.f))
 	f.blank()
 	for _, o := range u.opts {
-		f.line("    %s: ClassVar[int] = %d", o.idConst, o.f.ID)
+		f.line("    %s: _ClassVar[int] = %d", o.idConst, o.f.ID)
 	}
 }
 
@@ -212,7 +212,7 @@ func (g *gen) emitUnionIsDefault(f *pyfile, u *unionShape) {
 // exactly as a field of its kind (omitted at its default), every other option
 // forced (emitMarshalAt).
 func (g *gen) emitUnionSerialize(f *pyfile, u *unionShape) {
-	f.line("    def serialize(self, e: Encoder) -> None:")
+	f.line("    def serialize(self, e: _Encoder) -> None:")
 	f.line("        _w = self._which")
 	f.line("        _v = self._value")
 	first := true

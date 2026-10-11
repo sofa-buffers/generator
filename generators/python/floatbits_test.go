@@ -62,8 +62,8 @@ messages:
 		"if not (_M__Def__b.matches(self.b)):",
 		"if not (_M__Def__a.matches(self.a)):",
 		"if self.c != [1, 2]:",
-		"\n_M__Def__a = FloatArrayDefault([0, 1.5])\n",
-		"\n_M__Def__b = FloatArrayDefault([0])\n",
+		"\n_M__Def__a = _FloatArrayDefault([0, 1.5])\n",
+		"\n_M__Def__b = _FloatArrayDefault([0])\n",
 	} {
 		if !strings.Contains(src, want) {
 			t.Errorf("generated module lacks %q", want)
@@ -74,12 +74,12 @@ messages:
 			t.Errorf("generated module still compares a float array with IEEE equality: %q", bad)
 		}
 	}
-	if !strings.Contains(src, "FloatArrayDefault, ") && !strings.Contains(src, ", FloatArrayDefault") {
+	if !strings.Contains(src, "FloatArrayDefault as _FloatArrayDefault") {
 		t.Errorf("FloatArrayDefault is not imported from sofab")
 	}
 	// One constant per field, however many compares read it; none for the
 	// integer array, and the constants come after the class that reads them.
-	if n := strings.Count(src, "= FloatArrayDefault("); n != 2 {
+	if n := strings.Count(src, "= _FloatArrayDefault("); n != 2 {
 		t.Errorf("%d FloatArrayDefault constants, want 2", n)
 	}
 	if strings.Contains(src, "_M__Def__c") || strings.Index(src, "_M__Def__a = ") < strings.Index(src, "class M") {
@@ -103,7 +103,7 @@ messages:
 	src := string(genPy(t, s, map[string]any{})["message.py"])
 	for _, want := range []string{
 		"lambda: [*_M__Def__b.values]",
-		"_M__Def__b = FloatArrayDefault([-0.0, 2])",
+		"_M__Def__b = _FloatArrayDefault([-0.0, 2])",
 	} {
 		if !strings.Contains(src, want) {
 			t.Errorf("missing %q in:\n%s", want, src)

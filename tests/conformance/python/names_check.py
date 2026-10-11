@@ -4,7 +4,8 @@ Usage: names_check.py <generated-project-dir>
 
 tests/conformance/lib/names.yaml spells its messages like the names the
 generated module already has -- sofab's imports (`status`, `visitor`,
-`binding`), the module constants (`reassembly`, `unbounded`), keywords (`none`,
+`binding`, which the module binds privately, so they keep their names), the
+module constants (`reassembly`, `unbounded`), keywords (`none`,
 `self`), roles and paths (`m_a` beside `m.a`). A class that rebinds one of
 those breaks the module at IMPORT or at the first decode, while the generator
 exits 0, so every message here is built, encoded, decoded one-shot and
@@ -57,5 +58,8 @@ for name, cls in harness.MESSAGES.items():
 
 # The module's own public names are still the module's: no class rebound them.
 assert message.REASSEMBLY > message.MAX_FIELD_SPAN > 0
-assert message.Status is Status
+# sofab's names are bound privately (`Status as _Status`), so a message spelled
+# like one keeps its name and leaves the corelib's binding alone.
+assert message._Status is Status
+assert message.Status is harness.MESSAGES["status"], message.Status
 print("names: %d messages round-trip one-shot and streamed" % checked)

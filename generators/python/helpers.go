@@ -27,7 +27,7 @@ func cfgString(cfg map[string]any, key, dflt string) string {
 //   - a split $defs union variant: the union's identifier + `__Default` + the
 //     Pascal option name (Shape__DefaultPt);
 //   - on top of that, escapeType's trailing underscore where the identifier is
-//     a name the module scope already has (Status_).
+//     a public name the module states itself (MAX_FIELD_SPAN_).
 //
 // baseIdent is the identifier BEFORE the escape; every name derived from a type
 // -- its private visitor, locations, tables and enum alias, `_` + base + `__` +
@@ -318,7 +318,7 @@ func (g *gen) emitCodec(f *pyfile, name string, ms generator.MessageSize) {
 		f.line("        :class:`sofab.SofaBufferError` is raised, never a short message.")
 		f.line(`        """`)
 		f.line("        buf = bytearray(%s.MAX_SIZE)", name)
-		f.line("        e = Encoder.over_buffer(buf, 0)")
+		f.line("        e = _Encoder.over_buffer(buf, 0)")
 		f.line("        self.serialize(e)")
 		f.line("        # Through a memoryview: slicing the bytearray itself would copy the")
 		f.line("        # prefix once more before bytes() copies it again.")
@@ -353,7 +353,7 @@ func (g *gen) emitCodec(f *pyfile, name string, ms generator.MessageSize) {
 		f.line("        scratch = bytearray(%d)", pyScratchSize)
 		f.line("        # The sink is handed a view over ``scratch``, which the encoder goes")
 		f.line("        # on writing into, so each piece is copied out here.")
-		f.line("        e = Encoder.over_buffer(scratch, 0, lambda _v: out.append(bytes(_v)))")
+		f.line("        e = _Encoder.over_buffer(scratch, 0, lambda _v: out.append(bytes(_v)))")
 		f.line("        self.serialize(e)")
 		f.line("        e.flush()")
 		f.line("        # One drain is the common case (a message below the scratch size), and")
@@ -399,9 +399,9 @@ func (g *gen) emitCodec(f *pyfile, name string, ms generator.MessageSize) {
 	f.line("        o = cls()")
 	if g.plans[name] != nil {
 		f.line("        v = %s(o)", g.visitorOf(name))
-		f.line("        d = Decoder(visitor=v, %s,", g.capsArgs())
+		f.line("        d = _Decoder(visitor=v, %s,", g.capsArgs())
 	} else {
-		f.line("        d = Decoder(visitor=%s(o), %s,", g.visitorOf(name), g.capsArgs())
+		f.line("        d = _Decoder(visitor=%s(o), %s,", g.visitorOf(name), g.capsArgs())
 	}
 	// One call, so nothing spans a chunk boundary and the buffer is never
 	// written; the most a TRUNCATED message can leave behind is the construct in
@@ -409,10 +409,10 @@ func (g *gen) emitCodec(f *pyfile, name string, ms generator.MessageSize) {
 	// allocate 64 KiB per one-shot decode for a buffer nothing touches.
 	f.line("                    reassembly=MAX_FIELD_SPAN)")
 	f.line("        st = d.feed(data)")
-	f.line("        if st is Status.INVALID:")
-	f.line(`            raise SofaDecodeError(d.error or "invalid message")`)
-	f.line("        if st is Status.INCOMPLETE:")
-	f.line(`            raise SofaIncompleteError(d.error or "truncated message")`)
+	f.line("        if st is _Status.INVALID:")
+	f.line(`            raise _SofaDecodeError(d.error or "invalid message")`)
+	f.line("        if st is _Status.INCOMPLETE:")
+	f.line(`            raise _SofaIncompleteError(d.error or "truncated message")`)
 	if g.plans[name] != nil {
 		f.line("        # COMPLETE, so the destination table's slots are final: one pass")
 		f.line("        # moves them onto the message. It runs AFTER the two refusals, so")

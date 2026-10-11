@@ -87,36 +87,33 @@ func unionDerivedShape(name string) bool {
 //
 // Every generated class and enum is declared at MODULE level, beside what the
 // module imports and the constants it states. A class spelled like one of those
-// rebinds it for everything after its definition -- a message `status` would
-// turn every `Status.COMPLETE` into an AttributeError, a message `reassembly`
-// every decoder()'s default -- and the generator exits 0, because the breakage
-// is only found at import or at the first decode.
+// rebinds it for everything after its definition -- a message `reassembly` would
+// turn every decoder()'s default into a class -- and the generator exits 0,
+// because the breakage is only found at import or at the first decode.
 //
 // A type identifier (naming.TypeIdent) always starts with an upper-case letter,
-// so only the upper-case names of the module scope can be reached, and a
-// generator-owned private name (`_StreamDecoder`, `_M__Visitor`) never can: no
-// schema name starts with `_`. What is left is this list, and a type identifier
-// on it takes a trailing underscore (`Status_`), which no other type identifier
-// has (ARCHITECTURE §8, "Naming").
+// and no schema name starts with `_`. So the module keeps everything it does
+// not state as public API out of reach by a leading underscore: a
+// generator-owned private name (`_StreamDecoder`, `_M__Visitor`), and every
+// upper-case name it imports -- sofab's (`_Decoder`, `_Status`,
+// `_SofaArgumentError`, sofabBindings) and the standard library's (`_IntEnum`,
+// `_ClassVar`). An import therefore never takes a type name, and a corelib name
+// the generator starts importing renames no user type (generator#719).
 //
-// The imports stay unaliased and the constants public on purpose: MAX_FIELD_SPAN
-// and REASSEMBLY are documented API a caller sizes decoder() with, and sofab's
-// names are what a user of the module reads alongside it.
+// What is left is this list: the keywords a class cannot be named at all, and
+// the module's own public constants. MAX_FIELD_SPAN and REASSEMBLY are documented
+// API a caller sizes decoder() with, and the MAX_DYN_* limits are the numbers
+// every Decoder is handed, so they keep their names, and a type identifier on
+// the list takes a trailing underscore (`REASSEMBLY_`), which no other type identifier has (ARCHITECTURE §8,
+// "Naming"). The list is closed: it holds what the module declares, never what
+// it imports, and nothing schema-dependent.
 
 // pyTypeReserved is every module-level name a generated type must not take,
-// each with the reason it is taken. Every upper-case name module() can import is
-// on it (TestTypeReservedCoversImports).
+// each with the reason it is taken. Every upper-case name the module binds
+// without a leading underscore is on it (TestTypeReservedCoversImports).
 var pyTypeReserved = map[string]string{
 	// Keywords a class cannot be named at all.
 	"False": "keyword", "None": "keyword", "True": "keyword",
-	// Imported from the standard library by the type section.
-	"IntEnum": "enum import", "IntFlag": "enum import", "ClassVar": "typing import",
-	// Imported from corelib-py (the `from sofab import` line).
-	"Binding": "sofab import", "Decoder": "sofab import", "Encoder": "sofab import",
-	"Field": "sofab import", "FixlenSubtype": "sofab import", "FloatArrayDefault": "sofab import",
-	"SofaArgumentError": "sofab import", "SofaDecodeError": "sofab import", "SofaIncompleteError": "sofab import",
-	"SofaLimitError": "sofab import", "Status": "sofab import",
-	"UNBOUNDED": "sofab import", "Visitor": "sofab import", "WireType": "sofab import",
 	// The module's own public constants.
 	"MAX_DYN_ARRAY_COUNT": "module constant", "MAX_DYN_STRING_LEN": "module constant",
 	"MAX_DYN_BLOB_LEN": "module constant", "MAX_FIELD_SPAN": "module constant",

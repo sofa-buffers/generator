@@ -151,7 +151,7 @@ def main(argv):
     dec = message.E.decoder()
     st = dec.feed(truncated)
     check("F/refused decode publishes no table field",
-          (st is message.Status.INCOMPLETE, dec.message.tag), (True, 0))
+          (st is sofab.Status.INCOMPLETE, dec.message.tag), (True, 0))
 
     # --- G: two scopes whose paths spell one name ----------------------------
     o = message.E()
@@ -177,7 +177,7 @@ def main(argv):
     for i in range(len(full)):
         st = dec.feed(full[i:i + 1])
     check("I/streamed one byte at a time",
-          (st is message.Status.COMPLETE, dec.message.tag, dec.message.name, dec.message.nums),
+          (st is sofab.Status.COMPLETE, dec.message.tag, dec.message.name, dec.message.nums),
           (True, 2, "second", [4]))
 
     if failures:
