@@ -110,10 +110,14 @@ of the crate rather than two.
 | value | rustc | generated `Cargo.toml` |
 |---|---|---|
 | `"0.8"` (default) | 1.70 or newer | `heapless = "0.8"`, corelib feature `heapless` |
-| `"0.9"` | **1.87 or newer** (heapless 0.9's own minimum) | `heapless = "0.9"`, corelib feature `heapless09` |
+| `"0.9"` | **1.87 or newer** (heapless 0.9's own minimum) | `heapless = "0.9"`, corelib feature `heapless09`, `rust-version = "1.87"` |
+
+With `"0.9"`, the generated `Cargo.toml` declares `rust-version = "1.87"`, so
+cargo refuses an older toolchain up front instead of failing inside heapless.
+With `"0.8"` it declares no `rust-version`.
 
 Write the value quoted: an unquoted `0.9` is a YAML number, which the config
-schema rejects.
+schema rejects, and generation fails rather than falling back to the default.
 
 ```yaml
 targets:
