@@ -31,19 +31,24 @@ import (
 // the decode side emits for them (declaredWidthCond), on the member.
 
 // arrBound is the bound set of one array level: its own `count` and, for a
-// string/blob element, the element `maxlen`. name labels the refusal.
+// string/blob element, the element `maxlen`. name labels the refusal, and rows
+// are the index variables of the enclosing row loops, outermost first, when the
+// level is a row of a nested array (ARCHITECTURE §9.6.1).
 type arrBound struct {
 	name       string
+	rows       []string
 	hasCount   bool
 	count      int64
 	elemMaxHas bool
 	elemMax    int64
 }
 
-// rowBound is the bound set of a nested array's row, read from its ArrayElem.
-func rowBound(parent arrBound, items *ir.ArrayElem) arrBound {
+// rowBound is the bound set of row iv of a nested array, read from its
+// ArrayElem: the parent's path with that index appended.
+func rowBound(parent arrBound, iv string, items *ir.ArrayElem) arrBound {
 	return arrBound{
-		name:       parent.name + " row",
+		name:       parent.name,
+		rows:       append(append([]string(nil), parent.rows...), iv),
 		hasCount:   items.HasCount,
 		count:      items.Count,
 		elemMaxHas: items.ElemMaxHas,
@@ -57,8 +62,21 @@ func fitsInt(n int64) bool { return n < math.MaxInt32 }
 
 // overThrow renders `if (cond) throw` with the ARGUMENT category.
 func overThrow(cond, name, detail string) string {
-	return fmt.Sprintf("if (%s) throw SofabException(SofabError.ARGUMENT, %s)",
-		cond, ktStringLit(name+": "+detail))
+	return overThrowAt(cond, name, nil, "", detail)
+}
+
+// overThrowAt is overThrow for a value inside the rows of a nested array: the
+// text names the field, the index of every enclosing row (`deep[1][0]`), then
+// suffix (" element" for a leaf element of that row). The indices are string
+// templates, so the text is built only when the guard fires.
+func overThrowAt(cond, name string, rows []string, suffix, detail string) string {
+	lit := ktStringLit(name)
+	lit = lit[:len(lit)-1]
+	for _, iv := range rows {
+		lit += "[$" + iv + "]"
+	}
+	lit += ktStringLit(suffix + ": " + detail)[1:]
+	return fmt.Sprintf("if (%s) throw SofabException(SofabError.ARGUMENT, %s)", cond, lit)
 }
 
 // countGuard is the refusal of an array value holding more than its `count`
@@ -68,7 +86,7 @@ func countGuard(b arrBound, val string) string {
 	if !b.hasCount || !fitsInt(b.count) {
 		return ""
 	}
-	return overThrow(fmt.Sprintf("%s.size > %d", val, b.count), b.name,
+	return overThrowAt(fmt.Sprintf("%s.size > %d", val, b.count), b.name, b.rows, "",
 		fmt.Sprintf("more than count %d elements", b.count))
 }
 
