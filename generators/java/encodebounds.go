@@ -2,6 +2,7 @@ package java
 
 import (
 	"fmt"
+	"strings"
 
 	"github.com/sofa-buffers/generator/internal/ir"
 )
@@ -27,7 +28,22 @@ import (
 // argThrow is the encode-side refusal: the checked argument category serialize
 // already declares (IOException), raised before the field's first byte.
 func argThrow(name, detail string) string {
-	return fmt.Sprintf("throw new SofabException(SofabError.ARGUMENT, \"%s: %s\");", name, detail)
+	return argThrowAt(name, nil, "", detail)
+}
+
+// argThrowAt is argThrow for a value inside the rows of a nested array: rows are
+// the index variables of the enclosing row loops, outermost first, and the text
+// names each after the field (`deep[1][0]: ...`), then suffix (" element" for a
+// leaf element of that row). The indices are concatenated into the message in
+// the throw statement itself, so the text is built only when the guard fires.
+func argThrowAt(name string, rows []string, suffix, detail string) string {
+	var msg strings.Builder
+	msg.WriteString(`"` + name)
+	for _, iv := range rows {
+		msg.WriteString(`[" + ` + iv + ` + "]`)
+	}
+	msg.WriteString(suffix + ": " + detail + `"`)
+	return fmt.Sprintf("throw new SofabException(SofabError.ARGUMENT, %s);", msg.String())
 }
 
 // encodeWidthGuard refuses a long-backed scalar of kind k held in acc that lies
@@ -42,9 +58,12 @@ func encodeWidthGuard(k ir.Kind, ref *ir.TypeRef, acc, name string) string {
 }
 
 // arrBound is what one array level declares: its capacity and, for a string or
-// blob element, the element maxlen. name labels the refusal.
+// blob element, the element maxlen. name labels the refusal, and rows are the
+// index variables of the enclosing row loops, outermost first, when the level is
+// a row of a nested array (ARCHITECTURE §9.6.1).
 type arrBound struct {
 	name       string
+	rows       []string
 	hasCount   bool
 	count      int64
 	elemMaxHas bool
@@ -52,12 +71,14 @@ type arrBound struct {
 }
 
 func fieldArrBound(fld *ir.Field) arrBound {
-	return arrBound{fld.Name, fld.HasCount, fld.Count, fld.ElemMaxHas, fld.ElemMax}
+	return arrBound{name: fld.Name, hasCount: fld.HasCount, count: fld.Count, elemMaxHas: fld.ElemMaxHas, elemMax: fld.ElemMax}
 }
 
-// inner is the bound of one element row of this array.
-func (b arrBound) inner(items *ir.ArrayElem) arrBound {
-	return arrBound{b.name + " element", items.HasCount, items.Count, items.ElemMaxHas, items.ElemMax}
+// inner is the bound of element row iv of this array: the field's path with that
+// index appended.
+func (b arrBound) inner(items *ir.ArrayElem, iv string) arrBound {
+	rows := append(append([]string(nil), b.rows...), iv)
+	return arrBound{name: b.name, rows: rows, hasCount: items.HasCount, count: items.Count, elemMaxHas: items.ElemMaxHas, elemMax: items.ElemMax}
 }
 
 // countGuard refuses an array whose length (lenExpr) is past its declared
@@ -66,7 +87,7 @@ func (b arrBound) countGuard(lenExpr string) string {
 	if !b.hasCount {
 		return ""
 	}
-	return fmt.Sprintf("if (%s > %d) %s", lenExpr, b.count, argThrow(b.name, fmt.Sprintf("array count above schema capacity %d", b.count)))
+	return fmt.Sprintf("if (%s > %d) %s", lenExpr, b.count, argThrowAt(b.name, b.rows, "", fmt.Sprintf("array count above schema capacity %d", b.count)))
 }
 
 // blobMaxlenGuard refuses a blob (acc, possibly null) longer than its maxlen.

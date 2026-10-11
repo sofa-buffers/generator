@@ -34,6 +34,7 @@ messages:
       ds:  { id: 14, type: string }
       db:  { id: 15, type: blob }
       da:  { id: 16, type: array, items: { type: u32 } }
+      deep: { id: 17, type: array, items: { type: array, count: 2, items: { type: array, count: 3, items: { type: blob, count: 2, maxlen: 2 } } } }
 `
 	got := javaMethod(t, genJavaFromYAML(t, src, map[string]any{})["src/main/java/message/M.java"], "public void serialize(OStream os)")
 	for _, want := range []string{
@@ -53,7 +54,13 @@ messages:
 		`if (_t1.size() > 2) throw new SofabException(SofabError.ARGUMENT, "ab: array count above schema capacity 2");`,
 		`if (_e0.length > 3) throw new SofabException(SofabError.ARGUMENT, "ab element: blob length above schema maxlen 3");`,
 		`if (_t2.size() > 2) throw new SofabException(SofabError.ARGUMENT, "ar: array count above schema capacity 2");`,
-		`if (_e0.length > 5) throw new SofabException(SofabError.ARGUMENT, "ar element: array count above schema capacity 5");`,
+		// A row's refusal names the row: the field, then the index of every
+		// enclosing row, concatenated only in the throw.
+		`if (_e0.length > 5) throw new SofabException(SofabError.ARGUMENT, "ar[" + _i0 + "]: array count above schema capacity 5");`,
+		`if (_t3.size() > 2) throw new SofabException(SofabError.ARGUMENT, "deep: array count above schema capacity 2");`,
+		`if (_t4.size() > 3) throw new SofabException(SofabError.ARGUMENT, "deep[" + _i0 + "]: array count above schema capacity 3");`,
+		`if (_t5.size() > 2) throw new SofabException(SofabError.ARGUMENT, "deep[" + _i0 + "][" + _i1 + "]: array count above schema capacity 2");`,
+		`if (_e2.length > 2) throw new SofabException(SofabError.ARGUMENT, "deep[" + _i0 + "][" + _i1 + "] element: blob length above schema maxlen 2");`,
 		`if (this.abo.size() > 6) throw new SofabException(SofabError.ARGUMENT, "abo: array count above schema capacity 6");`,
 	} {
 		if !strings.Contains(got, want) {
