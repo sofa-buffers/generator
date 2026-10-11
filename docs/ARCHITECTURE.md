@@ -5656,6 +5656,24 @@ refused where the loop reaches it, after the array header and the elements
 before it: the encoder's output is then a failed message, never a short one
 handed back, and generated `encode()` raises and returns nothing.
 
+**The refusal text names the level.** Where the category carries a message
+written by the generated guard, the message starts with the position of the
+value within the struct or union whose `serialize` emits it (a row of an array
+nested in a struct that is itself an array element reads `inner[1]`, not
+`sa[0].inner[1]`): the field name, then, for a value inside the rows of a nested array, the
+index of every enclosing row (`srows: array over count 2` for the field itself,
+`srows[1]: array over count 2` for its second row, `deep[1][0]: …` one level
+further down). A row guard's text interpolates the loop indices the encode
+already holds, and is formatted only on the failure path: a Python f-string in
+the `raise`, a Dart non-`const` `SofabException` built in the `throw`. The
+guard that does not fire builds no string and allocates nothing, and a
+top-level guard keeps its constant text. Backends whose refusal carries no
+generated text (Go `RejectArgument()`, C++ `rejectArgument()`, Rust and Zig
+`Error::Argument` / `error.InvalidArgument`, C's descriptor-driven refusal)
+emit none, so the footprint profiles gain no `.rodata`. Java, Kotlin, C# and
+TypeScript name the level by a constant word (`srows element`, `srows row`,
+`srows[]`) but not the row index.
+
 Before generator#656 the only guard was accidental: a bounded target whose
 buffer is exactly `MAX_SIZE` refused once the *whole message* overflowed it, and a
 single over-bound value in a small message never gets that far. The same input
