@@ -1326,7 +1326,7 @@ func TestTSCompactArrayKeepsItsTail(t *testing.T) {
 		// A nested native row is written under the positional guard: an interior
 		// empty row is not written at all, the last one always is. Its own count
 		// is refused at encode before the row is written (generator#656).
-		"      if (_e0.length !== 0 || _i0 === _a0.length - 1) {\n        if (_e0.length > 3) throw new SofabError(SofabErrorCode.Argument, \"rows[]: array count above schema capacity 3\");\n        os.writeUnsignedArray(_i0, _e0);\n      }\n",
+		"      if (_e0.length !== 0 || _i0 === _a0.length - 1) {\n        if (_e0.length > 3) throw new SofabError(SofabErrorCode.Argument, `rows[${_i0}]: array count above schema capacity 3`);\n        os.writeUnsignedArray(_i0, _e0);\n      }\n",
 	} {
 		if !strings.Contains(mod, want) {
 			t.Errorf("fixed-count message.ts missing unchanged dynamic form %q", want)
@@ -1726,7 +1726,7 @@ messages:
 		"    for (let _i0 = 0, _a0 = this.fstrs; _i0 < _a0.length; _i0++) {\n      if (_a0[_i0]! !== \"\" || _i0 === _a0.length - 1) {\n        os.writeString(_i0, _a0[_i0]!, 8);\n      }\n    }\n",
 		"    for (let _i0 = 0, _a0 = this.fblobs; _i0 < _a0.length; _i0++) {\n      if (_a0[_i0]!.length !== 0 || _i0 === _a0.length - 1) {\n        if (_a0[_i0]!.length > 4) throw new SofabError(SofabErrorCode.Argument, \"fblobs[]: blob byte length above schema maxlen 4\");\n        os.writeBlob(_i0, _a0[_i0]!);\n      }\n    }\n",
 		// A NATIVE nested row has no frame of its own, so the rule lands on the write.
-		"    this.rows.forEach((_e0, _i0, _a0) => {\n      if (_e0.length !== 0 || _i0 === _a0.length - 1) {\n        if (_e0.length > 3) throw new SofabError(SofabErrorCode.Argument, \"rows[]: array count above schema capacity 3\");\n        os.writeUnsignedArray(_i0, _e0);\n      }\n    });\n",
+		"    this.rows.forEach((_e0, _i0, _a0) => {\n      if (_e0.length !== 0 || _i0 === _a0.length - 1) {\n        if (_e0.length > 3) throw new SofabError(SofabErrorCode.Argument, `rows[${_i0}]: array count above schema capacity 3`);\n        os.writeUnsignedArray(_i0, _e0);\n      }\n    });\n",
 	} {
 		if !strings.Contains(mod, want) {
 			t.Errorf("message.ts missing positional element rule %q:\n%s", want, mod)
