@@ -626,7 +626,6 @@ run_variant() {
     ENCBND_OPTS=""
     case "$label" in no-std-*) ENCBND_OPTS="--bounded-only" ;; esac
     echo "==> [$label] an over-bound value is refused at encode (generator#656)"
-    python3 "$ROOT/tests/conformance/lib/check_encode_bounds.py" --self-test
     printf 'version: 1\nmessages:\n' > "$WORK/encbnd.yaml"
     python3 "$ROOT/tests/conformance/lib/check_encode_bounds.py" --emit-schema $ENCBND_OPTS >> "$WORK/encbnd.yaml"
     rust_build "$WORK/encbnd.yaml" "$WORK/encbnd-$label"
@@ -1305,6 +1304,10 @@ PY
     FMT_SKIP_DEFS=""
     check_format rust "$WORK/fmt-$label"
 }
+
+# The encode-bound driver's self-test does not depend on the backend, so it runs
+# once here rather than once per variant inside run_variant.
+python3 "$ROOT/tests/conformance/lib/check_encode_bounds.py" --self-test
 
 # corelib-rs (std, the default): always-on, no feature flags.
 run_variant rs "corelib: rs" "$STD"

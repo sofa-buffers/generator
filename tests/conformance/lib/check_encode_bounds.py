@@ -49,6 +49,16 @@ The REFUSE cases, over the probe message `bnd`:
     nested struct's array  over its count
     scalar past its width  u8, i16 (both signs), enum, bitfield -- wherever the
                            backend's type can hold the value
+    array element past     a u8[] and an i16[], both past the top and below the
+                           bottom (-1 for the u8[]), with a count (`bnd`)
+    its width              and without one (`unb`, so not under --bounded-only);
+                           the over-width element comes after valid ones, so the
+                           refusal lands mid-field and the encode as a whole must
+                           fail -- bytes already written for the field are no
+                           answer. One more cell puts the over-width element past
+                           the count, which a clamping container cuts away
+    enum / bitfield array  an enum[] (i8 width: 200, -129) and a bitfield[] (u8
+    element past its width width: 256, -1), the over-width element after valid ones
 
 ## KNOWN_GAP
 
@@ -73,7 +83,10 @@ A cell the harness cannot reach: the value is refused, wrapped or cast to the fi
 storage type BEFORE any generated encode code runs (Go's and serde's JSON layers
 reject `300` for a `uint8`, System.Text.Json throws, a C, C++, Zig or Kotlin harness
 casts it), or a bounded container refuses it at assignment (rs-no-std's
-`heapless`). Whatever the harness answers there says nothing about the generated
+`heapless`). The integer array element cells (generator#721) are the same story
+one level down: they are asserted only where the array's storage holds a wider
+integer than its element (Python, Dart), and blocked wherever the element type is
+the declared width. Whatever the harness answers there says nothing about the generated
 encoder, so the cell is declared with its reason, still run, and reported as
 `blocked`; it is neither a pass nor a gap, and its outcome is not asserted. A
 blocked cell is the weakest answer this driver gives: every one of them needs a
@@ -85,6 +98,8 @@ Runs the table against a model harness that is this file itself: one that refuse
 every over-bound value passes every case, and the same model with ONE guard removed
 (`--defect FIELD`) fails exactly the cases of that field. So the driver is shown to
 go red on a missing guard, and to stay green on a present one, without a backend.
+The verdicts run side by side, one thread each, since each spawns its own model
+process.
 
 ## Not covered here
 
@@ -97,6 +112,7 @@ SOFAB_ENCODE_BOUNDS_DISCOVER=1 does the same for a whole suite run.
 """
 import json
 import os
+from concurrent.futures import ThreadPoolExecutor
 import subprocess
 import sys
 
@@ -125,6 +141,15 @@ STRINGS_AND_ARRAYS = (
     "n_arr_count_plus_1",
 )
 SCALARS = ("u8_over", "i16_over", "i16_under", "e_over", "f_over")
+# An integer array element past its declared width (generator#721): with a count,
+# without one, and (a8_over_past_count) one the count cuts away.
+# An unsigned element below 0 is past its width as much as one above the top.
+ELEM_WIDTH = ("a8_elem_over", "a8_elem_under", "a16_elem_over", "a16_elem_under")
+ELEM_WIDTH_UNBOUNDED = ("d8_elem_over", "d8_elem_under", "d16_elem_over", "d16_elem_under")
+# An enum or bitfield array element past the declared width (i8 for the enum, u8 for
+# the bitfield): the width binds, not the constant set or the mask.
+ELEM_WIDTH_KINDS = ("ea_elem_over", "ea_elem_under", "fa_elem_over", "fa_elem_under")
+ELEM_CELLS = ELEM_WIDTH + ELEM_WIDTH_UNBOUNDED + ELEM_WIDTH_KINDS
 
 # One line per variant, so that a backend change edits only its own lines.
 KNOWN_GAP = {
@@ -156,11 +181,11 @@ assert set(KNOWN_GAP) == set(VARIANTS)
 # One line per variant; a cell here is asserted as clamped, never as refused.
 CLAMP_CONTRACT = {
     "c": ("b_over_1", "b_over_60", "au_count_plus_1", "au_count_plus_2", "as_count_plus_1",
-          "n_arr_count_plus_1"),
+          "n_arr_count_plus_1", "a8_over_past_count"),
     "cpp": (),
-    "cpp-static": STRINGS_AND_ARRAYS,
+    "cpp-static": STRINGS_AND_ARRAYS + ("a8_over_past_count",),
     "c-cpp": (),
-    "c-cpp-static": STRINGS_AND_ARRAYS,
+    "c-cpp-static": STRINGS_AND_ARRAYS + ("a8_over_past_count",),
     "rust": (),
     "rust-static": (),
     "rs-no-std": (),
@@ -171,7 +196,7 @@ CLAMP_CONTRACT = {
     "kotlin": (),
     "csharp": (),
     "dart": (),
-    "zig": ("au_count_plus_1", "au_count_plus_2", "n_arr_count_plus_1"),
+    "zig": ("au_count_plus_1", "au_count_plus_2", "n_arr_count_plus_1", "a8_over_past_count"),
     "typescript": (),
     "typescript-long": (),
     "typescript-number": (),
@@ -233,6 +258,80 @@ _block(("rs-no-std",), SCALARS, _RS_WIDTH)
 _block(("rs-no-std-std",), STRINGS_AND_ARRAYS, _HEAPLESS)
 _block(("rs-no-std-std",), SCALARS, _RS_WIDTH)
 
+# An integer array element past its width (generator#721). Only a backend whose
+# array storage holds a wider integer than the declared element (Python's list[int],
+# Dart's Int64 storage) can carry 300 into a u8[] to the encoder; there the cells
+# are asserted. Everywhere else the element type IS the declared width, exactly as
+# for the scalars above, and the cell is blocked with the same kind of reason.
+_ELEM_ALL = ELEM_WIDTH + ELEM_WIDTH_UNBOUNDED
+_block(("c",), ELEM_WIDTH,
+       "the element type is the declared width (uint8_t[], int16_t[]), so the encoder has no "
+       "width to check; the harness's cast to it wraps 300 -> 0x2c and -1 -> 0xff before encode")
+_CPP_ELEM = ("the element type is the declared width (std::uint8_t / std::int16_t in a vector or "
+             "InlineVector), so encode needs no check; the harness's cast wraps 300 to 0x2c "
+             "before the generated code sees it")
+_block(("cpp", "cpp-static"), _ELEM_ALL, _CPP_ELEM)
+_block(("c-cpp", "c-cpp-static"), ELEM_WIDTH, _CPP_ELEM)
+_block(("zig",), _ELEM_ALL,
+       "the element type is the declared width ([]u8 / []i16 and their FixedArray), so no "
+       "over-width element can be stored; the harness casts the JSON number into it (300 -> "
+       "0x2c) before the generated code sees it")
+_block(("go",), _ELEM_ALL + ("a8_over_past_count",),
+       "the element type is the declared width ([]uint8, []int16), so no over-width element can "
+       "reach the encoder; encoding/json refuses the number before encode")
+_block(("csharp",), _ELEM_ALL + ("a8_over_past_count",),
+       "the element type is the declared width (byte[], short[]), so no over-width element can "
+       "be assigned; System.Text.Json throws on the number before encode")
+_block(("java",), _ELEM_ALL,
+       "the element type is the declared width (byte[] for u8, short[] for i16), so no "
+       "over-width element can be stored; the harness narrows the number into it (300 -> 0x2c, -1 -> 0xff)")
+_block(("kotlin",), _ELEM_ALL,
+       "the element type is the declared width (UByteArray for u8, ShortArray for i16), so no "
+       "over-width element can be stored; the harness narrows the number into it (300 -> 0x2c, -1 -> 0xff)")
+_block(("typescript", "typescript-long", "typescript-number"), _ELEM_ALL,
+       "the field is a typed array of the declared width (Uint8Array, Int16Array), so no "
+       "over-width element can be stored; constructing it from the JSON numbers wraps 300 -> 44 and -1 -> 255")
+_RS_ELEM = ("the element type is the declared width (Vec<u8>/Vec<i16>, or heapless::Vec of "
+            "them), so no over-width element exists to encode (serde refuses the number at "
+            "assignment, harness panic)")
+for _v in ("rust", "rust-static", "rs-no-std", "rs-no-std-dynamic", "rs-no-std-std"):
+    _block((_v,), _ELEM_ALL + ("a8_over_past_count",), _RS_ELEM)
+
+# An enum or bitfield array element past its declared width: the same split. Python
+# (list of ints) and Dart (Int64 storage with an ElemRange) carry 200 into an i8-wide
+# enum[] to the encoder and are asserted; everywhere else the element type is the
+# declared width.
+_KIND_ELEM = {
+    "c": "the element type is the declared width (int8_t[] for the enum, uint8_t[] for the "
+         "bitfield), so the encoder has no width to check; the harness's cast wraps 200 -> -56 and -1 -> 0xff",
+    "cpp": "the element type is the declared width (an enum class over std::int8_t, a "
+           "std::uint8_t bitfield, in a vector or InlineVector), so encode needs no check; the "
+           "harness's cast wraps the number before the generated code sees it",
+    "zig": "the element type is the declared width (FixedArray(i8, 3) / FixedArray(u8, 3)), so "
+           "no over-width element can be stored; the harness casts the JSON number into it",
+    "go": "the element type is the declared width ([]Bnd_Ea over int8, []Bnd_Fa over uint8), so "
+          "no over-width element can reach the encoder; encoding/json refuses the number first",
+    "csharp": "the element type is the declared width (sbyte[] for the enum, byte[] for the "
+              "bitfield), so no over-width element can be assigned; System.Text.Json throws first",
+    "java": "the element type is the declared width (byte[] for the enum and the bitfield), so "
+            "no over-width element can be stored; the harness narrows the number into it",
+    "kotlin": "the element type is the declared width (ByteArray for the enum, UByteArray for the "
+              "bitfield), so no over-width element can be stored; the harness narrows the number",
+    "typescript": "the field is a typed array of the declared width (Int8Array for the enum, "
+                  "Uint8Array for the bitfield), so no over-width element can be stored; "
+                  "constructing it from the JSON numbers wraps 200 -> -56 and -1 -> 0xff",
+    "rust": "the element type is the declared width (Vec<i8>/Vec<u8>, or heapless::Vec of them), "
+            "so no over-width element exists to encode (serde refuses the number at assignment, "
+            "harness panic)",
+}
+for _vs, _key in ((("c",), "c"), (("cpp", "cpp-static", "c-cpp", "c-cpp-static"), "cpp"),
+                  (("zig",), "zig"), (("go",), "go"), (("csharp",), "csharp"),
+                  (("java",), "java"), (("kotlin",), "kotlin"),
+                  (("typescript", "typescript-long", "typescript-number"), "typescript"),
+                  (("rust", "rust-static", "rs-no-std", "rs-no-std-dynamic", "rs-no-std-std"),
+                   "rust")):
+    _block(_vs, ELEM_WIDTH_KINDS, _KIND_ELEM[_key])
+
 
 def emit_schema(bounded_only=False) -> int:
     print("# The encode-bound probe (generator#656), printed by")
@@ -253,12 +352,19 @@ def emit_schema(bounded_only=False) -> int:
     print("        type: struct")
     print("        fields:")
     print("          arr: { id: 0, type: array, items: { type: u16, count: 2 } }")
+    print("      a8: { id: 9, type: array, items: { type: u8, count: 3 } }")
+    print("      a16: { id: 10, type: array, items: { type: i16, count: 3 } }")
+    print("      ea: { id: 11, type: array, items: { type: enum, count: 3, enum: { A: 0, B: 1, C: 2 } } }")
+    print("      fa: { id: 12, type: array, items: { type: bitfield, count: 3, "
+          "bits: { x: { pos: 0 }, y: { pos: 1 }, z: { pos: 2 } } } }")
     if not bounded_only:
         print(f"  {CTRL}:")
         print("    payload:")
         print("      s: { id: 0, type: string }")
         print("      b: { id: 1, type: blob }")
         print("      a: { id: 2, type: array, items: { type: u32 } }")
+        print("      d8: { id: 3, type: array, items: { type: u8 } }")
+        print("      d16: { id: 4, type: array, items: { type: i16 } }")
     return 0
 
 
@@ -287,10 +393,21 @@ def cases(blob_json: str, bounded_only: bool):
         ("i16_under", MSG, {"i16": -40000}, "refuse"),
         ("e_over", MSG, {"e": 200}, "refuse"),
         ("f_over", MSG, {"f": 256}, "refuse"),
+        ("a8_elem_over", MSG, {"a8": [1, 255, 300]}, "refuse"),
+        ("a8_elem_under", MSG, {"a8": [1, 0, -1]}, "refuse"),
+        ("a16_elem_over", MSG, {"a16": [-1, 32767, 32768]}, "refuse"),
+        ("a16_elem_under", MSG, {"a16": [1, -32768, -32769]}, "refuse"),
+        ("a8_over_past_count", MSG, {"a8": [1, 2, 3, 300]}, "refuse"),
+        ("ea_elem_over", MSG, {"ea": [0, 1, 200]}, "refuse"),
+        ("ea_elem_under", MSG, {"ea": [0, 1, -129]}, "refuse"),
+        ("fa_elem_over", MSG, {"fa": [1, 2, 256]}, "refuse"),
+        ("fa_elem_under", MSG, {"fa": [1, 0, -1]}, "refuse"),
         ("at_bound", MSG, {
             "s": "xxxx", "b": B(4), "u8": 255, "i16": -32768,
             "au": [4294967295, 0, 1], "as": ["abcd", "", "éé"],
-            "e": 2, "f": 7, "n": {"arr": [65535, 1]}}, "control"),
+            "e": 2, "f": 7, "n": {"arr": [65535, 1]},
+            "a8": [255, 0, 1], "a16": [-32768, 32767, 0],
+            "ea": [-128, 127, 2], "fa": [255, 0, 7]}, "control"),
         ("at_bound_utf8", MSG, {"s": "éé"}, "control"),
         ("at_bound_other_edge", MSG, {"u8": 255, "i16": 32767, "e": 127, "f": 255}, "control"),
     ]
@@ -299,6 +416,12 @@ def cases(blob_json: str, bounded_only: bool):
             ("unbounded_string", CTRL, {"s": "y" * 600}, "control"),
             ("unbounded_blob", CTRL, {"b": B(600)}, "control"),
             ("unbounded_array", CTRL, {"a": list(range(300))}, "control"),
+            ("unbounded_elem_width", CTRL, {"d8": list(range(256)) * 2,
+                                            "d16": [-32768, -1, 0, 1, 32767] * 60}, "control"),
+            ("d8_elem_over", CTRL, {"d8": [1, 2, 3, 255, 256]}, "refuse"),
+            ("d8_elem_under", CTRL, {"d8": [1, 0, -1]}, "refuse"),
+            ("d16_elem_over", CTRL, {"d16": [0, -32768, 32767, 32768]}, "refuse"),
+            ("d16_elem_under", CTRL, {"d16": [0, 32767, -32768, -32769]}, "refuse"),
         ]
     return out
 
@@ -322,7 +445,7 @@ def clamped(sent: dict, b64: str) -> dict:
             out[k] = _cut_utf8(v, 4)
         elif k == "b":
             out[k] = blob(hd.bytes_of(v)[:4] if not isinstance(v, list) else bytes(v[:4]), b64)
-        elif k == "au":
+        elif k in ("au", "a8", "a16"):
             out[k] = v[:3]
         elif k == "as":
             out[k] = [_cut_utf8(x, 4) for x in v[:3]]
@@ -349,7 +472,10 @@ def same(want, got) -> bool:
 
 
 def same_field(name, want, got) -> bool:
-    """A blob compares by its bytes, whatever its spelling."""
+    """A blob, and a u8-wide array (Go's []uint8 and []Bnd_Fa are base64 in JSON),
+    compares by its bytes, whatever its spelling."""
+    if name in ("a8", "d8", "fa") and isinstance(got, str):
+        return hd.bytes_of(got) == bytes(want)
     if name == "b":
         return hd.bytes_of(got) == (bytes(want) if isinstance(want, list) else hd.bytes_of(want))
     return same(want, got)
@@ -414,6 +540,29 @@ def verdict(cmd, cwd, name, msg, sent, kind, b64, clamp=False):
     return None
 
 
+# The fields a clamping container cuts at assignment, and the element width of
+# every integer array the model checks (lo, hi).
+CLAMPABLE = ("s", "b", "au", "as", "n", "a8", "a16")
+WIDTH = {"a8": (0, 255), "a16": (-32768, 32767), "d8": (0, 255), "d16": (-32768, 32767),
+         "ea": (-128, 127), "fa": (0, 255)}
+GUARDS = ("s", "b", "au", "as", "n", "u8", "i16", "e", "f", "a8", "a16", "d8", "d16", "ea", "fa")
+
+
+def clampable_cells(table):
+    """The refuse cells a clamping container turns into a valid value: every field
+    clampable, and every element left after the cut within its width (an over-width
+    element the count does not cut is a width refusal, never a clamp)."""
+    out = []
+    for n, m, sent, k in table:
+        if k != "refuse" or m != MSG or not set(sent) <= set(CLAMPABLE):
+            continue
+        cut = clamped(sent, "array")
+        if any(not WIDTH[f][0] <= x <= WIDTH[f][1] for f in cut if f in WIDTH for x in cut[f]):
+            continue
+        out.append((n, m, sent, k))
+    return out
+
+
 def model_harness(argv) -> int:
     """A harness for the probe schema that enforces every bound, minus `--defect`'s
     field. `encode` prints the JSON back as the "wire", `decode` echoes it."""
@@ -424,10 +573,11 @@ def model_harness(argv) -> int:
         sys.stdout.buffer.write(data)
         return 0
     obj = json.loads(data)
-    if "--clamp" in argv and argv[argv.index("encode") + 1] != CTRL:
+    ctrl = argv[argv.index("encode") + 1] == CTRL
+    if "--clamp" in argv and not ctrl:
         # A clamping container: strings, blobs and arrays are cut at assignment
         # (--cut-midchar cuts a string at its byte bound, ignoring characters).
-        clampable = {k: v for k, v in obj.items() if k in ("s", "b", "au", "as", "n")}
+        clampable = {k: v for k, v in obj.items() if k in CLAMPABLE}
         cut = clamped(clampable, "array")
         if "--cut-midchar" in argv and "s" in obj:
             cut["s"] = obj["s"].encode()[:4].decode(errors="replace")
@@ -435,9 +585,20 @@ def model_harness(argv) -> int:
             del cut[defect]
         obj.update(cut)
         data = json.dumps(obj).encode()
+    if "--no-elem-width" in argv:
+        # Every length and count guard kept, the element width guard dropped: the
+        # exact defect generator#721 is about.
+        lo_hi = {k: (-(1 << 64), 1 << 64) for k in WIDTH}
+    else:
+        lo_hi = WIDTH
     bad = []
     for k, v in obj.items():
-        if k == defect or argv[argv.index("encode") + 1] == CTRL:
+        if k == defect:
+            continue
+        if ctrl:
+            # The unbounded message: no length bound, but an element width still.
+            if k in lo_hi and any(not lo_hi[k][0] <= x <= lo_hi[k][1] for x in v):
+                bad.append(k)
             continue
         if k == "s" and len(v.encode()) > 4:
             bad.append(k)
@@ -457,6 +618,8 @@ def model_harness(argv) -> int:
             bad.append(k)
         elif k == "f" and not 0 <= v <= 255:
             bad.append(k)
+        elif k in lo_hi and (len(v) > 3 or any(not lo_hi[k][0] <= x <= lo_hi[k][1] for x in v)):
+            bad.append(k)
     if bad:
         print("error: over-bound " + ",".join(bad), file=sys.stderr)
         return 1
@@ -464,36 +627,60 @@ def model_harness(argv) -> int:
     return 0
 
 
+def _failing(cmd, rows, clamp=False):
+    """The names of the rows whose verdict is a problem. Each verdict spawns its own
+    harness processes, so they run side by side."""
+    with ThreadPoolExecutor(os.cpu_count() or 4) as pool:
+        probs = pool.map(lambda c: verdict(cmd, None, c[0], c[1], c[2], c[3], "array", clamp=clamp), rows)
+        return {c[0] for c, p in zip(rows, probs) if p is not None}
+
+
 def self_test() -> int:
     table = cases("array", False)
     bad = []
-    for defect in (None, "s", "b", "au", "as", "n", "u8", "i16", "e", "f"):
+    for defect in (None,) + GUARDS:
         cmd = [sys.executable, os.path.abspath(__file__), "--model-harness"] \
             + (["--defect", defect] if defect else [])
-        got = {name for name, msg, sent, kind in table
-               if verdict(cmd, None, name, msg, sent, kind, "array") is not None}
+        got = _failing(cmd, table)
         want = set() if defect is None else \
             {n for n, _, sent, k in table if k == "refuse" and defect in sent}
         if got != want:
             bad.append(f"defect {defect}: failing cells {sorted(got)}, want {sorted(want)}")
+    # Only the element width guard missing: exactly the over-width element cells go
+    # red, and the one past the count stays refused by the count guard.
+    cmd = [sys.executable, os.path.abspath(__file__), "--model-harness", "--no-elem-width"]
+    got = _failing(cmd, table)
+    if got != set(ELEM_CELLS):
+        bad.append(f"no element width guard: failing cells {sorted(got)}, "
+                   f"want {sorted(ELEM_CELLS)}")
     # The clamp contract: a clamping model passes every clampable case held to it,
     # and one that cuts mid-character or skips a field's clamp turns exactly those red.
-    clampable = [(n, m, sent, k) for n, m, sent, k in table
-                 if k == "refuse" and set(sent) <= {"s", "b", "au", "as", "n"}]
+    clampable = clampable_cells(table)
     base = [sys.executable, os.path.abspath(__file__), "--model-harness", "--clamp"]
     for extra, want in (([], set()),
                         (["--cut-midchar"], {"s_over_midchar"}),
-                        (["--defect", "au"], {"au_count_plus_1", "au_count_plus_2"})):
-        got = {n for n, m, sent, k in clampable
-               if verdict(base + extra, None, n, m, sent, k, "array", clamp=True) is not None}
+                        (["--defect", "au"], {"au_count_plus_1", "au_count_plus_2"}),
+                        (["--defect", "a8"], {"a8_over_past_count"})):
+        got = _failing(base + extra, clampable, clamp=True)
         if got != want:
             bad.append(f"clamp {extra}: failing cells {sorted(got)}, want {sorted(want)}")
+    # A u8 array may come back as base64 (Go's []uint8), and still compares by bytes.
+    if not same_field("a8", [255, 0, 1], "/wAB") or same_field("a8", [255, 0, 2], "/wAB") \
+            or not same_field("fa", [255, 0, 1], "/wAB"):
+        bad.append("same_field: a base64 u8 array does not compare by its bytes")
     for b in bad:
         print("FAIL self-test " + b)
     if not bad:
-        print(f"self-test: the model harness passes {len(table)} cases and each of 9 removed "
-              f"guards turns exactly its own refuse cases red; the clamp contract holds "
+        print(f"self-test: the model harness passes {len(table)} cases and each of {len(GUARDS)} "
+              f"removed guards turns exactly its own refuse cases red, a missing element width "
+              f"guard exactly the {len(ELEM_CELLS)} element cells; the clamp contract holds "
               f"{len(clampable)} cases and catches a mid-character cut and a missing clamp")
+        # A clamping model must not pass an over-width element the count keeps.
+        width = [c for c in table if c[0] in ELEM_WIDTH + ELEM_WIDTH_KINDS]
+        held = sorted({c[0] for c in width} - _failing(base, width, clamp=True))
+        if held:
+            print(f"FAIL self-test clamp: over-width element passed as clamped: {held}")
+            return 1
     return 1 if bad else 0
 
 

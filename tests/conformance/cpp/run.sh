@@ -1283,7 +1283,6 @@ YAML
     ENCBND_OPTS=""
     if [ -n "$corelib" ]; then ENCBND_OPTS="--bounded-only"; fi
     echo "==> [$label] an over-bound value is refused at encode (generator#656)"
-    python3 "$ROOT/tests/conformance/lib/check_encode_bounds.py" --self-test
     printf 'version: 1\nmessages:\n' > "$WORK/encbnd.yaml"
     python3 "$ROOT/tests/conformance/lib/check_encode_bounds.py" --emit-schema $ENCBND_OPTS >> "$WORK/encbnd.yaml"
     ( cd "$ROOT" && go run ./cmd/sofabgen --config "$WORK/cfg-$label.yaml" --lang cpp \
@@ -1309,6 +1308,10 @@ YAML
             -- "$WORK/emptyabs-$label/harness/harness"
     done
 }
+
+# The encode-bound driver's self-test does not depend on the backend, so it runs
+# once here rather than once per variant inside run_variant.
+python3 "$ROOT/tests/conformance/lib/check_encode_bounds.py" --self-test
 
 # Pure C++20 corelib-cpp (default).
 run_variant cpp "" "" "-I$CPP/include" SOFAB_CPP_DIR="$CPP" SOFAB_C_DIR="$CC"
