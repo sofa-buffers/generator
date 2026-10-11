@@ -959,7 +959,7 @@ func (g *gen) marshalArray(f *kfile, ind, idExpr, val string, elem ir.Kind, ref 
 		// emptiness test and costs the omitted interior nothing.
 		blobGuard := ""
 		if bnd.elemMaxHas {
-			blobGuard = overThrow(fmt.Sprintf("%s.size > %d", ev, bnd.elemMax), bnd.name+" element", fmt.Sprintf("longer than maxlen %d bytes", bnd.elemMax)) + "; "
+			blobGuard = overThrowAt(fmt.Sprintf("%s.size > %d", ev, bnd.elemMax), bnd.name, bnd.rows, " element", fmt.Sprintf("longer than maxlen %d bytes", bnd.elemMax)) + "; "
 		}
 		f.line("%sfor (%s in 0 until %s.size) { val %s = %s[%s]; if (%s.isNotEmpty() || %s) { %sos.writeBlob(%s, %s) } }",
 			ind, iv, lv, ev, lv, iv, ev, lastElemExpr(iv, lv), blobGuard, iv, ev)
@@ -982,13 +982,13 @@ func (g *gen) marshalArray(f *kfile, ind, idExpr, val string, elem ir.Kind, ref 
 			// interior row equal to the element default (the empty row) is not
 			// written at all, and the last row always is.
 			f.line("%s    if (%s.isNotEmpty() || %s) {", ind, ev, lastElemExpr(iv, lv))
-			g.marshalArray(f, ind+"        ", iv, ev, items.Elem, items.ElemRef, items.ElemItems, rowBound(bnd, items), depth+1, "")
+			g.marshalArray(f, ind+"        ", iv, ev, items.Elem, items.ElemRef, items.ElemItems, rowBound(bnd, iv, items), depth+1, "")
 			f.line("%s    }", ind)
 		} else {
 			// A wrapper row has its own frame, so it takes the closer instead --
 			// the same interior/last choice, expressed the same way as for a
 			// struct element above.
-			g.marshalArray(f, ind+"    ", iv, ev, items.Elem, items.ElemRef, items.ElemItems, rowBound(bnd, items), depth+1, lastElemExpr(iv, lv))
+			g.marshalArray(f, ind+"    ", iv, ev, items.Elem, items.ElemRef, items.ElemItems, rowBound(bnd, iv, items), depth+1, lastElemExpr(iv, lv))
 		}
 		f.line("%s}", ind)
 	}

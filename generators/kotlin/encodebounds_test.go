@@ -31,7 +31,8 @@ func TestKotlinEncodeBounds(t *testing.T) {
 		"      ae: { id: 13, type: array, items: { type: enum, enum: { $ref: \"#/$defs/enum/E\" }, count: 8 } }\n" +
 		"      us: { id: 14, type: string }\n" +
 		"      ub: { id: 15, type: blob }\n" +
-		"      ua: { id: 16, type: array, items: { type: u32 } }\n"
+		"      ua: { id: 16, type: array, items: { type: u32 } }\n" +
+		"      deep: { id: 17, type: array, items: { type: array, count: 2, items: { type: array, count: 3, items: { type: blob, count: 2, maxlen: 2 } } } }\n"
 	m := genFromYAML(t, src, map[string]any{})["src/main/kotlin/message/M.kt"]
 	ser := m[strings.Index(m, "public fun serialize(os: OStream)"):]
 	ser = ser[:strings.Index(ser, "\n    }\n")]
@@ -46,9 +47,15 @@ func TestKotlinEncodeBounds(t *testing.T) {
 		"if ((this.f and 0xffffUL.inv()) != 0UL) throw SofabException(SofabError.ARGUMENT, \"f: value outside declared bitfield width\")",
 		"if (_e0.size > 9) throw SofabException(SofabError.ARGUMENT, \"ab element: longer than maxlen 9 bytes\")",
 		"if (_t2.size > 4) throw SofabException(SofabError.ARGUMENT, \"nn: more than count 4 elements\")",
-		"if (_e0.size > 2) throw SofabException(SofabError.ARGUMENT, \"nn row: more than count 2 elements\")",
+		"if (_e0.size > 2) throw SofabException(SofabError.ARGUMENT, \"nn[$_i0]: more than count 2 elements\")",
 		"if (_t3.size > 3) throw SofabException(SofabError.ARGUMENT, \"ns: more than count 3 elements\")",
-		"if (_t4.size > 5) throw SofabException(SofabError.ARGUMENT, \"ns row: more than count 5 elements\")",
+		"if (_t4.size > 5) throw SofabException(SofabError.ARGUMENT, \"ns[$_i0]: more than count 5 elements\")",
+		// A row's refusal names the row: the field, then the index of every
+		// enclosing row, as string templates built only in the throw.
+		"throw SofabException(SofabError.ARGUMENT, \"deep: more than count 2 elements\")",
+		"throw SofabException(SofabError.ARGUMENT, \"deep[$_i0]: more than count 3 elements\")",
+		"throw SofabException(SofabError.ARGUMENT, \"deep[$_i0][$_i1]: more than count 2 elements\")",
+		"if (_e2.size > 2) throw SofabException(SofabError.ARGUMENT, \"deep[$_i0][$_i1] element: longer than maxlen 2 bytes\")",
 		"os.writeString(_i1, _e1, 6)",
 		"if (this.ae.size > 8) throw SofabException(SofabError.ARGUMENT, \"ae: more than count 8 elements\")",
 		"if (this.us.isNotEmpty()) os.writeString(14, this.us)\n",
