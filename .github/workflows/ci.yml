@@ -288,10 +288,13 @@ jobs:
       # rustfmt is not optional here: SOFAB_FORMAT_STRICT above forbids the skip
       # the suite would otherwise take. With it installed the suite generates
       # with --format=require, so sofabgen runs it over every generated .rs file,
-      # and then holds the result to `rustfmt --check`.
+      # and then holds the result to `rustfmt --check`. thumbv6m-none-eabi is
+      # the real no_std target the suite builds every rs-no-std lib for; the
+      # suite fails without it rather than skipping those builds.
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy, rustfmt
+          targets: thumbv6m-none-eabi
       - uses: ./.github/actions/corelib-refs
       - name: Rust backend — generate, build, round-trip, conformance
         run: ./tests/conformance/rust/run.sh

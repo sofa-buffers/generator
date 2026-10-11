@@ -39,6 +39,18 @@ the generated crate genuinely `#![no_std]`:
 - a decode stack bounded at compile time,
 - `serde` behind a cargo feature rather than an unconditional dependency.
 
+The library is the firmware artifact; build it without the `std` default
+feature, with or without the serde derives:
+
+```sh
+cargo build --lib --no-default-features --target thumbv6m-none-eabi
+cargo build --lib --no-default-features --features serde --target thumbv6m-none-eabi
+```
+
+With `allow_dynamic: true` the fields are `alloc` containers, so the crate's
+`serde` feature also turns on serde's `alloc` feature; a heap-free crate keeps
+serde free of `alloc`.
+
 Set it to `false` to emit an ordinary `std` crate that still links the no-std
 corelib — useful when the same schema has to be consumed by a host-side tool
 built from the same generated code.

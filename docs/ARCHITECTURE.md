@@ -7496,6 +7496,17 @@ A reimplementation is **conformant** when it reproduces these gates:
    generator always requests all five wire features (§7.3's skip needs every wire
    type), so a narrow no-std feature set exists only in the capability-guard
    rewrites of a generated `Cargo.toml`, which are checked to fail to build.
+   What Rust does build is the firmware crate itself: every `rs-no-std` lib leg
+   (static and `allow_dynamic` storage, over heapless 0.8 and 0.9) is built with
+   `--lib --no-default-features`, without and with `--features serde`, on the
+   host **and for `thumbv6m-none-eabi`**. Only the real no_std target proves the
+   crate is no_std: on the host std stays in the sysroot, so a dependency that
+   links std, or a serde impl reachable only through serde's `std`, compiles
+   anyway. An `allow_dynamic` crate's types hold `alloc::string::String` /
+   `alloc::vec::Vec`, whose serde impls sit behind serde's `alloc` feature, so
+   that crate's `serde` feature enables `serde/alloc` (a heap-free crate does not;
+   generator#729). A missing target fails the suite instead of skipping the
+   builds, and `lang-rust` installs it.
    The C descriptor profiles run too: BIG runs the whole shared vector file
    without `--max-id`; SMALL runs the skip matrix and the corpus round trip (the
    typed/encode vectors hold a `composite` message larger than SMALL's 255-byte

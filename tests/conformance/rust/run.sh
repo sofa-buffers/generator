@@ -1907,15 +1907,13 @@ run_variant no-std-std-hl09 "corelib: rs-no-std, no_std: false, $HL09" "$NOSTD"
 # target: `cargo build --lib --no-default-features` drops serde/std and compiles
 # the pure heapless (+ optional alloc) crate. Exercise BOTH allow_dynamic configs,
 # mirroring the c-cpp bounded-vs-allow_dynamic split.
-echo "==> no_std lib builds heap-free (--lib --no-default-features), allow_dynamic on AND off"
+# The crate shapes are checked first; the builds follow, all in one loop.
 
 # (a) allow_dynamic: true — every variable-length field is an alloc container, so
-# the crate pulls `extern crate alloc` yet still compiles as #![no_std] on a lib.
+# the crate pulls `extern crate alloc` yet must still compile as #![no_std].
 # Deliberately inspects the crate run_variant built for the dynamic leg -- the
 # assertion is about THAT leg's output, so borrowing it is the point here.
 grep -q 'extern crate alloc' "$WORK/ex-no-std-dynamic/src/lib.rs" || { echo "FAIL: allow_dynamic crate should pull extern crate alloc"; exit 1; }
-( cd "$WORK/ex-no-std-dynamic" && cargo build -q --lib --no-default-features )
-echo "==> [no-std-dynamic] lib builds (alloc fallback)"
 
 # (b) allow_dynamic: false (default) — a fully bounded schema must lower to pure
 # heapless with NO allocator at all (no `extern crate alloc`), and an unbounded
@@ -1925,29 +1923,42 @@ printf 'generic: { emit: project }\ntargets: { rust: { corelib: rs-no-std } }\n'
 if grep -q 'extern crate alloc' "$WORK/no-std-static/src/lib.rs"; then echo "FAIL: no-std-static crate must not pull alloc"; exit 1; fi
 sed -i "s#\${SOFAB_RS_CORELIB}#$NOSTD#" "$WORK/no-std-static/Cargo.toml"
 crate_bin_name "$WORK/no-std-static"
-( cd "$WORK/no-std-static" && cargo build -q --lib --no-default-features )
-echo "==> [no-std-static] lib builds (pure heapless, no alloc)"
 
-# And both firmware shapes over heapless 0.9: the bare #![no_std] lib with and
-# without the allocator, and serde without std on the heapless one (the same
-# pair the 0.8 legs below build). heapless 0.9 has its own no_std/serde feature
-# wiring, so the hosted runs above do not cover it.
-for HLDIR in ex-no-std-dynamic-hl09 ex-no-std-static-hl09; do
-    ( cd "$WORK/$HLDIR" && cargo build -q --lib --no-default-features )
-done
-( cd "$WORK/ex-no-std-static-hl09" && cargo build -q --lib --no-default-features --features serde )
+# The heapless 0.9 firmware shapes have to be heap-free in the same way.
 if grep -q 'extern crate alloc' "$WORK/ex-no-std-static-hl09/src/lib.rs"; then echo "FAIL: no-std-static-hl09 crate must not pull alloc"; exit 1; fi
-echo "==> [no-std-*-hl09] lib builds heap-free over heapless 0.9 (with and without serde)"
+grep -q 'extern crate alloc' "$WORK/ex-no-std-dynamic-hl09/src/lib.rs" || { echo "FAIL: no-std-dynamic-hl09 crate should pull extern crate alloc"; exit 1; }
 
 # Building the no-std-static crate is not the same as running it. The heapless profile
 # has its own `acc` -- the buffer that reassembles a string/blob split across
 # feed chunks is a fixed-capacity heapless::Vec here, a distinct path from the
-# alloc leg's growable Vec. Drive it.
-# A declared feature combination that is never built breaks silently. `serde`
-# without `std` is exactly that: a bare-metal consumer that wants the derives but
-# no std. It is offered, so it has to compile.
-echo "==> no_std + serde without std compiles"
-( cd "$WORK/no-std-static" && cargo build -q --lib --no-default-features --features serde )
+# alloc leg's growable Vec. That run follows further down.
+#
+# A hosted `--no-default-features` build proves less than it looks: std is still
+# in the sysroot, so a dependency that quietly links std (or a serde impl that
+# only exists under serde's `std`) compiles there anyway. Every firmware lib leg
+# -- static and dynamic storage, over both heapless majors -- is therefore built
+# on the host AND for a real no_std target (thumbv6m-none-eabi: no std, no
+# atomics CAS), each without and with `--features serde`. `serde` without `std`
+# is a declared combination a bare-metal consumer asks for (the derives, no
+# std); one that is never built breaks silently -- which is how an allow_dynamic
+# crate shipped without serde's alloc impls (generator#729). The target is
+# required, not optional: a missing one fails the run rather than skipping the
+# only builds that can tell.
+NOSTD_TARGET=thumbv6m-none-eabi
+rustup target list --installed 2>/dev/null | grep -qx "$NOSTD_TARGET" || {
+    echo "FAIL: rust target $NOSTD_TARGET is not installed (rustup target add $NOSTD_TARGET); the no_std lib builds need it"; exit 1; }
+echo "==> no_std libs build as real no_std ($NOSTD_TARGET) and on the host, with and without serde"
+for LIBDIR in ex-no-std-dynamic ex-no-std-static ex-no-std-dynamic-hl09 ex-no-std-static-hl09 no-std-static; do
+    for FEATS in "" "--features serde"; do
+        # shellcheck disable=SC2086 # FEATS is deliberately word-split
+        ( cd "$WORK/$LIBDIR" && cargo build -q --lib --no-default-features $FEATS ) \
+            || { echo "FAIL: [$LIBDIR] host lib build --no-default-features $FEATS"; exit 1; }
+        # shellcheck disable=SC2086
+        ( cd "$WORK/$LIBDIR" && cargo build -q --lib --no-default-features $FEATS --target "$NOSTD_TARGET" ) \
+            || { echo "FAIL: [$LIBDIR] $NOSTD_TARGET lib build --no-default-features $FEATS"; exit 1; }
+    done
+    echo "==> [$LIBDIR] lib builds: host + $NOSTD_TARGET, with and without serde"
+done
 
 # The generated crate emits sofab::require!(...) to fail the build when the
 # corelib was compiled without a wire feature the schema needs. A guard that

@@ -2782,6 +2782,58 @@ func TestRustHeaplessMajor(t *testing.T) {
 	}
 }
 
+// TestRustSerdeAllocFeature: a no_std crate declares serde without default
+// features, so serde's impls for alloc::string::String / alloc::vec::Vec are
+// reachable only through serde's `alloc` feature (generator#729). The crate's
+// `serde` feature enables it exactly when the generated types hold an alloc
+// container (allow_dynamic with a variable-length field); a heap-free crate
+// keeps serde alloc-free, and the hosted Cargo.toml shapes, whose serde keeps
+// its default `std`, never name it.
+func TestRustSerdeAllocFeature(t *testing.T) {
+	const withAlloc = `serde = ["dep:serde", "serde/alloc", "heapless/serde"]`
+	const without = `serde = ["dep:serde", "heapless/serde"]`
+	for _, tc := range []struct {
+		def  string
+		cfg  map[string]any
+		want string // the crate's serde feature line ("" = none at all)
+	}{
+		{"seq_elements.yaml", map[string]any{"corelib": "rs"}, ""},
+		{"seq_elements.yaml", map[string]any{"corelib": "rs", "allow_dynamic": false}, ""},
+		{"seq_elements.yaml", map[string]any{"corelib": "rs-no-std"}, without},
+		{"seq_elements.yaml", map[string]any{"corelib": "rs-no-std", "heapless": "0.9"}, without},
+		{"seq_elements.yaml", map[string]any{"corelib": "rs-no-std", "allow_dynamic": true}, withAlloc},
+		{"seq_elements.yaml", map[string]any{"corelib": "rs-no-std", "allow_dynamic": true, "heapless": "0.9"}, withAlloc},
+		{"strings_blobs.yaml", map[string]any{"corelib": "rs-no-std", "allow_dynamic": true}, withAlloc},
+		// allow_dynamic over a schema with no variable-length field: no alloc
+		// container, so no alloc anywhere.
+		{"enums.yaml", map[string]any{"corelib": "rs-no-std", "allow_dynamic": true}, without},
+		{"seq_elements.yaml", map[string]any{"corelib": "rs-no-std", "no_std": false}, ""},
+		{"seq_elements.yaml", map[string]any{"corelib": "rs-no-std", "no_std": false, "allow_dynamic": true}, ""},
+	} {
+		tc.cfg["emit"] = "project"
+		files, ok := generateFile(t, "../../tests/matrix/corpus/defs/"+tc.def, tc.cfg)
+		if !ok {
+			t.Fatalf("%s %v: generation failed", tc.def, tc.cfg)
+		}
+		toml := files["Cargo.toml"]
+		got := ""
+		for _, line := range strings.Split(toml, "\n") {
+			if strings.HasPrefix(line, "serde = [") {
+				got = line
+			}
+		}
+		if got != tc.want {
+			t.Errorf("%s %v: serde feature = %q, want %q", tc.def, tc.cfg, got, tc.want)
+		}
+		if tc.want == "" && strings.Contains(toml, "serde/alloc") {
+			t.Errorf("%s %v: a hosted crate must not name serde/alloc:\n%s", tc.def, tc.cfg, toml)
+		}
+		if (tc.want == withAlloc) != strings.Contains(files["src/lib.rs"], "extern crate alloc;") {
+			t.Errorf("%s %v: serde/alloc must follow extern crate alloc:\n%s", tc.def, tc.cfg, files["src/lib.rs"])
+		}
+	}
+}
+
 // A schema bound that the fixlen LENGTH WORD already decides must be latched at
 // that word, not once payload bytes arrive (CORELIB_PLAN §5.2, generator#267).
 //
