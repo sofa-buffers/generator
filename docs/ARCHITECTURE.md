@@ -5408,7 +5408,8 @@ while both corelibs keep `rust-version = "1.70"` for every build without
 covers `heapless09`). The default stays 0.8 for that reason. The conformance
 suite runs the four heapless-holding legs (`rs-static`, `no-std-dynamic`,
 `no-std-static`, `no-std-std`) a second time as `-hl09` legs, plus the bare
-`#![no_std]` lib builds, and asserts each built against heapless 0.9 alone.
+`#![no_std]` lib builds (static and dynamic, and serde without std on the static
+one), and asserts each built against heapless 0.9 alone.
 **Measured** (`tests/bench/run.sh --rows rust-rs,rust-rs-static,rust-rs-unbounded,rust-rs-no-std,rust-rs-no-std-dyn`,
 main vs this change, same corelib checkouts): every default row is identical to
 the instruction and the byte. Selecting 0.9 (one-off, the row configs plus
