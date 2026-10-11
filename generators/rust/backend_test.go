@@ -2757,6 +2757,14 @@ func TestRustHeaplessMajor(t *testing.T) {
 					t.Errorf("0.9 Cargo.toml missing %q:\n%s", w, v09["Cargo.toml"])
 				}
 			}
+			// heapless 0.9 raises the crate's MSRV; 0.8 keeps the corelib's and
+			// declares none.
+			if !strings.Contains(v09["Cargo.toml"], "edition = \"2021\"\nrust-version = \"1.87\"\n") {
+				t.Errorf("0.9 Cargo.toml must declare rust-version 1.87:\n%s", v09["Cargo.toml"])
+			}
+			if strings.Contains(v08["Cargo.toml"], "rust-version") {
+				t.Errorf("0.8 Cargo.toml must not declare a rust-version:\n%s", v08["Cargo.toml"])
+			}
 			if strings.Contains(v09["Cargo.toml"], `"0.8"`) || strings.Contains(v09["Cargo.toml"], `"heapless"]`) {
 				t.Errorf("0.9 Cargo.toml still names heapless 0.8:\n%s", v09["Cargo.toml"])
 			}
@@ -2776,9 +2784,24 @@ func TestRustHeaplessMajor(t *testing.T) {
 	if strings.Contains(dyn, "heapless") {
 		t.Errorf("corelib-rs with dynamic storage must not pull in heapless, whatever the major:\n%s", dyn)
 	}
+	if strings.Contains(dyn, "rust-version") {
+		t.Errorf("a crate without heapless must not take heapless 0.9's rust-version:\n%s", dyn)
+	}
 
-	if _, err := (&Backend{}).Generate(exampleSchemaBounded(t), map[string]any{"heapless": "1.0"}); err == nil {
-		t.Error("an unknown heapless major must be refused")
+	// A bad value is a config error, never a silent fallback to the default:
+	// an unquoted YAML 0.9 arrives as a float.
+	for _, bad := range []any{"1.0", "", 0.9, 0.8, 9, true} {
+		_, err := (&Backend{}).Generate(exampleSchemaBounded(t), map[string]any{"heapless": bad})
+		if err == nil {
+			t.Errorf("heapless: %#v must be refused", bad)
+			continue
+		}
+		if !strings.Contains(err.Error(), "heapless") {
+			t.Errorf("heapless: %#v: error does not name the option: %v", bad, err)
+		}
+		if _, isString := bad.(string); !isString && !strings.Contains(err.Error(), "quote") {
+			t.Errorf("heapless: %#v: a non-string error must tell the user to quote it: %v", bad, err)
+		}
 	}
 }
 

@@ -41,9 +41,9 @@ func (*Backend) Generate(s *ir.Schema, cfg map[string]any) ([]generator.File, er
 	// no heap to spare, a server target would rather hold what a message carries
 	// than its declared worst case.
 	allowDynamic := cfgBoolDefault(cfg, "allow_dynamic", corelib != "rs-no-std")
-	heapless := cfgString(cfg, "heapless", heapless08)
-	if heapless != heapless08 && heapless != heapless09 {
-		return nil, fmt.Errorf("rust: heapless must be %q or %q, got %q", heapless08, heapless09, heapless)
+	heapless, err := cfgEnum(cfg, "heapless", heapless08, heapless08, heapless09)
+	if err != nil {
+		return nil, err
 	}
 	g := &gen{
 		schema:       s,
