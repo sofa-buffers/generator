@@ -68,7 +68,7 @@ can exist and the keys change nothing.
 |--------|-----|---------------------------|
 | `c` | [c.md](c.md) | `symbol_prefix` |
 | `cpp` | [cpp.md](cpp.md) | `corelib`, `allow_dynamic`, `namespace` |
-| `rust` | [rust.md](rust.md) | `corelib`, `no_std`, `allow_dynamic` |
+| `rust` | [rust.md](rust.md) | `corelib`, `no_std`, `allow_dynamic`, `heapless` |
 | `go` | [go.md](go.md) | `package`, `module_path`, `go_version` |
 | `python` | [python.md](python.md) | — |
 | `java` | [java.md](java.md) | `package` |

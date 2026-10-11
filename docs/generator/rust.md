@@ -10,6 +10,7 @@ choice decides the whole profile — throughput or footprint.
 | `corelib` | `rs` \| `rs-no-std` | `rs` | Which Rust corelib the generated crate targets. |
 | `no_std` | boolean | `true` for `rs-no-std` | Emit a genuinely `#![no_std]`, heap-free crate. `corelib: rs-no-std` only. |
 | `allow_dynamic` | boolean | depends on `corelib` | Storage for schema-bounded fields: `String`/`Vec` or fixed-capacity `heapless` ones. |
+| `heapless` | `"0.8"` \| `"0.9"` | `"0.8"` | Which major of the `heapless` crate the generated crate's fixed-capacity fields come from. `"0.9"` needs rustc 1.87. |
 
 The generic options apply here too — including `format`, which decides whether
 `sofabgen` runs `rustfmt` over what it emitted (see [Formatting](#formatting));
@@ -66,8 +67,9 @@ allocate what a message carries than its declared worst case).
 Two things worth knowing before switching it off under `corelib: rs`:
 
 - **It adds a `heapless` dependency** to the generated crate, and turns on the
-  corelib's `heapless` feature, which lets the corelib grow and fill those
-  fixed-capacity arrays while decoding.
+  corelib's matching heapless feature, which lets the corelib grow and fill
+  those fixed-capacity arrays while decoding. Which major of `heapless` is the
+  [`heapless`](#heapless) option's call.
 - **Unbounded fields are unaffected.** They stay in `String` / `Vec`, so the
   switch applies per field wherever a bound exists and static storage can be
   turned on without changing the schema.
@@ -79,6 +81,41 @@ Two things worth knowing before switching it off under `corelib: rs`:
 
 This is the Rust analogue of the C++ [`allow_dynamic`](cpp.md#allow_dynamic),
 and behaves the same way.
+
+## `heapless`
+
+Selects the major of the [`heapless`](https://crates.io/crates/heapless) crate
+the generated crate depends on, wherever it holds heapless containers: with
+`allow_dynamic: false`, and in every `corelib: rs-no-std` crate (its decode
+stack and encode buffer are heapless too, even with `allow_dynamic: true`).
+Elsewhere it has no effect.
+
+A `heapless::Vec` from 0.8 and one from 0.9 are **different types**. Pick the
+major the rest of your project already uses, so a generated message's fields
+can be handed to your own code without copying, and the image carries one copy
+of the crate rather than two.
+
+| value | rustc | generated `Cargo.toml` |
+|---|---|---|
+| `"0.8"` (default) | 1.70 or newer | `heapless = "0.8"`, corelib feature `heapless` |
+| `"0.9"` | **1.87 or newer** (heapless 0.9's own minimum) | `heapless = "0.9"`, corelib feature `heapless09` |
+
+Write the value quoted: an unquoted `0.9` is a YAML number, which the config
+schema rejects.
+
+```yaml
+targets:
+  rust:
+    corelib: rs-no-std
+    heapless: "0.9"
+```
+
+The generated source is the same for both — it names `heapless::Vec` /
+`heapless::String`, and only `Cargo.toml` differs. When you generate sources
+only (`emit: sources`) and write your own `Cargo.toml`, depend on the heapless
+major you use under the name `heapless`, and enable the matching corelib
+feature: `heapless` for 0.8, `heapless09` for 0.9 (`alloc` instead under
+`corelib: rs-no-std` with `allow_dynamic: true`).
 
 ## Encoding
 
