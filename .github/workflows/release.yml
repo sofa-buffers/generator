@@ -273,7 +273,7 @@ jobs:
           merge-multiple: true
       - uses: actions/setup-python@v7
         with:
-          python-version: "3.14"
+          python-version: "3.15"
       - name: Build the wheels from the released binaries
         # No build backend and no dependencies: build-wheels.py writes the wheels
         # with stdlib zipfile. --version is required; it is the release tag.
