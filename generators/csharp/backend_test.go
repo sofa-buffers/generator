@@ -2097,6 +2097,7 @@ messages:
       ub: { id: 11, type: blob }
       ua: { id: 12, type: array, items: { type: u32 } }
       uas: { id: 13, type: array, items: { type: string } }
+      deep: { id: 14, type: array, items: { type: array, count: 2, items: { type: array, count: 3, items: { type: blob, count: 2, maxlen: 2 } } } }
 `)
 	got := buildModule(t, src, "bounds.yaml", map[string]any{"namespace": "T"})
 	arg := "throw new global::sofab.SofabException(global::sofab.SofabError.Argument, "
@@ -2110,7 +2111,13 @@ messages:
 		`if (this.ab.Count > 2) ` + arg + `"ab: array count above schema capacity 2");`,
 		`var _b0 = this.ab[_i0] ?? global::System.Array.Empty<byte>(); if (_b0.Length > 9) ` + arg + `"ab element: blob length above schema maxlen 9");`,
 		`if (this.mx.Count > 2) ` + arg + `"mx: array count above schema capacity 2");`,
-		`if (this.mx[_i0].Count > 11) ` + arg + `"mx row: array count above schema capacity 11");`,
+		// A row's refusal names the row: the field, then the index of every
+		// enclosing row, interpolated only in the throw.
+		`if (this.mx[_i0].Count > 11) ` + arg + `$"mx[{_i0}]: array count above schema capacity 11");`,
+		`if (this.deep.Count > 2) ` + arg + `"deep: array count above schema capacity 2");`,
+		`if (this.deep[_i0].Count > 3) ` + arg + `$"deep[{_i0}]: array count above schema capacity 3");`,
+		`if (this.deep[_i0][_i1].Count > 2) ` + arg + `$"deep[{_i0}][{_i1}]: array count above schema capacity 2");`,
+		`if (_b2.Length > 2) ` + arg + `$"deep[{_i0}][{_i1}] element: blob length above schema maxlen 2");`,
 		`if (this.bl.Count > 12) ` + arg + `"bl: array count above schema capacity 12");`,
 		`os.WriteString(10, this.us ?? "");`,
 		`os.WriteString(_i0, this.uas[_i0] ?? "");`,
@@ -2128,8 +2135,8 @@ messages:
 			t.Errorf("unexpected encode guard %q in Serialize", bad)
 		}
 	}
-	if n := strings.Count(ser, "SofabError.Argument"); n != 9 {
-		t.Errorf("Serialize carries %d Argument refusals, want 9 (b, bd, au, as, ab, ab element, mx, mx row, bl)", n)
+	if n := strings.Count(ser, "SofabError.Argument"); n != 13 {
+		t.Errorf("Serialize carries %d Argument refusals, want 13 (b, bd, au, as, ab, ab element, mx, mx row, bl, deep x4)", n)
 	}
 	for _, typ := range []string{"public byte u8;", "public short i16;"} {
 		if !strings.Contains(got, typ) {
