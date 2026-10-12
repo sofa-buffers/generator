@@ -147,12 +147,21 @@ gen() { ( cd "$ROOT" && go run ./cmd/sofabgen --config "${3:-$WORK/cfg.yaml}" --
 # again whenever any .ts in it is newer than the bundle -- a project a leg
 # regenerates or patches never runs stale code. Nothing is lost: tsx never
 # typechecked either, that is tsc_strict's job.
+#
+# The bundle is written to a private file and renamed into place. Drivers start
+# the harness from a thread pool (check_declared_width_kinds.py runs 8 at once),
+# so on a fresh project several starts bundle concurrently; esbuild truncates its
+# outfile before writing it, and a start that found harness.mjs already there ran
+# `node` on that EMPTY file -- an empty module, exit 0, nothing printed
+# (generator#733). A rename is atomic: every `node` opens a complete bundle.
 TH="$WORK/th"
 cat > "$TH" <<'SH'
 #!/bin/sh
 if [ ! -f harness.mjs ] || [ -n "$(find . -maxdepth 1 -name '*.ts' -newer harness.mjs)" ]; then
+    tmp=".harness.$$.mjs"
     npx --no esbuild harness.ts --bundle --platform=node --format=esm \
-        --outfile=harness.mjs --log-level=warning || exit 1
+        --outfile="$tmp" --log-level=warning || { rm -f "$tmp"; exit 1; }
+    mv -f "$tmp" harness.mjs || exit 1
 fi
 exec node harness.mjs "$@"
 SH
