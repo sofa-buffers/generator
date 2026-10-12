@@ -510,7 +510,7 @@ func (g *gen) message(m *ir.Message, ps *planSet) (hdr, src []byte, err error) {
 	for _, k := range ps.order {
 		g.emitDescriptor(c, ps.plans[k])
 	}
-	g.emitFuncs(c, m, msgType, ps.plans[msgKey])
+	g.emitFuncs(c, ps, m, msgType, ps.plans[msgKey])
 
 	return h.bytes(), c.bytes(), nil
 }
@@ -1223,6 +1223,40 @@ func (g *gen) emitDescriptor(c *cfile, p *objectPlan) {
 	c.blank()
 }
 
+// treeHasDefaults reports whether any descriptor sofab_object_init would walk
+// from p carries a default image -- the question emitFuncs asks to decide whether
+// <msg>__init needs the walk at all (generator#737).
+//
+// It is emitDescriptor's own decision, read recursively: a plain object has an
+// image when a leaf field declares a non-zero default (p.defaults), and a union
+// has one when its default option is not option 0 or that option's default is
+// non-zero (unionHasImage, which mirrors unionImage without emitting it). A
+// holder never carries one. The recursion follows nested_list, which is what the
+// corelib's walk follows, and a $defs object is looked up in g.defs because that
+// is where its plan lives.
+func (g *gen) treeHasDefaults(ps *planSet, p *objectPlan, seen map[string]bool) bool {
+	if p == nil || seen[p.key] {
+		return false
+	}
+	seen[p.key] = true
+	if len(p.defaults) > 0 {
+		return true
+	}
+	if p.union != nil && g.unionHasImage(p) {
+		return true
+	}
+	for _, nk := range p.nested {
+		n := ps.plans[nk]
+		if n == nil && g.defs != nil {
+			n = g.defs.plans[nk]
+		}
+		if g.treeHasDefaults(ps, n, seen) {
+			return true
+		}
+	}
+	return false
+}
+
 func (g *gen) emitProtos(h *cfile, m *ir.Message, msgType string, root *objectPlan) {
 	pfx := root.key
 	decT := g.typeName(role(pfx, "decoder"))
@@ -1270,7 +1304,7 @@ func (g *gen) emitProtos(h *cfile, m *ir.Message, msgType string, root *objectPl
 	h.line("sofab_ret_t %s(%s *d, const void *buf, size_t len);", role(pfx, "decoder_feed"), decT)
 }
 
-func (g *gen) emitFuncs(c *cfile, m *ir.Message, msgType string, root *objectPlan) {
+func (g *gen) emitFuncs(c *cfile, ps *planSet, m *ir.Message, msgType string, root *objectPlan) {
 	pfx := root.key
 	decT := g.typeName(role(pfx, "decoder"))
 
@@ -1279,7 +1313,22 @@ func (g *gen) emitFuncs(c *cfile, m *ir.Message, msgType string, root *objectPla
 	// blob's companion length member (not a descriptor field) would otherwise be
 	// left uninitialized and drive a garbage-length encode (issue #128).
 	c.line("    memset(msg, 0, sizeof(*msg));")
-	c.line("    sofab_object_init(&%s, msg);", root.descr)
+	// ...and when no descriptor in the tree carries a default image, that is the
+	// whole of it: the walk would then write nothing but zeros over memory the
+	// memset just zeroed, field by field, at runtime (generator#737). The walk
+	// costs ~15x the memset on a mid-size message -- its per-field clear has a
+	// runtime size, which at -Os is a `rep stosb` per field, while one memset is
+	// vectorised over the whole struct.
+	//
+	// What makes the memset sufficient is that the NULL-image branch of
+	// sofab_object_init writes only zeros: the per-field clear, a sized
+	// buffer's companion length, a holder's element count, and no union tag
+	// (_default_tag reads the image, so without one it is 0). The memset covers
+	// every one of those plus the padding the walk cannot reach -- and keeping it
+	// is what makes the padding deterministic.
+	if g.treeHasDefaults(ps, root, map[string]bool{}) {
+		c.line("    sofab_object_init(&%s, msg);", root.descr)
+	}
 	c.line("}")
 	c.blank()
 

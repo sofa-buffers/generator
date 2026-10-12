@@ -179,6 +179,40 @@ gcc -std=c99 $WARNFLAGS -I"$INC" -I"$WORK/blobdef" \
     "$SRC/object.c" "$SRC/ostream.c" "$SRC/istream.c" -o "$WORK/blobdef_check"
 "$WORK/blobdef_check"
 
+# <msg>__init is the bulk clear ALONE where the tree carries no default image
+# (generator#737): the descriptor walk would write nothing but zeros over memory
+# the memset just zeroed, field by field, at runtime. That rests on an assumption
+# about the corelib -- the NULL-image branch of sofab_object_init writes only
+# zeros -- so it is pinned here against the corelib this suite builds with, in
+# both directions, with a defaults-carrying message as the control.
+echo "==> init: the bulk clear alone equals memset + the descriptor walk (generator#737)"
+mkdir -p "$WORK/initeq"
+cat > "$WORK/initeq/noinit.yaml" <<'YAML'
+version: 1
+messages:
+  noinit:
+    payload:
+      n: { id: 0, type: u32 }
+      s: { id: 1, type: string, maxlen: 8 }
+      b: { id: 2, type: blob, maxlen: 4 }
+      a: { id: 3, type: array, items: { type: u16, count: 3 } }
+      sa: { id: 4, type: array, items: { type: string, count: 2, maxlen: 4 } }
+      nested: { id: 5, type: struct, fields: { x: { id: 0, type: u8 }, y: { id: 1, type: blob, maxlen: 4 } } }
+YAML
+cat > "$WORK/initeq/withdef.yaml" <<'YAML'
+version: 1
+messages:
+  withdef:
+    payload:
+      n: { id: 0, type: u32, default: 4242 }
+YAML
+( cd "$ROOT" && go run ./cmd/sofabgen --lang c --in "$WORK/initeq/noinit.yaml" --out "$WORK/initeq" )
+( cd "$ROOT" && go run ./cmd/sofabgen --lang c --in "$WORK/initeq/withdef.yaml" --out "$WORK/initeq" )
+gcc -std=c99 $WARNFLAGS -I"$INC" -I"$WORK/initeq" \
+    "$ROOT/tests/conformance/c/init_equivalence_check.c" "$WORK"/initeq/*_sofab.c \
+    "$SRC/object.c" "$SRC/ostream.c" "$SRC/istream.c" -o "$WORK/initeq_check"
+"$WORK/initeq_check"
+
 # The LIFETIME half of the same contract (CORELIB_PLAN S6.7 / S6.7.1,
 # generator#412): a decoded message must OWN its bytes, so the buffer it came
 # from may be reused, overwritten or FREED the moment the call returns -- S6.0
