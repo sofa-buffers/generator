@@ -931,6 +931,16 @@ func (g *gen) emitStruct(h *cfile, p *objectPlan) {
 			g.emitMember(h, m, "    ")
 		}
 	}
+	// A payload may declare no fields at all (generator#738): MESSAGE_SPEC §2
+	// makes the all-default message the empty byte string, so a field-less
+	// message is a legal schema -- the ping. ISO C has no empty struct, and
+	// `struct {}` is a GCC extension whose sizeof is 0 in C and 1 in C++, so the
+	// two views of the same type would not even agree. One placeholder member
+	// says so instead; nothing reads it, the descriptor describes no field, and a
+	// schema name cannot start with "_" so it collides with nothing.
+	if p.union == nil && len(p.members) == 0 {
+		h.line("    char _novalue; /*!< Placeholder: this payload declares no fields. */")
+	}
 	h.line("} %s;", p.cType)
 	h.blank()
 }
@@ -1157,11 +1167,18 @@ func (g *gen) emitDescriptor(c *cfile, p *objectPlan) {
 		c.line("#pragma GCC diagnostic push")
 		c.line(`#pragma GCC diagnostic ignored "-Wdeprecated-declarations"`)
 	}
-	c.line("static const sofab_object_descr_field_t %s[] = {", fieldsSym(p.key))
-	for _, fe := range p.fields {
-		c.line("%s", fe.macro)
+	if len(p.fields) == 0 {
+		// Same ISO C rule as the placeholder member in emitStruct: no zero-length
+		// array. A tentative definition with static storage is zero-filled, and the
+		// descriptor's field COUNT is 0, so the entry is never read (generator#738).
+		c.line("static const sofab_object_descr_field_t %s[1]; /* unused: no fields */", fieldsSym(p.key))
+	} else {
+		c.line("static const sofab_object_descr_field_t %s[] = {", fieldsSym(p.key))
+		for _, fe := range p.fields {
+			c.line("%s", fe.macro)
+		}
+		c.line("};")
 	}
-	c.line("};")
 
 	// nested_list / nested_count arguments (NULL, 0 when the object has no
 	// struct/union/sequence children — byte-identical to the historical form).

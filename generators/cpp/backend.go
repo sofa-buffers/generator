@@ -1075,7 +1075,7 @@ func (g *gen) emitStruct(f *hfile, name, summary string, fields []*ir.Field, isM
 	// named only when a string or blob arm reads it: a message without one would
 	// otherwise carry an unused parameter, which -Wextra reports and a user's
 	// -Werror build turns into an error.
-	sizeParam, countParam := g.deserializeParams(fields)
+	isParam, sizeParam, countParam := g.deserializeParams(fields)
 	f.line("    /**")
 	f.line("     * @brief Bind one decoded field to its member.")
 	f.line("     *")
@@ -1086,7 +1086,7 @@ func (g *gen) emitStruct(f *hfile, name, summary string, fields []*ir.Field, isM
 	f.line("     * @param _is Stream delivering the field.")
 	f.line("     * @param _id Field identifier.")
 	f.line("     */")
-	f.line("    void deserialize(sofab::IStreamImpl &_is, sofab::id _id, %s, %s) noexcept override {", sizeParam, countParam)
+	f.line("    void deserialize(%s, sofab::id _id, %s, %s) noexcept override {", isParam, sizeParam, countParam)
 	f.line("        switch (_id) {")
 	for _, fld := range fields {
 		f.line("        case %d:", fld.ID)
@@ -1114,9 +1114,20 @@ func (g *gen) emitStruct(f *hfile, name, summary string, fields []*ir.Field, isM
 	f.blank()
 }
 
-// deserializeParams names deserialize()'s size and count parameters: named
-// only where an arm reads them, unnamed otherwise (see emitStruct).
-func (g *gen) deserializeParams(fields []*ir.Field) (string, string) {
+// deserializeParams names deserialize()'s stream, size and count parameters:
+// named only where an arm reads them, unnamed otherwise (see emitStruct).
+//
+// The stream is read by every field arm there is, so it is named whenever this
+// type binds a field at all -- and unnamed when it binds none, which is a type
+// whose payload declares no fields (generator#738): a legal schema, since
+// MESSAGE_SPEC §2 makes the all-default message the empty byte string, and one
+// whose header otherwise failed to compile under the -Wall -Wextra -Werror this
+// suite builds generated code with.
+func (g *gen) deserializeParams(fields []*ir.Field) (string, string, string) {
+	isParam := "sofab::IStreamImpl &"
+	if len(fields) > 0 {
+		isParam = "sofab::IStreamImpl &_is"
+	}
 	sizeParam := "std::size_t"
 	if g.clib {
 		for _, fld := range fields {
@@ -1141,7 +1152,7 @@ func (g *gen) deserializeParams(fields []*ir.Field) (string, string) {
 			}
 		}
 	}
-	return sizeParam, countParam
+	return isParam, sizeParam, countParam
 }
 
 // emitStructDoc writes a Doxygen @brief block before a struct, when the summary

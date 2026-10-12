@@ -7207,6 +7207,39 @@ A reimplementation is **conformant** when it reproduces these gates:
    three legs skip the dyn file by name and compile the bounded one, so the
    family-wide claim is about the bounded half and says so.
 
+   *The empty payload* (`tests/conformance/lib/check_empty_payload.py`,
+   generator#738): a message whose payload declares NO fields round-trips, and so
+   does a field whose struct declares none. MESSAGE_SPEC §2 omits every field equal
+   to its default, so the all-default message IS the empty byte string and a
+   field-less message is a legal schema whose every value encodes to zero bytes --
+   the ping, the signal, the keep-alive -- with `MAX_SIZE == 0`.
+
+   The gap it closes was a hole in the CORPUS again, the same shape as
+   `check_array_lengths.py`'s: `payload: {}` validated all along, and no schema in
+   `tests/` or `examples/` had one, so eleven backends had eleven answers. C++
+   ABORTED on `corelib: c-cpp` (`std::vector::data()` is null at size 0 and the C
+   install asserted non-null; corelib-c-cpp#195), Java THREW
+   (`OStream.overScratch(0)` refused the size; corelib-java#128), the TypeScript
+   project emit PANICKED (the bench sink folded `fields[0]`) and its module named a
+   visitor and a Decoder it did not emit (a guard kept from #160, when its only job
+   was to leave an unused `WireType` import out -- the rendered-text import scan
+   decides that on its own now), the Zig harness did not compile (an unused
+   parameter and a `var` that is never mutated are errors there), C++ and Rust
+   warned where the suites treat a warning as an error, and the C header declared
+   an empty struct and a zero-length array -- GCC extensions, not ISO C, and an
+   empty struct's `sizeof` is 0 in C and 1 in C++, so the two views of one type did
+   not even agree.
+
+   What the driver asserts: `{}` encodes to exactly zero bytes and the encode
+   SUCCEEDS (the status is the only thing separating it from a refusal, §9.6.1);
+   zero bytes decode as a complete message and re-encode to zero bytes, which is
+   the path any relay takes; and beside it, a `{ s: struct {}, n: u32 }` message
+   whose struct is equal to its default is omitted (§2), so `{"n": 7}` is `08 07`
+   whether the struct is sent explicitly or not, and reads back with `n == 7`. The
+   driver prints its own schema, and `--no-struct` drops the field-less struct for
+   a backend that cannot express one (no suite passes it). Wired in every suite,
+   inside `cpp`'s variant loop, `rust`'s label loop and `python`'s engine loop.
+
    *Boolean tolerant decode* (`tests/conformance/lib/check_boolean_tolerant.py`):
    CORELIB_PLAN §4.4 on every target (generator#644). A decoder reads every
    non-zero boolean as `true` — `256` and `2^64-1` included, no width bound — and

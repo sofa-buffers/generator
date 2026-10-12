@@ -299,6 +299,16 @@ func (g *gen) benchSinkExpr(mt string, m *ir.Message) string {
 // benchSinkOn is that fold over an arbitrary decoded-object expression, so the
 // pull and the chunked workloads share one definition of "cheap unelidable read".
 func (g *gen) benchSinkOn(obj string, m *ir.Message) string {
+	// A message with no fields has nothing to fold: its decode produces an object
+	// with no readable value (generator#738 -- `payload: {}` is a legal schema,
+	// MESSAGE_SPEC §2 making the all-default message the empty byte string). The
+	// object itself is then the only thing to read, and reading it is what keeps
+	// the decode from being elided -- folding a constant would measure nothing.
+	// No bench row names such a schema; this is here so that emitting the harness
+	// for one is not a crash.
+	if len(m.Fields) == 0 {
+		return "Number(" + obj + " !== undefined)"
+	}
 	fld := benchSinkField(m)
 	acc := obj + "." + tsIdent(fld)
 	for _, x := range m.Fields {
@@ -312,6 +322,9 @@ func (g *gen) benchSinkOn(obj string, m *ir.Message) string {
 // benchSinkField names one cheap integer scalar of m, folded in the bench loop so
 // the decode cannot be elided. Prefers a narrow int: with `int64: bigint` a u64/i64
 // field would fold through BigInt and add cost that is not decode cost.
+//
+// Only called for a message that HAS a field; benchSinkOn answers the field-less
+// one before asking.
 func benchSinkField(m *ir.Message) string {
 	for _, f := range m.Fields {
 		switch f.Kind {

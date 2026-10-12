@@ -1,0 +1,29 @@
+# A message whose payload declares no fields, and a field whose struct declares
+# none (generator#738).
+#
+# MESSAGE_SPEC §2 omits every field equal to its default, so the all-default
+# message IS the empty byte string: a message with no fields is a legal schema
+# whose every value encodes to zero bytes -- the ping, the signal, the keep-alive
+# -- and MAX_SIZE is 0 for it.
+#
+# `payload: {}` validated all along and nothing in the repo declared one, so the
+# shape reached eleven backends untested and got eleven answers: an abort on
+# corelib: c-cpp (a null buffer at length 0), a throw in Java (a scratch size
+# below 1), a generator PANIC in TypeScript (the bench sink folding fields[0]), a
+# Zig harness that would not compile (an unused parameter and a never-mutated
+# var), warnings where the suites treat one as an error, and a C header with an
+# empty struct and a zero-length array -- GCC extensions rather than ISO C.
+#
+# This file is the COMPILE half, as array_lengths.yaml is for #550: every backend
+# generates and builds the shape here whether or not anything else exercises it.
+# The round trip is tests/conformance/lib/check_empty_payload.py.
+version: 1
+messages:
+  ping:
+    summary: A message with no fields at all; its every value is the empty byte string.
+    payload: {}
+  holder:
+    summary: A field whose struct declares no fields, beside one that does.
+    payload:
+      s: { id: 0, type: struct, fields: {} }
+      n: { id: 1, type: u32 }

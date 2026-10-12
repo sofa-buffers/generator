@@ -178,7 +178,10 @@ class Gen:
         is the index of this array within the array that holds it, if any."""
         kind = spec["kind"]
         if kind == "struct":
-            return self.fields(self.named[spec["ref"]]["fields"], base, alt, v)
+            # `.get`, not `[...]`: --dump-ir omits an empty field list, and a struct
+            # that declares no fields is a legal schema -- MESSAGE_SPEC §2 makes the
+            # all-default message the empty byte string (generator#738).
+            return self.fields(self.named[spec["ref"]].get("fields") or [], base, alt, v)
         if kind == "union":
             return self.union(spec["ref"], base, alt, v)
         if kind == "array":
@@ -269,7 +272,7 @@ def has_union(ir, fields, seen=None):
             if key in seen:
                 return False
             seen.add(key)
-            return any(spec_has(field_spec(f)) for f in named[key]["fields"])
+            return any(spec_has(field_spec(f)) for f in named[key].get("fields") or [])
         if spec["kind"] == "array":
             return spec_has(spec["elem"])
         return False
@@ -343,12 +346,16 @@ def roundtrip(label, name, msg, gen, args):
     base = load(harness("decode", harness("encode", b"{}")), "the empty message's decode")
     digest = None
     rounds = [("", False)]
-    if has_union(gen.ir, msg["fields"]):
+    if has_union(gen.ir, msg.get("fields") or []):
         rounds.append((" (non-default union options)", True))
     for tag, alt in rounds:
-        fixture = gen.fields(msg["fields"], base if not alt else None, alt)
+        fixture = gen.fields(msg.get("fields") or [], base if not alt else None, alt)
         enc = harness("encode", json.dumps(spell(fixture, args.int64_json)).encode())
-        if not enc:
+        # Zero bytes mean an encoder wrote nothing for a message that carries
+        # values -- unless the message carries none: a payload that declares no
+        # fields has the empty byte string as its ONLY encoding (MESSAGE_SPEC §2,
+        # generator#738), and the round trip below still has to hold for it.
+        if not enc and fixture:
             fail(label, where + tag, "a value-filled message encoded to zero bytes")
         if not alt:
             digest = hashlib.sha256(enc).hexdigest()

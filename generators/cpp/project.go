@@ -240,6 +240,12 @@ func (g *gen) jsonHeader(s *ir.Schema) []byte {
 func (g *gen) emitJSONFns(f *hfile, typeName string, fields []*ir.Field) {
 	// to_json
 	f.line("inline void to_json(const %s &o, std::ostream &out) {", typeName)
+	// A type with no fields prints `{}` and reads nothing out of it
+	// (generator#738): the discard keeps the harness compiling under the
+	// -Wall -Wextra -Werror this suite builds it with, as from_json's does.
+	if len(fields) == 0 {
+		f.line("    (void)o;")
+	}
 	f.line("    out << '{';")
 	for i, fld := range fields {
 		if i > 0 {

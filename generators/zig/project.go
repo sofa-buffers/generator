@@ -370,6 +370,13 @@ fn jsonWriteBytes(b: []const u8, w: *std.Io.Writer) !void {
 func (g *gen) emitJSON(f *zfile, base, name string, fields []*ir.Field) {
 	// toJson: every field, schema order, schema names.
 	f.line("fn toJson_%s(o: *const message.%s, w: *std.Io.Writer) std.Io.Writer.Error!void {", base, name)
+	// A type with no fields prints `{}` and reads nothing out of it. Zig rejects
+	// an unused parameter, so the discard is emitted exactly where the loop below
+	// would otherwise be the only use -- the same rule fromJson already follows
+	// for `alloc` and `obj` (generator#738: `payload: {}` is a legal schema).
+	if len(fields) == 0 {
+		f.line("    _ = o;")
+	}
 	f.line("    try w.writeByte('{');")
 	for i, fld := range fields {
 		comma := ","
@@ -395,7 +402,13 @@ func (g *gen) emitJSON(f *zfile, base, name string, fields []*ir.Field) {
 	// rejects unused AND pointlessly-discarded names alike, so the discards
 	// are emitted exactly when a name goes unused.
 	f.line("fn fromJson_%s(alloc: std.mem.Allocator, v: std.json.Value) message.%s {", base, name)
-	f.line("    var o: message.%s = .{};", name)
+	// `var` only where a member is loaded into it: with no fields nothing is
+	// assigned and Zig rejects a local that is never mutated.
+	decl := "var"
+	if len(fields) == 0 {
+		decl = "const"
+	}
+	f.line("    %s o: message.%s = .{};", decl, name)
 	f.line("    const obj = switch (v) {")
 	f.line("        .object => |ob| ob,")
 	f.line("        else => return o,")

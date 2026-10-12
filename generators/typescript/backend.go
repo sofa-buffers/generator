@@ -441,31 +441,37 @@ func (g *gen) moduleBody(f *tsfile, s *ir.Schema) {
 	// module needs is a property of the emitted arms -- the same reason the import
 	// scan reads the rendered text rather than the schema a second time. They are
 	// written out ahead of it, after the classes they name.
-	if decodesAnyField(s) {
-		vis := &tsfile{}
-		for _, key := range s.NamedOrder {
-			nt := s.Named[key]
-			if nt.Category == ir.CatStruct || nt.Category == ir.CatUnion {
-				g.emitVisitor(vis, g.typeName(key), g.typeRaw(key), nt)
-			}
+	//
+	// Emitted for EVERY message, a field-less one included (generator#738). This
+	// block used to be skipped when no type in the schema had a field -- a guard
+	// kept from #160, when its only job was to leave an unused `WireType` import
+	// out, which the rendered-text import scan above now decides on its own. By
+	// the time the flat-visitor surface landed the guard was suppressing the very
+	// visitor and Decoder that `decode()` and `decoder()` name, so a schema whose
+	// message declares `payload: {}` emitted a module that did not compile.
+	vis := &tsfile{}
+	for _, key := range s.NamedOrder {
+		nt := s.Named[key]
+		if nt.Category == ir.CatStruct || nt.Category == ir.CatUnion {
+			g.emitVisitor(vis, g.typeName(key), g.typeRaw(key), nt)
 		}
-		for _, m := range s.Messages {
-			g.emitVisitor(vis, msgName(m), msgRaw(m), &ir.NamedType{Category: ir.CatStruct, Fields: m.Fields})
-			g.emitDecoderClass(vis, msgName(m), msgRaw(m))
-		}
-		if len(g.mkName) > 0 {
-			f.line("// Element factories: an array element's default, built fresh for each slot.")
-			f.line("// An element equal to its default is left off the wire, so decoding an array")
-			f.line("// with a gap in it has to fill the missing slots -- and one shared instance")
-			f.line("// would make every filled slot, and every element decoded into a filled one,")
-			f.line("// the same object. One factory per element type, shared by every array of it.")
-			for _, name := range g.mkName {
-				f.line("const %s = %s;", name, g.mks[name])
-			}
-			f.blank()
-		}
-		f.b.WriteString(vis.b.String())
 	}
+	for _, m := range s.Messages {
+		g.emitVisitor(vis, msgName(m), msgRaw(m), &ir.NamedType{Category: ir.CatStruct, Fields: m.Fields})
+		g.emitDecoderClass(vis, msgName(m), msgRaw(m))
+	}
+	if len(g.mkName) > 0 {
+		f.line("// Element factories: an array element's default, built fresh for each slot.")
+		f.line("// An element equal to its default is left off the wire, so decoding an array")
+		f.line("// with a gap in it has to fill the missing slots -- and one shared instance")
+		f.line("// would make every filled slot, and every element decoded into a filled one,")
+		f.line("// the same object. One factory per element type, shared by every array of it.")
+		for _, name := range g.mkName {
+			f.line("const %s = %s;", name, g.mks[name])
+		}
+		f.blank()
+	}
+	f.b.WriteString(vis.b.String())
 }
 
 // schemaHasStringField reports whether any emitted class holds a `string` leaf --
@@ -512,24 +518,6 @@ func schemaHasStringField(s *ir.Schema) bool {
 	for _, key := range s.NamedOrder {
 		nt := s.Named[key]
 		if (nt.Category == ir.CatStruct || nt.Category == ir.CatUnion) && has(nt.Fields) {
-			return true
-		}
-	}
-	return false
-}
-
-// decodesAnyField reports whether any emitted class (message, struct or union)
-// has at least one field, i.e. whether the pull decoder emits any switch case and thus
-// the WireType-guarded import is needed. Enums and bitfields carry no fields.
-func decodesAnyField(s *ir.Schema) bool {
-	for _, m := range s.Messages {
-		if len(m.Fields) > 0 {
-			return true
-		}
-	}
-	for _, key := range s.NamedOrder {
-		nt := s.Named[key]
-		if (nt.Category == ir.CatStruct || nt.Category == ir.CatUnion) && len(nt.Fields) > 0 {
 			return true
 		}
 	}

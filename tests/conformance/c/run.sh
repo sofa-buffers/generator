@@ -1188,6 +1188,20 @@ make -C "$WORK/defaults" SOFAB_C_CORELIB="$CORELIB" >/dev/null
 python3 "$ROOT/tests/conformance/lib/check_defaults.py" "C" \
     -- "$WORK/defaults/harness/harness"
 
+# A message with NO fields round-trips (generator#738): MESSAGE_SPEC §2 makes the
+# all-default message the empty byte string, so `payload: {}` is a legal schema --
+# the ping, the keep-alive -- and nothing in tests/ or examples/ had one, which is
+# why eleven backends had eleven answers to it: an abort, a throw, a generator
+# panic, a harness that would not compile. The shared driver prints its own schema.
+echo "==> empty payload: the ping encodes to nothing and decodes from nothing (generator#738)"
+printf 'version: 1\nmessages:\n' > "$WORK/emptypl.yaml"
+python3 "$ROOT/tests/conformance/lib/check_empty_payload.py" --emit-schema >> "$WORK/emptypl.yaml"
+( cd "$ROOT" && go run ./cmd/sofabgen --config "$WORK/proj.yaml" --lang c \
+    --in "$WORK/emptypl.yaml" --out "$WORK/emptypl" )
+make -C "$WORK/emptypl" SOFAB_C_CORELIB="$CORELIB" >/dev/null
+python3 "$ROOT/tests/conformance/lib/check_empty_payload.py" "C" \
+    -- "$WORK/emptypl/harness/harness"
+
 # Float defaults (generator#636): a float is compared with its default by bit
 # pattern, so -0.0 is written next to a default of 0. The expectations are wire
 # byte literals in the driver; its KNOWN_GAP lists what still fails.
