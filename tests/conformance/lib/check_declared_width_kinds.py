@@ -150,6 +150,8 @@ import re
 import subprocess
 import sys
 
+import harness_dialect as hd
+
 MESSAGE = "closed"
 
 # Handed to a harness as its chunk size to find out whether it reads the argument
@@ -743,23 +745,23 @@ def main():
                     "or a safety-checked abort would read the same. rc=%d, output:\n%s"
                     % (args.label, name, args.invalid_pattern, rc, text))
             if args.status_verb:
-                _, sout, serr = done[(name, "status", None)]
-                got = (sout.strip().splitlines() or [""])[0]
+                src, sout, serr = done[(name, "status", None)]
+                got = hd.status_line(sout)
                 if got != args.status_invalid:
                     die("[%s] %s -- must be %s, got %r%s"
                         % (args.label, name, args.status_invalid, got,
-                           ("\n" + serr.strip()) if serr.strip() else ""))
+                           hd.status_ended(src, sout, serr)))
         else:
             if rc != 0:
                 die("[%s] %s must DECODE -- %s; rc=%d:\n%s"
                     % (args.label, name, why, rc, text))
             if args.status_verb:
-                _, sout, serr = done[(name, "status", None)]
-                got = (sout.strip().splitlines() or [""])[0]
+                src, sout, serr = done[(name, "status", None)]
+                got = hd.status_line(sout)
                 if got != args.status_complete:
                     die("[%s] %s -- must decode %s, got %r%s"
                         % (args.label, name, args.status_complete, got,
-                           ("\n" + serr.strip()) if serr.strip() else ""))
+                           hd.status_ended(src, sout, serr)))
             if not args.no_values:
                 one_shot = check_value(name, out, value, why, wire, one_shot_leg)
 
