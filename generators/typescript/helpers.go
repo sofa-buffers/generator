@@ -607,7 +607,13 @@ func (g *gen) emitJSON(f *tsfile, name string, fields []*ir.Field) {
 	f.line("    };")
 	f.line("  }")
 	f.blank()
-	f.line("  static fromJSON(d: Record<string, unknown>): %s {", name)
+	// `_d` where there is no field to read out of it (generator#738): tsc exempts
+	// the underscore under --noUnusedParameters.
+	dName := "d"
+	if len(fields) == 0 {
+		dName = "_d"
+	}
+	f.line("  static fromJSON(%s: Record<string, unknown>): %s {", dName, name)
 	f.line("    const o = new %s();", name)
 	for _, fld := range fields {
 		f.line("    if (Object.prototype.hasOwnProperty.call(d, %q)) %s;", fld.Name, g.fromJSONStmt(fld))

@@ -602,8 +602,15 @@ func (g *gen) emitClass(f *tsfile, name, raw, summary string, fields []*ir.Field
 	}
 	f.blank()
 
-	// marshal
-	f.line("  serialize(os: OStream): void {")
+	// marshal. A type with no fields writes nothing, so the stream goes unread:
+	// `_os`, the spelling tsc exempts under --noUnusedParameters, rather than a
+	// module a consumer cannot build (generator#738). The hook signatures below
+	// are narrowed by fitParams for the same reason.
+	osName := "os"
+	if len(fields) == 0 {
+		osName = "_os"
+	}
+	f.line("  serialize(%s: OStream): void {", osName)
 	for _, fld := range fields {
 		g.emitMarshal(f, fld)
 	}

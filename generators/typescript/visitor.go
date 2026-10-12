@@ -218,22 +218,6 @@ func (g *gen) emitDecode(f *tsfile, name, raw string) {
 func (g *gen) emitVisitor(f *tsfile, name, raw string, nt *ir.NamedType) {
 	scopes := g.buildScopes(raw, nt)
 
-	f.line("// Dispatch locations for %s: one per sequence-framed scope in its tree.", name)
-	f.line("// A field id is only unique WITHIN a scope -- a nested sequence opens a fresh")
-	f.line("// id space -- so the visitor below keys every hook on (location, id).")
-	for _, sc := range scopes {
-		f.line("const %s = %d;", sc.name, sc.id)
-	}
-	f.blank()
-
-	f.line("/**")
-	f.line(" * Flat decode visitor for {@link %s}.", name)
-	f.line(" *")
-	f.line(" * corelib-ts's visitor is flat -- one object receives every callback at every")
-	f.line(" * depth -- so the scope the walk is currently inside is tracked here, in `_c`,")
-	f.line(" * and every hook keys on it. sequenceBegin sets it; sequenceEnd restores the")
-	f.line(" * parent, which is static: the scopes form a tree, so no stack is needed.")
-	f.line(" */")
 	// The hooks are rendered first: whether an index register is ever READ is a
 	// property of the emitted arms. A wrapper row of strings or blobs hands its
 	// elements to a corelib collector, so the row index it records is never
@@ -249,8 +233,34 @@ func (g *gen) emitVisitor(f *tsfile, name, raw string, nt *ir.NamedType) {
 	g.emitArrayCbs(hooks, scopes)
 	hookText := hooks.b.String()
 
+	// The location constants exist for `_c` and the hook switches that compare
+	// against it. A type with no fields has no hook that reads it, and an unread
+	// const is an error under noUnusedLocals like any other (generator#738).
+	if strings.Contains(hookText, "this._c") {
+		f.line("// Dispatch locations for %s: one per sequence-framed scope in its tree.", name)
+		f.line("// A field id is only unique WITHIN a scope -- a nested sequence opens a fresh")
+		f.line("// id space -- so the visitor below keys every hook on (location, id).")
+		for _, sc := range scopes {
+			f.line("const %s = %d;", sc.name, sc.id)
+		}
+		f.blank()
+	}
+
+	f.line("/**")
+	f.line(" * Flat decode visitor for {@link %s}.", name)
+	f.line(" *")
+	f.line(" * corelib-ts's visitor is flat -- one object receives every callback at every")
+	f.line(" * depth -- so the scope the walk is currently inside is tracked here, in `_c`,")
+	f.line(" * and every hook keys on it. sequenceBegin sets it; sequenceEnd restores the")
+	f.line(" * parent, which is static: the scopes form a tree, so no stack is needed.")
+	f.line(" */")
 	f.line("class %s implements Visitor {", visitorName(raw))
-	f.line("  private _c = %s;", scopes[0].name)
+	// The current-scope register, like the index/row ones below: emitted only
+	// where a hook reads it. A type with no fields has no hook that does, and an
+	// unread private member is an error under --noUnusedLocals (generator#738).
+	if strings.Contains(hookText, "this._c") {
+		f.line("  private _c = %s;", scopes[0].name)
+	}
 	for _, sc := range scopes {
 		if sc.ix != "" {
 			var read bool
