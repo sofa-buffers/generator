@@ -287,7 +287,12 @@ func (g *gen) emitStruct(f *zfile, name, vis string, fields []*ir.Field, isMessa
 		f.emitDoc("    ", fieldDoc(fld, generator.BoundNote(fld, zigStorage(typ))))
 		f.line("    %s: %s = %s,", zigIdent(fld.Name), typ, g.zigFieldDefault(fld))
 	}
-	f.blank()
+	// The blank line separates the member list from the declarations below it.
+	// A type with no fields has no list to separate, and `zig fmt` removes a
+	// blank line that opens a container (generator#738, gate 10).
+	if len(fields) > 0 {
+		f.blank()
+	}
 	if isMessage {
 		ms := g.messageSize(name, fields)
 		if !ms.Bounded {
