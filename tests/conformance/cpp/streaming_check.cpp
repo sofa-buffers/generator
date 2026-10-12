@@ -39,6 +39,7 @@
 
 // The shared fixture: fillMessage() and SOFAB_STREAM_ARGS, so this check and
 // ownership_check.cpp cannot drift apart on which field kinds are populated.
+#include "encoded.hpp"
 #include "sample.hpp"
 
 static std::vector<std::uint8_t> g_sink;
@@ -48,7 +49,7 @@ static std::vector<std::uint8_t> g_sink;
 // encode identically ARE the same message on the wire.
 static bool sameMessage(const MSG_TYPE &a, const MSG_TYPE &b)
 {
-    return a.encode() == b.encode();
+    return encoded(a) == encoded(b);
 }
 
 static void collect(std::span<const std::uint8_t> bytes)
@@ -63,7 +64,7 @@ int main()
 
     // ---- 1. streaming encode is byte-identical --------------------------
 
-    const std::vector<std::uint8_t> oneShot = out.encode();
+    const std::vector<std::uint8_t> oneShot = encoded(out);
     if (oneShot.empty()) { std::printf("FAIL: message encoded to nothing\n"); return 1; }
 
     // 7 bytes: smaller than any single field, so the callback fires mid-value

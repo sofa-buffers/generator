@@ -52,6 +52,7 @@
 #include <cstring>
 #include <vector>
 
+#include "encoded.hpp"
 #include "sample.hpp"
 
 // 'A': see the header note. An aliased string destination must still encode.
@@ -73,7 +74,7 @@ static void mustMatch(const char *what,
                       const std::vector<std::uint8_t> &want,
                       const MSG_TYPE &got)
 {
-    const std::vector<std::uint8_t> re = got.encode();
+    const std::vector<std::uint8_t> re = encoded(got);
     if (re != want)
     {
         std::printf("FAIL: %s: a decoded field aliased the storage it was decoded from\n", what);
@@ -88,7 +89,7 @@ int main()
     MSG_TYPE sample;
     fillMessage(sample);
 
-    const std::vector<std::uint8_t> want = sample.encode();
+    const std::vector<std::uint8_t> want = encoded(sample);
     if (want.empty()) { std::printf("FAIL: the sample encoded to nothing\n"); return 2; }
 
     // ---- 1. one-shot, out of heap storage that is then destroyed ---------

@@ -597,7 +597,8 @@ static int fails = 0;
 
 static G roundtrip(const G &in) {
     std::uint8_t buf[G::_maxSize];
-    std::size_t n = in.encodeTo(buf, sizeof buf);
+    std::size_t n = 0;
+    CHECK(in.encodeTo(buf, sizeof buf, n) == sofab::Error::None);
     G out;
     CHECK(G::try_decode(buf, n, out).ok());
     return out;

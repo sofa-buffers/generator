@@ -28,6 +28,8 @@
 #include <cstring>
 #include <vector>
 
+#include "encoded.hpp"
+
 #ifdef SOFAB_STREAM_LIMITS
 #define SOFAB_STREAM_ARGS {sofab::Limits{SIZE_MAX}}
 #else
@@ -128,7 +130,7 @@ int main()
     // tolerant input must reproduce byte for byte.
     MSG_TYPE canonScalar;
     canonScalar.flag = true;
-    const std::vector<std::uint8_t> wantScalar = canonScalar.encode();
+    const std::vector<std::uint8_t> wantScalar = encoded(canonScalar);
     MSG_TYPE canonArrays;
     canonArrays.flag = true;
     canonArrays.flags.resize(5);
@@ -154,11 +156,11 @@ int main()
     canonArrays.cube[1].resize(1);
     canonArrays.cube[1][0].resize(1);
     canonArrays.cube[1][0][0] = 1;
-    const std::vector<std::uint8_t> wantArrays = canonArrays.encode();
+    const std::vector<std::uint8_t> wantArrays = encoded(canonArrays);
     MSG_TYPE canonSmall;
     canonSmall.flags.resize(3);
     canonSmall.flags[0] = 1; canonSmall.flags[1] = 0; canonSmall.flags[2] = 1;
-    const std::vector<std::uint8_t> wantSmall = canonSmall.encode();
+    const std::vector<std::uint8_t> wantSmall = encoded(canonSmall);
 
     int cases = 0;
     for (bool drip : {false, true})
@@ -172,7 +174,7 @@ int main()
         else
         {
             if (byteOf(s.flag) != 1) fail(surface, "a scalar boolean of 256 must be stored as 1");
-            if (s.encode() != wantScalar) fail(surface, "a scalar boolean of 256 must re-encode as 1");
+            if (encoded(s) != wantScalar) fail(surface, "a scalar boolean of 256 must re-encode as 1");
         }
 
         MSG_TYPE m;
@@ -182,7 +184,7 @@ int main()
         else
         {
             if (!holds(m.flags, {1, 0, 1})) fail(surface, "flags [2, 0, 5] must be stored as [1, 0, 1]");
-            if (m.encode() != wantSmall) fail(surface, "flags [2, 0, 5] must re-encode as [1, 0, 1]");
+            if (encoded(m) != wantSmall) fail(surface, "flags [2, 0, 5] must re-encode as [1, 0, 1]");
         }
 
         MSG_TYPE a;
@@ -204,7 +206,7 @@ int main()
         if (a.cube.size() != 2 || a.cube[0].size() != 2 || a.cube[1].size() != 1 ||
             !holds(a.cube[0][0], {1, 1}) || !holds(a.cube[0][1], {0}) || !holds(a.cube[1][0], {1}))
             fail(surface, "cube [[[2, max], [0]], [[256]]] must be stored as [[[1, 1], [0]], [[1]]]");
-        if (a.encode() != wantArrays)
+        if (encoded(a) != wantArrays)
             fail(surface, "the decoded boolean arrays must re-encode with every true element as 1");
     }
 

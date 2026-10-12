@@ -851,27 +851,46 @@ func (g *gen) emitStruct(f *hfile, name, summary string, fields []*ir.Field, isM
 		// appending into the result removes the cap instead of checking it: the
 		// ceiling never binds an encode at all, which is what Rust's unbounded arm
 		// does.
+		// Both report their verdict rather than folding it into the result
+		// (generator#736). CORELIB_PLAN §5.1.2: "an encoder that could not write
+		// what it was asked to write reports it, and a one-shot helper that
+		// ignores that report is non-conformant" -- and since generator#656 the
+		// refusal is reachable from an ordinary setter, not just from a caller
+		// mistake. "No bytes" cannot carry it: an all-default message encodes to
+		// zero bytes legitimately (MESSAGE_SPEC §2), so an empty result is a
+		// legal value and a refusal at once. The status is the return value and
+		// the bytes are the out-parameter; §6.1.1 closes the name set, so there
+		// is no try_encode twin to put the verdict in (the decode side has one
+		// only because §6.1.1 blesses the name).
 		f.line("    /**")
-		f.line("     * @brief Encode this message into a new byte vector.")
-		f.line("     * @return The encoded bytes. Empty if the message encodes to nothing,")
-		f.line("     *         and also empty if the encode was refused (a value past its")
-		f.line("     *         schema bound, see @ref serialize) -- use encodeTo() when the")
-		f.line("     *         two need telling apart.")
+		f.line("     * @brief Encode this message into @p _out.")
+		f.line("     *")
+		f.line("     * @p _out is emptied first and holds the complete message when this")
+		f.line("     * returns @ref sofab::Error::None; on a refusal it is left empty, never")
+		f.line("     * partially written. It may be reused across messages, which keeps its")
+		f.line("     * buffer instead of allocating a new one per encode.")
+		f.line("     *")
+		f.line("     * @param _out Receives the encoded bytes. Empty on success means the")
+		f.line("     *             message encodes to nothing, which an all-default message")
+		f.line("     *             legitimately does.")
+		f.line("     * @return @ref sofab::Error::None on success, else the code the encode")
+		f.line("     *         was refused with -- @ref sofab::Error::InvalidArgument for a")
+		f.line("     *         value past its schema bound (see @ref serialize).")
 		f.line("     */")
-		f.line("    std::vector<std::uint8_t> encode() const {")
+		f.line("    [[nodiscard]] sofab::Error encode(std::vector<std::uint8_t> &_out) const {")
 		if ms.Bounded {
-			f.line("        std::vector<std::uint8_t> _out(_maxSize);")
+			f.line("        _out.assign(_maxSize, 0);")
 			f.line("        sofab::OStreamView _os{_out.data(), _out.size()};")
 			f.line("        serialize(_os);")
 			// The buffer is the schema's worst case, so a refusal here is an
-			// argument error (an id past ID_MAX, a value past FIXLEN_MAX), never a
-			// capacity one. Checked rather than assumed: returning what was written
-			// as if it were the message is what §5.1 forbids.
-			f.line("        if (!_os.ok()) { return {}; }")
+			// argument error, never a capacity one: an id past ID_MAX, a value past
+			// FIXLEN_MAX, or -- the one ordinary application code reaches
+			// (generator#656) -- a value past its own declared bound.
+			f.line("        if (!_os.ok()) { _out.clear(); return _os.error(); }")
 			f.line("        _out.resize(_os.bytesUsed());")
-			f.line("        return _out;")
+			f.line("        return sofab::Error::None;")
 		} else {
-			f.line("        std::vector<std::uint8_t> _out;")
+			f.line("        _out.clear();")
 			f.line("        std::uint8_t _scratch[512];")
 			f.line("        sofab::OStreamView _os{")
 			f.line("            [&_out](std::span<const std::uint8_t> _chunk) {")
@@ -880,26 +899,35 @@ func (g *gen) emitStruct(f *hfile, name, summary string, fields []*ir.Field, isM
 			f.line("            _scratch, sizeof(_scratch)};")
 			f.line("        serialize(_os);")
 			f.line("        _os.flush();")
-			f.line("        if (!_os.ok()) { return {}; }")
-			f.line("        return _out;")
+			f.line("        if (!_os.ok()) { _out.clear(); return _os.error(); }")
+			f.line("        return sofab::Error::None;")
 		}
 		f.line("    }")
 		// encodeTo(): the same, into storage the caller already has — no
-		// allocation at all. Returns 0 if the message does not fit in cap, in
-		// which case dst holds however much was written before that was found out.
+		// allocation at all. Its two failures are the ones a caller must tell
+		// apart: the buffer was too small (BufferFull, raise it) or the message
+		// itself was refused (InvalidArgument, fix the value), which is why the
+		// code is returned and the byte count is the out-parameter.
 		f.line("    /**")
 		f.line("     * @brief Encode this message into caller-provided storage (no allocation).")
-		f.line("     * @param _dst Destination buffer.")
-		f.line("     * @param _cap Capacity of @p _dst in bytes.")
-		f.line("     * @return Bytes written, or 0 if the message does not fit in @p _cap or")
-		f.line("     *         was refused (a value past its schema bound, see @ref serialize);")
-		f.line("     *         then @p _dst holds however much was written first.")
+		f.line("     * @param _dst  Destination buffer.")
+		f.line("     * @param _cap  Capacity of @p _dst in bytes.")
+		f.line("     * @param _used Receives the number of bytes written; 0 unless this returns")
+		f.line("     *              @ref sofab::Error::None.")
+		f.line("     * @return @ref sofab::Error::None on success,")
+		f.line("     *         @ref sofab::Error::BufferFull if the message does not fit in")
+		f.line("     *         @p _cap, or @ref sofab::Error::InvalidArgument if the encode was")
+		f.line("     *         refused (a value past its schema bound, see @ref serialize). On")
+		f.line("     *         anything but None, @p _dst holds however much was written before")
+		f.line("     *         the failure was found out.")
 		f.line("     */")
-		f.line("    std::size_t encodeTo(std::uint8_t *_dst, std::size_t _cap) const noexcept {")
+		f.line("    [[nodiscard]] sofab::Error encodeTo(std::uint8_t *_dst, std::size_t _cap, std::size_t &_used) const noexcept {")
+		f.line("        _used = 0;")
 		f.line("        sofab::OStreamView _os{_dst, _cap};")
 		f.line("        serialize(_os);")
-		f.line("        if (!_os.ok()) { return 0; }")
-		f.line("        return _os.bytesUsed();")
+		f.line("        if (!_os.ok()) { return _os.error(); }")
+		f.line("        _used = _os.bytesUsed();")
+		f.line("        return sofab::Error::None;")
 		f.line("    }")
 		// Infallible, best-effort decode: kept for back-compat. It discards feed's
 		// Result and always returns a value, so it can never reject malformed input

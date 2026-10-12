@@ -147,17 +147,31 @@ func TestCppCCppEncodeBoundsOptOut(t *testing.T) {
 	}
 }
 
-// TestCppHarnessReportsAnEncodeRefusal: encode() answers a refusal with no bytes,
-// which is also what an all-default message encodes to; the harness tells them
-// apart with _isDefault() and exits non-zero on the refusal, so the conformance
-// driver sees it.
+// TestCppHarnessReportsAnEncodeRefusal: the harness asks encode() for the
+// verdict and exits non-zero on a refusal, so the conformance driver sees it.
+//
+// It used to INFER the refusal: encode() answered one with no bytes, which is
+// also what an all-default message encodes to, and _isDefault() -- serialize's
+// exact negation -- was the only thing that could separate them. That the
+// harness needed the trick at all was the defect (generator#736): the verdict is
+// a status now, on both one-shot surfaces, and nothing has to be inferred.
 func TestCppHarnessReportsAnEncodeRefusal(t *testing.T) {
 	main, err := genHeader(t, encodeBoundsSrc, "harness/main.cpp", map[string]any{"namespace": "sofabuffers", "emit": "project"})
 	if err != nil {
 		t.Fatalf("generate: %v", err)
 	}
-	if !strings.Contains(main, `if (bytes.empty() && !obj._isDefault()) { std::cerr << "encode refused\n"; return 1; }`) {
-		t.Error("the harness encode verb does not report a refused encode")
+	for _, want := range []string{
+		`std::vector<std::uint8_t> bytes;`,
+		`if (obj.encode(bytes) != sofab::Error::None) { std::cerr << "encode refused\n"; return 1; }`,
+	} {
+		if !strings.Contains(main, want) {
+			t.Errorf("the harness encode verb does not report a refused encode, missing %q", want)
+		}
+	}
+	// The inference is gone: _isDefault() is still emitted (the count-ed array
+	// writer reads it), but no longer stands in for a verdict.
+	if strings.Contains(main, "_isDefault()") {
+		t.Errorf("the harness still infers a refusal from emptiness:\n%s", main)
 	}
 	js, err := genHeader(t, encodeBoundsSrc, "harness/_json.hpp", map[string]any{"namespace": "sofabuffers", "emit": "project", "allow_dynamic": false})
 	if err != nil {

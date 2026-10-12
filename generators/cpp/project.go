@@ -30,7 +30,12 @@ func (g *gen) emitBench(f *hfile, s *ir.Schema) {
 		f.line("static std::vector<std::uint8_t> _bench_%s_wire;", low)
 		f.blank()
 		f.line("extern \"C\" __attribute__((noinline)) void run_encode_%s() {", low)
-		f.line("    _bench_%s_wire = _bench_%s_in.encode();", low, low)
+		// The status is discarded deliberately: the bench input is a fixed,
+		// in-bounds message, and a branch here would be measured as part of the
+		// encode. _bench_<m>_wire is reused across ops, so the encode allocates
+		// only on the first one (generator#736 made the destination an
+		// out-parameter; it used to be a fresh vector per op).
+		f.line("    (void)_bench_%s_in.encode(_bench_%s_wire);", low, low)
 		f.line("}")
 		f.blank()
 		f.line("extern \"C\" __attribute__((noinline)) void run_decode_%s() {", low)
@@ -537,11 +542,12 @@ func (g *gen) harnessMain(s *ir.Schema) []byte {
 		f.line("            sofab_json_t *root = sofab_json_parse(in.data(), in.size(), err, sizeof(err));")
 		f.line("            if (!root) { std::cerr << \"json: \" << err << \"\\n\"; return 1; }")
 		f.line("            %s obj; from_json(root, obj); sofab_json_free(root);", mt)
-		f.line("            auto bytes = obj.encode();")
-		// encode() answers a refusal with no bytes, and so does a message that
-		// writes nothing; _isDefault() is serialize's exact negation, so an empty
-		// result from a non-default message is the refusal (an over-bound value).
-		f.line("            if (bytes.empty() && !obj._isDefault()) { std::cerr << \"encode refused\\n\"; return 1; }")
+		// The refusal comes back as a status (generator#736), so the harness asks
+		// encode() instead of inferring it: an empty result used to be read
+		// through _isDefault(), serialize's exact negation, because "no bytes" is
+		// both a refusal and the legitimate encoding of an all-default message.
+		f.line("            std::vector<std::uint8_t> bytes;")
+		f.line("            if (obj.encode(bytes) != sofab::Error::None) { std::cerr << \"encode refused\\n\"; return 1; }")
 		f.line("            std::cout.write(reinterpret_cast<const char *>(bytes.data()), bytes.size());")
 		// The encode twin of streamdecode: the same message through a sink, drained
 		// into a buffer the harness owns. Window 0 is the generated one-shot
@@ -560,8 +566,8 @@ func (g *gen) harnessMain(s *ir.Schema) []byte {
 		f.line("            %s obj; from_json(root, obj); sofab_json_free(root);", mt)
 		f.line("            std::size_t win = argc > 3 ? std::strtoull(argv[3], nullptr, 10) : 0;")
 		f.line("            if (win == 0) {")
-		f.line("                auto bytes = obj.encode();")
-		f.line("                if (bytes.empty() && !obj._isDefault()) { std::cerr << \"encode refused\\n\"; return 1; }")
+		f.line("                std::vector<std::uint8_t> bytes;")
+		f.line("                if (obj.encode(bytes) != sofab::Error::None) { std::cerr << \"encode refused\\n\"; return 1; }")
 		f.line("                std::cout.write(reinterpret_cast<const char *>(bytes.data()), bytes.size());")
 		f.line("            } else {")
 		f.line("                std::vector<std::uint8_t> buf(std::max<std::size_t>(win, %s));", minBuf)

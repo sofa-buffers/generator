@@ -57,7 +57,7 @@ func TestCppStructural(t *testing.T) {
 		"sofab::OStreamImpl::Result serialize(sofab::OStreamImpl &_os) const noexcept override",
 		"void deserialize(sofab::IStreamImpl &_is, sofab::id _id,",
 		"static constexpr std::size_t _maxSize =",
-		"std::vector<std::uint8_t> encode() const",
+		"[[nodiscard]] sofab::Error encode(std::vector<std::uint8_t> &_out) const", // the status is the return value (generator#736)
 		"static Myfirstmessage decode(",
 		"static sofab::IStreamImpl::Result try_decode(const std::uint8_t *_data, std::size_t _len, Myfirstmessage &_out)",
 		"enum class Myfirstmessage_Someenum : std::int8_t {", // smallest signed backing
@@ -376,7 +376,7 @@ func TestCppFixedContainers(t *testing.T) {
 		"static sofab::FixedStringSeq<sofab::InlineVector<sofab::FixedString<16>, 5>>", // string-seq collector
 		"static sofab::FixedMessageSeq<sofab::InlineVector<",                           // struct-seq collector (places by element index)
 		// over-index element rejected INVALID (generator#149), no infinite loop (issue #126)
-		"std::size_t encodeTo(std::uint8_t *_dst", // heap-free encode
+		"[[nodiscard]] sofab::Error encodeTo(std::uint8_t *_dst, std::size_t _cap, std::size_t &_used) const noexcept", // heap-free encode
 	} {
 		if !strings.Contains(h, want) {
 			t.Errorf("fixed header missing %q", want)
@@ -2500,11 +2500,13 @@ func TestCppEncodeRespectsTheCeilingDistinction(t *testing.T) {
 	bounded := headerFromYAML(t, "version: 1\nmessages:\n  B:\n    payload:\n"+
 		"      s: { id: 1, type: string, maxlen: 16 }\n", "b.hpp")
 	for _, want := range []string{
-		"std::vector<std::uint8_t> _out(_maxSize);",
+		// the destination is the caller's vector, sized to the derived worst case
+		"_out.assign(_maxSize, 0);",
 		"sofab::OStreamView _os{_out.data(), _out.size()};",
 		// the check that was missing: returning what was written as if it were the
-		// message is what the buffer-ownership contract forbids
-		"if (!_os.ok()) { return {}; }",
+		// message is what the buffer-ownership contract forbids. The code is
+		// RETURNED (generator#736) -- "no bytes" is also a legal encoding.
+		"if (!_os.ok()) { _out.clear(); return _os.error(); }",
 	} {
 		if !strings.Contains(bounded, want) {
 			t.Errorf("bounded encode missing %q:\n%s", want, bounded)
@@ -2519,18 +2521,18 @@ func TestCppEncodeRespectsTheCeilingDistinction(t *testing.T) {
 	for _, want := range []string{
 		// the ceiling is still declared, and still must not size the buffer
 		"static constexpr std::size_t _maxSizeLimit =",
-		"std::vector<std::uint8_t> _out;",
+		"_out.clear();",
 		"std::uint8_t _scratch[512];",
 		"_out.insert(_out.end(), _chunk.begin(), _chunk.end());",
 		"_os.flush();",
-		"if (!_os.ok()) { return {}; }",
+		"if (!_os.ok()) { _out.clear(); return _os.error(); }",
 	} {
 		if !strings.Contains(unbounded, want) {
 			t.Errorf("unbounded encode missing %q:\n%s", want, unbounded)
 		}
 	}
 	// The defect itself: an unbounded message must never be capped at the ceiling.
-	if strings.Contains(unbounded, "std::vector<std::uint8_t> _out(_maxSize);") {
+	if strings.Contains(unbounded, "_out.assign(_maxSize, 0);") {
 		t.Errorf("unbounded encode still sizes its buffer from the configured ceiling:\n%s", unbounded)
 	}
 }
