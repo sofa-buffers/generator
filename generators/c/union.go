@@ -118,6 +118,23 @@ func (g *gen) emitUnionMembers(h *cfile, p *objectPlan) {
 //
 // A string/blob/array option's default is empty by the schema rule, so the
 // leaf default is a scalar whenever it is non-zero.
+// unionHasImage is unionImage's decision without the emission: a union carries a
+// default image when its default option is not option 0, or when that option's
+// own default is non-zero. The two must agree -- treeHasDefaults asks this one to
+// decide whether <msg>__init needs the descriptor walk (generator#737), and a
+// disagreement would either drop a tag the walk was to seed or keep a walk that
+// writes nothing.
+func (g *gen) unionHasImage(p *objectPlan) bool {
+	un := p.union
+	d := un.DefaultOption()
+	id := *un.DefaultID
+	if isSeqOption(d) {
+		return id != 0
+	}
+	_, nonZero := g.cDefaultInit(d)
+	return id != 0 || nonZero
+}
+
 func (g *gen) unionImage(c *cfile, p *objectPlan) string {
 	un := p.union
 	d := un.DefaultOption()
