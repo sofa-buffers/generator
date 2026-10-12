@@ -535,7 +535,9 @@ func (g *gen) emitUnionDeserialize(f *hfile, opts []*unionOpt) {
 	for i, o := range opts {
 		fields[i] = o.f
 	}
-	sizeParam, countParam := g.deserializeParams(fields)
+	// A union always has at least one option (validation refuses `oneof: {}`), so
+	// the stream parameter is always named here.
+	isParam, sizeParam, countParam := g.deserializeParams(fields)
 	f.line("    /**")
 	f.line("     * @brief Bind one decoded child to its option, selecting that option.")
 	f.line("     *")
@@ -544,7 +546,7 @@ func (g *gen) emitUnionDeserialize(f *hfile, opts []*unionOpt) {
 	f.line("     * the held option continues it. A mistyped or unknown child is skipped")
 	f.line("     * and switches nothing.")
 	f.line("     */")
-	f.line("    void deserialize(sofab::IStreamImpl &_is, sofab::id _id, %s, %s) noexcept override {", sizeParam, countParam)
+	f.line("    void deserialize(%s, sofab::id _id, %s, %s) noexcept override {", isParam, sizeParam, countParam)
 	f.line("        switch (_id) {")
 	// c-cpp: scalar options bound through the same C++ type share one arm.
 	// They sit at the same address in the storage union and readMatch binds

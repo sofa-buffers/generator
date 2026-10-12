@@ -1214,6 +1214,12 @@ func (g *gen) emitVisitor(f *rfile, msg *ir.Message, name string, fields []*ir.F
 	f.blank()
 
 	f.line("struct _V<'a> {")
+	// A message with no fields binds nothing, so no arm ever reads `m`
+	// (generator#738). The borrow still has to be held -- the visitor is handed
+	// the destination -- so the field stays and says why it is unread.
+	if len(fs) == 0 || len(fields) == 0 {
+		f.line("    #[allow(dead_code)] // a type with no fields binds nothing")
+	}
 	f.line("    m: &'a mut %s,", name)
 	if g.noStd {
 		// Heap-free: bounded location stack.

@@ -1192,6 +1192,18 @@ build "$WORK/defaults.yaml" "$WORK/defaults"
 python3 "$ROOT/tests/conformance/lib/check_defaults.py" "Kotlin" \
     -- "$WORK/defaults/build/install/harness/bin/harness"
 
+# A message with NO fields round-trips (generator#738): MESSAGE_SPEC §2 makes the
+# all-default message the empty byte string, so `payload: {}` is a legal schema --
+# the ping, the keep-alive -- and nothing in tests/ or examples/ had one, which is
+# why eleven backends had eleven answers to it: an abort, a throw, a generator
+# panic, a harness that would not compile. The shared driver prints its own schema.
+echo "==> empty payload: the ping encodes to nothing and decodes from nothing (generator#738)"
+printf 'version: 1\nmessages:\n' > "$WORK/emptypl.yaml"
+python3 "$ROOT/tests/conformance/lib/check_empty_payload.py" --emit-schema >> "$WORK/emptypl.yaml"
+build "$WORK/emptypl.yaml" "$WORK/emptypl"
+python3 "$ROOT/tests/conformance/lib/check_empty_payload.py" "Kotlin" \
+    -- "$WORK/emptypl/build/install/harness/bin/harness"
+
 # Float defaults (generator#636): a float is compared with its default by bit
 # pattern, so -0.0 is written next to a default of 0. The expectations are wire
 # byte literals in the driver; its KNOWN_GAP lists what still fails.

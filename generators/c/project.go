@@ -130,6 +130,14 @@ func (g *gen) harness(s *ir.Schema) []byte {
 	}
 	h.blank()
 
+	// Array bound for a MAX_SIZE-sized buffer. MAX_SIZE is 0 for a message whose
+	// payload declares no fields -- a legal schema, MESSAGE_SPEC §2 making the
+	// all-default message the empty byte string -- and ISO C has no zero-size
+	// array (generator#738). The extra byte is never written: the encode is
+	// bounded by MAX_SIZE, not by the array.
+	h.line("#define _SOFAB_BUF(n) ((n) > 0 ? (n) : 1)")
+	h.blank()
+
 	// The rest of the file is rendered first so the prelude can carry only the
 	// helpers it calls: an unused static function is a -Wunused-function
 	// diagnostic, and a schema with no string or blob field calls none of the
@@ -209,6 +217,12 @@ func fromJSON(base string) string { return private(base, "from_json") }
 
 func (g *gen) emitToJSON(h *cfile, cType, base string, fields []*ir.Field) {
 	h.line("static void %s(const %s *o, FILE *out) {", toJSON(base), cType)
+	// A type with no fields prints `{}` and reads nothing out of it
+	// (generator#738): the discard keeps the harness warning-clean, the way the
+	// one for `c` in emitFromJSON does.
+	if len(fields) == 0 {
+		h.line("    (void)o;")
+	}
 	h.line(`    fputc('{', out);`)
 	for i, f := range fields {
 		if i > 0 {
@@ -341,6 +355,10 @@ func (g *gen) emitFromJSON(h *cfile, cType, base string, fields []*ir.Field) {
 	h.line("static void %s(const sofab_json_t *j, %s *o) {", fromJSON(base), cType)
 	h.line("    const sofab_json_t *c;")
 	h.line("    (void)c;")
+	if len(fields) == 0 {
+		h.line("    (void)j;")
+		h.line("    (void)o;")
+	}
 	for _, f := range fields {
 		g.fieldFromJSON(h, f)
 	}
@@ -531,7 +549,7 @@ func (g *gen) emitBench(h *cfile, s *ir.Schema) {
 		// collection stops, which is what stops the op being optimized away.
 		h.line("static %s _bench_%s_in;", ct, low)
 		h.line("static %s _bench_%s_out;", ct, low)
-		h.line("static unsigned char _bench_%s_wire[%s];", low, maxSize)
+		h.line("static unsigned char _bench_%s_wire[_SOFAB_BUF(%s)];", low, maxSize)
 		h.line("static size_t _bench_%s_wire_len;", low)
 		h.blank()
 		h.line("__attribute__((noinline)) void run_encode_%s(void) {", low)
@@ -665,7 +683,7 @@ func (g *gen) emitMain(h *cfile, s *ir.Schema) {
 		h.line(`            if (!root) { fprintf(stderr, "json: %%s\n", err); return 1; }`)
 		h.line("            %s(root, &obj);", fromJSON(b))
 		h.line("            sofab_json_free(root);")
-		h.line("            unsigned char out[%s];", macro(b, "MAX_SIZE"))
+		h.line("            unsigned char out[_SOFAB_BUF(%s)];", macro(b, "MAX_SIZE"))
 		h.line("            size_t used = 0;")
 		h.line("            if (%s(&obj, out, sizeof(out), &used) != SOFAB_RET_OK) return 1;", role(b, "encode"))
 		h.line("            fwrite(out, 1, used, stdout);")
@@ -683,7 +701,7 @@ func (g *gen) emitMain(h *cfile, s *ir.Schema) {
 		h.line("            sofab_json_free(root);")
 		h.line("            size_t win = argc > 3 ? (size_t)strtoull(argv[3], NULL, 10) : 0;")
 		h.line("            if (win == 0) {")
-		h.line("                unsigned char out[%s];", macro(b, "MAX_SIZE"))
+		h.line("                unsigned char out[_SOFAB_BUF(%s)];", macro(b, "MAX_SIZE"))
 		h.line("                size_t used = 0;")
 		h.line("                if (%s(&obj, out, sizeof(out), &used) != SOFAB_RET_OK) return 1;", role(b, "encode"))
 		h.line("                fwrite(out, 1, used, stdout);")

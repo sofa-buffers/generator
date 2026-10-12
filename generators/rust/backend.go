@@ -652,7 +652,15 @@ func (g *gen) emitStruct(f *rfile, name string, fields []*ir.Field, msg *ir.Mess
 			f.line("    /// The `%s` feature compiles that check out.", encodeBoundsFeature)
 		}
 	}
-	f.line("    pub fn serialize<_F: sofab::Flush>(&self, os: &mut sofab::OStream<'_, _F>) -> Result<(), sofab::Error> {")
+	// A type with no fields writes nothing, so the stream is unused -- `_os`,
+	// the idiomatic spelling, rather than a warning in the user's build
+	// (generator#738: `payload: {}` is a legal schema, MESSAGE_SPEC §2 making the
+	// all-default message the empty byte string).
+	osName := "os"
+	if len(fields) == 0 {
+		osName = "_os"
+	}
+	f.line("    pub fn serialize<_F: sofab::Flush>(&self, %s: &mut sofab::OStream<'_, _F>) -> Result<(), sofab::Error> {", osName)
 	for _, fld := range fields {
 		g.emitSerialize(f, fld)
 	}
