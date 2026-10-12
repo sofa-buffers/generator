@@ -291,6 +291,39 @@ YAML
         $STREAM_OBJS
     "$WORK/boolchk-$label"
 
+    # generator#736: a refused encode and the all-default message must be
+    # DISTINGUISHABLE. Both produce zero bytes -- the all-default message
+    # legitimately (MESSAGE_SPEC §2), a refusal because the encode never
+    # completed -- so the verdict cannot be read off the bytes, and
+    # CORELIB_PLAN §5.1.2 makes ignoring the encoder's report non-conformant for
+    # a one-shot helper. encode()/encodeTo() return a sofab::Error and take their
+    # destination as an out-parameter; this leg asserts the property that buys:
+    # same bytes, different status, in both directions, plus that a short buffer
+    # is BufferFull and not a refusal.
+    #
+    # Refusing needs storage that can HOLD an over-bound value, i.e. the dynamic
+    # mode; the static profiles clamp on assignment by contract, so they get
+    # -DSOFAB_ENCREF_CLAMPS and assert the clamp instead.
+    echo "==> [$label] a refused encode is distinguishable from the all-default message (generator#736)"
+    mkdir -p "$WORK/encref-$label"
+    cat > "$WORK/encref-$label/encref.yaml" <<'YAML'
+version: 1
+messages:
+  encref:
+    payload:
+      s: { id: 0, type: string, maxlen: 4 }
+      n: { id: 1, type: u32 }
+YAML
+    (cd "$ROOT" && go run ./cmd/sofabgen --config "$WORK/cfg-corpus-$label.yaml" --lang cpp \
+        --in "$WORK/encref-$label/encref.yaml" --out "$WORK/encref-$label") >/dev/null
+    ENCREF_CLAMPS=
+    [ "$dynamic" = false ] && ENCREF_CLAMPS=-DSOFAB_ENCREF_CLAMPS=1
+    g++ -std=c++20 $WARNFLAGS $include -I"$WORK/encref-$label" $ENCREF_CLAMPS \
+        -DMSG_TYPE=sofabuffers::Encref -include encref.hpp \
+        -o "$WORK/encref-$label/check" "$ROOT/tests/conformance/cpp/encode_refusal_check.cpp" \
+        $STREAM_OBJS
+    "$WORK/encref-$label/check"
+
     echo "==> [$label] JSON encode -> decode round-trip"
     OUT=$(printf '%s' "$IN" | "$WORK/ex-$label/harness/harness" encode myfirstmessage | "$WORK/ex-$label/harness/harness" decode myfirstmessage)
     for chk in \

@@ -76,9 +76,10 @@ Two things worth knowing before switching it on under `corelib: cpp`:
 The two storage modes treat a value longer than its `maxlen` or `count`
 differently, because they see it at different times:
 
-- **`std::string` / `std::vector`** can hold any length, so encode checks
-  it. `encode()` returns no bytes, `encodeTo()` returns 0, and a stream
-  passed to `serialize()` reports `InvalidArgument` (`ok()` is false).
+- **`std::string` / `std::vector`** can hold any length, so encode checks it
+  and refuses the message: `encode()` and `encodeTo()` return
+  `sofab::Error::InvalidArgument` and hand back no bytes, and a stream passed
+  to `serialize()` reports the same code (`ok()` is false).
 - **`FixedString<N>` / `FixedBytes<N>` / `InlineVector<T, N>`** cannot
   hold more than `N`, so they shorten the value when you assign it, and
   encode then writes the shortened value. A string is cut at `N` bytes and
@@ -87,6 +88,32 @@ differently, because they see it at different times:
 
 Integer, enum and bitfield members already have the declared width as their
 C++ type, so a value past that width cannot be stored in them at all.
+
+A refusal is reported as a status, because "no bytes" cannot carry it: an
+all-default message encodes to nothing, which is a legal, round-trippable
+value, so an empty result and a refused encode are the same bytes and only the
+status separates them. Both one-shot entry points therefore return a
+`sofab::Error` and take their destination as an out-parameter, and both are
+`[[nodiscard]]` — ignoring the status is a compile error in a `-Werror` build:
+
+```cpp
+std::vector<std::uint8_t> bytes;
+if (msg.encode(bytes) != sofab::Error::None) {
+    // a value is past its declared bound; `bytes` is left empty
+}
+
+std::uint8_t buf[Msg::_maxSize];
+std::size_t used = 0;
+switch (msg.encodeTo(buf, sizeof buf, used)) {
+case sofab::Error::None:            break;  // `used` bytes written into buf
+case sofab::Error::InvalidArgument: break;  // a value past its declared bound
+case sofab::Error::BufferFull:      break;  // buf is too small for the message
+default:                            break;
+}
+```
+
+A buffer of `Msg::_maxSize` always holds a message a bounded schema allows, so
+`BufferFull` there means the buffer was sized from something else.
 
 **`SOFAB_DISABLE_ENCODE_BOUNDS`** (`corelib: c-cpp` only). Define it when
 you build to remove the encode checks above from the image. Use it only when

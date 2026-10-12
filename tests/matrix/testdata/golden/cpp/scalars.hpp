@@ -108,33 +108,48 @@ struct Scalars : sofab::Message {
     }
 
     /**
-     * @brief Encode this message into a new byte vector.
-     * @return The encoded bytes. Empty if the message encodes to nothing,
-     *         and also empty if the encode was refused (a value past its
-     *         schema bound, see @ref serialize) -- use encodeTo() when the
-     *         two need telling apart.
+     * @brief Encode this message into @p _out.
+     *
+     * @p _out is emptied first and holds the complete message when this
+     * returns @ref sofab::Error::None; on a refusal it is left empty, never
+     * partially written. It may be reused across messages, which keeps its
+     * buffer instead of allocating a new one per encode.
+     *
+     * @param _out Receives the encoded bytes. Empty on success means the
+     *             message encodes to nothing, which an all-default message
+     *             legitimately does.
+     * @return @ref sofab::Error::None on success, else the code the encode
+     *         was refused with -- @ref sofab::Error::InvalidArgument for a
+     *         value past its schema bound (see @ref serialize).
      */
-    std::vector<std::uint8_t> encode() const {
-        std::vector<std::uint8_t> _out(_maxSize);
+    [[nodiscard]] sofab::Error encode(std::vector<std::uint8_t> &_out) const {
+        _out.assign(_maxSize, 0);
         sofab::OStreamView _os{_out.data(), _out.size()};
         serialize(_os);
-        if (!_os.ok()) { return {}; }
+        if (!_os.ok()) { _out.clear(); return _os.error(); }
         _out.resize(_os.bytesUsed());
-        return _out;
+        return sofab::Error::None;
     }
     /**
      * @brief Encode this message into caller-provided storage (no allocation).
-     * @param _dst Destination buffer.
-     * @param _cap Capacity of @p _dst in bytes.
-     * @return Bytes written, or 0 if the message does not fit in @p _cap or
-     *         was refused (a value past its schema bound, see @ref serialize);
-     *         then @p _dst holds however much was written first.
+     * @param _dst  Destination buffer.
+     * @param _cap  Capacity of @p _dst in bytes.
+     * @param _used Receives the number of bytes written; 0 unless this returns
+     *              @ref sofab::Error::None.
+     * @return @ref sofab::Error::None on success,
+     *         @ref sofab::Error::BufferFull if the message does not fit in
+     *         @p _cap, or @ref sofab::Error::InvalidArgument if the encode was
+     *         refused (a value past its schema bound, see @ref serialize). On
+     *         anything but None, @p _dst holds however much was written before
+     *         the failure was found out.
      */
-    std::size_t encodeTo(std::uint8_t *_dst, std::size_t _cap) const noexcept {
+    [[nodiscard]] sofab::Error encodeTo(std::uint8_t *_dst, std::size_t _cap, std::size_t &_used) const noexcept {
+        _used = 0;
         sofab::OStreamView _os{_dst, _cap};
         serialize(_os);
-        if (!_os.ok()) { return 0; }
-        return _os.bytesUsed();
+        if (!_os.ok()) { return _os.error(); }
+        _used = _os.bytesUsed();
+        return sofab::Error::None;
     }
     /**
      * @brief Decode a message, best effort.

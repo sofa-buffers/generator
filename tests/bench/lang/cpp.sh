@@ -6,9 +6,10 @@
 # API. So unlike C, this recipe needs a driver TU.
 #
 # The driver deliberately calls ONLY the heap-free path — encodeTo() + try_decode().
-# The convenience encode() returns std::vector and would drag the allocator in,
-# which is not what a footprint consumer pays. Keep it that way: an accidental
-# encode() call here would silently add heap machinery to every reported number.
+# The convenience encode() takes a std::vector destination and would drag the
+# allocator in, which is not what a footprint consumer pays. Keep it that way: an
+# accidental encode() call here would silently add heap machinery to every
+# reported number.
 #
 # Note this exceeds the corelib convention: corelib-c-cpp/tools/footprint.sh sets
 # -DSOFAB_ENABLE_CPP=OFF and never measures C++ footprint on any arch.
@@ -201,7 +202,12 @@ extern "C" void reset() {
     static std::uint8_t buf[message::VehicleTelemetry::_maxSize];
     message::VehicleTelemetry v;
     v.odometer_m = *(volatile std::uint64_t *)0x20001000;
-    std::size_t n = v.encodeTo(buf, sizeof(buf));
+    // encodeTo() returns its verdict and writes the byte count into `n`
+    // (generator#736). Discarded here like the try_decode result below: the
+    // input is a fixed in-bounds message and a branch would be measured as part
+    // of the encode -- and on this footprint row, linked into the image.
+    std::size_t n = 0;
+    (void)v.encodeTo(buf, sizeof(buf), n);
 
     message::VehicleTelemetry out;
     (void)message::VehicleTelemetry::try_decode(buf, n, out);
