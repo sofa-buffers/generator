@@ -70,6 +70,7 @@ import sys
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import check_skipped_string_utf8 as ssu  # noqa: E402
 import check_header_limits as chl  # noqa: E402
+import harness_dialect as hd  # noqa: E402
 
 BAD_FF = ssu.BAD_FF
 BAD_TRUNC = ssu.BAD_TRUNC
@@ -232,13 +233,13 @@ def main():
                             % (args.label, tag, args.invalid_pattern,
                                (out + err).strip()))
                 if args.status_verb:
-                    _, sout, serr = ssu.run(harness + [args.status_verb] + msg,
-                                            args.cwd, wire)
-                    got = (sout.strip().splitlines() or [""])[0]
+                    src, sout, serr = ssu.run(harness + [args.status_verb] + msg,
+                                              args.cwd, wire)
+                    got = hd.status_line(sout)
                     if got != "INVALID":
                         ssu.die("[%s] %s -- category must be INVALID, got %r%s"
                                 % (args.label, tag, got,
-                                   ("\n" + serr.strip()) if serr.strip() else ""))
+                                   hd.status_ended(src, sout, serr)))
                 n_inv += 1
                 continue
             if rc != 0:

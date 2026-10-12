@@ -79,6 +79,8 @@ import re
 import subprocess
 import sys
 
+import harness_dialect as hd
+
 MSG = "deep"
 
 # Field ids, shared by the emitted schema and the forged headers.
@@ -303,11 +305,11 @@ def main() -> int:
                               f"    want {json.dumps(want)}"
                               + (f"\n    {', '.join(lost)} lost after unwind" if lost else ""))
         if want is None and status:
-            _, sout, _ = run(cmd, [status, msg], wire, cwd)
-            got = (sout.strip().splitlines() or [""])[0]
+            src, sout, serr = run(cmd, [status, msg], wire, cwd)
+            got = hd.status_line(sout)
             if got != status_invalid:
                 failed.append(f"{name} [{status}]: category must be {status_invalid}, "
-                              f"got {got!r}")
+                              f"got {got!r}{hd.status_ended(src, sout, serr)}")
 
     if failed:
         print(f"FAIL {label} MAX_DEPTH: {len(failed)} failures")

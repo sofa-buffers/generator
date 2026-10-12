@@ -63,6 +63,8 @@ import re
 import subprocess
 import sys
 
+import harness_dialect as hd
+
 MSG = "sbb"
 
 # Field ids, shared by the emitted schema and the forged headers.
@@ -295,10 +297,11 @@ def main() -> int:
                 failed.append(f"{name} [{where}]: the skip desynchronised the stream -- "
                               f"tail = {json.dumps(obj.get('tail'))}, want {TAIL_VALUE}")
         if want is None and status:
-            _, sout, serr = run(cmd, [status, msg], wire, cwd)
-            got = (sout.strip().splitlines() or [""])[0]
+            src, sout, serr = run(cmd, [status, msg], wire, cwd)
+            got = hd.status_line(sout)
             if got != "INVALID":
-                failed.append(f"{name} [{status}]: category must be INVALID, got {got!r}")
+                failed.append(f"{name} [{status}]: category must be INVALID, "
+                              f"got {got!r}{hd.status_ended(src, sout, serr)}")
 
     if failed:
         print(f"FAIL {label} §7.3 before §7.1: {len(failed)} failures")

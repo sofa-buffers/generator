@@ -163,6 +163,8 @@ import re
 import subprocess
 import sys
 
+import harness_dialect as hd
+
 
 def die(msg):
     print("FAIL: " + msg)
@@ -430,13 +432,13 @@ def main():
                     % (args.label, name, args.invalid_pattern,
                        (out + err).strip()))
             if args.status_verb:
-                _, sout, serr = run(harness + [args.status_verb] + msg,
-                                    args.cwd, wire)
-                got = (sout.strip().splitlines() or [""])[0]
+                src, sout, serr = run(harness + [args.status_verb] + msg,
+                                      args.cwd, wire)
+                got = hd.status_line(sout)
                 if got != "INVALID":
                     die("[%s] %s -- category must be INVALID, got %r%s"
                         % (args.label, name, got,
-                           ("\n" + serr.strip()) if serr.strip() else ""))
+                           hd.status_ended(src, sout, serr)))
             n_invalid += 1
             continue
 

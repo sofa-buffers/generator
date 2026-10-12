@@ -134,6 +134,8 @@ import re
 import subprocess
 import sys
 
+import harness_dialect as hd
+
 MESSAGE = "refusal"
 SHAPES = ("array", "string", "blob", "wrapper")
 
@@ -452,13 +454,13 @@ def main():
                 die("[%s] %s [%s] must DECODE -- %s; rc=%d:\n%s"
                     % (args.label, name, args.verb, why, rc, text.strip()))
             if args.status_verb:
-                _, sout, serr = run(harness + [args.status_verb] + msg,
-                                    args.cwd, wire)
-                got = (sout.strip().splitlines() or [""])[0]
+                src, sout, serr = run(harness + [args.status_verb] + msg,
+                                      args.cwd, wire)
+                got = hd.status_line(sout)
                 if got != args.status_complete:
                     die("[%s] %s -- must decode COMPLETE, got %r%s"
                         % (args.label, name, got,
-                           ("\n" + serr.strip()) if serr.strip() else ""))
+                           hd.status_ended(src, sout, serr)))
             if not args.no_values:
                 field, want = value
                 got = decoded_field(out, field)
@@ -494,16 +496,16 @@ def main():
                     "apart: %s. Harness printed:\n%s"
                     % (args.label, name, refused, other_pat, why, text.strip()))
         if args.status_verb:
-            _, sout, serr = run(harness + [args.status_verb] + msg, args.cwd,
-                                wire)
-            got = (sout.strip().splitlines() or [""])[0]
+            src, sout, serr = run(harness + [args.status_verb] + msg,
+                                  args.cwd, wire)
+            got = hd.status_line(sout)
             if got == other_status:
                 die("[%s] %s -- reported as %s. §6.3 keeps the two apart: %s"
                     % (args.label, name, refused, why))
             if got != want_status:
                 die("[%s] %s -- category must be %s (%r), got %r%s"
                     % (args.label, name, wanted, want_status, got,
-                       ("\n" + serr.strip()) if serr.strip() else ""))
+                       hd.status_ended(src, sout, serr)))
 
     channel = ("--status-verb %s" % args.status_verb if args.status_verb
                else "%s/%s" % (args.limit_pattern, args.invalid_pattern))

@@ -15,6 +15,9 @@ import this module so the tolerance is written once:
   * a non-finite float comes OUT as a bare `inf` / `-inf` / `nan` (C), as
     `Infinity` / `NaN` (Python, Dart, Java), or as the strings "inf" / "-inf" /
     "nan" (Go, TypeScript) -- `loads_out()` reads all of them, and `-0` as -0.0.
+  * a `status` verb answers with its verdict on the first stdout line --
+    `status_line()` reads it, and `status_ended()` says how the call ended when
+    that line is not the one wanted.
 
 Nothing here knows about any one backend; a harness that needs a spelling this
 module does not cover gets it added here, not in a driver.
@@ -139,3 +142,28 @@ def loads_out(text: str):
     text = _BARE_NONFINITE.sub(
         lambda m: m.group(1) or '"%s%s"' % (m.group(2), m.group(3)), text)
     return json.loads(text, parse_int=lambda s: -0.0 if s == "-0" else int(s))
+
+
+def status_line(out) -> str:
+    """The verdict a `status` call printed: the first line of its stdout."""
+    if isinstance(out, bytes):
+        out = out.decode("utf-8", "replace")
+    return (out.strip().splitlines() or [""])[0]
+
+
+def status_ended(rc: int, out, err) -> str:
+    """How a `status` call ended, as a suffix for a failure message.
+
+    The verdict line alone cannot tell a harness that crashed, one killed by a
+    signal (a negative `rc` from subprocess) and one that exited 0 without
+    writing a byte apart; this names the exit, says whether stdout was empty,
+    and appends stderr.
+    """
+    if isinstance(out, bytes):
+        out = out.decode("utf-8", "replace")
+    if isinstance(err, bytes):
+        err = err.decode("utf-8", "replace")
+    end = "killed by signal %d" % -rc if rc < 0 else "exit status %d" % rc
+    shown = "stdout %r" % out.strip()[:200] if out.strip() else "nothing on stdout"
+    tail = ("; stderr:\n" + err.strip()) if err.strip() else ", nothing on stderr"
+    return " [status call: %s, %s%s]" % (end, shown, tail)
