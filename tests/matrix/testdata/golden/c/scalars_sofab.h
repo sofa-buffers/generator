@@ -31,8 +31,8 @@
 #if defined(SOFAB_DISABLE_INT64_SUPPORT)
 # error "SofaBuffers: message Scalars uses 64-bit integers, but the corelib was built with SOFAB_DISABLE_INT64_SUPPORT."
 #endif
-#if !defined(SOFAB_OBJECT_COUNT_EXTENT)
-# error "SofaBuffers: message Scalars stores default values in a prefix image (SOFAB_OBJECT_COUNT_EXTENT), which this corelib-c-cpp predates. Update the corelib."
+#if !defined(SOFAB_OBJECT_DESCR_WITH_PREFIX_DEFAULTS)
+# error "SofaBuffers: message Scalars stores default values in a prefix image (SOFAB_OBJECT_DESCR_WITH_PREFIX_DEFAULTS), which this corelib-c-cpp predates. Update the corelib."
 #endif
 
 /* --- value-width guard: field ids must fit the corelib's id ceiling --- */

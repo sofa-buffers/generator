@@ -45,7 +45,7 @@ static const _message_Scalars__defimg_t _message_Scalars__defaults = {
     .f64 = -2.5,
     .flag = 1,
 };
-const sofab_object_descr_t message_Scalars__descr = SOFAB_OBJECT_DESCR_WITH_DEFAULTS(_message_Scalars__fields, 9, NULL, 0, &_message_Scalars__defaults);
+const sofab_object_descr_t message_Scalars__descr = SOFAB_OBJECT_DESCR_WITH_PREFIX_DEFAULTS(_message_Scalars__fields, 9, NULL, 0, &_message_Scalars__defaults);
 
 void message_Scalars__init(message_Scalars_t *msg) {
     memset(msg, 0, sizeof(*msg));

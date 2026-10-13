@@ -1336,6 +1336,49 @@ for cfg in names-default proj; do
 done
 echo "==> names.yaml builds and round-trips (default prefix and sofab_)"
 
+# Default-image forms (generator#741; corelib-c-cpp README "Descriptor limits").
+# An object whose defaulted members fit the descriptor's extent byte gets a
+# PREFIX image -- only those members in .rodata instead of a copy of the whole
+# struct. One whose do not keeps the WHOLE-object image, which carries no extent
+# (0 reads as "all of it"); that fallback is what keeps a defaulted
+# `string<maxlen: 300>` or `array<u32, count: 64>` compiling at all, since no
+# extent value says how far a prefix that long reaches. Both forms have to build
+# under the strict warning set AND seed what the schema declares, so each is
+# round-tripped from the empty message: every field at its default encodes to
+# zero bytes (MESSAGE_SPEC §2), and decoding those zero bytes must hand back the
+# defaults the image holds.
+echo "==> default image: a prefix, and the whole-object fallback (generator#741)"
+cat > "$WORK/defimg.yaml" <<'YAML'
+version: 1
+messages:
+  shortdefaults:
+    payload:
+      n:    { id: 0, type: u32, default: 4242 }
+      flag: { id: 1, type: boolean, default: true }
+      note: { id: 2, type: string, maxlen: 8 }
+  longdefaults:
+    payload:
+      text: { id: 0, type: string, maxlen: 300, default: hello }
+      n:    { id: 1, type: u32, default: 7 }
+YAML
+( cd "$ROOT" && go run ./cmd/sofabgen --config "$WORK/proj.yaml" --lang c \
+    --in "$WORK/defimg.yaml" --out "$WORK/defimg" >/dev/null )
+grep -q 'SOFAB_OBJECT_DESCR_WITH_PREFIX_DEFAULTS' "$WORK/defimg/generated/shortdefaults_sofab.c" \
+    || { echo "FAIL: short defaults did not take the prefix image"; exit 1; }
+grep -q 'SOFAB_OBJECT_DESCR_WITH_DEFAULTS' "$WORK/defimg/generated/longdefaults_sofab.c" \
+    || { echo "FAIL: a 301-byte prefix must fall back to the whole-object image"; exit 1; }
+make -C "$WORK/defimg" SOFAB_C_CORELIB="$CORELIB" >/dev/null \
+    || { echo "FAIL: the default-image forms did not build"; exit 1; }
+for case in 'shortdefaults {"n":4242,"flag":true,"note":""}' 'longdefaults {"text":"hello","n":7}'; do
+    msg=${case%% *}; want=${case#* }
+    bytes=$(printf '%s' "$want" | "$WORK/defimg/harness/harness" encode "$msg" | wc -c)
+    [ "$bytes" -eq 0 ] || { echo "FAIL: $msg at its defaults encoded $bytes bytes, not 0"; exit 1; }
+    got=$(printf '' | "$WORK/defimg/harness/harness" decode "$msg") \
+        || { echo "FAIL: $msg did not decode the empty message"; exit 1; }
+    python3 "$ROOT/tests/conformance/lib/json_equal.py" "$want" "$got" \
+        --label "C: $msg seeds its declared defaults from the image" || exit 1
+done
+
 # max_message_size (generator#637, ARCHITECTURE §9.6): C stores every field in a
 # fixed, schema-bounded object, so there is no unbounded encode to check; only the
 # generate-time budget and the rejection of an unbounded field apply.

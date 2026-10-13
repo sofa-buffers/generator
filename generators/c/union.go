@@ -47,7 +47,10 @@ func (g *gen) unionLeafMember(cType string, f *ir.Field) (decl, entry string, er
 		entry = fmt.Sprintf("    SOFAB_OBJECT_FIELD_ARRAY_SIZED(%d, %s, u.%s.items, u.%s.len, %s),", f.ID, cType, mn, mn, arrayFieldType(f.Elem))
 		return decl, entry, nil
 	}
-	return g.scalarMember(cType, f, "u."+mn)
+	// The size is dropped: a union's image is its own prefix already
+	// (emitUnionImage), so no union option ever feeds prefixExtent.
+	decl, entry, _, err = g.scalarMember(cType, f, "u."+mn)
+	return decl, entry, err
 }
 
 // unionMemberNote is memberNote for a union option: a sized option keeps its
