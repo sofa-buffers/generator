@@ -77,12 +77,14 @@ func TestCInitDropsTheWalkWithoutDefaults(t *testing.T) {
 // emitDescriptor, which decides per object whether to emit an image at all. A
 // walk kept where no image exists is the cost #737 removes; a walk dropped where
 // one exists would lose a declared default, so the two are pinned together --
-// WITH_DEFAULTS or a non-NULL union image in the file iff the walk is emitted.
+// WITH_DEFAULTS (whole or prefix) or a non-NULL union image in the file iff the
+// walk is emitted.
 func TestCInitWalkMatchesTheDescriptorDecision(t *testing.T) {
 	files := genCFromYAML(t, initWalkSrc)
 	for _, msg := range []string{"plain", "withdef", "nesteddef", "uniondef", "unionzero"} {
 		src := files[msg+"_sofab.c"]
 		hasImage := strings.Contains(src, "SOFAB_OBJECT_DESCR_WITH_DEFAULTS") ||
+			strings.Contains(src, "SOFAB_OBJECT_DESCR_WITH_PREFIX_DEFAULTS") ||
 			(strings.Contains(src, "SOFAB_OBJECT_DESCR_UNION") && !strings.Contains(src, ", NULL, message_"))
 		walks := strings.Contains(initOf(t, files, msg), "sofab_object_init")
 		if hasImage != walks {

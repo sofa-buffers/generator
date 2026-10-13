@@ -11,6 +11,7 @@ package c
 
 import (
 	"fmt"
+	"math"
 	"regexp"
 	"sort"
 	"strings"
@@ -175,9 +176,16 @@ type member struct {
 	// (generator#741): those members are ordered FIRST, so the default image can
 	// be the struct's prefix instead of a copy of all of it.
 	hasDefault bool
-	doc        string // field description (+unit), single-lined; "" => no member comment
-	note       string // schema-bound note (generator#308); "" => the field has no bound
-	deprecated bool   // field carries deprecated:true — emit the native attribute + doc note
+	// bytes/calign are the member's C sizeof and alignment -- what the prefix
+	// image's own sizeof follows from (prefixExtent). bytes is 0 for a member
+	// whose size the backend does not compute (a nested struct, a sequence, a
+	// wrapper holder); none of those ever carries an image entry. calign is the
+	// REAL alignment, where align above is the ordering rank that rates every
+	// buffer 8 to sort it first.
+	bytes, calign int64
+	doc           string // field description (+unit), single-lined; "" => no member comment
+	note          string // schema-bound note (generator#308); "" => the field has no bound
+	deprecated    bool   // field carries deprecated:true — emit the native attribute + doc note
 }
 
 // memberDoc derives a member's Doxygen text from the field's description and
@@ -659,11 +667,12 @@ func (g *gen) collect(key string, path []string, fields []*ir.Field, un *ir.Name
 			p.fields = append(p.fields, fieldEntry{macro: entry})
 			p.optDecl[f.ID] = decl
 		default:
-			decl, entry, err := g.scalarMember(p.cType, f, at(f))
+			decl, entry, bytes, err := g.scalarMember(p.cType, f, at(f))
 			if err != nil {
 				return err
 			}
-			p.members = append(p.members, member{decl: decl, ident: cIdent(f.Name), align: ir.AlignRank(f), doc: memberDoc(f), note: note, deprecated: f.Deprecated})
+			p.members = append(p.members, member{decl: decl, ident: cIdent(f.Name), align: ir.AlignRank(f),
+				bytes: bytes, calign: g.cAlign(f), doc: memberDoc(f), note: note, deprecated: f.Deprecated})
 			p.fields = append(p.fields, fieldEntry{macro: entry})
 			declared := len(p.defaults)
 			// A compact array's declared default is an array of its OWN length, not
@@ -875,15 +884,21 @@ func (g *gen) buildHolder(ps *planSet, key string, spec arraySpec) *objectPlan {
 // non-composite field. at is the member's path in the descriptor (the member
 // name, or u.<option> inside a union); the sized blob/array forms below are
 // struct-only — a union wraps them (unionLeafMember).
-func (g *gen) scalarMember(cType string, f *ir.Field, at string) (decl, entry string, err error) {
+// scalarMember declares a leaf field's storage. bytes is the C sizeof of
+// everything the returned decl declares -- a sized buffer's companion length
+// included -- so that the one place which knows the storage is also the one
+// that reports its size (prefixExtent reads it).
+func (g *gen) scalarMember(cType string, f *ir.Field, at string) (decl, entry string, bytes int64, err error) {
 	mn := cIdent(f.Name)
 	switch f.Kind {
 	case ir.KindU8, ir.KindU16, ir.KindU32, ir.KindU64:
 		decl = fmt.Sprintf("%s %s;", uintC(f.Kind), mn)
 		entry = field(f.ID, cType, at, "UNSIGNED")
+		bytes = cScalarWidth(uintC(f.Kind))
 	case ir.KindI8, ir.KindI16, ir.KindI32, ir.KindI64:
 		decl = fmt.Sprintf("%s %s;", intC(f.Kind), mn)
 		entry = field(f.ID, cType, at, "SIGNED")
+		bytes = cScalarWidth(intC(f.Kind))
 	case ir.KindBool:
 		// BOOLEAN, not UNSIGNED: the wire form is the same unsigned varint, but
 		// CORELIB_PLAN §4.4 reads every non-zero value as true and normalizes it,
@@ -891,12 +906,15 @@ func (g *gen) scalarMember(cType string, f *ir.Field, at string) (decl, entry st
 		// rejected as INVALID by the one-byte width check.
 		decl = fmt.Sprintf("uint8_t %s;", mn)
 		entry = field(f.ID, cType, at, "BOOLEAN")
+		bytes = 1
 	case ir.KindFP32:
 		decl = fmt.Sprintf("float %s;", mn)
 		entry = field(f.ID, cType, at, "FP32")
+		bytes = 4
 	case ir.KindFP64:
 		decl = fmt.Sprintf("double %s;", mn)
 		entry = field(f.ID, cType, at, "FP64")
+		bytes = 8
 	case ir.KindString:
 		// checkBounded guarantees a maxlen on every string, so the storage is the
 		// schema bound directly (no zero-usable-capacity fallback). +1 for the NUL:
@@ -905,6 +923,7 @@ func (g *gen) scalarMember(cType string, f *ir.Field, at string) (decl, entry st
 		// of storage to be accepted at its schema bound (#103).
 		decl = fmt.Sprintf("char %s[%d];", mn, f.Maxlen+1)
 		entry = field(f.ID, cType, at, "STRING")
+		bytes = f.Maxlen + 1
 	case ir.KindBlob:
 		// A blob is opaque bytes and may be shorter than its maxlen, so it needs a
 		// companion used-length: a bare uint8_t[N] cannot represent "3 of a possible
@@ -918,12 +937,15 @@ func (g *gen) scalarMember(cType string, f *ir.Field, at string) (decl, entry st
 		lenT := blobLenC(f.Maxlen)
 		decl = fmt.Sprintf("%s %s; uint8_t %s[%d];", lenT, lenMember(f.Name), mn, f.Maxlen)
 		entry = fmt.Sprintf("    SOFAB_OBJECT_FIELD_BLOB_SIZED(%d, %s, %s, %s),", f.ID, cType, mn, lenMember(f.Name))
+		bytes = cScalarWidth(lenT) + f.Maxlen
 	case ir.KindEnum:
 		decl = fmt.Sprintf("%s %s;", enumC(f.Ref), mn)
 		entry = field(f.ID, cType, at, "SIGNED")
+		bytes = cScalarWidth(enumC(f.Ref))
 	case ir.KindBitfield:
 		decl = fmt.Sprintf("%s %s;", bitfieldC(f.Ref), mn)
 		entry = field(f.ID, cType, at, "UNSIGNED")
+		bytes = cScalarWidth(bitfieldC(f.Ref))
 	case ir.KindArray:
 		// Native array element (numeric/enum/boolean/bitfield): enum -> signed,
 		// bitfield -> unsigned, boolean -> the §4.4 boolean array (arrayFieldType),
@@ -941,11 +963,12 @@ func (g *gen) scalarMember(cType string, f *ir.Field, at string) (decl, entry st
 		et := g.arrayElemCType(f.Elem, f.ElemRef)
 		w := lenWidth(f.Count, cScalarWidth(et))
 		decl = fmt.Sprintf("%s %s; %s %s[%d];", lenC(w), lenMember(f.Name), et, mn, f.Count)
+		bytes = w + f.Count*cScalarWidth(et)
 		entry = fmt.Sprintf("    SOFAB_OBJECT_FIELD_ARRAY_SIZED(%d, %s, %s, %s, %s),", f.ID, cType, mn, lenMember(f.Name), arrayFieldType(f.Elem))
 	default:
-		return "", "", fmt.Errorf("field %q: unsupported kind %s for C backend", f.Name, f.Kind)
+		return "", "", 0, fmt.Errorf("field %q: unsupported kind %s for C backend", f.Name, f.Kind)
 	}
-	return decl, entry, nil
+	return decl, entry, bytes, nil
 }
 
 // ---- emit pieces --------------------------------------------------------
@@ -1230,7 +1253,7 @@ func (g *gen) emitDescriptor(c *cfile, p *objectPlan) {
 			p.descr, fieldsSym(p.key), len(p.fields), nested, nestedCount, g.unionImage(c, p), p.cType)
 	} else if len(p.defaults) > 0 {
 		// A holder (fixedSeq) never carries a defaults image (its elements default to
-		// empty/zero), so WITH_DEFAULTS and SEQ are mutually exclusive in practice.
+		// empty/zero), so the image forms and SEQ are mutually exclusive in practice.
 		//
 		// The image is the PREFIX of the object that carries defaults, not a copy of
 		// all of it (generator#741): a message that defaults one byte costs one byte
@@ -1242,30 +1265,39 @@ func (g *gen) emitDescriptor(c *cfile, p *objectPlan) {
 		// offsetof test per member says so at compile time instead of by argument.
 		// The same technique the union image has always used.
 		//
-		// corelib-c-cpp#196 is what reads it: the descriptor records
-		// sizeof(*image) as the extent, and a field at or past it is compared
-		// against zero, which is what "no declared default" means.
-		imgT := private(p.key, "defimg_t")
-		c.line("typedef struct {")
-		for _, m := range p.members {
-			if m.hasDefault {
-				c.line("    %s", m.decl)
+		// SOFAB_OBJECT_DESCR_WITH_PREFIX_DEFAULTS is what reads it: the descriptor
+		// records sizeof(*image) as the extent, and a field at or past it is seeded
+		// with and compared against zero, which is what "no declared default"
+		// means. Past the extent byte no value says how far a prefix reaches, so an
+		// image that long goes over as the WHOLE object through
+		// SOFAB_OBJECT_DESCR_WITH_DEFAULTS, which needs no extent (0 = all of it).
+		imgT, macro := p.cType, "SOFAB_OBJECT_DESCR_WITH_DEFAULTS"
+		if usesPrefixImage(p) {
+			imgT, macro = private(p.key, "defimg_t"), "SOFAB_OBJECT_DESCR_WITH_PREFIX_DEFAULTS"
+			c.line("typedef struct {")
+			for _, m := range p.members {
+				if m.hasDefault {
+					c.line("    %s", m.decl)
+				}
 			}
-		}
-		c.line("} %s;", imgT)
-		for _, m := range p.members {
-			if m.hasDefault {
-				c.line("typedef char %s_at_%s[(offsetof(%s, %s) == offsetof(%s, %s)) ? 1 : -1];",
-					private(p.key, "defimg"), m.ident, imgT, m.ident, p.cType, m.ident)
+			c.line("} %s;", imgT)
+			for _, m := range p.members {
+				if m.hasDefault {
+					c.line("typedef char %s_at_%s[(offsetof(%s, %s) == offsetof(%s, %s)) ? 1 : -1];",
+						private(p.key, "defimg"), m.ident, imgT, m.ident, p.cType, m.ident)
+				}
 			}
+		} else {
+			c.line("/* The defaulted members span %d bytes, over SOFAB_OBJECT_DESCR_EXTENT_MAX:", prefixExtent(p))
+			c.line("   the image is the whole object, which the descriptor records as extent 0. */")
 		}
 		c.line("static const %s %s = {", imgT, defaultsSym(p.key))
 		for _, d := range p.defaults {
 			c.line("    .%s = %s,", d.ident, d.expr)
 		}
 		c.line("};")
-		c.line("const sofab_object_descr_t %s = SOFAB_OBJECT_DESCR_WITH_DEFAULTS(%s, %d, %s, %d, &%s);",
-			p.descr, fieldsSym(p.key), len(p.fields), nested, nestedCount, defaultsSym(p.key))
+		c.line("const sofab_object_descr_t %s = %s(%s, %d, %s, %d, &%s);",
+			p.descr, macro, fieldsSym(p.key), len(p.fields), nested, nestedCount, defaultsSym(p.key))
 	} else if p.fixedSeq {
 		c.line("const sofab_object_descr_t %s = SOFAB_OBJECT_DESCR_SEQ_SIZED(%s, %d, %s, %d, %s, len);",
 			p.descr, fieldsSym(p.key), len(p.fields), nested, nestedCount, p.cType)
@@ -1460,17 +1492,15 @@ func (g *gen) emitGuards(h *cfile, what, owner string, caps capset, maxField int
 	if caps.prefixImage {
 		// A default image covers only the object's defaulted prefix, and the
 		// descriptor tells the corelib how far it reaches (generator#741). An
-		// older corelib reads every defaulted field's own offset out of the image
-		// with no extent to stop it -- which still COMPILES, because the macro
-		// that records the extent is the corelib's own, and then reads past a
-		// .rodata object at run time. Nothing else would catch that, so the
-		// generated header refuses the pairing by the macro's absence (the
-		// corelib signals features by what its headers define; it bumps
-		// SOFAB_API_VERSION only on a break, and this is not one -- an image
-		// generated BEFORE #196 covers the whole object, whose extent the new
-		// corelib reads correctly).
-		h.line("#if !defined(SOFAB_OBJECT_COUNT_EXTENT)")
-		h.line(`# error "SofaBuffers: %s stores default values in a prefix image (SOFAB_OBJECT_COUNT_EXTENT), which this corelib-c-cpp predates. Update the corelib."`, what)
+		// older corelib has no extent to stop it and reads every defaulted
+		// field's own offset out of the image, past a .rodata object at run
+		// time. The test is for the macro the descriptor CALLS, which is also
+		// the only reliable one: the corelib signals features by what its
+		// headers define (it bumps SOFAB_API_VERSION only on a break, and this
+		// is not one -- a whole-object image, which is still what a long prefix
+		// falls back to, reads correctly either way).
+		h.line("#if !defined(SOFAB_OBJECT_DESCR_WITH_PREFIX_DEFAULTS)")
+		h.line(`# error "SofaBuffers: %s stores default values in a prefix image (SOFAB_OBJECT_DESCR_WITH_PREFIX_DEFAULTS), which this corelib-c-cpp predates. Update the corelib."`, what)
 		h.line("#endif")
 	}
 	if caps.union {
@@ -1516,15 +1546,58 @@ type capset struct {
 	prefixImage bool
 }
 
-// withImages folds in whether any object of the set carries a default image.
-// The capability walk cannot see it: whether a declared default is non-zero
-// (and so stored at all) is the backend's own question, answered while
-// collecting the plans. A union's own image is NOT one: it has always been a
-// prefix, every corelib that has unions at all reads it as one, and the
-// generated code for it did not change.
+// descrExtentMax mirrors SOFAB_OBJECT_DESCR_EXTENT_MAX: the bytes the
+// descriptor's extent byte can describe, and so the longest PREFIX default
+// image there is (corelib-c-cpp, "Descriptor limits"). A longer image has to be
+// the WHOLE object, which needs no extent -- 0 says "all of it".
+const descrExtentMax = 255
+
+// prefixExtent is sizeof() of the prefix image emitDescriptor would emit: the
+// defaulted members, in declaration order, laid out by the C rule (each at the
+// next offset its alignment allows, the whole padded to the widest). Alignments
+// are the ones every ABI the target compiles for uses, or wider -- x86-32 aligns
+// a uint64_t to 4 and AVR aligns everything to 1 -- so the result is the real
+// sizeof or larger, never smaller. A member of unknown size (bytes == 0) makes
+// it unbounded: no prefix is claimed for a layout the backend cannot size.
+func prefixExtent(p *objectPlan) int64 {
+	var off, maxAlign int64 = 0, 1
+	for _, m := range p.members {
+		if !m.hasDefault {
+			continue
+		}
+		if m.bytes <= 0 {
+			return math.MaxInt64
+		}
+		a := m.calign
+		if a < 1 {
+			a = 1
+		}
+		if a > maxAlign {
+			maxAlign = a
+		}
+		off = (off+a-1)/a*a + m.bytes
+	}
+	return (off + maxAlign - 1) / maxAlign * maxAlign
+}
+
+// usesPrefixImage: this object's defaults fit an image that covers only its
+// defaulted prefix. They do not when that prefix is longer than the extent can
+// describe -- a defaulted `string<maxlen: 300>` or `array<u32, count: 64>` --
+// and then the image is the whole object, exactly as it was before
+// generator#741: the .rodata win is given up, never the schema.
+func usesPrefixImage(p *objectPlan) bool {
+	return p.union == nil && len(p.defaults) > 0 && prefixExtent(p) <= descrExtentMax
+}
+
+// withImages folds in whether any object of the set emits a PREFIX default
+// image. The capability walk cannot see it: whether a declared default is
+// non-zero (and so stored at all), and whether the prefix fits the extent, are
+// the backend's own questions, answered from the collected plans. A union's own
+// image is NOT one: it has always been a prefix, every corelib that has unions
+// at all reads it as one, and the generated code for it did not change.
 func withImages(caps capset, ps *planSet) capset {
 	for _, k := range ps.order {
-		if len(ps.plans[k].defaults) > 0 {
+		if usesPrefixImage(ps.plans[k]) {
 			caps.prefixImage = true
 		}
 	}

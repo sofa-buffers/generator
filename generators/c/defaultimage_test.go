@@ -2,6 +2,7 @@ package c
 
 import (
 	"regexp"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -131,7 +132,7 @@ func between(t *testing.T, s, open, close string) string {
 // run time and compile cleanly doing it (generator#741). The generated header
 // has to refuse the pairing.
 func TestCPrefixImageRefusesAnOlderCorelib(t *testing.T) {
-	const guard = "#if !defined(SOFAB_OBJECT_COUNT_EXTENT)"
+	const guard = "#if !defined(SOFAB_OBJECT_DESCR_WITH_PREFIX_DEFAULTS)"
 
 	h := genCFromYAML(t, defaultImageSrc)["m_sofab.h"]
 	if !strings.Contains(h, guard) {
@@ -146,4 +147,48 @@ func TestCPrefixImageRefusesAnOlderCorelib(t *testing.T) {
 	if strings.Contains(h, guard) {
 		t.Errorf("a message with no default image must not require the macro:\n%s", h)
 	}
+}
+
+// TestCDefaultImageFallsBackToTheWholeObject: the descriptor describes a prefix
+// image with one byte, so a prefix over 255 bytes has no extent that says how
+// far it reaches (corelib-c-cpp, "Descriptor limits"). The image is then the
+// whole object -- extent 0, "all of it" -- which is what the backend emitted
+// before generator#741. A defaulted `string<maxlen: 300>` is a legal schema and
+// stays one: the .rodata win is what gets dropped, never the schema.
+func TestCDefaultImageFallsBackToTheWholeObject(t *testing.T) {
+	// char[255] of image: the last size the extent byte still describes.
+	c := genCFromYAML(t, defaultedString(254))["m_sofab.c"]
+	if !strings.Contains(c, "SOFAB_OBJECT_DESCR_WITH_PREFIX_DEFAULTS") {
+		t.Errorf("a 255-byte prefix still fits the extent:\n%s", c)
+	}
+
+	// char[256]: one byte over, so the whole object goes over instead
+	c = genCFromYAML(t, defaultedString(255))["m_sofab.c"]
+	if !strings.Contains(c, "const sofab_object_descr_t message_m__descr = SOFAB_OBJECT_DESCR_WITH_DEFAULTS(") {
+		t.Errorf("a 256-byte prefix must hand over the whole object:\n%s", c)
+	}
+	if !strings.Contains(c, "static const message_m_t _message_m__defaults = {") {
+		t.Errorf("the fallback image is an object, not a prefix type:\n%s", c)
+	}
+	for _, unwanted := range []string{"defimg_t", "WITH_PREFIX_DEFAULTS"} {
+		if strings.Contains(c, unwanted) {
+			t.Errorf("no prefix machinery in the fallback, found %q:\n%s", unwanted, c)
+		}
+	}
+	if !strings.Contains(c, "over SOFAB_OBJECT_DESCR_EXTENT_MAX") {
+		t.Errorf("the fallback must say why it is one:\n%s", c)
+	}
+
+	// ... and such a file asks nothing new of the corelib: its descriptor is the
+	// one every corelib has always read.
+	h := genCFromYAML(t, defaultedString(255))["m_sofab.h"]
+	if strings.Contains(h, "SOFAB_OBJECT_DESCR_WITH_PREFIX_DEFAULTS") {
+		t.Errorf("a whole-object image must not require the prefix macro:\n%s", h)
+	}
+}
+
+// defaultedString is a one-field schema whose image is char[maxlen+1].
+func defaultedString(maxlen int) string {
+	return "version: 1\nmessages:\n  m:\n    payload:\n" +
+		"      s: { id: 0, type: string, maxlen: " + strconv.Itoa(maxlen) + ", default: hi }\n"
 }

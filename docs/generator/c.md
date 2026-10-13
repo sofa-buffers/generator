@@ -97,6 +97,19 @@ defaulted members instead of a copy of the whole message: on a 29-field
 telemetry message that is 68 instead of 824 bytes of read-only data. A message
 with no default declares no such struct at all.
 
+The defaults struct is addressed by the same offsets as the message, which is
+what makes the prefix work, and the descriptor records how far it reaches in one
+byte beside the field count. Two consequences, both compile-time:
+
+- The defaults struct may span at most **255 bytes**. Past that no value says
+  how far it reaches, so the generator hands over a copy of the whole message
+  instead -- the shape every version before this one emitted. A message that
+  defaults a `string` with `maxlen: 300` or an `array<u32, count: 64>` lands
+  there: it keeps working, it just pays the bigger `.rodata` again.
+- An object may declare at most **255 fields** (a message, a `$defs` struct, a
+  union); a 256th fails to compile naming the limit. A wrapper array's element
+  count is not affected -- `count: 1000` is fine.
+
 Neither reordering is visible on the wire: encode walks the message's
 descriptor in field-id order, and decode keys off the id on the wire, so the
 bytes are the same whatever the declaration order is. Access fields by name —
