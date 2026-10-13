@@ -83,6 +83,26 @@ the C standard headers (`size_t`, `uint8_t` and the other `<stdint.h>` types,
 and every typedef of the corelib (`sofab_ostream_t`, `sofab_istream_t`,
 `sofab_ret_t`, …).
 
+## Struct layout
+
+The members of a generated struct are **not** in schema order. They are
+declared
+
+1. the fields the schema gives a non-zero `default` first, then
+2. widest alignment first (8, 4, 2, 1 bytes), stable within a width.
+
+The second key cuts the padding the native ABI would otherwise insert. The
+first one lets the default values live in a struct that covers only the
+defaulted members instead of a copy of the whole message: on a 29-field
+telemetry message that is 68 instead of 824 bytes of read-only data. A message
+with no default declares no such struct at all.
+
+Neither reordering is visible on the wire: encode walks the message's
+descriptor in field-id order, and decode keys off the id on the wire, so the
+bytes are the same whatever the declaration order is. Access fields by name —
+the struct is not meant to be initialised positionally (`{ 1, 2, 3 }`), and a
+designated initialiser (`{ .speed = 3 }`) is order-independent anyway.
+
 ## Bounds at encode
 
 A field's schema bound is part of its storage, and encode treats the two
