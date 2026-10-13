@@ -31,6 +31,9 @@
 #if defined(SOFAB_DISABLE_INT64_SUPPORT)
 # error "SofaBuffers: message Scalars uses 64-bit integers, but the corelib was built with SOFAB_DISABLE_INT64_SUPPORT."
 #endif
+#if !defined(SOFAB_OBJECT_COUNT_EXTENT)
+# error "SofaBuffers: message Scalars stores default values in a prefix image (SOFAB_OBJECT_COUNT_EXTENT), which this corelib-c-cpp predates. Update the corelib."
+#endif
 
 /* --- value-width guard: field ids must fit the corelib's id ceiling --- */
 #if 8 > SOFAB_ID_MAX
@@ -41,15 +44,15 @@ typedef struct {
     uint64_t u64max;
     int64_t i64min;
     double f64;
+    float f32;
+    uint8_t u8max;
+    int8_t i8min;
+    uint8_t flag;
     /**
      * Schema bound: count 4 is a capacity; flags__len carries the length -- elements set without it encode an EMPTY array; encode clamps flags__len to at most 4. Over 4 on the wire is INVALID.
      */
     uint8_t flags__len; uint8_t flags[4];
-    float f32;
     uint8_t u8min;
-    uint8_t u8max;
-    int8_t i8min;
-    uint8_t flag;
 } message_Scalars_t;
 
 /*! Worst-case serialized size of Scalars (every field present, all maxlen/count). */

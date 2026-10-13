@@ -168,8 +168,13 @@ type defaultInit struct {
 }
 
 type member struct {
-	decl       string // e.g. "uint16_t u16;"
-	align      int    // storage alignment in bytes, for widest-first member ordering
+	decl  string // e.g. "uint16_t u16;"
+	ident string // the member's C identifier ("" for a holder's synthetic slots)
+	align int    // storage alignment in bytes, for widest-first member ordering
+	// hasDefault marks a member the schema gives a non-zero default
+	// (generator#741): those members are ordered FIRST, so the default image can
+	// be the struct's prefix instead of a copy of all of it.
+	hasDefault bool
 	doc        string // field description (+unit), single-lined; "" => no member comment
 	note       string // schema-bound note (generator#308); "" => the field has no bound
 	deprecated bool   // field carries deprecated:true — emit the native attribute + doc note
@@ -459,7 +464,7 @@ func (g *gen) headerPrelude(h *cfile, guardName, what, owner string, caps capset
 func (g *gen) message(m *ir.Message, ps *planSet) (hdr, src []byte, err error) {
 	msgKey := g.msgBase(m)
 
-	caps := g.capabilities(m.Fields)
+	caps := withImages(g.capabilities(m.Fields), ps)
 	guardName := macro(msgKey, "H")
 	msgType := g.typeName(msgKey)
 
@@ -528,7 +533,7 @@ func (g *gen) defsFiles() (hdr, src []byte) {
 	for _, fs := range ps.scopes {
 		scopes = append(scopes, fs...)
 	}
-	caps := g.capabilities(scopes)
+	caps := withImages(g.capabilities(scopes), ps)
 	// The walk sees a union through the field that holds one; here the union
 	// may be a top-level object of the set, whose descriptor is defined below.
 	for _, k := range ps.order {
@@ -615,7 +620,7 @@ func (g *gen) collect(key string, path []string, fields []*ir.Field, un *ir.Name
 				p.nested = append(p.nested, ck)
 			}
 			decl := fmt.Sprintf("%s %s;", g.typeName(ck), cIdent(f.Name))
-			p.members = append(p.members, member{decl: decl, align: ir.AlignRank(f), doc: memberDoc(f), note: note, deprecated: f.Deprecated})
+			p.members = append(p.members, member{decl: decl, ident: cIdent(f.Name), align: ir.AlignRank(f), doc: memberDoc(f), note: note, deprecated: f.Deprecated})
 			p.fields = append(p.fields, fieldEntry{macro: fmt.Sprintf(
 				"    SOFAB_OBJECT_FIELD_SEQUENCE(%d, %s, %s, SOFAB_OBJECT_FIELDTYPE_SEQUENCE, %d),",
 				f.ID, p.cType, at(f), nestedIdx[ck])})
@@ -634,7 +639,7 @@ func (g *gen) collect(key string, path []string, fields []*ir.Field, un *ir.Name
 				p.nested = append(p.nested, ck)
 			}
 			decl := fmt.Sprintf("%s %s;", ep.cType, cIdent(f.Name))
-			p.members = append(p.members, member{decl: decl, align: ir.AlignRank(f), doc: memberDoc(f), note: note, deprecated: f.Deprecated})
+			p.members = append(p.members, member{decl: decl, ident: cIdent(f.Name), align: ir.AlignRank(f), doc: memberDoc(f), note: note, deprecated: f.Deprecated})
 			p.fields = append(p.fields, fieldEntry{macro: fmt.Sprintf(
 				"    SOFAB_OBJECT_FIELD_SEQUENCE(%d, %s, %s, SOFAB_OBJECT_FIELDTYPE_SEQUENCE, %d),",
 				f.ID, p.cType, at(f), nestedIdx[ck])})
@@ -650,7 +655,7 @@ func (g *gen) collect(key string, path []string, fields []*ir.Field, un *ir.Name
 			if err != nil {
 				return err
 			}
-			p.members = append(p.members, member{decl: decl, align: ir.AlignRank(f), doc: memberDoc(f), note: note, deprecated: f.Deprecated})
+			p.members = append(p.members, member{decl: decl, ident: cIdent(f.Name), align: ir.AlignRank(f), doc: memberDoc(f), note: note, deprecated: f.Deprecated})
 			p.fields = append(p.fields, fieldEntry{macro: entry})
 			p.optDecl[f.ID] = decl
 		default:
@@ -658,8 +663,9 @@ func (g *gen) collect(key string, path []string, fields []*ir.Field, un *ir.Name
 			if err != nil {
 				return err
 			}
-			p.members = append(p.members, member{decl: decl, align: ir.AlignRank(f), doc: memberDoc(f), note: note, deprecated: f.Deprecated})
+			p.members = append(p.members, member{decl: decl, ident: cIdent(f.Name), align: ir.AlignRank(f), doc: memberDoc(f), note: note, deprecated: f.Deprecated})
 			p.fields = append(p.fields, fieldEntry{macro: entry})
+			declared := len(p.defaults)
 			// A compact array's declared default is an array of its OWN length, not
 			// one padded out to the capacity (§2/§3/§6): `default: [1,2,3]` on a
 			// `count: 5` field is the three-element [1,2,3]. The length lives in the
@@ -681,6 +687,14 @@ func (g *gen) collect(key string, path []string, fields []*ir.Field, un *ir.Name
 			if expr, ok := g.cDefaultInit(f); ok {
 				p.defaults = append(p.defaults, defaultInit{ident: cIdent(f.Name), expr: expr})
 			}
+			// A leaf is the only kind of field that puts anything in the image, and
+			// this is the only place that records one — so marking the member here
+			// keeps the flag and the image's initializers from ever disagreeing
+			// (a sized buffer contributes its companion length, its content, or
+			// both; one mark either way).
+			if len(p.defaults) > declared {
+				p.members[len(p.members)-1].hasDefault = true
+			}
 		}
 	}
 	// Order the struct members widest-first to minimise padding. The descriptor
@@ -689,7 +703,21 @@ func (g *gen) collect(key string, path []string, fields []*ir.Field, un *ir.Name
 	// member layout (offsets are resolved with offsetof at compile time). A
 	// union's options overlay each other, so they keep schema order.
 	if un == nil {
-		sort.SliceStable(p.members, func(i, j int) bool { return p.members[i].align > p.members[j].align })
+		// A defaulted member FIRST, then widest-first within each group
+		// (generator#741). The corelib reads the default image through the object's
+		// own offsets, so the image can only be smaller than the object if the
+		// members it describes are a contiguous PREFIX. Ordering by alignment alone
+		// scatters them: on vehicle_telemetry the defaulted members sat at offsets
+		// 106, 814 and 816 of 824, so an image that stopped after the last one
+		// would still have been 820 bytes. Grouping them measured SMALLER than
+		// widest-first alone there (sizeof 824 -> 808), because same-width members
+		// end up adjacent either way.
+		sort.SliceStable(p.members, func(i, j int) bool {
+			if p.members[i].hasDefault != p.members[j].hasDefault {
+				return p.members[i].hasDefault
+			}
+			return p.members[i].align > p.members[j].align
+		})
 	}
 	ps.plans[key] = p
 	ps.order = append(ps.order, key)
@@ -1203,7 +1231,35 @@ func (g *gen) emitDescriptor(c *cfile, p *objectPlan) {
 	} else if len(p.defaults) > 0 {
 		// A holder (fixedSeq) never carries a defaults image (its elements default to
 		// empty/zero), so WITH_DEFAULTS and SEQ are mutually exclusive in practice.
-		c.line("static const %s %s = {", p.cType, defaultsSym(p.key))
+		//
+		// The image is the PREFIX of the object that carries defaults, not a copy of
+		// all of it (generator#741): a message that defaults one byte costs one byte
+		// of .rodata instead of sizeof(the whole struct). The defaulted members were
+		// ordered first for exactly this.
+		//
+		// Its type repeats those members verbatim, so their offsets ARE the object's
+		// own -- a C member's offset depends only on the members before it -- and one
+		// offsetof test per member says so at compile time instead of by argument.
+		// The same technique the union image has always used.
+		//
+		// corelib-c-cpp#196 is what reads it: the descriptor records
+		// sizeof(*image) as the extent, and a field at or past it is compared
+		// against zero, which is what "no declared default" means.
+		imgT := private(p.key, "defimg_t")
+		c.line("typedef struct {")
+		for _, m := range p.members {
+			if m.hasDefault {
+				c.line("    %s", m.decl)
+			}
+		}
+		c.line("} %s;", imgT)
+		for _, m := range p.members {
+			if m.hasDefault {
+				c.line("typedef char %s_at_%s[(offsetof(%s, %s) == offsetof(%s, %s)) ? 1 : -1];",
+					private(p.key, "defimg"), m.ident, imgT, m.ident, p.cType, m.ident)
+			}
+		}
+		c.line("static const %s %s = {", imgT, defaultsSym(p.key))
 		for _, d := range p.defaults {
 			c.line("    .%s = %s,", d.ident, d.expr)
 		}
@@ -1401,6 +1457,22 @@ func (g *gen) emitGuards(h *cfile, what, owner string, caps capset, maxField int
 		h.line(`# error "SofaBuffers: %s %s."`, what, c.msg)
 		h.line("#endif")
 	}
+	if caps.prefixImage {
+		// A default image covers only the object's defaulted prefix, and the
+		// descriptor tells the corelib how far it reaches (generator#741). An
+		// older corelib reads every defaulted field's own offset out of the image
+		// with no extent to stop it -- which still COMPILES, because the macro
+		// that records the extent is the corelib's own, and then reads past a
+		// .rodata object at run time. Nothing else would catch that, so the
+		// generated header refuses the pairing by the macro's absence (the
+		// corelib signals features by what its headers define; it bumps
+		// SOFAB_API_VERSION only on a break, and this is not one -- an image
+		// generated BEFORE #196 covers the whole object, whose extent the new
+		// corelib reads correctly).
+		h.line("#if !defined(SOFAB_OBJECT_COUNT_EXTENT)")
+		h.line(`# error "SofaBuffers: %s stores default values in a prefix image (SOFAB_OBJECT_COUNT_EXTENT), which this corelib-c-cpp predates. Update the corelib."`, what)
+		h.line("#endif")
+	}
 	if caps.union {
 		// A corelib that predates tagged unions has no SOFAB_OBJECT_DESCR_UNION
 		// at all: without this the .c fails on an undeclared macro "call" in a
@@ -1438,6 +1510,25 @@ func (g *gen) emitGuards(h *cfile, what, owner string, caps capset, maxField int
 
 type capset struct {
 	fixlen, fp64, array, sequence, value64, union bool
+	// prefixImage: some object in this file stores its default values in an
+	// image that covers only its defaulted PREFIX (generator#741). Unlike the
+	// others this is not a schema feature but an ABI one -- see emitGuards.
+	prefixImage bool
+}
+
+// withImages folds in whether any object of the set carries a default image.
+// The capability walk cannot see it: whether a declared default is non-zero
+// (and so stored at all) is the backend's own question, answered while
+// collecting the plans. A union's own image is NOT one: it has always been a
+// prefix, every corelib that has unions at all reads it as one, and the
+// generated code for it did not change.
+func withImages(caps capset, ps *planSet) capset {
+	for _, k := range ps.order {
+		if len(ps.plans[k].defaults) > 0 {
+			caps.prefixImage = true
+		}
+	}
+	return caps
 }
 
 // capabilities are the corelib features the objects described by fields --

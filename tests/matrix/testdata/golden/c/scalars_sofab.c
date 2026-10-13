@@ -20,7 +20,23 @@ static const sofab_object_descr_field_t _message_Scalars__fields[] = {
     SOFAB_OBJECT_FIELD(7, message_Scalars_t, flag, SOFAB_OBJECT_FIELDTYPE_BOOLEAN),
     SOFAB_OBJECT_FIELD_ARRAY_SIZED(8, message_Scalars_t, flags, flags__len, SOFAB_OBJECT_FIELDTYPE_ARRAY_BOOLEAN),
 };
-static const message_Scalars_t _message_Scalars__defaults = {
+typedef struct {
+    uint64_t u64max;
+    int64_t i64min;
+    double f64;
+    float f32;
+    uint8_t u8max;
+    int8_t i8min;
+    uint8_t flag;
+} _message_Scalars__defimg_t;
+typedef char _message_Scalars__defimg_at_u64max[(offsetof(_message_Scalars__defimg_t, u64max) == offsetof(message_Scalars_t, u64max)) ? 1 : -1];
+typedef char _message_Scalars__defimg_at_i64min[(offsetof(_message_Scalars__defimg_t, i64min) == offsetof(message_Scalars_t, i64min)) ? 1 : -1];
+typedef char _message_Scalars__defimg_at_f64[(offsetof(_message_Scalars__defimg_t, f64) == offsetof(message_Scalars_t, f64)) ? 1 : -1];
+typedef char _message_Scalars__defimg_at_f32[(offsetof(_message_Scalars__defimg_t, f32) == offsetof(message_Scalars_t, f32)) ? 1 : -1];
+typedef char _message_Scalars__defimg_at_u8max[(offsetof(_message_Scalars__defimg_t, u8max) == offsetof(message_Scalars_t, u8max)) ? 1 : -1];
+typedef char _message_Scalars__defimg_at_i8min[(offsetof(_message_Scalars__defimg_t, i8min) == offsetof(message_Scalars_t, i8min)) ? 1 : -1];
+typedef char _message_Scalars__defimg_at_flag[(offsetof(_message_Scalars__defimg_t, flag) == offsetof(message_Scalars_t, flag)) ? 1 : -1];
+static const _message_Scalars__defimg_t _message_Scalars__defaults = {
     .u8max = 255,
     .u64max = 18446744073709551615ULL,
     .i8min = -128,
