@@ -37,10 +37,10 @@ var goStringCheckMembers = map[string]bool{
 }
 
 // goMembers are the methods the backend declares on every generated type
-// (Serialize) and on every message (Encode, EncodeTo). One list for all kinds,
-// so a name spells the same member in a struct and in a message.
+// (Serialize) and on every message (Encode, EncodeTo, EncodeInto). One list for
+// all kinds, so a name spells the same member in a struct and in a message.
 var goMembers = map[string]bool{
-	"Serialize": true, "Encode": true, "EncodeTo": true,
+	"Serialize": true, "Encode": true, "EncodeTo": true, "EncodeInto": true,
 }
 
 // unionReserved are the members a union type declares on top of the above.

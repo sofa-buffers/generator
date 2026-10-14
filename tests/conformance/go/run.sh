@@ -103,6 +103,54 @@ DRIP=$(cd "$WORK/proj" && GOFLAGS=-mod=mod go run ./harness streamdecode myfirst
 }
 echo "==> streaming decode OK"
 
+# The PUSH decoder (generator#747): the same bytes again, but HANDED to the
+# decoder instead of pulled out of a reader. X__DecodeFrom owns its reader loop
+# and never hands its decoder back, so a consumer whose transport calls IT --
+# a callback-driven socket, or one that overwrites the buffer it passes -- had
+# to restate X__New + sofab.NewDecoder to reach a Feed at all.
+#
+# Fed ONE BYTE per Feed, so the decoder suspends inside a varint, inside a
+# payload and inside an open sequence, and the harness copies each chunk into
+# one REUSED scratch slice: Feed borrows a chunk for the call only (§6.0), so a
+# destination that kept a window into it decodes garbage here and nowhere else.
+#
+# The assertion is EQUIVALENCE with the in-memory decode, not "it decodes".
+echo "==> push decode must equal the in-memory decode (generator#747)"
+PUSH=$(cd "$WORK/proj" && GOFLAGS=-mod=mod go run ./harness pushdecode myfirstmessage < "$WORK/rt.bin")
+[ "$WHOLE" = "$PUSH" ] || {
+    echo "FAIL: pushdecode differs from decode"
+    echo "  decode:    $WHOLE"
+    echo "  pushdecode: $PUSH"
+    exit 1
+}
+echo "==> push decode OK"
+
+# Encode into a buffer the CALLER owns (generator#747). Encode() allocates and
+# EncodeTo() streams; neither lets a caller with a pooled or stack buffer hand
+# the encoder its own storage, which is the shape every other backend has
+# (C++ encodeTo(dst, cap, used), Python Encoder.over_buffer, the OStream(byte[n])
+# of TS/Java/Kotlin/C#).
+#
+# Three legs, and the last is the one that matters: the bytes must be identical
+# to Encode's, an EXACTLY sized destination must still fit, and a destination
+# one byte short must REFUSE. A short buffer that returned the prefix it managed
+# would be a silently truncated message on the wire -- the corelib owns no
+# storage and grows nothing (§5.1), so there is no second chance to notice.
+echo "==> encode into a caller-owned buffer, and refuse one too short (generator#747)"
+printf '%s' "$IN" | (cd "$WORK/proj" && GOFLAGS=-mod=mod go run ./harness encodeinto myfirstmessage) > "$WORK/into.bin"
+cmp -s "$WORK/rt.bin" "$WORK/into.bin" || { echo "FAIL: EncodeInto bytes differ from Encode"; exit 1; }
+N=$(wc -c < "$WORK/rt.bin" | tr -d ' ')
+printf '%s' "$IN" | (cd "$WORK/proj" && GOFLAGS=-mod=mod go run ./harness encodeinto myfirstmessage "$N") > "$WORK/into_exact.bin"
+cmp -s "$WORK/rt.bin" "$WORK/into_exact.bin" || { echo "FAIL: an exactly sized destination must hold the message"; exit 1; }
+if printf '%s' "$IN" | (cd "$WORK/proj" && GOFLAGS=-mod=mod go run ./harness encodeinto myfirstmessage "$((N - 1))") > "$WORK/into_short.bin" 2>"$WORK/into_short.err"; then
+    echo "FAIL: a destination one byte short must be refused, not truncated"; exit 1
+fi
+grep -q 'output buffer full' "$WORK/into_short.err" || {
+    echo "FAIL: a short destination must report BufferFull, got: $(cat "$WORK/into_short.err")"; exit 1
+}
+[ ! -s "$WORK/into_short.bin" ] || { echo "FAIL: a refused EncodeInto must emit no bytes"; exit 1; }
+echo "==> caller-owned-buffer encode OK ($N bytes; $((N - 1)) refused)"
+
 # Over-count scalar array (generator#100): someuintarray declares count: 4
 # (id 15 -> header 0x7b = 15<<3 | unsigned-array). 5 wire elements MUST be
 # INVALID per MESSAGE_SPEC 3+7 (decode exits non-zero); exactly 4 still decode.
@@ -920,7 +968,7 @@ YAML
 ( cd "$ROOT" && go run ./cmd/sofabgen --config "$WORK/cfg-refusal.yaml" --lang go --in "$WORK/refusal.yaml" --out "$WORK/refusal" )
 sed -i "s#\${SOFAB_GO_CORELIB}#$CORELIB#" "$WORK/refusal/go.mod"
 ( cd "$WORK/refusal" && GOFLAGS=-mod=mod go mod tidy >/dev/null 2>&1 && go build -o "$WORK/refusal.bin" ./harness )
-for surface in decode streamdecode; do
+for surface in decode streamdecode pushdecode; do
     python3 "$ROOT/tests/conformance/lib/check_refusal_category.py" "go" \
         --verb "$surface" --blob-base64 --limit-pattern 'limit exceeded' --invalid-pattern 'invalid message' \
         -- "$WORK/refusal.bin"
@@ -930,9 +978,15 @@ done
 # empty Feed, repeats the refusal under the same category and never hands back a
 # message. Same capped project as above, the driver's own message.
 echo "==> a refusal is terminal: asking again repeats it (generator#647)"
-python3 "$ROOT/tests/conformance/lib/check_terminal_refusal.py" "go" \
-    --marker finish --invalid-name InvalidMessage --limit-name LimitExceeded \
-    -- "$WORK/refusal.bin"
+# On both resumable surfaces. The push decoder is the one that can really show
+# it: there the REFUSED decoder is the caller's own object, so asking again is
+# the same decoder answering, where streamdecode has to replay the message into
+# a second decoder the harness builds.
+for surface in streamdecode pushdecode; do
+    python3 "$ROOT/tests/conformance/lib/check_terminal_refusal.py" "go" \
+        --verb "$surface" --marker finish --invalid-name InvalidMessage --limit-name LimitExceeded \
+        -- "$WORK/refusal.bin"
+done
 
 # The verdict AND the decoded value must not depend on where the chunks were cut
 # (CORELIB_PLAN S5.2/S6.0/S6.4 / S7.2 item 4; generator#312, #648). Every fixture
@@ -946,14 +1000,20 @@ python3 "$ROOT/tests/conformance/lib/check_terminal_refusal.py" "go" \
 # for each fixture, so a streamdecode that is self-consistently wrong still fails.
 echo "==> a chunk boundary must not change the verdict or the value (generator#312, #648)"
 ( cd "$WORK/proj" && GOFLAGS=-mod=mod go build -o "$WORK/harness.bin" ./harness )
+# Both resumable surfaces, not just the reader-driven one: they share the
+# corelib's state machine, but the chunk ARRIVES differently -- DecodeFrom cuts
+# it out of its own scratch buffer, the push decoder is handed the caller's --
+# and only the surface actually driven can show that its own plumbing resumes.
+for surface in streamdecode pushdecode; do
 python3 "$ROOT/tests/conformance/lib/check_chunk_invariance.py" "Go" \
-    --message myfirstmessage --oneshot --expect 15 \
+    --message myfirstmessage --oneshot --expect 15 --chunked-verb "$surface" \
     "$WORK/overcount.bin" "$WORK/control.bin" "$WORK/fp64_at_fp32.bin" \
     "$WORK/fp32_overcount.bin" "$WORK/skipped_bad_utf8.bin" "$WORK/declared_bad_utf8.bin" \
     "$WORK/overcount_trunc.bin" "$WORK/incount_trunc.bin" "$WORK/overindex.bin" \
     "$WORK/overindex_control.bin" "$WORK/overindex_trunc.bin" "$WORK/inindex_trunc.bin" \
     "$WORK/overmaxlen.bin" "$WORK/overmaxlen_control.bin" "$WORK/rt.bin" \
     -- "$WORK/harness.bin"
+done
 
 # The BOUNDED encode arm (CORELIB_PLAN §5.1). A schema whose every field carries
 # a count/maxlen has a worst case, so Encode allocates exactly MaxSize bytes and

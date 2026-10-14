@@ -316,7 +316,7 @@ func (g *gen) harness(s *ir.Schema, modPath string) []byte {
 	g.emitBench(f, s, pkgAlias)
 	f.line("func main() {")
 	f.line("\tif len(os.Args) < 2 {")
-	f.line("\t\tfmt.Fprintln(os.Stderr, \"usage: harness <encode|decode|streamdecode|streamencode|bench> [Message|workload]\")")
+	f.line("\t\tfmt.Fprintln(os.Stderr, \"usage: harness <encode|decode|streamdecode|pushdecode|streamencode|encodeinto|bench> [Message|workload]\")")
 	f.line("\t\tos.Exit(2)")
 	f.line("\t}")
 	f.line("\tmode := os.Args[1]")
@@ -378,6 +378,44 @@ func (g *gen) harness(s *ir.Schema, modPath string) []byte {
 		f.line("\t\t\tout, _ := marshalJSON(obj)")
 		f.line("\t\t\tos.Stdout.Write(out)")
 		f.line("\t\t\tfmt.Fprintln(os.Stdout)")
+		// The PUSH twin of streamdecode (generator#747): the same bytes, but handed
+		// TO the decoder instead of pulled out of a reader, through the generated
+		// X__NewDecoder / Feed / Message. Chunked by the same third argument, 1 by
+		// default, so every byte position is a suspend point; the chunk is copied
+		// into one REUSED scratch slice, because Feed borrows it for the call only
+		// and a destination that kept a window into it would decode garbage.
+		f.line("\t\t} else if mode == \"pushdecode\" {")
+		f.line("\t\t\td := %s.%s__NewDecoder()", pkgAlias, base)
+		f.line("\t\t\tn := chunkArg()")
+		f.line("\t\t\tif n == 0 {")
+		f.line("\t\t\t\tn = len(in)")
+		f.line("\t\t\t}")
+		f.line("\t\t\tout := sofab.Complete")
+		f.line("\t\t\tvar chunk []byte")
+		f.line("\t\t\tfor i := 0; i < len(in); i += n {")
+		f.line("\t\t\t\tj := i + n")
+		f.line("\t\t\t\tif j > len(in) {")
+		f.line("\t\t\t\t\tj = len(in)")
+		f.line("\t\t\t\t}")
+		f.line("\t\t\t\tchunk = append(chunk[:0], in[i:j]...)")
+		f.line("\t\t\t\tvar ferr error")
+		f.line("\t\t\t\tout, ferr = d.Feed(chunk)")
+		f.line("\t\t\t\tif ferr != nil {")
+		// A refusal is terminal (CORELIB_PLAN §5.2, §6.3): asking the SAME decoder
+		// again is an empty Feed, and the second answer is printed as `[finish=X]`
+		// for tests/conformance/lib/check_terminal_refusal.py -- the one thing the
+		// push surface can show that streamdecode cannot, since there the decoder
+		// is DecodeFrom's and never reaches the caller.
+		f.line("\t\t\t\t\t_, again := d.Feed(nil)")
+		f.line("\t\t\t\t\tfail(fmt.Errorf(\"%%v [finish=%%s]\", ferr, verdictName(again)))")
+		f.line("\t\t\t\t}")
+		f.line("\t\t\t}")
+		f.line("\t\t\tif out != sofab.Complete {")
+		f.line("\t\t\t\tfail(sofab.ErrIncomplete)")
+		f.line("\t\t\t}")
+		f.line("\t\t\tjs, _ := marshalJSON(d.Message())")
+		f.line("\t\t\tos.Stdout.Write(js)")
+		f.line("\t\t\tfmt.Fprintln(os.Stdout)")
 		// The encode twin of streamdecode: the same message through a sink, drained
 		// into a buffer the harness owns. Window 0 is the generated EncodeTo with its
 		// own scratch; any other window is a scratch of that size (raised to the
@@ -410,6 +448,25 @@ func (g *gen) harness(s *ir.Schema, modPath string) []byte {
 		f.line("\t\t\t\t}")
 		f.line("\t\t\t}")
 		f.line("\t\t\tos.Stdout.Write(out.Bytes())")
+		// Encode into a buffer the CALLER owns (generator#747). The size is the
+		// third argument, defaulting to the generated MaxSize; a size below what
+		// the message needs must be REFUSED, which is what the conformance leg
+		// drives it with.
+		f.line("\t\t} else if mode == \"encodeinto\" {")
+		f.line("\t\t\tobj := %s.%s__New()", pkgAlias, base)
+		f.line("\t\t\tif err := unmarshalJSON(in, obj); err != nil {")
+		f.line("\t\t\t\tfail(err)")
+		f.line("\t\t\t}")
+		f.line("\t\t\tsz := windowArg()")
+		f.line("\t\t\tif sz == 0 {")
+		f.line("\t\t\t\tsz = %s.%s__MaxSize", pkgAlias, base)
+		f.line("\t\t\t}")
+		f.line("\t\t\tdst := make([]byte, sz)")
+		f.line("\t\t\tn, err := obj.EncodeInto(dst)")
+		f.line("\t\t\tif err != nil {")
+		f.line("\t\t\t\tfail(err)")
+		f.line("\t\t\t}")
+		f.line("\t\t\tos.Stdout.Write(dst[:n])")
 		f.line("\t\t} else {")
 		f.line("\t\t\tfail(fmt.Errorf(\"unknown mode %%q\", mode))")
 		f.line("\t\t}")
@@ -456,8 +513,9 @@ func (g *gen) harness(s *ir.Schema, modPath string) []byte {
 	f.line("\treturn 1")
 	f.line("}")
 	f.blank()
-	f.line("// windowArg is `streamencode`'s third argument: the encode buffer size in")
-	f.line("// bytes, 0 for the generated EncodeTo with its own scratch.")
+	f.line("// windowArg is the third argument of `streamencode` and `encodeinto`: the")
+	f.line("// output buffer size in bytes. 0 means each verb's own default -- the")
+	f.line("// generated EncodeTo with its own scratch, and <Msg>__MaxSize.")
 	f.line("func windowArg() int {")
 	f.line("\tif len(os.Args) > 3 {")
 	f.line("\t\tn, err := strconv.Atoi(os.Args[3])")

@@ -4,6 +4,7 @@
 Usage:
   check_chunk_invariance.py <label> <fixture.bin>... --message NAME
                             [--sizes 1,2,3,5,16,0] [--cwd DIR]
+                            [--chunked-verb streamdecode]
                             -- <harness argv...>
 
 CORELIB_PLAN §5.2 makes the decode outcome computable at *any* byte boundary,
@@ -39,6 +40,12 @@ while `Decoder.finish()`/`Finish()` is strict about end-of-input (ARCHITECTURE
 and call it a chunking bug, which it is not. Size `0` has no such gap: it is the
 degenerate split of the path under test, and it separates "the streaming path is
 wrong" from "it is wrong *when it suspends*".
+
+`--chunked-verb` names the chunked surface to sweep, `streamdecode` by default.
+A backend with more than one resumable entry point -- Go has the reader-driven
+`DecodeFrom` and the push `Decoder.Feed` -- runs the table once per surface:
+they share the corelib's state machine, but the chunk ARRIVES differently, and
+only the surface actually driven can show that its own plumbing resumes.
 
 `--oneshot` adds the cross-check back for the suites where `decode` IS fallible
 (python, dart, go): there the one-shot verdict and value must match too, which
@@ -122,6 +129,7 @@ def main() -> int:
     message = opt(head, "--message")
     cwd = opt(head, "--cwd")
     sizes = [int(s) for s in opt(head, "--sizes", DEFAULT_SIZES).split(",")]
+    verb = opt(head, "--chunked-verb", "streamdecode")
     expect = opt(head, "--expect")
     oneshot = "--oneshot" in head
     # Fixtures are the bare paths in the head; options are name/value pairs, and
@@ -162,7 +170,7 @@ def main() -> int:
         jobs += [(f, None) for f in fixtures]
     with concurrent.futures.ThreadPoolExecutor(max_workers=workers()) as pool:
         results = dict(zip(jobs, pool.map(
-            lambda j: run_one(cmd, cwd, "decode" if j[1] is None else "streamdecode",
+            lambda j: run_one(cmd, cwd, "decode" if j[1] is None else verb,
                               message, j[1], data[j[0]]),
             jobs)))
 
@@ -182,7 +190,7 @@ def main() -> int:
                 print(f"FAIL {name}: the unchunked reference feed {err}")
                 return 1
 
-        legs = [(f"streamdecode at {where(s)}", results[(f, s)]) for s in sizes]
+        legs = [(f"{verb} at {where(s)}", results[(f, s)]) for s in sizes]
         if oneshot:
             legs.append(("the one-shot decode", results[(f, None)]))
 
@@ -221,7 +229,7 @@ def main() -> int:
 
     sz = ", ".join("whole" if s == 0 else str(s) for s in sizes)
     also = " (+ the one-shot decode)" if oneshot else ""
-    print(f"{label} chunk invariance: {len(fixtures)} fixtures "
+    print(f"{label} chunk invariance [{verb}]: {len(fixtures)} fixtures "
           f"({accepted} accept, {rejected} reject) x {len(sizes)} splits [{sz}]{also}; "
           f"verdict and value identical at every split")
     return 0

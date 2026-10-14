@@ -1169,6 +1169,11 @@ messages:
 //     ceiling is a policy number, not a size the message cannot exceed. Sizing
 //     the buffer from it would refuse a larger message the caller legitimately
 //     built, so a fixed scratch drains into caller-owned storage instead.
+//
+// The bounded arm reaches the corelib through EncodeInto, the surface whose
+// destination is the caller's to begin with: Encode is then the allocation and
+// nothing else, and there is one place where a message meets a sink-less
+// encoder rather than two that can drift apart.
 func TestGoEncodeUsesCallerOwnedBuffers(t *testing.T) {
 	bounded := genGo(t, schemaFromYAMLString(t, `
 version: 1
@@ -1181,8 +1186,9 @@ messages:
 	for _, want := range []string{
 		"const B__MaxSize = ",
 		"buf := make([]byte, B__MaxSize)",
-		"e, err := sofab.NewEncoderBuffer(buf, 0, _B__EncOpts...)",
-		"return e.Bytes(), nil",
+		"n, err := m.EncodeInto(buf)",
+		"return buf[:n], nil",
+		"e, err := sofab.NewEncoderBuffer(dst, 0, _B__EncOpts...)",
 	} {
 		if !strings.Contains(bounded, want) {
 			t.Errorf("bounded encode missing %q:\n%s", want, bounded)

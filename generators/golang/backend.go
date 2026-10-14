@@ -1653,6 +1653,8 @@ func (g *gen) messageFile(m *ir.Message) []byte {
 	typeName, base := msgIdent(m), msgBase(m)
 	newFn, decFn, decFromFn := base+"__New", base+"__Decode", base+"__DecodeFrom"
 	maxSize, maxSizeLimit, maxDepth := base+"__MaxSize", base+"__MaxSizeLimit", base+"__MaxDepth"
+	encOptsFn := base + "__EncodeOptions"
+	decType, newDecFn := base+"__Decoder", base+"__NewDecoder"
 	if m.Summary != "" {
 		f.line("// %s - %s", typeName, oneline(m.Summary))
 	}
@@ -1690,9 +1692,9 @@ func (g *gen) messageFile(m *ir.Message) []byte {
 	// this file constructs size its lazy-sequence id stack to the schema instead
 	// of to MaxDepth: up to a small inline capacity that stack then lives inside
 	// the Encoder, and a one-shot encode pays no separate allocation for it.
-	encOpts := ""
+	encOpts, optsVar := "", ""
 	if depth, ok := ir.SeqDepth(m.Fields, map[string]bool{}); ok && depth <= wireMaxDepth {
-		optsVar := "_" + base + "__EncOpts"
+		optsVar = "_" + base + "__EncOpts"
 		encOpts = ", " + optsVar + "..."
 		f.line("// %s is the deepest sequence nesting encoding this message opens,", maxDepth)
 		f.line("// derived from the schema: no value of it nests deeper.")
@@ -1714,6 +1716,31 @@ func (g *gen) messageFile(m *ir.Message) []byte {
 		f.blank()
 	}
 
+	// The same options, reachable from OUTSIDE the package. A caller that drives
+	// the corelib's Encoder itself -- its own buffer, its own flush sink -- needs
+	// the encoder this message's Encode would have built, and restating
+	// WithMaxDepth(M__MaxDepth) by hand silently drifts the day the backend adds
+	// an option. The accessor exists for every message, including one whose
+	// options are empty, so the caller never has to know which arm it got.
+	f.line("// %s are the options %s's own Encode, EncodeTo and", encOptsFn, typeName)
+	f.line("// EncodeInto build their sofab.Encoder with. Pass them to")
+	f.line("// sofab.NewEncoderBuffer or sofab.NewEncoderSink to drive an encode yourself")
+	f.line("// and get the encoder this message expects.")
+	f.line("//")
+	f.line("// The slice is shared and read-only: append to it rather than assigning")
+	f.line("// into it.")
+	f.line("func %s() []sofab.Option {", encOptsFn)
+	if optsVar != "" {
+		f.line("\treturn %s", optsVar)
+	} else {
+		// No schema-derived depth bound, so there is nothing to pass and nothing
+		// for a caller to restate; the answer is still the whole truth about this
+		// message's encoders.
+		f.line("\treturn nil")
+	}
+	f.line("}")
+	f.blank()
+
 	// public Encode/Decode wrappers
 	if ms.Bounded {
 		// One exactly-sized buffer, allocated HERE: the corelib is handed storage
@@ -1730,15 +1757,11 @@ func (g *gen) messageFile(m *ir.Message) []byte {
 		f.line("// is refused with sofab.ErrArgument before any byte is returned.")
 		f.line("func (m *%s) Encode() ([]byte, error) {", typeName)
 		f.line("\tbuf := make([]byte, %s)", maxSize)
-		f.line("\te, err := sofab.NewEncoderBuffer(buf, 0%s)", encOpts)
+		f.line("\tn, err := m.EncodeInto(buf)")
 		f.line("\tif err != nil {")
 		f.line("\t\treturn nil, err")
 		f.line("\t}")
-		f.line("\tm.Serialize(e)")
-		f.line("\tif err := e.Flush(); err != nil {")
-		f.line("\t\treturn nil, err")
-		f.line("\t}")
-		f.line("\treturn e.Bytes(), nil")
+		f.line("\treturn buf[:n], nil")
 		f.line("}")
 	} else {
 		// An unbounded field has no worst case, so MaxSize here is a configured
@@ -1769,6 +1792,50 @@ func (g *gen) messageFile(m *ir.Message) []byte {
 		f.line("\treturn out, nil")
 		f.line("}")
 	}
+	f.blank()
+	// Encode into storage the CALLER owns, and the only surface of the three that
+	// allocates nothing at all: no buffer here, none in the corelib (§5.1). It is
+	// the shape a caller with a pooled or stack buffer needs, and the one a caller
+	// that must not allocate on the encode path needs -- both had to restate
+	// NewEncoderBuffer plus the message's options by hand.
+	//
+	// A dst too short does not truncate: the encoder latches ErrBufferFull and
+	// Flush reports it, so a partial image is never handed back as a complete one.
+	// It does, though, leave those bytes IN dst -- the corelib writes into the
+	// installed buffer and finds out it is short only when it runs out (§5.1, no
+	// reservation) -- so the emitted comment says the count is 0 AND that dst's
+	// contents are undefined, which is what a caller recycling a pooled buffer
+	// has to know.
+	f.line("// EncodeInto serializes the message into dst, which the CALLER owns, and")
+	f.line("// returns how many bytes it wrote.")
+	f.line("//")
+	f.line("// This call allocates nothing: dst is the whole of the storage, and it is")
+	f.line("// never grown or replaced. A dst too short for the message is refused with")
+	f.line("// sofab.ErrBufferFull and the count is 0 -- a partial image is never")
+	f.line("// returned as a complete one. The refusal is not a promise about dst")
+	f.line("// itself: the encoder writes as it goes and only runs out at the end, so")
+	f.line("// a refused call leaves dst holding an unfinished image whose contents are")
+	f.line("// undefined.")
+	f.line("//")
+	if ms.Bounded {
+		f.line("// %s bytes always suffice: it is the schema's worst case, so a", maxSize)
+		f.line("// conformant value cannot encode to more.")
+	} else {
+		f.line("// A field of this message is unbounded, so there is no size dst can be")
+		f.line("// given to be sure of fitting every value: %s is a configured", maxSize)
+		f.line("// ceiling, not a worst case. Size dst from what you encode, or use EncodeTo.")
+	}
+	f.line("func (m *%s) EncodeInto(dst []byte) (int, error) {", typeName)
+	f.line("\te, err := sofab.NewEncoderBuffer(dst, 0%s)", encOpts)
+	f.line("\tif err != nil {")
+	f.line("\t\treturn 0, err")
+	f.line("\t}")
+	f.line("\tm.Serialize(e)")
+	f.line("\tif err := e.Flush(); err != nil {")
+	f.line("\t\treturn 0, err")
+	f.line("\t}")
+	f.line("\treturn len(e.Bytes()), nil")
+	f.line("}")
 	f.blank()
 	// Streaming encode, one shape for both arms: the writer IS the drain, so the
 	// message never has to exist as one contiguous []byte -- what bounds memory is
@@ -1850,7 +1917,70 @@ func (g *gen) messageFile(m *ir.Message) []byte {
 	f.line("\t}")
 	f.line("\treturn m, nil")
 	f.line("}")
+	f.blank()
+	g.emitDecoder(f, typeName, newFn, decFn, decFromFn, decType, newDecFn)
 	return g.render(f, msgFile(m))
+}
+
+// emitDecoder writes the push decoder: a HANDLE on the corelib's resumable
+// Decoder plus the destination it fills. The two entry points beside it both
+// take the input on their own terms -- X__Decode needs the whole wire image in
+// one contiguous buffer, X__DecodeFrom needs an io.Reader -- and a caller whose
+// transport hands it chunks has neither. It had to restate what this handle is
+// (X__New plus sofab.NewDecoder) to reach a Feed at all, which is the gap
+// generator#747 was filed on.
+//
+// It carries NO parse state and NO rule of its own, which is what keeps it on
+// the right side of CORELIB_PLAN §5.3.1: suspending inside a varint, a payload
+// or an array, resuming on the next chunk, and the three-valued verdict are all
+// the corelib Decoder's, and the two wrappers above are the same machine. The
+// same bytes therefore give the same events in the same order through any of
+// the three, chunked at any boundary.
+func (g *gen) emitDecoder(f *gofile, typeName, newFn, decFn, decFromFn, decType, newDecFn string) {
+	f.line("// %s decodes one message from chunks, in whatever sizes they arrive.", decType)
+	f.line("//")
+	f.line("// %s is the in-memory path for bytes you already hold and %s", decFn, decFromFn)
+	f.line("// pulls them out of an io.Reader; this is the one to reach for when the")
+	f.line("// bytes are PUSHED at you -- a callback-driven transport, or one that")
+	f.line("// reuses the buffer it hands over.")
+	f.line("//")
+	f.line("// The verdict is Feed's own, and identical to what the other two reach on")
+	f.line("// the same bytes: they are all one decoder, so a message that is INVALID")
+	f.line("// whole is INVALID chunked, at every chunk boundary.")
+	f.line("type %s struct {", decType)
+	f.line("\tmsg *%s", typeName)
+	f.line("\tdec *sofab.Decoder")
+	f.line("}")
+	f.blank()
+	f.line("// %s returns a decoder bound to a fresh message, with the schema", newDecFn)
+	f.line("// defaults already applied -- an absent field decodes back to its default,")
+	f.line("// exactly as it does through %s.", decFn)
+	f.line("func %s() *%s {", newDecFn, decType)
+	f.line("\tm := %s()", newFn)
+	f.line("\treturn &%s{msg: m, dec: sofab.NewDecoder(m)}", decType)
+	f.line("}")
+	f.blank()
+	f.line("// Feed hands the decoder the next chunk and returns the outcome for every")
+	f.line("// byte fed so far: sofab.Complete when they end on a field boundary,")
+	f.line("// sofab.Incomplete when they end inside a field. A chunk may be of any")
+	f.line("// size, one byte included, and a header, a varint, a payload or an array")
+	f.line("// may be split across any number of calls.")
+	f.line("//")
+	f.line("// Neither outcome is a failure: the wire format has no end marker at the")
+	f.line("// top level, so only the caller's own framing knows whether more could")
+	f.line("// still have come. The error is non-nil exactly when the outcome is")
+	f.line("// sofab.Invalid, and that is terminal -- every later Feed answers it again.")
+	f.line("//")
+	f.line("// chunk is borrowed for the duration of the call only: the message OWNS its")
+	f.line("// bytes, so chunk may be reused or overwritten the moment this returns.")
+	f.line("func (d *%s) Feed(chunk []byte) (sofab.Outcome, error) {", decType)
+	f.line("\treturn d.dec.Feed(chunk)")
+	f.line("}")
+	f.blank()
+	f.line("// Message is the destination, holding whatever has been decoded so far. It")
+	f.line("// is the same message at every call and it is filled in place, so a caller")
+	f.line("// may take it once and read it after each Feed.")
+	f.line("func (d *%s) Message() *%s { return d.msg }", decType, typeName)
 }
 
 // wireMaxDepth is the format's MAX_DEPTH (corelib-go sofab.MaxDepth, §4.9): the
