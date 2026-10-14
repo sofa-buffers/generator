@@ -631,7 +631,8 @@ func (v *validator) checkEnumInitialisable(values []int64, loc string) {
 		return
 	}
 	v.add(loc, "enum field declares no \"default\" and its enum declares no constant with the value 0, "+
-		"so the field would initialize to 0 — a value the enum rejects; "+
+		"so the field would initialize to 0 — a value the width admits but no constant names, "+
+		"which every receiver would then reconstruct from an omitted field; "+
 		"give the field a default naming one of the constants, or give the enum a 0 constant")
 }
 

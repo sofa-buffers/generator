@@ -2015,7 +2015,7 @@ messages:
 // for two flags declared side by side. Nothing crashed, because the decoder stores
 // a plain int and the annotation was simply untrue; it broke for the first caller
 // who wrote the obvious `Flags(msg.f)`. An enum is the other shape -- one value
-// out of a set -- and IntEnum refusing an undeclared value is exactly right there.
+// out of a set -- and keeps IntEnum.
 func TestPythonBitfieldIsIntFlagAndEnumIsIntEnum(t *testing.T) {
 	mod := string(genPy(t, schemaFile(t, "../../examples/messages/example.yaml"), map[string]any{})["message.py"])
 	for _, want := range []string{

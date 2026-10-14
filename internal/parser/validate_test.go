@@ -511,6 +511,20 @@ func TestEnumFieldMustBeInitialisable(t *testing.T) {
 			if tc.bad && !got {
 				t.Fatalf("expected an error containing %q, got: %v", want, errs)
 			}
+			// The REASON is pinned too. MESSAGE_SPEC §1 bounds an enum by its
+			// declared width, and 0 is inside it: the value is admitted, it just
+			// names nothing. A message that calls it a value the enum rejects
+			// teaches the withdrawn closed-enum rule.
+			if tc.bad {
+				for _, reason := range []string{"a value the width admits but no constant names", "reconstruct from an omitted field"} {
+					if !strings.Contains(errs.Error(), reason) {
+						t.Fatalf("the error must give the §1 reason %q, got: %v", reason, errs)
+					}
+				}
+				if strings.Contains(errs.Error(), "rejects") {
+					t.Fatalf("the error calls an unnamed value rejected, which §1 no longer says: %v", errs)
+				}
+			}
 			if !tc.bad && got {
 				t.Fatalf("this schema is initialisable and must validate, got:\n%s", errs.Error())
 			}
