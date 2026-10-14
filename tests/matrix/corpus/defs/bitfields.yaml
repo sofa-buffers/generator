@@ -10,14 +10,16 @@ messages:
       # signed carrier holds and no double carries exactly.
       #
       # Every element is a combination of the DECLARED flags (mask
-      # 0x8000000000000001). It has to be: MESSAGE_SPEC §1 closes a bitfield by
-      # that mask, §2 makes a `default` what absence reconstructs, and the last
-      # element of an array is always written — so a default outside the mask would
-      # be a value this schema's own encoder writes and every decoder in the family
-      # refuses.
+      # 0x8000000000000001). It has to be, and the reason is authoring, not the
+      # wire: MESSAGE_SPEC §1 bounds a bitfield by the WIDTH its highest `pos`
+      # implies, and an undeclared bit inside it decodes. But §2 makes a `default`
+      # what absence reconstructs, so a default carrying an undeclared bit would pin
+      # the field at a combination no flag names — the generator refuses it where
+      # it is written (checkMaskElem).
       masks: { id: 1, type: array, items: { type: bitfield, count: 4, bits: { LOW: { pos: 0 }, HIGH: { pos: 63 } } }, default: [0, 0x1, 9223372036854775808, "9223372036854775809"] }
       # The highest declared pos is 2, so every backend backs this bitfield with a
-      # single byte — and the byte is NOT the bound. The declared mask is 0b101, so
-      # the four valid values are 0, 1, 4 and 5, and this default names two of them.
-      # 255 fits the storage and is not one of them.
+      # single byte — and the byte is NOT the bound on what a default may say. The
+      # declared mask is 0b101, so the four combinations a default can name are 0,
+      # 1, 4 and 5, and this default names two of them. 255 fits the storage and
+      # names none of them.
       narrow: { id: 2, type: array, items: { type: bitfield, count: 2, bits: { A: { pos: 0 }, C: { pos: 2 } } }, default: [5, 4] }

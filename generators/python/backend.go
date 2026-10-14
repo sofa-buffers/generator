@@ -685,11 +685,12 @@ func (g *gen) emitEnum(f *pyfile, nt *ir.NamedType) {
 // for two flags a schema declares side by side, which is the ordinary case
 // rather than an edge one. IntFlag composes, so every declared combination and
 // the zero value construct. An enum is the opposite shape (one value out of a
-// set) and keeps IntEnum, where refusing an undeclared value is correct.
+// set) and keeps IntEnum.
 //
 // No `boundary=` argument: it arrives in 3.11 and the generated project declares
-// requires-python >= 3.9. Rejecting an UNDECLARED bit is the decoder's job in any
-// case (MESSAGE_SPEC S1, enforced in on_field), not the type's.
+// requires-python >= 3.9. Nor would one belong here: MESSAGE_SPEC S1 bounds a
+// bitfield by its declared WIDTH, an undeclared bit inside it is a valid value,
+// and the bound is the decoder's job (declaredWidthCond), not the type's.
 func (g *gen) emitBitfieldConsts(f *pyfile, nt *ir.NamedType) {
 	f.line("class %s(_IntFlag):", typeIdent(nt))
 	for _, fl := range nt.Flags {
