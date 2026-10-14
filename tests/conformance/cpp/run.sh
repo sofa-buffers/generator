@@ -262,6 +262,43 @@ run_variant() {
         $OWN_OBJS
     "$WORK/own-$label"
 
+    # generator#745: what a REUSED destination keeps. try_decode() resets the
+    # destination and decodes into it, and reset()'s own doc states which half
+    # of that survives -- a container's OWN buffer, never its elements. This
+    # leg holds the generated code to the half it promises, against the real
+    # corelib: every container the first message grew is found at the same
+    # address with the same capacity on every later decode (a reset() written
+    # as `out = Msg{}` fails here), and a message of scalar containers costs no
+    # allocation at all. The element half is asserted as an UPPER bound -- at
+    # most one block per heap-owning element -- so a corelib that learns to
+    # pool its elements passes by more rather than failing.
+    #
+    # Dynamic storage on EITHER corelib: since generator#744 both try_decode
+    # into the caller's object, and allow_dynamic -- not the corelib -- is what
+    # makes an element a std::string. The static profiles are skipped because
+    # FixedString/InlineVector have no capacity() to compare and no heap to
+    # hand back, not because the property does not hold there.
+    if [ "$dynamic" != false ]; then
+        echo "==> [$label] a reused destination keeps its containers, not their elements (generator#745)"
+        mkdir -p "$WORK/reuse-$label"
+        cat > "$WORK/reuse-$label/reusechk.yaml" <<'YAML'
+version: 1
+messages:
+  reusechk:
+    payload:
+      name:     { id: 0, type: string, maxlen: 64 }
+      counts:   { id: 1, type: array, items: { type: u32, count: 8 } }
+      warnings: { id: 2, type: array, items: { type: string, maxlen: 64, count: 4 } }
+YAML
+        (cd "$ROOT" && go run ./cmd/sofabgen --config "$WORK/cfg-corpus-$label.yaml" --lang cpp \
+            --in "$WORK/reuse-$label/reusechk.yaml" --out "$WORK/reuse-$label") >/dev/null
+        g++ -std=c++20 $WARNFLAGS $include -I"$WORK/reuse-$label" $STREAM_LIMITS \
+            -DMSG_TYPE=sofabuffers::Reusechk -include reusechk.hpp \
+            -o "$WORK/reusechk-$label" "$ROOT/tests/conformance/cpp/reuse_check.cpp" \
+            $STREAM_OBJS
+        "$WORK/reusechk-$label"
+    fi
+
     # CORELIB_PLAN S4.4 (generator#581): every non-zero boolean reads as true, is
     # normalized to 1, and has no width bound. A boolean array's member element is
     # std::uint8_t, and the harness JSON prints `v ? true : false`, so a raw 2

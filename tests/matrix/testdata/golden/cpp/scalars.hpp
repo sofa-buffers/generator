@@ -92,8 +92,9 @@ struct Scalars : sofab::Message {
      * @c sofab::IStreamInline) and it is yours to call between messages,
      * alongside the stream's own reset for the decoder state.
      *
-     * Containers are cleared, not reallocated: the capacity a reused
-     * destination has already paid for is kept.
+     * Containers are cleared, not reallocated: a container keeps its own
+     * buffer, so the capacity a reused destination has already paid for is
+     * not handed back.
      */
     void reset() noexcept {
         u8min = 0;

@@ -34,8 +34,9 @@ anything over. On a rejected input it holds the fields decoded before the error
 `reset()` itself differs in how it gets there, and only in that: with `c-cpp` and
 static storage, where every field is inline, it reconstructs the object in place
 instead of assigning field by field — the same values, and references to the
-object stay valid. Everywhere else it clears each container, so a reused
-destination keeps the buffers it has already allocated.
+object stay valid. Everywhere else it clears each container in place, so a
+reused destination keeps the buffers it has already allocated — see *Reusing a
+destination* for what that does and does not cover.
 
 **`c-cpp` requires a fully bounded schema.** Every `string`, `blob` and `array`
 must carry a `maxlen` or `count`; an unbounded field fails generation rather
@@ -132,6 +133,58 @@ you build to remove the encode checks above from the image. Use it only when
 your own code guarantees that every value fits its bound. Without the checks,
 an over-long value is encoded, and a receiver then rejects that message as
 invalid. Decode checks bounds either way.
+
+## Reusing a destination
+
+`try_decode(data, len, out)` puts `out` back to its declared defaults
+(`out.reset()`) and then decodes into it, on either corelib, so the same object
+can take message after message. `reset()` is public: drive a stream yourself and
+it is yours to call between messages.
+
+What that reuse keeps, and what it does not:
+
+| | kept across a reuse cycle |
+|---|---|
+| a `string` / `blob` **field** | yes — the member is cleared in place and keeps its capacity |
+| an **array** field's own buffer | yes — it keeps the capacity it grew to |
+| that array's **elements** | no — clearing destroys them |
+
+The last row is the one that costs something. Clearing a container destroys its
+elements, so an element that owns storage of its own — a `std::string` element,
+a `std::vector` row of a matrix, a struct element holding either — gives that
+storage back, and the next decode allocates it again: up to one `malloc`/`free`
+pair per such element per message.
+
+```cpp
+Msg out;
+for (auto &frame : frames) {
+    (void)Msg::try_decode(frame.data(), frame.size(), out);
+    // out.warnings keeps its own buffer; each warning string does not
+}
+```
+
+How many pairs it actually is depends on the payload as much as on the schema:
+a short element that fits inside its own `std::string` (the small-string
+optimization) costs nothing, and neither does an empty array row. For a
+`vehicle_telemetry` message (`examples/messages/realworld/`) carrying four long
+`warnings` strings, four `cell_mv` rows and three `ecu_sigs` blobs it is 11
+allocations and 11 frees per message, roughly 4% of the instructions that
+decode spends; the same message with those three fields empty costs none. Scalar
+containers (`std::vector<std::uint32_t>`, a `blob` field, a `string` field) own
+no element storage and cost nothing at all.
+
+The generated `reset()` doc says this per message, and says it only for a
+message that actually has such an element.
+
+**`allow_dynamic` decides it, not `corelib`.** Under `allow_dynamic: false` a
+bounded element is a `sofab::FixedString<N>` / `sofab::FixedBytes<N>` /
+`sofab::InlineVector<T, N>`, which owns no heap at all — there the reuse cycle
+allocates nothing and the note is absent. Under `allow_dynamic: true` the
+element is a `std::string` / `std::vector` on **either** corelib, `c-cpp`
+included, and the cycle costs the same there.
+
+If the per-element allocation matters for your workload, `allow_dynamic: false`
+removes it for every field the schema bounds.
 
 ## `namespace`
 

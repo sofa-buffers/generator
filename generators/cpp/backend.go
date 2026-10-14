@@ -700,6 +700,20 @@ func flagDoc(fl *ir.BitfieldFlag) string {
 // the whole point of a reuse API. Struct and union members recurse into their own
 // reset() rather than being assigned a fresh temporary, for the same reason.
 //
+// It reaches the container's own buffer and no further. Clearing destroys the
+// ELEMENTS, so a std::vector<std::string> gives every element's buffer back and
+// the next decode takes it again -- 11 free + 11 alloc per decode on
+// examples/messages/realworld/vehicle_telemetry.yaml, ~100 Ir per element pair
+// (generator#745). This is not the generator's to fix: the array collectors
+// clear the same container from the corelib side (StringSeq::prepare and its
+// siblings), so a reset() that kept the elements would be undone by the very
+// next present sequence -- measured: feeding that same message into the steady
+// state with NO reset() in front of it costs the same 11 alloc + 11 free.
+// Keeping them needs a container with a logical size and a pool of cleared
+// elements -- a corelib type (ARCHITECTURE §8) and a public member-type change.
+// Until then the emitted doc states which half is kept, and states it only
+// where an element that owns storage exists.
+//
 // Public because a caller driving the visitor itself (sofab::IStreamInline, or a
 // bare sofab::IStreamImpl) owns its destinations and needs the same call between
 // messages; corelib-cpp exposes the decoder-state half as IStreamImpl::reset().
@@ -761,8 +775,17 @@ func (g *gen) emitReset(f *hfile, name string, fields []*ir.Field, isMessage boo
 		f.blank()
 		return
 	}
-	f.line("     * Containers are cleared, not reallocated: the capacity a reused")
-	f.line("     * destination has already paid for is kept.")
+	f.line("     * Containers are cleared, not reallocated: a container keeps its own")
+	f.line("     * buffer, so the capacity a reused destination has already paid for is")
+	f.line("     * not handed back.")
+	if g.resetLosesElementStorage(fields) {
+		f.line("     *")
+		f.line("     * Its ELEMENTS are not part of that buffer. Clearing destroys them, so")
+		f.line("     * an element that owns storage of its own - a @c std::string or")
+		f.line("     * @c std::vector element, or a struct element holding one - gives that")
+		f.line("     * storage back here, and the next decode takes it again: such a")
+		f.line("     * container's own buffer survives a reuse cycle, its elements do not.")
+	}
 	f.line("     */")
 	f.line("    void reset() noexcept {")
 	for _, fld := range fields {
@@ -1061,8 +1084,17 @@ func (g *gen) emitStruct(f *hfile, name, summary string, fields []*ir.Field, isM
 		//   is the same C-ABI field callback IStreamObject uses, pointed at the
 		//   caller's object.
 		kept := "without giving its buffers back"
-		if g.clib {
+		switch {
+		case g.clib:
 			kept = "without a second copy of the message on the stack"
+		case g.resetLosesElementStorage(fields):
+			// generator#745: "without giving its buffers back" is a CONTAINER-level
+			// promise, and the reset() this calls keeps only the container. Where an
+			// element owns storage of its own the promise is false, so say no more
+			// than reset() does. (The c-cpp clause above is about the stack, not the
+			// heap, so it stays true whatever the elements own; that profile's
+			// element half is on its reset() too.)
+			kept = "keeping the buffers @ref reset keeps"
 		}
 		f.line("    /**")
 		f.line("     * @brief Decode a message into @p _out, reporting whether the input was")
