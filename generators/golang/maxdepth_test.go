@@ -82,10 +82,19 @@ func TestGoEncodeMaxDepth(t *testing.T) {
 					t.Errorf("missing %q:\n%s", want, got)
 				}
 			}
-			// Every Encoder the file constructs takes the bound: Encode (buffer or
-			// sink arm) and EncodeTo, and no constructor is left without it.
-			if n, all := strings.Count(got, "_D__EncOpts...)"), strings.Count(got, "sofab.NewEncoder"); n != all || n != 2 {
-				t.Errorf("%d of %d encoder constructors pass the bound, want 2 of 2:\n%s", n, all, got)
+			// Every Encoder the file constructs takes the bound, and no constructor
+			// is left without it. The bounded arm builds two -- EncodeInto's
+			// caller-owned buffer and EncodeTo's sink, with Encode delegating to
+			// the first -- and the unbounded arm three, because its Encode has a
+			// sink of its own. Counted with the "(": the EncodeOptions doc names
+			// both constructors in prose, which is not a call.
+			ctors := strings.Count(got, "sofab.NewEncoderBuffer(") + strings.Count(got, "sofab.NewEncoderSink(")
+			want := 2
+			if strings.Contains(got, "D__MaxSizeLimit") {
+				want = 3
+			}
+			if n := strings.Count(got, "_D__EncOpts...)"); n != ctors || ctors != want {
+				t.Errorf("%d of %d encoder constructors pass the bound, want %d:\n%s", n, ctors, want, got)
 			}
 		})
 	}

@@ -194,6 +194,17 @@ const Scalars__MaxDepth = 0
 // passing it allocates nothing per call.
 var _Scalars__EncOpts = []sofab.Option{sofab.WithMaxDepth(1)}
 
+// Scalars__EncodeOptions are the options Scalars's own Encode, EncodeTo and
+// EncodeInto build their sofab.Encoder with. Pass them to
+// sofab.NewEncoderBuffer or sofab.NewEncoderSink to drive an encode yourself
+// and get the encoder this message expects.
+//
+// The slice is shared and read-only: append to it rather than assigning
+// into it.
+func Scalars__EncodeOptions() []sofab.Option {
+	return _Scalars__EncOpts
+}
+
 // Encode serializes the message into a buffer this call allocates and owns.
 //
 // The buffer is exactly Scalars__MaxSize bytes -- the schema's worst case -- so a
@@ -201,15 +212,36 @@ var _Scalars__EncOpts = []sofab.Option{sofab.WithMaxDepth(1)}
 // is refused with sofab.ErrArgument before any byte is returned.
 func (m *Scalars) Encode() ([]byte, error) {
 	buf := make([]byte, Scalars__MaxSize)
-	e, err := sofab.NewEncoderBuffer(buf, 0, _Scalars__EncOpts...)
+	n, err := m.EncodeInto(buf)
 	if err != nil {
 		return nil, err
 	}
+	return buf[:n], nil
+}
+
+// EncodeInto serializes the message into dst, which the CALLER owns, and
+// returns how many bytes it wrote.
+//
+// This call allocates nothing: dst is the whole of the storage, and it is
+// never grown or replaced. A dst too short for the message is refused with
+// sofab.ErrBufferFull and the count is 0 -- a partial image is never
+// returned as a complete one. The refusal is not a promise about dst
+// itself: the encoder writes as it goes and only runs out at the end, so
+// a refused call leaves dst holding an unfinished image whose contents are
+// undefined.
+//
+// Scalars__MaxSize bytes always suffice: it is the schema's worst case, so a
+// conformant value cannot encode to more.
+func (m *Scalars) EncodeInto(dst []byte) (int, error) {
+	e, err := sofab.NewEncoderBuffer(dst, 0, _Scalars__EncOpts...)
+	if err != nil {
+		return 0, err
+	}
 	m.Serialize(e)
 	if err := e.Flush(); err != nil {
-		return nil, err
+		return 0, err
 	}
-	return e.Bytes(), nil
+	return len(e.Bytes()), nil
 }
 
 // EncodeTo serializes the message straight into w.
@@ -275,3 +307,48 @@ func Scalars__DecodeFrom(r io.Reader) (*Scalars, error) {
 	}
 	return m, nil
 }
+
+// Scalars__Decoder decodes one message from chunks, in whatever sizes they arrive.
+//
+// Scalars__Decode is the in-memory path for bytes you already hold and Scalars__DecodeFrom
+// pulls them out of an io.Reader; this is the one to reach for when the
+// bytes are PUSHED at you -- a callback-driven transport, or one that
+// reuses the buffer it hands over.
+//
+// The verdict is Feed's own, and identical to what the other two reach on
+// the same bytes: they are all one decoder, so a message that is INVALID
+// whole is INVALID chunked, at every chunk boundary.
+type Scalars__Decoder struct {
+	msg *Scalars
+	dec *sofab.Decoder
+}
+
+// Scalars__NewDecoder returns a decoder bound to a fresh message, with the schema
+// defaults already applied -- an absent field decodes back to its default,
+// exactly as it does through Scalars__Decode.
+func Scalars__NewDecoder() *Scalars__Decoder {
+	m := Scalars__New()
+	return &Scalars__Decoder{msg: m, dec: sofab.NewDecoder(m)}
+}
+
+// Feed hands the decoder the next chunk and returns the outcome for every
+// byte fed so far: sofab.Complete when they end on a field boundary,
+// sofab.Incomplete when they end inside a field. A chunk may be of any
+// size, one byte included, and a header, a varint, a payload or an array
+// may be split across any number of calls.
+//
+// Neither outcome is a failure: the wire format has no end marker at the
+// top level, so only the caller's own framing knows whether more could
+// still have come. The error is non-nil exactly when the outcome is
+// sofab.Invalid, and that is terminal -- every later Feed answers it again.
+//
+// chunk is borrowed for the duration of the call only: the message OWNS its
+// bytes, so chunk may be reused or overwritten the moment this returns.
+func (d *Scalars__Decoder) Feed(chunk []byte) (sofab.Outcome, error) {
+	return d.dec.Feed(chunk)
+}
+
+// Message is the destination, holding whatever has been decoded so far. It
+// is the same message at every call and it is filled in place, so a caller
+// may take it once and read it after each Feed.
+func (d *Scalars__Decoder) Message() *Scalars { return d.msg }

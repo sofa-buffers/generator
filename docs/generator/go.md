@@ -42,6 +42,65 @@ The formatting is done in-process (`go/format`), so no Go toolchain is needed
 at generation time; source that library cannot parse is a generator bug, and
 generation then fails with an error naming the file instead of writing it.
 
+## Encoding and decoding
+
+A message `m` generates six entry points, differing only in who owns the
+storage. All three decode paths are the same corelib decoder, so the same bytes
+give the same verdict and the same value whichever one reads them, and whether
+they arrive whole or a byte at a time.
+
+| | signature | storage |
+|---|---|---|
+| encode, allocating | `func (m *M) Encode() ([]byte, error)` | allocated here: one `M__MaxSize` buffer for a bounded schema, a growing `[]byte` fed by a fixed scratch otherwise |
+| encode into your buffer | `func (m *M) EncodeInto(dst []byte) (int, error)` | yours; nothing is allocated |
+| encode to a stream | `func (m *M) EncodeTo(w io.Writer) error` | yours; a fixed scratch drains into `w` as it fills |
+| decode bytes in hand | `func M__Decode(data []byte) (*M, error)` | the message copies out of `data` |
+| decode from a reader | `func M__DecodeFrom(r io.Reader) (*M, error)` | a 4 KiB chunk, drained from `r` |
+| decode from chunks | `func M__NewDecoder() *M__Decoder` | the chunks are yours |
+
+**`EncodeInto`** writes into `dst` and returns how many bytes it wrote. A `dst`
+too short is `sofab.ErrBufferFull` and a count of `0` — never a prefix passed
+off as a message. It is the count that is `0`, not `dst`: the encoder writes
+into `dst` as it goes and only finds out that it is short when it runs out, so
+after a refusal `dst` holds an unfinished image and its contents are undefined.
+Zero it yourself if you recycle it and that matters. For a schema with a worst
+case, `M__MaxSize` bytes always fit; where the schema has an unbounded field,
+`M__MaxSize` is a configured ceiling rather than a bound on a value, so size
+`dst` from what you encode or use `EncodeTo`.
+
+**`M__EncodeOptions()`** returns the `[]sofab.Option` the three encode paths
+build their `sofab.Encoder` with. Pass it to `sofab.NewEncoderBuffer` or
+`sofab.NewEncoderSink` to drive an encode yourself — with your own flush sink,
+or a buffer you install in pieces — and get the encoder the message expects.
+The slice is shared: append to it rather than assigning into it.
+
+**`M__Decoder`** is the push decoder, for bytes that are handed to you rather
+than read by you:
+
+```go
+d := message.M__NewDecoder()
+for chunk := range chunks {
+	out, err := d.Feed(chunk)   // sofab.Complete | sofab.Incomplete
+	if err != nil {             // sofab.Invalid, and terminal
+		return err
+	}
+	_ = out
+}
+use(d.Message())
+```
+
+`Feed` takes a chunk of any size, one byte included; a header, a varint, a
+payload or an array may be split across any number of calls. It returns the
+outcome for everything fed so far: `sofab.Complete` if the bytes end on a field
+boundary, `sofab.Incomplete` if they end inside a field. Neither is a failure —
+the format has no end marker at the top level, so only your own framing knows
+whether more could have come. An error means `sofab.Invalid`, and that is
+terminal: every later `Feed` answers it again.
+
+A chunk is borrowed for the call only. The message owns its bytes, so you may
+reuse or overwrite the chunk the moment `Feed` returns. `Message()` is the
+destination, filled in place, and is the same message at every call.
+
 ## Field names
 
 A field's Go field is the schema name in Go casing: underscores are folded into
@@ -57,7 +116,7 @@ and `string` is `String_`. Those names are:
 - the embedded `StringCheck` of a type with a string field, and what it
   provides: `UTF8Valid`, `SetStringCheck`;
 - the methods every generated type declares: `Serialize`, and on a message also
-  `Encode`, `EncodeTo`.
+  `Encode`, `EncodeTo`, `EncodeInto`.
 
 Only the Go field changes: the wire is keyed by the field id, and the `json` tag
 keeps the schema name.
@@ -72,7 +131,7 @@ one package, so each name is built so that no other can spell it:
 |---|---|---|
 | message, `$defs` type | the name in Go casing | message `vehicle_state` is `VehicleState`, `$defs` struct `point` is `Point` |
 | inline type | its path (the message, then each field or option leading to it) in Go casing, joined with `_` | struct field `pos` of message `m` is `M_Pos`; the element struct of an array field `pts` is `M_Pts` |
-| a message's functions and constants | the message type, `__`, the role | `M__New()`, `M__Decode(b)`, `M__DecodeFrom(r)`, `M__MaxSize`, `M__MaxSizeLimit`, `M__MaxDepth` |
+| a message's functions, types and constants | the message type, `__`, the role | `M__New()`, `M__Decode(b)`, `M__DecodeFrom(r)`, `M__NewDecoder()`, `M__Decoder`, `M__EncodeOptions()`, `M__MaxSize`, `M__MaxSizeLimit`, `M__MaxDepth` |
 | enum constant, bitfield flag | the type, `_`, the name | `Color_Red`, `Flags_On` |
 | union option id | the option's path, `__ID` | `M_Shape_Pt__ID` |
 | `$defs` union used with several `default_id`s | the union, `__Default`, the option | `Shape__DefaultPt` |
