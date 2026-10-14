@@ -1212,11 +1212,35 @@ messages:
 			t.Errorf("m.hpp missing corelib collector %q\n%s", want, h)
 		}
 	}
+	// Scoped to deserialize(): reset() clears the very same members, by design
+	// and in the only place a clear belongs (generator#744).
+	arms := deserializeBody(t, h)
 	for _, notWant := range []string{"strs.clear();", "blobs.clear();", "msgs.clear();", "native.clear();"} {
-		if strings.Contains(h, notWant) {
-			t.Errorf("the arm must not clear %q — prepare() does it behind the tag match:\n%s", notWant, h)
+		if strings.Contains(arms, notWant) {
+			t.Errorf("the arm must not clear %q — prepare() does it behind the tag match:\n%s", notWant, arms)
 		}
 	}
+}
+
+// deserializeBody is the generated deserialize() of the FIRST message in h --
+// the decode arms, and nothing else of the header. Several checks are about
+// what an arm may not do, which a whole-header search cannot tell from the same
+// statement in reset().
+func deserializeBody(t *testing.T, h string) string {
+	t.Helper()
+	const open = "void deserialize("
+	i := strings.Index(h, open)
+	if i < 0 {
+		t.Fatalf("no deserialize() in:\n%s", h)
+	}
+	rest := h[i:]
+	// The member functions are emitted one per block at a fixed indent, so the
+	// first line that closes at that indent ends the body.
+	j := strings.Index(rest, "\n    }\n")
+	if j < 0 {
+		t.Fatalf("deserialize() does not end:\n%s", rest)
+	}
+	return rest[:j]
 }
 
 // TestCppNativeArrayIsNotPaddedToCount pins the construction value of a
@@ -1375,8 +1399,8 @@ func TestCppResetPutsEveryFieldBackInPlace(t *testing.T) {
 		// reset and the wire-absent value cannot drift apart. A `count: N` array
 		// is EMPTY at rest -- `count` is a capacity, not a length (MESSAGE_SPEC
 		// §3) -- and a declared default shorter than the count stands as written.
-		"        items = {};",
-		"        names = {};",
+		"        items.clear();",
+		"        names.clear();",
 		"        nums = {7, 8, 9};",
 		"        tag = 3;",
 		// A struct member recurses instead of being assigned a fresh temporary:
@@ -1396,15 +1420,15 @@ func TestCppResetPutsEveryFieldBackInPlace(t *testing.T) {
 		t.Errorf("reset() must stay public - generated messages have no private section:\n%s", h)
 	}
 	// The reuse entry point resets the caller's destination and then decodes
-	// straight into it. Staging in a second instance and copying across would
-	// mask the staleness but throw away every buffer `out` already holds, which
-	// is the only reason to pass a destination in.
+	// straight into it, through IStreamInto (generator#744) -- the same three
+	// lines the fixed profile emits. Staging in a second instance and copying
+	// across would mask the staleness but throw away every buffer `out` already
+	// holds, which is the only reason to pass a destination in.
 	for _, want := range []string{
 		"static sofab::IStreamImpl::Result try_decode(const std::uint8_t *_data, std::size_t _len, M &_out) {",
 		"        _out.reset();",
-		"        sofab::IStreamInline _is{[&_out, &_isp](sofab::id _id, std::size_t _size, std::size_t _count) {",
-		"            _out.deserialize(*_isp, _id, _size, _count);",
-		"        return _is.feed(_data, _len);",
+		"        sofab::IStreamInto<M> _in{_out, sofab::Limits{SIZE_MAX}};",
+		"        return _in.feed(_data, _len);",
 	} {
 		if !strings.Contains(h, want) {
 			t.Errorf("try_decode missing %q:\n%s", want, h)
@@ -1413,8 +1437,13 @@ func TestCppResetPutsEveryFieldBackInPlace(t *testing.T) {
 	if strings.Contains(h, "_out = *_in;") {
 		t.Errorf("try_decode must decode into the caller's destination, not copy into it:\n%s", h)
 	}
+	// The callback knot IStreamInto untied: no stream reached through a pointer
+	// patched in after its own construction.
+	if strings.Contains(h, "sofab::IStreamInline *_isp") {
+		t.Errorf("try_decode must not need a self-reference fixup any more:\n%s", h)
+	}
 	// The reset runs before the bytes are fed - after would undo the decode.
-	if strings.Index(h, "_out.reset();") > strings.Index(h, "return _is.feed(_data, _len);") {
+	if strings.Index(h, "_out.reset();") > strings.Index(h, "return _in.feed(_data, _len);") {
 		t.Errorf("out.reset() must precede the feed:\n%s", h)
 	}
 	// The sequence-start clear is untouched: a re-opened wrapper still replaces
@@ -1424,8 +1453,35 @@ func TestCppResetPutsEveryFieldBackInPlace(t *testing.T) {
 	}
 }
 
-// TestCppTryDecodeCarriesTheDerivedReassemblyCap: IStreamInline takes the field
-// callback first, so a configured cap rides in as a TRAILING argument - the
+// TestCppReinitResetLeavesTheUnionAlone: the message's reset() reconstructs on
+// the static c-cpp profile (generator#744), which puts a union member back to
+// its default option through the union's own constructor. The union class keeps
+// its per-option reset: it is not a message, and an option is selected, not
+// cleared.
+func TestCppReinitResetLeavesTheUnionAlone(t *testing.T) {
+	src := "version: 1\nmessages:\n  m:\n    payload:\n" +
+		"      pick:\n        id: 0\n        type: union\n        default_id: 1\n        oneof:\n" +
+		"          a: { id: 0, type: u32, default: 7 }\n" +
+		"          b: { id: 1, type: string, maxlen: 8 }\n" +
+		"      n: { id: 1, type: u16, default: 3 }\n"
+	h, err := genHeader(t, src, "m.hpp", map[string]any{"corelib": "c-cpp"})
+	if err != nil {
+		t.Fatalf("generate: %v", err)
+	}
+	if !strings.Contains(h, "        ::new (static_cast<void *>(this)) M();") {
+		t.Errorf("the message must reconstruct:\n%s", h)
+	}
+	// The union's reset selects its default option; it is not reconstructed.
+	if !strings.Contains(h, `void reset() noexcept { mutable_b() = ""; }`) {
+		t.Errorf("the union must keep its per-option reset:\n%s", h)
+	}
+	if strings.Contains(h, "::new (static_cast<void *>(this)) M_Pick();") {
+		t.Errorf("a union is not a message and must not reconstruct itself:\n%s", h)
+	}
+}
+
+// TestCppTryDecodeCarriesTheDerivedReassemblyCap: IStreamInto takes the
+// destination first, so a configured cap rides in as a TRAILING argument - the
 // IStreamObject spelling (the cap as the only argument) does not compile there.
 func TestCppTryDecodeCarriesTheDerivedReassemblyCap(t *testing.T) {
 	src := "version: 1\nmessages:\n  m:\n    payload:\n" +
@@ -1434,8 +1490,8 @@ func TestCppTryDecodeCarriesTheDerivedReassemblyCap(t *testing.T) {
 	if err != nil {
 		t.Fatalf("generate: %v", err)
 	}
-	if !strings.Contains(h, "}, sofab::Limits{SOFAB_MAX_DYN_BUFFERED_FIELD}};") {
-		t.Errorf("try_decode's stream must carry the cap after the callback:\n%s", h)
+	if !strings.Contains(h, "_in{_out, sofab::Limits{SOFAB_MAX_DYN_BUFFERED_FIELD}};") {
+		t.Errorf("try_decode's stream must carry the cap after the destination:\n%s", h)
 	}
 	// The uncapped case passes the callback alone (the fixed profile's
 	// IStreamInline has no limits parameter at all). It is now reachable only
@@ -1453,17 +1509,17 @@ func TestCppTryDecodeCarriesTheDerivedReassemblyCap(t *testing.T) {
 	}
 }
 
-// TestCppFixedProfileKeepsItsDecodeShape: the heap-free profile still emits
-// reset(), but try_decode keeps decoding into a fresh instance and copying it
-// over the destination.
+// TestCppFixedProfileDecodesIntoTheDestination: the heap-free profile decodes
+// into the caller's object too (generator#744).
 //
-// There is nothing to reuse there - the containers are inline, so the copy is a
-// memcpy with no allocation to hand back - and the destination it decodes into
-// starts at the declared defaults every time, so it cannot go stale. Routing it
-// through a callback instead would put std::function in .text on the targets
-// that have the least of it: this profile's IStreamObject dispatches through a
-// C-ABI function pointer, IStreamInline does not.
-func TestCppFixedProfileKeepsItsDecodeShape(t *testing.T) {
+// It used to decode into a freshly constructed IStreamObject and copy the result
+// over the destination, which put a SECOND whole message on the stack of every
+// decode plus a copy of it -- on the profile with the least stack to spare. What
+// kept it that way was the heap profile's shape, not the staging: IStreamInline
+// holds a std::function, which has no business in .text here. IStreamInto has
+// none (the same C-ABI field callback IStreamObject uses, pointed at the
+// caller's object), so the copy is gone and the callback plumbing stays out.
+func TestCppFixedProfileDecodesIntoTheDestination(t *testing.T) {
 	src := "version: 1\nmessages:\n  m:\n    payload:\n" +
 		"      names: { id: 0, type: array, items: { type: string, count: 4, maxlen: 16 } }\n" +
 		"      tag:   { id: 1, type: i32, default: 3 }\n"
@@ -1473,20 +1529,43 @@ func TestCppFixedProfileKeepsItsDecodeShape(t *testing.T) {
 	}
 	for _, want := range []string{
 		"    void reset() noexcept {",
-		"        names = {};",
-		"        tag = 3;",
-		"        sofab::IStreamObject<M> _in;",
-		"        if (_r.ok()) { _out = *_in; }",
+		// Every field is inline on this profile, so reset() is the constructor
+		// again rather than a second copy of the defaults (generator#744).
+		"        this->~M();",
+		"        ::new (static_cast<void *>(this)) M();",
+		"        _out.reset();",
+		"        sofab::IStreamInto<M> _in{_out};",
+		"        return _in.feed(_data, _len);",
 	} {
 		if !strings.Contains(h, want) {
 			t.Errorf("fixed profile missing %q:\n%s", want, h)
 		}
 	}
-	// No callback plumbing: that is the whole point of keeping this shape.
-	// (reset()'s doc comment names IStreamInline as the thing a caller might be
-	// driving; what must not appear is a stream instantiated here.)
+	// The defaults are still declared once, on the members themselves.
+	for _, want := range []string{"names = {};", "tag = 3;"} {
+		if !strings.Contains(h, want) {
+			t.Errorf("fixed profile lost a member default %q:\n%s", want, h)
+		}
+	}
+	// The staging instance and its copy are what #744 removed.
+	if strings.Contains(h, "if (_r.ok()) { _out = *_in; }") {
+		t.Errorf("try_decode must decode into the caller's destination, not copy into it:\n%s", h)
+	}
+	// Still no callback plumbing: IStreamInto needs none, and std::function does
+	// not exist in a freestanding build. (reset()'s doc comment names
+	// IStreamInline as the thing a caller might be driving; what must not appear
+	// is a stream instantiated here.)
 	if strings.Contains(h, "sofab::IStreamInline _is") {
 		t.Errorf("the fixed profile must not route try_decode through a std::function:\n%s", h)
+	}
+	// The reset runs before the bytes are fed - after would undo the decode.
+	if strings.Index(h, "        _out.reset();") > strings.Index(h, "        return _in.feed(_data, _len);") {
+		t.Errorf("out.reset() must precede the feed:\n%s", h)
+	}
+	// decode() returns by value, so IT still owns an instance: the by-value API
+	// is unchanged, only the one that is handed a destination moved.
+	if !strings.Contains(h, "        sofab::IStreamObject<M> _in;") {
+		t.Errorf("decode() must still stage in its own IStreamObject:\n%s", h)
 	}
 }
 
@@ -1899,8 +1978,13 @@ func TestCppCountIsACapacityNotALength(t *testing.T) {
 				t.Fatalf("generate: %v", err)
 			}
 			// A struct element's member type is a generated row name, so only its
-			// initializer is pinned; reset() must agree with the declaration.
-			want := append(tc.want, " pts = {};", "        strs = {};")
+			// initializer is pinned; reset() must agree with the declaration --
+			// except where reset() IS the declaration, i.e. the c-cpp static
+			// profile, which reconstructs instead of clearing (generator#744).
+			want := append(tc.want, " pts = {};")
+			if !strings.Contains(h, "::new (static_cast<void *>(this))") {
+				want = append(want, "        strs.clear();")
+			}
 			for _, w := range want {
 				if !strings.Contains(h, w) {
 					t.Errorf("[%s] missing %q:\n%s", tc.name, w, h)

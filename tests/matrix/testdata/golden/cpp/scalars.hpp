@@ -104,7 +104,7 @@ struct Scalars : sofab::Message {
         f32 = 3.14f;
         f64 = -2.5;
         flag = true;
-        flags = {};
+        flags.clear();
     }
 
     /**
@@ -183,12 +183,8 @@ struct Scalars : sofab::Message {
      */
     static sofab::IStreamImpl::Result try_decode(const std::uint8_t *_data, std::size_t _len, Scalars &_out) {
         _out.reset();
-        sofab::IStreamInline *_isp = nullptr;
-        sofab::IStreamInline _is{[&_out, &_isp](sofab::id _id, std::size_t _size, std::size_t _count) {
-            _out.deserialize(*_isp, _id, _size, _count);
-        }, sofab::Limits{SIZE_MAX}};
-        _isp = &_is;
-        return _is.feed(_data, _len);
+        sofab::IStreamInto<Scalars> _in{_out, sofab::Limits{SIZE_MAX}};
+        return _in.feed(_data, _len);
     }
 
     /**

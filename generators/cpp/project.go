@@ -621,7 +621,7 @@ func (g *gen) harnessMain(s *ir.Schema) []byte {
 			f.line("            sofab::IStreamInline *_isp = nullptr;")
 			f.line("            sofab::IStreamInline _is{[&obj, &_isp](sofab::id _id, std::size_t _size, std::size_t _count) {")
 			f.line("                obj.deserialize(*_isp, _id, _size, _count);")
-			f.line("            }%s};", g.istreamInlineLimits())
+			f.line("            }%s};", g.trailingLimits())
 			f.line("            _isp = &_is;")
 		}
 		f.line("            sofab::IStreamImpl::Result r = _is.feed(p, 0);")

@@ -184,6 +184,23 @@ namespace std {
 [[noreturn]] void __throw_bad_array_new_length() { for (;;) {} }
 }
 
+/* libstdc++ splits basic_string::_M_replace into an inline hot path and this
+ * out-of-line cold one, and declares `extern template class basic_string<char>`
+ * -- so the body lives in libstdc++.a, which -nostdlib does not link. It is
+ * reached from `s = "literal"`, which the dyn profile's generated reset() emits
+ * for a string field with a non-empty default (generator#744 made reset()
+ * reachable: try_decode calls it, where before it was gc-sectioned away).
+ *
+ * Stubbed, not instantiated: `template class std::__cxx11::basic_string<char>;`
+ * would bring the real bodies in and COUNT them, and they are the environment's
+ * -- a firmware using std::string on this profile links a C++ runtime. Named by
+ * its mangled symbol because a private member cannot be defined otherwise; the
+ * 32-bit `j` (unsigned int) in it matches the ARM targets this row builds for,
+ * and the row is ARM-only (see the arch note at the top). Excluded from the sum
+ * beside the other glue. */
+extern "C" void
+_ZNSt7__cxx1112basic_stringIcSt11char_traitsIcESaIcEE15_M_replace_coldEPcjPKcjj() { for (;;) {} }
+
 // The single --gc-sections root, hardcoded to the default bench schema/message
 // (tests/bench/rows.json). Volatile in/out so the optimizer cannot const-fold
 // or elide the encode/decode work; everything reachable from here is what a
@@ -304,6 +321,8 @@ EOF
         "std::__throw_out_of_range_fmt(char const*, ...)"
         "std::__throw_logic_error(char const*)"
         "std::__throw_bad_array_new_length()"
+        "std::__cxx11::basic_string<char, std::char_traits<char>, std::allocator<char> >::_M_replace_cold(char*, unsigned int, char const*, unsigned int, unsigned int)"
+        "std::__cxx11::basic_string<char, std::char_traits<char>, std::allocator<char> >::_M_replace_cold(char*, unsigned int, char const*, unsigned int, unsigned int)"
         "(anonymous namespace)::arena" "(anonymous namespace)::arena_used"
     )
     python3 "$(dirname "${BASH_SOURCE[0]}")/../lib/sum_syms.py" \

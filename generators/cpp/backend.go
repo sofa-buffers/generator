@@ -206,10 +206,11 @@ func (g *gen) istreamLimits() string {
 	return "{sofab::Limits{" + g.bufferedFieldArg() + "}}"
 }
 
-// istreamInlineLimits is the same cap as a trailing constructor argument, for
-// IStreamInline — whose first parameter is the field callback. Empty in the
-// fixed profile, where the corelib-c-cpp IStreamInline takes the callback alone.
-func (g *gen) istreamInlineLimits() string {
+// trailingLimits is the same cap as a TRAILING constructor argument, for the
+// two streams whose first parameter is something else: IStreamInto takes the
+// destination, IStreamInline (which only the project harness drives) takes the
+// field callback. Empty in the fixed profile, where neither takes a cap at all.
+func (g *gen) trailingLimits() string {
 	if g.clib {
 		return ""
 	}
@@ -348,6 +349,7 @@ func (g *gen) emitHeader(hs headerSpec) []byte {
 	// A union's storage: std::variant on corelib-cpp; on c-cpp a tag and a C++
 	// union whose options are placement-new'd (<new>) and, where one can own heap
 	// storage (allow_dynamic), ended with std::destroy_at (<memory>).
+	// It also backs reset() where that reconstructs the object (reinitInPlace).
 	if g.unionHas(hs.reach) {
 		if !g.clib {
 			f.line("#include <variant>")
@@ -357,6 +359,8 @@ func (g *gen) emitHeader(hs headerSpec) []byte {
 				f.line("#include <memory>")
 			}
 		}
+	} else if g.reinitInPlace() {
+		f.line("#include <new>")
 	}
 	f.line("#include %q", "sofab/sofab.hpp")
 	if hs.includeDefs {
@@ -699,7 +703,28 @@ func flagDoc(fl *ir.BitfieldFlag) string {
 // Public because a caller driving the visitor itself (sofab::IStreamInline, or a
 // bare sofab::IStreamImpl) owns its destinations and needs the same call between
 // messages; corelib-cpp exposes the decoder-state half as IStreamImpl::reset().
-func (g *gen) emitReset(f *hfile, fields []*ir.Field, isMessage bool) {
+// reinitInPlace: reset() may put the object back by ending its lifetime and
+// constructing a new one in the same storage, instead of assigning every field
+// its declared default a second time.
+//
+// Only on corelib-c-cpp with static storage, and that is not a conservative
+// choice but the exact condition: checkBounded refuses an unbounded field on
+// this corelib, and every bounded one is then FixedString/FixedBytes/
+// InlineVector or a scalar -- so no member owns heap storage, there is nothing
+// for the destructor to hand back, and the constructor's job and reset()'s are
+// the same job. Anywhere else a member may be a std::string or std::vector
+// whose buffer reset() promises to KEEP (that is the point of reusing a
+// destination), and reconstructing would free it.
+//
+// What it buys is that the defaults exist once in the image instead of twice.
+// try_decode calls reset(), so since generator#744 the per-field form is
+// reachable in every firmware: on the bench's cpp-c-cpp row it cost 998 B of
+// .text next to the constructor it duplicates, which is more than the whole
+// change saves. Reconstructing is 2 lines whatever the field count, and the
+// constructor was already in the image.
+func (g *gen) reinitInPlace() bool { return g.clib && g.fixed }
+
+func (g *gen) emitReset(f *hfile, name string, fields []*ir.Field, isMessage bool) {
 	f.line("    /**")
 	f.line("     * @brief Put every field back to its declared default, in place.")
 	f.line("     *")
@@ -723,23 +748,68 @@ func (g *gen) emitReset(f *hfile, fields []*ir.Field, isMessage bool) {
 		f.line("     * the decoder state.")
 	}
 	f.line("     *")
+	if g.reinitInPlace() && isMessage {
+		f.line("     * Every field is inline here, so this is the constructor again: the")
+		f.line("     * object's lifetime ends and a new one begins in the same storage,")
+		f.line("     * which is the same defaults without a second copy of them in the")
+		f.line("     * image. Any reference to this object stays valid.")
+		f.line("     */")
+		f.line("    void reset() noexcept {")
+		f.line("        this->~%s();", name)
+		f.line("        ::new (static_cast<void *>(this)) %s();", name)
+		f.line("    }")
+		f.blank()
+		return
+	}
 	f.line("     * Containers are cleared, not reallocated: the capacity a reused")
 	f.line("     * destination has already paid for is kept.")
 	f.line("     */")
 	f.line("    void reset() noexcept {")
 	for _, fld := range fields {
 		acc := g.member(fld.Name)
-		switch fld.Kind {
-		case ir.KindStruct, ir.KindUnion:
+		switch {
+		case fld.Kind == ir.KindStruct || fld.Kind == ir.KindUnion:
 			// Recurse: the nested default is that type's own declaration state, and
 			// reaching it in place keeps the nested containers' capacity too.
 			f.line("        %s.reset();", acc)
+		case emptyContainerDefault(fld, g.cppDefault(fld)):
+			// clear(), not assignment from an empty literal. Every container here
+			// has one and it is the cheapest form of exactly this operation --
+			// which matters because try_decode calls reset() on every decode
+			// (generator#744), so this runs in the hot path and is linked into
+			// every image:
+			//
+			//   - `x = {}` on a FIXED container (InlineVector, FixedBytes) assigns a
+			//     value-initialised one, i.e. writes zeroes over the whole inline
+			//     capacity; clear() sets the logical length and leaves the bytes.
+			//     Nothing reads past the length -- encode writes size() elements and
+			//     the default test compares that many.
+			//   - `s = ""` on a std::string goes through operator=(const char *),
+			//     whose libstdc++ body reaches _M_replace_cold -- an out-of-line
+			//     symbol a -nostdlib embedded link does not have (the bench's
+			//     cpp-c-cpp-dyn image stopped linking on it). clear() is inline.
+			//
+			// A non-empty default keeps its assignment: there is nothing to clear to.
+			f.line("        %s.clear();", acc)
 		default:
 			f.line("        %s = %s;", acc, g.cppDefault(fld))
 		}
 	}
 	f.line("    }")
 	f.blank()
+}
+
+// emitContainerDefault: the field holds a container whose declared default is
+// the empty one, so reset() can clear it instead of assigning an empty literal.
+// Keyed on the rendered default rather than on f.Default being nil, so a schema
+// that spells the empty default out (`default: ""`, `default: []`) takes the
+// same path as one that leaves it off.
+func emptyContainerDefault(f *ir.Field, def string) bool {
+	switch f.Kind {
+	case ir.KindString, ir.KindBlob, ir.KindArray:
+		return def == `""` || def == "{}"
+	}
+	return false
 }
 
 func (g *gen) emitStruct(f *hfile, name, summary string, fields []*ir.Field, isMessage bool) {
@@ -826,7 +896,7 @@ func (g *gen) emitStruct(f *hfile, name, summary string, fields []*ir.Field, isM
 		f.blank()
 	}
 
-	g.emitReset(f, fields, isMessage)
+	g.emitReset(f, name, fields, isMessage)
 
 	// per-message encode()/decode() (members so multiple messages don't clash).
 	if isMessage {
@@ -959,77 +1029,60 @@ func (g *gen) emitStruct(f *hfile, name, summary string, fields []*ir.Field, isM
 		// infallible decode above drops it, so the public C++ API could otherwise
 		// never reject (generator#83).
 		//
-		// Two shapes, because the destination means something different in each
-		// profile — and MESSAGE_SPEC §2 is what makes the difference matter. An
-		// all-default field is now absent from the bytes, so a destination that is
+		// ONE shape, both profiles: reset the caller's destination, bind it to an
+		// IStreamInto, feed. `out` IS the destination -- nothing is staged in a
+		// second instance and copied across, which is the point of passing one in
+		// (the bench decode row and the JSON harness both feed one in a loop).
+		//
+		// The reset is what decoding in place costs, and MESSAGE_SPEC §2 is why: an
+		// all-default field is absent from the bytes, so a destination that is
 		// DECODED INTO keeps the previous message's value for every field these
 		// bytes do not carry, a wrapper array included (its collector clears on the
-		// sequence header, which an absent field never sends). Only the start of the
-		// decode can clear that, which is what reset() is for.
+		// sequence header, which an absent field never sends). Only the start of
+		// the decode can clear that.
 		//
-		//   heap profile (corelib-cpp): `out` IS the destination. An IStreamInline
-		//   binds this message's deserialize, so nothing is staged in a second
-		//   instance and copied across — which is the point of passing a destination
-		//   in (the bench decode row and the JSON harness both feed one in a loop),
-		//   and why the reset has to be here. The stream reaches the callback through
-		//   a pointer filled in right after construction: IStreamInline takes its
-		//   callback by value, so the lambda cannot capture the object it is being
-		//   handed to.
+		// Both corelibs grew IStreamInto for this (generator#744, corelib-c-cpp#197
+		// and corelib-cpp#163). Before it the two profiles had two shapes, for
+		// reasons that were each about the corelib and not about the destination:
+		//
+		//   heap profile (corelib-cpp): an IStreamInline whose callback forwarded
+		//   to out.deserialize. That callback needs the stream it is installed on,
+		//   so the lambda could not capture the object it was being handed to and
+		//   the generated code reached it through a pointer filled in right after
+		//   construction. IStreamInto is the same decode with the knot untied.
 		//
 		//   fixed profile (corelib-c-cpp): decode into a freshly constructed
-		//   IStreamObject and copy the result over `out`. That is a memcpy of inline
-		//   storage — no allocation to hand back, nothing to reuse — and it cannot go
-		//   stale, because the destination it decodes into starts at the declared
-		//   defaults every time. It stays this way for footprint: this profile's
-		//   IStreamObject dispatches through a C-ABI function pointer, whereas
-		//   IStreamInline holds a std::function, so routing the decode through a
-		//   callback here would put that machinery in .text on the targets that have
-		//   the least of it. reset() is emitted all the same, for a caller driving
-		//   the stream itself.
-		f.line("    /**")
+		//   IStreamObject and copy the result over `out`, which put a SECOND whole
+		//   message on the stack of every decode plus a copy of it -- 1096 B on the
+		//   arena's example, on the profile with the least stack to spare. What
+		//   kept it that way was the heap profile's shape, not the staging:
+		//   IStreamInline holds a std::function, which has no business in .text
+		//   here (and does not even exist freestanding). IStreamInto has none -- it
+		//   is the same C-ABI field callback IStreamObject uses, pointed at the
+		//   caller's object.
+		kept := "without giving its buffers back"
 		if g.clib {
-			f.line("     * @brief Decode a message, reporting whether the input was acceptable.")
-			f.line("     *")
-			f.line("     * Decodes into a fresh instance and copies it over @p _out on success,")
-			f.line("     * so @p _out never carries anything over from an earlier message. To")
-			f.line("     * decode into a destination directly, drive the stream yourself and")
-			f.line("     * call @ref reset on it between messages.")
-			f.line("     *")
-			f.line("     * @param _data Encoded bytes.")
-			f.line("     * @param _len  Number of bytes at @p _data.")
-			f.line("     * @param _out  Receives the message on success; untouched otherwise.")
-			f.line("     * @return The decode result; check @c ok() before reading @p _out.")
-			f.line("     */")
-			f.line("    static sofab::IStreamImpl::Result try_decode(const std::uint8_t *_data, std::size_t _len, %s &_out) {", name)
-			f.line("        sofab::IStreamObject<%s> _in%s;", name, g.istreamLimits())
-			f.line("        sofab::IStreamImpl::Result _r = _in.feed(_data, _len);")
-			f.line("        if (_r.ok()) { _out = *_in; }")
-			f.line("        return _r;")
-			f.line("    }")
-		} else {
-			f.line("     * @brief Decode a message into @p _out, reporting whether the input was")
-			f.line("     *        acceptable.")
-			f.line("     *")
-			f.line("     * @p _out is put back to its declared defaults first (@ref reset) and")
-			f.line("     * then decoded into directly, so it may be reused across messages")
-			f.line("     * without carrying anything over and without giving its buffers back.")
-			f.line("     *")
-			f.line("     * @param _data Encoded bytes.")
-			f.line("     * @param _len  Number of bytes at @p _data.")
-			f.line("     * @param _out  Receives the message; on a rejected input it holds the")
-			f.line("     *             fields decoded before the error, never an older message's.")
-			f.line("     * @return The decode result; check @c ok() before reading @p _out.")
-			f.line("     */")
-			f.line("    static sofab::IStreamImpl::Result try_decode(const std::uint8_t *_data, std::size_t _len, %s &_out) {", name)
-			f.line("        _out.reset();")
-			f.line("        sofab::IStreamInline *_isp = nullptr;")
-			f.line("        sofab::IStreamInline _is{[&_out, &_isp](sofab::id _id, std::size_t _size, std::size_t _count) {")
-			f.line("            _out.deserialize(*_isp, _id, _size, _count);")
-			f.line("        }%s};", g.istreamInlineLimits())
-			f.line("        _isp = &_is;")
-			f.line("        return _is.feed(_data, _len);")
-			f.line("    }")
+			kept = "without a second copy of the message on the stack"
 		}
+		f.line("    /**")
+		f.line("     * @brief Decode a message into @p _out, reporting whether the input was")
+		f.line("     *        acceptable.")
+		f.line("     *")
+		f.line("     * @p _out is put back to its declared defaults first (@ref reset) and")
+		f.line("     * then decoded into directly, so it may be reused across messages")
+		f.line("     * without carrying anything over and %s.", kept)
+		f.line("     *")
+		f.line("     * @param _data Encoded bytes.")
+		f.line("     * @param _len  Number of bytes at @p _data.")
+		f.line("     * @param _out  Receives the message; on a rejected input it holds the")
+		f.line("     *             fields decoded before the error, never an older message's.")
+		f.line("     * @return The decode result; check @c ok() before reading @p _out.")
+		f.line("     */")
+		f.line("    static sofab::IStreamImpl::Result try_decode(const std::uint8_t *_data, std::size_t _len, %s &_out) {", name)
+		f.line("        _out.reset();")
+		f.line("        sofab::IStreamInto<%s> _in{_out%s};", name, g.trailingLimits())
+		f.line("        return _in.feed(_data, _len);")
+		f.line("    }")
 		f.blank()
 	}
 
