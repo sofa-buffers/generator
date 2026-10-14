@@ -25,6 +25,18 @@ compares a float field, and each element of a float array, with its default by
 bit pattern, so `-0.0` is not the default `0`). The two produce **identical wire bytes**. What differs is what the generated
 code costs at runtime and what the schema must declare.
 
+The generated API is the same either way, down to how `try_decode` treats the
+destination you hand it: it is put back to its declared defaults (`reset()`) and
+then decoded into directly, so it can be reused across messages without carrying
+anything over. On a rejected input it holds the fields decoded before the error
+— never an older message's — so check the result before reading it.
+
+`reset()` itself differs in how it gets there, and only in that: with `c-cpp` and
+static storage, where every field is inline, it reconstructs the object in place
+instead of assigning field by field — the same values, and references to the
+object stay valid. Everywhere else it clears each container, so a reused
+destination keeps the buffers it has already allocated.
+
 **`c-cpp` requires a fully bounded schema.** Every `string`, `blob` and `array`
 must carry a `maxlen` or `count`; an unbounded field fails generation rather
 than falling back to the heap. That is the point of the profile — the storage a
