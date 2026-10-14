@@ -917,3 +917,121 @@ func (g *gen) rowIndexCap(cap int64) string {
 	}
 	return "SOFAB_MAX_DYN_ARRAY_COUNT"
 }
+
+// resetLosesElementStorage reports whether putting @p fields back to their
+// declared defaults gives heap storage back that the next decode has to take
+// again.
+//
+// reset() clears containers in place, so a container keeps its OWN buffer, and
+// so does a plain string/blob member. What a clear does NOT keep is the
+// container's ELEMENTS: they are destroyed, and an element that owns storage of
+// its own -- a std::string or std::vector element, or a struct/union element
+// holding one -- hands that storage to the allocator.
+//
+// So the question is per FIELD SHAPE, and the two shapes answer it differently:
+//
+//   - an array field, and a union member (whose reset() selects the default
+//     option, destroying whatever other option was held): the whole value is
+//     destroyed, so storage ANYWHERE in its tree can go back -- namedOwnsStorage.
+//   - a struct member: reset() recurses into that struct's own reset(), so its
+//     members are cleared in place exactly as these are. Only what IT loses --
+//     its own arrays' elements, its own union members -- is lost through it.
+//
+// Keeping the elements would take a container that holds a logical size beside
+// a pool of cleared elements, which is a corelib type and a corelib collector
+// (ARCHITECTURE §8) -- and a public member-type change here. Until that exists,
+// the generated doc says which half is kept, and says it only where such an
+// element exists at all.
+func (g *gen) resetLosesElementStorage(fields []*ir.Field) bool {
+	return g.anyElementOwnsStorage(fields, map[string]bool{})
+}
+
+// anyElementOwnsStorage walks fields under the IN-PLACE rule: this object is
+// reset, not destroyed.
+//
+// `seen` keeps a type that reaches itself from recursing forever. Its keys carry
+// the rule the type was visited under -- "m:" in place, "w:" whole value -- so a
+// type that appears both as a struct member and as an array element is answered
+// once per rule and not once in total.
+func (g *gen) anyElementOwnsStorage(fields []*ir.Field, seen map[string]bool) bool {
+	for _, f := range fields {
+		switch f.Kind {
+		case ir.KindStruct:
+			// Reset in place through its own reset(), so the member rule again.
+			if f.Ref == nil || f.Ref.Target == nil || seen["m:"+f.Ref.Key] {
+				continue
+			}
+			seen["m:"+f.Ref.Key] = true
+			if g.anyElementOwnsStorage(f.Ref.Target.Fields, seen) {
+				return true
+			}
+		case ir.KindUnion:
+			// reset() selects the default option, and selecting destroys the value
+			// another option was holding -- the whole-value rule.
+			if g.namedOwnsStorage(f.Ref, seen) {
+				return true
+			}
+		case ir.KindArray:
+			// Both container shapes destroy their elements on clear --
+			// InlineVector no less than std::vector -- so the question is only
+			// what ONE element owns.
+			if g.elemOwnsStorage(f.Elem, f.ElemRef, f.ElemItems, f.ElemMaxHas, f.ElemMax, seen) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// elemOwnsStorage answers that question for a single array element, which IS
+// destroyed: the whole-value rule throughout.
+func (g *gen) elemOwnsStorage(elem ir.Kind, ref *ir.TypeRef, items *ir.ArrayElem, elemMaxHas bool, elemMax int64, seen map[string]bool) bool {
+	switch elem {
+	case ir.KindString, ir.KindBlob:
+		// The storage mode decides: FixedString/FixedBytes own nothing.
+		return !(g.fixed && elemMaxHas)
+	case ir.KindArray:
+		if items == nil {
+			return false
+		}
+		// A row of a matrix: the inner container's own buffer counts, and so do
+		// the inner elements when it has none.
+		if strings.HasPrefix(g.cppArrayContainer(items.Elem, items.ElemRef, items.ElemItems, items.Count, items.ElemMaxHas, items.ElemMax), "std::vector<") {
+			return true
+		}
+		return g.elemOwnsStorage(items.Elem, items.ElemRef, items.ElemItems, items.ElemMaxHas, items.ElemMax, seen)
+	case ir.KindStruct, ir.KindUnion:
+		return g.namedOwnsStorage(ref, seen)
+	}
+	return false
+}
+
+// namedOwnsStorage reports whether a value of this struct/union type owns heap
+// storage anywhere in its tree -- the rule for a value that is DESTROYED rather
+// than reset, so every member counts, a plain string included.
+func (g *gen) namedOwnsStorage(ref *ir.TypeRef, seen map[string]bool) bool {
+	if ref == nil || ref.Target == nil || seen["w:"+ref.Key] {
+		return false
+	}
+	seen["w:"+ref.Key] = true
+	for _, f := range ref.Target.Fields {
+		switch f.Kind {
+		case ir.KindString, ir.KindBlob:
+			if !(g.fixed && f.HasMaxlen) {
+				return true
+			}
+		case ir.KindArray:
+			if strings.HasPrefix(g.cppType(f), "std::vector<") {
+				return true
+			}
+			if g.elemOwnsStorage(f.Elem, f.ElemRef, f.ElemItems, f.ElemMaxHas, f.ElemMax, seen) {
+				return true
+			}
+		case ir.KindStruct, ir.KindUnion:
+			if g.namedOwnsStorage(f.Ref, seen) {
+				return true
+			}
+		}
+	}
+	return false
+}
