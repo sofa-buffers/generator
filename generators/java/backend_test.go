@@ -130,6 +130,58 @@ messages:
 	}
 }
 
+// TestJavaConvenienceEntryPointsDeclareTheirRefusal: encode() and decode() report
+// a refusal through the CHECKED exception, like serialize/encodeTo/tryDecode
+// beside them, and wrap nothing (generator#748).
+//
+// The old shape caught the refusal and rethrew it as a bare
+// java.lang.RuntimeException, which cost the caller two things: a refusal became
+// indistinguishable from a genuine bug raised in the same call (an NPE arrives as
+// a RuntimeException too), and the SofabError sat one getCause() away. `catch
+// (Exception e)` on the decode side swept up unchecked throwables as well, so a
+// bug inside the visitor was re-labelled a decode failure.
+func TestJavaConvenienceEntryPointsDeclareTheirRefusal(t *testing.T) {
+	const src = `
+version: 1
+messages:
+  b:
+    payload:
+      s: { id: 0, type: string, maxlen: 8 }
+  u:
+    payload:
+      s: { id: 0, type: string }
+`
+	files := genJavaFromYAML(t, src, map[string]any{"package": "message"})
+	// Both buffer shapes: the bounded one encodes into overScratch, the
+	// unbounded one drains into a ByteArrayOutputStream, and the clause has to
+	// be the same on both -- a throws clause that varied with the schema would
+	// be worse than the wrapper it replaces.
+	for _, f := range []string{"B.java", "U.java"} {
+		src := files["src/main/java/message/"+f]
+		if src == "" {
+			t.Fatalf("%s not generated", f)
+		}
+		for _, want := range []string{
+			"    public byte[] encode() throws IOException {",
+			"    public static " + strings.TrimSuffix(f, ".java") + " decode(byte[] data) throws SofabException {",
+		} {
+			if !strings.Contains(src, want) {
+				t.Errorf("%s: missing %q:\n%s", f, want, src)
+			}
+		}
+		for _, bad := range []string{"RuntimeException", "catch (Exception"} {
+			if strings.Contains(src, bad) {
+				t.Errorf("%s: still emits %q -- a refusal must leave by its own type:\n%s", f, bad, src)
+			}
+		}
+		// Nothing is caught on the way out: the try/catch that carried the
+		// wrapper is gone, not merely re-thrown from.
+		if strings.Contains(src, "catch (IOException e) { throw") {
+			t.Errorf("%s: encode still re-wraps its refusal:\n%s", f, src)
+		}
+	}
+}
+
 func TestJavaDeterministic(t *testing.T) {
 	if exampleFile(t) != exampleFile(t) {
 		t.Fatal("Java generation not deterministic")

@@ -155,7 +155,6 @@ messages:
   Decoder: { payload: { x: { id: 0, type: u8 } } }
   Deprecated: { payload: { x: { id: 0, type: u8 } } }
   Double: { payload: { x: { id: 0, type: u8 } } }
-  Exception: { payload: { x: { id: 0, type: u8 } } }
   FixlenType: { payload: { x: { id: 0, type: u8 } } }
   Float: { payload: { x: { id: 0, type: u8 } } }
   IOException: { payload: { x: { id: 0, type: u8 } } }
@@ -167,7 +166,6 @@ messages:
   Object: { payload: { x: { id: 0, type: u8 } } }
   Override: { payload: { x: { id: 0, type: u8 } } }
   PayloadAcc: { payload: { x: { id: 0, type: u8 } } }
-  RuntimeException: { payload: { x: { id: 0, type: u8 } } }
   Seq: { payload: { x: { id: 0, type: u8 } } }
   Sofab: { payload: { x: { id: 0, type: u8 } } }
   SofabError: { payload: { x: { id: 0, type: u8 } } }
@@ -176,3 +174,5 @@ messages:
   SuppressWarnings: { payload: { x: { id: 0, type: u8 } } }
   System: { payload: { x: { id: 0, type: u8 } } }
   Visitor: { payload: { x: { id: 0, type: u8 } } }
+  Exception: { payload: { x: { id: 0, type: u8 } } }
+  RuntimeException: { payload: { x: { id: 0, type: u8 } } }

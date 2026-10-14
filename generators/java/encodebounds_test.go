@@ -151,12 +151,22 @@ messages:
 	}{{"M.java", true}, {"D.java", false}} {
 		src := files["src/main/java/message/"+c.file]
 		for _, doc := range []string{
-			"wrapping the {@link SofabException} that",
+			"@throws IOException a field past its schema bound: {@link #serialize}",
 			"A field past its schema bound makes {@link #serialize} throw",
 		} {
 			if got := strings.Contains(src, doc); got != c.want {
 				t.Errorf("%s: encode/encodeTo doc %q present = %v, want %v:\n%s", c.file, doc, got, c.want, src)
 			}
+		}
+		// encode() declares `throws IOException` either way -- the signature
+		// does not vary with the schema -- so the class that CANNOT refuse says
+		// so instead of documenting a refusal that can never arrive.
+		const noBound = "@throws IOException the clause {@link #serialize} carries; this"
+		if got := strings.Contains(src, noBound); got == c.want {
+			t.Errorf("%s: encode doc %q present = %v, want %v:\n%s", c.file, noBound, got, !c.want, src)
+		}
+		if !strings.Contains(src, "public byte[] encode() throws IOException {") {
+			t.Errorf("%s: encode() does not declare IOException:\n%s", c.file, src)
 		}
 	}
 }

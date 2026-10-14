@@ -116,17 +116,25 @@ var javaTypeNames = map[string]string{
 	"Boolean":               "java.lang: boolean array element",
 	"Deprecated":            "java.lang: the @Deprecated annotation",
 	"Double":                "java.lang: fp64 array element",
-	"Exception":             "java.lang: decode()'s catch",
 	"Float":                 "java.lang: fp32 array element",
 	"IllegalStateException": "java.lang: Decoder.finish()",
 	"Long":                  "java.lang: boxed integer element, Long.parseUnsignedLong",
 	"Object":                "java.lang: the bulk-array destination",
 	"Override":              "java.lang: the @Override annotation",
-	"RuntimeException":      "java.lang: encode()/decode() wrap",
 	"String":                "java.lang: string fields",
 	"SuppressWarnings":      "java.lang: the @SuppressWarnings annotation",
 	"System":                "java.lang: System.arraycopy",
 }
+
+// javaUnescapedTypeNames are java.lang type names the generated package once
+// used and no longer does: `Exception` and `RuntimeException` came off
+// javaTypeNames when encode()/decode() stopped catching, so a message of either
+// name is now the class `Exception` / `RuntimeException`, not `Exception_`.
+// They are kept here, disjoint from javaTypeNames (TestJavaNamesInScope), so
+// the collision schema still carries both: the conformance build is the proof
+// that a generated class of that name compiles warning-free in a package that
+// also has to resolve `IOException` and `SofabException`.
+var javaUnescapedTypeNames = []string{"Exception", "RuntimeException"}
 
 // escapeType is a type identifier as the class it names: with a trailing
 // underscore where the generated code already means something by it

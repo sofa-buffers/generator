@@ -154,7 +154,10 @@ func (g *gen) emitBench(f *jfile, s *ir.Schema) {
 		mt := g.harnessType(messageIdent(m.Name))
 		low := strings.ToLower(m.Name)
 		sink := benchSinkField(m)
-		f.line("    private static void benchOp_%s(boolean enc, %s obj, byte[] wire) {", low, mt)
+		// encode()/decode() declare their refusal (generator#748); nothing here
+		// handles one, so it travels out through benchMain's own clause.
+		// IOException covers both: decode()'s SofabException is a subclass of it.
+		f.line("    private static void benchOp_%s(boolean enc, %s obj, byte[] wire) throws IOException {", low, mt)
 		f.line("        if (enc) {")
 		f.line("            benchSink ^= obj.encode().length;")
 		f.line("        } else {")
