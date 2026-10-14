@@ -653,6 +653,31 @@ java -cp "$WORK/skipblob/target/harness.jar" message.SkippedBlobAlloc \
     || { echo "FAIL: a skipped blob must not be materialised"; exit 1; }
 echo "==> skipped-blob allocation OK"
 
+# encode() and decode() report a refusal through the CHECKED SofabException
+# (generator#748): a caller gets the SofabError off the exception it catches,
+# and a genuine bug in the same call still arrives as its own unchecked type.
+#
+# RefusalType.java carries half the check in its SIGNATURES -- `catch
+# (SofabException)` around encode()/decode() does not compile unless they declare
+# it -- so the `mvn package` below is as much of the row as the run is. It needs a
+# maxlen-bounded field reachable from both entry points, which is all this project
+# is.
+echo "==> encode()/decode() refuse through the checked exception (generator#748)"
+cat > "$WORK/refuse.yaml" <<'YAML'
+version: 1
+messages:
+  refuse:
+    payload:
+      s: { id: 0, type: string, maxlen: 8 }
+YAML
+( cd "$ROOT" && go run ./cmd/sofabgen --config "$WORK/cfg.yaml" --lang java \
+    --in "$WORK/refuse.yaml" --out "$WORK/refuse" )
+cp "$ROOT/tests/conformance/java/RefusalType.java" "$WORK/refuse/src/main/java/message/"
+( cd "$WORK/refuse" && mvn -q $MVN_STRICT -Dsofab.version="$VER" package )
+java -cp "$WORK/refuse/target/harness.jar" message.RefusalType \
+    || { echo "FAIL: encode()/decode() must refuse through SofabException"; exit 1; }
+echo "==> checked-refusal surface OK"
+
 # A WRAPPER array carries no count header, so the cap has to bind its element
 # INDEX instead (generator#387). Gap filling (S5.1) is exactly why: an interior
 # element equal to the default is omitted, so the array's length is highest
@@ -923,6 +948,9 @@ corpus_roundtrip_summary Java "$WORK/corpus.tally"
 # field and a union option, and every type-level name (javaTypeNames) as a
 # message of its own (TestReservedSchemaFile keeps it in step with the list;
 # TestJavaNamesInScope keeps the list in step with the generated classes).
+# It also carries the names the package deliberately does NOT reserve
+# (javaUnescapedTypeNames: Exception, RuntimeException), whose class keeps the
+# schema spelling -- this build is what proves such a class still compiles.
 # The generator exits 0 on a class that does not compile, so the project must
 # build warning-free, and every value of reserved.json -- the union holding
 # option `v`, the setters' parameter name -- must come back under its schema name.

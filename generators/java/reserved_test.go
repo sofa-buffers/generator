@@ -4,6 +4,8 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
+	"go/scanner"
+	"go/token"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -76,6 +78,11 @@ messages:
       u:            { id: %d, type: union, oneof: { %s } }
 `, fields.String(), k, fields.String(), k, k+1, k+2, strings.Join(opts, ", "))
 	for _, n := range reservedTypeNames() {
+		fmt.Fprintf(&b, "  %s: { payload: { x: { id: 0, type: u8 } } }\n", n)
+	}
+	// And the names the package deliberately no longer reserves: their class
+	// keeps the schema spelling, and must still build (javaUnescapedTypeNames).
+	for _, n := range javaUnescapedTypeNames {
 		fmt.Fprintf(&b, "  %s: { payload: { x: { id: 0, type: u8 } } }\n", n)
 	}
 	return b.String()
@@ -270,17 +277,42 @@ func TestJavaNamesInScope(t *testing.T) {
 		}
 	}
 	// And the other way round: a list entry the backend no longer emits is stale.
+	// The haystack is the backend's TOKENS, not its text: go/scanner drops the
+	// comments, so a name that survives in prose alone -- in the very comment
+	// explaining why the code stopped emitting it -- is still reported.
 	var src strings.Builder
 	for _, name := range []string{"backend.go", "helpers.go", "union.go", "visitor.go"} {
 		b, err := os.ReadFile(name)
 		if err != nil {
 			t.Fatal(err)
 		}
-		src.Write(b)
+		fset := token.NewFileSet()
+		var sc scanner.Scanner
+		sc.Init(fset.AddFile(name, fset.Base(), len(b)), b, nil, 0)
+		for {
+			_, tok, lit := sc.Scan()
+			if tok == token.EOF {
+				break
+			}
+			if lit != "" {
+				src.WriteString(lit)
+				src.WriteByte('\n')
+			}
+		}
 	}
 	for n := range javaTypeNames {
 		if !used[n] && !regexp.MustCompile(`\b`+n+`\b`).MatchString(src.String()) {
 			t.Errorf("javaTypeNames lists %s, which the backend no longer emits", n)
+		}
+	}
+	// The two lists are complements, never both: a name the package uses again
+	// has to go back to being escaped, not stay on the unescaped list.
+	for _, n := range javaUnescapedTypeNames {
+		if _, ok := javaTypeNames[n]; ok {
+			t.Errorf("%s is on javaTypeNames and on javaUnescapedTypeNames", n)
+		}
+		if used[n] {
+			t.Errorf("the generated package uses %s again; it belongs back on javaTypeNames", n)
 		}
 	}
 }

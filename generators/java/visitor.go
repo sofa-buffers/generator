@@ -1370,7 +1370,9 @@ func (g *gen) emitVisitor(f *jfile, name, vis string, fields []*ir.Field) {
 			// A wire element count above the schema `count` capacity is INVALID
 			// per MESSAGE_SPEC §3+§7 — reject up front, never clamp or keep-all
 			// (generator#100). Unchecked wrapper: Visitor callbacks cannot throw
-			// the checked SofabException; decode() rethrows as RuntimeException.
+			// the checked SofabException, so the guard wraps one; IStream.feed is
+			// the boundary that unwraps it (corelib-java#129), and decode() lets
+			// that checked exception out as it stands (generator#748).
 			// An UNBOUNDED array (no schema count) is instead governed by the
 			// configured max_dyn_array_count when set (generator#102): exceeding
 			// it is LIMIT_EXCEEDED — a receiver policy error, not INVALID_MSG.

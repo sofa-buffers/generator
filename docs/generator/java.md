@@ -75,6 +75,12 @@ the generated code uses (`OStream`, `IStream`, `Visitor`, `Seq`, …), the
 `IOException`), and the `java.lang` types and annotations it uses (`String`,
 `Long`, `Object`, `System`, `Deprecated`, `Override`, …).
 
+The list is exactly what the generated package names, nothing more: a
+`java.lang` type the generated code does not use is left alone. A message
+`Exception` is the class `Exception`, not `Exception_`, because no generated
+class names `java.lang.Exception` — refusals travel as `SofabException` and
+`IOException`, both of which are on the list.
+
 A class whose file Windows cannot create gets the same trailing underscore:
 `CON`, `PRN`, `AUX`, `NUL`, `COM0`–`COM9` and `LPT0`–`LPT9` are device names
 there in any case and with any extension, so a message `con` is the class
@@ -89,6 +95,65 @@ In `emit: project` the harness (`Json`, `Main`) is the subpackage
 `<package>.harness` — `src/main/java/<package>/harness/` — so a message `json`
 or `main` is an ordinary class of the generated package. The jar's main class is
 `<package>.harness.Main`.
+
+## Errors
+
+Every entry point that can be refused declares a **checked** exception, and
+nothing is wrapped:
+
+| method | clause |
+|---|---|
+| `serialize(OStream os)` | `throws IOException` |
+| `encodeTo(OStream os)` | `throws IOException` |
+| `byte[] encode()` | `throws IOException` |
+| `static <M> decode(byte[] data)` | `throws SofabException` |
+| `static DecodeStatus tryDecode(byte[] data, <M> out)` | `throws SofabException` |
+| `Decoder.feed(...)` | `throws SofabException` |
+
+`SofabException` extends `java.io.IOException`, so the `IOException` clause is
+the broad one and the refusal still arrives as the specific type. Catch it to
+read the category:
+
+```java
+try {
+    byte[] wire = m.encode();
+} catch (SofabException e) {
+    switch (e.error()) {          // SofabError
+        case ARGUMENT -> ...;     // a field past its schema bound
+        default -> ...;
+    }
+}
+```
+
+The encode side declares `IOException` rather than `SofabException` because
+that is what `serialize` declares, and narrowing it would put a two-arm
+`try`/`catch` back into the generated method. `encode()` owns its own sink, so
+in practice every exception it throws is a `SofabException`; a plain
+`IOException` can only reach you from `encodeTo(os)`, out of the sink *you*
+installed on that `OStream`.
+
+`encode()` declares the clause for every message, whether or not the schema
+puts a bound on anything: the signature does not change shape with the schema.
+Its javadoc does — a message no field of which can be refused says so.
+
+A programming error is **not** a refusal and stays unchecked — an NPE out of
+`encode()` is a `NullPointerException`, never a `SofabException` — so a
+`catch` written for refusals does not swallow bugs.
+
+`Decoder.finish()` is the one deliberate exception to all this: a stream that
+ended mid-field throws `IllegalStateException`, not `SofabException`. Nothing
+is wrong with those bytes; the caller declared end-of-input at a point the
+message did not agree with.
+
+### Required corelib version
+
+A `Visitor` callback cannot declare a checked exception, so the generated
+decode guards report a schema bound or a receiver cap by throwing an
+`UncheckedIOException` around the `SofabException`, and the stream boundary
+unwraps it. corelib-java does that unwrapping only **after 0.13.0**. Build
+generated code against 0.13.0 or older and a guard's rejection leaves
+`decode()` as an `UncheckedIOException` instead — past the declared
+`throws SofabException`, so the `catch` above compiles and never fires.
 
 ## Unions
 

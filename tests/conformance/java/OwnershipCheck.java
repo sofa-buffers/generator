@@ -125,7 +125,7 @@ public final class OwnershipCheck {
         byte[] re;
         try {
             re = got.encode();
-        } catch (RuntimeException e) {
+        } catch (java.io.IOException e) {
             System.out.println("FAIL: " + what + ": re-encoding the decoded message threw: " + e);
             failures++;
             return;

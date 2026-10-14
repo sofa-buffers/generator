@@ -311,31 +311,53 @@ func (g *gen) emitClass(f *jfile, name, vis string, fields []*ir.Field, summary 
 		// one's bytes. An unbounded one is not sized by MAX_SIZE (an imposed
 		// ceiling, not a bound): a fixed scratch drains into a growing output, so a
 		// message above the ceiling still encodes.
-		// The refusal is documented only where serialize can raise it, as on
-		// serialize itself (emitSerializeRefusalDoc).
+		// A refusal leaves by the CHECKED exception, the clause `serialize` and
+		// `encodeTo` already carry (generator#748). Wrapping it in a bare
+		// RuntimeException made a refusal indistinguishable from a genuine bug in
+		// the same call and put the SofabError one getCause() away.
+		// SofabException extends IOException, so `catch (SofabException e) {
+		// e.error(); }` reads the code off this clause directly, while an NPE
+		// stays unchecked and distinct.
+		// The clause is IOException, not the narrower SofabException, because
+		// `serialize` declares IOException: narrowing would need a two-arm catch
+		// here (SofabException through, any other IOException wrapped), which is
+		// the try/catch this change removes. corelib-java throws no IOException
+		// that is not a SofabException today, so the wider clause costs a caller
+		// a catch arm it can never enter -- the price of keeping generated code
+		// free of exception handling.
+		// The clause does not vary with the schema: one shape for every message
+		// is worth more than sparing the bound-less ones their try block. Only
+		// the javadoc varies (canRefuse), because only it can be read as a
+		// promise that a refusal is reachable. `serialize` documents its own
+		// refusal separately (emitSerializeRefusalDoc).
 		canRefuse := hasEncodeBound(fields)
+		f.line("    /**")
+		f.line("     * Encode this message into a new array.")
+		f.line("     *")
 		if canRefuse {
-			f.line("    /**")
-			f.line("     * Encode this message into a new array.")
-			f.line("     *")
-			f.line("     * @throws RuntimeException wrapping the {@link SofabException} that")
-			f.line("     *         {@link #serialize} raises; no bytes are returned then")
-			f.line("     */")
-		}
-		f.line("    public byte[] encode() {")
-		f.line("        try {")
-		if ms.Bounded {
-			f.line("            OStream os = OStream.overScratch(MAX_SIZE);")
-			f.line("            serialize(os);")
-			f.line("            return os.copyOfBytesUsed();")
+			f.line("     * @throws IOException a field past its schema bound: {@link #serialize}")
+			f.line("     *         refuses and no bytes are returned. Every refusal is a")
+			f.line("     *         {@link SofabException}, whose {@code error()} is the code.")
 		} else {
-			f.line("            java.io.ByteArrayOutputStream out = new java.io.ByteArrayOutputStream();")
-			f.line("            OStream os = new OStream(new byte[512], 0, out::write);")
-			f.line("            serialize(os);")
-			f.line("            os.flush();")
-			f.line("            return out.toByteArray();")
+			// No field of this message can be refused, so the clause is here
+			// only because `serialize` declares it -- say that rather than
+			// document a refusal that cannot arrive.
+			f.line("     * @throws IOException the clause {@link #serialize} carries; this")
+			f.line("     *         schema bounds no field, so nothing on this path raises one.")
 		}
-		f.line("        } catch (IOException e) { throw new RuntimeException(e); }")
+		f.line("     */")
+		f.line("    public byte[] encode() throws IOException {")
+		if ms.Bounded {
+			f.line("        OStream os = OStream.overScratch(MAX_SIZE);")
+			f.line("        serialize(os);")
+			f.line("        return os.copyOfBytesUsed();")
+		} else {
+			f.line("        java.io.ByteArrayOutputStream out = new java.io.ByteArrayOutputStream();")
+			f.line("        OStream os = new OStream(new byte[512], 0, out::write);")
+			f.line("        serialize(os);")
+			f.line("        os.flush();")
+			f.line("        return out.toByteArray();")
+		}
 		f.line("    }")
 		// Streaming encode. `serialize` writes the fields and nothing else, so a
 		// nested message can be written into an open frame; this is the entry
@@ -362,10 +384,22 @@ func (g *gen) emitClass(f *jfile, name, vis string, fields []*ir.Field, summary 
 		// throwing on a truncated message, so this cannot tell COMPLETE from
 		// INCOMPLETE — prefer tryDecode when that verdict matters
 		// (generator#105).
-		f.line("    public static %s decode(byte[] data) {", name)
+		// It declares what feed declares and catches nothing (generator#748):
+		// since corelib-java#129 every refusal leaves feed as the checked
+		// SofabException, so re-wrapping it could only hide the SofabError behind
+		// a getCause(). The old `catch (Exception e)` swept up unchecked
+		// throwables as well, which re-labelled a genuine bug as a decode failure.
+		f.line("    /**")
+		f.line("     * Decode a whole message into a fresh instance. This cannot tell")
+		f.line("     * COMPLETE from INCOMPLETE -- {@code feed} suspends rather than throw")
+		f.line("     * on truncated bytes; use {@link #tryDecode} when that verdict matters.")
+		f.line("     *")
+		f.line("     * @throws SofabException the bytes were refused; {@code e.error()} is the")
+		f.line("     *         code (INVALID_MSG, LIMIT_EXCEEDED, ARGUMENT)")
+		f.line("     */")
+		f.line("    public static %s decode(byte[] data) throws SofabException {", name)
 		f.line("        %s m = new %s();", name, name)
-		f.line("        try { new IStream().feed(data, new %s(m)); }", vis)
-		f.line("        catch (Exception e) { throw new RuntimeException(e); }")
+		f.line("        new IStream().feed(data, new %s(m));", vis)
 		f.line("        return m;")
 		f.line("    }")
 		// Status-surfacing one-shot decode (MESSAGE_SPEC §7): fills the
