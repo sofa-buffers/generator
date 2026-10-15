@@ -3,6 +3,8 @@ package zig
 import (
 	"fmt"
 	"os"
+	"os/exec"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -809,6 +811,31 @@ func TestZigNonKeywordsAreNotQuoted(t *testing.T) {
 		if containsCode(m, `@"`+n+`"`) {
 			t.Errorf("field %q is quoted; zig fmt strips an unnecessary @\"...\" and a user's `zig fmt --check` then fails", n)
 		}
+	}
+}
+
+// A bitfield that declares no flag is legal (its width is u8) and its constant
+// holder has no member; `zig fmt` writes that empty container on one line.
+func TestZigFlaglessBitfieldIsFormatterClean(t *testing.T) {
+	files, err := (&Backend{}).Generate(buildSchema(t,
+		"version: 1\nmessages: { M: { payload: { a: { id: 0, type: bitfield, bits: {} } } } }\n"), map[string]any{})
+	if err != nil {
+		t.Fatalf("generate: %v", err)
+	}
+	m := files[0].Content
+	if !strings.Contains(string(m), "pub const M_A = struct {};\n") {
+		t.Errorf("the flag-less bitfield holder is not the one-line empty container zig fmt writes:\n%s", m)
+	}
+	zig, err := exec.LookPath("zig")
+	if err != nil {
+		t.Skip("zig not found")
+	}
+	path := filepath.Join(t.TempDir(), "message.zig")
+	if err := os.WriteFile(path, m, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if out, err := exec.Command(zig, "fmt", "--check", path).CombinedOutput(); err != nil {
+		t.Fatalf("zig fmt --check rejects the generated file: %v\n%s", err, out)
 	}
 }
 

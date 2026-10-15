@@ -256,6 +256,13 @@ func (g *gen) emitEnum(f *zfile, nt *ir.NamedType) {
 
 func (g *gen) emitBitfieldConsts(f *zfile, nt *ir.NamedType) {
 	backing := bitfieldBacking(nt)
+	if len(nt.Flags) == 0 {
+		// A bitfield may declare no flag (`bits: {}`); `zig fmt` writes the
+		// empty container on one line.
+		f.line("pub const %s = struct {};", typeIdent(nt))
+		f.blank()
+		return
+	}
 	f.line("pub const %s = struct {", typeIdent(nt))
 	for _, fl := range nt.Flags {
 		doc := fl.Description
