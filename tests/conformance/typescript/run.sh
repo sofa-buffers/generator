@@ -288,6 +288,18 @@ python3 "$ROOT/tests/conformance/lib/check_nondefault.py" "$BASE" "$FULL" \
     --label "typescript: round-trip fixture" || exit 1
 echo "==> [$VL] round-trip fixture OK (no field sits on its schema default)"
 
+# Decode into a REUSED destination on example.yaml (the Decoder's `out`,
+# generator#754): every fixture -- the full one above, two sparse ones and the
+# empty payload -- is decoded into a destination already holding every other one,
+# and once more with each malformed tail. The driver's own schema is the leg
+# further down; this one holds the reset to the corpus message.
+python3 "$ROOT/tests/conformance/lib/check_reused_destination.py" "typescript $VL: example.yaml" \
+    --msg myfirstmessage --cwd "$VW/ex" \
+    --fixture "full=$FULL" \
+    --fixture 'short={"someu8":9,"someuintarray":[5],"somestringarray":["z"],"somestructarray":[{"x":0,"y":0},{"x":5,"y":0}],"somematrix":[[],[3]],"someunion":{"option3":{"unionstructint":4,"unionstructbool":true}},"someboolarray":[true],"somestruct":{"nestedint":1}}' \
+    --fixture 'other={"somestring":"s","someblob":[],"someintarray":[],"someunion":{"option2":"two"},"someunionarray":[{"asstring":"q"}],"somemap":[{"key":"k","value":0}],"somestructwitharray":{"values":[]}}' \
+    -- "$TH" || exit 1
+
 # The two encode-buffer arms (CORELIB_PLAN §5.1). The caller owns the output
 # buffer: generated code allocates it and the corelib neither grows nor
 # reallocates it. Which shape applies is a property of the SCHEMA, and
@@ -1583,19 +1595,20 @@ done
 # A destination handed to the Decoder is reset before the first byte (generator#754):
 # absence fires no callback, so without that every field the new message omits
 # would keep the older message's value. The shared driver prints its own schema,
-# forges every image itself, and holds the reused destination to a fresh decode
-# byte for byte -- after a full, a sparse, an empty and a refused input. The
-# schema has a 64-bit field, so the leg runs in every int64 mode.
+# forges every image itself, and decodes each into a destination already holding
+# every other one -- the empty message and a refused input included -- holding
+# the result to a fresh decode as data and byte for byte. The schema has a 64-bit
+# field, so the leg runs in every int64 mode.
 echo "==> decode into a reused destination equals a fresh decode (generator#754)"
 printf 'version: 1\nmessages:\n' > "$WORK/reuse.yaml"
-python3 "$ROOT/tests/conformance/lib/check_decode_into_reused.py" --self-test
-python3 "$ROOT/tests/conformance/lib/check_decode_into_reused.py" --emit-schema >> "$WORK/reuse.yaml"
+python3 "$ROOT/tests/conformance/lib/check_reused_destination.py" --self-test || exit 1
+python3 "$ROOT/tests/conformance/lib/check_reused_destination.py" --emit-schema >> "$WORK/reuse.yaml"
 for mode in bigint long number; do
     gen "$WORK/reuse.yaml" "$WORK/reuse-$mode" "$WORK/cfg_$mode.yaml"
     ln -s "$WORK/ex/node_modules" "$WORK/reuse-$mode/node_modules"
     tsc_strict "$WORK/reuse-$mode"
-    python3 "$ROOT/tests/conformance/lib/check_decode_into_reused.py" "typescript int64: $mode" \
-        --cwd "$WORK/reuse-$mode" -- "$TH"
+    python3 "$ROOT/tests/conformance/lib/check_reused_destination.py" "typescript int64: $mode" \
+        --cwd "$WORK/reuse-$mode" -- "$TH" || exit 1
 done
 
 # MESSAGE_SPEC §7.4 -- a field id REPEATED inside one scope (generator#523). The
