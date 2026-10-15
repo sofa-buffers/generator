@@ -84,7 +84,7 @@ func (g *gen) harness(s *ir.Schema) []byte {
 	f.line("    static readonly JsonSerializerOptions Opts = new() { IncludeFields = true, NumberHandling = JsonNumberHandling.AllowNamedFloatingPointLiterals, Converters = { %s } };", strings.Join(convs, ", "))
 	g.emitBenchBody(f, s)
 	f.line("    static int Main(string[] args) {")
-	f.line("        if (args.Length < 1) { Console.Error.WriteLine(\"usage: harness <encode|decode|streamdecode|streamencode|trydecode|reusedecode|bench> [Message|workload] [prev-file]\"); return 2; }")
+	f.line("        if (args.Length < 1) { Console.Error.WriteLine(\"usage: harness <encode|decode|streamdecode|streamencode|trydecode|reusedecode|bench> [Message|workload] [prev-hex]\"); return 2; }")
 	f.line("        string mode = args[0];")
 	f.line("        string name = args.Length > 1 ? args[1] : %q;", defaultMessage(s))
 	f.line("        using var ms = new MemoryStream();")
@@ -187,14 +187,14 @@ func (g *gen) harness(s *ir.Schema) []byte {
 		f.line("                stdout.Write(head, 0, head.Length);")
 		f.line("                var json = JsonSerializer.SerializeToUtf8Bytes(obj, Opts);")
 		f.line("                stdout.Write(json, 0, json.Length); stdout.WriteByte((byte)'\\n');")
-		// Decode into a REUSED destination: the bytes of the file args[2] first,
+		// Decode into a REUSED destination: the bytes args[2] spells in hex first,
 		// then stdin into the same object, through TryDecode(data, msg). Prints the
 		// verdict (a refusal's code included, exit 0), the destination as JSON and
 		// its re-encode as hex; tests/conformance/lib/check_reused_destination.py
 		// holds both against a fresh decode.
 		f.line("            } else if (mode == \"reusedecode\") {")
 		f.line("                var obj = new %s();", mt)
-		f.line("                %s.TryDecode(File.ReadAllBytes(args[2]), obj);", mt)
+		f.line("                %s.TryDecode(Convert.FromHexString(args.Length > 2 ? args[2] : \"\"), obj);", mt)
 		f.line("                string st;")
 		f.line("                try { st = %s.TryDecode(input, obj).ToString().ToUpperInvariant(); }", mt)
 		f.line("                catch (SofabException e) { st = e.Error.ToString(); }")

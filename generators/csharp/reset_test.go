@@ -175,7 +175,7 @@ messages:
 	}
 }
 
-// TestCsHarnessReuseVerb: the harness's reusedecode verb decodes the file it is
+// TestCsHarnessReuseVerb: the harness's reusedecode verb decodes the hex it is
 // given and then stdin into ONE destination through TryDecode(data, msg), and
 // prints the verdict, the JSON and the re-encode a refusal included
 // (tests/conformance/lib/check_reused_destination.py).
@@ -183,7 +183,7 @@ func TestCsHarnessReuseVerb(t *testing.T) {
 	prog := csProgram(t, resetSchema)
 	for _, w := range []string{
 		"} else if (mode == \"reusedecode\") {",
-		"global::Message.M.TryDecode(File.ReadAllBytes(args[2]), obj);",
+		"global::Message.M.TryDecode(Convert.FromHexString(args.Length > 2 ? args[2] : \"\"), obj);",
 		"try { st = global::Message.M.TryDecode(input, obj).ToString().ToUpperInvariant(); }",
 		"catch (SofabException e) { st = e.Error.ToString(); }",
 		"try { hex = Convert.ToHexString(obj.Encode()).ToLowerInvariant(); }",
