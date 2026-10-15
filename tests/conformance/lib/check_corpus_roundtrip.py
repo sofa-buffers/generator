@@ -117,12 +117,19 @@ class Gen:
     def mask_values(self, ref):
         """Non-zero combinations of the declared flags, widest set first."""
         bits = [1 << f["pos"] for f in self.named[ref].get("flags") or []]
+        if not bits:
+            # A bitfield declaring no flag has no combination but 0, its
+            # default; bit 0 is undeclared yet inside its u8 width, which
+            # MESSAGE_SPEC §1 makes a valid value every receiver keeps.
+            return [1, 0]
         full = 0
         for b in bits:
             full |= b
         out = [full]
         out += [b for b in reversed(bits)]
-        return [x for x in out if x < self.limit] or [0]
+        # 0 last: the one candidate left when every combination is the
+        # default (a single flag defaulted on).
+        return [x for x in out if x < self.limit] + [0]
 
     # -- one value ---------------------------------------------------------
 
@@ -138,8 +145,10 @@ class Gen:
         if kind == "boolean":
             return v % 2 == 0
         if kind == "enum":
+            # The non-zero constants first, 0 last: the one candidate left when
+            # the enum's only non-zero constant is the field's default.
             vals = self.consts(ref)
-            nz = [x for x in vals if x != 0] or vals
+            nz = [x for x in vals if x != 0] + [x for x in vals if x == 0]
             return nz[v % len(nz)]
         if kind == "bitfield":
             vals = self.mask_values(ref)
