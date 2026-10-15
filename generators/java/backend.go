@@ -25,7 +25,7 @@ func (*Backend) Generate(s *ir.Schema, cfg map[string]any) ([]generator.File, er
 	g := &gen{schema: s, pkg: cfgString(cfg, "package", "message"), banner: cfgString(cfg, "tool_banner", "sofabgen"), license: generator.LicenseID(cfg), limits: resolveLimits(s, cfg), size: generator.NewSizePolicy(cfg)}
 	dir := "src/main/java/" + strings.ReplaceAll(g.pkg, ".", "/") + "/"
 	var files []generator.File
-	// Every named struct/union gets its OWN file, so it can be public: Java
+	// Every named struct/union/enum/bitfield gets its OWN file, so it can be public: Java
 	// allows one public top-level class per file, and the message owns that slot
 	// in <Message>.java (generator#305). Emitting them per message would also
 	// declare a shared type twice, which does not compile at all.
