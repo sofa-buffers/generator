@@ -4,6 +4,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 )
@@ -376,8 +377,18 @@ func TestPythonEncodeHandsValuesOverUncoerced(t *testing.T) {
 			t.Errorf("missing %q", want)
 		}
 	}
+	// Every constant holder the module declares, enum and bitfield alike: an
+	// omission test calling any of them builds a member per call.
+	var holders []string
+	for _, m := range regexp.MustCompile(`(?m)^class (\w+)\(_Int(?:Enum|Flag)\):$`).FindAllStringSubmatch(mod, -1) {
+		holders = append(holders, regexp.QuoteMeta(m[1]))
+	}
+	if len(holders) < 2 {
+		t.Fatalf("found %d constant holder class(es), want the schema's enums and bitfields", len(holders))
+	}
+	builds := regexp.MustCompile(`\b(?:` + strings.Join(holders, "|") + `)\(|__Enum\(`)
 	for _, line := range strings.Split(enc, "\n") {
-		if strings.Contains(line, "if ") && (strings.Contains(line, "M_Col(") || strings.Contains(line, "M_Cd(")) {
+		if strings.Contains(line, "if ") && builds.MatchString(line) {
 			t.Errorf("an omission test builds an enum member per call: %s", strings.TrimSpace(line))
 		}
 		if strings.Contains(line, "if bytes(") {
