@@ -101,6 +101,7 @@ func TestCsResetRestoresEveryFieldInPlace(t *testing.T) {
 func TestCsTryDecodeIntoDestination(t *testing.T) {
 	src := buildModule(t, []byte(resetSchema), "reset.yaml", map[string]any{})
 	into := "    public static global::sofab.DecodeStatus TryDecode(byte[] data, M msg) {\n" +
+		"        global::System.ArgumentNullException.ThrowIfNull(msg);\n" +
 		"        msg.Reset();\n" +
 		"        return new global::sofab.IStream().Feed(data, 0, data.Length, new _M__Visitor(msg));\n" +
 		"    }\n"
@@ -120,7 +121,8 @@ func TestCsTryDecodeIntoDestination(t *testing.T) {
 	for _, c := range []string{
 		"holds the fields decoded before the",
 		"error, never an older message's.",
-		"into it overwrites that object",
+		"overwrites that object. Anything else",
+		"elements, an object inside a union option -- is replaced by a new one.",
 	} {
 		if !strings.Contains(src, c) {
 			t.Errorf("the TryDecode(data, msg) doc comment does not state %q", c)
