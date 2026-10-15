@@ -73,9 +73,10 @@ var csKeywords = map[string]bool{
 	"volatile": true, "while": true,
 }
 
-// csMembers are the members every generated class declares: Serialize and
-// IsDefault on all, and on a message Reset, Encode, EncodeTo, Decode,
-// TryDecode, the nested Decoder class and the MaxSize/MaxSizeLimit constants.
+// csMembers are the members a generated class declares: Serialize and
+// IsDefault on every class, Reset on a struct and a message class, and on a
+// message Encode, EncodeTo, Decode, TryDecode, the nested Decoder class and the
+// MaxSize/MaxSizeLimit constants.
 var csMembers = map[string]bool{
 	"Serialize": true, "IsDefault": true, "Reset": true, "Encode": true,
 	"EncodeTo": true, "Decode": true, "TryDecode": true, "Decoder": true,
@@ -161,10 +162,10 @@ func (g *gen) nameTypes() {
 	}
 }
 
-// fieldMembers are the members a struct class declares: its fields and the two
-// every class has.
+// fieldMembers are the members a struct class declares: its fields, the two
+// every class has, and Reset.
 func fieldMembers(fields []*ir.Field) map[string]bool {
-	ms := map[string]bool{"Serialize": true, "IsDefault": true}
+	ms := map[string]bool{"Serialize": true, "IsDefault": true, "Reset": true}
 	for _, f := range fields {
 		ms[strings.TrimPrefix(csIdent(f.Name), "@")] = true
 	}

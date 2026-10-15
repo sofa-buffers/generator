@@ -107,6 +107,22 @@ python3 "$ROOT/tests/conformance/lib/check_nondefault.py" "$BASE" "$FULL" \
     --label "csharp: round-trip fixture" || exit 1
 echo "==> round-trip fixture OK (no field sits on its schema default)"
 
+# Decode into a REUSED destination (TryDecode(data, msg), generator#757). The
+# destination is Reset before the feed, so it must read exactly as a fresh decode:
+# every fixture -- the full one above, two sparse ones and the empty payload -- is
+# decoded into a destination already holding every other one, and once more with
+# a malformed tail, where it must hold the fields decoded before the error and
+# none of the older message's. The sparse fixtures leave fields out and at their
+# default, shorten arrays, switch the union to another option, and leave the blob
+# out (`short`) or empty (`other`). Compared as data and as re-encoded bytes.
+echo "==> a reused destination reads as a fresh decode (generator#757)"
+python3 "$ROOT/tests/conformance/lib/check_reused_destination.py" --self-test || exit 1
+python3 "$ROOT/tests/conformance/lib/check_reused_destination.py" csharp --msg myfirstmessage \
+    --fixture "full=$FULL" \
+    --fixture 'short={"someu8":9,"someuintarray":[5],"somestringarray":["z"],"somestructarray":[{"x":0,"y":0},{"x":5,"y":0}],"somematrix":[[],[3]],"someunion":{"option3":{"unionstructint":4,"unionstructbool":true}},"someboolarray":[true],"somestruct":{"nestedint":1}}' \
+    --fixture 'other={"somestring":"s","someblob":[],"someintarray":[],"someunion":{"option2":"two"},"someunionarray":[{"asstring":"q"}],"somemap":[{"key":"k","value":0}],"somestructwitharray":{"values":[]}}' \
+    -- $H || exit 1
+
 # The BOUNDED encode arm (CORELIB_PLAN §5.1, ARCHITECTURE §9.6, generator#415).
 # Generated code owns the output buffer and the corelib never grows or
 # reallocates it, so the worst-case size the backend derives from the schema --

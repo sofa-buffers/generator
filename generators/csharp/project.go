@@ -84,7 +84,7 @@ func (g *gen) harness(s *ir.Schema) []byte {
 	f.line("    static readonly JsonSerializerOptions Opts = new() { IncludeFields = true, NumberHandling = JsonNumberHandling.AllowNamedFloatingPointLiterals, Converters = { %s } };", strings.Join(convs, ", "))
 	g.emitBenchBody(f, s)
 	f.line("    static int Main(string[] args) {")
-	f.line("        if (args.Length < 1) { Console.Error.WriteLine(\"usage: harness <encode|decode|streamdecode|streamencode|trydecode|bench> [Message|workload]\"); return 2; }")
+	f.line("        if (args.Length < 1) { Console.Error.WriteLine(\"usage: harness <encode|decode|streamdecode|streamencode|trydecode|reusedecode|bench> [Message|workload] [prev-file]\"); return 2; }")
 	f.line("        string mode = args[0];")
 	f.line("        string name = args.Length > 1 ? args[1] : %q;", defaultMessage(s))
 	f.line("        using var ms = new MemoryStream();")
@@ -187,6 +187,26 @@ func (g *gen) harness(s *ir.Schema) []byte {
 		f.line("                stdout.Write(head, 0, head.Length);")
 		f.line("                var json = JsonSerializer.SerializeToUtf8Bytes(obj, Opts);")
 		f.line("                stdout.Write(json, 0, json.Length); stdout.WriteByte((byte)'\\n');")
+		// Decode into a REUSED destination: the bytes of the file args[2] first,
+		// then stdin into the same object, through TryDecode(data, msg). Prints the
+		// verdict (a refusal's code included, exit 0), the destination as JSON and
+		// its re-encode as hex; tests/conformance/lib/check_reused_destination.py
+		// holds both against a fresh decode.
+		f.line("            } else if (mode == \"reusedecode\") {")
+		f.line("                var obj = new %s();", mt)
+		f.line("                %s.TryDecode(File.ReadAllBytes(args[2]), obj);", mt)
+		f.line("                string st;")
+		f.line("                try { st = %s.TryDecode(input, obj).ToString().ToUpperInvariant(); }", mt)
+		f.line("                catch (SofabException e) { st = e.Error.ToString(); }")
+		f.line("                string hex;")
+		f.line("                try { hex = Convert.ToHexString(obj.Encode()).ToLowerInvariant(); }")
+		f.line("                catch (SofabException) { hex = \"-\"; }")
+		f.line("                var head = System.Text.Encoding.ASCII.GetBytes(st + \"\\n\");")
+		f.line("                stdout.Write(head, 0, head.Length);")
+		f.line("                var json = JsonSerializer.SerializeToUtf8Bytes(obj, Opts);")
+		f.line("                stdout.Write(json, 0, json.Length); stdout.WriteByte((byte)'\\n');")
+		f.line("                var tail = System.Text.Encoding.ASCII.GetBytes(hex + \"\\n\");")
+		f.line("                stdout.Write(tail, 0, tail.Length);")
 		f.line("            } else { Console.Error.WriteLine(\"unknown mode\"); return 2; }")
 		f.line("            break;")
 		f.line("        }")

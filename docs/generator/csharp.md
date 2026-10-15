@@ -21,6 +21,54 @@ choose.
 that for C# alone. Left unset, this target's own default (`Message`) applies
 rather than a generic one — each language keeps its own idiomatic capitalisation.
 
+## Reusing a destination
+
+`TryDecode` has two overloads with the same verdict — `Complete` or
+`Incomplete`, and a `SofabException` for malformed input:
+
+```csharp
+var st = Msg.TryDecode(data, out var msg);   // decodes into a new Msg
+var st = Msg.TryDecode(data, msg);           // decodes into the Msg you pass
+```
+
+The second one first calls `msg.Reset()` and then decodes into `msg`, so the
+same object can take message after message. A field the bytes leave out reads
+as its schema default, exactly as in a new object, and nothing of the message
+`msg` held before is left. That holds on a refusal too: `msg` then holds the
+fields decoded before the error, and none of the older message's.
+
+```csharp
+var msg = new Msg();
+foreach (var frame in frames) {
+    if (Msg.TryDecode(frame, msg) == global::sofab.DecodeStatus.Complete) {
+        Use(msg);
+    }
+}
+```
+
+`Reset()` is public on every message and struct class. It puts each field back
+to its schema default in place:
+
+| field | `Reset()` |
+|---|---|
+| scalar, enum, bitfield, string | assigned its default |
+| blob, numeric array (`byte[]`, `ushort[]`, …) | assigned a new array holding its default (decode replaces these whole too) |
+| nested struct | reset in place (`Reset()`) |
+| union | back to its default option in place (`Clear()`, the union's name for the same operation) |
+| `List` (arrays of strings, blobs, booleans, structs, unions, arrays) | cleared, keeping its capacity, and refilled with the declared default if the schema has one |
+
+**Objects you took from `msg` belong to it.** A nested struct or a `List` you
+read from `msg` is the same object the next decode resets and fills: after the
+next `TryDecode(data, msg)` it holds the new message's values. Copy what must
+outlive the next decode. A numeric array or a blob is not overwritten in place —
+decode puts a new array in the field — so an array you took from `msg` keeps
+its values. So does a struct, union or `List` you took from a union's option:
+`Clear()` and every decode start an option from a new object (see
+[Unions](#unions)).
+
+`Decode(data)` and `TryDecode(data, out msg)` always build a new message, so
+nothing they return is reused.
+
 ## Field names
 
 A field's C# field is the field's schema name. A field named like a C# keyword
@@ -29,9 +77,10 @@ name. In C# a class's fields, methods, properties and nested types share one
 namespace, so a field whose name the generated class already uses gets a
 trailing underscore instead — the field `Encode` is `Encode_`. Those names are:
 
-- the members every generated class declares: `Serialize`, `IsDefault`, and on
-  a message also `Reset`, `Encode`, `EncodeTo`, `Decode`, `TryDecode`, the
-  nested `Decoder` class, `MaxSize` and `MaxSizeLimit`;
+- the members a generated class declares: `Serialize` and `IsDefault` on
+  every class, `Reset` on a struct and a message class, and on a message also
+  `Encode`, `EncodeTo`, `Decode`, `TryDecode`, the nested `Decoder` class,
+  `MaxSize` and `MaxSizeLimit`;
 - the members every class inherits from `object`: `Equals`, `GetHashCode`,
   `GetType`, `ToString`, `MemberwiseClone`, `Finalize`, `ReferenceEquals`.
 

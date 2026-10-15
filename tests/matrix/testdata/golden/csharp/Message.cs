@@ -43,6 +43,22 @@ public sealed class Scalars {
         if (!(this.flags.Count == 0)) return false;
         return true;
     }
+    /// <summary>
+    /// Every field back to its schema default, in place: a nested object is reset
+    /// and a list cleared rather than replaced, so a reference taken from this
+    /// object reads the defaults too.
+    /// </summary>
+    public void Reset() {
+        this.u8min = 0;
+        this.u8max = 255;
+        this.u64max = 18446744073709551615UL;
+        this.i8min = -128;
+        this.i64min = -9223372036854775808L;
+        this.f32 = 3.14f;
+        this.f64 = -2.5;
+        this.flag = true;
+        (this.flags ??= new(4)).Clear();
+    }
     public const int MaxSize = 55;
     // Per-thread scratch buffer and encoder: Encode() serialises into the
     // buffer and returns an exact-size copy, so neither the worst-case
@@ -86,6 +102,23 @@ public sealed class Scalars {
     }
     public static global::sofab.DecodeStatus TryDecode(byte[] data, out Scalars msg) {
         msg = new Scalars();
+        return new global::sofab.IStream().Feed(data, 0, data.Length, new _Scalars__Visitor(msg));
+    }
+    /// <summary>
+    /// Decode into <paramref name="msg"/>, a destination the caller owns and
+    /// may reuse: it is <see cref="Reset"/> first, so a field absent from
+    /// <paramref name="data"/> reads as its default. The verdict is the one
+    /// <c>TryDecode(data, out msg)</c> returns.
+    /// </summary>
+    /// <remarks>
+    /// On a refusal <paramref name="msg"/> holds the fields decoded before the
+    /// error, never an older message's. An object reached through it -- a
+    /// nested struct, a list -- belongs to the destination: the next decode
+    /// into it overwrites that object, so copy what must outlive it.
+    /// </remarks>
+    /// <exception cref="global::sofab.SofabException">Malformed input, as for <c>TryDecode(data, out msg)</c>.</exception>
+    public static global::sofab.DecodeStatus TryDecode(byte[] data, Scalars msg) {
+        msg.Reset();
         return new global::sofab.IStream().Feed(data, 0, data.Length, new _Scalars__Visitor(msg));
     }
     /// <summary>
