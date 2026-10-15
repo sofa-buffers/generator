@@ -49,10 +49,9 @@ var pyMembers = map[string]bool{
 //
 // Annotations are postponed (`from __future__ import annotations`) and default
 // factories are lambdas, both of which read the module scope and not the
-// class's, so the type names they spell need no entry. The two defaults that
-// are evaluated in the class body do not name a type either: a blob default is
-// a bytes literal, and an enum default goes through the enum's private alias
-// (enumAlias), which no field can be spelled like.
+// class's, so the type names they spell need no entry. No default evaluated in
+// the class body names a type either: a blob default is a bytes literal, and an
+// enum default is its plain integer.
 var pyEvaluated = map[string]bool{
 	"classmethod": true, "property": true, "field": true, "list": true,
 	"REASSEMBLY": true,

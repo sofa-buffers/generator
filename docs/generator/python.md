@@ -169,6 +169,53 @@ Everything else the module declares for its own use starts with `_` — the
 decode visitor of a class `M` is `_M__Visitor` — so no schema name can reach
 it.
 
+## Enums and bitfields
+
+An `enum` or `bitfield` field is an `int` — a scalar field, an array element, a
+struct member and a union option alike — and its declared constants are a class
+beside it: an `IntEnum` for an enum, an `IntFlag` for a bitfield, named as in
+[Type names](#type-names).
+
+```yaml
+color: { id: 0, type: enum, enum: { RED: 0, GREEN: 1, BLUE: 2, GRAY: 10 }, default: 2 }
+flags: { id: 1, type: bitfield, bits: { A: { pos: 0 }, B: { pos: 1 } } }
+```
+
+```python
+class M_Color(IntEnum):
+    RED = 0
+    GREEN = 1
+    BLUE = 2
+    GRAY = 10
+
+class M_Flags(IntFlag):
+    A = 1 << 0
+    B = 1 << 1
+
+@dataclass
+class M:
+    #: Constants: :class:`M_Color`.
+    color: int = 2
+    #: Constants: :class:`M_Flags`.
+    flags: int = 0
+```
+
+The field holds a plain `int` whether the message is fresh or decoded, and the
+constants compare with it directly (`m.color == M_Color.BLUE`,
+`m.flags & M_Flags.B`) and can be assigned to it (`m.color = M_Color.GRAY`).
+
+The type is `int` because an enum is bounded by the width its declaration
+implies, not by the constants it names: `{RED: 0, … GRAY: 10}` implies a signed
+8-bit width, so `5` is a valid value. It decodes as `5` and re-encodes as `5`,
+although no constant names it. A bitfield likewise keeps a bit no flag declares,
+as long as it fits the width implied by the highest declared `pos`. Only a value
+outside the width is refused — `SofaDecodeError` on decode, `SofaArgumentError`
+on encode.
+
+Converting a decoded value to the constant class is therefore yours to guard:
+`M_Color(m.color)` raises `ValueError` for `5`. `M_Flags(m.flags)` accepts any
+combination of declared flags.
+
 ## Unions
 
 A `union` holds exactly one of its options. It is a `@dataclass` of its own with

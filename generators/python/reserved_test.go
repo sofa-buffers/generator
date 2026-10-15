@@ -154,9 +154,10 @@ func TestReservedNamesAreMangled(t *testing.T) {
 			t.Errorf("type %s rebinds the module-level %s", n, n)
 		}
 	}
-	// The class body reads the enum through its alias and the blob default as a
-	// literal, so the fields `Color` and `bytes` before them cannot rebind them.
-	for _, want := range []string{"    col: Color = _Color__Enum(2)\n", "    bl: bytes = b\"\\x01\\x02\\x03\"\n"} {
+	// The class body evaluates the enum default as its plain integer and the
+	// blob default as a literal, so the fields `Color` and `bytes` before them
+	// rebind nothing either reads.
+	for _, want := range []string{"    col: int = 2\n", "    bl: bytes = b\"\\x01\\x02\\x03\"\n"} {
 		if !strings.Contains(mod, want) {
 			t.Errorf("missing %q", want)
 		}

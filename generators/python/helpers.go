@@ -60,14 +60,14 @@ func visitorIdent(base string) string { return "_" + base + "__Visitor" }
 // visitorOf is the decode visitor of the class named `name`.
 func (g *gen) visitorOf(name string) string { return visitorIdent(g.bases[name]) }
 
-// enumAlias is the private module-level alias of an enum: `_` + base +
-// `__Enum`. A dataclass field default is evaluated in the CLASS body, where a
-// field bound earlier under the enum's own name (a field `Color` beside a field
-// of type Color) would rebind it; no field can be spelled with a leading
-// underscore, so the default reads the enum through this name instead.
-func enumAlias(nt *ir.NamedType) string { return "_" + baseIdent(nt) + "__Enum" }
-
 // pyAnnot is the dataclass field type annotation (string, lazy via __future__).
+//
+// An enum or bitfield field is an `int`, like every other integer: MESSAGE_SPEC
+// §1 bounds both by their declared WIDTH, so an in-width value no constant names
+// is valid, decodes as received and re-encodes unchanged. The generated IntEnum /
+// IntFlag class holds the named constants beside the field (an IntEnum member is
+// an int, so `m.f == E.A` holds); naming it as the field's type would claim a
+// closed set `E(m.f)` rejects for such a value.
 func (g *gen) pyAnnot(f *ir.Field) string {
 	switch f.Kind {
 	case ir.KindFP32, ir.KindFP64:
@@ -78,7 +78,7 @@ func (g *gen) pyAnnot(f *ir.Field) string {
 		return "str"
 	case ir.KindBlob:
 		return "bytes"
-	case ir.KindEnum, ir.KindBitfield, ir.KindStruct, ir.KindUnion:
+	case ir.KindStruct, ir.KindUnion:
 		return g.refName(f.Ref)
 	case ir.KindArray:
 		return g.pyArrayAnnot(f.Elem, f.ElemRef, f.ElemItems)
@@ -88,7 +88,7 @@ func (g *gen) pyAnnot(f *ir.Field) string {
 }
 
 // pyArrayAnnot returns the list[...] annotation for an array element, recursing
-// for nested arrays.
+// for nested arrays. An enum or bitfield element is an int, as in pyAnnot.
 func (g *gen) pyArrayAnnot(elem ir.Kind, ref *ir.TypeRef, items *ir.ArrayElem) string {
 	switch elem {
 	case ir.KindString:
@@ -99,11 +99,11 @@ func (g *gen) pyArrayAnnot(elem ir.Kind, ref *ir.TypeRef, items *ir.ArrayElem) s
 		return "list[float]"
 	case ir.KindBool:
 		return "list[bool]"
-	case ir.KindEnum, ir.KindStruct, ir.KindUnion:
+	case ir.KindStruct, ir.KindUnion:
 		return "list[" + g.refName(ref) + "]"
 	case ir.KindArray:
 		return "list[" + g.pyArrayAnnot(items.Elem, items.ElemRef, items.ElemItems) + "]"
-	default: // integers, bitfield
+	default: // integers, enum, bitfield
 		return "list[int]"
 	}
 }
@@ -145,13 +145,12 @@ func (g *gen) pyDefault(f *ir.Field) string {
 		}
 		return "b\"\""
 	case ir.KindEnum:
-		// Through the enum's private alias: the class body evaluates this, and
-		// a field spelled like the enum class would rebind that name there.
-		tn := enumAlias(f.Ref.Target)
+		// The plain integer, not the IntEnum member: a decoded message holds an
+		// int, so a fresh one does too (pyAnnot).
 		if f.Default != nil {
-			return fmt.Sprintf("%s(%s)", tn, scalarLit(f.Default))
+			return scalarLit(f.Default)
 		}
-		return tn + "(0)"
+		return "0"
 	case ir.KindBitfield:
 		return fmt.Sprintf("%d", g.bitfieldDefault(f))
 	case ir.KindStruct, ir.KindUnion:
