@@ -752,6 +752,28 @@ func TestPythonSyntaxValid(t *testing.T) {
 	}
 }
 
+// A bitfield that declares no flag is legal (its width is u8) and emitted
+// IntFlag class has no member to fill its body; it must still parse.
+func TestPythonFlaglessBitfieldIsValid(t *testing.T) {
+	mod := genPy(t, schema(t, `version: 1
+messages: { M: { payload: { a: { id: 0, type: bitfield, bits: {} } } } }
+`), map[string]any{})["message.py"]
+	if !strings.Contains(string(mod), "class M_A(_IntFlag):\n    pass\n") {
+		t.Errorf("the flag-less bitfield class has no `pass` body:\n%s", mod)
+	}
+	py, err := exec.LookPath("python3")
+	if err != nil {
+		t.Skip("python3 not found")
+	}
+	path := filepath.Join(t.TempDir(), "message.py")
+	if err := os.WriteFile(path, mod, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if out, err := exec.Command(py, "-m", "py_compile", path).CombinedOutput(); err != nil {
+		t.Fatalf("generated Python is invalid:\n%s", out)
+	}
+}
+
 // pyEngine reports which corelib-py engine a test that reaches it WITHOUT its own
 // SOFAB_PUREPYTHON loop is running on, and fails when that is not the engine the
 // caller asked for. tests/conformance/python/run.sh runs this package once per
