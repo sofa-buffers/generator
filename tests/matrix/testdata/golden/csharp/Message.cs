@@ -44,9 +44,10 @@ public sealed class Scalars {
         return true;
     }
     /// <summary>
-    /// Every field back to its schema default, in place: a nested object is reset
-    /// and a list cleared rather than replaced, so a reference taken from this
-    /// object reads the defaults too.
+    /// Every field back to its schema default. A nested struct is reset and a
+    /// list cleared in place, so a reference taken to either reads the defaults
+    /// too. An array, a blob and the object a union option holds are replaced,
+    /// so a reference taken to one of those keeps its old value.
     /// </summary>
     public void Reset() {
         this.u8min = 0;
@@ -112,12 +113,16 @@ public sealed class Scalars {
     /// </summary>
     /// <remarks>
     /// On a refusal <paramref name="msg"/> holds the fields decoded before the
-    /// error, never an older message's. An object reached through it -- a
-    /// nested struct, a list -- belongs to the destination: the next decode
-    /// into it overwrites that object, so copy what must outlive it.
+    /// error, never an older message's. A nested struct or a list held directly
+    /// by the message belongs to the destination: the next decode into it
+    /// overwrites that object. Anything else -- an array, a blob, a list's
+    /// elements, an object inside a union option -- is replaced by a new one.
+    /// Copy what must outlive the next decode.
     /// </remarks>
+    /// <exception cref="global::System.ArgumentNullException"><paramref name="msg"/> is null.</exception>
     /// <exception cref="global::sofab.SofabException">Malformed input, as for <c>TryDecode(data, out msg)</c>.</exception>
     public static global::sofab.DecodeStatus TryDecode(byte[] data, Scalars msg) {
+        global::System.ArgumentNullException.ThrowIfNull(msg);
         msg.Reset();
         return new global::sofab.IStream().Feed(data, 0, data.Length, new _Scalars__Visitor(msg));
     }

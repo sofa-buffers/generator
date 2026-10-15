@@ -35,7 +35,8 @@ The second one first calls `msg.Reset()` and then decodes into `msg`, so the
 same object can take message after message. A field the bytes leave out reads
 as its schema default, exactly as in a new object, and nothing of the message
 `msg` held before is left. That holds on a refusal too: `msg` then holds the
-fields decoded before the error, and none of the older message's.
+fields decoded before the error, and none of the older message's. `msg` must
+not be null: a null `msg` throws `ArgumentNullException`.
 
 ```csharp
 var msg = new Msg();
@@ -52,7 +53,7 @@ to its schema default in place:
 | field | `Reset()` |
 |---|---|
 | scalar, enum, bitfield, string | assigned its default |
-| blob, numeric array (`byte[]`, `ushort[]`, …) | assigned a new array holding its default (decode replaces these whole too) |
+| blob, numeric array (`byte[]`, `ushort[]`, …) | assigned its initializer: its default, or an empty array (decode replaces these whole too) |
 | nested struct | reset in place (`Reset()`) |
 | union | back to its default option in place (`Clear()`, the union's name for the same operation) |
 | `List` (arrays of strings, blobs, booleans, structs, unions, arrays) | cleared, keeping its capacity, and refilled with the declared default if the schema has one |
@@ -62,9 +63,10 @@ read from `msg` is the same object the next decode resets and fills: after the
 next `TryDecode(data, msg)` it holds the new message's values. Copy what must
 outlive the next decode. A numeric array or a blob is not overwritten in place —
 decode puts a new array in the field — so an array you took from `msg` keeps
-its values. So does a struct, union or `List` you took from a union's option:
-`Clear()` and every decode start an option from a new object (see
-[Unions](#unions)).
+its values. So does an element you took from a `List`, since the list is
+cleared and refilled with new elements, and a struct, union or `List` you took
+from a union's option: `Clear()` and every decode start an option from a new
+object (see [Unions](#unions)).
 
 `Decode(data)` and `TryDecode(data, out msg)` always build a new message, so
 nothing they return is reused.

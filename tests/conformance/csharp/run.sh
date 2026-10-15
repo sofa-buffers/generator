@@ -122,6 +122,33 @@ python3 "$ROOT/tests/conformance/lib/check_reused_destination.py" csharp --msg m
     --fixture 'short={"someu8":9,"someuintarray":[5],"somestringarray":["z"],"somestructarray":[{"x":0,"y":0},{"x":5,"y":0}],"somematrix":[[],[3]],"someunion":{"option3":{"unionstructint":4,"unionstructbool":true}},"someboolarray":[true],"somestruct":{"nestedint":1}}' \
     --fixture 'other={"somestring":"s","someblob":[],"someintarray":[],"someunion":{"option2":"two"},"someunionarray":[{"asstring":"q"}],"somemap":[{"key":"k","value":0}],"somestructwitharray":{"values":[]}}' \
     -- $H || exit 1
+# example.yaml's union defaults to a scalar option. A union whose DEFAULT option
+# is a struct or a list makes a parent's Reset() swap a new object into that
+# option, and a struct array refills its List with new elements: this schema
+# covers both, plus a blob that falls back to a declared default.
+cat > "$WORK/reuse.yaml" <<'YAML'
+version: 1
+messages:
+  reuse:
+    payload:
+      b: { id: 0, type: blob, maxlen: 8, default: "CQ==" }
+      u:
+        id: 1
+        type: union
+        default_id: 0
+        oneof:
+          st: { id: 0, type: struct, fields: { x: { id: 0, type: u8, default: 3 }, y: { id: 1, type: string, maxlen: 8 } } }
+          xs: { id: 1, type: array, items: { type: u16, count: 4 } }
+          n:  { id: 2, type: i32 }
+      rows: { id: 2, type: array, items: { type: struct, count: 3, fields: { x: { id: 0, type: u8, default: 3 } } } }
+YAML
+build "$WORK/reuse.yaml" "$WORK/reuse"
+python3 "$ROOT/tests/conformance/lib/check_reused_destination.py" csharp --msg reuse \
+    --fixture 'st={"b":[1,2],"u":{"st":{"x":77,"y":"hey"}},"rows":[{"x":5},{"x":6}]}' \
+    --fixture 'stdef={"u":{"st":{"x":3,"y":"z"}},"rows":[{"x":9}]}' \
+    --fixture 'xs={"b":[],"u":{"xs":[4,5,6]}}' \
+    --fixture 'n={"u":{"n":-2},"rows":[{"x":0},{"x":0},{"x":1}]}' \
+    -- dotnet "$WORK/reuse/bin/Debug/net9.0/harness.dll" || exit 1
 
 # The BOUNDED encode arm (CORELIB_PLAN §5.1, ARCHITECTURE §9.6, generator#415).
 # Generated code owns the output buffer and the corelib never grows or
