@@ -21,7 +21,7 @@ build measures code that never ships.
 tests/
 ├── matrix/                 # Tier 1 — hermetic Go tests (run in the CI "hermetic" job)
 │   ├── matrix_test.go      #   generate every corpus def across ALL backends; reject invalid defs
-│   ├── golden_test.go      #   regenerate scalars.yaml per backend, byte-diff vs committed goldens
+│   ├── golden_test.go      #   regenerate scalars.yaml + named_kinds.yaml per backend, byte-diff vs committed goldens
 │   ├── refs_test.go        #   $ref / shared-type graph resolution
 │   ├── omit_test.go        #   sparse-canonical marshal
 │   ├── realworld_test.go   #   the multi-file vehicle_telemetry schema
@@ -29,7 +29,8 @@ tests/
 │   │   ├── defs/           #     20 positive corner-case definitions
 │   │   ├── invalid/        #     46 definitions that MUST be rejected
 │   │   └── shared/         #     $defs reused across defs
-│   └── testdata/golden/    #   committed golden output, one dir per backend
+│   ├── testdata/golden/    #   committed golden output of scalars.yaml, one dir per backend
+│   └── testdata/golden_named_kinds/ # the same for named_kinds.yaml, plus one dir per enum/bitfield-relevant config variant
 │
 ├── conformance/            # Tier 2 — per-language integration harnesses (one CI job each: lang-<x>)
 │   ├── c/        { run.sh, example_roundtrip.c }

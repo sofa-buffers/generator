@@ -18,7 +18,12 @@ Corner-case SofaBuffers definitions, exercised hermetically by `tests/matrix`
   negative values), bitfields (pos 0 and 63, both defaulted so a pos-63 mask
   reaches each backend's default renderer, plus arrays of bitfield — the one
   place a mask is written as a **number** — in every accepted spelling, and a
-  narrow bitfield whose mask fills its one-byte backing), nested structs, unions
+  narrow bitfield whose mask fills its one-byte backing; `named_kinds.yaml`
+  carries both kinds at both edges of every declared width — i8/i16/i32 for an
+  enum, u8/u16/u32/u64 for a bitfield — in every position a backend binds them
+  at, plus a field named like its type, an inline type folding like a `$defs`
+  name and reserved constant/flag names, and is the schema the golden gate
+  pins for them), nested structs, unions
   (`unions.yaml`: `default_id` on a non-first and on a struct option, an omitted
   `default_id` meaning the lowest option id, a `$defs` union used with two
   different `default_id`s — which analysis splits into one generated type per
