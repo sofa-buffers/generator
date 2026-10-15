@@ -88,7 +88,12 @@ func (g *gen) harness(s *ir.Schema) []byte {
 	// `feed` and `finish` are the whole decode surface: the wrapper keeps no
 	// remembered status to name here, because a refusal is terminal in the corelib
 	// and `finish` asks it rather than reading a copy (generator#541).
-	f.line("const DECODERS: Record<string, { new (): { feed(chunk: Uint8Array): import(%q).DecodeStatus; finish(): { toJSON(): Record<string, unknown> } } }> = {", corelibPkg)
+	//
+	// The constructor's destination is typed `never` here: each Decoder takes its
+	// own message class, which no one type in this map can name, and `never` is
+	// assignable to every one of them. Only `recodeinto` passes one, the object
+	// the same message's decode() returned.
+	f.line("const DECODERS: Record<string, { new (out?: never): { feed(chunk: Uint8Array): import(%q).DecodeStatus; finish(): { toJSON(): Record<string, unknown> }; readonly message: { encode(): Uint8Array } } }> = {", corelibPkg)
 	for _, m := range s.Messages {
 		f.line("  %q: M.%s,", m.Name, decoderName(msgRaw(m)))
 	}
@@ -263,6 +268,24 @@ func (g *gen) harness(s *ir.Schema) []byte {
 	// re-encoding is bit-exact. This mode can.
 	f.line("    const obj = cls.decode(new Uint8Array(input));")
 	f.line("    process.stdout.write(obj.encode());")
+	// A destination that held one message, decoded into again (the Decoder's
+	// `out`): argv[4] is the hex of the message it held, stdin the one decoded
+	// into it, stdout the destination re-encoded -- after a refusal too, with exit
+	// 1, since what a refused destination holds is part of the contract.
+	// tests/conformance/lib/check_decode_into_reused.py drives it.
+	f.line("  } else if (mode === \"recodeinto\") {")
+	f.line("    const prev = cls.decode(new Uint8Array(Buffer.from(process.argv[4] ?? \"\", \"hex\")));")
+	f.line("    const dec = new DECODERS[name](prev as never);")
+	f.line("    let rc = 0;")
+	f.line("    try {")
+	f.line("      dec.feed(new Uint8Array(input));")
+	f.line("      dec.finish();")
+	f.line("    } catch (e) {")
+	f.line("      process.stderr.write(`decode error: ${String(e)}\\n`);")
+	f.line("      rc = 1;")
+	f.line("    }")
+	f.line("    process.stdout.write(dec.message.encode());")
+	f.line("    return rc;")
 	f.line("  } else if (mode === \"status\") {")
 	// Surface the §7 decode outcome (COMPLETE / INVALID / INCOMPLETE / LIMIT_EXCEEDED)
 	// so a conformance harness can assert the INVALID-vs-INCOMPLETE distinction that

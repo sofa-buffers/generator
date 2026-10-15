@@ -122,7 +122,8 @@ underscore — the field `encode` is `encode_`. Those names are:
 
 - `constructor`, which a class body rejects as a field;
 - the methods every generated class declares: `serialize`, `toJSON`,
-  `isDefault`, and on a message also `encode`;
+  `isDefault`, on a message and a struct also `reset`, and on a message also
+  `encode`;
 - the members every object inherits: `toString`, `toLocaleString`, `valueOf`,
   `hasOwnProperty`, `isPrototypeOf`, `propertyIsEnumerable`.
 
@@ -321,6 +322,30 @@ id, change nothing.
 option — `{"pt":{"x":7,"y":2}}`, also when that is the `default_id` option at
 its default — and `fromJSON()` selects the option it finds. A union member left
 out of a message's JSON reads as the union's default.
+
+## Decoding into an existing message
+
+`M.decode(bytes)` always returns a new message. To decode into one you already
+hold, hand it to the incremental decoder:
+
+```ts
+const d = new M__Decoder(msg);  // msg is reset() here
+d.feed(bytes);
+d.finish();                     // msg now equals M.decode(bytes)
+```
+
+A field that equals its default is not on the wire, so a decoder cannot tell
+"left out" from "not sent yet". That is why the constructor first resets the
+message you hand it: afterwards it holds exactly what a fresh decode of the same
+bytes would, and a field the new message leaves out reads its default, never the
+value the message held before. If the input is rejected, the message holds the
+fields decoded before the error and the defaults for the rest.
+
+`reset()` is public on every message and struct class, and puts every field
+back to its declared default — what `new M()` holds. A nested struct is reset in
+place; a union goes back to its `default_id` option through its own `clear()`;
+every other field is assigned a new default value, so an array or blob the
+message held before is let go, not cleared.
 
 ## Formatting
 

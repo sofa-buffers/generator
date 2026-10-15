@@ -624,6 +624,9 @@ func (g *gen) emitClass(f *tsfile, name, raw, summary string, fields []*ir.Field
 	// all-default predicate (the explicit form of marshal's lazy framing)
 	g.emitIsDefault(f, fields)
 
+	// back to the declared defaults (what a decoder resets its destination with)
+	g.emitReset(f, name, fields)
+
 	// JSON
 	g.emitJSON(f, name, fields)
 
@@ -771,6 +774,39 @@ func (g *gen) emitIsDefault(f *tsfile, fields []*ir.Field) {
 		f.line("    if (!(%s)) return false;", g.fieldIsDefaultExpr(fld))
 	}
 	f.line("    return true;")
+	f.line("  }")
+	f.blank()
+}
+
+// emitReset emits reset(): every field back to its declared default, so the
+// object equals a fresh `new <name>()`. It is what the incremental decoder runs
+// on a destination it is handed (emitDecoderClass): an absent field fires no
+// callback (MESSAGE_SPEC §4), so a destination that still held an older message
+// would keep that message's value for every field the new one omits.
+//
+// The body is the field list and its defaults -- the same initialisers the class
+// body declares -- so it is per-schema code. A nested struct is reset in place,
+// as decode fills it in place; a union goes back to its default option through
+// its own clear(). Every other field takes a fresh default value, exactly as the
+// constructor builds it: nothing is kept or reused.
+func (g *gen) emitReset(f *tsfile, name string, fields []*ir.Field) {
+	f.line("  /** Every field back to its declared default, as a fresh `new %s()` holds it. */", name)
+	f.line("  reset(): void {")
+	for _, fld := range fields {
+		acc := g.storage("this", fld)
+		switch fld.Kind {
+		case ir.KindStruct:
+			f.line("    %s.reset();", acc)
+			continue
+		case ir.KindUnion:
+			f.line("    %s.clear();", acc)
+			continue
+		}
+		f.line("    %s = %s;", acc, g.tsDefault(fld))
+		if raw, ok := g.fp32Raw[fld]; ok {
+			f.line("    this.%s = null;", raw)
+		}
+	}
 	f.line("  }")
 	f.blank()
 }
