@@ -246,7 +246,7 @@ class _Scalars__Visitor implements Visitor {
  * result equals a fresh decode -- a field the new message omits reads its
  * default, never the value the destination held before. On a rejected input
  * the destination holds the fields decoded before the error, never an older
- * message's.
+ * message's; the field being decoded at the error may be partly filled.
  */
 export class Scalars__Decoder {
   private readonly out: Scalars;

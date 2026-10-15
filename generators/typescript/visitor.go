@@ -1536,7 +1536,7 @@ func (g *gen) emitDecoderClass(f *tsfile, name, raw string) {
 	f.line(" * result equals a fresh decode -- a field the new message omits reads its")
 	f.line(" * default, never the value the destination held before. On a rejected input")
 	f.line(" * the destination holds the fields decoded before the error, never an older")
-	f.line(" * message's.")
+	f.line(" * message's; the field being decoded at the error may be partly filled.")
 	f.line(" */")
 	f.line("export class %s {", decoderName(raw))
 	f.line("  private readonly out: %s;", name)
