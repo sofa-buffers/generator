@@ -1,0 +1,213 @@
+# The named leaf kinds -- `enum` and `bitfield` -- in every position and at
+# every width a backend treats differently, in one file the golden gate pins
+# (tests/matrix/golden_test.go, `TestGoldenOutput`) as well as every suite
+# building and round-tripping it as part of the corpus.
+#
+# The golden gate pinned only scalars.yaml, which declares neither kind, so a
+# change to the emitted enum/bitfield shape -- holder classes, annotations,
+# defaults, the declared-width guard -- regenerated with no diff at all
+# (generator#767). This file is that missing snapshot. It is arranged by what a
+# backend varies on, one message per axis:
+#
+#   Widths     -- the declared width (MESSAGE_SPEC §1): an enum is bound by the
+#                 smallest SIGNED type holding its constants (i8/i16/i32), a
+#                 bitfield by the smallest UNSIGNED type holding its highest pos
+#                 (u8/u16/u32/u64). Each width appears at both of its edges, so
+#                 the guard and the carrier type are pinned at the boundary that
+#                 picks them.
+#   Positions  -- where the kind is bound: a scalar field, a field with a
+#                 default, a deprecated and a described field, an array element
+#                 with and without a default, a matrix row and a depth-3 row, a
+#                 struct member (of a $defs and of an inline struct, and one
+#                 struct deeper), a struct-array element's member, a union
+#                 option (as the default option and not, in split variants, and
+#                 as an array option), and a union inside an array -- each for a
+#                 $defs and an inline type.
+#
+# TestGoldenSetsCoverNamedKinds reads this file's IR and fails when one of
+# these cases drops out.
+#   Names      -- a field named like the type it carries, an inline type whose
+#                 path folds like a $defs type's name (generator#624), and
+#                 constant / flag names spelled like keywords.
+#
+# Everything here is bounded, so the fixed-storage targets (c, cpp with
+# corelib: c-cpp, rust with corelib: rs-no-std) generate it too.
+#
+# Not reached here: the `emit: project` harness (tests/matrix/names_test.go and
+# the conformance suites build that), and a cross-file $ref (cross_file.yaml).
+version: 1
+$defs:
+  enum:
+    # i8, at both edges.
+    Tiny: { MIN: -128, ZERO: 0, MAX: 127 }
+    # i16, one past i8 on each side. No 0 constant, so every scalar field of it
+    # must name a default (MESSAGE_SPEC §1).
+    Short: { BELOW: -129, ABOVE: 128 }
+    # i32, at both edges: the widest width an enum can declare.
+    Wide: { MIN: -2147483648, ZERO: 0, MAX: 2147483647 }
+    # Only positive constants, and still a SIGNED width (i8): the wire type of an
+    # enum never follows the sign of its constants. Gaps (2..8 undeclared), an
+    # alias (two names for 9), and both constant spellings, one described.
+    Level:
+      LOW: 1
+      HIGH: { value: 9, description: "the top level" }
+      ALSO_HIGH: 9
+    # A $defs enum whose name a field below carries (Names.mode).
+    mode: { off: 0, on: 1 }
+    # Folds like the inline enum of Names.kind (path Names > kind).
+    NamesKind: { X: 0, Y: 1 }
+    # Constant names spelled like keywords and like the members a target's own
+    # enum machinery has (`name`/`value`, `values`/`entries`/`ordinal`, `None`).
+    # Most targets re-case a constant (VALUE, Value), which is what keeps them
+    # apart; a target keeping the spelling (Dart) has to escape them.
+    Word: { value: 0, name: 1, values: 2, class: 3, default: 4, None: 5, self: 6, entries: 7, ordinal: 8 }
+  bitfield:
+    # u8, at its upper edge. B0 carries the flag metadata every backend
+    # documents: a description and an EXPLICIT `default: false`, which is not
+    # the same declaration as no default at all.
+    Bits8:
+      B0: { pos: 0, default: false, description: "the lowest flag" }
+      B7: { pos: 7 }
+    # u16, at both edges, with no flag below it: the first flag a mask has is
+    # not bit 0.
+    Bits16: { B8: { pos: 8 }, B15: { pos: 15 } }
+    # u32, at both edges.
+    Bits32: { B0: { pos: 0 }, B16: { pos: 16 }, B31: { pos: 31 } }
+    # u64, at both edges: the only width whose guard is dead code, and the one
+    # whose top bit no signed 64-bit carrier holds as a positive value.
+    Bits64: { B0: { pos: 0 }, B32: { pos: 32 }, B63: { pos: 63 } }
+    # Declares no flag at all: still a u8 width.
+    Nothing: {}
+    # Every flag defaulted on, at three widths' tops: the field-level default
+    # is the mask 0x8000_0000_8000_0001.
+    AllOn:
+      LOW: { pos: 0, default: true }
+      MID: { pos: 31, default: true }
+      TOP: { pos: 63, default: true }
+    # Flag names spelled like keywords and like a flag set's own members.
+    Opts: { none: { pos: 0 }, all: { pos: 1 }, bits: { pos: 2 }, raw: { pos: 3 }, value: { pos: 4 }, class: { pos: 5 } }
+  struct:
+    Holder:
+      level: { id: 0, type: enum, enum: { $ref: '#/$defs/enum/Level' }, default: 9 }
+      wide:  { id: 1, type: bitfield, bits: { $ref: '#/$defs/bitfield/Bits64' } }
+      # inline types inside a $defs struct: path Holder > sign / perm
+      sign:  { id: 2, type: enum, enum: { NEG: -1, POS: 1 }, default: -1 }
+      perm:  { id: 3, type: bitfield, bits: { r: { pos: 0 }, x: { pos: 9, default: true } } }
+    # one struct level deeper: struct > struct > enum/bitfield
+    Outer:
+      holder: { id: 0, type: struct, fields: { $ref: '#/$defs/struct/Holder' } }
+      tag:    { id: 1, type: enum, enum: { $ref: '#/$defs/enum/Short' }, default: 128 }
+  union:
+    # Used at three sites with three default_ids (an enum option with a
+    # negative default, an inline enum option, a bitfield option), so analysis
+    # splits it into one type per default.
+    Choice:
+      tiny:  { id: 0, type: enum, enum: { $ref: '#/$defs/enum/Tiny' }, default: -128 }
+      short: { id: 1, type: enum, enum: { $ref: '#/$defs/enum/Short' }, default: 128 }
+      bits:  { id: 2, type: bitfield, bits: { $ref: '#/$defs/bitfield/AllOn' } }
+      pick:  { id: 3, type: enum, enum: { P: 5, Q: 6 }, default: 6 }
+      flags: { id: 4, type: bitfield, bits: { r: { pos: 0 }, w: { pos: 40, default: true } } }
+      num:   { id: 5, type: u8 }
+      # arrays of both kinds as an option: bound through another path than a
+      # field's array (a view over the option's storage on some targets)
+      e_arr: { id: 6, type: array, items: { type: enum, count: 2, enum: { $ref: '#/$defs/enum/Tiny' } } }
+      b_arr: { id: 7, type: array, items: { type: bitfield, count: 2, bits: { $ref: '#/$defs/bitfield/Bits64' } } }
+messages:
+  Widths:
+    payload:
+      # enum: every width at both edges, from a $defs type
+      tiny:     { id: 0,  type: enum, enum: { $ref: '#/$defs/enum/Tiny' } }
+      tiny_min: { id: 1,  type: enum, enum: { $ref: '#/$defs/enum/Tiny' }, default: -128 }
+      tiny_max: { id: 2,  type: enum, enum: { $ref: '#/$defs/enum/Tiny' }, default: 127 }
+      short_lo: { id: 3,  type: enum, enum: { $ref: '#/$defs/enum/Short' }, default: -129 }
+      short_hi: { id: 4,  type: enum, enum: { $ref: '#/$defs/enum/Short' }, default: 128 }
+      wide_min: { id: 5,  type: enum, enum: { $ref: '#/$defs/enum/Wide' }, default: -2147483648 }
+      wide_max: { id: 6,  type: enum, enum: { $ref: '#/$defs/enum/Wide' }, default: 2147483647 }
+      level:    { id: 7,  type: enum, enum: { $ref: '#/$defs/enum/Level' }, default: 1 }
+      level_hi: { id: 8,  type: enum, enum: { $ref: '#/$defs/enum/Level' }, default: 9 }
+      # enum: the same widths inline
+      in_i8:    { id: 9,  type: enum, enum: { N: -1, P: 1 }, default: -1 }
+      in_i16:   { id: 10, type: enum, enum: { N: -32768, P: 32767 }, default: -32768 }
+      in_i32:   { id: 11, type: enum, enum: { N: -2147483648, P: 2147483647 }, default: 2147483647 }
+      # i32 picked by one past i16 on each side
+      past_i16: { id: 23, type: enum, enum: { LOW: -32769, HIGH: 32768 }, default: 32768 }
+      # bitfield: every width, from a $defs type
+      b8:       { id: 12, type: bitfield, bits: { $ref: '#/$defs/bitfield/Bits8' } }
+      b16:      { id: 13, type: bitfield, bits: { $ref: '#/$defs/bitfield/Bits16' } }
+      b32:      { id: 14, type: bitfield, bits: { $ref: '#/$defs/bitfield/Bits32' } }
+      b64:      { id: 15, type: bitfield, bits: { $ref: '#/$defs/bitfield/Bits64' } }
+      nothing:  { id: 16, type: bitfield, bits: { $ref: '#/$defs/bitfield/Nothing' } }
+      all_on:   { id: 17, type: bitfield, bits: { $ref: '#/$defs/bitfield/AllOn' } }
+      # bitfield: each width's lower edge inline, defaulted at that bit
+      in_u8:    { id: 18, type: bitfield, bits: { b: { pos: 7, default: true } } }
+      in_u16:   { id: 19, type: bitfield, bits: { b: { pos: 8, default: true } } }
+      in_u32:   { id: 20, type: bitfield, bits: { b: { pos: 16, default: true } } }
+      in_u64:   { id: 21, type: bitfield, bits: { b: { pos: 32, default: true } } }
+      in_none:  { id: 22, type: bitfield, bits: {} }
+  Positions:
+    payload:
+      # scalar, default, deprecated -- $defs and inline
+      e:         { id: 0,  type: enum, enum: { $ref: '#/$defs/enum/Wide' } }
+      e_dflt:    { id: 1,  type: enum, enum: { $ref: '#/$defs/enum/Wide' }, default: -2147483648 }
+      e_old:     { id: 2,  type: enum, enum: { $ref: '#/$defs/enum/Tiny' }, default: 127, deprecated: true, description: "replaced by e" }
+      e_in_old:  { id: 3,  type: enum, enum: { A: 0, B: -5 }, default: -5, deprecated: true }
+      e_doc:     { id: 26, type: enum, enum: { $ref: '#/$defs/enum/Level' }, default: 1, description: "described, not deprecated" }
+      b_doc:     { id: 27, type: bitfield, bits: { $ref: '#/$defs/bitfield/Bits8' }, description: "described, not deprecated" }
+      b:         { id: 4,  type: bitfield, bits: { $ref: '#/$defs/bitfield/Bits32' } }
+      b_old:     { id: 5,  type: bitfield, bits: { $ref: '#/$defs/bitfield/AllOn' }, deprecated: true, description: "replaced by b" }
+      b_in_old:  { id: 6,  type: bitfield, bits: { k: { pos: 12, default: true } }, deprecated: true }
+      # array elements: with a default (shorter than count, every edge) and
+      # without one -- including an enum with no 0 constant, whose undefaulted
+      # element still starts at 0
+      ea_dflt:   { id: 7,  type: array, items: { type: enum, count: 4, enum: { $ref: '#/$defs/enum/Tiny' } }, default: [-128, 127, 0] }
+      ea_wide:   { id: 8,  type: array, items: { type: enum, count: 2, enum: { $ref: '#/$defs/enum/Wide' } }, default: [-2147483648, 2147483647] }
+      ea_short:  { id: 9,  type: array, items: { type: enum, count: 3, enum: { $ref: '#/$defs/enum/Short' } } }
+      ea_in:     { id: 10, type: array, items: { type: enum, count: 3, enum: { L: -300, H: 300 } }, default: [300] }
+      ba_dflt:   { id: 11, type: array, items: { type: bitfield, count: 4, bits: { $ref: '#/$defs/bitfield/Bits64' } }, default: [0, 1, 4294967296, 9223372036854775808] }
+      ba_16:     { id: 12, type: array, items: { type: bitfield, count: 3, bits: { $ref: '#/$defs/bitfield/Bits16' } }, default: [256, 32768, 33024] }
+      ba_none:   { id: 13, type: array, items: { type: bitfield, count: 2, bits: { $ref: '#/$defs/bitfield/Nothing' } } }
+      ba_in:     { id: 14, type: array, items: { type: bitfield, count: 2, bits: { lo: { pos: 1 }, hi: { pos: 20 } } }, default: [1048578] }
+      # rows: a matrix of each kind, and an inline enum three levels down
+      e_rows:    { id: 15, type: array, items: { type: array, count: 2, items: { type: enum, count: 2, enum: { $ref: '#/$defs/enum/Short' } } } }
+      b_rows:    { id: 16, type: array, items: { type: array, count: 2, items: { type: bitfield, count: 2, bits: { $ref: '#/$defs/bitfield/Bits64' } } } }
+      e_cube:    { id: 17, type: array, items: { type: array, count: 2, items: { type: array, count: 2, items: { type: enum, count: 2, enum: { U: -1, V: 1 } } } } }
+      b_cube:    { id: 28, type: array, items: { type: array, count: 2, items: { type: array, count: 2, items: { type: bitfield, count: 2, bits: { lo: { pos: 0 }, hi: { pos: 9 } } } } } }
+      # struct members: a $defs struct (with inline types inside), an inline
+      # struct carrying both kinds inline, and a struct-array element's member
+      holder:    { id: 18, type: struct, fields: { $ref: '#/$defs/struct/Holder' } }
+      inline_s:
+        id: 19
+        type: struct
+        fields:
+          tone: { id: 0, type: enum, enum: { DARK: -2, LIGHT: 2 }, default: 2 }
+          caps: { id: 1, type: bitfield, bits: { up: { pos: 15, default: true } } }
+      holders:   { id: 20, type: array, items: { type: struct, count: 2, fields: { $ref: '#/$defs/struct/Holder' } } }
+      outer:     { id: 29, type: struct, fields: { $ref: '#/$defs/struct/Outer' } }
+      # union options: the default option is a $defs enum, an inline enum and a
+      # bitfield in turn (three split variants of Choice)
+      u_tiny:    { id: 21, type: union, default_id: 0, oneof: { $ref: '#/$defs/union/Choice' } }
+      u_pick:    { id: 22, type: union, default_id: 3, oneof: { $ref: '#/$defs/union/Choice' } }
+      u_flags:   { id: 23, type: union, default_id: 4, oneof: { $ref: '#/$defs/union/Choice' } }
+      # an inline union whose options are inline kinds
+      u_inline:
+        id: 24
+        type: union
+        default_id: 1
+        oneof:
+          lvl: { id: 0, type: enum, enum: { $ref: '#/$defs/enum/Level' }, default: 1 }
+          inb: { id: 1, type: bitfield, bits: { t: { pos: 63, default: true } } }
+          ine: { id: 2, type: enum, enum: { M: -7, N: 7 }, default: 7 }
+      # a union inside an array, its default option an enum, then a bitfield
+      u_list:    { id: 25, type: array, items: { type: union, count: 2, default_id: 1, oneof: { $ref: '#/$defs/union/Choice' } } }
+      u_blist:   { id: 30, type: array, items: { type: union, count: 2, default_id: 4, oneof: { $ref: '#/$defs/union/Choice' } } }
+  Names:
+    payload:
+      # a field named exactly like the $defs type it carries
+      mode:  { id: 0, type: enum, enum: { $ref: '#/$defs/enum/mode' } }
+      # path Names > kind folds like the $defs enum NamesKind
+      kind:  { id: 1, type: enum, enum: { A: 0, B: 1 } }
+      names_kind: { id: 2, type: enum, enum: { $ref: '#/$defs/enum/NamesKind' } }
+      # reserved constant and flag names
+      word:  { id: 3, type: enum, enum: { $ref: '#/$defs/enum/Word' }, default: 4 }
+      opts:  { id: 4, type: bitfield, bits: { $ref: '#/$defs/bitfield/Opts' } }
+      words: { id: 5, type: array, items: { type: enum, count: 2, enum: { $ref: '#/$defs/enum/Word' } }, default: [1, 2] }

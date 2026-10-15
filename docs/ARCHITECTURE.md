@@ -7722,9 +7722,32 @@ A reimplementation is **conformant** when it reproduces these gates:
    without `--max-id`; SMALL runs the skip matrix and the corpus round trip (the
    typed/encode vectors hold a `composite` message larger than SMALL's 255-byte
    ceiling, and the drivers refuse a run without it rather than drop it).
-5. **Golden reproducibility** — regenerate a fixed def for every backend and
-   byte-diff against committed goldens (`tests/matrix/testdata/golden/`); plus a
-   frozen IR golden. The goldens are `Generate` output, and a plain `sofabgen`
+5. **Golden reproducibility** — regenerate fixed defs for every backend and
+   byte-diff against committed goldens; plus a frozen IR golden. Two sets are
+   pinned (`goldenSets` in `tests/matrix/golden_test.go`): `scalars.yaml` under
+   `tests/matrix/testdata/golden/`, and `named_kinds.yaml` under
+   `testdata/golden_named_kinds/` — `enum` and `bitfield` at both edges of every
+   declared width, in every position a backend binds them at, which no snapshot
+   reached before (generator#767: three changes to that output "left the goldens
+   unchanged"). The second set also pins each config switch that changes the
+   emitted enum/bitfield shape — cpp and rust on their footprint corelib
+   (`c-cpp`, `rs-no-std`) and with `allow_dynamic` flipped on both corelibs —
+   in its own `<lang>-<variant>` directory, and a variant whose output equals
+   its backend's default run fails the gate, since it would pin nothing. A
+   golden file that is no longer generated, and a directory no pinned run owns,
+   fail the gate as a drifted file does; `-update` rewrites each run's
+   directory whole and removes the unowned ones. `TestGoldenSetsCoverNamedKinds`
+   reads the pinned schemas' IR and fails when a case drops out: both edges of
+   every declared width (and one past each narrower width), each position —
+   field, defaulted/deprecated/described field, array element with and without
+   a default, depth-2 and depth-3 row, struct, nested-struct and
+   struct-array-element member, default and other union option, split union,
+   union array option, union inside an array — for both kinds, a $defs and an
+   inline declaration of each, and the declaration shapes with a branch of
+   their own (alias constant, no 0 constant, described constant, flag-less
+   bitfield, flag defaulted on, explicit `default: false`, described flag). A
+   backend change that adds a switch-dependent enum/bitfield path adds its
+   variant to the set. The goldens are `Generate` output, and a plain `sofabgen`
    run reproduces them byte for byte — that is what `--format` defaulting to
    `off` buys (gate 10). They are refreshed through the test itself — `go test
    ./tests/matrix -run TestGoldenOutput -update` — because a run with
