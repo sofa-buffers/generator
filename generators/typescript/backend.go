@@ -787,8 +787,9 @@ func (g *gen) emitIsDefault(f *tsfile, fields []*ir.Field) {
 // The body is the field list and its defaults -- the same initialisers the class
 // body declares -- so it is per-schema code. A nested struct is reset in place,
 // as decode fills it in place; a union goes back to its default option through
-// its own clear(). Every other field takes a fresh default value, exactly as the
-// constructor builds it: nothing is kept or reused.
+// its own clear(). Every other field takes its default value exactly as the
+// constructor builds it (an empty native array is the module's shared _E_<Type>):
+// nothing is kept or reused.
 func (g *gen) emitReset(f *tsfile, name string, fields []*ir.Field) {
 	f.line("  /** Every field back to its declared default, as a fresh `new %s()` holds it. */", name)
 	f.line("  reset(): void {")

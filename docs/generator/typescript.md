@@ -334,18 +334,22 @@ d.feed(bytes);
 d.finish();                     // msg now equals M.decode(bytes)
 ```
 
-A field that equals its default is not on the wire, so a decoder cannot tell
-"left out" from "not sent yet". That is why the constructor first resets the
-message you hand it: afterwards it holds exactly what a fresh decode of the same
-bytes would, and a field the new message leaves out reads its default, never the
-value the message held before. If the input is rejected, the message holds the
-fields decoded before the error and the defaults for the rest.
+A field that equals its default is not on the wire, so decoding never touches
+it. That is why the constructor first resets the message you hand it:
+afterwards it holds exactly what a fresh decode of the same bytes would, and a
+field the new message leaves out reads its default, never the value the message
+held before. If the input is rejected, the message holds the fields decoded
+before the error, the field being decoded when it was rejected may be partly
+filled, and every other field holds its default — never a value of the message
+it held before.
 
 `reset()` is public on every message and struct class, and puts every field
 back to its declared default — what `new M()` holds. A nested struct is reset in
-place; a union goes back to its `default_id` option through its own `clear()`;
-every other field is assigned a new default value, so an array or blob the
-message held before is let go, not cleared.
+place, so a reference you kept to it sees the next message; a union goes back to
+its `default_id` option through its own `clear()`; every other field is assigned
+its default value as `new M()` builds it, so an array or blob the message held
+before is let go, not cleared, and a reference you kept to it still holds the
+old value.
 
 ## Formatting
 

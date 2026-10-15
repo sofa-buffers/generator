@@ -42,10 +42,13 @@ differs from its default, so it shows up as bytes the input never carried.
 
 One message, `reuse`, with a field of each shape a reset has to put back: a
 scalar with a non-zero default, a 64-bit integer, a boolean defaulting to true,
-an fp32 (whose NaN bytes some targets keep beside the value), a string with a
-default, a blob without and one with a default, a native array with a default and
-an fp32 array, a string array, a struct, a union and an array of structs. Every
-array and string is bounded, so the statically sized profiles build it too.
+an fp32 (held as a signaling NaN with payload bits, whose wire word some targets
+keep beside the value), a string with a default, a blob without and one with a
+default, a native array with a default and an fp32 array, a string array, a
+struct, a union whose default option is a struct, an array of structs, a
+deprecated field with a default, a struct nested in a struct, a matrix, an array
+of unions, an enum and a bitfield with a flag above bit 31. Every array and
+string is bounded, so the statically sized profiles build it too.
 
 ## The rows
 
@@ -53,6 +56,10 @@ array and string is bounded, so the statically sized profiles build it too.
     full_to_sparse   FULL held, SPARSE decoded into it: absent scalars, string and
                      blobs, shorter arrays, a struct with one field absent, the
                      union on a different option
+    union_default_to_defaults
+                     the union held on its default option at a non-default value,
+                     a message without the union decoded into it: the option's
+                     value back to its default
     full_to_defaults FULL held, a message with ONE field decoded into it: every
                      other field back to its default, the union to its default
                      option
@@ -79,7 +86,7 @@ SUB_FP32, SUB_STRING, SUB_BLOB = 0, 2, 3       # fixlen subtypes (§4.6)
 FIXLEN_FP32 = 0x20                             # fixlen word of an fp32 array (§4.8)
 
 # Field ids of `reuse`.
-N, I, OK, F, S, B, BD, A, FA, SA, ST, U, RA = range(13)
+N, I, OK, F, S, B, BD, A, FA, SA, ST, U, RA, OLD, NS, MX, UA, E, BF = range(19)
 # An id the schema does not declare, for the refused field.
 UNKNOWN = 31
 
@@ -114,6 +121,31 @@ SCHEMA = f"""\
           q: {{ id: 1, type: string, maxlen: 8 }}
           r: {{ id: 2, type: struct, fields: {{ y: {{ id: 0, type: u8 }} }} }}
       ra: {{ id: {RA}, type: array, items: {{ type: struct, count: 4, fields: {{ z: {{ id: 0, type: u8 }} }} }} }}
+      old: {{ id: {OLD}, type: u32, default: 9, deprecated: true }}
+      ns:
+        id: {NS}
+        type: struct
+        fields:
+          w: {{ id: 0, type: u8, default: 4 }}
+          in:
+            id: 1
+            type: struct
+            fields:
+              v: {{ id: 0, type: string, maxlen: 8, default: "iv" }}
+              k: {{ id: 1, type: u16 }}
+      mx: {{ id: {MX}, type: array, items: {{ type: array, count: 3, items: {{ type: u8, count: 4 }} }} }}
+      ua:
+        id: {UA}
+        type: array
+        items:
+          type: union
+          count: 3
+          default_id: 0
+          oneof:
+            m: {{ id: 0, type: i32 }}
+            t: {{ id: 1, type: string, maxlen: 4 }}
+      e:  {{ id: {E}, type: enum, enum: {{ A: 0, B: 1, C: 2 }}, default: 1 }}
+      bf: {{ id: {BF}, type: bitfield, bits: {{ X: {{ pos: 0, default: true }}, Y: {{ pos: 1 }}, H: {{ pos: 40 }} }} }}
 """
 
 
@@ -162,6 +194,11 @@ def fp32(fid: int, x: float) -> bytes:
     return fixlen(fid, SUB_FP32, struct.pack("<f", x))
 
 
+# A signaling fp32 NaN with payload bits (0x7fa00001: quiet bit clear), which a
+# double-only target can only re-encode from the wire word it kept (§4.6).
+SNAN32 = bytes.fromhex("0100a07f")
+
+
 def uarray(fid: int, values) -> bytes:
     return header(fid, WT_ARR_U) + varint(len(values)) + b"".join(varint(v) for v in values)
 
@@ -180,7 +217,7 @@ FULL = b"".join([
     unsigned(N, 77),
     signed(I, -1234567890123),
     unsigned(OK, 0),
-    fp32(F, 1.5),
+    fixlen(F, SUB_FP32, SNAN32),
     string(S, "full"),
     blob(B, b"\x09\x08\x07"),
     blob(BD, b"\x05"),
@@ -190,10 +227,17 @@ FULL = b"".join([
     seq(ST, signed(0, 42), string(1, "in")),
     seq(U, seq(2, unsigned(0, 9))),
     seq(RA, seq(0, unsigned(0, 1)), seq(1, unsigned(0, 2)), seq(2, unsigned(0, 3))),
+    unsigned(OLD, 99),
+    seq(NS, unsigned(0, 8), seq(1, string(0, "deep"), unsigned(1, 300))),
+    seq(MX, uarray(0, [1, 2, 3]), uarray(1, [4]), uarray(2, [5, 6])),
+    seq(UA, seq(0, signed(0, -7)), seq(1, string(1, "ut")), seq(2, signed(0, 8))),
+    signed(E, 2),
+    unsigned(BF, (1 << 40) | 2),
 ])
 
-# Scalars, string and blobs absent; every array shorter; the struct with x
-# absent; the union on another option (held, so written: §4.2).
+# Scalars, string, blobs, enum and bitfield absent; every array shorter; the
+# struct with x absent and the nested struct with only its inner `k`; the union
+# on another option (held, so written: §4.2).
 SPARSE = b"".join([
     uarray(A, [3]),
     f32array(FA, [4.0]),
@@ -201,6 +245,17 @@ SPARSE = b"".join([
     seq(ST, string(1, "sp")),
     seq(U, string(1, "q")),
     seq(RA, seq(0, unsigned(0, 5))),
+    seq(NS, seq(1, unsigned(1, 3))),
+    seq(MX, uarray(0, [7])),
+    seq(UA, seq(0, string(1, "v"))),
+])
+
+# The union on its DEFAULT option at a non-default value (written, §4.2): a
+# reset that put the union back on that option but kept its old value would
+# still differ from a fresh decode of a message that omits the union.
+HELD_DEFAULT_OPTION = b"".join([
+    unsigned(N, 77),
+    seq(U, unsigned(0, 42)),
 ])
 
 # One field; everything else, the union included, at its default.
@@ -212,12 +267,14 @@ EMPTY = b""
 # 64-bit bound (§4.1): INVALID, and only after every SPARSE field was applied.
 REJECTED = SPARSE + header(UNKNOWN, WT_UNSIGNED) + b"\xff" * 10 + b"\x01"
 
-IMAGES = (("full", FULL), ("sparse", SPARSE), ("defaults", DEFAULTS))
+IMAGES = (("full", FULL), ("sparse", SPARSE), ("defaults", DEFAULTS),
+          ("held_default_option", HELD_DEFAULT_OPTION))
 
 # row, held, decoded into it, expected re-encode, expected exit code
 ROWS = (
     ("full_to_sparse", FULL, SPARSE, SPARSE, 0),
     ("full_to_defaults", FULL, DEFAULTS, DEFAULTS, 0),
+    ("union_default_to_defaults", HELD_DEFAULT_OPTION, DEFAULTS, DEFAULTS, 0),
     ("full_to_empty", FULL, EMPTY, EMPTY, 0),
     ("full_to_rejected", FULL, REJECTED, SPARSE, 1),
     ("sparse_to_full", SPARSE, FULL, FULL, 0),
