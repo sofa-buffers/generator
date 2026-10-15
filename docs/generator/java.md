@@ -1,8 +1,8 @@
 # Java target — `targets.java`
 
 Emits one class per message and named type, against `corelib-java`. Java allows
-a single public top-level class per file, so every named struct and union gets
-its own alongside the message.
+a single public top-level class per file, so every named struct, union, enum
+and bitfield gets its own alongside the message.
 
 ## Options
 
@@ -63,8 +63,11 @@ path joined with `_`:
 | inline struct element of array field `pts` in message `m` | `M_Pts` | `M_Pts.java` |
 | inline struct option `pt` of union field `u` in message `m` | `M_U_Pt` | `M_U_Pt.java` |
 | `$defs` union `shape` used with `default_id` of option `pt` | `Shape__DefaultPt` | `Shape__DefaultPt.java` |
+| `$defs` enum or bitfield `level` | `Level` | `Level.java` |
+| inline enum or bitfield of field `mode` in message `m` | `M_Mode` | `M_Mode.java` |
 
-Enums and bitfields lower to `long` and have no class.
+An enum's or bitfield's class holds its constants; the field itself is a
+`long` (see [Enums and bitfields](#enums-and-bitfields)).
 
 A class whose name the generated code already uses for something else gets a
 trailing underscore — a message `string` is the class `String_` in
@@ -95,6 +98,62 @@ In `emit: project` the harness (`Json`, `Main`) is the subpackage
 `<package>.harness` — `src/main/java/<package>/harness/` — so a message `json`
 or `main` is an ordinary class of the generated package. The jar's main class is
 `<package>.harness.Main`.
+
+## Enums and bitfields
+
+An enum or bitfield field is a `long`, not a Java `enum`: the field must also
+hold a value that is inside the declared width but names no constant — it
+decodes, is kept as received and re-encodes unchanged — and a bitfield field
+must keep bits that no flag declares. A Java `enum` can hold neither.
+
+The names the schema gives the values are constants in a class of their own,
+one per enum and bitfield type, named like any other class
+([Class names](#class-names)):
+
+```yaml
+$defs:
+  enum:
+    level: { LOW: -3, OFF: 0, ON: 1, MAX: 127 }
+  bitfield:
+    perm: { R: { pos: 0 }, W: { pos: 1 }, X: { pos: 3 } }
+```
+
+```java
+public final class Level {
+    private Level() {}
+    public static final long LOW = -3L;
+    public static final long OFF = 0L;
+    public static final long ON = 1L;
+    public static final long MAX = 127L;
+}
+
+public final class Perm {
+    private Perm() {}
+    public static final long R = 1L << 0;
+    public static final long W = 1L << 1;
+    public static final long X = 1L << 3;
+}
+```
+
+An enum constant is the value; a bitfield constant is its flag's mask, so the
+schema reads straight through:
+
+```java
+m.level = Level.MAX;
+if (m.level == Level.OFF) { ... }
+m.perm |= Perm.W;
+if ((m.perm & Perm.X) != 0) { ... }
+```
+
+Each constant carries the schema's `description` as its javadoc, a flag also
+its `default`, and the field's javadoc links its class with `@see`. The
+constants are compile-time constants, so they work as `switch` labels.
+
+A constant whose name is a Java keyword gets a trailing underscore — an enum
+value `default` is the constant `default_`. An array of enums or bitfields
+uses the same class; its elements may be stored narrower than `long` (a
+`byte[]` for an enum whose values fit 8 bits), so assigning a constant to an
+element takes a cast: `m.levels[0] = (byte) Level.MAX`.
 
 ## Errors
 

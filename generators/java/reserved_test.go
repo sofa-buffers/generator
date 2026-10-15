@@ -255,7 +255,19 @@ func TestJavaNamesInScope(t *testing.T) {
 			pkgFiles[f.Path] = string(f.Content)
 		}
 		checkTypeNames(t, filepath.Base(def), s, pkgFiles, used)
+		// An enum/bitfield holder declares no field a schema field could meet:
+		// its statics are the schema's own constants (emitEnumHolder), and it has
+		// a class of its own.
+		holders := map[string]bool{}
+		for _, nt := range s.Named {
+			if nt.Category == ir.CatEnum || nt.Category == ir.CatBitfield {
+				holders["src/main/java/message/"+typeIdent(nt)+".java"] = true
+			}
+		}
 		for path, content := range pkgFiles {
+			if holders[path] {
+				continue
+			}
 			f := struct{ Path string }{path}
 			body := publicClassBody(content)
 			for _, m := range staticRe.FindAllStringSubmatch(body, -1) {
@@ -344,6 +356,13 @@ func checkTypeNames(t *testing.T, def string, s *ir.Schema, files map[string]str
 	}
 	for _, nt := range s.Named {
 		addFields(nt.Fields)
+		// A holder's constants are schema names too, not type names.
+		for _, c := range nt.Consts {
+			fieldNames[javaConstIdent(c.Name)] = true
+		}
+		for _, fl := range nt.Flags {
+			fieldNames[javaConstIdent(fl.Name)] = true
+		}
 	}
 	generated := map[string]bool{}
 	bodies := map[string]string{}

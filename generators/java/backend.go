@@ -179,6 +179,16 @@ func fieldDoc(fld *ir.Field, note string) string {
 	// The schema bound belongs with the description, ahead of the @deprecated
 	// tag: Javadoc block tags have to come last (generator#308).
 	d = generator.AppendDoc(d, note)
+	// An enum/bitfield field is a bare long; @see leads from it to the holder
+	// class that names its values. A block tag, so it goes after the text and
+	// ahead of @deprecated (the javadoc tag order).
+	if h := constHolder(fld); h != "" {
+		if d == "" {
+			d = "@see " + h
+		} else {
+			d += "\n\n@see " + h
+		}
+	}
 	if fld.Deprecated {
 		const tag = "@deprecated This field is deprecated and may be removed in a future version."
 		if d == "" {
@@ -190,9 +200,9 @@ func fieldDoc(fld *ir.Field, note string) string {
 	return d
 }
 
-// namedTypes lists every struct/union the schema's messages reach, deduplicated
-// and in a stable order: each message's reachable set in message order, which
-// keeps a type ahead of whatever refers to it.
+// namedTypes lists every struct/union/enum/bitfield the schema's messages
+// reach, deduplicated and in a stable order: each message's reachable set in
+// message order, which keeps a type ahead of whatever refers to it.
 //
 // Deduplication is the point. A type reached from two messages is ONE class in
 // the package; emitting it into each message's file declared it twice and the
@@ -202,10 +212,6 @@ func (g *gen) namedTypes() []string {
 	seen := map[string]bool{}
 	for _, m := range g.schema.Messages {
 		for _, key := range g.reachable(m) {
-			nt := g.schema.Named[key]
-			if nt.Category != ir.CatStruct && nt.Category != ir.CatUnion {
-				continue // enum/bitfield lower to a raw integer: no class to emit
-			}
 			if !seen[key] {
 				seen[key] = true
 				order = append(order, key)
@@ -215,7 +221,8 @@ func (g *gen) namedTypes() []string {
 	return order
 }
 
-// namedTypeFile emits <Type>.java: one public class for a schema struct/union.
+// namedTypeFile emits <Type>.java: one public class for a schema struct/union,
+// or the constant holder of an enum/bitfield (emitEnumHolder).
 //
 // It is public because a caller outside the generated package has to be able to
 // touch it — a message's struct-typed field is a public member, and a type the
@@ -226,6 +233,16 @@ func (g *gen) namedTypeFile(key string, nt *ir.NamedType) []byte {
 	f := &jfile{}
 	g.header(f)
 	f.line("package %s;", g.pkg)
+	switch nt.Category {
+	case ir.CatEnum:
+		f.blank()
+		emitEnumHolder(f, nt)
+		return f.bytes()
+	case ir.CatBitfield:
+		f.blank()
+		emitBitfieldHolder(f, nt)
+		return f.bytes()
+	}
 	f.line("import org.sofabuffers.sofab.*;")
 	f.line("import java.io.IOException;")
 	f.line("import java.util.*;")
