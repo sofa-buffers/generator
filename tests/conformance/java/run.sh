@@ -154,6 +154,17 @@ java -cp "$WORK/ex/target/harness.jar" message.OwnershipCheck \
     || { echo "FAIL: a decoded field aliased the buffer it was decoded from"; exit 1; }
 echo "==> decode ownership OK"
 
+# An enum/bitfield field is a long with its schema's names as constants beside
+# it, one holder class per type (MESSAGE_SPEC §1). Nothing in the generated code
+# uses a holder, so only a user-side program shows the names exist, compile as
+# constants, and leave an unnamed in-width value and an undeclared bit intact.
+# Same project, same strict build as OwnershipCheck above.
+echo "==> enum/bitfield named constants (MESSAGE_SPEC §1)"
+cp "$ROOT/tests/conformance/java/NamedConstants.java" "$WORK/ex/src/main/java/message/"
+( cd "$WORK/ex" && mvn -q $MVN_STRICT -Dsofab.version="$VER" package )
+java -cp "$WORK/ex/target/harness.jar" message.NamedConstants \
+    || { echo "FAIL: enum/bitfield named constants"; exit 1; }
+
 # Over-count scalar array (generator#100): someuintarray declares count: 4
 # (id 15 -> header 0x7b = 15<<3 | unsigned-array). 5 wire elements MUST be
 # INVALID per MESSAGE_SPEC 3+7 (decode exits non-zero); exactly 4 still decode.
