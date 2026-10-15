@@ -190,8 +190,8 @@ func TestJavaDeterministic(t *testing.T) {
 
 // TestJavaDeprecatedField: a deprecated field carries both the native
 // @Deprecated annotation and a Javadoc @deprecated tag (with its original
-// description preserved). Java lowers enum/bitfield fields to raw long, so no
-// enum/flag symbols are emitted to annotate.
+// description preserved). An enum/bitfield field stays a raw long; its names
+// live in a holder class of long constants, not in a Java enum.
 func TestJavaDeprecatedField(t *testing.T) {
 	const src = `
 version: 1
@@ -220,12 +220,21 @@ messages:
 			t.Errorf("Telemetry.java missing %q", want)
 		}
 	}
-	// Java lowers enum/bitfield to long: no enum/flag type or symbol is emitted.
+	// The field stays a long; the names go in a holder class, not a Java enum.
 	if strings.Contains(m, "enum Mode") || strings.Contains(m, "enum Flags") {
 		t.Error("Java must lower enum/bitfield to long, not emit enum types")
 	}
 	if !strings.Contains(m, "public long mode;") || !strings.Contains(m, "public long status") {
 		t.Error("enum/bitfield fields must be lowered to long")
+	}
+	files := genJavaFromYAML(t, src, map[string]any{"package": "messages"})
+	for name, want := range map[string]string{
+		"src/main/java/messages/Mode.java":  "    /** Powered down. */\n    public static final long Off = 0L;",
+		"src/main/java/messages/Flags.java": "    /** Initialized. (default: true) */\n    public static final long ready = 1L << 0;",
+	} {
+		if !strings.Contains(files[name], want) {
+			t.Errorf("%s missing %q:\n%s", name, want, files[name])
+		}
 	}
 }
 

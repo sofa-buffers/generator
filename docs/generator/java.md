@@ -147,10 +147,13 @@ if ((m.perm & Perm.X) != 0) { ... }
 
 Each constant carries the schema's `description` as its javadoc, a flag also
 its `default`, and the field's javadoc links its class with `@see`. The
-constants are compile-time constants, so they work as `switch` labels.
+constants are compile-time constants, but Java cannot `switch` on a `long`;
+an enum is at most 32 bits wide, so cast both sides to `int`:
+`switch ((int) m.level) { case (int) Level.MAX: ... }`.
 
-A constant whose name is a Java keyword gets a trailing underscore — an enum
-value `default` is the constant `default_`. An array of enums or bitfields
+A constant whose name is a Java keyword, a literal (`true`, `false`, `null`)
+or a restricted identifier (`var`, `record`, `yield`) gets a trailing
+underscore — an enum value `default` is the constant `default_`. An array of enums or bitfields
 uses the same class; its elements may be stored narrower than `long` (a
 `byte[]` for an enum whose values fit 8 bits), so assigning a constant to an
 element takes a cast: `m.levels[0] = (byte) Level.MAX`.

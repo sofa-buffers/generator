@@ -1104,8 +1104,8 @@ messages:
 // but the declared bit POSITIONS get named #defines beside it, the same way
 // Go emits typed consts and Kotlin emits const vals next to an equally raw
 // field. Before this, C emitted neither: a caller had to know the schema by
-// heart to set/test any bit (see docs/ARCHITECTURE.md's "C and Java lower
-// enum/bitfield fields to a raw integer and emit no named constants").
+// heart to set/test any bit. C's enum fields still emit no named constants
+// (docs/ARCHITECTURE.md §10, metadata paragraph).
 func TestCBitfieldFlagConstants(t *testing.T) {
 	files := genCFromYAML(t, `
 version: 1
