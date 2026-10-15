@@ -214,6 +214,7 @@ func (g *gen) emitClass(f *cfile, name, vis, summary string, fields []*ir.Field,
 	f.line("    }")
 
 	g.emitIsDefault(f, fields, dep)
+	g.emitReset(f, fields, dep)
 
 	if isMessage {
 		ms := g.messageSize(name, fields)
@@ -303,6 +304,29 @@ func (g *gen) emitClass(f *cfile, name, vis, summary string, fields []*ir.Field,
 		// end-of-input and decides whether truncation is an error.
 		f.line("    public static global::sofab.DecodeStatus TryDecode(byte[] data, out %s msg) {", name)
 		f.line("        msg = new %s();", name)
+		f.line("        return new global::sofab.IStream().Feed(data, 0, data.Length, new %s(msg));", vis)
+		f.line("    }")
+		// The same decode into a destination the caller owns and reuses. Reset
+		// first, so a field the bytes leave out reads as its default and nothing
+		// of the message the destination held before survives -- not even on a
+		// refusal. An overload, not a new name: TryDecode is the blessed spelling
+		// (ARCHITECTURE §6.1.1), and C# tells a by-value parameter from an `out`
+		// one, so `TryDecode(data, out var m)` still binds the overload above.
+		f.line("    /// <summary>")
+		f.line("    /// Decode into <paramref name=\"msg\"/>, a destination the caller owns and")
+		f.line("    /// may reuse: it is <see cref=\"Reset\"/> first, so a field absent from")
+		f.line("    /// <paramref name=\"data\"/> reads as its default. The verdict is the one")
+		f.line("    /// <c>TryDecode(data, out msg)</c> returns.")
+		f.line("    /// </summary>")
+		f.line("    /// <remarks>")
+		f.line("    /// On a refusal <paramref name=\"msg\"/> holds the fields decoded before the")
+		f.line("    /// error, never an older message's. An object reached through it -- a")
+		f.line("    /// nested struct, a list -- belongs to the destination: the next decode")
+		f.line("    /// into it overwrites that object, so copy what must outlive it.")
+		f.line("    /// </remarks>")
+		f.line("    /// <exception cref=\"global::sofab.SofabException\">Malformed input, as for <c>TryDecode(data, out msg)</c>.</exception>")
+		f.line("    public static global::sofab.DecodeStatus TryDecode(byte[] data, %s msg) {", name)
+		f.line("        msg.Reset();")
 		f.line("        return new global::sofab.IStream().Feed(data, 0, data.Length, new %s(msg));", vis)
 		f.line("    }")
 		// Streaming decode (PLAN §5.6). The corelib's IStream is resumable, so
@@ -435,6 +459,53 @@ func (g *gen) emitIsDefault(f *cfile, fields []*ir.Field, dep bool) {
 		f.line("#pragma warning restore 612")
 	}
 	f.line("        return true;")
+	f.line("    }")
+}
+
+// emitReset emits Reset(): every field back to the value a fresh object holds,
+// in place. It is the field initializers again, except where a decode writes
+// INTO the member rather than replacing it: a nested struct is reset and a
+// union cleared, each recursively, and a list is cleared -- keeping its capacity
+// -- and refilled from the hoisted default where the schema declares one. A
+// scalar, a string, a blob and a primitive array are assigned their initializer,
+// since a decode replaces those whole anyway. A null member (a caller may assign
+// one, and Serialize reads it as the default) is constructed as the initializer
+// does. `dep` is emitMarshal's CS0612 guard.
+//
+// The body is the schema's field list and defaults; no line of it is the same
+// for every schema (ARCHITECTURE §8).
+func (g *gen) emitReset(f *cfile, fields []*ir.Field, dep bool) {
+	f.line("    /// <summary>")
+	f.line("    /// Every field back to its schema default, in place: a nested object is reset")
+	f.line("    /// and a list cleared rather than replaced, so a reference taken from this")
+	f.line("    /// object reads the defaults too.")
+	f.line("    /// </summary>")
+	f.line("    public void Reset() {")
+	if dep {
+		f.line("#pragma warning disable 612 // internal access to a member marked [Obsolete] (CS0612)")
+	}
+	for _, fld := range fields {
+		acc := "this." + csIdent(fld.Name)
+		switch {
+		case fld.Kind == ir.KindStruct:
+			f.line("        (%s ??= new()).Reset();", acc)
+		case fld.Kind == ir.KindUnion:
+			// A union's own spelling of the same operation (union.go).
+			f.line("        (%s ??= new()).Clear();", acc)
+		case fld.Kind == ir.KindArray && !primArrayElem(fld.Elem):
+			// A List: the boolean array, or a wrapper array.
+			if _, ok := g.csArrayCompareDefault(fld); ok {
+				f.line("        (%s ??= new()).Clear(); %s.AddRange(%s);", acc, acc, arrDefName(fld))
+			} else {
+				f.line("        (%s ??= %s).Clear();", acc, strings.TrimPrefix(g.csInit(fld), " = "))
+			}
+		default:
+			f.line("        %s = %s;", acc, g.csDefaultValue(fld))
+		}
+	}
+	if dep {
+		f.line("#pragma warning restore 612")
+	}
 	f.line("    }")
 }
 

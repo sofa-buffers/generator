@@ -33,12 +33,15 @@ import (
 // access boxes or casts. Only default_id's slot is initialised: a fresh union
 // allocates nothing for the options it does not hold.
 //
-// C# has no destination-reuse path (every decode surface constructs its
-// message), and a C# struct class has no in-place reset, so a real switch to a
-// reference option (struct, union, list) puts a FRESH default instance in its
-// slot, exactly as the first selection does; an option that is already held is
-// never touched. A reference obtained earlier is therefore never reset behind the
-// caller's back -- it is merely no longer held.
+// A real switch to a reference option (struct, union, list) puts a FRESH default
+// instance in its slot, exactly as the first selection does; an option that is
+// already held is never touched. A reference obtained earlier is therefore never
+// reset behind the caller's back -- it is merely no longer held. Clear() does the
+// same for the default option, and it is the union's spelling of the Reset() a
+// struct or message class has: a parent's Reset() calls it, so a decode into a
+// reused destination (TryDecode(data, msg)) finds the union at default_id at its
+// own default, and an option slot left from the older message is unreachable
+// until a selection replaces it.
 //
 // Everything emitted here differs per schema -- the slots and their types, the
 // ids, one accessor set and one encode arm per option. Selection is a tag store;
