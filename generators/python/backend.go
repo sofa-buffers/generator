@@ -698,6 +698,11 @@ func (g *gen) emitBitfieldConsts(f *pyfile, nt *ir.NamedType) {
 		}
 		f.line("    %s = 1 << %d", strings.ToUpper(fl.Name), fl.Pos)
 	}
+	// A bitfield may declare no flag at all (`bits: {}`); a class body cannot
+	// be empty.
+	if len(nt.Flags) == 0 {
+		f.line("    pass")
+	}
 	f.blank()
 }
 
