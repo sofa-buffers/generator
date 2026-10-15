@@ -166,6 +166,10 @@ func (g *gen) emitUnionAccessors(f *pyfile, u *unionShape) {
 		} else if len(doc) > 1 {
 			f.line(`        """%s`, doc[0])
 			for _, dl := range doc[1:] {
+				if dl == "" {
+					f.blank()
+					continue
+				}
 				f.line("        %s", dl)
 			}
 			f.line(`        """`)

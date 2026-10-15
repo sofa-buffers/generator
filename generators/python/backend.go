@@ -748,8 +748,9 @@ func emitClassDoc(f *pyfile, summary string) {
 // "#: ") from a field's Description and Unit. A multi-line description yields one
 // line per source line; a non-empty Unit is appended as " (unit: <Unit>)" to the
 // last line. A deprecated field gets a trailing ".. deprecated::" directive so
-// Sphinx renders the deprecation and pydoc surfaces the note. Returns nil when
-// there is nothing to document.
+// Sphinx renders the deprecation and pydoc surfaces the note; an empty string in
+// the result is a blank doc line, which the caller writes without trailing
+// whitespace. Returns nil when there is nothing to document.
 func pyFieldDocLines(fld *ir.Field) []string {
 	var lines []string
 	if fld.Description != "" {
@@ -769,6 +770,12 @@ func pyFieldDocLines(fld *ir.Field) []string {
 		lines = append(lines, holder)
 	}
 	if fld.Deprecated {
+		// A directive must open its own block: directly after a text line,
+		// reStructuredText reads it as part of that paragraph, so a blank line
+		// ("") separates the two whenever anything precedes it.
+		if len(lines) > 0 {
+			lines = append(lines, "")
+		}
 		lines = append(lines,
 			".. deprecated::",
 			"   Deprecated and retained only for backward compatibility; do not use in new code.")
@@ -824,6 +831,10 @@ func (g *gen) emitDataclassBody(f *pyfile, name, summary string, fields []*ir.Fi
 		}
 		// Sphinx attribute comment(s) immediately before the declaration.
 		for _, dl := range pyFieldDocLines(fld) {
+			if dl == "" {
+				f.line("    #:")
+				continue
+			}
 			f.line("    #: %s", dl)
 		}
 		f.line("    %s: %s = %s", pyIdent(fld.Name), g.pyAnnot(fld), g.pyDefault(fld))
