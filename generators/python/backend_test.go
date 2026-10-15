@@ -523,8 +523,11 @@ messages:
 		// bitfield flag description + default note (and no-default flag)
 		"    #: Node has completed initialization. (default: true)\n    READY = 1 << 0",
 		"    #: Core temperature exceeded the safe threshold.\n    OVERHEATED = 1 << 1",
-		// deprecated field doc: description then a Sphinx deprecated directive
-		"    #: Old identifier retained for backward compatibility.\n    #: .. deprecated::",
+		// deprecated field doc: description, a blank doc line, then the Sphinx
+		// directive -- directly after the text line reStructuredText would read
+		// ".. deprecated::" as part of that paragraph (no trailing space on the
+		// blank line)
+		"    #: Old identifier retained for backward compatibility.\n    #:\n    #: .. deprecated::",
 	} {
 		if !strings.Contains(mod, want) {
 			t.Errorf("message.py missing %q", want)
@@ -2255,6 +2258,59 @@ func TestPythonStdlibImportsFollowTheBody(t *testing.T) {
 	} {
 		if got := head(c.path); got != c.want {
 			t.Errorf("%s: stdlib imports\n%s\nwant\n%s", c.path, got, c.want)
+		}
+	}
+}
+
+// TestPythonDeprecatedDirectiveOpensItsOwnBlock: ".. deprecated::" is a
+// reStructuredText directive, and a directive written straight after a text line
+// is read as part of that paragraph, so Sphinx never renders it. Whatever doc line
+// precedes it -- a description, a bound note, the constant-holder line -- is
+// therefore separated by a blank doc line, in a field's "#:" comment and in a
+// union option's docstring alike; a deprecated field with nothing else to say
+// gets no leading blank line, and the blank line carries no trailing whitespace.
+func TestPythonDeprecatedDirectiveOpensItsOwnBlock(t *testing.T) {
+	const src = `
+version: 1
+$defs:
+  enum:
+    Mode: { A: 0, B: 1 }
+messages:
+  M:
+    payload:
+      bare:  { id: 0, type: u32, deprecated: true }
+      named: { id: 1, type: enum, enum: { $ref: "#/$defs/enum/Mode" }, deprecated: true }
+      bound: { id: 2, type: string, maxlen: 8, description: "A short label.", deprecated: true }
+      u:
+        id: 3
+        type: union
+        default_id: 0
+        oneof:
+          a: { id: 0, type: u8 }
+          b: { id: 1, type: u8, description: "Superseded option.", deprecated: true }
+`
+	mod := string(genPy(t, schema(t, src), map[string]any{})["message.py"])
+	for _, want := range []string{
+		// nothing precedes the directive: no blank line in front of it
+		"\n    #: .. deprecated::\n    #:    Deprecated and retained only for backward compatibility; do not use in new code.\n    bare: int",
+		// the constant-holder line, then a blank doc line, then the directive
+		"    #: Constants: :class:`Mode`.\n    #:\n    #: .. deprecated::",
+		// description + bound note, then the blank doc line
+		"\n    #:\n    #: .. deprecated::\n    #:    Deprecated and retained only for backward compatibility; do not use in new code.\n    bound: str",
+		// union option docstring: a truly empty line before the directive
+		"        \"\"\"Superseded option.\n\n        .. deprecated::",
+	} {
+		if !strings.Contains(mod, want) {
+			t.Errorf("message.py missing %q:\n%s", want, mod)
+		}
+	}
+	for _, bad := range []string{
+		"#: Constants: :class:`Mode`.\n    #: .. deprecated::",
+		"Superseded option.\n        .. deprecated::",
+		"#: \n", // a blank doc line with trailing whitespace
+	} {
+		if strings.Contains(mod, bad) {
+			t.Errorf("message.py still has %q", bad)
 		}
 	}
 }
