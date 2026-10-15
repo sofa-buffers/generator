@@ -74,10 +74,10 @@ import (
 var tsClassBody = map[string]bool{"constructor": true}
 
 // tsMembers are the instance methods the backend declares on every generated
-// class (serialize, toJSON, isDefault) and on every message (encode). A field of
-// the same name is a duplicate identifier.
+// class (serialize, toJSON, isDefault), on every message (encode) and on every
+// message and struct (reset). A field of the same name is a duplicate identifier.
 var tsMembers = map[string]bool{
-	"serialize": true, "toJSON": true, "isDefault": true, "encode": true,
+	"serialize": true, "toJSON": true, "isDefault": true, "encode": true, "reset": true,
 }
 
 // tsObjectMembers are the members every class inherits from Object. A field of

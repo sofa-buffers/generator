@@ -105,6 +105,20 @@ export class Scalars {
     return true;
   }
 
+  /** Every field back to its declared default, as a fresh `new Scalars()` holds it. */
+  reset(): void {
+    this.u8min = 0;
+    this.u8max = 255;
+    this.u64max = 18446744073709551615n;
+    this.i8min = -128;
+    this.i64min = -9223372036854775808n;
+    this.f32 = 3.14;
+    this.f32Fp32Raw = null;
+    this.f64 = -2.5;
+    this.flag = true;
+    this.flags = _E_Uint8Array;
+  }
+
   toJSON(): Record<string, unknown> {
     return {
       "u8min": this.u8min,
@@ -226,12 +240,20 @@ class _Scalars__Visitor implements Visitor {
  * Nothing is retained from the chunks you feed: a string is decoded and a
  * blob copied before it reaches the destination, so a chunk may be reused as
  * soon as `feed` returns.
+ *
+ * Pass a destination to decode into it: the constructor resets it to the
+ * declared defaults (`reset()`) before the first byte is applied, so the
+ * result equals a fresh decode -- a field the new message omits reads its
+ * default, never the value the destination held before. On a rejected input
+ * the destination holds the fields decoded before the error, never an older
+ * message's.
  */
 export class Scalars__Decoder {
   private readonly out: Scalars;
   private readonly is: IStream;
 
   constructor(out?: Scalars) {
+    out?.reset();
     this.out = out ?? new Scalars();
     this.is = new IStream(new _Scalars__Visitor(this.out, new PayloadAcc()));
   }

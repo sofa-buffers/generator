@@ -1580,6 +1580,24 @@ for mode in long number; do
     done
 done
 
+# A destination handed to the Decoder is reset before the first byte (generator#754):
+# absence fires no callback, so without that every field the new message omits
+# would keep the older message's value. The shared driver prints its own schema,
+# forges every image itself, and holds the reused destination to a fresh decode
+# byte for byte -- after a full, a sparse, an empty and a refused input. The
+# schema has a 64-bit field, so the leg runs in every int64 mode.
+echo "==> decode into a reused destination equals a fresh decode (generator#754)"
+printf 'version: 1\nmessages:\n' > "$WORK/reuse.yaml"
+python3 "$ROOT/tests/conformance/lib/check_decode_into_reused.py" --self-test
+python3 "$ROOT/tests/conformance/lib/check_decode_into_reused.py" --emit-schema >> "$WORK/reuse.yaml"
+for mode in bigint long number; do
+    gen "$WORK/reuse.yaml" "$WORK/reuse-$mode" "$WORK/cfg_$mode.yaml"
+    ln -s "$WORK/ex/node_modules" "$WORK/reuse-$mode/node_modules"
+    tsc_strict "$WORK/reuse-$mode"
+    python3 "$ROOT/tests/conformance/lib/check_decode_into_reused.py" "typescript int64: $mode" \
+        --cwd "$WORK/reuse-$mode" -- "$TH"
+done
+
 # MESSAGE_SPEC §7.4 -- a field id REPEATED inside one scope (generator#523). The
 # rule has two halves and this checks BOTH on one message: a re-opened SEQUENCE
 # continues its scope, so struct/union members MERGE and unrecurring children are

@@ -16,12 +16,13 @@
     "isDefault": 6,
     "isPrototypeOf": 7,
     "propertyIsEnumerable": 8,
-    "serialize": 9,
-    "toJSON": 10,
-    "toLocaleString": 11,
-    "toString": 12,
-    "valueOf": 13,
-    "which": 14
+    "reset": 9,
+    "serialize": 10,
+    "toJSON": 11,
+    "toLocaleString": 12,
+    "toString": 13,
+    "valueOf": 14,
+    "which": 15
   },
   "inner_inner2": {
     "x": 6
@@ -29,13 +30,14 @@
   "isDefault": 5,
   "isPrototypeOf": 6,
   "propertyIsEnumerable": 7,
-  "serialize": 8,
-  "toJSON": 9,
-  "toLocaleString": 10,
-  "toString": 11,
+  "reset": 8,
+  "serialize": 9,
+  "toJSON": 10,
+  "toLocaleString": 11,
+  "toString": 12,
   "u": {
     "which": 9
   },
-  "valueOf": 12,
-  "which": 13
+  "valueOf": 13,
+  "which": 14
 }
