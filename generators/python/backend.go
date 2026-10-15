@@ -672,9 +672,6 @@ func (g *gen) emitEnum(f *pyfile, nt *ir.NamedType) {
 		}
 		f.line("    %s = %d", strings.ToUpper(c.Name), c.Value)
 	}
-	// The name a dataclass default reads the enum through (enumAlias): a class
-	// body could have rebound the enum's own name by then.
-	f.line("%s = %s", enumAlias(nt), typeIdent(nt))
 	f.blank()
 }
 
@@ -768,12 +765,33 @@ func pyFieldDocLines(fld *ir.Field) []string {
 	if note := generator.BoundNote(fld, generator.StorageDynamic); note != "" {
 		lines = append(lines, note)
 	}
+	if holder := constHolder(fld); holder != "" {
+		lines = append(lines, holder)
+	}
 	if fld.Deprecated {
 		lines = append(lines,
 			".. deprecated::",
 			"   Deprecated and retained only for backward compatibility; do not use in new code.")
 	}
 	return lines
+}
+
+// constHolder names the class holding an enum or bitfield field's constants --
+// the field (or its array element) is a plain int (pyAnnot), so the annotation no
+// longer points there. "" for every other kind.
+func constHolder(fld *ir.Field) string {
+	kind, ref := fld.Kind, fld.Ref
+	if kind == ir.KindArray {
+		// The innermost element: a nested array of enums is a list[list[int]].
+		kind, ref = fld.Elem, fld.ElemRef
+		for it := fld.ElemItems; kind == ir.KindArray && it != nil; it = it.ElemItems {
+			kind, ref = it.Elem, it.ElemRef
+		}
+	}
+	if (kind != ir.KindEnum && kind != ir.KindBitfield) || ref == nil || ref.Target == nil {
+		return ""
+	}
+	return fmt.Sprintf("Constants: :class:`%s`.", typeIdent(ref.Target))
 }
 
 // emitDataclass writes one generated class. `u` is non-nil for a union type,
@@ -909,22 +927,7 @@ func (g *gen) fieldIsDefaultExprAt(fld *ir.Field, acc string) string {
 	if cmp, ok := floatZeroCmp(fld, acc, false); ok {
 		return cmp
 	}
-	return fmt.Sprintf("%s == %s", acc, g.cmpDefault(fld))
-}
-
-// cmpDefault is the default a scalar leaf's omission test compares with. It is
-// pyDefault except for an enum, which compares with its integer value: an
-// IntEnum member equals its int, and the literal costs nothing per call where
-// `_E__Enum(v)` runs EnumType.__call__ on every encode (about 12x the compare).
-// The dataclass default stays the member, so a fresh field still holds one.
-func (g *gen) cmpDefault(fld *ir.Field) string {
-	if fld.Kind == ir.KindEnum {
-		if fld.Default != nil {
-			return scalarLit(fld.Default)
-		}
-		return "0"
-	}
-	return g.pyDefault(fld)
+	return fmt.Sprintf("%s == %s", acc, g.pyDefault(fld))
 }
 
 // floatZeroCmp is the default test of a float scalar whose default is a zero,
@@ -1086,7 +1089,7 @@ func (g *gen) emitMarshalAt(f *pyfile, fld *ir.Field, acc, ind string, forced bo
 	if cmp, ok := floatZeroCmp(fld, acc, true); ok {
 		f.line("%sif %s:", ind, cmp)
 	} else {
-		f.line("%sif %s != %s:", ind, acc, g.cmpDefault(fld))
+		f.line("%sif %s != %s:", ind, acc, g.pyDefault(fld))
 	}
 	f.line("%s    %s", ind, write)
 }

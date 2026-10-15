@@ -377,7 +377,7 @@ func TestPythonEncodeHandsValuesOverUncoerced(t *testing.T) {
 		}
 	}
 	for _, line := range strings.Split(enc, "\n") {
-		if strings.Contains(line, "if ") && strings.Contains(line, "__Enum(") {
+		if strings.Contains(line, "if ") && (strings.Contains(line, "M_Col(") || strings.Contains(line, "M_Cd(")) {
 			t.Errorf("an omission test builds an enum member per call: %s", strings.TrimSpace(line))
 		}
 		if strings.Contains(line, "if bytes(") {
@@ -528,7 +528,7 @@ for name, a, b in same:
     if ea != eb:
         bad.append("%s: %s != %s" % (name, ea.hex(), eb.hex()))
 again = M.decode(M(col=M_Col.BLUE, fl=M_Fl.B, aen=[M_Aen.B]).encode())
-if again.col != 300 or again.fl != 0x200 or again.aen != [1] or again.cd is not M_Cd.Y:
+if again.col != 300 or again.fl != 0x200 or again.aen != [1] or type(again.cd) is not int or again.cd != M_Cd.Y:
     bad.append("enum/bitfield round trip: %r" % again)
 if bad:
     sys.exit("[%s]\n  " % sofab.IMPL + "\n  ".join(bad))

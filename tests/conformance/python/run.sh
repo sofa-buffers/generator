@@ -1297,6 +1297,13 @@ for ENGINE in $ENGINES; do
         --stream-verb streamdecode --stream-sizes 1,2,3,0 \
         --stream-invalid-pattern 'decode failed: INVALID|SofaDecodeError' \
         -- python3 harness.py
+    # The same message through the generated Python API rather than the JSON
+    # harness: an in-width value no constant names is a valid value, so every
+    # enum/bitfield position is annotated and held as a plain int -- a fresh
+    # message too -- and the IntEnum / IntFlag class only holds the constants.
+    # The JSON leg above cannot see a type: an IntEnum member dumps as its int.
+    python3 "$ROOT/tests/conformance/python/enum_int_check.py" "$WORK/closedproj" "$ENGINE" \
+        || { echo "FAIL: [$ENGINE] an enum/bitfield position is not a plain int"; exit 1; }
 done
 unset SOFAB_PUREPYTHON || true
 # MESSAGE_SPEC §7.4 -- a field id REPEATED inside one scope (generator#523). The
