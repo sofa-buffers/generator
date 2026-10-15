@@ -213,8 +213,10 @@ outside the width is refused — `SofaDecodeError` on decode, `SofaArgumentError
 on encode.
 
 Converting a decoded value to the constant class is therefore yours to guard:
-`M_Color(m.color)` raises `ValueError` for `5`. `M_Flags(m.flags)` accepts any
-combination of declared flags.
+`M_Color(m.color)` raises `ValueError` for `5`, or for any other value no
+constant names. `M_Flags(m.flags)` accepts any in-width value, undeclared bits
+included (`M_Flags(4)` is a valid flag value), because an `IntFlag` keeps the
+bits it does not name.
 
 ## Unions
 

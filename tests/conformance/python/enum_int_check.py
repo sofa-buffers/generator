@@ -16,8 +16,10 @@ definitions, an enum and a bitfield at all six positions):
 
   * every field, struct member, union option and array element is annotated
     ``int`` (``list[int]``, ``list[list[int]]``);
-  * a fresh message holds a plain ``int`` there (``type(x) is int``), so a fresh
-    and a decoded message hold the same type;
+  * a fresh message holds a plain ``int`` there (``type(x) is int``), a union
+    option's getter included while another option is held, so a fresh and a
+    decoded message hold the same type -- and are equal, with the same repr and
+    the same JSON;
   * a message carrying in-width values no constant names decodes -- one-shot and
     fed one byte at a time -- into plain ints equal to the wire values, and
     re-encodes to the same bytes;
@@ -27,6 +29,7 @@ definitions, an enum and a bitfield at all six positions):
 Usage: enum_int_check.py <generated-project-dir> <native|python>
        (asserts the engine it actually loaded; exits non-zero on failure)
 """
+import json
 import sys
 import typing
 
@@ -88,6 +91,28 @@ def main(argv):
                       (m.Closed_Cun(), "un_en"), (m.Closed_Cun(), "un_bf")]:
         v = getattr(obj, name)
         check("fresh %s.%s is %r (%s), want a plain int" % (type(obj).__name__, name, v, type(v).__name__), is_int(v))
+
+    # A union getter's NOT-HELD fallback is a plain int too: un_en is the
+    # default option, so only another option being held reaches its fallback.
+    c = m.Closed_Cun()
+    c.un_bf = 4
+    v = c.un_en
+    check("Closed_Cun.un_en while un_bf is held is %r (%s), want a plain int" % (v, type(v).__name__),
+          is_int(v) and v == 0)
+    c = m.Closed_Cun()
+    v = c.un_bf
+    check("Closed_Cun.un_bf while un_en is held is %r (%s), want a plain int" % (v, type(v).__name__),
+          is_int(v) and v == 0)
+
+    # A fresh message and one decoded from its own encoding are the same value:
+    # equal, the same repr, the same JSON.
+    back = m.Closed.decode(fresh.encode())
+    check("a fresh message != its decoded encoding: %r vs %r" % (fresh, back), fresh == back)
+    check("a fresh message's repr differs from its decoded encoding's: %r vs %r" % (fresh, back),
+          repr(fresh) == repr(back))
+    jf = json.dumps(fresh.to_jsonable(), sort_keys=True)
+    jb = json.dumps(back.to_jsonable(), sort_keys=True)
+    check("a fresh message's JSON differs from its decoded encoding's: %s vs %s" % (jf, jb), jf == jb)
 
     # The holders still hold the constants, and compare with the int field.
     check("Closed_Cen.Z is 10", m.Closed_Cen.Z == 10)
