@@ -264,7 +264,8 @@ func (g *gen) emitEnumConsts(f *kfile, name string, nt *ir.NamedType) {
 	if summary == "" {
 		summary = "Declared values of the `" + nt.Name + "` enum."
 	}
-	f.kdoc("", summary+"\n\nThe field itself is an `Int`: an enum is a SIGNED 32-bit value on the\nwire, and a value outside this set still has to survive a decode, which a\nclosed `enum class` could not represent.")
+	lo, hi, _ := ir.EnumWidthRange(&ir.TypeRef{Key: nt.Key, Target: nt})
+	f.kdoc("", summary+fmt.Sprintf("\n\nThe field itself is an `Int`. The enum's declared width is the smallest\nsigned type holding its constants, here %d..%d: a value outside it is\nrefused, and a value inside it but outside this set is kept, which a\nclosed `enum class` could not represent.", lo, hi))
 	f.line("public object %s {", name)
 	for _, c := range nt.Consts {
 		f.kdoc("    ", c.Description)
@@ -282,7 +283,11 @@ func (g *gen) emitBitfieldConsts(f *kfile, name string, nt *ir.NamedType) {
 	if summary == "" {
 		summary = "Flag masks of the `" + nt.Name + "` bitfield."
 	}
-	f.kdoc("", summary+"\n\nThe field itself is a `ULong`: flag positions run 0..63 and the wire word\nis an unsigned varint, so `ULong` is the whole domain and nothing a peer\ncan send is lost.")
+	bound := "here the whole `ULong`: no value\nis past it, and an undeclared bit is kept."
+	if hi, ok := ir.BitfieldWidthMax(&ir.TypeRef{Key: nt.Key, Target: nt}); ok {
+		bound = fmt.Sprintf("here 0..%#x: a value past\nit is refused, and an undeclared bit inside it is kept.", hi)
+	}
+	f.kdoc("", summary+"\n\nThe field itself is a `ULong`, which holds every width a bitfield can\ndeclare. The declared width is the smallest unsigned type holding the\nhighest flag position, "+bound)
 	f.line("public object %s {", name)
 	for _, fl := range nt.Flags {
 		doc := fl.Description

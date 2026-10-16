@@ -9,8 +9,9 @@ import org.sofabuffers.sofab.*
 /**
  * Declared values of the `Word` enum.
  *
- * The field itself is an `Int`: an enum is a SIGNED 32-bit value on the
- * wire, and a value outside this set still has to survive a decode, which a
+ * The field itself is an `Int`. The enum's declared width is the smallest
+ * signed type holding its constants, here -128..127: a value outside it is
+ * refused, and a value inside it but outside this set is kept, which a
  * closed `enum class` could not represent.
  */
 public object Word {
