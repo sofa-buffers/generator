@@ -75,8 +75,9 @@ func (g *gen) harness(s *ir.Schema) []byte {
 	// decode() is typed with encode()/serialize() as well as toJSON(): the `recode`
 	// mode below re-encodes a decoded object without going through JSON, which is the
 	// only way to observe wire detail a JSON value cannot hold (an fp32 signaling
-	// NaN's payload bits, say).
-	f.line("const MESSAGES: Record<string, { fromJSON(d: Record<string, unknown>): { encode(): Uint8Array; serialize(os: import(%q).OStream): void; toJSON(): Record<string, unknown> }; decode(b: Uint8Array): { encode(): Uint8Array; serialize(os: import(%q).OStream): void; toJSON(): Record<string, unknown> } }> = {", corelibPkg, corelibPkg)
+	// NaN's payload bits, say). tryDecode's destination is typed `never` for the
+	// reason DECODERS' is: each message takes its own class.
+	f.line("const MESSAGES: Record<string, { fromJSON(d: Record<string, unknown>): { encode(): Uint8Array; serialize(os: import(%q).OStream): void; toJSON(): Record<string, unknown> }; decode(b: Uint8Array): { encode(): Uint8Array; serialize(os: import(%q).OStream): void; toJSON(): Record<string, unknown> }; tryDecode(b: Uint8Array, out: never): import(%q).DecodeStatus }> = {", corelibPkg, corelibPkg, corelibPkg)
 	for _, m := range s.Messages {
 		f.line("  %q: M.%s,", m.Name, msgName(m))
 	}
@@ -287,6 +288,20 @@ func (g *gen) harness(s *ir.Schema) []byte {
 	f.line("    let hex = \"-\";")
 	f.line("    try { hex = Buffer.from(dec.message.encode()).toString(\"hex\"); } catch { /* the encode refused */ }")
 	f.line("    process.stdout.write(st + \"\\n\" + showJSON(dec.message.toJSON()) + \"\\n\" + hex + \"\\n\");")
+	// The same contract through tryDecode(bytes, out), the one-shot surface that
+	// also writes over the destination's storage (emitReuse): the verdict it
+	// returns, or the code of the refusal it threw, then the destination as above.
+	f.line("  } else if (mode === \"trydecodeinto\") {")
+	f.line("    const prev = cls.decode(new Uint8Array(Buffer.from(process.argv[4] ?? \"\", \"hex\")));")
+	f.line("    let st: string;")
+	f.line("    try {")
+	f.line("      st = cls.tryDecode(new Uint8Array(input), prev as never);")
+	f.line("    } catch (e) {")
+	f.line("      st = (e as { code?: string })?.code ?? String(e);")
+	f.line("    }")
+	f.line("    let hex = \"-\";")
+	f.line("    try { hex = Buffer.from(prev.encode()).toString(\"hex\"); } catch { /* the encode refused */ }")
+	f.line("    process.stdout.write(st + \"\\n\" + showJSON(prev.toJSON()) + \"\\n\" + hex + \"\\n\");")
 	f.line("  } else if (mode === \"status\") {")
 	// Surface the §7 decode outcome (COMPLETE / INVALID / INCOMPLETE / LIMIT_EXCEEDED)
 	// so a conformance harness can assert the INVALID-vs-INCOMPLETE distinction that

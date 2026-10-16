@@ -127,7 +127,7 @@ underscore — the field `encode` is `encode_`. Those names are:
 - the members every object inherits: `toString`, `toLocaleString`, `valueOf`,
   `hasOwnProperty`, `isPrototypeOf`, `propertyIsEnumerable`.
 
-The statics (`fromJSON`, `decode`, `MAX_SIZE`) are a namespace of their own, so
+The statics (`fromJSON`, `decode`, `tryDecode`, `MAX_SIZE`) are a namespace of their own, so
 a field may take their names. Only the member changes: the wire is keyed by the
 field id, and the JSON key stays the schema name.
 
@@ -326,22 +326,59 @@ out of a message's JSON reads as the union's default.
 ## Decoding into an existing message
 
 `M.decode(bytes)` always returns a new message. To decode into one you already
-hold, hand it to the incremental decoder:
+hold — a receive loop decoding message after message into the same object —
+call `tryDecode`:
+
+```ts
+const msg = new M();
+for (const bytes of frames) {
+  const st = M.tryDecode(bytes, msg); // throws on a refused message
+  if (st === DecodeStatus.Complete) handle(msg);
+}
+```
+
+It returns `Complete`, or `Incomplete` when the bytes end inside a field or an
+open sequence (`msg` then holds every field decoded so far). A refused message
+throws a `SofabError`, as `decode` does: `INVALID_MSG` for bytes that are
+malformed or outside the schema, `LIMIT_EXCEEDED` for a receiver cap. Only a
+message class has `tryDecode`.
+
+A field that equals its default is not on the wire, so decoding never touches
+it. That is why `msg` is reset to its declared defaults first: afterwards it
+holds exactly what `M.decode(bytes)` would, and a field the new message leaves
+out reads its default, never the value `msg` held before. If the input is
+rejected or cut short, `msg` holds the fields decoded before that point, the
+field being decoded then may be partly filled, and every other field holds its
+default — never a value of the message it held before.
+
+**What it reuses.** `tryDecode` writes the new message into the storage `msg`
+already holds wherever it fits, instead of allocating it again:
+
+- a typed array (`Uint16Array`, `Float32Array`, …) whose length is the new
+  array's — under `int64: bigint` the 64-bit ones too; a `Long[]` is rebuilt;
+- a blob of the same length;
+- an array of strings, blobs, structs, unions or typed rows: the array itself,
+  each element object, each typed row of the right length and each blob buffer
+  of the right length.
+
+This covers the fields of the message and of a struct nested in it through
+struct fields. A union's option, and the arrays held inside an array element or a
+row of strings, are built new, as `decode` builds them.
+
+So **a reference you keep into `msg` may change on the next `tryDecode`**: an
+array, a blob buffer or an element object you took out of one message can show
+the next one. Copy out what must outlive the next decode. For the same reason
+`msg` must not share storage with anything that has to keep its value — a buffer
+you assigned to two fields, or to a field and something else.
+
+The incremental decoder takes a destination too, and resets it the same way, but
+builds new storage for everything it decodes:
 
 ```ts
 const d = new M__Decoder(msg);  // msg is reset() here
 d.feed(bytes);
 d.finish();                     // msg now equals M.decode(bytes)
 ```
-
-A field that equals its default is not on the wire, so decoding never touches
-it. That is why the constructor first resets the message you hand it:
-afterwards it holds exactly what a fresh decode of the same bytes would, and a
-field the new message leaves out reads its default, never the value the message
-held before. If the input is rejected, the message holds the fields decoded
-before the error, the field being decoded when it was rejected may be partly
-filled, and every other field holds its default — never a value of the message
-it held before.
 
 `reset()` is public on every message and struct class, and puts every field
 back to its declared default — what `new M()` holds. A nested struct is reset in

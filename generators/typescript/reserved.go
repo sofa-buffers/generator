@@ -169,7 +169,7 @@ func fp32RawNames(fields []*ir.Field, into map[*ir.Field]string) {
 // split union variant adds `__Default<Variant>`), a type's companion at module
 // level is `<T>__<Role>` (the Decoder class, an enum's Array alias) and a private
 // module name is `_<T>__<Role>` (the flat visitor, its scope constants, the
-// element factory) or a fixed `_` name (`_E_Uint8Array`, `_MK_ARR`, `_decode`).
+// element factory and reset) or a fixed `_` name (`_E_Uint8Array`, `_MK_ARR`, `_decode`).
 // None of those can meet a TypeIdent, which has no `__`, never starts with `_` and
 // never ends with one. What is left is a TypeIdent equal to a name the module
 // declares or reaches unqualified -- tsTypeReserved -- and such a type takes a
@@ -250,6 +250,7 @@ func decoderName(raw string) string    { return raw + "__Decoder" }
 func enumArrayAlias(raw string) string { return raw + "__Array" }
 func visitorName(raw string) string    { return "_" + raw + "__Visitor" }
 func makeName(raw string) string       { return "_" + raw + "__Make" }
+func resetName(raw string) string      { return "_" + raw + "__Reset" }
 func scopeRoot(raw string) string      { return "_" + raw + "__Loc" }
 
 // locChild is the decoder scope of the field `name` below the scope `loc`. The

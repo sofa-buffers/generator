@@ -95,6 +95,17 @@ func (g *gen) floatDefault(carrier, lit string) string {
 	return name
 }
 
+// hasElemReset reports whether the module declares an element reset (see
+// elemReset), which only a message's tryDecode reaches.
+func (g *gen) hasElemReset() bool {
+	for _, n := range g.mkName {
+		if strings.HasSuffix(n, "__Reset") {
+			return true
+		}
+	}
+	return false
+}
+
 // mkArr names the one factory every fresh-array gap takes: a wrapper row, a row
 // of rows and a `Long[]` matrix row all fill a gap with a new empty array, and
 // `never[]` is assignable to each of their element types.
@@ -293,9 +304,9 @@ func usedEmptyTyped(body string) []string {
 }
 
 // corelibNames is every name a generated module may take from the corelib, in
-// the order they are imported. `decode` is aliased: the generated class carries a
-// static `decode` of its own (§6.1.1), and the alias keeps the two apart at the
-// one call site that needs the free function.
+// the order they are imported. `decode` and `tryDecode` are aliased: a generated
+// message carries statics of those names (§6.1.1), and the alias keeps the two
+// apart at the one call site that needs the free function.
 var corelibNames = []string{
 	"OStream", "WireType", "FixlenSubtype", "ArrayKind", "DecodeStatus",
 	"Long", "SofabError", "SofabErrorCode", "elementsEqual", "longElementsEqual", "fp32ArrayBitsEqual", "fp64ArrayBitsEqual",
@@ -360,6 +371,9 @@ func usedImports(body string) []string {
 	}
 	if identUsed(body, "_decode") {
 		out = append(out, "decode as _decode")
+	}
+	if identUsed(body, "_tryDecode") {
+		out = append(out, "tryDecode as _tryDecode")
 	}
 	return out
 }
@@ -453,11 +467,11 @@ func (g *gen) moduleBody(f *tsfile, s *ir.Schema) {
 	for _, key := range s.NamedOrder {
 		nt := s.Named[key]
 		if nt.Category == ir.CatStruct || nt.Category == ir.CatUnion {
-			g.emitVisitor(vis, g.typeName(key), g.typeRaw(key), nt)
+			g.emitVisitor(vis, g.typeName(key), g.typeRaw(key), nt, false)
 		}
 	}
 	for _, m := range s.Messages {
-		g.emitVisitor(vis, msgName(m), msgRaw(m), &ir.NamedType{Category: ir.CatStruct, Fields: m.Fields})
+		g.emitVisitor(vis, msgName(m), msgRaw(m), &ir.NamedType{Category: ir.CatStruct, Fields: m.Fields}, true)
 		g.emitDecoderClass(vis, msgName(m), msgRaw(m))
 	}
 	if len(g.mkName) > 0 {
@@ -466,6 +480,10 @@ func (g *gen) moduleBody(f *tsfile, s *ir.Schema) {
 		f.line("// with a gap in it has to fill the missing slots -- and one shared instance")
 		f.line("// would make every filled slot, and every element decoded into a filled one,")
 		f.line("// the same object. One factory per element type, shared by every array of it.")
+		if g.hasElemReset() {
+			f.line("// The resets put an element a previous decode built back to that default in")
+			f.line("// place, for tryDecode into a reused destination.")
+		}
 		for _, name := range g.mkName {
 			f.line("const %s = %s;", name, g.mks[name])
 		}
@@ -633,6 +651,9 @@ func (g *gen) emitClass(f *tsfile, name, raw, summary string, fields []*ir.Field
 	// decode: the class carries only the public decode(bytes) entry, which runs
 	// the corelib's one-shot decode against this type's flat visitor (visitor.go).
 	g.emitDecode(f, name, raw)
+	if isMessage {
+		g.emitTryDecode(f, name, raw)
+	}
 	f.line("}")
 	f.blank()
 }
