@@ -288,17 +288,21 @@ python3 "$ROOT/tests/conformance/lib/check_nondefault.py" "$BASE" "$FULL" \
     --label "typescript: round-trip fixture" || exit 1
 echo "==> [$VL] round-trip fixture OK (no field sits on its schema default)"
 
-# Decode into a REUSED destination on example.yaml (the Decoder's `out`,
-# generator#754): every fixture -- the full one above, two sparse ones and the
-# empty payload -- is decoded into a destination already holding every other one,
-# and once more with each malformed tail. The driver's own schema is the leg
-# further down; this one holds the reset to the corpus message.
-python3 "$ROOT/tests/conformance/lib/check_reused_destination.py" "typescript $VL: example.yaml" \
-    --msg myfirstmessage --cwd "$VW/ex" \
-    --fixture "full=$FULL" \
-    --fixture 'short={"someu8":9,"someuintarray":[5],"somestringarray":["z"],"somestructarray":[{"x":0,"y":0},{"x":5,"y":0}],"somematrix":[[],[3]],"someunion":{"option3":{"unionstructint":4,"unionstructbool":true}},"someboolarray":[true],"somestruct":{"nestedint":1}}' \
-    --fixture 'other={"somestring":"s","someblob":[],"someintarray":[],"someunion":{"option2":"two"},"someunionarray":[{"asstring":"q"}],"somemap":[{"key":"k","value":0}],"somestructwitharray":{"values":[]}}' \
-    -- "$TH" || exit 1
+# Decode into a REUSED destination on example.yaml, through both surfaces that
+# take one: the Decoder's `out` (generator#754) and tryDecode(bytes, out), which
+# also writes over the storage the destination holds (generator#760). Every
+# fixture -- the full one above, two sparse ones and the empty payload -- is
+# decoded into a destination already holding every other one, and once more with
+# each malformed tail. The driver's own schema is the leg further down; this one
+# holds the reset to the corpus message.
+for verb in reusedecode trydecodeinto; do
+    python3 "$ROOT/tests/conformance/lib/check_reused_destination.py" "typescript $VL: example.yaml ($verb)" \
+        --verb "$verb" --msg myfirstmessage --cwd "$VW/ex" \
+        --fixture "full=$FULL" \
+        --fixture 'short={"someu8":9,"someuintarray":[5],"somestringarray":["z"],"somestructarray":[{"x":0,"y":0},{"x":5,"y":0}],"somematrix":[[],[3]],"someunion":{"option3":{"unionstructint":4,"unionstructbool":true}},"someboolarray":[true],"somestruct":{"nestedint":1}}' \
+        --fixture 'other={"somestring":"s","someblob":[],"someintarray":[],"someunion":{"option2":"two"},"someunionarray":[{"asstring":"q"}],"somemap":[{"key":"k","value":0}],"somestructwitharray":{"values":[]}}' \
+        -- "$TH" || exit 1
+done
 
 # The two encode-buffer arms (CORELIB_PLAN §5.1). The caller owns the output
 # buffer: generated code allocates it and the corelib neither grows nor
@@ -1599,7 +1603,7 @@ done
 # every other one -- the empty message and a refused input included -- holding
 # the result to a fresh decode as data and byte for byte. The schema has a 64-bit
 # field, so the leg runs in every int64 mode.
-echo "==> decode into a reused destination equals a fresh decode (generator#754)"
+echo "==> decode into a reused destination equals a fresh decode (generator#754, #760)"
 printf 'version: 1\nmessages:\n' > "$WORK/reuse.yaml"
 python3 "$ROOT/tests/conformance/lib/check_reused_destination.py" --self-test || exit 1
 python3 "$ROOT/tests/conformance/lib/check_reused_destination.py" --emit-schema >> "$WORK/reuse.yaml"
@@ -1607,8 +1611,36 @@ for mode in bigint long number; do
     gen "$WORK/reuse.yaml" "$WORK/reuse-$mode" "$WORK/cfg_$mode.yaml"
     ln -s "$WORK/ex/node_modules" "$WORK/reuse-$mode/node_modules"
     tsc_strict "$WORK/reuse-$mode"
-    python3 "$ROOT/tests/conformance/lib/check_reused_destination.py" "typescript int64: $mode" \
-        --cwd "$WORK/reuse-$mode" -- "$TH" || exit 1
+    for verb in reusedecode trydecodeinto; do
+        python3 "$ROOT/tests/conformance/lib/check_reused_destination.py" "typescript int64: $mode ($verb)" \
+            --verb "$verb" --cwd "$WORK/reuse-$mode" -- "$TH" || exit 1
+    done
+done
+
+# tryDecode(bytes, out) writes over the storage the destination already holds
+# (generator#760). The value is the driver's business above; what it cannot see
+# is the STORAGE: reuse_storage_check.ts proves the arrays, buffers and element
+# objects are the ones the previous decode left, that every prefix of every image
+# reads as a fresh decode of it -- the field the cut lands in included, which is
+# where storage written in place would show the older message -- and that a
+# receiver cap hit inside an array leaves none of the held array's tail. Its
+# schema has the shapes the driver's has not (blob arrays, an unbounded blob and
+# string array, boolean / enum / 64-bit / fp64 arrays, a row of strings, a nested
+# struct holding storage), generated with tight caps so the receiver-cap path is
+# the one exercised; the 64-bit array makes it mode-sensitive.
+echo "==> tryDecode writes over the destination's storage, never its values (generator#760)"
+cat > "$WORK/cfg_store.yaml.in" <<'YAML'
+generic: { emit: project, max_dyn_array_count: 4, max_dyn_string_len: 8, max_dyn_blob_len: 8 }
+YAML
+for mode in bigint long number; do
+    { cat "$WORK/cfg_store.yaml.in"; printf 'targets: { typescript: { int64: %s } }\n' "$mode"; } > "$WORK/cfg_store_$mode.yaml"
+    gen "$ROOT/tests/conformance/typescript/reuse_storage.yaml" "$WORK/store-$mode" "$WORK/cfg_store_$mode.yaml"
+    ln -s "$WORK/ex/node_modules" "$WORK/store-$mode/node_modules"
+    # Dropped in before the typecheck, so tsc checks it against this mode's API.
+    cp "$ROOT/tests/conformance/typescript/reuse_storage_check.ts" "$WORK/store-$mode/"
+    tsc_strict "$WORK/store-$mode"
+    ( cd "$WORK/store-$mode" && npx tsx reuse_storage_check.ts ) \
+        || { echo "FAIL: tryDecode storage reuse (int64: $mode)"; exit 1; }
 done
 
 # MESSAGE_SPEC §7.4 -- a field id REPEATED inside one scope (generator#523). The

@@ -689,6 +689,11 @@ func (g *gen) tsArrayToJSON(val string, elem ir.Kind, ref *ir.TypeRef, items *ir
 		// A numeric enum IS a number on the wire and in JSON, so only the container
 		// has to be widened.
 		return fmt.Sprintf("Array.from(%s)", val)
+	case ir.KindString:
+		// A copy, like every other element kind's: the member array is storage
+		// tryDecode writes the next message into, so handing it out would let the
+		// next decode rewrite a JSON value already returned.
+		return val + ".slice()"
 	default:
 		// `JSON.stringify` renders a typed array as an OBJECT (`{"0":9,...}`), not
 		// an array, so the widening is not cosmetic: without it the emitted JSON is
@@ -773,7 +778,9 @@ func (g *gen) tsArrayFromJSON(src string, elem ir.Kind, ref *ir.TypeRef, items *
 	case ir.KindBool:
 		return fmt.Sprintf("Uint8Array.from(%s as boolean[], (%s) => (%s ? 1 : 0))", src, x, x)
 	case ir.KindString:
-		return fmt.Sprintf("%s as string[]", src)
+		// Copied, not adopted: the member is storage tryDecode writes into, and the
+		// caller's own input array must not be rewritten by a later decode.
+		return fmt.Sprintf("(%s as string[]).slice()", src)
 	default:
 		// JSON carries a plain array; the member is the typed one. The constructor
 		// is also the one place a value outside the declared width becomes visible

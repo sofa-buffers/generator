@@ -1,0 +1,58 @@
+# tryDecode(bytes, out) writes over the storage `out` already holds
+# (generator#760). check_reused_destination.py proves the VALUE equals a fresh
+# decode; reuse_storage_check.ts, generated from this schema, proves the
+# storage is actually reused, and pins the shapes that driver's schema has no
+# field of: a blob array (bounded and not), an unbounded blob and string array
+# (the receiver-cap path, generated with tight caps), boolean, enum, 64-bit and
+# fp64 arrays, a row of strings, a nested struct holding storage of its own, a
+# struct element holding a typed array, and a union option holding an array.
+version: 1
+messages:
+  store:
+    payload:
+      a:   { id: 0, type: array, items: { type: u16, count: 8 }, default: [7, 7] }
+      fa:  { id: 1, type: array, items: { type: fp32, count: 4 } }
+      ok:  { id: 2, type: array, items: { type: boolean, count: 4 } }
+      e:   { id: 3, type: array, items: { type: enum, count: 4, enum: { A: 0, B: 1, C: 2 } } }
+      w:   { id: 4, type: array, items: { type: u64, count: 4 } }
+      b:   { id: 5, type: blob, maxlen: 16 }
+      bu:  { id: 6, type: blob }
+      bd:  { id: 7, type: blob, maxlen: 8, default: "AQI=" }
+      sa:  { id: 8, type: array, items: { type: string, maxlen: 8 } }
+      ba:  { id: 9, type: array, items: { type: blob, count: 4, maxlen: 8 } }
+      bx:  { id: 10, type: array, items: { type: blob } }
+      ra:
+        id: 11
+        type: array
+        items:
+          type: struct
+          fields:
+            z: { id: 0, type: u8 }
+            t: { id: 1, type: array, items: { type: u8, count: 4 } }
+      ua:
+        id: 12
+        type: array
+        items:
+          type: union
+          count: 3
+          default_id: 0
+          oneof:
+            m: { id: 0, type: i32 }
+            s: { id: 1, type: string, maxlen: 4 }
+      mx:  { id: 13, type: array, items: { type: array, count: 3, items: { type: u8, count: 4 } } }
+      mw:  { id: 14, type: array, items: { type: array, count: 2, items: { type: string, count: 2, maxlen: 4 } } }
+      ns:
+        id: 15
+        type: struct
+        fields:
+          ta: { id: 0, type: array, items: { type: i32, count: 4 } }
+          nb: { id: 1, type: blob, maxlen: 4 }
+          sl: { id: 2, type: array, items: { type: string, count: 2, maxlen: 4 } }
+      un:
+        id: 16
+        type: union
+        default_id: 0
+        oneof:
+          xs: { id: 0, type: array, items: { type: u16, count: 4 } }
+          n:  { id: 1, type: u8 }
+      f64: { id: 17, type: array, items: { type: fp64, count: 3 } }

@@ -59,24 +59,38 @@ type tsScope struct {
 	seq        string // corelib collector slot for this array's elements
 	child      int    // element scope id, -1 when the element is a value
 	parent     int    // scope this one is entered from, -1 for the root
+
+	// fixed is set on a scope a reused destination keeps across its reset():
+	// the message itself, a struct reached from it through struct fields only,
+	// and an array held directly by one of those. Only a message visitor marks
+	// any (emitVisitor's reuse); see emitReuse.
+	fixed bool
+	// stale is the register holding the array the PREVIOUS decode left in this
+	// array scope's field, for a fixed array whose collector is re-armed over it
+	// (stale != "" iff the scope is armed); reset names the element reset a
+	// FramedSeq takes, "" for the other collectors.
+	stale string
+	reset string
 }
 
 type tsScopeSet struct{ scopes []*tsScope }
 
 // buildScopes walks a class's tree and assigns one scope per sequence-framed
-// location reachable from it, rooted at the class itself.
-func (g *gen) buildScopes(raw string, nt *ir.NamedType) []*tsScope {
+// location reachable from it, rooted at the class itself. reuse marks the fixed
+// scopes (tsScope.fixed), for a message visitor that tryDecode drives.
+func (g *gen) buildScopes(raw string, nt *ir.NamedType, reuse bool) []*tsScope {
 	ss := &tsScopeSet{}
-	ss.object(g, scopeRoot(raw), "this.o", nt)
+	ss.object(g, scopeRoot(raw), "this.o", nt, reuse)
 	return ss.scopes
 }
 
 // object adds the scope of one message, struct or union (nt) and, below it, the
 // scopes its sequence-framed fields open.
-func (ss *tsScopeSet) object(g *gen, locName, path string, nt *ir.NamedType) int {
+func (ss *tsScopeSet) object(g *gen, locName, path string, nt *ir.NamedType, fixed bool) int {
 	sc := &tsScope{
 		id: len(ss.scopes), name: locName,
 		fields: nt.Fields, path: path, seqChild: map[int64]int{}, child: -1, parent: -1,
+		fixed: fixed,
 	}
 	if nt.Category == ir.CatUnion {
 		sc.union = g.unionShapeOf(nt.Key, nt)
@@ -85,8 +99,12 @@ func (ss *tsScopeSet) object(g *gen, locName, path string, nt *ir.NamedType) int
 	for _, fld := range nt.Fields {
 		switch fld.Kind {
 		case ir.KindStruct, ir.KindUnion:
+			// A struct field is reset in place, so its object -- and what it holds --
+			// survives the reset a reused destination takes. A union's clear() puts
+			// its option back, so nothing below a union is fixed.
 			sc.seqChild[fld.ID] = ss.object(g, locChild(locName, fld.Name),
-				g.memberPath(sc, fld), fld.Ref.Target)
+				g.memberPath(sc, fld), fld.Ref.Target,
+				sc.fixedFields() && fld.Kind == ir.KindStruct)
 			ss.scopes[sc.seqChild[fld.ID]].parent = sc.id
 		case ir.KindArray:
 			// A native scalar array arrives element-wise through arrayBegin /
@@ -96,7 +114,7 @@ func (ss *tsScopeSet) object(g *gen, locName, path string, nt *ir.NamedType) int
 				sc.seqChild[fld.ID] = ss.array(g, locChild(locName, fld.Name),
 					g.memberAcc(sc, fld), fld.Name,
 					fld.Elem, fld.ElemRef, fld.ElemItems,
-					capOf(fld.HasCount, fld.Count), fld.ElemMaxHas, fld.ElemMax)
+					capOf(fld.HasCount, fld.Count), fld.ElemMaxHas, fld.ElemMax, sc.fixedFields())
 				ss.scopes[sc.seqChild[fld.ID]].parent = sc.id
 			}
 		}
@@ -105,11 +123,12 @@ func (ss *tsScopeSet) object(g *gen, locName, path string, nt *ir.NamedType) int
 }
 
 func (ss *tsScopeSet) array(g *gen, locName, arrPath, loc string, elem ir.Kind, ref *ir.TypeRef,
-	items *ir.ArrayElem, cap int64, emHas bool, em int64) int {
+	items *ir.ArrayElem, cap int64, emHas bool, em int64, fixed bool) int {
 	sc := &tsScope{
 		id: len(ss.scopes), name: locName,
 		isArr: true, arrPath: arrPath, elem: elem, elemRef: ref, elemItems: items,
 		cap: cap, elemMaxHas: emHas, elemMax: em, loc: loc, child: -1, parent: -1,
+		fixed: fixed,
 	}
 	ss.scopes = append(ss.scopes, sc)
 	// EVERY wrapper array is driven through a corelib collector. The two §6.2.1
@@ -127,7 +146,10 @@ func (ss *tsScopeSet) array(g *gen, locName, arrPath, loc string, elem ir.Kind, 
 		// UTF-8 decode. Generated code only routes the two events to it.
 	case ir.KindStruct, ir.KindUnion:
 		sc.ix = fmt.Sprintf("_ix%d", sc.id)
-		sc.child = ss.object(g, locName+"_e", fmt.Sprintf("%s[this.%s]!", arrPath, sc.ix), ref.Target)
+		// An element is reset in place by its collector (elemReset), and that reset
+		// puts the element's own arrays back rather than keeping them: nothing
+		// below an element is fixed.
+		sc.child = ss.object(g, locName+"_e", fmt.Sprintf("%s[this.%s]!", arrPath, sc.ix), ref.Target, false)
 		ss.scopes[sc.child].parent = sc.id
 	case ir.KindArray:
 		// A native row arrives whole through arrayBegin/array<kind> at THIS scope,
@@ -138,11 +160,85 @@ func (ss *tsScopeSet) array(g *gen, locName, arrPath, loc string, elem ir.Kind, 
 			sc.ix = fmt.Sprintf("_ix%d", sc.id)
 			sc.child = ss.array(g, locName+"_r", fmt.Sprintf("%s[this.%s]!", arrPath, sc.ix), loc+" row",
 				items.Elem, items.ElemRef, items.ElemItems,
-				capOf(items.HasCount, items.Count), items.ElemMaxHas, items.ElemMax)
+				capOf(items.HasCount, items.Count), items.ElemMaxHas, items.ElemMax, false)
 			ss.scopes[sc.child].parent = sc.id
 		}
 	}
+	if fixed {
+		g.armReuse(sc)
+	}
 	return sc.id
+}
+
+// fixedFields reports whether the fields of object scope sc keep their storage
+// across a reused destination's reset(): sc is fixed and not a union, whose
+// clear() replaces the option it holds.
+func (sc *tsScope) fixedFields() bool { return sc.fixed && sc.union == nil }
+
+// armReuse decides whether a fixed wrapper array's collector is re-armed over the
+// array the previous decode left there (the corelib's reuse mode), and with which
+// element reset. A string, a blob, a struct and a union element are; so is a row
+// held in a typed array, whose storage staleAt hands back. A wrapper row and a
+// `Long[]` row are not: their array is built fresh, as in a plain decode.
+func (g *gen) armReuse(sc *tsScope) {
+	switch sc.elem {
+	case ir.KindString, ir.KindBlob:
+	case ir.KindStruct, ir.KindUnion:
+		sc.reset = g.elemReset(sc.elemRef)
+	case ir.KindArray:
+		if !g.sharedGapSafe(sc.elemItems.Elem, sc.elemItems.ElemRef) {
+			return
+		}
+	default:
+		return
+	}
+	sc.stale = fmt.Sprintf("_s%d", sc.id)
+}
+
+// elemReset registers the module-level reset a re-armed FramedSeq runs on an
+// element the previous decode built: the element's own reset() (a union's
+// clear()), handing the same object back, so it is reused rather than replaced.
+// Per element type, like the factories beside it, because it names a generated
+// class.
+func (g *gen) elemReset(ref *ir.TypeRef) string {
+	t := g.typeName(ref.Key)
+	op := "reset"
+	if ref.Target.Category == ir.CatUnion {
+		op = "clear"
+	}
+	return g.factory(resetName(g.typeRaw(ref.Key)), fmt.Sprintf("(o: %s): %s => { o.%s(); return o; }", t, t, op))
+}
+
+// staleMember reports whether object-scope field f has typed storage of its own
+// that a reused destination's next decode may write into: a typed native array
+// (filled whole by the bulk hand-off when the count matches) or a blob (by
+// PayloadAcc.takeInto when the length matches). Its register is staleReg.
+func (g *gen) staleMember(sc *tsScope, f *ir.Field) bool {
+	if !sc.fixedFields() {
+		return false
+	}
+	switch f.Kind {
+	case ir.KindBlob:
+		return true
+	case ir.KindArray:
+		return nativeArrayElem(f.Elem) && g.tsTypedArray(f.Elem, f.ElemRef) != ""
+	}
+	return false
+}
+
+// typedZero is the zero a typed array of this element kind is filled with: a
+// bigint for a 64-bit typed array, which refuses a number.
+func (g *gen) typedZero(elem ir.Kind, ref *ir.TypeRef) string {
+	if strings.HasPrefix(g.tsTypedArray(elem, ref), "Big") {
+		return "0n"
+	}
+	return "0"
+}
+
+// staleReg names the register holding what the previous decode left in field f
+// of scope sc (see staleMember). Scoped by location like arrayDst.
+func staleReg(sc *tsScope, f *ir.Field) string {
+	return fmt.Sprintf("_s%d%s", sc.id, naming.Pascal(f.Name))
 }
 
 // visStorage is storage() for the flat visitor, which is a class BESIDE the one
@@ -211,12 +307,55 @@ func (g *gen) emitDecode(f *tsfile, name, raw string) {
 	f.line("  }")
 }
 
+// emitTryDecode generates a message's tryDecode(bytes, out): §6.1.1's fallible
+// twin of decode, into a destination the caller owns and reuses.
+//
+// The outcome is the corelib's one-shot tryDecode: Complete or Incomplete is
+// returned, and a refusal is thrown -- the same channels as IStream.feed, so a
+// malformed message is a SofabError (INVALID_MSG) here exactly as in decode().
+// The visitor keeps the destination's storage before resetting it (emitReuse),
+// and _end runs whatever the outcome.
+func (g *gen) emitTryDecode(f *tsfile, name, raw string) {
+	f.line("  /**")
+	f.line("   * Decode `bytes` into `out`, a message you hold and may decode into again.")
+	f.line("   *")
+	f.line("   * `out` is reset to its declared defaults first, so the result equals")
+	f.line("   * `%s.decode(bytes)`: a field the bytes omit reads its default, never", name)
+	f.line("   * the value `out` held before. What the previous decode left in `out` is")
+	f.line("   * written over where the new value fits it -- a typed array of the same")
+	f.line("   * length, a blob of the same length, an array of strings, blobs, structs,")
+	f.line("   * unions or typed rows and its elements -- and a nested struct or union")
+	f.line("   * object is reset in place, so a reference you kept into an earlier")
+	f.line("   * message may now show this one. Copy out what must outlive the next")
+	f.line("   * decode.")
+	f.line("   *")
+	f.line("   * @returns `Complete`, or `Incomplete` when the bytes end inside a field or")
+	f.line("   *   an open sequence; `out` then holds every field decoded so far, and the")
+	f.line("   *   field the bytes end in may be partly filled.")
+	f.line("   * @throws SofabError the bytes were refused: `INVALID_MSG` (malformed, or")
+	f.line("   *   outside the schema) or `LIMIT_EXCEEDED` (a receiver cap). `out` then")
+	f.line("   *   holds the fields decoded before the error, never an older message's;")
+	f.line("   *   the field the error interrupted may be partly filled.")
+	f.line("   */")
+	f.line("  static tryDecode(bytes: Uint8Array, out: %s): DecodeStatus {", name)
+	f.line("    const v = new %s(out, new PayloadAcc());", visitorName(raw))
+	f.line("    v._reuse();")
+	f.line("    try {")
+	f.line("      return _tryDecode(bytes, v);")
+	f.line("    } finally {")
+	f.line("      v._end();")
+	f.line("    }")
+	f.line("  }")
+}
+
 // --- the flat visitor -------------------------------------------------------
 
 // emitVisitor writes the flat visitor class for one generated type, preceded by
-// its location constants.
-func (g *gen) emitVisitor(f *tsfile, name, raw string, nt *ir.NamedType) {
-	scopes := g.buildScopes(raw, nt)
+// its location constants. reuse is set for a message, whose tryDecode drives the
+// visitor over a reused destination (emitReuse); a struct's or a union's own
+// visitor serves only its decode(bytes) and is emitted as before.
+func (g *gen) emitVisitor(f *tsfile, name, raw string, nt *ir.NamedType, reuse bool) {
+	scopes := g.buildScopes(raw, nt, reuse)
 
 	// The hooks are rendered first: whether an index register is ever READ is a
 	// property of the emitted arms. A wrapper row of strings or blobs hands its
@@ -287,10 +426,180 @@ func (g *gen) emitVisitor(f *tsfile, name, raw string, nt *ir.NamedType) {
 				g.emptyRegisterLit(x.Elem, x.ElemRef, g.tsArrayType(x.Elem, x.ElemRef, x.ElemItems)))
 		}
 	}
+	if reuse {
+		g.emitStaleRegisters(f, scopes)
+	}
 	f.line("  constructor(readonly o: %s, readonly a: PayloadAcc) {}", name)
 	f.b.WriteString(hookText)
+	if reuse {
+		g.emitReuse(f, scopes)
+	}
 	f.line("}")
 	f.blank()
+}
+
+// --- decoding into a reused destination ---------------------------------------
+//
+// tryDecode(bytes, out) decodes into a message the caller already holds, and in a
+// receive loop that message holds the previous one. The result must equal a
+// fresh decode -- an absent field fires no callback, so every field the bytes
+// omit must read its default -- while the storage the previous decode left is
+// written over instead of allocated again, which is the point of the entry
+// point:
+//
+//	typed native array   the kept array when its length is the wire count, zeroed
+//	blob                 the kept buffer when its length is the payload's
+//	                     (PayloadAcc.takeReusing)
+//	wrapper array        the kept array, its collector re-armed (reuse()), so the
+//	                     elements -- objects, typed rows, blob buffers -- are
+//	                     claimed in place and end() cuts the previous tail
+//
+// reset() cannot come first: it REPLACES every array and blob with a new default,
+// which is both the storage lost and an allocation per field per call. So _reuse
+// moves each such field's storage into a register of the visitor's and resets
+// every OTHER field, and the arm that consumes a register takes it (sets it to
+// null). _end then gives every field whose register was never taken -- a field
+// the bytes omitted, or never reached because the decode was cut short or
+// refused -- the default reset() would have given it, so the destination ends
+// exactly where reset() + decode would have left it. It runs in tryDecode's
+// `finally`, and it is the only reader of the registers: until it runs, an
+// untouched storage field still holds the previous message's value, which nothing
+// reads.
+//
+// Only FIXED fields are kept (tsScope.fixed): the message's, and those of a
+// struct reached through struct fields, whose object reset() keeps. A union's
+// option and anything inside an array element are rebuilt as decode() rebuilds
+// them; their own reset (clear(), the element reset) runs in _reuse as reset()
+// would run it.
+//
+// What the corelib holds of this is the part that is the same for every schema:
+// the collectors' reuse mode, PayloadAcc.takeReusing and the one-shot tryDecode.
+// What stays here is per schema: which fields have storage, their registers and
+// defaults, and the per-field arm. The typed-array arm's choice (`kept.length ===
+// count ? kept.fill(0) : new T(count)`) is the one exception, and a known gap: the
+// corelib has no typed-array allocator to hand it to yet (corelib-ts#210).
+
+// emitStaleRegisters declares the registers _reuse fills: one per fixed typed
+// array, fixed blob and armed wrapper array, typed as the member and null until
+// kept. A plain decode never fills them, so every arm it runs sees null and
+// builds its storage as before; `_re` tells a typed matrix row whether its
+// collector was re-armed, so a plain decode does not ask it.
+func (g *gen) emitStaleRegisters(f *tsfile, scopes []*tsScope) {
+	rows := false
+	for _, sc := range scopes {
+		if sc.stale != "" {
+			f.line("  private %s: %s | null = null;", sc.stale, g.arrElemType(sc))
+			if sc.row != "" {
+				rows = true
+			}
+		}
+		if sc.isArr {
+			continue
+		}
+		for _, x := range sc.fields {
+			if !g.staleMember(sc, x) {
+				continue
+			}
+			t := "Uint8Array"
+			if x.Kind != ir.KindBlob {
+				t = g.tsArrayType(x.Elem, x.ElemRef, x.ElemItems)
+			}
+			f.line("  private %s: %s | null = null;", staleReg(sc, x), t)
+		}
+	}
+	if rows {
+		f.line("  private _re = false;")
+	}
+}
+
+// keptMember reports whether field f of object scope sc keeps its storage across
+// a tryDecode (a staleMember, or a wrapper array whose collector is re-armed),
+// and names its register.
+func (g *gen) keptMember(sc *tsScope, scopes []*tsScope, f *ir.Field) (string, bool) {
+	if g.staleMember(sc, f) {
+		return staleReg(sc, f), true
+	}
+	if f.Kind == ir.KindArray && sc.fixedFields() {
+		if ch, ok := sc.seqChild[f.ID]; ok && scopes[ch].stale != "" {
+			return scopes[ch].stale, true
+		}
+	}
+	return "", false
+}
+
+// emitReuse writes the visitor's two tryDecode hooks (see the section comment).
+//
+// _reuse keeps each fixed field's storage and resets every other field the way
+// reset() does -- a struct reached through struct fields field by field, since
+// its own reset() would replace the storage below it; a union through clear().
+//
+// _end gives each field whose storage was never taken its default, and cuts
+// every re-armed wrapper array to the length this decode gave it, so a shorter
+// message -- or one refused or cut short inside the array -- leaves none of the
+// previous message's tail. Once, at the end, not at each sequenceEnd: the slot
+// register names the one collector bound to each field, and a field re-opened
+// (§7.4) is bound to a fresh array, so the collector it replaced belongs to an
+// array the message no longer holds. A plain decode pays nothing for either.
+func (g *gen) emitReuse(f *tsfile, scopes []*tsScope) {
+	f.line("  /** tryDecode: keep the destination's storage for this decode and reset the rest. */")
+	f.line("  _reuse(): void {")
+	if g.hasArmedRow(scopes) {
+		f.line("    this._re = true;")
+	}
+	g.emitPartialReset(f, scopes, scopes[0])
+	f.line("  }")
+	f.line("  /** tryDecode: every field this decode did not reach to its default; cut each re-armed array. */")
+	f.line("  _end(): void {")
+	for _, sc := range scopes {
+		if sc.isArr || !sc.fixedFields() {
+			continue
+		}
+		for _, x := range sc.fields {
+			if reg, ok := g.keptMember(sc, scopes, x); ok {
+				f.line("    if (this.%s !== null) %s = %s;", reg, g.memberAcc(sc, x), g.tsDefault(x))
+			}
+		}
+	}
+	for _, sc := range scopes {
+		if sc.stale != "" {
+			f.line("    this.%s?.end();", sc.seq)
+		}
+	}
+	f.line("  }")
+}
+
+// hasArmedRow reports whether any re-armed wrapper array holds typed rows.
+func (g *gen) hasArmedRow(scopes []*tsScope) bool {
+	for _, sc := range scopes {
+		if sc.stale != "" && sc.row != "" {
+			return true
+		}
+	}
+	return false
+}
+
+// emitPartialReset is reset() over fixed object scope sc, with each kept field
+// moved into its register instead of assigned its default.
+func (g *gen) emitPartialReset(f *tsfile, scopes []*tsScope, sc *tsScope) {
+	for _, x := range sc.fields {
+		acc := g.memberAcc(sc, x)
+		if reg, ok := g.keptMember(sc, scopes, x); ok {
+			f.line("    this.%s = %s;", reg, acc)
+			continue
+		}
+		switch x.Kind {
+		case ir.KindStruct:
+			g.emitPartialReset(f, scopes, scopes[sc.seqChild[x.ID]])
+			continue
+		case ir.KindUnion:
+			f.line("    %s.clear();", acc)
+			continue
+		}
+		f.line("    %s = %s;", acc, g.tsDefault(x))
+		if raw, ok := g.fp32Raw[x]; ok {
+			f.line("    %s.%s = null;", sc.path, raw)
+		}
+	}
 }
 
 // scopeSwitch renders a hook body as one switch on the current location. Each
@@ -511,9 +820,16 @@ func (g *gen) objSeqArm(sc *tsScope, scopes []*tsScope) []string {
 			// destination is the field on THIS scope's object (sc.path), not on the
 			// message: a wrapper array inside a nested struct/union lands there.
 			acc := g.memberAcc(sc, fld)
-			if unionLongBacked(g, sc, fld) {
+			switch {
+			case ch.stale != "":
+				// tryDecode's kept array, if there is one, is the destination and its
+				// collector is re-armed over it (emitReuse). The register is taken, so
+				// a re-opened field (§7.4) starts from an empty array as decode() does.
+				b = fmt.Sprintf("    case %d: { const _r = this.%s; this.%s = null; const _t: %s = _r ?? []; %s = _t; ",
+					fld.ID, ch.stale, ch.stale, g.arrElemType(ch), acc)
+			case unionLongBacked(g, sc, fld):
 				b = fmt.Sprintf("    case %d: { %s = []; const _t = %s; ", fld.ID, acc, acc)
-			} else {
+			default:
 				b = fmt.Sprintf("    case %d: { const _t: %s = []; %s = _t; ", fld.ID, g.arrElemType(ch), acc)
 			}
 			// The collector is bound HERE, over the destination this arm just
@@ -521,6 +837,9 @@ func (g *gen) objSeqArm(sc *tsScope, scopes []*tsScope) []string {
 			// array -- which is also what §7.4's replacement needs: a re-opened
 			// array field must not keep collecting into the destination it dropped.
 			b += fmt.Sprintf("this.%s = %s; ", ch.seq, g.seqCtor(ch, "_t"))
+			if ch.stale != "" {
+				b += fmt.Sprintf("if (_r !== null) this.%s.reuse(%s); ", ch.seq, ch.reset)
+			}
 		} else if sc.union != nil {
 			// A struct/union option: select it (at its default unless it is held,
 			// which is left alone, so a re-opened or repeated option merges, §7.4)
@@ -943,6 +1262,15 @@ func (g *gen) emitPayloadCb(f *tsfile, scopes []*tsScope, cb string) {
 				// one is joined first, and the destination is left untouched until
 				// its last piece lands.
 				store = fmt.Sprintf("if (offset === 0 && end - start === total) { %s = decodeUtf8(src, start, end); } else { const _p = this.a.take(total, offset, src, start, end); if (_p !== null) %s = decodeUtf8(_p); }", acc, acc)
+			} else if g.staleMember(sc, x) {
+				// The buffer tryDecode kept takes the payload when it is exactly its
+				// length -- the corelib's choice (takeReusing) -- and every piece of a
+				// split payload is offered the same one. It is released once the field
+				// holds it: a repeated id (§7.4) would otherwise write the next
+				// occurrence into the value the first one left, and a decode cut short
+				// inside that occurrence would leave a value neither carried.
+				store = fmt.Sprintf("{ const _p = this.a.takeReusing(this.%s, total, offset, src, start, end); if (_p !== null) { %s = _p; this.%s = null; } }",
+					staleReg(sc, x), acc, staleReg(sc, x))
 			} else {
 				store = fmt.Sprintf("{ const _p = this.a.take(total, offset, src, start, end); if (_p !== null) %s = _p; }", acc)
 			}
@@ -1238,9 +1566,17 @@ func (g *gen) emitArrayCbs(f *tsfile, scopes []*tsScope) {
 			}
 			// A ROW is an array wrapper, so a re-opened row id REPLACES what an
 			// earlier header built there (§7.4) -- place, not reserve.
-			b = append(b, fmt.Sprintf("    const _r%s = %s; this.%s!.place(id, _r); this.%s = _r;",
-				g.newArrayDecl(sc.elemItems.Elem, sc.elemItems.ElemRef, g.matRowType(sc)),
-				g.newArrayExpr(sc.elemItems.Elem, sc.elemItems.ElemRef, g.matRowType(sc)), sc.seq, sc.row))
+			if sc.stale != "" {
+				// A re-armed collector hands back the row the previous decode left at
+				// this index; it is the destination when it holds exactly `count`.
+				b = append(b, fmt.Sprintf("    const _o = this._re ? this.%s!.staleAt(id) : null; const _r = _o !== null && _o.length === count ? _o.fill(%s) : %s; this.%s!.place(id, _r); this.%s = _r;",
+					sc.seq, g.typedZero(sc.elemItems.Elem, sc.elemItems.ElemRef),
+					g.newArrayExpr(sc.elemItems.Elem, sc.elemItems.ElemRef, g.matRowType(sc)), sc.seq, sc.row))
+			} else {
+				b = append(b, fmt.Sprintf("    const _r%s = %s; this.%s!.place(id, _r); this.%s = _r;",
+					g.newArrayDecl(sc.elemItems.Elem, sc.elemItems.ElemRef, g.matRowType(sc)),
+					g.newArrayExpr(sc.elemItems.Elem, sc.elemItems.ElemRef, g.matRowType(sc)), sc.seq, sc.row))
+			}
 			begin[sc.id] = b
 
 			p := g.planBulk(sc.elemItems.Elem, sc.elemItems.ElemRef)
@@ -1277,6 +1613,17 @@ func (g *gen) emitArrayCbs(f *tsfile, scopes []*tsScope) {
 			// for a header that passed §7.3, and never for one that did not.
 			if unionLongBacked(g, sc, x) {
 				b += fmt.Sprintf("%s = []; const _d = %s; this.%s = _d; ", acc, acc, arrayDst(sc, x))
+			} else if g.staleMember(sc, x) {
+				// The array tryDecode kept is the destination when its length is the
+				// wire count (emitReuse), and taking it marks the field reached. It is
+				// zeroed first, as a new one would be: the
+				// hand-off writes every element of a COMPLETE array, but a decode that
+				// ends inside this one must leave zeros past the last element it wrote,
+				// never the previous message's.
+				b += fmt.Sprintf("const _s = this.%s; this.%s = null; const _d = _s !== null && _s.length === count ? _s.fill(%s) : %s; %s = _d; this.%s = _d; ",
+					staleReg(sc, x), staleReg(sc, x), g.typedZero(x.Elem, x.ElemRef),
+					g.newArrayExpr(x.Elem, x.ElemRef, g.tsArrayType(x.Elem, x.ElemRef, x.ElemItems)),
+					acc, arrayDst(sc, x))
 			} else {
 				b += fmt.Sprintf("const _d%s = %s; %s = _d; this.%s = _d; ",
 					g.newArrayDecl(x.Elem, x.ElemRef, g.tsArrayType(x.Elem, x.ElemRef, x.ElemItems)),
