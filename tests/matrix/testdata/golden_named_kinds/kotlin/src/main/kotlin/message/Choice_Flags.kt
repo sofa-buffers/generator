@@ -9,9 +9,10 @@ import org.sofabuffers.sofab.*
 /**
  * Flag masks of the `Choice.flags` bitfield.
  *
- * The field itself is a `ULong`: flag positions run 0..63 and the wire word
- * is an unsigned varint, so `ULong` is the whole domain and nothing a peer
- * can send is lost.
+ * The field itself is a `ULong`, which holds every width a bitfield can
+ * declare. The declared width is the smallest unsigned type holding the
+ * highest flag position, here the whole `ULong`: no value
+ * is past it, and an undeclared bit is kept.
  */
 public object Choice_Flags {
     public const val r: ULong = 1uL

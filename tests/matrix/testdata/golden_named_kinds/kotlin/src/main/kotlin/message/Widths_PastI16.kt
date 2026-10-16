@@ -9,8 +9,9 @@ import org.sofabuffers.sofab.*
 /**
  * Declared values of the `Widths.past_i16` enum.
  *
- * The field itself is an `Int`: an enum is a SIGNED 32-bit value on the
- * wire, and a value outside this set still has to survive a decode, which a
+ * The field itself is an `Int`. The enum's declared width is the smallest
+ * signed type holding its constants, here -2147483648..2147483647: a value outside it is
+ * refused, and a value inside it but outside this set is kept, which a
  * closed `enum class` could not represent.
  */
 public object Widths_PastI16 {

@@ -9,9 +9,10 @@ import org.sofabuffers.sofab.*
 /**
  * Flag masks of the `Bits8` bitfield.
  *
- * The field itself is a `ULong`: flag positions run 0..63 and the wire word
- * is an unsigned varint, so `ULong` is the whole domain and nothing a peer
- * can send is lost.
+ * The field itself is a `ULong`, which holds every width a bitfield can
+ * declare. The declared width is the smallest unsigned type holding the
+ * highest flag position, here 0..0xff: a value past
+ * it is refused, and an undeclared bit inside it is kept.
  */
 public object Bits8 {
     /** the lowest flag (default: false) */
