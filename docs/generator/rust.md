@@ -177,6 +177,67 @@ With `emit: sources` (the default) there is no generated `Cargo.toml`: declare
 `disable_encode_bounds = []` under `[features]` of the crate that includes the
 module (Cargo reports an unknown feature in a `cfg` otherwise).
 
+## Decoding
+
+```rust
+// corelib: rs
+pub fn try_decode(data: &[u8], out: &mut Self) -> Result<(), DecodeError>
+pub fn reset(&mut self)
+
+// corelib: rs-no-std
+pub fn try_decode(data: &[u8]) -> Result<Self, DecodeError>
+
+// both
+pub fn decode(data: &[u8]) -> Self
+pub fn decoder() -> M__Decoder
+```
+
+`try_decode` decodes a whole buffer and gives the verdict:
+`Err(DecodeError::Incomplete)` when the bytes end inside a field, and
+`Err(DecodeError::Sofab(e))` when the decode refused them, `e` being the
+corelib's reason. `decode` is the best-effort form: it never refuses and returns
+whatever it filled. `decoder()` returns an incremental decoder to `feed` in
+chunks and `finish` once the input is over.
+
+### Decoding into a reused destination (`corelib: rs`)
+
+With `corelib: rs`, `try_decode` writes into a message the caller owns, so a
+receive loop decodes every message into the same one:
+
+```rust
+let mut msg = VehicleTelemetry::default();
+while let Some(frame) = next_frame() {
+    VehicleTelemetry::try_decode(&frame, &mut msg)?;
+    handle(&msg);
+}
+```
+
+- **It reads as a fresh decode.** `out` is reset to its defaults before the
+  bytes are applied, so a field the new message leaves out reads as its
+  default, never as the value the message before it held.
+- **It keeps the storage `out` holds.** Strings, blobs and arrays are written
+  into the buffers they already have. So are the elements of an array of
+  strings, blobs, rows, structs or unions, up to the length the new message
+  gives the array. Once `out` has held a message of a given shape, decoding
+  another of that shape allocates nothing. The elements past an array's new
+  length are dropped, and so is storage inside a union option other than
+  the one the union falls back to. An array that sits inside an array element
+  or a union option is cleared with its owner and grows again.
+- **On `Err`, `out` holds the fields decoded before the refusal**, and nothing
+  of the message it held before.
+- **`out` keeps the largest buffers it has held** until it is dropped. With
+  unbounded fields that is up to the receiver limits
+  (`max_dyn_array_count`, `max_dyn_string_len`, `max_dyn_blob_len`) per field.
+
+`reset()` puts every field back to its schema default in place: a string, blob
+or array is cleared and refilled from its default and keeps its buffer, and a
+nested struct or union is reset the same way. It is emitted on every struct and
+message.
+
+`corelib: rs-no-std` keeps `try_decode` returning a new message and has no
+`reset()`: there the reuse would cost flash on every embedded target, and
+`heapless` fields hold no heap storage it could keep.
+
 ## Field names
 
 A field's struct member is the field's schema name. A field named like a Rust

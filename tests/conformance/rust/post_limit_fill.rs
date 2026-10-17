@@ -104,14 +104,18 @@ fn nums(n: u64) -> Vec<u8> {
     w
 }
 
-/// One `mat` row (id 2) at index 0 with four u32 elements, repeated k times.
-/// A repeated row id appends, so this is the count-less shape whose destination
-/// can keep growing within a single message.
+/// k occurrences of the `mat` wrapper (id 2), the i-th holding one row of four
+/// u32 elements at index i, so the count-less matrix grows to k rows within a
+/// single message and every row is storage of its own. A distinct index per
+/// occurrence and not one index repeated: a repeated wrapper replaces (§7.4),
+/// and on corelib-rs it decodes into the row the occurrence before it left
+/// (generator#755), so k repeats of index 0 would cost one row and could no
+/// longer tell a refused message from a collected one.
 fn mat_rows(k: u64) -> Vec<u8> {
     let mut w = Vec::new();
-    for _ in 0..k {
+    for i in 0..k {
         put_varint(&mut w, (2u64 << 3) | 6);
-        put_varint(&mut w, (0u64 << 3) | 3);
+        put_varint(&mut w, (i << 3) | 3);
         put_varint(&mut w, 4);
         for i in 0..4u64 {
             put_varint(&mut w, i + 1);
@@ -127,7 +131,7 @@ fn per_decode(msg: &[u8]) -> usize {
     let reps = 8usize;
     let before = ALLOCATED.load(Ordering::Relaxed);
     for _ in 0..reps {
-        let r = Pl::try_decode(msg);
+        let r = one_shot!(Pl, msg);
         std::hint::black_box(&r);
     }
     (ALLOCATED.load(Ordering::Relaxed) - before) / reps
@@ -160,12 +164,12 @@ fn main() {
     //    LimitExceeded either way, which is why the guard cannot be judged by it.
     assert!(
         matches!(
-            Pl::try_decode(&refused),
+            one_shot!(Pl, &refused),
             Err(DecodeError::Sofab(sofab::Error::LimitExceeded))
         ),
         "the refused message must be LimitExceeded"
     );
-    assert!(Pl::try_decode(&nums(3)).is_ok(), "the control must decode");
+    assert!(one_shot!(Pl, &nums(3)).is_ok(), "the control must decode");
 
     // 4. ...and so is the incremental one. `feed` refuses on the very chunk that
     //    crosses the cap, and `finish` consumes the decoder rather than handing
@@ -340,7 +344,7 @@ fn shape(name: &str, tail: Vec<u8>, len_of: fn(&Pl) -> usize) {
     );
     assert!(
         matches!(
-            Pl::try_decode(&refused),
+            one_shot!(Pl, &refused),
             Err(DecodeError::Sofab(sofab::Error::LimitExceeded))
         ),
         "the refused {} message must be LimitExceeded",

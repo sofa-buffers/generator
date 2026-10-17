@@ -199,6 +199,19 @@ func resolveLimits(s *ir.Schema, cfg map[string]any) limitSet {
 // std reports whether the std corelib-rs is selected (vs corelib-rs-no-std).
 func (g *gen) std() bool { return g.corelib != "rs-no-std" }
 
+// reuse reports whether the backend emits the decode into a reused destination
+// (generator#755): `reset()`, `try_decode(data, &mut out)` and the visitor that
+// writes into the storage a destination already holds, through corelib-rs's
+// `sofab::seq::reuse_*` collectors.
+//
+// corelib-rs only. corelib-rs-no-std is the footprint profile and does not take
+// it (corelib-rs-no-std#133): the reuse collectors and live counts cost flash on
+// every embedded target measured -- +348 B with heapless, +372-380 B with alloc,
+// for a decoder with four wrapper arrays -- and heapless storage holds no heap
+// to keep, so nothing offsets it. Flash wins over Ir there, so that profile's
+// output is unchanged, its `try_decode(data) -> Result<Self, _>` included.
+func (g *gen) reuse() bool { return g.std() }
+
 // fixedFields reports whether a MESSAGE container may be fixed-capacity, so a
 // push/extend can fail and its Result must be consumed rather than assumed away.
 //
@@ -666,6 +679,9 @@ func (g *gen) emitStruct(f *rfile, name string, fields []*ir.Field, msg *ir.Mess
 	}
 	f.line("        Ok(())")
 	f.line("    }")
+	if g.reuse() {
+		g.emitReset(f, fields)
+	}
 
 	if isMessage {
 		if !g.staticStore {
@@ -721,12 +737,38 @@ func (g *gen) emitStruct(f *rfile, name string, fields []*ir.Field, msg *ir.Mess
 		f.line("    pub fn decode(data: &[u8]) -> Self {")
 		f.line("        %s::decode(data)", privateIdent(msg, "Decode"))
 		f.line("    }")
-		f.line("    /// Decode a whole buffer, surfacing the accept/reject verdict --")
-		f.line("    /// a truncated tail included, which is `DecodeError::Incomplete` and")
-		f.line("    /// not a half-filled value.")
-		f.line("    pub fn try_decode(data: &[u8]) -> Result<Self, DecodeError> {")
-		f.line("        %s::try_decode(data)", privateIdent(msg, "Decode"))
-		f.line("    }")
+		if g.reuse() {
+			// The decode into a caller-owned destination (generator#755): the one
+			// spelling CORELIB_PLAN §6.1.1 blesses, taking the destination the way
+			// C++'s try_decode does. A receive loop hands the same `out` back every
+			// time, and the strings, blobs, arrays and array elements it already
+			// holds are written into rather than allocated again.
+			f.line("    /// Decode a whole buffer into `out`, surfacing the accept/reject verdict --")
+			f.line("    /// a truncated tail included, which is `DecodeError::Incomplete`.")
+			f.line("    ///")
+			f.line("    /// `out` is reset first, so it reads as a fresh decode of `data` and never")
+			f.line("    /// as a field of the message it held before. The storage it holds is")
+			f.line("    /// written into, not dropped: a string, a blob and an array keep their")
+			f.line("    /// buffers, and so do the elements of an array of strings, blobs, rows,")
+			f.line("    /// structs or unions up to the length the new message gives it -- a")
+			f.line("    /// destination handed the same shape of message on every call stops")
+			f.line("    /// allocating after the first. Elements past that length are dropped;")
+			f.line("    /// storage below an array element, and inside a union option other than")
+			f.line("    /// the one the union falls back to, is replaced rather than kept.")
+			f.line("    ///")
+			f.line("    /// On `Err`, `out` holds the fields decoded before the refusal, and none")
+			f.line("    /// of the message it held before.")
+			f.line("    pub fn try_decode(data: &[u8], out: &mut Self) -> Result<(), DecodeError> {")
+			f.line("        %s::try_decode(data, out)", privateIdent(msg, "Decode"))
+			f.line("    }")
+		} else {
+			f.line("    /// Decode a whole buffer, surfacing the accept/reject verdict --")
+			f.line("    /// a truncated tail included, which is `DecodeError::Incomplete` and")
+			f.line("    /// not a half-filled value.")
+			f.line("    pub fn try_decode(data: &[u8]) -> Result<Self, DecodeError> {")
+			f.line("        %s::try_decode(data)", privateIdent(msg, "Decode"))
+			f.line("    }")
+		}
 		f.line("    /// An incremental decoder for this message: hold it and feed chunks as")
 		f.line("    /// they arrive, instead of buffering the whole message first.")
 		f.line("    pub fn decoder() -> %s {", roleIdent(msg, "Decoder"))

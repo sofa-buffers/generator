@@ -92,6 +92,21 @@ impl Scalars {
         }
         Ok(())
     }
+    /// Every field back to its schema default, in place: a string, blob or
+    /// array is cleared and refilled from its default, so it keeps the heap
+    /// capacity it holds, and a nested struct or union is reset the same way.
+    /// The elements of an array are dropped; the array keeps its own buffer.
+    pub fn reset(&mut self) {
+        self.u8min = 0;
+        self.u8max = 255;
+        self.u64max = 18446744073709551615;
+        self.i8min = -128;
+        self.i64min = i64::MIN;
+        self.f32 = 3.14;
+        self.f64 = -2.5;
+        self.flag = true;
+        self.flags.clear();
+    }
     /// Encode the message. A value past its schema bound is refused with
     /// `sofab::Error::Argument` (see `serialize`), and no bytes are returned.
     pub fn encode(&self) -> Result<Vec<u8>, sofab::Error> {
@@ -103,11 +118,23 @@ impl Scalars {
     pub fn decode(data: &[u8]) -> Self {
         _Scalars__Decode::decode(data)
     }
-    /// Decode a whole buffer, surfacing the accept/reject verdict --
-    /// a truncated tail included, which is `DecodeError::Incomplete` and
-    /// not a half-filled value.
-    pub fn try_decode(data: &[u8]) -> Result<Self, DecodeError> {
-        _Scalars__Decode::try_decode(data)
+    /// Decode a whole buffer into `out`, surfacing the accept/reject verdict --
+    /// a truncated tail included, which is `DecodeError::Incomplete`.
+    ///
+    /// `out` is reset first, so it reads as a fresh decode of `data` and never
+    /// as a field of the message it held before. The storage it holds is
+    /// written into, not dropped: a string, a blob and an array keep their
+    /// buffers, and so do the elements of an array of strings, blobs, rows,
+    /// structs or unions up to the length the new message gives it -- a
+    /// destination handed the same shape of message on every call stops
+    /// allocating after the first. Elements past that length are dropped;
+    /// storage below an array element, and inside a union option other than
+    /// the one the union falls back to, is replaced rather than kept.
+    ///
+    /// On `Err`, `out` holds the fields decoded before the refusal, and none
+    /// of the message it held before.
+    pub fn try_decode(data: &[u8], out: &mut Self) -> Result<(), DecodeError> {
+        _Scalars__Decode::try_decode(data, out)
     }
     /// An incremental decoder for this message: hold it and feed chunks as
     /// they arrive, instead of buffering the whole message first.
@@ -131,13 +158,13 @@ mod _Scalars__Decode {
         m
     }
 
-    pub fn try_decode(data: &[u8]) -> Result<Scalars, DecodeError> {
-        let mut m = Scalars::default();
+    pub fn try_decode(data: &[u8], m: &mut Scalars) -> Result<(), DecodeError> {
+        m.reset();
         let overflow;
         let invalid;
         let fed;
         {
-            let mut v = _V { m: &mut m, stack: [_Loc::Root; 1], sp: 0, cur: _Loc::Root, dead: 0, err: false, inv: false, askip: 0, afill: 0 };
+            let mut v = _V { m: &mut *m, stack: [_Loc::Root; 1], sp: 0, cur: _Loc::Root, dead: 0, err: false, inv: false, askip: 0, afill: 0 };
             let mut is = sofab::IStream::new();
             fed = is.feed(data, &mut v);
             overflow = v.err;
@@ -157,7 +184,7 @@ mod _Scalars__Decode {
         // A fixed-capacity field overflowed during the fill:
         // report it rather than return a silently-truncated value.
         if overflow { return Err(DecodeError::Sofab(sofab::Error::BufferFull)); }
-        Ok(m)
+        Ok(())
     }
 
     /// Incremental decoder: hold one and feed the message as bytes arrive.

@@ -148,7 +148,7 @@ fn check_full(m: &Deep, how: &str) {
 fn main() {
     // 1. From below: the longest well-formed chain decodes, one-shot and chunked.
     let wire = full_wire();
-    let one = match Deep::try_decode(&wire) {
+    let one = match one_shot!(Deep, &wire) {
         Ok(m) => m,
         Err(e) => fail(&format!("a well-formed message reaching the schema's full depth was refused: {e:?}")),
     };
@@ -175,7 +175,7 @@ fn main() {
             os.write_str(0, "t").unwrap();
             os.write_sequence_end().unwrap();
         });
-        let m = Deep::try_decode(&sparse).unwrap_or_else(|e| fail(&format!("sparse tags refused: {e:?}")));
+        let m = one_shot!(Deep, &sparse).unwrap_or_else(|e| fail(&format!("sparse tags refused: {e:?}")));
         if m.tags.len() != 1 || m.tags[0].as_str() != "t" {
             fail("tags[0] after a one-element wrapper array");
         }
@@ -199,7 +199,7 @@ fn main() {
         os.write_sequence_end().unwrap();
         os.write_unsigned(1, 7).unwrap();
     });
-    match Deep::try_decode(&over) {
+    match one_shot!(Deep, &over) {
         Err(DecodeError::Sofab(sofab::Error::InvalidMsg)) => {}
         other => fail(&format!("an over-index element nesting past the stack must be InvalidMsg, got {other:?}")),
     }
@@ -209,14 +209,14 @@ fn main() {
     // the whole message.
     let chain = build(|os| write_struct_chain(os));
     let before = ALLOCATED.load(Ordering::Relaxed);
-    let m = Deep::try_decode(&chain).unwrap_or_else(|e| fail(&format!("struct chain refused: {e:?}")));
+    let m = one_shot!(Deep, &chain).unwrap_or_else(|e| fail(&format!("struct chain refused: {e:?}")));
     let spent = ALLOCATED.load(Ordering::Relaxed) - before;
     if spent != 0 || m.s1.s2.s3.v != 42 || m.tail != 7 {
         fail(&format!("a decode that fills no container must not allocate: {spent} bytes"));
     }
     if STATIC {
         let before = ALLOCATED.load(Ordering::Relaxed);
-        let m = Deep::try_decode(&wire).unwrap_or_else(|e| fail(&format!("full message refused: {e:?}")));
+        let m = one_shot!(Deep, &wire).unwrap_or_else(|e| fail(&format!("full message refused: {e:?}")));
         let spent = ALLOCATED.load(Ordering::Relaxed) - before;
         if spent != 0 {
             fail(&format!("allow_dynamic: false must decode without the heap: {spent} bytes"));

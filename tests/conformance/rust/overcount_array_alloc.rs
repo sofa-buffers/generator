@@ -79,7 +79,7 @@ fn per_decode(msg: &[u8]) -> (usize, String) {
     let before = ALLOCATED.load(Ordering::Relaxed);
     let mut verdict = String::new();
     for _ in 0..reps {
-        let r = Bnd::try_decode(msg);
+        let r = one_shot!(Bnd, msg);
         // Formatting allocates, so the verdict is only rendered after the count
         // is taken -- keep the loop body free of anything but the decode.
         std::hint::black_box(&r);
@@ -172,7 +172,7 @@ fn main() {
     for v in 0..BOUND as u64 {
         put_varint(&mut good, v + 10);
     }
-    let m = Bnd::try_decode(&good).expect("a message inside the bound must decode");
+    let m = one_shot!(Bnd, &good).expect("a message inside the bound must decode");
     assert_eq!(m.arr, vec![10u64, 11, 12, 13], "the accept path must still fill");
     println!("    a legal {BOUND}-element array still decodes to {:?}", m.arr);
 
@@ -185,7 +185,7 @@ fn main() {
     for v in 0..BOUND {
         goodfx.extend_from_slice(&(v as f64 + 0.5).to_le_bytes());
     }
-    let mf = Bnd::try_decode(&goodfx).expect("a bound-exact fixlen array must decode");
+    let mf = one_shot!(Bnd, &goodfx).expect("a bound-exact fixlen array must decode");
     assert_eq!(
         mf.fx,
         vec![0.5f64, 1.5, 2.5, 3.5],
@@ -203,7 +203,7 @@ fn main() {
     for v in 0..WIDE {
         put_varint(&mut goodwide, v % 4294967296);
     }
-    let mw = Bnd::try_decode(&goodwide).expect("a legal wide array must decode");
+    let mw = one_shot!(Bnd, &goodwide).expect("a legal wide array must decode");
     assert_eq!(mw.wide.len(), WIDE as usize, "the width-guarded arm must fill to the end");
     assert_eq!(mw.wide[0], 0, "first element");
     assert_eq!(
@@ -220,7 +220,7 @@ fn main() {
     // good message after a bad one, on the same shape.)
     let (_, first) = per_decode(&ints);
     assert_eq!(first, "Err");
-    let m2 = Bnd::try_decode(&good).expect("a rejected decode must not poison the next one");
+    let m2 = one_shot!(Bnd, &good).expect("a rejected decode must not poison the next one");
     assert_eq!(m2.arr, vec![10u64, 11, 12, 13]);
     println!("    a decoder that rejected one message still decodes the next");
 }

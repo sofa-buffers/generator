@@ -325,10 +325,13 @@ func TestRustUnionDecodeSwitch(t *testing.T) {
 			"self.m.u.pt_mut().x = value as i32")
 		str := sliceFn(t, m, "    fn string(")
 		if cfg["corelib"] == "rs" && cfg["allow_dynamic"] == nil {
+			// Written into the option's String through its select-if-not-held
+			// accessor, so a held option keeps its buffer (generator#755); an array
+			// inside an option is not a reused array and keeps reserve_elem.
 			wantAll(t, cfg, str, "a string option is not selected at the completion store",
-				"(_Loc::Root_u, 1) => self.m.u = M_U::S(_s),",
-				"(_Loc::Root_v_e, 1) => self.m.v[self._ix0] = M_V::S(_s),",
-				"sofab::seq::place_elem(&mut (*self.m.u.strs_mut()), id,")
+				"(_Loc::Root_u, 1) => { let _d = self.m.u.s_mut(); _d.clear(); _d.push_str(_s); }",
+				"(_Loc::Root_v_e, 1) => { let _d = self.m.v[self._ix0].s_mut(); _d.clear(); _d.push_str(_s); }",
+				"match sofab::seq::reserve_elem(&mut (*self.m.u.strs_mut()), id,")
 		}
 		if cfg["corelib"] == "rs-no-std" && cfg["allow_dynamic"] == nil {
 			wantAll(t, cfg, str, "a fixed-capacity string option is not selected at the completion store",
