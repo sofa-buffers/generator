@@ -227,15 +227,16 @@ func TestGoHeaderBoundsAtTheWord(t *testing.T) {
 		"case 2:\n\t\tif sub != sofab.FixlenStr {\n\t\t\treturn nil\n\t\t}\n\t\tif total > 8 {",
 		"case 3:\n\t\tif sub != sofab.FixlenBlob {\n\t\t\treturn nil\n\t\t}\n\t\tif total > 16 {",
 		// The destination is opened at the header, sized from the count the line
-		// above has just bounded -- and by make, never by reslicing, so an array
-		// that arrives EMPTY decodes as the empty array and not as a nil slice.
-		"m.Ua = make([]uint32, 0, count)",
+		// above has just bounded -- by sofab.ReuseSlice over the storage a
+		// previous decode left, which never returns nil, so an array that arrives
+		// EMPTY decodes as the empty array and not as a nil slice.
+		"m.Ua = sofab.ReuseSlice(m._spareUa, count)",
 		// An unbounded array is bounded in the very same arm, one line up, by the
 		// receiver cap that exists to bound exactly this allocation -- and in the
 		// other category, the cap being a policy rejection of well-formed bytes
 		// (§6.2.1). The corelib holds no cap of its own to fall back on any more
 		// (corelib-go#133), so this arm is the whole bound on this shape.
-		"case 4:\n\t\tif kind != sofab.ArrayUnsigned {\n\t\t\treturn nil\n\t\t}\n\t\tif count > MaxDynArrayCount {\n\t\t\treturn sofab.ErrLimitExceeded\n\t\t}\n\t\tm.Da = make([]uint32, 0, count)",
+		"case 4:\n\t\tif kind != sofab.ArrayUnsigned {\n\t\t\treturn nil\n\t\t}\n\t\tif count > MaxDynArrayCount {\n\t\t\treturn sofab.ErrLimitExceeded\n\t\t}\n\t\tm.Da = sofab.ReuseSlice(m._spareDa, count)",
 		// ...and the unbounded string likewise, at its length word.
 		"case 5:\n\t\tif sub != sofab.FixlenStr {\n\t\t\treturn nil\n\t\t}\n\t\tif total > MaxDynStringLen {\n\t\t\treturn sofab.ErrLimitExceeded\n\t\t}",
 	} {

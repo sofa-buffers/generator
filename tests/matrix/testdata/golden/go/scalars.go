@@ -21,6 +21,10 @@ type Scalars struct {
 	U8max uint8   `json:"u8max"`
 	I8min int8    `json:"i8min"`
 	Flag  bool    `json:"flag"`
+	// The _spare members keep an array's or a blob's storage across Reset,
+	// which puts the field itself back to its default (nil where it has
+	// none, as a fresh message holds it); the next decode writes into it.
+	_spareFlags []bool
 }
 
 func (m *Scalars) Serialize(e *sofab.Encoder) {
@@ -154,7 +158,7 @@ func (m *Scalars) ArrayBegin(id sofab.ID, kind sofab.ArrayKind, count int) error
 		if count > 4 {
 			return sofab.ErrInvalidMsg
 		}
-		m.Flags = make([]bool, 0, count)
+		m.Flags = sofab.ReuseSlice(m._spareFlags, count)
 	}
 	return nil
 }
@@ -179,6 +183,23 @@ func Scalars__New() *Scalars {
 	m.F64 = -2.5
 	m.Flag = true
 	return m
+}
+
+// Reset puts every field of Scalars back to its schema default, in place, so
+// that it reads exactly as a fresh one: a nested struct is Reset and a union
+// Cleared. An array or blob keeps the storage it held for the next decode
+// into this object, which writes into it -- so a slice read from it, or
+// assigned to it, before Reset is overwritten by Reset or by that decode.
+func (m *Scalars) Reset() {
+	m.U8min = 0
+	m.U8max = 255
+	m.U64max = 18446744073709551615
+	m.I8min = -128
+	m.I64min = -9223372036854775808
+	m.F32 = 3.14
+	m.F64 = -2.5
+	m.Flag = true
+	m._spareFlags, m.Flags = m.Flags, nil
 }
 
 // Scalars__MaxSize is this message's worst-case encoded size, derived from the
@@ -279,6 +300,24 @@ func Scalars__Decode(data []byte) (*Scalars, error) {
 		return nil, err
 	}
 	return m, nil
+}
+
+// Scalars__TryDecode decodes data into out, which the caller owns, instead of into a
+// new message: out is Reset first, so afterwards it reads exactly as
+// Scalars__Decode(data) would. It is the shape for a receive loop that decodes
+// every message into the same object.
+//
+// The storage out's arrays and blobs held is written into rather than
+// allocated anew, so a slice read from out before this call -- or held
+// by a copy of it -- is overwritten by it. Copy what you keep.
+//
+// The error is Scalars__Decode's: nil, sofab.ErrIncomplete for bytes that end
+// inside a field, or the refusal. On a refusal out holds the fields
+// decoded before the error and the defaults for the rest, never a value of
+// the message it held before.
+func Scalars__TryDecode(data []byte, out *Scalars) error {
+	out.Reset()
+	return sofab.AcceptBytes(data, out)
 }
 
 // Scalars__DecodeFrom parses a message straight out of r (with defaults pre-applied).

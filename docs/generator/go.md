@@ -44,8 +44,8 @@ generation then fails with an error naming the file instead of writing it.
 
 ## Encoding and decoding
 
-A message `m` generates six entry points, differing only in who owns the
-storage. All three decode paths are the same corelib decoder, so the same bytes
+A message `m` generates seven entry points, differing only in who owns the
+storage. All four decode paths are the same corelib decoder, so the same bytes
 give the same verdict and the same value whichever one reads them, and whether
 they arrive whole or a byte at a time.
 
@@ -55,6 +55,7 @@ they arrive whole or a byte at a time.
 | encode into your buffer | `func (m *M) EncodeInto(dst []byte) (int, error)` | yours; nothing is allocated |
 | encode to a stream | `func (m *M) EncodeTo(w io.Writer) error` | yours; a fixed scratch drains into `w` as it fills |
 | decode bytes in hand | `func M__Decode(data []byte) (*M, error)` | the message copies out of `data` |
+| decode into your message | `func M__TryDecode(data []byte, out *M) error` | `out`, and the storage its arrays and blobs already hold |
 | decode from a reader | `func M__DecodeFrom(r io.Reader) (*M, error)` | a 4 KiB chunk, drained from `r` |
 | decode from chunks | `func M__NewDecoder() *M__Decoder` | the chunks are yours |
 
@@ -101,6 +102,57 @@ A chunk is borrowed for the call only. The message owns its bytes, so you may
 reuse or overwrite the chunk the moment `Feed` returns. `Message()` is the
 destination, filled in place, and is the same message at every call.
 
+### Decoding into a reused destination
+
+`M__TryDecode` decodes into a message you own, so a receive loop decodes every
+message into the same one:
+
+```go
+msg := message.M__New()
+for frame := range frames {
+	if err := message.M__TryDecode(frame, msg); err != nil {
+		return err
+	}
+	handle(msg)
+}
+```
+
+- **It reads as a fresh decode.** `out` is reset before the bytes are applied
+  (`out.Reset()`), so a field the new message leaves out reads as its default,
+  never as the value the message before it held. Absent and empty read exactly
+  as `M__Decode` gives them: an absent array is `nil` and one that arrived empty
+  is empty (at any depth, and as a held union option), and a blob that is
+  absent or arrived empty is `nil`.
+- **The error is `M__Decode`'s**: `nil`, `sofab.ErrIncomplete` for bytes that
+  end inside a field, or the refusal. On a refusal `out` holds the fields
+  decoded before it and the defaults for the rest, and nothing of the message
+  it held before.
+- **It keeps the storage `out` holds.** An array or blob field is written into
+  the storage it had, and so are the elements of an array of blobs and the rows
+  of an array of arrays, up to the length the new message gives them. The same
+  holds inside a nested struct.
+- **A slice read from `out` is overwritten.** A slice you took from `out`
+  before the call — or one you assigned to it, or one held by a copy of `out` —
+  shares that storage, and the next decode writes into it. Copy what you keep.
+- **Some storage is not kept.** A string is allocated on every decode (a Go
+  string is immutable). The fields of a struct inside an array, and a union's
+  options, start from new storage, since the element and the union are rebuilt.
+  A field the previous message left out and that declares no default has no
+  storage to hand on, so its next arrival allocates. Each array of strings,
+  blobs, structs, unions or arrays also allocates the corelib object that
+  gathers its elements. Apart from these, decoding a message of the shape `out`
+  already held allocates nothing.
+- **`out` keeps the largest storage it has held** per field until the field
+  is set to `nil`.
+
+`Reset()` is the reset `M__TryDecode` runs, and is public on every message and
+struct: every field back to its schema default, a nested struct `Reset()` and a
+union `Clear()`ed. Afterwards the object reads as a fresh `M__New()`, and its
+arrays and blobs keep their storage for the next decode into it — which means
+a slice read from it before `Reset()` is overwritten by `Reset()` itself where
+the field declares a default, or by that decode. A union has no `Reset()`;
+`Clear()` is its spelling of the same operation.
+
 ## Field names
 
 A field's Go field is the schema name in Go casing: underscores are folded into
@@ -115,8 +167,8 @@ and `string` is `String_`. Those names are:
   `ArrayEnd`, `BeginSequence`, `EndSequence`, and the embedded `VisitorBase`;
 - the embedded `StringCheck` of a type with a string field, and what it
   provides: `UTF8Valid`, `SetStringCheck`;
-- the methods every generated type declares: `Serialize`, and on a message also
-  `Encode`, `EncodeTo`, `EncodeInto`.
+- the methods every generated type declares: `Serialize`, on a struct and a
+  message `Reset`, and on a message also `Encode`, `EncodeTo`, `EncodeInto`.
 
 Only the Go field changes: the wire is keyed by the field id, and the `json` tag
 keeps the schema name.
@@ -131,7 +183,7 @@ one package, so each name is built so that no other can spell it:
 |---|---|---|
 | message, `$defs` type | the name in Go casing | message `vehicle_state` is `VehicleState`, `$defs` struct `point` is `Point` |
 | inline type | its path (the message, then each field or option leading to it) in Go casing, joined with `_` | struct field `pos` of message `m` is `M_Pos`; the element struct of an array field `pts` is `M_Pts` |
-| a message's functions, types and constants | the message type, `__`, the role | `M__New()`, `M__Decode(b)`, `M__DecodeFrom(r)`, `M__NewDecoder()`, `M__Decoder`, `M__EncodeOptions()`, `M__MaxSize`, `M__MaxSizeLimit`, `M__MaxDepth` |
+| a message's functions, types and constants | the message type, `__`, the role | `M__New()`, `M__Decode(b)`, `M__TryDecode(b, out)`, `M__DecodeFrom(r)`, `M__NewDecoder()`, `M__Decoder`, `M__EncodeOptions()`, `M__MaxSize`, `M__MaxSizeLimit`, `M__MaxDepth` |
 | enum constant, bitfield flag | the type, `_`, the name | `Color_Red`, `Flags_On` |
 | union option id | the option's path, `__ID` | `M_Shape_Pt__ID` |
 | `$defs` union used with several `default_id`s | the union, `__Default`, the option | `Shape__DefaultPt` |

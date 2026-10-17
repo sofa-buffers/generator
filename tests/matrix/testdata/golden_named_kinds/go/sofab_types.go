@@ -85,6 +85,18 @@ func (m *Holder) setDefaults() {
 	m.Perm = Holder_Perm(512)
 }
 
+// Reset puts every field of Holder back to its schema default, in place, so
+// that it reads exactly as a fresh one: a nested struct is Reset and a union
+// Cleared. An array or blob keeps the storage it held for the next decode
+// into this object, which writes into it -- so a slice read from it, or
+// assigned to it, before Reset is overwritten by Reset or by that decode.
+func (m *Holder) Reset() {
+	m.Level = Level(9)
+	m.Wide = Bits64(0)
+	m.Sign = Holder_Sign(-1)
+	m.Perm = Holder_Perm(512)
+}
+
 // Holder_Perm is a generated bitfield (unsigned wire varint).
 type Holder_Perm uint16
 
@@ -150,6 +162,16 @@ func (m *Outer) BeginSequence(id sofab.ID) (sofab.Visitor, error) {
 // nested level, in place.
 func (m *Outer) setDefaults() {
 	m.Holder.setDefaults()
+	m.Tag = Short(128)
+}
+
+// Reset puts every field of Outer back to its schema default, in place, so
+// that it reads exactly as a fresh one: a nested struct is Reset and a union
+// Cleared. An array or blob keeps the storage it held for the next decode
+// into this object, which writes into it -- so a slice read from it, or
+// assigned to it, before Reset is overwritten by Reset or by that decode.
+func (m *Outer) Reset() {
+	m.Holder.Reset()
 	m.Tag = Short(128)
 }
 
@@ -2048,6 +2070,16 @@ func (m *Positions_InlineS) Signed(id sofab.ID, v int64) error {
 // setDefaults seeds the schema defaults Positions_InlineS's members declare, at every
 // nested level, in place.
 func (m *Positions_InlineS) setDefaults() {
+	m.Tone = Positions_InlineS_Tone(2)
+	m.Caps = Positions_InlineS_Caps(32768)
+}
+
+// Reset puts every field of Positions_InlineS back to its schema default, in place, so
+// that it reads exactly as a fresh one: a nested struct is Reset and a union
+// Cleared. An array or blob keeps the storage it held for the next decode
+// into this object, which writes into it -- so a slice read from it, or
+// assigned to it, before Reset is overwritten by Reset or by that decode.
+func (m *Positions_InlineS) Reset() {
 	m.Tone = Positions_InlineS_Tone(2)
 	m.Caps = Positions_InlineS_Caps(32768)
 }

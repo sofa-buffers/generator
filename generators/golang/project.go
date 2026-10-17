@@ -215,13 +215,15 @@ func (g *gen) emitBench(f *gofile, s *ir.Schema, pkgAlias string) {
 		f.line("\tbench%sWire = b", base)
 		f.line("}")
 		f.blank()
+		// The decode op is <Msg>__TryDecode into bench<M>Out, which the warmup
+		// below has already decoded the same wire into: the receive-loop steady
+		// state that surface is for, as the corelib: rs rows measure it. Setup,
+		// not a warmup in the runtime sense -- the destination is the op's input.
 		f.line("//go:noinline")
 		f.line("func run_decode_%s() {", low)
-		f.line("\tobj, err := %s.%s__Decode(bench%sWire)", pkgAlias, base, base)
-		f.line("\tif err != nil {")
+		f.line("\tif err := %s.%s__TryDecode(bench%sWire, bench%sOut); err != nil {", pkgAlias, base, base, base)
 		f.line("\t\tfail(err)")
 		f.line("\t}")
-		f.line("\tbench%sOut = obj", base)
 		f.line("}")
 		f.blank()
 		f.line("// warmup_* pay the runtime's one-time costs (lazy itabs, type/name")
@@ -240,11 +242,9 @@ func (g *gen) emitBench(f *gofile, s *ir.Schema, pkgAlias string) {
 		f.blank()
 		f.line("//go:noinline")
 		f.line("func warmup_decode_%s() {", low)
-		f.line("\tobj, err := %s.%s__Decode(bench%sWire)", pkgAlias, base, base)
-		f.line("\tif err != nil {")
+		f.line("\tif err := %s.%s__TryDecode(bench%sWire, bench%sOut); err != nil {", pkgAlias, base, base, base)
 		f.line("\t\tfail(err)")
 		f.line("\t}")
-		f.line("\tbench%sOut = obj", base)
 		f.line("}")
 		f.blank()
 	}
@@ -265,7 +265,8 @@ func (g *gen) emitBench(f *gofile, s *ir.Schema, pkgAlias string) {
 		f.line("\t\t\trun_encode_%s()", low)
 		f.line("\t\t} else {")
 		f.line("\t\t\twarmup_encode_%s() // setup: the decode input (not collected)", low)
-		f.line("\t\t\twarmup_decode_%s() // one-time runtime costs (not collected)", low)
+		f.line("\t\t\tbench%sOut = %s.%s__New()", base, pkgAlias, base)
+		f.line("\t\t\twarmup_decode_%s() // one-time runtime costs, and the destination's first decode (not collected)", low)
 		f.line("\t\t\trun_decode_%s()", low)
 		f.line("\t\t}")
 		f.line("\t\tvar sink uint64")
@@ -316,7 +317,7 @@ func (g *gen) harness(s *ir.Schema, modPath string) []byte {
 	g.emitBench(f, s, pkgAlias)
 	f.line("func main() {")
 	f.line("\tif len(os.Args) < 2 {")
-	f.line("\t\tfmt.Fprintln(os.Stderr, \"usage: harness <encode|decode|streamdecode|pushdecode|streamencode|encodeinto|bench> [Message|workload]\")")
+	f.line("\t\tfmt.Fprintln(os.Stderr, \"usage: harness <encode|decode|streamdecode|pushdecode|reusedecode|streamencode|encodeinto|bench> [Message|workload] [chunk|window|held-hex]\")")
 	f.line("\t\tos.Exit(2)")
 	f.line("\t}")
 	f.line("\tmode := os.Args[1]")
@@ -416,6 +417,46 @@ func (g *gen) harness(s *ir.Schema, modPath string) []byte {
 		f.line("\t\t\tjs, _ := marshalJSON(d.Message())")
 		f.line("\t\t\tos.Stdout.Write(js)")
 		f.line("\t\t\tfmt.Fprintln(os.Stdout)")
+		// Decode into a REUSED destination (generator#756): the message the third
+		// argument spells in hex through the plain Decode and once more through
+		// X__TryDecode, then stdin into that same object through X__TryDecode. Prints the verdict (a refusal's code
+		// included, exit 0), the destination as JSON and its re-encode as hex ("-"
+		// if the encode refuses); tests/conformance/lib/check_reused_destination.py
+		// holds all three against a fresh decode.
+		f.line("\t\t} else if mode == \"reusedecode\" {")
+		f.line("\t\t\theld := \"\"")
+		f.line("\t\t\tif len(os.Args) > 3 {")
+		f.line("\t\t\t\theld = os.Args[3]")
+		f.line("\t\t\t}")
+		f.line("\t\t\thb, err := hex.DecodeString(held)")
+		f.line("\t\t\tif err != nil {")
+		f.line("\t\t\t\tfail(err)")
+		f.line("\t\t\t}")
+		f.line("\t\t\tobj, err := %s.%s__Decode(hb)", pkgAlias, base)
+		f.line("\t\t\tif err != nil {")
+		f.line("\t\t\t\tfail(fmt.Errorf(\"held message: %%w\", err))")
+		f.line("\t\t\t}")
+		// Once more through TryDecode, so the destination the next message meets
+		// already keeps storage of its own -- a spare filled, as in a receive
+		// loop -- and not only the fields a plain Decode leaves.
+		f.line("\t\t\tif err := %s.%s__TryDecode(hb, obj); err != nil {", pkgAlias, base)
+		f.line("\t\t\t\tfail(fmt.Errorf(\"held message, decoded again: %%w\", err))")
+		f.line("\t\t\t}")
+		f.line("\t\t\tst := \"COMPLETE\"")
+		f.line("\t\t\tif err := %s.%s__TryDecode(in, obj); errors.Is(err, sofab.ErrIncomplete) {", pkgAlias, base)
+		f.line("\t\t\t\tst = \"INCOMPLETE\"")
+		f.line("\t\t\t} else if err != nil {")
+		f.line("\t\t\t\tst = verdictName(err)")
+		f.line("\t\t\t}")
+		f.line("\t\t\twire := \"-\"")
+		f.line("\t\t\tif b, err := obj.Encode(); err == nil {")
+		f.line("\t\t\t\twire = hex.EncodeToString(b)")
+		f.line("\t\t\t}")
+		f.line("\t\t\tjs, _ := marshalJSON(obj)")
+		f.line("\t\t\tfmt.Fprintln(os.Stdout, st)")
+		f.line("\t\t\tos.Stdout.Write(js)")
+		f.line("\t\t\tfmt.Fprintln(os.Stdout)")
+		f.line("\t\t\tfmt.Fprintln(os.Stdout, wire)")
 		// The encode twin of streamdecode: the same message through a sink, drained
 		// into a buffer the harness owns. Window 0 is the generated EncodeTo with its
 		// own scratch; any other window is a scratch of that size (raised to the

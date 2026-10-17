@@ -18,8 +18,8 @@ cpp-cpp-static     maxspeed   toggle    10625         21325
 cpp-cpp-unbounded  maxspeed   toggle    8484          21663
 csharp             maxspeed   subtract  29462         70166
 dart               maxspeed   subtract  24713         39094
-go                 maxspeed   toggle    18605         45116
-go-unbounded       maxspeed   toggle    13165         39544
+go                 maxspeed   toggle    18622         39724
+go-unbounded       maxspeed   toggle    13165         29532
 java               maxspeed   subtract  17368         31711
 kotlin             maxspeed   subtract  17541         32773
 python             maxspeed   subtract  1068392       1979918

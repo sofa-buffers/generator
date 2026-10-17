@@ -347,6 +347,7 @@ func (g *gen) typesFile() []byte {
 		case ir.CatStruct:
 			g.emitObject(f, g.typeName(key), nt.Fields)
 			g.emitSetDefaults(f, key, g.typeName(key), nt.Fields)
+			g.emitReset(f, g.typeName(key), nt.Fields)
 		case ir.CatUnion:
 			g.emitUnion(f, nt)
 		}
@@ -464,6 +465,19 @@ func (g *gen) emitObject(f *gofile, typeName string, fields []*ir.Field) {
 			continue
 		}
 		f.line("\t%s %s %s%s", name, g.goType(fld), tag, fieldDoc(fld))
+	}
+	first := true
+	for _, fld := range fields {
+		if !hasSpare(fld) {
+			continue
+		}
+		if first {
+			f.line("\t// The _spare members keep an array's or a blob's storage across Reset,")
+			f.line("\t// which puts the field itself back to its default (nil where it has")
+			f.line("\t// none, as a fresh message holds it); the next decode writes into it.")
+			first = false
+		}
+		f.line("\t%s %s", spareName(fld), g.goType(fld))
 	}
 	if hasFixlenField(fields) {
 		f.line("\t// _acc assembles a string or blob payload the codec delivers in pieces")
@@ -1243,7 +1257,14 @@ func (g *gen) emitVisitorMethods(f *gofile, typeName string, fields []*ir.Field,
 		store := func(expr string) string { return acc + " = " + expr }
 		sel := ""
 		descend := fmt.Sprintf("return &%s, nil", acc)
+		// spare is the storage a previous decode left for this field (emitReset);
+		// "" in a union, whose option slots have none.
+		spare := ""
+		if hasSpare(fld) {
+			spare = "m." + spareName(fld)
+		}
 		if u != nil {
+			spare = ""
 			o := u.byField[fld]
 			acc = "m." + o.slot
 			store = func(expr string) string { return fmt.Sprintf("m.%s(%s)", o.setter, expr) }
@@ -1280,7 +1301,14 @@ func (g *gen) emitVisitorMethods(f *gofile, typeName string, fields []*ir.Field,
 			// is a copy. A split payload arrives in storage the accumulator hands
 			// over, which needs no copy, but the arm cannot tell the two apart and
 			// the copy is what makes the message outlive the input either way.
-			blob = append(blob, arm(fld.ID, takePayload+store("append([]byte(nil), _b...)")))
+			// In a struct the copy lands in the storage a previous decode left
+			// (sofab.ReuseBytes, which keeps an empty blob nil as the plain copy
+			// does); a union option has no spare and copies fresh.
+			cp := "append([]byte(nil), _b...)"
+			if spare != "" {
+				cp = fmt.Sprintf("sofab.ReuseBytes(%s, _b)", spare)
+			}
+			blob = append(blob, arm(fld.ID, takePayload+store(cp)))
 			if body := g.fixlenBeginBody("sofab.FixlenBlob", fld); body != "" {
 				fixBegin = append(fixBegin, arm(fld.ID, body))
 			}
@@ -1293,7 +1321,7 @@ func (g *gen) emitVisitorMethods(f *gofile, typeName string, fields []*ir.Field,
 			// elements, so there is nothing to fill in at [M, N).
 			switch {
 			case isNativeArrayElem(fld.Elem):
-				arrBegin = append(arrBegin, arm(fld.ID, g.arrayBeginBody(fld, acc, sel, g.goArrayElem(fld.Elem, fld.ElemRef, fld.ElemItems))))
+				arrBegin = append(arrBegin, arm(fld.ID, g.arrayBeginBody(fld, acc, sel, spare, g.goArrayElem(fld.Elem, fld.ElemRef, fld.ElemItems))))
 				elemArm := arm(fld.ID, widthGuard(fld.Elem, fld.ElemRef)+g.elemAppendStmt(acc, fld.Elem, fld.ElemRef))
 				switch {
 				case isUnsignedNativeArray(fld.Elem):
@@ -1306,7 +1334,21 @@ func (g *gen) emitVisitorMethods(f *gofile, typeName string, fields []*ir.Field,
 					f64Arr = append(f64Arr, elemArm)
 				}
 			default: // wrapper-sequence array (string/blob/struct/union/nested)
-				seq = append(seq, arm(fld.ID, fmt.Sprintf("%s%s = %s[:0]\n\t\treturn %s, nil", sel, acc, acc, g.arrayCollector("&"+acc, fld.Elem, fld.ElemRef, fld.ElemItems, fieldBounds(fld)))))
+				// The collector appends into the slice it is handed, so the arm hands
+				// it an empty one. In a struct that is the spare's storage, whose
+				// elements past the length a collector refills index for index
+				// (corelib-go#152); it is never nil, so an array that ARRIVED empty
+				// reads as the empty array whether the storage is new or reused --
+				// the native-array rule (arrayBeginBody), and the only reading a
+				// reused destination can give exactly as a fresh one does. A union
+				// option has no spare and reuses its slot's own storage, by the same
+				// never-nil call, so a held option that arrived empty reads the same.
+				from := acc
+				if spare != "" {
+					from = spare
+				}
+				open := fmt.Sprintf("%s = sofab.ReuseSlice(%s, 0)", acc, from)
+				seq = append(seq, arm(fld.ID, fmt.Sprintf("%s%s\n\t\treturn %s, nil", sel, open, g.arrayCollector("&"+acc, fld.Elem, fld.ElemRef, fld.ElemItems, fieldBounds(fld)))))
 			}
 		}
 	}
@@ -1423,13 +1465,23 @@ func (g *gen) fixlenBeginBody(sub string, fld *ir.Field) string {
 // sel is "" for a struct member; for a union option it is the statement that
 // selects the option, placed after both checks so that a header this option does
 // not accept never switches the union (MESSAGE_SPEC §7.4.1).
-func (g *gen) arrayBeginBody(fld *ir.Field, acc, sel, elemType string) string {
+//
+// spare is the struct member keeping the storage a previous decode left (see
+// emitReset), "" for a union option. With one, the destination is
+// sofab.ReuseSlice over it: that storage, truncated, when it holds count, and a
+// fresh slice of exactly count otherwise -- never nil either way, so the
+// empty-array reading above holds for a reused destination too. Sizing from the
+// wire count is still this arm's call, made after the bound.
+func (g *gen) arrayBeginBody(fld *ir.Field, acc, sel, spare, elemType string) string {
 	body := fmt.Sprintf("if kind != sofab.%s {\n\t\t\treturn nil\n\t\t}\n\t\t", goArrayWireKind(fld.Elem))
 	switch {
 	case fld.HasCount:
 		body += fmt.Sprintf("if count > %d {\n\t\t\treturn sofab.ErrInvalidMsg\n\t\t}\n\t\t", fld.Count)
 	case g.limits.arrayHas:
 		body += fmt.Sprintf("if count > %s {\n\t\t\treturn sofab.ErrLimitExceeded\n\t\t}\n\t\t", g.arrayCapExpr())
+	}
+	if spare != "" {
+		return body + sel + fmt.Sprintf("%s = sofab.ReuseSlice(%s, count)", acc, spare)
 	}
 	return body + sel + fmt.Sprintf("%s = make([]%s, 0, count)", acc, elemType)
 }
@@ -1651,7 +1703,7 @@ func (g *gen) messageFile(m *ir.Message) []byte {
 	// The message's companions are roles on its unescaped identifier (M__New,
 	// M__Decode, M__MaxSize, ...); the private encode options are _M__EncOpts.
 	typeName, base := msgIdent(m), msgBase(m)
-	newFn, decFn, decFromFn := base+"__New", base+"__Decode", base+"__DecodeFrom"
+	newFn, decFn, decFromFn, tryDecFn := base+"__New", base+"__Decode", base+"__DecodeFrom", base+"__TryDecode"
 	maxSize, maxSizeLimit, maxDepth := base+"__MaxSize", base+"__MaxSizeLimit", base+"__MaxDepth"
 	encOptsFn := base + "__EncodeOptions"
 	decType, newDecFn := base+"__Decoder", base+"__NewDecoder"
@@ -1668,6 +1720,7 @@ func (g *gen) messageFile(m *ir.Message) []byte {
 	f.line("\treturn m")
 	f.line("}")
 	f.blank()
+	g.emitReset(f, typeName, m.Fields)
 
 	// Worst-case encoded size. It is what sizes the buffer Encode hands the
 	// encoder: the corelib owns no storage and never grows any (CORELIB_PLAN
@@ -1879,6 +1932,29 @@ func (g *gen) messageFile(m *ir.Message) []byte {
 	f.line("\treturn m, nil")
 	f.line("}")
 	f.blank()
+	// Decode into a destination the CALLER owns (generator#756): the blessed
+	// try_decode (CORELIB_PLAN §6.1.1) in this backend's role spelling, taking the
+	// destination as C++ and Rust do. It is Decode with Reset in place of New, and
+	// no second machine: the same visitor on the same AcceptBytes, so the verdict
+	// is Decode's on the same bytes.
+	f.line("// %s decodes data into out, which the caller owns, instead of into a", tryDecFn)
+	f.line("// new message: out is Reset first, so afterwards it reads exactly as")
+	f.line("// %s(data) would. It is the shape for a receive loop that decodes", decFn)
+	f.line("// every message into the same object.")
+	f.line("//")
+	f.line("// The storage out's arrays and blobs held is written into rather than")
+	f.line("// allocated anew, so a slice read from out before this call -- or held")
+	f.line("// by a copy of it -- is overwritten by it. Copy what you keep.")
+	f.line("//")
+	f.line("// The error is %s's: nil, sofab.ErrIncomplete for bytes that end", decFn)
+	f.line("// inside a field, or the refusal. On a refusal out holds the fields")
+	f.line("// decoded before the error and the defaults for the rest, never a value of")
+	f.line("// the message it held before.")
+	f.line("func %s(data []byte, out *%s) error {", tryDecFn, typeName)
+	f.line("\tout.Reset()")
+	f.line("\treturn sofab.AcceptBytes(data, out)")
+	f.line("}")
+	f.blank()
 	// Streaming decode -- the twin of EncodeTo above, and what makes this target
 	// meet CORELIB_PLAN §5.6 (generator#312). Decode%s needs the whole wire image
 	// in one contiguous buffer BY CONSTRUCTION; this one hands the decoder
@@ -2028,6 +2104,78 @@ func (g *gen) emitSetDefaults(f *gofile, key, typeName string, fields []*ir.Fiel
 	f.line("}")
 	f.blank()
 }
+
+// emitReset emits Reset for a struct or message type: every field back to its
+// schema default, in place, so that a decode into the object afterwards reads
+// exactly as one into a fresh <Msg>__New -- the contract <Msg>__TryDecode rests
+// on. Absence fires no callback (MESSAGE_SPEC §2), so a field the next message
+// omits is only ever put back here.
+//
+// What the body holds is the schema's field list and defaults: a scalar, string,
+// enum or bitfield takes its default (the value New gives it), a struct field its
+// own Reset and a union field Clear. An array or blob field takes its default too
+// -- nil where it declares none, which is what keeps an absent field `null` and
+// an arrived empty one `[]` -- and hands the storage it held to its _spare
+// member, which the next decode's arm writes into (sofab.ReuseSlice,
+// sofab.ReuseBytes). A non-empty default is appended into that same storage
+// rather than assigned as a literal, which would allocate per Reset. The hand-on
+// is a move, not a merge: a field the previous message left absent (and
+// declaring no default) hands nothing on, and its next arrival allocates.
+//
+// A union keeps Clear, which builds a new zero value: its option slots keep no
+// storage across it.
+func (g *gen) emitReset(f *gofile, typeName string, fields []*ir.Field) {
+	f.line("// Reset puts every field of %s back to its schema default, in place, so", typeName)
+	f.line("// that it reads exactly as a fresh one: a nested struct is Reset and a union")
+	f.line("// Cleared. An array or blob keeps the storage it held for the next decode")
+	f.line("// into this object, which writes into it -- so a slice read from it, or")
+	f.line("// assigned to it, before Reset is overwritten by Reset or by that decode.")
+	f.line("func (m *%s) Reset() {", typeName)
+	for _, fld := range fields {
+		f.line("\t%s", g.resetStmt(fld))
+	}
+	f.line("}")
+	f.blank()
+}
+
+// resetStmt is the one statement emitReset puts a field back with.
+func (g *gen) resetStmt(fld *ir.Field) string {
+	acc := "m." + goFieldName(fld.Name)
+	switch fld.Kind {
+	case ir.KindStruct:
+		return acc + ".Reset()"
+	case ir.KindUnion:
+		return acc + ".Clear()"
+	}
+	if hasSpare(fld) {
+		lit, ok := g.defaultLiteral(fld)
+		switch {
+		case !ok:
+			return fmt.Sprintf("m.%s, %s = %s, nil", spareName(fld), acc, acc)
+		case isZeroLiteral(lit):
+			// An empty default ([]T{}, []byte{}) is zero-sized and allocates
+			// nothing; it must not be nil, which reads as absent.
+			return fmt.Sprintf("m.%s, %s = %s, %s", spareName(fld), acc, acc, lit)
+		}
+		// The default is copied into the storage the field held, which the spare
+		// then shares: the next arrival writes over it, and New's literal would
+		// have cost an allocation on every Reset.
+		return fmt.Sprintf("m.%s, %s = %s, append(%s[:0], %s...)", spareName(fld), acc, acc, acc, lit)
+	}
+	return acc + " = " + g.defaultCompare(fld)
+}
+
+// hasSpare reports whether a struct or message field keeps storage across Reset
+// in a _spare member: an array (native or wrapper) or a blob. A string is
+// immutable in Go and has no storage to keep.
+func hasSpare(fld *ir.Field) bool {
+	return fld.Kind == ir.KindArray || fld.Kind == ir.KindBlob
+}
+
+// spareName is the _spare member of a field hasSpare accepts: private channel
+// (ARCHITECTURE §8, "Naming"), so no schema name reaches it, and one per field,
+// since the field's Go name is distinct in its scope.
+func spareName(fld *ir.Field) string { return "_spare" + goFieldName(fld.Name) }
 
 // needsDefaults reports whether the struct/union type key declares, at any
 // nested level, a member default that differs from Go's zero value -- i.e.
