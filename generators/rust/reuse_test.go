@@ -219,6 +219,31 @@ messages:
 	}
 }
 
+// TestRustResetSingleCharDefault: a one-character String default is refilled
+// with push(char) -- push_str of a one-character literal is a clippy
+// single_char_add_str finding, which fails a -D warnings build -- and escaped
+// as a Rust char literal; a heapless String keeps push_str.
+func TestRustResetSingleCharDefault(t *testing.T) {
+	src := `
+version: 1
+messages:
+  m:
+    payload:
+      a: { id: 0, type: string, default: "x" }
+      q: { id: 1, type: string, default: "'" }
+      e: { id: 2, type: string, default: "é" }
+      h: { id: 3, type: string, maxlen: 4, default: "y" }
+`
+	m := moduleFromYAML(t, src, map[string]any{"corelib": "rs"})
+	wantAll(t, nil, m, "a one-character default is pushed as a char",
+		"self.a.push('x');", `self.q.push('\'');`, `self.e.push('\u{e9}');`)
+	if strings.Contains(m, `push_str("x")`) {
+		t.Error(`push_str("x") would fail clippy::single_char_add_str`)
+	}
+	s := moduleFromYAML(t, src, map[string]any{"corelib": "rs", "allow_dynamic": false})
+	wantAll(t, nil, s, "a heapless String keeps push_str", `let _ = self.h.push_str("y");`)
+}
+
 // TestRustReuseEmitsNoStaticHelper: the element reuse is corelib-rs's
 // (ARCHITECTURE §8) -- the generated code names a container, a live count and a
 // reset, and holds no loop over slots, no truncation of its own and no reuse

@@ -125,11 +125,11 @@ impl Scalars {
     /// as a field of the message it held before. The storage it holds is
     /// written into, not dropped: a string, a blob and an array keep their
     /// buffers, and so do the elements of an array of strings, blobs, rows,
-    /// structs or unions up to the length the new message gives it -- a
-    /// destination handed the same shape of message on every call stops
-    /// allocating after the first. Elements past that length are dropped;
-    /// storage below an array element, and inside a union option other than
-    /// the one the union falls back to, is replaced rather than kept.
+    /// structs or unions up to the length the new message gives it, the
+    /// strings and blobs of a struct element included. Elements past that
+    /// length are dropped. What is not kept: the elements of an array inside
+    /// an array element or a row (it is emptied and grows again), and the
+    /// storage of a union option other than the one the union falls back to.
     ///
     /// On `Err`, `out` holds the fields decoded before the refusal, and none
     /// of the message it held before.
