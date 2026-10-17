@@ -61,7 +61,13 @@ func (g *gen) resetStmts(lv, recv string, fld *ir.Field) []string {
 	case ir.KindString:
 		out := []string{recv + ".clear();"}
 		if lit, ok := fld.Default.(string); ok && lit != "" {
-			out = append(out, fill(fmt.Sprintf("%s.push_str(%q)", recv, lit)))
+			if r := []rune(lit); len(r) == 1 && !fixed {
+				// clippy::single_char_add_str refuses push_str of a one-character
+				// literal on a String (heapless's push_str is another method).
+				out = append(out, fmt.Sprintf("%s.push(%s);", recv, rustCharLit(r[0])))
+			} else {
+				out = append(out, fill(fmt.Sprintf("%s.push_str(%q)", recv, lit)))
+			}
 		}
 		return out
 	case ir.KindBlob:
@@ -84,6 +90,19 @@ func (g *gen) resetStmts(lv, recv string, fld *ir.Field) []string {
 		return []string{recv + "._reset();"}
 	}
 	return []string{fmt.Sprintf("%s = %s;", lv, g.rustFieldDefault(fld))}
+}
+
+// rustCharLit spells r as a Rust char literal: printable ASCII as itself (with
+// `'` and `\` escaped), anything else as `\u{..}`, which Rust accepts for every
+// scalar value.
+func rustCharLit(r rune) string {
+	switch {
+	case r == '\'' || r == '\\':
+		return `'\` + string(r) + `'`
+	case r >= 0x20 && r < 0x7f:
+		return "'" + string(r) + "'"
+	}
+	return fmt.Sprintf(`'\u{%x}'`, r)
 }
 
 // emitReset emits a struct's or a message's public reset() into its impl block.

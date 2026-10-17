@@ -218,11 +218,14 @@ while let Some(frame) = next_frame() {
 - **It keeps the storage `out` holds.** Strings, blobs and arrays are written
   into the buffers they already have. So are the elements of an array of
   strings, blobs, rows, structs or unions, up to the length the new message
-  gives the array. Once `out` has held a message of a given shape, decoding
-  another of that shape allocates nothing. The elements past an array's new
-  length are dropped, and so is storage inside a union option other than
-  the one the union falls back to. An array that sits inside an array element
-  or a union option is cleared with its owner and grows again.
+  gives the array, and the strings and blobs inside a struct element. The
+  elements past an array's new length are dropped.
+- **Some storage is not kept.** An array inside an array element, inside a row
+  or inside a union option is emptied with its owner and grows again, so a
+  matrix of strings, or a string array inside a struct element, allocates its
+  strings on every decode. A union option other than the one the union falls
+  back to is replaced. Without such fields, once `out` has held a message of a
+  given shape, decoding another of that shape allocates nothing.
 - **On `Err`, `out` holds the fields decoded before the refusal**, and nothing
   of the message it held before.
 - **`out` keeps the largest buffers it has held** until it is dropped. With
