@@ -14,7 +14,7 @@ import (
 // exported() leaves such a name as it is.
 func reservedNames() []string {
 	var names []string
-	for _, set := range []map[string]bool{goVisitorMembers, goStringCheckMembers, goMembers, unionReserved} {
+	for _, set := range []map[string]bool{goVisitorMembers, goStringCheckMembers, goMembers, unionReserved, structReserved} {
 		for n := range set {
 			names = append(names, n)
 		}

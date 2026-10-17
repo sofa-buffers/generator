@@ -333,6 +333,38 @@ func Widths__New() *Widths {
 	return m
 }
 
+// Reset puts every field of Widths back to its schema default, in place, so
+// that it reads exactly as a fresh one: a nested struct is Reset and a union
+// Cleared. An array or blob keeps the storage it held for the next decode
+// into this object, which writes into it -- so a slice read from it, or
+// assigned to it, before Reset is overwritten by Reset or by that decode.
+func (m *Widths) Reset() {
+	m.Tiny = Tiny(0)
+	m.TinyMin = Tiny(-128)
+	m.TinyMax = Tiny(127)
+	m.ShortLo = Short(-129)
+	m.ShortHi = Short(128)
+	m.WideMin = Wide(-2147483648)
+	m.WideMax = Wide(2147483647)
+	m.Level = Level(1)
+	m.LevelHi = Level(9)
+	m.InI8 = Widths_InI8(-1)
+	m.InI16 = Widths_InI16(-32768)
+	m.InI32 = Widths_InI32(2147483647)
+	m.B8 = Bits8(0)
+	m.B16 = Bits16(0)
+	m.B32 = Bits32(0)
+	m.B64 = Bits64(0)
+	m.Nothing = Nothing(0)
+	m.AllOn = AllOn(9223372039002259457)
+	m.InU8 = Widths_InU8(128)
+	m.InU16 = Widths_InU16(256)
+	m.InU32 = Widths_InU32(65536)
+	m.InU64 = Widths_InU64(4294967296)
+	m.InNone = Widths_InNone(0)
+	m.PastI16 = Widths_PastI16(32768)
+}
+
 // Widths__MaxSize is this message's worst-case encoded size, derived from the
 // schema: no value of it can encode to more.
 const Widths__MaxSize = 207
@@ -431,6 +463,24 @@ func Widths__Decode(data []byte) (*Widths, error) {
 		return nil, err
 	}
 	return m, nil
+}
+
+// Widths__TryDecode decodes data into out, which the caller owns, instead of into a
+// new message: out is Reset first, so afterwards it reads exactly as
+// Widths__Decode(data) would. It is the shape for a receive loop that decodes
+// every message into the same object.
+//
+// The storage out's arrays and blobs held is written into rather than
+// allocated anew, so a slice read from out before this call -- or held
+// by a copy of it -- is overwritten by it. Copy what you keep.
+//
+// The error is Widths__Decode's: nil, sofab.ErrIncomplete for bytes that end
+// inside a field, or the refusal. On a refusal out holds the fields
+// decoded before the error and the defaults for the rest, never a value of
+// the message it held before.
+func Widths__TryDecode(data []byte, out *Widths) error {
+	out.Reset()
+	return sofab.AcceptBytes(data, out)
 }
 
 // Widths__DecodeFrom parses a message straight out of r (with defaults pre-applied).

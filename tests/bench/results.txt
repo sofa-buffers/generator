@@ -16,7 +16,7 @@
 #
 # Numbers shift when anything below shifts. Check here FIRST: if the header is
 # unchanged and a number moved, the generator caused it.
-# corelib:   c-cpp 08ff097 | cpp 1f6ffe3 | cs 31ce61e | dart b2a79cd | go 5706066 | java 51d91ff | kotlin-mp e3e43ca | py 96f210b | rs d8e3d44 | rs-no-std e23c7b9 | ts e76f743 | zig 4071af3
+# corelib:   c-cpp 08ff097 | cpp 1f6ffe3 | cs 31ce61e | dart b2a79cd | go 6797cf1 | java 51d91ff | kotlin-mp e3e43ca | py 96f210b | rs d8e3d44 | rs-no-std e23c7b9 | ts e76f743 | zig 4071af3
 #
 ## instruction cost
 row                profile    method    encode_ir/op  decode_ir/op
@@ -28,8 +28,8 @@ cpp-cpp-static     maxspeed   toggle    10625         21284
 cpp-cpp-unbounded  maxspeed   toggle    8476          21663
 csharp             maxspeed   subtract  29454         70166
 dart               maxspeed   subtract  24711         39094
-go                 maxspeed   toggle    18605         45116
-go-unbounded       maxspeed   toggle    13156         39526
+go                 maxspeed   toggle    18605         39724
+go-unbounded       maxspeed   toggle    13156         29532
 java               maxspeed   subtract  17364         31714
 kotlin             maxspeed   subtract  17532         32772
 python             maxspeed   subtract  1068498       1977192

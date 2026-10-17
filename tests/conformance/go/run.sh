@@ -125,6 +125,34 @@ PUSH=$(cd "$WORK/proj" && GOFLAGS=-mod=mod go run ./harness pushdecode myfirstme
 }
 echo "==> push decode OK"
 
+# Decode into a REUSED destination (X__TryDecode(data, out), generator#756). out
+# is Reset before the decode and its arrays and blobs are written into rather
+# than allocated anew, so it must read exactly as a fresh decode: every fixture
+# -- the full one above, two sparse ones and the empty payload -- is decoded into
+# a destination already holding every other one, and once more with each
+# malformed tail, where it must hold the fields decoded before the error and
+# none of the older message's. The sparse fixtures leave fields out and at their
+# default, shorten arrays, switch the union to another option, and leave the blob
+# out (`short`) or empty (`other`). Compared as data -- nil and empty apart -- and
+# as re-encoded bytes. Then the driver's own schema, every image forged by the
+# driver: a field of each shape a Reset has to put back.
+echo "==> a reused destination reads as a fresh decode (generator#756)"
+( cd "$WORK/proj" && GOFLAGS=-mod=mod go build -o "$WORK/proj-harness" ./harness )
+python3 "$ROOT/tests/conformance/lib/check_reused_destination.py" --self-test || exit 1
+python3 "$ROOT/tests/conformance/lib/check_reused_destination.py" "go: example.yaml" \
+    --msg myfirstmessage \
+    --fixture "full=$FULL" \
+    --fixture 'short={"someu8":9,"someuintarray":[5],"somestringarray":["z"],"somestructarray":[{"x":0,"y":0},{"x":5,"y":0}],"somematrix":[[],[3]],"someunion":{"option3":{"unionstructint":4,"unionstructbool":true}},"someboolarray":[true],"somestruct":{"nestedint":1}}' \
+    --fixture 'other={"somestring":"s","someblob":[],"someintarray":[],"someunion":{"option2":"two"},"someunionarray":[{"asstring":"q"}],"somemap":[{"key":"k","value":0}],"somestructwitharray":{"values":[]}}' \
+    -- "$WORK/proj-harness" || exit 1
+printf 'version: 1\nmessages:\n' > "$WORK/reuse.yaml"
+python3 "$ROOT/tests/conformance/lib/check_reused_destination.py" --emit-schema >> "$WORK/reuse.yaml"
+( cd "$ROOT" && go run ./cmd/sofabgen --config "$WORK/cfg.yaml" --lang go --in "$WORK/reuse.yaml" --out "$WORK/reuse" )
+sed -i "s#\${SOFAB_GO_CORELIB}#$CORELIB#" "$WORK/reuse/go.mod"
+( cd "$WORK/reuse" && GOFLAGS=-mod=mod go build -o "$WORK/reuse-harness" ./harness )
+python3 "$ROOT/tests/conformance/lib/check_reused_destination.py" "go: own schema" \
+    -- "$WORK/reuse-harness" || exit 1
+
 # Encode into a buffer the CALLER owns (generator#747). Encode() allocates and
 # EncodeTo() streams; neither lets a caller with a pooled or stack buffer hand
 # the encoder its own storage, which is the shape every other backend has

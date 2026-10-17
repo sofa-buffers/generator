@@ -48,6 +48,13 @@ var unionReserved = map[string]bool{
 	"Which": true, "Clear": true, "MarshalJSON": true, "UnmarshalJSON": true,
 }
 
+// structReserved are the members a struct and a message declare and a union
+// does not: Reset, which a union spells Clear. Kept off goMembers so an option
+// named `reset` keeps its getter Reset.
+var structReserved = map[string]bool{
+	"Reset": true,
+}
+
 // goReserved reports whether n, an exported name, is on the list.
 func goReserved(n string) bool {
 	return goVisitorMembers[n] || goStringCheckMembers[n] || goMembers[n]
@@ -57,7 +64,7 @@ func goReserved(n string) bool {
 // a trailing underscore when it is on the list.
 func goFieldName(name string) string {
 	n := exported(name)
-	if goReserved(n) {
+	if goReserved(n) || structReserved[n] {
 		return n + "_"
 	}
 	return n

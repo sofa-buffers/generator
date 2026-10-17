@@ -18,6 +18,10 @@ type Names struct {
 	NamesKind NamesKind  `json:"names_kind"`
 	Word      Word       `json:"word"`
 	Opts      Opts       `json:"opts"`
+	// The _spare members keep an array's or a blob's storage across Reset,
+	// which puts the field itself back to its default (nil where it has
+	// none, as a fresh message holds it); the next decode writes into it.
+	_spareWords []Word
 }
 
 func (m *Names) Serialize(e *sofab.Encoder) {
@@ -113,7 +117,7 @@ func (m *Names) ArrayBegin(id sofab.ID, kind sofab.ArrayKind, count int) error {
 		if count > 2 {
 			return sofab.ErrInvalidMsg
 		}
-		m.Words = make([]Word, 0, count)
+		m.Words = sofab.ReuseSlice(m._spareWords, count)
 	}
 	return nil
 }
@@ -135,6 +139,20 @@ func Names__New() *Names {
 	m.Word = Word(4)
 	m.Words = []Word{1, 2}
 	return m
+}
+
+// Reset puts every field of Names back to its schema default, in place, so
+// that it reads exactly as a fresh one: a nested struct is Reset and a union
+// Cleared. An array or blob keeps the storage it held for the next decode
+// into this object, which writes into it -- so a slice read from it, or
+// assigned to it, before Reset is overwritten by Reset or by that decode.
+func (m *Names) Reset() {
+	m.Mode = Mode(0)
+	m.Kind = Names_Kind(0)
+	m.NamesKind = NamesKind(0)
+	m.Word = Word(4)
+	m.Opts = Opts(0)
+	m._spareWords, m.Words = m.Words, append(m.Words[:0], []Word{1, 2}...)
 }
 
 // Names__MaxSize is this message's worst-case encoded size, derived from the
@@ -235,6 +253,24 @@ func Names__Decode(data []byte) (*Names, error) {
 		return nil, err
 	}
 	return m, nil
+}
+
+// Names__TryDecode decodes data into out, which the caller owns, instead of into a
+// new message: out is Reset first, so afterwards it reads exactly as
+// Names__Decode(data) would. It is the shape for a receive loop that decodes
+// every message into the same object.
+//
+// The storage out's arrays and blobs held is written into rather than
+// allocated anew, so a slice read from out before this call -- or held
+// by a copy of it -- is overwritten by it. Copy what you keep.
+//
+// The error is Names__Decode's: nil, sofab.ErrIncomplete for bytes that end
+// inside a field, or the refusal. On a refusal out holds the fields
+// decoded before the error and the defaults for the rest, never a value of
+// the message it held before.
+func Names__TryDecode(data []byte, out *Names) error {
+	out.Reset()
+	return sofab.AcceptBytes(data, out)
 }
 
 // Names__DecodeFrom parses a message straight out of r (with defaults pre-applied).

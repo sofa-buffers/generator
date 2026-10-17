@@ -65,6 +65,24 @@ type Positions struct {
 	EInOld Positions_EInOld `json:"e_in_old"`
 	EDoc   Level            `json:"e_doc"` // described, not deprecated
 	BDoc   Bits8            `json:"b_doc"` // described, not deprecated
+	// The _spare members keep an array's or a blob's storage across Reset,
+	// which puts the field itself back to its default (nil where it has
+	// none, as a fresh message holds it); the next decode writes into it.
+	_spareEaDflt  []Tiny
+	_spareEaWide  []Wide
+	_spareEaShort []Short
+	_spareEaIn    []Positions_EaIn
+	_spareBaDflt  []Bits64
+	_spareBa16    []Bits16
+	_spareBaNone  []Nothing
+	_spareBaIn    []Positions_BaIn
+	_spareERows   [][]Short
+	_spareBRows   [][]Bits64
+	_spareECube   [][][]Positions_ECube
+	_spareHolders []Holder
+	_spareUList   []Choice__DefaultShort
+	_spareBCube   [][][]Positions_BCube
+	_spareUBlist  []Choice__DefaultFlags
 }
 
 func (m *Positions) Serialize(e *sofab.Encoder) {
@@ -463,7 +481,7 @@ func (m *Positions) ArrayBegin(id sofab.ID, kind sofab.ArrayKind, count int) err
 		if count > 4 {
 			return sofab.ErrInvalidMsg
 		}
-		m.EaDflt = make([]Tiny, 0, count)
+		m.EaDflt = sofab.ReuseSlice(m._spareEaDflt, count)
 	case 8:
 		if kind != sofab.ArraySigned {
 			return nil
@@ -471,7 +489,7 @@ func (m *Positions) ArrayBegin(id sofab.ID, kind sofab.ArrayKind, count int) err
 		if count > 2 {
 			return sofab.ErrInvalidMsg
 		}
-		m.EaWide = make([]Wide, 0, count)
+		m.EaWide = sofab.ReuseSlice(m._spareEaWide, count)
 	case 9:
 		if kind != sofab.ArraySigned {
 			return nil
@@ -479,7 +497,7 @@ func (m *Positions) ArrayBegin(id sofab.ID, kind sofab.ArrayKind, count int) err
 		if count > 3 {
 			return sofab.ErrInvalidMsg
 		}
-		m.EaShort = make([]Short, 0, count)
+		m.EaShort = sofab.ReuseSlice(m._spareEaShort, count)
 	case 10:
 		if kind != sofab.ArraySigned {
 			return nil
@@ -487,7 +505,7 @@ func (m *Positions) ArrayBegin(id sofab.ID, kind sofab.ArrayKind, count int) err
 		if count > 3 {
 			return sofab.ErrInvalidMsg
 		}
-		m.EaIn = make([]Positions_EaIn, 0, count)
+		m.EaIn = sofab.ReuseSlice(m._spareEaIn, count)
 	case 11:
 		if kind != sofab.ArrayUnsigned {
 			return nil
@@ -495,7 +513,7 @@ func (m *Positions) ArrayBegin(id sofab.ID, kind sofab.ArrayKind, count int) err
 		if count > 4 {
 			return sofab.ErrInvalidMsg
 		}
-		m.BaDflt = make([]Bits64, 0, count)
+		m.BaDflt = sofab.ReuseSlice(m._spareBaDflt, count)
 	case 12:
 		if kind != sofab.ArrayUnsigned {
 			return nil
@@ -503,7 +521,7 @@ func (m *Positions) ArrayBegin(id sofab.ID, kind sofab.ArrayKind, count int) err
 		if count > 3 {
 			return sofab.ErrInvalidMsg
 		}
-		m.Ba16 = make([]Bits16, 0, count)
+		m.Ba16 = sofab.ReuseSlice(m._spareBa16, count)
 	case 13:
 		if kind != sofab.ArrayUnsigned {
 			return nil
@@ -511,7 +529,7 @@ func (m *Positions) ArrayBegin(id sofab.ID, kind sofab.ArrayKind, count int) err
 		if count > 2 {
 			return sofab.ErrInvalidMsg
 		}
-		m.BaNone = make([]Nothing, 0, count)
+		m.BaNone = sofab.ReuseSlice(m._spareBaNone, count)
 	case 14:
 		if kind != sofab.ArrayUnsigned {
 			return nil
@@ -519,7 +537,7 @@ func (m *Positions) ArrayBegin(id sofab.ID, kind sofab.ArrayKind, count int) err
 		if count > 2 {
 			return sofab.ErrInvalidMsg
 		}
-		m.BaIn = make([]Positions_BaIn, 0, count)
+		m.BaIn = sofab.ReuseSlice(m._spareBaIn, count)
 	}
 	return nil
 }
@@ -576,13 +594,13 @@ func (m *Positions) ArraySigned(id sofab.ID, _ int, v int64) error {
 func (m *Positions) BeginSequence(id sofab.ID) (sofab.Visitor, error) {
 	switch id {
 	case 15:
-		m.ERows = m.ERows[:0]
+		m.ERows = sofab.ReuseSlice(m._spareERows, 0)
 		return sofab.NewSignedMatrixSeq[Short](&m.ERows, sofab.Bounds{Count: 2}, sofab.Bounds{Count: 2}, _caps, -32768, 32767), nil
 	case 16:
-		m.BRows = m.BRows[:0]
+		m.BRows = sofab.ReuseSlice(m._spareBRows, 0)
 		return sofab.NewUnsignedMatrixSeq[Bits64](&m.BRows, sofab.Bounds{Count: 2}, sofab.Bounds{Count: 2}, _caps, 0), nil
 	case 17:
-		m.ECube = m.ECube[:0]
+		m.ECube = sofab.ReuseSlice(m._spareECube, 0)
 		return sofab.NewNestedSeq[[]Positions_ECube](&m.ECube, sofab.Bounds{Count: 2}, _caps, func(p *[][]Positions_ECube) sofab.Visitor {
 			return sofab.NewSignedMatrixSeq[Positions_ECube](p, sofab.Bounds{Count: 2}, sofab.Bounds{Count: 2}, _caps, -128, 127)
 		}), nil
@@ -591,7 +609,7 @@ func (m *Positions) BeginSequence(id sofab.ID) (sofab.Visitor, error) {
 	case 19:
 		return &m.InlineS, nil
 	case 20:
-		m.Holders = m.Holders[:0]
+		m.Holders = sofab.ReuseSlice(m._spareHolders, 0)
 		return sofab.NewMessageSeqInit[Holder, *Holder](&m.Holders, sofab.Bounds{Count: 2}, _caps, (*Holder).setDefaults), nil
 	case 21:
 		return &m.UTiny, nil
@@ -602,17 +620,17 @@ func (m *Positions) BeginSequence(id sofab.ID) (sofab.Visitor, error) {
 	case 24:
 		return &m.UInline, nil
 	case 25:
-		m.UList = m.UList[:0]
+		m.UList = sofab.ReuseSlice(m._spareUList, 0)
 		return sofab.NewMessageSeqInit[Choice__DefaultShort, *Choice__DefaultShort](&m.UList, sofab.Bounds{Count: 2}, _caps, (*Choice__DefaultShort).setDefaults), nil
 	case 28:
-		m.BCube = m.BCube[:0]
+		m.BCube = sofab.ReuseSlice(m._spareBCube, 0)
 		return sofab.NewNestedSeq[[]Positions_BCube](&m.BCube, sofab.Bounds{Count: 2}, _caps, func(p *[][]Positions_BCube) sofab.Visitor {
 			return sofab.NewUnsignedMatrixSeq[Positions_BCube](p, sofab.Bounds{Count: 2}, sofab.Bounds{Count: 2}, _caps, 65535)
 		}), nil
 	case 29:
 		return &m.Outer, nil
 	case 30:
-		m.UBlist = m.UBlist[:0]
+		m.UBlist = sofab.ReuseSlice(m._spareUBlist, 0)
 		return sofab.NewMessageSeqInit[Choice__DefaultFlags, *Choice__DefaultFlags](&m.UBlist, sofab.Bounds{Count: 2}, _caps, (*Choice__DefaultFlags).setDefaults), nil
 	}
 	return nil, nil
@@ -641,6 +659,45 @@ func Positions__New() *Positions {
 	m.EDoc = Level(1)
 	m.Outer.setDefaults()
 	return m
+}
+
+// Reset puts every field of Positions back to its schema default, in place, so
+// that it reads exactly as a fresh one: a nested struct is Reset and a union
+// Cleared. An array or blob keeps the storage it held for the next decode
+// into this object, which writes into it -- so a slice read from it, or
+// assigned to it, before Reset is overwritten by Reset or by that decode.
+func (m *Positions) Reset() {
+	m.E = Wide(0)
+	m.EDflt = Wide(-2147483648)
+	m.EOld = Tiny(127)
+	m.EInOld = Positions_EInOld(-5)
+	m.B = Bits32(0)
+	m.BOld = AllOn(9223372039002259457)
+	m.BInOld = Positions_BInOld(4096)
+	m._spareEaDflt, m.EaDflt = m.EaDflt, append(m.EaDflt[:0], []Tiny{-128, 127, 0}...)
+	m._spareEaWide, m.EaWide = m.EaWide, append(m.EaWide[:0], []Wide{-2147483648, 2147483647}...)
+	m._spareEaShort, m.EaShort = m.EaShort, nil
+	m._spareEaIn, m.EaIn = m.EaIn, append(m.EaIn[:0], []Positions_EaIn{300}...)
+	m._spareBaDflt, m.BaDflt = m.BaDflt, append(m.BaDflt[:0], []Bits64{0, 1, 4294967296, 9223372036854775808}...)
+	m._spareBa16, m.Ba16 = m.Ba16, append(m.Ba16[:0], []Bits16{256, 32768, 33024}...)
+	m._spareBaNone, m.BaNone = m.BaNone, nil
+	m._spareBaIn, m.BaIn = m.BaIn, append(m.BaIn[:0], []Positions_BaIn{1048578}...)
+	m._spareERows, m.ERows = m.ERows, nil
+	m._spareBRows, m.BRows = m.BRows, nil
+	m._spareECube, m.ECube = m.ECube, nil
+	m.Holder.Reset()
+	m.InlineS.Reset()
+	m._spareHolders, m.Holders = m.Holders, nil
+	m.UTiny.Clear()
+	m.UPick.Clear()
+	m.UFlags.Clear()
+	m.UInline.Clear()
+	m._spareUList, m.UList = m.UList, nil
+	m.EDoc = Level(1)
+	m.BDoc = Bits8(0)
+	m._spareBCube, m.BCube = m.BCube, nil
+	m.Outer.Reset()
+	m._spareUBlist, m.UBlist = m.UBlist, nil
 }
 
 // Positions__MaxSize is this message's worst-case encoded size, derived from the
@@ -740,6 +797,24 @@ func Positions__Decode(data []byte) (*Positions, error) {
 		return nil, err
 	}
 	return m, nil
+}
+
+// Positions__TryDecode decodes data into out, which the caller owns, instead of into a
+// new message: out is Reset first, so afterwards it reads exactly as
+// Positions__Decode(data) would. It is the shape for a receive loop that decodes
+// every message into the same object.
+//
+// The storage out's arrays and blobs held is written into rather than
+// allocated anew, so a slice read from out before this call -- or held
+// by a copy of it -- is overwritten by it. Copy what you keep.
+//
+// The error is Positions__Decode's: nil, sofab.ErrIncomplete for bytes that end
+// inside a field, or the refusal. On a refusal out holds the fields
+// decoded before the error and the defaults for the rest, never a value of
+// the message it held before.
+func Positions__TryDecode(data []byte, out *Positions) error {
+	out.Reset()
+	return sofab.AcceptBytes(data, out)
 }
 
 // Positions__DecodeFrom parses a message straight out of r (with defaults pre-applied).

@@ -354,10 +354,11 @@ func TestWireNestedRowSparsityIsPositional(t *testing.T) {
 	if got, want := encHex(t, rows, "vec", `{"arr":[[],["a"]]}`), "060e020a610707"; got != want {
 		t.Errorf("an interior empty wrapper row must leave a gap: got %s, want %s", got, want)
 	}
-	// (encoding/json renders an empty Go slice as null, so an empty row reads as
-	// null on the way back -- the LENGTH is what these pin.)
+	// A trailing empty row ARRIVES (as an empty frame), so it reads back as the
+	// empty row; an interior one is a gap and reads as a nil row, which
+	// encoding/json renders as null -- the LENGTH is what these pin.
 	for _, c := range []struct{ in, want string }{
-		{`{"arr":[["a"],[]]}`, `{"arr":[["a"],null]}`},
+		{`{"arr":[["a"],[]]}`, `{"arr":[["a"],[]]}`},
 		{`{"arr":[[],["a"]]}`, `{"arr":[null,["a"]]}`},
 		{`{"arr":[["a","b"],[],["c"]]}`, `{"arr":[["a","b"],null,["c"]]}`},
 	} {

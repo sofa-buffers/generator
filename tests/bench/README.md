@@ -935,6 +935,17 @@ warmup in the Go sense: nothing global is being warmed, the destination is the
 op's own input. The `corelib: rs-no-std` rows keep `try_decode(data)` and decode
 into a fresh message.
 
+The `go` rows (`go`, `go-unbounded`) do the same with `<Msg>__TryDecode(data,
+out)`: `warmup_decode_<w>` decodes the wire into the `out` the collected
+`run_decode_<w>` then decodes it into again, so that one uncollected op is both
+the runtime warmup above and the destination's first decode. What the row reads
+is therefore the reused destination -- its arrays and blobs written into, only
+its strings and the collector objects allocated -- and not `<Msg>__Decode` into
+a fresh message. The `go` row reads one of two values on that op, 1342 Ir apart
+(39724 / 41066 at corelib-go 6797cf1, each in two of four runs): one allocator
+span refill, the phase `benchAlignSpan` pins for encode and nothing pins for the
+strings the decode still allocates. Compare a moved `go` decode against both.
+
 **`subtract`** (java, kotlin, python, ts, csharp) — no native symbol exists (the hot
 code is JIT'd or interpreted), so run at two rep counts and subtract:
 

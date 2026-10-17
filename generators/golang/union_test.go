@@ -208,7 +208,7 @@ func TestGoUnionDecodeSwitch(t *testing.T) {
 	mustContain(t, "BeginSequence", seq,
 		"case 2:\n\t\treturn m.MutPt(), nil",
 		"case 6:\n\t\treturn m.MutInner(), nil",
-		"case 4:\n\t\tm.which = M_U_Strs__ID ^ M_U_Pt__ID\n\t\tm.optStrs = m.optStrs[:0]\n\t\treturn sofab.NewStringSeq(&m.optStrs,")
+		"case 4:\n\t\tm.which = M_U_Strs__ID ^ M_U_Pt__ID\n\t\tm.optStrs = sofab.ReuseSlice(m.optStrs, 0)\n\t\treturn sofab.NewStringSeq(&m.optStrs,")
 	// Mut<Opt>() resets only when another option is held.
 	mustContain(t, "MutPt", funcBody(t, types, "func (m *M_U) MutPt() *M_U_Pt {"),
 		"\tif m.which != 0 {\n\t\tm.which = 0\n\t\tm.optPt = M_U_Pt{}\n\t\tm.optPt.setDefaults()\n\t}\n\treturn &m.optPt\n")
