@@ -227,6 +227,9 @@ func (g *gen) emitUnion(f *rfile, name string, nt *ir.NamedType) {
 		}
 		f.line("    }")
 	}
+	if g.reuse() {
+		g.emitUnionReset(f, opts)
+	}
 	// MESSAGE_SPEC §4.2: default_id is written like an ordinary field of its kind
 	// (omitted at its default, so a union at its default leaves the frame empty
 	// and the enclosing lazy frame drops it); any other option is written even at

@@ -72,14 +72,14 @@ fn main() {
     put_varint(&mut msg, ((N as u64) << 3) | 3);
     msg.resize(msg.len() + N, b'a');
 
-    let m = Dyn::try_decode(&msg).expect("a skipped 1 MiB blob must decode Ok, cap or no cap");
+    let m = one_shot!(Dyn, &msg).expect("a skipped 1 MiB blob must decode Ok, cap or no cap");
     assert!(m.b.is_empty(), "the skipped payload landed in the declared blob b");
     assert!(m.s.is_empty(), "the skipped payload landed in the declared string s");
 
     let reps = 16usize;
     let before = ALLOCATED.load(Ordering::Relaxed);
     for _ in 0..reps {
-        let m = Dyn::try_decode(&msg).expect("decode");
+        let m = one_shot!(Dyn, &msg).expect("decode");
         std::hint::black_box(&m);
     }
     let per = (ALLOCATED.load(Ordering::Relaxed) - before) / reps;

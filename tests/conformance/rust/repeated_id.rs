@@ -48,7 +48,7 @@ fn build(f: impl FnOnce(&mut sofab::OStream<'_, sofab::NoFlush>)) -> Vec<u8> {
 }
 
 fn decode(wire: &[u8]) -> Myfirstmessage {
-    Myfirstmessage::try_decode(wire).expect("a repeated id is well-defined, never INVALID (§7.4)")
+    one_shot!(Myfirstmessage, wire).expect("a repeated id is well-defined, never INVALID (§7.4)")
 }
 
 fn fail(what: &str, got: String, want: &str) -> ! {

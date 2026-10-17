@@ -39,7 +39,7 @@ fn main() {
     m.a = text;
 
     let one_shot = m.encode().expect("encode");
-    let expect = Vecs::try_decode(&one_shot).expect("one-shot decode failed");
+    let expect = one_shot!(Vecs, &one_shot).expect("one-shot decode failed");
 
     // 1. streaming encode is byte-identical, through a buffer far smaller than
     //    the payload.
@@ -99,7 +99,7 @@ fn main() {
             .expect("fits the schema count");
     }
     let wire = arr.encode().expect("encode");
-    let want = Vecsa::try_decode(&wire).expect("one-shot decode failed");
+    let want = one_shot!(Vecsa, &wire).expect("one-shot decode failed");
 
     for size in [1usize, 3, 7, 16] {
         let mut dec = Vecsa::decoder();
@@ -167,7 +167,7 @@ unwind was lost (got {} element(s))",
         const SCRIBBLE: u8 = 0x41;
 
         let mut owned: std::vec::Vec<u8> = one_shot.iter().copied().collect();
-        let got = Vecs::try_decode(&owned).expect("heapless ownership: one-shot decode failed");
+        let got = one_shot!(Vecs, &owned).expect("heapless ownership: one-shot decode failed");
         owned.iter_mut().for_each(|b| *b = SCRIBBLE);
         assert!(
             got == expect,

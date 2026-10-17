@@ -923,6 +923,18 @@ filled on first touch. The warmup duplicates the body rather than calling `run_<
 collect the warmup too. c, cpp, rust and zig have no lazily-initialized runtime
 metadata and need none of this.
 
+The `corelib: rs` rows (`rust-rs`, `rust-rs-static`, `rust-rs-unbounded`) decode
+**into a destination that already holds one decode of the same wire**: their
+`try_decode(data, &mut out)` writes into the storage the destination has, and a
+receive loop handing it back on every call is what that signature is for. The
+generated `bench_main` fills `out` with one uncollected decode first (setup, like
+the pre-encode of the decode input), so the collected op is the steady state --
+no allocation for a message of the same shape -- and not the first decode, which
+allocates every string and element as a fresh destination does. This is not a
+warmup in the Go sense: nothing global is being warmed, the destination is the
+op's own input. The `corelib: rs-no-std` rows keep `try_decode(data)` and decode
+into a fresh message.
+
 **`subtract`** (java, kotlin, python, ts, csharp) — no native symbol exists (the hot
 code is JIT'd or interpreted), so run at two rep counts and subtract:
 

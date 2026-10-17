@@ -157,7 +157,7 @@ fn main() {
 
     // ---- 2. chunked decode is value-identical --------------------------
 
-    let expect = Myfirstmessage::try_decode(&one_shot).expect("one-shot decode failed");
+    let expect = one_shot!(Myfirstmessage, &one_shot).expect("one-shot decode failed");
 
     for size in [1usize, 2, 3, 5, 16, 64, 4096] {
         let mut dec = Myfirstmessage::decoder();
@@ -287,7 +287,7 @@ so a half-read field would be returned as a value"
         const SCRIBBLE: u8 = 0x41;
 
         let mut wire: Vec<u8> = one_shot.to_vec();
-        let got = Myfirstmessage::try_decode(&wire).expect("ownership: one-shot decode failed");
+        let got = one_shot!(Myfirstmessage, &wire).expect("ownership: one-shot decode failed");
         wire.iter_mut().for_each(|b| *b = SCRIBBLE);
         assert_eq!(
             &one_shot[..],

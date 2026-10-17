@@ -39,9 +39,20 @@ func (g *gen) emitBench(f *rfile, s *ir.Schema) {
 		f.blank()
 		f.line("#[inline(never)]")
 		f.line("#[no_mangle]")
-		f.line("pub fn run_decode_%s(wire: &[u8]) -> %s {", low, mt)
-		f.line("    black_box(%s::try_decode(black_box(wire)).expect(\"decode\"))", mt)
-		f.line("}")
+		if g.reuse() {
+			// The decode into a destination the caller hands back on every call
+			// (generator#755) -- the receive loop the signature exists for.
+			// bench_main fills `out` with one decode of the same wire before the
+			// collected one, so the measured op is the steady state: the storage
+			// the destination holds is written into, not allocated again.
+			f.line("pub fn run_decode_%s(wire: &[u8], out: &mut %s) {", low, mt)
+			f.line("    %s::try_decode(black_box(wire), black_box(out)).expect(\"decode\");", mt)
+			f.line("}")
+		} else {
+			f.line("pub fn run_decode_%s(wire: &[u8]) -> %s {", low, mt)
+			f.line("    black_box(%s::try_decode(black_box(wire)).expect(\"decode\"))", mt)
+			f.line("}")
+		}
 		f.blank()
 	}
 
@@ -64,7 +75,13 @@ func (g *gen) emitBench(f *rfile, s *ir.Schema) {
 		f.line("        if w == \"encode_%s\" {", low)
 		f.line("            sink = sink.wrapping_add(run_encode_%s(&obj) as u64);", low)
 		f.line("        } else {")
-		f.line("            let out = run_decode_%s(&wire);", low)
+		if g.reuse() {
+			f.line("            let mut out = %s::default();", mt)
+			f.line("            %s::try_decode(&wire, &mut out).expect(\"decode\"); // setup: the destination holds one decode (not collected)", mt)
+			f.line("            run_decode_%s(&wire, &mut out);", low)
+		} else {
+			f.line("            let out = run_decode_%s(&wire);", low)
+		}
 		f.line("            sink = sink.wrapping_add(serde_json::to_vec(&out).map(|v| v.len() as u64).unwrap_or(0));")
 		f.line("        }")
 		f.line("        eprintln!(\"sink={} BYTES={}\", sink, wire.len());")
@@ -389,11 +406,42 @@ func (g *gen) harness(s *ir.Schema) []byte {
 		// try_decode, not the best-effort decode: the harness must surface the
 		// accept/reject verdict (a malformed input exits non-zero) so the
 		// conformance run can assert rejects, e.g. over-count arrays (#100).
-		f.line("                let obj = match %s::try_decode(&input) {", mt)
-		f.line("                    Ok(o) => o,")
-		f.line("                    Err(e) => { eprintln!(\"decode error: {:?}\", e); std::process::exit(1); }")
-		f.line("                };")
+		if g.reuse() {
+			f.line("                let mut obj = %s::default();", mt)
+			f.line("                if let Err(e) = %s::try_decode(&input, &mut obj) {", mt)
+			f.line("                    eprintln!(\"decode error: {:?}\", e);")
+			f.line("                    std::process::exit(1);")
+			f.line("                }")
+		} else {
+			f.line("                let obj = match %s::try_decode(&input) {", mt)
+			f.line("                    Ok(o) => o,")
+			f.line("                    Err(e) => { eprintln!(\"decode error: {:?}\", e); std::process::exit(1); }")
+			f.line("                };")
+		}
 		f.line("                println!(\"{}\", serde_json::to_string(&obj).unwrap());")
+		if g.reuse() {
+			// The decode into a reused destination (generator#755), for
+			// tests/conformance/lib/check_reused_destination.py: the hex in the
+			// argument is decoded into a destination first, then stdin into that
+			// SAME destination; printed are the verdict, the destination as JSON
+			// and its re-encode as hex ("-" if the encode refused).
+			f.line("            } else if mode == \"reusedecode\" {")
+			f.line("                let held = args.get(3).map(|s| s.as_str()).unwrap_or(\"\");")
+			f.line("                let held: Vec<u8> = (0..held.len() / 2).map(|i| u8::from_str_radix(&held[2 * i..2 * i + 2], 16).expect(\"hex\")).collect();")
+			f.line("                let mut obj = %s::decode(&held);", mt)
+			f.line("                let verdict = match %s::try_decode(&input, &mut obj) {", mt)
+			f.line("                    Ok(()) => \"COMPLETE\".to_string(),")
+			f.line("                    Err(message::DecodeError::Incomplete) => \"INCOMPLETE\".to_string(),")
+			f.line("                    Err(message::DecodeError::Sofab(e)) => format!(\"{:?}\", e),")
+			f.line("                };")
+			f.line("                let hex: String = match obj.encode() {")
+			f.line("                    Ok(b) => b.iter().map(|b| format!(\"{:02x}\", b)).collect(),")
+			f.line("                    Err(_) => \"-\".to_string(),")
+			f.line("                };")
+			f.line("                println!(\"{}\", verdict);")
+			f.line("                println!(\"{}\", serde_json::to_string(&obj).unwrap());")
+			f.line("                println!(\"{}\", hex);")
+		}
 		// The same bytes through the incremental decoder (§5.6), fed ONE BYTE per
 		// feed by default. A whole-buffer feed would exercise the Decoder's signature without
 		// ever making it suspend and resume, which is the half that can actually be

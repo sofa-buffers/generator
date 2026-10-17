@@ -74,7 +74,7 @@ fn main() {
     put_varint(&mut msg, DECLARED);
     assert!(msg.len() <= 8, "the whole attack is a header: {} bytes", msg.len());
 
-    match Big::try_decode(&msg) {
+    match one_shot!(Big, &msg) {
         Err(DecodeError::Incomplete) => {}
         other => panic!("a truncated array must be Incomplete, got {other:?}"),
     }
@@ -82,7 +82,7 @@ fn main() {
     let reps = 8usize;
     let before = ALLOCATED.load(Ordering::Relaxed);
     for _ in 0..reps {
-        let r = Big::try_decode(&msg);
+        let r = one_shot!(Big, &msg);
         std::hint::black_box(&r);
     }
     let per = (ALLOCATED.load(Ordering::Relaxed) - before) / reps;
@@ -112,7 +112,7 @@ fn main() {
     for v in 0..n as u64 {
         put_varint(&mut full, v);
     }
-    let m = Big::try_decode(&full).expect("a well-formed over-ceiling array must decode");
+    let m = one_shot!(Big, &full).expect("a well-formed over-ceiling array must decode");
     assert_eq!(m.arr.len(), n, "the reserve clamp must not truncate the value");
     assert_eq!(m.arr[n - 1], (n - 1) as u64);
     println!("    a well-formed {n}-element array still decodes whole");

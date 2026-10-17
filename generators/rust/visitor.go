@@ -75,6 +75,44 @@ type frame struct {
 	// place is the assignable spelling of a union frame's value: path itself, or
 	// `*path` where path is a `<opt>_mut()` call (a union option of a union).
 	place string
+	// live is the slot in the visitor's `lv` array holding this wrapper array's
+	// live count (generator#755): how many of its slots the decode in progress has
+	// made, beside an array whose slots past it still hold an earlier decode's
+	// storage. -1 for every frame that has none: a struct/union frame, any array
+	// on corelib-rs-no-std (gen.reuse), and an array that is not on a fixed path
+	// (see fixedPath). Set by frames().
+	live int
+	// elemReset is the element reset an fkStructArr frame hands
+	// sofab::seq::reuse_elem: the element type's reset(), or a union's _reset().
+	elemReset string
+}
+
+// fixedPath reports whether a frame's path reaches its container through plain
+// fields only -- no union accessor (`<opt>_mut()`) and no array element
+// (`[self._ixN]`). Only such an array is the SAME container from one decode to
+// the next, so only it carries a live count; one inside an element or an option
+// is reset with its owner (the corelib's reuse is one level deep).
+func fixedPath(path string) bool {
+	return !strings.ContainsAny(path, "([")
+}
+
+// isArrayFrame reports whether a frame is a wrapper array's.
+func isArrayFrame(k frameKind) bool {
+	return k == fkSeqArr || k == fkStructArr || k == fkNestedNative || k == fkArrArr
+}
+
+// liveCount is the live-count slot of an array frame, as a `&mut` argument.
+func liveCount(fr frame) string { return fmt.Sprintf("&mut self.lv[%d]", fr.live) }
+
+// liveFrames lists the frames that carry a live count, in slot order.
+func liveFrames(fs []frame) []frame {
+	var out []frame
+	for _, fr := range fs {
+		if fr.live >= 0 {
+			out = append(out, fr)
+		}
+	}
+	return out
 }
 
 // member is the expression naming field fld of frame fr, for a method call on
@@ -378,6 +416,12 @@ func (g *gen) reserveArg(bound int64) string {
 // container (Error::Argument -> err); it disarms the fill like any other reject.
 func (g *gen) rowReserve(fr frame) string {
 	call := fmt.Sprintf("sofab::seq::reserve_row(&mut %s, id, %s)", fr.path, g.seqBound(fr.cap))
+	if fr.live >= 0 {
+		// A reused destination (generator#755): the row an earlier decode left at
+		// this index is emptied in place and keeps its buffer; same bound, same
+		// verdicts, same §7.4 replace as reserve_row.
+		call = fmt.Sprintf("sofab::seq::reuse_row(&mut %s, %s, id, %s)", fr.path, liveCount(fr), g.seqBound(fr.cap))
+	}
 	fail := fmt.Sprintf("%s self.afill = 0; return;", seqRefuse)
 	if fr.ecap >= 0 && g.boundedSeqIsDynamic() {
 		return fmt.Sprintf("match %s { Ok(_r) => _r.reserve_exact(%s), Err(_e) => { %s } }", call, g.reserveArg(fr.ecap), fail)
@@ -530,7 +574,11 @@ func (g *gen) frames(m *ir.Message) []frame {
 			// instead of merging into the first (§7.4). generator#247.
 			ix := fmt.Sprintf("_ix%d", nix)
 			nix++
-			out = append(out, frame{loc: loc, path: path, kind: fkStructArr, elemLoc: el, cap: cap, ixVar: ix, depth: depth})
+			reset := fmt.Sprintf("<%s>::reset", namedIdent(ref.Target))
+			if elem == ir.KindUnion {
+				reset = fmt.Sprintf("<%s>::_reset", namedIdent(ref.Target))
+			}
+			out = append(out, frame{loc: loc, path: path, kind: fkStructArr, elemLoc: el, cap: cap, ixVar: ix, depth: depth, elemReset: reset})
 			ep := fmt.Sprintf("%s[self.%s]", path, ix)
 			walkFields(depth+1, el, ep, ep, ref.Target.Fields, unionOf(ref))
 		case ir.KindArray:
@@ -555,6 +603,14 @@ func (g *gen) frames(m *ir.Message) []frame {
 	}
 
 	walkFields(0, "Root", "self.m", "self.m", m.Fields, nil)
+	nlive := 0
+	for i := range out {
+		out[i].live = -1
+		if g.reuse() && isArrayFrame(out[i].kind) && fixedPath(out[i].path) {
+			out[i].live = nlive
+			nlive++
+		}
+	}
 	return out
 }
 
@@ -1003,6 +1059,11 @@ func (g *gen) emitVisitor(f *rfile, msg *ir.Message, name string, fields []*ir.F
 	for _, ix := range ixVars {
 		askipInit += ", " + ix + ": 0"
 	}
+	// Live counts of the reused wrapper arrays (generator#755), one slot each.
+	lives := liveFrames(fs)
+	if len(lives) > 0 {
+		askipInit += fmt.Sprintf(", lv: [0; %d]", len(lives))
+	}
 	accInit := ""
 	if needAcc {
 		accInit = ", acc: " + accNew
@@ -1016,20 +1077,69 @@ func (g *gen) emitVisitor(f *rfile, msg *ir.Message, name string, fields []*ir.F
 	// input — prefer try_decode when the accept/reject verdict matters.
 	f.line("    pub fn decode(data: &[u8]) -> %s {", name)
 	f.line("        let mut m = %s::default();", name)
+	if len(lives) > 0 {
+		f.line("        let lv;")
+	}
 	f.line("        {")
 	f.line("            %s", vInit)
 	f.line("            let mut is = sofab::IStream::new();")
 	f.line("            let _ = is.feed(data, &mut v);")
+	if len(lives) > 0 {
+		f.line("            lv = v.lv;")
+	}
 	f.line("        }")
+	if len(lives) > 0 {
+		f.line("        _trim(&mut m, lv);")
+	}
 	f.line("        m")
 	f.line("    }")
 	f.blank()
+	if g.reuse() {
+		g.emitTryDecodeInto(f, name, strings.Replace(vInit, "m: &mut m,", "m: &mut *m,", 1), fields, lives)
+		g.emitTrim(f, fs, name, lives)
+		g.emitRearm(f, fs, name, fields, lives)
+	} else {
+		g.emitTryDecodeOwned(f, name, vInit)
+	}
+
+	// --- incremental decoder -------------------------------------------------
+	//
+	// decode/try_decode above own the IStream and the visitor for the length of
+	// one call, so the caller must have the whole message as one contiguous
+	// slice. The corelib does not require that -- IStream::feed is incremental
+	// and reports Incomplete so it can be called again -- but the generated API
+	// gave no way to hold the parse state across calls. At a transport that
+	// means buffering the entire message before decoding it, which is what
+	// streaming exists to avoid, and on a constrained target it means RAM for
+	// the whole message.
+	//
+	// The decoder owns the message and the visitor's persistent state as plain
+	// fields; _V borrows them for the duration of one feed and is destructured
+	// afterwards, so nothing here is self-referential.
+	g.emitDecoder(f, name, fs, stackCap, needAcc, accType, accNew, arrSkip, use.scalarArray, ixVars, lives)
+	g.emitVisitorBody(f, fs, name, fields, use, stackCap, needAcc, accType, arrSkip, emitArrayBegin, ixVars, lives)
+}
+
+// emitTryDecodeOwned is corelib-rs-no-std's try_decode: a fresh message per
+// call, handed back on success (see gen.reuse).
+func (g *gen) emitTryDecodeOwned(f *rfile, name, vInit string) {
 	// Fallible decode: surfaces the corelib's accept/reject decision. IStream::feed
 	// detects malformed input and returns Err, but the infallible decode above drops
-	// it, so the public Rust API could otherwise never reject (generator#79). Emitted
-	// for both the std and no_std profiles.
+	// it, so the public Rust API could otherwise never reject (generator#79).
 	f.line("    pub fn try_decode(data: &[u8]) -> Result<%s, DecodeError> {", name)
 	f.line("        let mut m = %s::default();", name)
+	g.emitTryDecodeBody(f, vInit, nil)
+	f.line("        Ok(m)")
+	f.line("    }")
+	f.blank()
+}
+
+// emitTryDecodeBody is the part of try_decode both signatures share: one feed
+// over the whole buffer, then the verdict, in the order §5.2 ranks them. With
+// live counts (generator#755) the reused arrays are cut to them first, on a
+// refusal as on success -- an omitted array, a cut-off input and an error never
+// reach the arrays' own end, so their earlier decode's tail would otherwise stay.
+func (g *gen) emitTryDecodeBody(f *rfile, vInit string, lives []frame) {
 	f.line("        let overflow;")
 	f.line("        let invalid;")
 	if g.limits.any() {
@@ -1043,6 +1153,9 @@ func (g *gen) emitVisitor(f *rfile, msg *ir.Message, name string, fields []*ir.F
 	// (generator#190). So read the sticky flags, apply the INVALID check, and only
 	// then surface feed's Incomplete/InvalidMsg.
 	f.line("        let fed;")
+	if len(lives) > 0 {
+		f.line("        let lv;")
+	}
 	f.line("        {")
 	f.line("            %s", vInit)
 	f.line("            let mut is = sofab::IStream::new();")
@@ -1052,7 +1165,13 @@ func (g *gen) emitVisitor(f *rfile, msg *ir.Message, name string, fields []*ir.F
 	if g.limits.any() {
 		f.line("            limited = v.lim;")
 	}
+	if len(lives) > 0 {
+		f.line("            lv = v.lv;")
+	}
 	f.line("        }")
+	if len(lives) > 0 {
+		f.line("        _trim(m, lv);")
+	}
 	f.line("        // A scalar array carried more elements than its schema `count`, an")
 	f.line("        // invalid-UTF-8 string, an over-length string/blob, or an over-index")
 	f.line("        // wrapper element: INVALID, and it dominates a truncated tail (S5.2).")
@@ -1078,25 +1197,11 @@ func (g *gen) emitVisitor(f *rfile, msg *ir.Message, name string, fields []*ir.F
 	f.line("        // A fixed-capacity field overflowed during the fill:")
 	f.line("        // report it rather than return a silently-truncated value.")
 	f.line("        if overflow { return Err(DecodeError::Sofab(sofab::Error::BufferFull)); }")
-	f.line("        Ok(m)")
-	f.line("    }")
-	f.blank()
+}
 
-	// --- incremental decoder -------------------------------------------------
-	//
-	// decode/try_decode above own the IStream and the visitor for the length of
-	// one call, so the caller must have the whole message as one contiguous
-	// slice. The corelib does not require that -- IStream::feed is incremental
-	// and reports Incomplete so it can be called again -- but the generated API
-	// gave no way to hold the parse state across calls. At a transport that
-	// means buffering the entire message before decoding it, which is what
-	// streaming exists to avoid, and on a constrained target it means RAM for
-	// the whole message.
-	//
-	// The decoder owns the message and the visitor's persistent state as plain
-	// fields; _V borrows them for the duration of one feed and is destructured
-	// afterwards, so nothing here is self-referential.
-	stateFields := g.visitorState(stackCap, needAcc, accType, accNew, arrSkip, use.scalarArray, ixVars)
+// emitDecoder emits the incremental decoder (see emitVisitor).
+func (g *gen) emitDecoder(f *rfile, name string, fs []frame, stackCap int, needAcc bool, accType, accNew string, arrSkip, scalarArray bool, ixVars []string, lives []frame) {
+	stateFields := g.visitorState(stackCap, needAcc, accType, accNew, arrSkip, scalarArray, ixVars, len(lives))
 	f.line("    /// Incremental decoder: hold one and feed the message as bytes arrive.")
 	f.line("    ///")
 	f.line("    /// The wire format has no end marker at the top level -- a message ends")
@@ -1186,6 +1291,11 @@ func (g *gen) emitVisitor(f *rfile, msg *ir.Message, name string, fields []*ir.F
 	f.line("                return Err(DecodeError::Incomplete);")
 	f.line("            }")
 	f.line("            if self.err { return Err(DecodeError::Sofab(sofab::Error::BufferFull)); }")
+	if len(lives) > 0 {
+		// A repeated wrapper started its live count over (§7.4); the slots
+		// its earlier occurrence filled past it go now.
+		f.line("            _trim(&mut self.m, self.lv);")
+	}
 	f.line("            Ok(self.m)")
 	f.line("        }")
 	f.line("    }")
@@ -1194,6 +1304,10 @@ func (g *gen) emitVisitor(f *rfile, msg *ir.Message, name string, fields []*ir.F
 	f.line("        fn default() -> Self { Self::new() }")
 	f.line("    }")
 	f.blank()
+}
+
+// emitVisitorBody emits the visitor itself: _Loc, _V and the Visitor impl.
+func (g *gen) emitVisitorBody(f *rfile, fs []frame, name string, fields []*ir.Field, use visitorUse, stackCap int, needAcc bool, accType string, arrSkip, emitArrayBegin bool, ixVars []string, lives []frame) {
 
 	// _Loc enum. Dead is the SKIPPED-SUBTREE scope: sequence_begin moves here for
 	// any (scope, id) the schema does not declare, and every callback arm is keyed
@@ -1271,6 +1385,12 @@ func (g *gen) emitVisitor(f *rfile, msg *ir.Message, name string, fields []*ir.F
 	// addresses its object through this slot instead of the last one pushed.
 	for _, ix := range ixVars {
 		f.line("    %s: usize, // index of the wrapper-array element currently decoding", ix)
+	}
+	// The live count of each reused wrapper array (generator#755): how many of
+	// its slots this decode has made; the slots past it hold an earlier decode's
+	// storage until sofab::seq::reuse_* resets them or _trim cuts them.
+	if len(lives) > 0 {
+		f.line("    lv: [usize; %d], // live counts of the reused wrapper arrays", len(lives))
 	}
 	f.line("}")
 	f.blank()
@@ -1419,6 +1539,12 @@ func (g *gen) emitVisitor(f *rfile, msg *ir.Message, name string, fields []*ir.F
 					// concatenated onto the first, and the capacity check below — written
 					// for an empty destination — then tripped into Error::BufferFull on
 					// any repeat at any size (generator#273 / Crucible F-0048).
+					if fr.live >= 0 {
+						// reuse_leaf resets the slot itself (the element type's
+						// clear(), keeping its buffer), so the push needs no clear.
+						f.line("            (_Loc::%s, _) => { %smatch %s { Ok(_e) => { let _ = _e.push_str(_s); if _e.len() != _s.len() { self.err = true; } } Err(_e) => { %s } } }", fr.loc, g.limGate(fr.cap), g.reuseLeaf(fr), seqRefuse)
+						continue
+					}
 					f.line("            (_Loc::%s, _) => { %smatch sofab::seq::reserve_elem(&mut %s, id, %s) { Ok(_e) => { _e.clear(); let _ = _e.push_str(_s); if _e.len() != _s.len() { self.err = true; } } Err(_e) => { %s } } }", fr.loc, g.limGate(fr.cap), fr.path, g.seqBound(fr.cap), seqRefuse)
 				}
 				for _, fld := range fr.fields {
@@ -1437,6 +1563,8 @@ func (g *gen) emitVisitor(f *rfile, msg *ir.Message, name string, fields []*ir.F
 			f.line("            _ => {}")
 			f.line("        }")
 			f.line("    }")
+		} else if g.reuse() {
+			g.emitStringInPlace(f, fs)
 		} else {
 			f.line("        // A Rust string type is Unicode, so a string is always strict. Invalid")
 			f.line("        // UTF-8 is the INVALID decode outcome (self.inv -> Error::InvalidMsg),")
@@ -1495,6 +1623,10 @@ func (g *gen) emitVisitor(f *rfile, msg *ir.Message, name string, fields []*ir.F
 				if fr.kind == fkSeqArr && fr.elemKind == ir.KindBlob {
 					// The blob twin of the string arm above: replace, never append
 					// (generator#273 / F-0048).
+					if fr.live >= 0 {
+						f.line("            (_Loc::%s, _) => { %smatch %s { Ok(_e) => { let _ = _e.extend_from_slice(_b); if _e.len() != total { self.err = true; } } Err(_e) => { %s } } }", fr.loc, g.limGate(fr.cap), g.reuseLeaf(fr), seqRefuse)
+						continue
+					}
 					f.line("            (_Loc::%s, _) => { %smatch sofab::seq::reserve_elem(&mut %s, id, %s) { Ok(_e) => { _e.clear(); let _ = _e.extend_from_slice(_b); if _e.len() != total { self.err = true; } } Err(_e) => { %s } } }", fr.loc, g.limGate(fr.cap), fr.path, g.seqBound(fr.cap), seqRefuse)
 				}
 				for _, fld := range fr.fields {
@@ -1511,6 +1643,8 @@ func (g *gen) emitVisitor(f *rfile, msg *ir.Message, name string, fields []*ir.F
 			f.line("            _ => {}")
 			f.line("        }")
 			f.line("    }")
+		} else if g.reuse() {
+			g.emitBlobInPlace(f, fs)
 		} else {
 			g.emitPayloadFeed(f, "_p")
 			f.line("        let _b = _p.to_vec();")
@@ -1682,6 +1816,10 @@ func (g *gen) emitVisitor(f *rfile, msg *ir.Message, name string, fields []*ir.F
 		// element and descend on each per-element sequence_begin.
 		var arms []string
 		add := func(format string, a ...any) { arms = append(arms, fmt.Sprintf(format, a...)) }
+		byLoc := map[string]frame{}
+		for _, fr := range fs {
+			byLoc[fr.loc] = fr
+		}
 		for _, fr := range fs {
 			switch fr.kind {
 			case fkStruct:
@@ -1695,10 +1833,26 @@ func (g *gen) emitVisitor(f *rfile, msg *ir.Message, name string, fields []*ir.F
 					case fld.Kind == ir.KindStruct || fld.Kind == ir.KindUnion:
 						add("            (_Loc::%s, %d) => _Loc::%s,", fr.loc, fld.ID, locChild(fr.loc, fld.Name))
 					case fld.Kind == ir.KindArray && isWrapperElem(fld.Elem):
+						if af := byLoc[locChild(fr.loc, fld.Name)]; af.live >= 0 {
+							// The wrapper replaces (§7.4) by starting the live count
+							// over; the slots it held stay, as storage for the
+							// elements that follow, and _trim cuts the rest at the end.
+							add("            (_Loc::%s, %d) => { self.lv[%d] = 0; _Loc::%s },", fr.loc, fld.ID, af.live, af.loc)
+							continue
+						}
 						add("            (_Loc::%s, %d) => { %s.clear(); _Loc::%s },", fr.loc, fld.ID, member(fr, fld), locChild(fr.loc, fld.Name))
 					}
 				}
 			case fkStructArr:
+				if fr.live >= 0 {
+					// A reused destination (generator#755): an element an earlier
+					// decode left at this index is reset in place, keeping its storage;
+					// one this decode already made is handed back to merge into (§7.4).
+					// Bound, verdicts and gap fill are reserve_elem's.
+					add("            (_Loc::%s, _) => { %sif let Err(_e) = sofab::seq::reuse_elem(&mut %s, %s, id, %s, %s) { %s return; } self.%s = id as usize; _Loc::%s },",
+						fr.loc, g.limGate(fr.cap), fr.path, liveCount(fr), g.seqBound(fr.cap), fr.elemReset, seqRefuse, fr.ixVar, fr.elemLoc)
+					continue
+				}
 				// generator#247: the element id IS the array index (§5.1), so the
 				// element is PLACED at out[id] after gap-filling with default
 				// elements -- exactly like the leaf string/blob path above -- and
@@ -1711,6 +1865,11 @@ func (g *gen) emitVisitor(f *rfile, msg *ir.Message, name string, fields []*ir.F
 				add("            (_Loc::%s, _) => { %sif let Err(_e) = sofab::seq::reserve_elem(&mut %s, id, %s) { %s return; } self.%s = id as usize; _Loc::%s },",
 					fr.loc, g.limGate(fr.cap), fr.path, g.seqBound(fr.cap), seqRefuse, fr.ixVar, fr.elemLoc)
 			case fkArrArr:
+				if fr.live >= 0 {
+					add("            (_Loc::%s, _) => { %sif let Err(_e) = sofab::seq::reuse_row(&mut %s, %s, id, %s) { %s return; } self.%s = id as usize; _Loc::%s },",
+						fr.loc, g.limGate(fr.cap), fr.path, liveCount(fr), g.seqBound(fr.cap), seqRefuse, fr.ixVar, fr.elemLoc)
+					continue
+				}
 				// Same rule as fkStructArr above: the element id IS the row's index
 				// (§5.1), so the row is placed at out[id] rather than appended -- an
 				// interior all-default row is omitted (§2) and leaves an id gap that
@@ -2335,7 +2494,7 @@ type vField struct {
 // the `&mut message` borrow. It is the single description used for the V
 // construction inside decode/try_decode and for the incremental Decoder, so the
 // two cannot drift apart.
-func (g *gen) visitorState(stackCap int, needAcc bool, accType, accNew string, arrSkip, scalarArray bool, ixVars []string) []vField {
+func (g *gen) visitorState(stackCap int, needAcc bool, accType, accNew string, arrSkip, scalarArray bool, ixVars []string, nlive int) []vField {
 	var out []vField
 	if g.noStd {
 		out = append(out, vField{"stack", fmt.Sprintf("heapless::Vec<_Loc, %d>", stackCap), "heapless::Vec::new()", false})
@@ -2369,6 +2528,11 @@ func (g *gen) visitorState(stackCap int, needAcc bool, accType, accNew string, a
 	// calls, since an element can straddle a chunk boundary.
 	for _, ix := range ixVars {
 		out = append(out, vField{ix, "usize", "0", true})
+	}
+	// The live counts must survive between feed calls for the same reason: an
+	// array can straddle a chunk boundary (generator#755).
+	if nlive > 0 {
+		out = append(out, vField{"lv", fmt.Sprintf("[usize; %d]", nlive), fmt.Sprintf("[0; %d]", nlive), true})
 	}
 	return out
 }

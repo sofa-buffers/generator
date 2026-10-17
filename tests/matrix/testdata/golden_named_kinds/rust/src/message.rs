@@ -317,6 +317,16 @@ impl Holder {
         if self.perm != 512 { os.write_unsigned(3, self.perm as sofab::Unsigned)?; }
         Ok(())
     }
+    /// Every field back to its schema default, in place: a string, blob or
+    /// array is cleared and refilled from its default, so it keeps the heap
+    /// capacity it holds, and a nested struct or union is reset the same way.
+    /// The elements of an array are dropped; the array keeps its own buffer.
+    pub fn reset(&mut self) {
+        self.level = 9;
+        self.wide = 0;
+        self.sign = -1;
+        self.perm = 512;
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
@@ -345,6 +355,14 @@ impl Outer {
         os.write_sequence_begin_lazy(0)?; self.holder.serialize(os)?; os.write_sequence_end()?;
         if self.tag != 128 { os.write_signed(1, self.tag as sofab::Signed)?; }
         Ok(())
+    }
+    /// Every field back to its schema default, in place: a string, blob or
+    /// array is cleared and refilled from its default, so it keeps the heap
+    /// capacity it holds, and a nested struct or union is reset the same way.
+    /// The elements of an array are dropped; the array keeps its own buffer.
+    pub fn reset(&mut self) {
+        self.holder.reset();
+        self.tag = 128;
     }
 }
 
@@ -490,6 +508,11 @@ impl Choice__DefaultTiny {
     pub fn b_arr_mut(&mut self) -> &mut Vec<u64> {
         if !matches!(self, Self::BArr(_)) { *self = Self::BArr(Vec::new()); }
         match self { Self::BArr(v) => v, _ => unreachable!() }
+    }
+    /// `tiny` at its own default: in place when it is the option held, so the
+    /// storage it holds is kept; otherwise the option held is dropped.
+    fn _reset(&mut self) {
+        *self = Self::default();
     }
     pub fn serialize<_F: sofab::Flush>(&self, os: &mut sofab::OStream<'_, _F>) -> Result<(), sofab::Error> {
         match self {
@@ -655,6 +678,11 @@ impl Choice__DefaultShort {
         if !matches!(self, Self::BArr(_)) { *self = Self::BArr(Vec::new()); }
         match self { Self::BArr(v) => v, _ => unreachable!() }
     }
+    /// `short` at its own default: in place when it is the option held, so the
+    /// storage it holds is kept; otherwise the option held is dropped.
+    fn _reset(&mut self) {
+        *self = Self::default();
+    }
     pub fn serialize<_F: sofab::Flush>(&self, os: &mut sofab::OStream<'_, _F>) -> Result<(), sofab::Error> {
         match self {
             Self::Tiny(v) => { os.write_signed(0, *v as sofab::Signed)?; }
@@ -818,6 +846,11 @@ impl Choice__DefaultPick {
     pub fn b_arr_mut(&mut self) -> &mut Vec<u64> {
         if !matches!(self, Self::BArr(_)) { *self = Self::BArr(Vec::new()); }
         match self { Self::BArr(v) => v, _ => unreachable!() }
+    }
+    /// `pick` at its own default: in place when it is the option held, so the
+    /// storage it holds is kept; otherwise the option held is dropped.
+    fn _reset(&mut self) {
+        *self = Self::default();
     }
     pub fn serialize<_F: sofab::Flush>(&self, os: &mut sofab::OStream<'_, _F>) -> Result<(), sofab::Error> {
         match self {
@@ -983,6 +1016,11 @@ impl Choice__DefaultFlags {
         if !matches!(self, Self::BArr(_)) { *self = Self::BArr(Vec::new()); }
         match self { Self::BArr(v) => v, _ => unreachable!() }
     }
+    /// `flags` at its own default: in place when it is the option held, so the
+    /// storage it holds is kept; otherwise the option held is dropped.
+    fn _reset(&mut self) {
+        *self = Self::default();
+    }
     pub fn serialize<_F: sofab::Flush>(&self, os: &mut sofab::OStream<'_, _F>) -> Result<(), sofab::Error> {
         match self {
             Self::Tiny(v) => { os.write_signed(0, *v as sofab::Signed)?; }
@@ -1031,6 +1069,14 @@ impl Positions_InlineS {
         if self.tone != 2 { os.write_signed(0, self.tone as sofab::Signed)?; }
         if self.caps != 32768 { os.write_unsigned(1, self.caps as sofab::Unsigned)?; }
         Ok(())
+    }
+    /// Every field back to its schema default, in place: a string, blob or
+    /// array is cleared and refilled from its default, so it keeps the heap
+    /// capacity it holds, and a nested struct or union is reset the same way.
+    /// The elements of an array are dropped; the array keeps its own buffer.
+    pub fn reset(&mut self) {
+        self.tone = 2;
+        self.caps = 32768;
     }
 }
 
@@ -1100,6 +1146,11 @@ impl Positions_UInline {
         if !matches!(self, Self::Ine(_)) { *self = Self::Ine(7); }
         match self { Self::Ine(v) => v, _ => unreachable!() }
     }
+    /// `inb` at its own default: in place when it is the option held, so the
+    /// storage it holds is kept; otherwise the option held is dropped.
+    fn _reset(&mut self) {
+        *self = Self::default();
+    }
     pub fn serialize<_F: sofab::Flush>(&self, os: &mut sofab::OStream<'_, _F>) -> Result<(), sofab::Error> {
         match self {
             Self::Lvl(v) => { os.write_signed(0, *v as sofab::Signed)?; }
@@ -1155,6 +1206,19 @@ impl Names {
         }
         Ok(())
     }
+    /// Every field back to its schema default, in place: a string, blob or
+    /// array is cleared and refilled from its default, so it keeps the heap
+    /// capacity it holds, and a nested struct or union is reset the same way.
+    /// The elements of an array are dropped; the array keeps its own buffer.
+    pub fn reset(&mut self) {
+        self.mode = 0;
+        self.kind = 0;
+        self.names_kind = 0;
+        self.word = 4;
+        self.opts = 0;
+        self.words.clear();
+        self.words.extend_from_slice(&[1, 2]);
+    }
     /// Encode the message. A value past its schema bound is refused with
     /// `sofab::Error::Argument` (see `serialize`), and no bytes are returned.
     pub fn encode(&self) -> Result<Vec<u8>, sofab::Error> {
@@ -1166,11 +1230,23 @@ impl Names {
     pub fn decode(data: &[u8]) -> Self {
         _Names__Decode::decode(data)
     }
-    /// Decode a whole buffer, surfacing the accept/reject verdict --
-    /// a truncated tail included, which is `DecodeError::Incomplete` and
-    /// not a half-filled value.
-    pub fn try_decode(data: &[u8]) -> Result<Self, DecodeError> {
-        _Names__Decode::try_decode(data)
+    /// Decode a whole buffer into `out`, surfacing the accept/reject verdict --
+    /// a truncated tail included, which is `DecodeError::Incomplete`.
+    ///
+    /// `out` is reset first, so it reads as a fresh decode of `data` and never
+    /// as a field of the message it held before. The storage it holds is
+    /// written into, not dropped: a string, a blob and an array keep their
+    /// buffers, and so do the elements of an array of strings, blobs, rows,
+    /// structs or unions up to the length the new message gives it -- a
+    /// destination handed the same shape of message on every call stops
+    /// allocating after the first. Elements past that length are dropped;
+    /// storage below an array element, and inside a union option other than
+    /// the one the union falls back to, is replaced rather than kept.
+    ///
+    /// On `Err`, `out` holds the fields decoded before the refusal, and none
+    /// of the message it held before.
+    pub fn try_decode(data: &[u8], out: &mut Self) -> Result<(), DecodeError> {
+        _Names__Decode::try_decode(data, out)
     }
     /// An incremental decoder for this message: hold it and feed chunks as
     /// they arrive, instead of buffering the whole message first.
@@ -1194,13 +1270,13 @@ mod _Names__Decode {
         m
     }
 
-    pub fn try_decode(data: &[u8]) -> Result<Names, DecodeError> {
-        let mut m = Names::default();
+    pub fn try_decode(data: &[u8], m: &mut Names) -> Result<(), DecodeError> {
+        m.reset();
         let overflow;
         let invalid;
         let fed;
         {
-            let mut v = _V { m: &mut m, stack: [_Loc::Root; 1], sp: 0, cur: _Loc::Root, dead: 0, err: false, inv: false, askip: 0, afill: 0 };
+            let mut v = _V { m: &mut *m, stack: [_Loc::Root; 1], sp: 0, cur: _Loc::Root, dead: 0, err: false, inv: false, askip: 0, afill: 0 };
             let mut is = sofab::IStream::new();
             fed = is.feed(data, &mut v);
             overflow = v.err;
@@ -1220,7 +1296,7 @@ mod _Names__Decode {
         // A fixed-capacity field overflowed during the fill:
         // report it rather than return a silently-truncated value.
         if overflow { return Err(DecodeError::Sofab(sofab::Error::BufferFull)); }
-        Ok(m)
+        Ok(())
     }
 
     /// Incremental decoder: hold one and feed the message as bytes arrive.
@@ -1614,6 +1690,49 @@ impl Positions {
         os.write_sequence_end()?;
         Ok(())
     }
+    /// Every field back to its schema default, in place: a string, blob or
+    /// array is cleared and refilled from its default, so it keeps the heap
+    /// capacity it holds, and a nested struct or union is reset the same way.
+    /// The elements of an array are dropped; the array keeps its own buffer.
+    pub fn reset(&mut self) {
+        self.e = 0;
+        self.e_dflt = -2147483648;
+        self.e_old = 127;
+        self.e_in_old = -5;
+        self.b = 0;
+        self.b_old = 9223372039002259457;
+        self.b_in_old = 4096;
+        self.ea_dflt.clear();
+        self.ea_dflt.extend_from_slice(&[-128, 127, 0]);
+        self.ea_wide.clear();
+        self.ea_wide.extend_from_slice(&[-2147483648, 2147483647]);
+        self.ea_short.clear();
+        self.ea_in.clear();
+        self.ea_in.extend_from_slice(&[300]);
+        self.ba_dflt.clear();
+        self.ba_dflt.extend_from_slice(&[0, 1, 4294967296, 9223372036854775808]);
+        self.ba_16.clear();
+        self.ba_16.extend_from_slice(&[256, 32768, 33024]);
+        self.ba_none.clear();
+        self.ba_in.clear();
+        self.ba_in.extend_from_slice(&[1048578]);
+        self.e_rows.clear();
+        self.b_rows.clear();
+        self.e_cube.clear();
+        self.holder.reset();
+        self.inline_s.reset();
+        self.holders.clear();
+        self.u_tiny._reset();
+        self.u_pick._reset();
+        self.u_flags._reset();
+        self.u_inline._reset();
+        self.u_list.clear();
+        self.e_doc = 1;
+        self.b_doc = 0;
+        self.b_cube.clear();
+        self.outer.reset();
+        self.u_blist.clear();
+    }
     /// Encode the message. A value past its schema bound is refused with
     /// `sofab::Error::Argument` (see `serialize`), and no bytes are returned.
     pub fn encode(&self) -> Result<Vec<u8>, sofab::Error> {
@@ -1625,11 +1744,23 @@ impl Positions {
     pub fn decode(data: &[u8]) -> Self {
         _Positions__Decode::decode(data)
     }
-    /// Decode a whole buffer, surfacing the accept/reject verdict --
-    /// a truncated tail included, which is `DecodeError::Incomplete` and
-    /// not a half-filled value.
-    pub fn try_decode(data: &[u8]) -> Result<Self, DecodeError> {
-        _Positions__Decode::try_decode(data)
+    /// Decode a whole buffer into `out`, surfacing the accept/reject verdict --
+    /// a truncated tail included, which is `DecodeError::Incomplete`.
+    ///
+    /// `out` is reset first, so it reads as a fresh decode of `data` and never
+    /// as a field of the message it held before. The storage it holds is
+    /// written into, not dropped: a string, a blob and an array keep their
+    /// buffers, and so do the elements of an array of strings, blobs, rows,
+    /// structs or unions up to the length the new message gives it -- a
+    /// destination handed the same shape of message on every call stops
+    /// allocating after the first. Elements past that length are dropped;
+    /// storage below an array element, and inside a union option other than
+    /// the one the union falls back to, is replaced rather than kept.
+    ///
+    /// On `Err`, `out` holds the fields decoded before the refusal, and none
+    /// of the message it held before.
+    pub fn try_decode(data: &[u8], out: &mut Self) -> Result<(), DecodeError> {
+        _Positions__Decode::try_decode(data, out)
     }
     /// An incremental decoder for this message: hold it and feed chunks as
     /// they arrive, instead of buffering the whole message first.
@@ -1645,26 +1776,32 @@ mod _Positions__Decode {
 
     pub fn decode(data: &[u8]) -> Positions {
         let mut m = Positions::default();
+        let lv;
         {
-            let mut v = _V { m: &mut m, stack: [_Loc::Root; 3], sp: 0, cur: _Loc::Root, dead: 0, err: false, inv: false, askip: 0, afill: 0, _ix0: 0, _ix1: 0, _ix2: 0, _ix3: 0, _ix4: 0, _ix5: 0, _ix6: 0, _ix7: 0, _ix8: 0 };
+            let mut v = _V { m: &mut m, stack: [_Loc::Root; 3], sp: 0, cur: _Loc::Root, dead: 0, err: false, inv: false, askip: 0, afill: 0, _ix0: 0, _ix1: 0, _ix2: 0, _ix3: 0, _ix4: 0, _ix5: 0, _ix6: 0, _ix7: 0, _ix8: 0, lv: [0; 7] };
             let mut is = sofab::IStream::new();
             let _ = is.feed(data, &mut v);
+            lv = v.lv;
         }
+        _trim(&mut m, lv);
         m
     }
 
-    pub fn try_decode(data: &[u8]) -> Result<Positions, DecodeError> {
-        let mut m = Positions::default();
+    pub fn try_decode(data: &[u8], m: &mut Positions) -> Result<(), DecodeError> {
+        _rearm(m);
         let overflow;
         let invalid;
         let fed;
+        let lv;
         {
-            let mut v = _V { m: &mut m, stack: [_Loc::Root; 3], sp: 0, cur: _Loc::Root, dead: 0, err: false, inv: false, askip: 0, afill: 0, _ix0: 0, _ix1: 0, _ix2: 0, _ix3: 0, _ix4: 0, _ix5: 0, _ix6: 0, _ix7: 0, _ix8: 0 };
+            let mut v = _V { m: &mut *m, stack: [_Loc::Root; 3], sp: 0, cur: _Loc::Root, dead: 0, err: false, inv: false, askip: 0, afill: 0, _ix0: 0, _ix1: 0, _ix2: 0, _ix3: 0, _ix4: 0, _ix5: 0, _ix6: 0, _ix7: 0, _ix8: 0, lv: [0; 7] };
             let mut is = sofab::IStream::new();
             fed = is.feed(data, &mut v);
             overflow = v.err;
             invalid = v.inv;
+            lv = v.lv;
         }
+        _trim(m, lv);
         // A scalar array carried more elements than its schema `count`, an
         // invalid-UTF-8 string, an over-length string/blob, or an over-index
         // wrapper element: INVALID, and it dominates a truncated tail (S5.2).
@@ -1679,7 +1816,59 @@ mod _Positions__Decode {
         // A fixed-capacity field overflowed during the fill:
         // report it rather than return a silently-truncated value.
         if overflow { return Err(DecodeError::Sofab(sofab::Error::BufferFull)); }
-        Ok(m)
+        Ok(())
+    }
+
+    /// Cut each reused wrapper array to the slots this decode made. Run after
+    /// every decode, a refused one included: an omitted array, a cut-off input
+    /// and an error never reach the array's end, so the tail an earlier decode
+    /// left there is cut here.
+    #[allow(deprecated)]
+    fn _trim(m: &mut Positions, lv: [usize; 7]) {
+        sofab::seq::SeqVec::truncate(&mut m.e_rows, lv[0]);
+        sofab::seq::SeqVec::truncate(&mut m.b_rows, lv[1]);
+        sofab::seq::SeqVec::truncate(&mut m.e_cube, lv[2]);
+        sofab::seq::SeqVec::truncate(&mut m.holders, lv[3]);
+        sofab::seq::SeqVec::truncate(&mut m.u_list, lv[4]);
+        sofab::seq::SeqVec::truncate(&mut m.b_cube, lv[5]);
+        sofab::seq::SeqVec::truncate(&mut m.u_blist, lv[6]);
+    }
+
+    /// `Positions::reset`, except that a reused wrapper array keeps its slots: they
+    /// are the storage the decode writes into, and _trim cuts what it did not
+    /// reach.
+    #[allow(deprecated)]
+    fn _rearm(m: &mut Positions) {
+        m.e = 0;
+        m.e_dflt = -2147483648;
+        m.e_old = 127;
+        m.e_in_old = -5;
+        m.b = 0;
+        m.b_old = 9223372039002259457;
+        m.b_in_old = 4096;
+        m.ea_dflt.clear();
+        m.ea_dflt.extend_from_slice(&[-128, 127, 0]);
+        m.ea_wide.clear();
+        m.ea_wide.extend_from_slice(&[-2147483648, 2147483647]);
+        m.ea_short.clear();
+        m.ea_in.clear();
+        m.ea_in.extend_from_slice(&[300]);
+        m.ba_dflt.clear();
+        m.ba_dflt.extend_from_slice(&[0, 1, 4294967296, 9223372036854775808]);
+        m.ba_16.clear();
+        m.ba_16.extend_from_slice(&[256, 32768, 33024]);
+        m.ba_none.clear();
+        m.ba_in.clear();
+        m.ba_in.extend_from_slice(&[1048578]);
+        m.holder.reset();
+        m.inline_s.reset();
+        m.u_tiny._reset();
+        m.u_pick._reset();
+        m.u_flags._reset();
+        m.u_inline._reset();
+        m.e_doc = 1;
+        m.b_doc = 0;
+        m.outer.reset();
     }
 
     /// Incremental decoder: hold one and feed the message as bytes arrive.
@@ -1717,11 +1906,12 @@ mod _Positions__Decode {
         _ix6: usize,
         _ix7: usize,
         _ix8: usize,
+        lv: [usize; 7],
     }
 
     impl _Decoder {
         pub fn new() -> Self {
-            Self { m: Positions::default(), is: sofab::IStream::new(), stack: [_Loc::Root; 3], sp: 0, cur: _Loc::Root, dead: 0, err: false, inv: false, askip: 0, afill: 0, _ix0: 0, _ix1: 0, _ix2: 0, _ix3: 0, _ix4: 0, _ix5: 0, _ix6: 0, _ix7: 0, _ix8: 0 }
+            Self { m: Positions::default(), is: sofab::IStream::new(), stack: [_Loc::Root; 3], sp: 0, cur: _Loc::Root, dead: 0, err: false, inv: false, askip: 0, afill: 0, _ix0: 0, _ix1: 0, _ix2: 0, _ix3: 0, _ix4: 0, _ix5: 0, _ix6: 0, _ix7: 0, _ix8: 0, lv: [0; 7] }
         }
 
         /// Feed the next chunk. `Ok(Status::Complete)` if it ended on a field
@@ -1730,10 +1920,10 @@ mod _Positions__Decode {
         /// these bytes were. `Err` is a refusal, and it is terminal.
         pub fn feed(&mut self, chunk: &[u8]) -> Result<sofab::Status, sofab::Error> {
             let fed = {
-                let mut v = _V { m: &mut self.m, stack: self.stack, sp: self.sp, cur: self.cur, dead: self.dead, err: self.err, inv: self.inv, askip: self.askip, afill: self.afill, _ix0: self._ix0, _ix1: self._ix1, _ix2: self._ix2, _ix3: self._ix3, _ix4: self._ix4, _ix5: self._ix5, _ix6: self._ix6, _ix7: self._ix7, _ix8: self._ix8 };
+                let mut v = _V { m: &mut self.m, stack: self.stack, sp: self.sp, cur: self.cur, dead: self.dead, err: self.err, inv: self.inv, askip: self.askip, afill: self.afill, _ix0: self._ix0, _ix1: self._ix1, _ix2: self._ix2, _ix3: self._ix3, _ix4: self._ix4, _ix5: self._ix5, _ix6: self._ix6, _ix7: self._ix7, _ix8: self._ix8, lv: self.lv };
                 let r = self.is.feed(chunk, &mut v);
                 // `..` covers `m`, ending its borrow before the write-back.
-                let _V { stack, sp, cur, dead, err, inv, askip, afill, _ix0, _ix1, _ix2, _ix3, _ix4, _ix5, _ix6, _ix7, _ix8, .. } = v;
+                let _V { stack, sp, cur, dead, err, inv, askip, afill, _ix0, _ix1, _ix2, _ix3, _ix4, _ix5, _ix6, _ix7, _ix8, lv, .. } = v;
                 self.stack = stack;
                 self.sp = sp;
                 self.cur = cur;
@@ -1751,6 +1941,7 @@ mod _Positions__Decode {
                 self._ix6 = _ix6;
                 self._ix7 = _ix7;
                 self._ix8 = _ix8;
+                self.lv = lv;
                 r
             };
             // INVALID dominates a truncated tail (S5.2), so it is reported
@@ -1773,6 +1964,7 @@ mod _Positions__Decode {
                 return Err(DecodeError::Incomplete);
             }
             if self.err { return Err(DecodeError::Sofab(sofab::Error::BufferFull)); }
+            _trim(&mut self.m, self.lv);
             Ok(self.m)
         }
     }
@@ -1827,6 +2019,7 @@ struct _V<'a> {
     _ix6: usize, // index of the wrapper-array element currently decoding
     _ix7: usize, // index of the wrapper-array element currently decoding
     _ix8: usize, // index of the wrapper-array element currently decoding
+    lv: [usize; 7], // live counts of the reused wrapper arrays
 }
 
 impl _V<'_> {
@@ -2005,8 +2198,8 @@ impl<'a> sofab::Visitor for _V<'a> {
             (sofab::ArrayKind::Unsigned, _Loc::Root, 12) => { if count > 3 { self.inv = true; self.afill = 0; return; }; self.m.ba_16.clear(); self.m.ba_16.reserve_exact(count) },
             (sofab::ArrayKind::Unsigned, _Loc::Root, 13) => { if count > 2 { self.inv = true; self.afill = 0; return; }; self.m.ba_none.clear(); self.m.ba_none.reserve_exact(count) },
             (sofab::ArrayKind::Unsigned, _Loc::Root, 14) => { if count > 2 { self.inv = true; self.afill = 0; return; }; self.m.ba_in.clear(); self.m.ba_in.reserve_exact(count) },
-            (sofab::ArrayKind::Signed, _Loc::Root_e__rows, _) => { if let Err(_e) = sofab::seq::check_index(id, sofab::seq::Bound::Schema(2)) { self.refuse(_e); self.afill = 0; return; }; if count > 2 { self.inv = true; self.afill = 0; return; }; match sofab::seq::reserve_row(&mut self.m.e_rows, id, sofab::seq::Bound::Schema(2)) { Ok(_r) => _r.reserve_exact(count), Err(_e) => { self.refuse(_e); self.afill = 0; return; } } self._ix0 = id as usize; },
-            (sofab::ArrayKind::Unsigned, _Loc::Root_b__rows, _) => { if let Err(_e) = sofab::seq::check_index(id, sofab::seq::Bound::Schema(2)) { self.refuse(_e); self.afill = 0; return; }; if count > 2 { self.inv = true; self.afill = 0; return; }; match sofab::seq::reserve_row(&mut self.m.b_rows, id, sofab::seq::Bound::Schema(2)) { Ok(_r) => _r.reserve_exact(count), Err(_e) => { self.refuse(_e); self.afill = 0; return; } } self._ix1 = id as usize; },
+            (sofab::ArrayKind::Signed, _Loc::Root_e__rows, _) => { if let Err(_e) = sofab::seq::check_index(id, sofab::seq::Bound::Schema(2)) { self.refuse(_e); self.afill = 0; return; }; if count > 2 { self.inv = true; self.afill = 0; return; }; match sofab::seq::reuse_row(&mut self.m.e_rows, &mut self.lv[0], id, sofab::seq::Bound::Schema(2)) { Ok(_r) => _r.reserve_exact(count), Err(_e) => { self.refuse(_e); self.afill = 0; return; } } self._ix0 = id as usize; },
+            (sofab::ArrayKind::Unsigned, _Loc::Root_b__rows, _) => { if let Err(_e) = sofab::seq::check_index(id, sofab::seq::Bound::Schema(2)) { self.refuse(_e); self.afill = 0; return; }; if count > 2 { self.inv = true; self.afill = 0; return; }; match sofab::seq::reuse_row(&mut self.m.b_rows, &mut self.lv[1], id, sofab::seq::Bound::Schema(2)) { Ok(_r) => _r.reserve_exact(count), Err(_e) => { self.refuse(_e); self.afill = 0; return; } } self._ix1 = id as usize; },
             (sofab::ArrayKind::Signed, _Loc::Root_e__cube_e, _) => { if let Err(_e) = sofab::seq::check_index(id, sofab::seq::Bound::Schema(2)) { self.refuse(_e); self.afill = 0; return; }; if count > 2 { self.inv = true; self.afill = 0; return; }; match sofab::seq::reserve_row(&mut self.m.e_cube[self._ix2], id, sofab::seq::Bound::Schema(2)) { Ok(_r) => _r.reserve_exact(count), Err(_e) => { self.refuse(_e); self.afill = 0; return; } } self._ix3 = id as usize; },
             (sofab::ArrayKind::Signed, _Loc::Root_u__tiny, 6) => { if count > 2 { self.inv = true; self.afill = 0; return; }; let _d = self.m.u_tiny.e_arr_mut(); _d.clear(); _d.reserve_exact(count) },
             (sofab::ArrayKind::Unsigned, _Loc::Root_u__tiny, 7) => { if count > 2 { self.inv = true; self.afill = 0; return; }; let _d = self.m.u_tiny.b_arr_mut(); _d.clear(); _d.reserve_exact(count) },
@@ -2027,26 +2220,26 @@ impl<'a> sofab::Visitor for _V<'a> {
         if self.cur == _Loc::Dead { self.dead = self.dead.saturating_add(1); return; }
         if let Some(_slot) = self.stack.get_mut(self.sp) { *_slot = self.cur; self.sp += 1; } else { self.err = true; self.dead = self.dead.saturating_add(1); self.cur = _Loc::Dead; return; }
         self.cur = match (self.cur, id) {
-            (_Loc::Root, 15) => { self.m.e_rows.clear(); _Loc::Root_e__rows },
-            (_Loc::Root, 16) => { self.m.b_rows.clear(); _Loc::Root_b__rows },
-            (_Loc::Root, 17) => { self.m.e_cube.clear(); _Loc::Root_e__cube },
+            (_Loc::Root, 15) => { self.lv[0] = 0; _Loc::Root_e__rows },
+            (_Loc::Root, 16) => { self.lv[1] = 0; _Loc::Root_b__rows },
+            (_Loc::Root, 17) => { self.lv[2] = 0; _Loc::Root_e__cube },
             (_Loc::Root, 18) => _Loc::Root_holder,
             (_Loc::Root, 19) => _Loc::Root_inline__s,
-            (_Loc::Root, 20) => { self.m.holders.clear(); _Loc::Root_holders },
+            (_Loc::Root, 20) => { self.lv[3] = 0; _Loc::Root_holders },
             (_Loc::Root, 21) => _Loc::Root_u__tiny,
             (_Loc::Root, 22) => _Loc::Root_u__pick,
             (_Loc::Root, 23) => _Loc::Root_u__flags,
             (_Loc::Root, 24) => _Loc::Root_u__inline,
-            (_Loc::Root, 25) => { self.m.u_list.clear(); _Loc::Root_u__list },
-            (_Loc::Root, 28) => { self.m.b_cube.clear(); _Loc::Root_b__cube },
+            (_Loc::Root, 25) => { self.lv[4] = 0; _Loc::Root_u__list },
+            (_Loc::Root, 28) => { self.lv[5] = 0; _Loc::Root_b__cube },
             (_Loc::Root, 29) => _Loc::Root_outer,
-            (_Loc::Root, 30) => { self.m.u_blist.clear(); _Loc::Root_u__blist },
-            (_Loc::Root_e__cube, _) => { if let Err(_e) = sofab::seq::reserve_row(&mut self.m.e_cube, id, sofab::seq::Bound::Schema(2)) { self.refuse(_e); return; } self._ix2 = id as usize; _Loc::Root_e__cube_e },
-            (_Loc::Root_holders, _) => { if let Err(_e) = sofab::seq::reserve_elem(&mut self.m.holders, id, sofab::seq::Bound::Schema(2)) { self.refuse(_e); return; } self._ix4 = id as usize; _Loc::Root_holders_e },
-            (_Loc::Root_u__list, _) => { if let Err(_e) = sofab::seq::reserve_elem(&mut self.m.u_list, id, sofab::seq::Bound::Schema(2)) { self.refuse(_e); return; } self._ix5 = id as usize; _Loc::Root_u__list_e },
-            (_Loc::Root_b__cube, _) => { if let Err(_e) = sofab::seq::reserve_row(&mut self.m.b_cube, id, sofab::seq::Bound::Schema(2)) { self.refuse(_e); return; } self._ix6 = id as usize; _Loc::Root_b__cube_e },
+            (_Loc::Root, 30) => { self.lv[6] = 0; _Loc::Root_u__blist },
+            (_Loc::Root_e__cube, _) => { if let Err(_e) = sofab::seq::reuse_row(&mut self.m.e_cube, &mut self.lv[2], id, sofab::seq::Bound::Schema(2)) { self.refuse(_e); return; } self._ix2 = id as usize; _Loc::Root_e__cube_e },
+            (_Loc::Root_holders, _) => { if let Err(_e) = sofab::seq::reuse_elem(&mut self.m.holders, &mut self.lv[3], id, sofab::seq::Bound::Schema(2), <Holder>::reset) { self.refuse(_e); return; } self._ix4 = id as usize; _Loc::Root_holders_e },
+            (_Loc::Root_u__list, _) => { if let Err(_e) = sofab::seq::reuse_elem(&mut self.m.u_list, &mut self.lv[4], id, sofab::seq::Bound::Schema(2), <Choice__DefaultShort>::_reset) { self.refuse(_e); return; } self._ix5 = id as usize; _Loc::Root_u__list_e },
+            (_Loc::Root_b__cube, _) => { if let Err(_e) = sofab::seq::reuse_row(&mut self.m.b_cube, &mut self.lv[5], id, sofab::seq::Bound::Schema(2)) { self.refuse(_e); return; } self._ix6 = id as usize; _Loc::Root_b__cube_e },
             (_Loc::Root_outer, 0) => _Loc::Root_outer_holder,
-            (_Loc::Root_u__blist, _) => { if let Err(_e) = sofab::seq::reserve_elem(&mut self.m.u_blist, id, sofab::seq::Bound::Schema(2)) { self.refuse(_e); return; } self._ix8 = id as usize; _Loc::Root_u__blist_e },
+            (_Loc::Root_u__blist, _) => { if let Err(_e) = sofab::seq::reuse_elem(&mut self.m.u_blist, &mut self.lv[6], id, sofab::seq::Bound::Schema(2), <Choice__DefaultFlags>::_reset) { self.refuse(_e); return; } self._ix8 = id as usize; _Loc::Root_u__blist_e },
             _ => _Loc::Dead,
         };
     }
@@ -2153,6 +2346,36 @@ impl Widths {
         if self.past_i16 != 32768 { os.write_signed(23, self.past_i16 as sofab::Signed)?; }
         Ok(())
     }
+    /// Every field back to its schema default, in place: a string, blob or
+    /// array is cleared and refilled from its default, so it keeps the heap
+    /// capacity it holds, and a nested struct or union is reset the same way.
+    /// The elements of an array are dropped; the array keeps its own buffer.
+    pub fn reset(&mut self) {
+        self.tiny = 0;
+        self.tiny_min = -128;
+        self.tiny_max = 127;
+        self.short_lo = -129;
+        self.short_hi = 128;
+        self.wide_min = -2147483648;
+        self.wide_max = 2147483647;
+        self.level = 1;
+        self.level_hi = 9;
+        self.in_i8 = -1;
+        self.in_i16 = -32768;
+        self.in_i32 = 2147483647;
+        self.b8 = 0;
+        self.b16 = 0;
+        self.b32 = 0;
+        self.b64 = 0;
+        self.nothing = 0;
+        self.all_on = 9223372039002259457;
+        self.in_u8 = 128;
+        self.in_u16 = 256;
+        self.in_u32 = 65536;
+        self.in_u64 = 4294967296;
+        self.in_none = 0;
+        self.past_i16 = 32768;
+    }
     /// Encode the message. A value past its schema bound is refused with
     /// `sofab::Error::Argument` (see `serialize`), and no bytes are returned.
     pub fn encode(&self) -> Result<Vec<u8>, sofab::Error> {
@@ -2164,11 +2387,23 @@ impl Widths {
     pub fn decode(data: &[u8]) -> Self {
         _Widths__Decode::decode(data)
     }
-    /// Decode a whole buffer, surfacing the accept/reject verdict --
-    /// a truncated tail included, which is `DecodeError::Incomplete` and
-    /// not a half-filled value.
-    pub fn try_decode(data: &[u8]) -> Result<Self, DecodeError> {
-        _Widths__Decode::try_decode(data)
+    /// Decode a whole buffer into `out`, surfacing the accept/reject verdict --
+    /// a truncated tail included, which is `DecodeError::Incomplete`.
+    ///
+    /// `out` is reset first, so it reads as a fresh decode of `data` and never
+    /// as a field of the message it held before. The storage it holds is
+    /// written into, not dropped: a string, a blob and an array keep their
+    /// buffers, and so do the elements of an array of strings, blobs, rows,
+    /// structs or unions up to the length the new message gives it -- a
+    /// destination handed the same shape of message on every call stops
+    /// allocating after the first. Elements past that length are dropped;
+    /// storage below an array element, and inside a union option other than
+    /// the one the union falls back to, is replaced rather than kept.
+    ///
+    /// On `Err`, `out` holds the fields decoded before the refusal, and none
+    /// of the message it held before.
+    pub fn try_decode(data: &[u8], out: &mut Self) -> Result<(), DecodeError> {
+        _Widths__Decode::try_decode(data, out)
     }
     /// An incremental decoder for this message: hold it and feed chunks as
     /// they arrive, instead of buffering the whole message first.
@@ -2192,13 +2427,13 @@ mod _Widths__Decode {
         m
     }
 
-    pub fn try_decode(data: &[u8]) -> Result<Widths, DecodeError> {
-        let mut m = Widths::default();
+    pub fn try_decode(data: &[u8], m: &mut Widths) -> Result<(), DecodeError> {
+        m.reset();
         let overflow;
         let invalid;
         let fed;
         {
-            let mut v = _V { m: &mut m, stack: [_Loc::Root; 1], sp: 0, cur: _Loc::Root, dead: 0, err: false, inv: false, askip: 0 };
+            let mut v = _V { m: &mut *m, stack: [_Loc::Root; 1], sp: 0, cur: _Loc::Root, dead: 0, err: false, inv: false, askip: 0 };
             let mut is = sofab::IStream::new();
             fed = is.feed(data, &mut v);
             overflow = v.err;
@@ -2218,7 +2453,7 @@ mod _Widths__Decode {
         // A fixed-capacity field overflowed during the fill:
         // report it rather than return a silently-truncated value.
         if overflow { return Err(DecodeError::Sofab(sofab::Error::BufferFull)); }
-        Ok(m)
+        Ok(())
     }
 
     /// Incremental decoder: hold one and feed the message as bytes arrive.

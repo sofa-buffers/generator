@@ -32,6 +32,18 @@ set -eu
 . "$(dirname "$0")/../lib/backend_tests.sh"
 
 ROOT=$(cd "$(dirname "$0")/../../.." && pwd)
+
+# one_shot_shim <corelib checkout> prints the `one_shot!(T, wire)` macro the
+# drivers below decode a whole buffer with: corelib-rs's try_decode writes into a
+# destination the caller owns (generator#755), corelib-rs-no-std's returns a new
+# value, and a driver shared by both legs spells the call once.
+one_shot_shim() {
+    if [ "$1" = "$STD" ]; then
+        cat "$ROOT/tests/conformance/rust/one_shot_std.rs"
+    else
+        cat "$ROOT/tests/conformance/rust/one_shot_nostd.rs"
+    fi
+}
 NOSTD="${1:-${SOFAB_RS_CORELIB:-}}"
 STD="${2:-${SOFAB_RS_STD_CORELIB:-}}"
 
@@ -284,6 +296,7 @@ run_variant() {
         no-std-dynamic|no-std-static) printf 'use sofabuffers_generated::*;\n' > "$WORK/stream-$label/src/main.rs" ;;
         *)        printf 'pub mod message;\nuse message::*;\n' > "$WORK/stream-$label/src/main.rs" ;;
     esac
+    one_shot_shim "$corelib" >> "$WORK/stream-$label/src/main.rs"
     sed '/^\/\/SOFAB_IMPORT$/d' "$ROOT/tests/conformance/rust/$STREAM_CHECK" \
         >> "$WORK/stream-$label/src/main.rs"
     case "$kind" in
@@ -321,6 +334,37 @@ run_variant() {
     python3 "$ROOT/tests/conformance/lib/check_nondefault.py" "$BASE" "$FULL" \
         --label "rust: round-trip fixture" || exit 1
     echo "==> round-trip fixture OK (no field sits on its schema default)"
+
+    # Decode into a REUSED destination (try_decode(data, &mut out), generator#755),
+    # corelib-rs only: corelib-rs-no-std keeps try_decode(data) -> Result<Self, _>
+    # (footprint, corelib-rs-no-std#133). The destination keeps its storage --
+    # strings, blobs, arrays, and through sofab::seq::reuse_* the elements of the
+    # wrapper arrays -- so it must still read exactly as a fresh decode: every
+    # input decoded into a destination already holding every other one, and once
+    # more with each malformed tail, where it holds the fields decoded before the
+    # error and none of the older message's. Compared as data and as re-encoded
+    # bytes. Both storages: rs-static holds heapless containers, whose reset and
+    # truncate are the corelib's other SeqVec impl.
+    case "$kind" in rs|rs-static)
+        echo "==> [$label] a reused destination reads as a fresh decode (generator#755)"
+        python3 "$ROOT/tests/conformance/lib/check_reused_destination.py" --self-test || exit 1
+        python3 "$ROOT/tests/conformance/lib/check_reused_destination.py" "Rust [$label]: example.yaml" \
+            --msg myfirstmessage \
+            --fixture "full=$FULL" \
+            --fixture 'short={"someu8":9,"someuintarray":[5],"somestringarray":["z"],"somestructarray":[{"x":0,"y":0},{"x":5,"y":0}],"somematrix":[[],[3]],"someunion":{"option3":{"unionstructint":4,"unionstructbool":true}},"someboolarray":[true],"somestruct":{"nestedint":1}}' \
+            --fixture 'other={"somestring":"s","someblob":[],"someintarray":[],"someunion":{"option2":"two"},"someunionarray":[{"asstring":"q"}],"somemap":[{"key":"k","value":0}],"somestructwitharray":{"values":[]}}' \
+            -- "$CARGO_TARGET_DIR/debug/harness_ex_$(printf '%s' "$label" | tr -c 'A-Za-z0-9' '_')" || exit 1
+        # The driver's own schema, every image forged from the wire format: a
+        # field of each shape a reset has to put back -- a union whose default
+        # option is a struct, struct and union arrays, a matrix, a string array.
+        printf 'version: 1\nmessages:\n' > "$WORK/reuse-$label.yaml"
+        python3 "$ROOT/tests/conformance/lib/check_reused_destination.py" --emit-schema >> "$WORK/reuse-$label.yaml"
+        rust_build "$WORK/reuse-$label.yaml" "$WORK/reuse-$label"
+        rust_clippy "$WORK/reuse-$label"
+        python3 "$ROOT/tests/conformance/lib/check_reused_destination.py" "Rust [$label]: own schema" \
+            -- "$CARGO_TARGET_DIR/debug/harness_reuse_$(printf '%s' "$label" | tr -c 'A-Za-z0-9' '_')" || exit 1
+        ;;
+    esac
 
     # Over-count scalar array (generator#100): someuintarray declares count: 4
     # (id 15 -> header 0x7b = 15<<3 | unsigned-array). 5 wire elements MUST be
@@ -502,6 +546,7 @@ run_variant() {
         no-std-dynamic|no-std-static) printf 'use sofabuffers_generated::*;\n' > "$WORK/rep-$label/src/main.rs" ;;
         *)        printf 'pub mod message;\nuse message::*;\n' > "$WORK/rep-$label/src/main.rs" ;;
     esac
+    one_shot_shim "$corelib" >> "$WORK/rep-$label/src/main.rs"
     sed '/^\/\/SOFAB_IMPORT$/d' "$ROOT/tests/conformance/rust/repeated_id.rs" \
         >> "$WORK/rep-$label/src/main.rs"
     case "$kind" in
@@ -1572,6 +1617,7 @@ rm -rf "$WORK/skipalloc"
 sed -i "s#\${SOFAB_RS_CORELIB}#$STD#" "$WORK/skipalloc/Cargo.toml"
 crate_bin_name "$WORK/skipalloc"
 printf 'pub mod message;\nuse message::*;\n' > "$WORK/skipalloc/src/main.rs"
+one_shot_shim "$STD" >> "$WORK/skipalloc/src/main.rs"
 sed '/^\/\/SOFAB_IMPORT$/d' "$ROOT/tests/conformance/rust/skipped_blob_alloc.rs" \
     >> "$WORK/skipalloc/src/main.rs"
 ( cd "$WORK/skipalloc" && cargo run -q ) || { echo "FAIL: a skipped blob must not be materialised"; exit 1; }
@@ -1609,6 +1655,7 @@ rm -rf "$WORK/bigalloc"
 sed -i "s#\${SOFAB_RS_CORELIB}#$STD#" "$WORK/bigalloc/Cargo.toml"
 crate_bin_name "$WORK/bigalloc"
 printf 'pub mod message;\nuse message::*;\n' > "$WORK/bigalloc/src/main.rs"
+one_shot_shim "$STD" >> "$WORK/bigalloc/src/main.rs"
 sed '/^\/\/SOFAB_IMPORT$/d' "$ROOT/tests/conformance/rust/truncated_array_alloc.rs" \
     >> "$WORK/bigalloc/src/main.rs"
 ( cd "$WORK/bigalloc" && cargo run -q ) || { echo "FAIL: a truncated bounded array must not allocate its declared count"; exit 1; }
@@ -1656,6 +1703,7 @@ rm -rf "$WORK/overalloc"
 sed -i "s#\${SOFAB_RS_CORELIB}#$STD#" "$WORK/overalloc/Cargo.toml"
 crate_bin_name "$WORK/overalloc"
 printf 'pub mod message;\nuse message::*;\n' > "$WORK/overalloc/src/main.rs"
+one_shot_shim "$STD" >> "$WORK/overalloc/src/main.rs"
 sed '/^\/\/SOFAB_IMPORT$/d' "$ROOT/tests/conformance/rust/overcount_array_alloc.rs" \
     >> "$WORK/overalloc/src/main.rs"
 ( cd "$WORK/overalloc" && cargo run -q ) || { echo "FAIL: a rejected bounded array must stop collecting"; exit 1; }
@@ -1669,6 +1717,7 @@ rm -rf "$WORK/overalloc-nsdyn"
 sed -i "s#\${SOFAB_RS_CORELIB}#$NOSTD#" "$WORK/overalloc-nsdyn/Cargo.toml"
 crate_bin_name "$WORK/overalloc-nsdyn"
 printf 'use sofabuffers_generated::*;\n' > "$WORK/overalloc-nsdyn/src/main.rs"
+one_shot_shim "$NOSTD" >> "$WORK/overalloc-nsdyn/src/main.rs"
 sed '/^\/\/SOFAB_IMPORT$/d' "$ROOT/tests/conformance/rust/overcount_array_alloc.rs" \
     >> "$WORK/overalloc-nsdyn/src/main.rs"
 ( cd "$WORK/overalloc-nsdyn" && cargo run -q --features std ) \
@@ -1729,6 +1778,7 @@ rm -rf "$WORK/postlim"
 sed -i "s#\${SOFAB_RS_CORELIB}#$STD#" "$WORK/postlim/Cargo.toml"
 crate_bin_name "$WORK/postlim"
 printf 'pub mod message;\nuse message::*;\n' > "$WORK/postlim/src/main.rs"
+one_shot_shim "$STD" >> "$WORK/postlim/src/main.rs"
 sed '/^\/\/SOFAB_IMPORT$/d' "$ROOT/tests/conformance/rust/post_limit_fill.rs" \
     >> "$WORK/postlim/src/main.rs"
 ( cd "$WORK/postlim" && cargo run -q ) || { echo "FAIL: a crossed cap must stop collecting, and stop materialising containers"; exit 1; }
@@ -1768,11 +1818,39 @@ for dleg in dyn:true static:false; do
     grep -q 'stack: \[_Loc; 4\],' "$WORK/depth-$dname/src/message.rs" \
         || { echo "FAIL: [$dname] the decode stack must be [_Loc; 4] for a depth-3 schema"; exit 1; }
     printf 'pub mod message;\nuse message::*;\nconst STATIC: bool = %s;\n' "$dstatic" > "$WORK/depth-$dname/src/main.rs"
+    one_shot_shim "$STD" >> "$WORK/depth-$dname/src/main.rs"
     sed '/^\/\/SOFAB_IMPORT$/d' "$ROOT/tests/conformance/rust/decode_stack_depth.rs" \
         >> "$WORK/depth-$dname/src/main.rs"
     ( cd "$WORK/depth-$dname" && cargo run -q ) || { echo "FAIL: [$dname] decode stack depth / wrapper growth"; exit 1; }
 done
 echo "==> [rs, rs-static] decode stack depth and wrapper growth OK"
+
+# The storage half of try_decode(data, &mut out) (generator#755), measured with a
+# counting allocator on the two bench schemas and their payloads: the steady state
+# of a destination handed back on every decode allocates nothing (the issue
+# measured 32/38 allocations per decode before), an empty message and a refusal
+# allocate nothing, and every result equals a fresh decode (reuse_alloc.rs says
+# what each step pins). check_reused_destination.py above proves the VALUES on
+# every shape; this proves the storage is actually kept. rs-static holds heapless
+# containers and must read 0 throughout.
+echo "==> [rs, rs-static] a reused destination keeps its storage (generator#755)"
+for rleg in "vt|corelib: rs|examples/messages/realworld/vehicle_telemetry.yaml|VehicleTelemetry|tests/bench/payload/vehicle_telemetry.json" \
+            "vts|corelib: rs, allow_dynamic: false|examples/messages/realworld/vehicle_telemetry.yaml|VehicleTelemetry|tests/bench/payload/vehicle_telemetry.json" \
+            "ui|corelib: rs|tests/bench/schema/unbounded_ingest.yaml|IngestBatch|tests/bench/payload/unbounded_ingest.json"; do
+    IFS="|" read -r rname rcfg rschema rtype rpayload <<EOF
+$rleg
+EOF
+    printf 'generic: { emit: project }\ntargets: { rust: { %s } }\n' "$rcfg" > "$WORK/cfg-reuse-$rname.yaml"
+    rm -rf "$WORK/reusealloc-$rname"
+    ( cd "$ROOT" && go run ./cmd/sofabgen --format=off --config "$WORK/cfg-reuse-$rname.yaml" --lang rust --in "$ROOT/$rschema" --out "$WORK/reusealloc-$rname" )
+    sed -i "s#\${SOFAB_RS_CORELIB}#$STD#" "$WORK/reusealloc-$rname/Cargo.toml"
+    crate_bin_name "$WORK/reusealloc-$rname"
+    printf 'pub mod message;\nuse message::*;\ntype M = %s;\n' "$rtype" > "$WORK/reusealloc-$rname/src/main.rs"
+    sed '/^\/\/SOFAB_IMPORT$/d' "$ROOT/tests/conformance/rust/reuse_alloc.rs" \
+        >> "$WORK/reusealloc-$rname/src/main.rs"
+    ( cd "$WORK/reusealloc-$rname" && cargo run -q < "$ROOT/$rpayload" ) \
+        || { echo "FAIL: [$rname] a reused destination must keep its storage"; exit 1; }
+done
 
 # CORELIB_PLAN §7.2 item 8 -- the shared file's `sequence_growth` block
 # (generator#449). Not run in corelib-rs, and not out of oversight: under the
@@ -2029,6 +2107,7 @@ echo "==> [no-std-static] streaming behaviour"
 # shared across storage-equal/shape-different legs, so it carries //SOFAB_IMPORT
 # rather than a hardcoded `use`.
 printf 'use sofabuffers_generated::*;\n' > "$WORK/no-std-static/src/main.rs"
+one_shot_shim "$NOSTD" >> "$WORK/no-std-static/src/main.rs"
 sed '/^\/\/SOFAB_IMPORT$/d' "$ROOT/tests/conformance/rust/streaming_check_nostd.rs" \
     >> "$WORK/no-std-static/src/main.rs"
 ( cd "$WORK/no-std-static" && cargo run -q --features std )
