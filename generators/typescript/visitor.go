@@ -226,13 +226,27 @@ func (g *gen) staleMember(sc *tsScope, f *ir.Field) bool {
 	return false
 }
 
-// typedZero is the zero a typed array of this element kind is filled with: a
-// bigint for a 64-bit typed array, which refuses a number.
-func (g *gen) typedZero(elem ir.Kind, ref *ir.TypeRef) string {
-	if strings.HasPrefix(g.tsTypedArray(elem, ref), "Big") {
-		return "0n"
+// typedReuse names the corelib's fit-or-allocate for the typed array an element
+// kind is held in -- reuse<W>(kept, count): the kept array zeroed when it is
+// exactly `count` long, a new one otherwise -- and the cast an enum's array
+// alias needs on the result. One function per width rather than one taking the
+// constructor: corelib-ts measured the shared one at ~+270 Ir per array (a
+// polymorphic construct and fill) against ~+20 for these.
+func (g *gen) typedReuse(elem ir.Kind, ref *ir.TypeRef, typ string) (fn, cast string) {
+	fn = typedReuseFn[g.tsTypedArray(elem, ref)]
+	if elem == ir.KindEnum {
+		cast = " as " + typ
 	}
-	return "0"
+	return fn, cast
+}
+
+// typedReuseFn maps each typed-array carrier to its corelib reuse function. A
+// boolean's Uint8Array takes the u8 one, as corelib-ts documents.
+var typedReuseFn = map[string]string{
+	"Uint8Array": "reuseU8", "Uint16Array": "reuseU16", "Uint32Array": "reuseU32",
+	"Int8Array": "reuseI8", "Int16Array": "reuseI16", "Int32Array": "reuseI32",
+	"BigUint64Array": "reuseU64", "BigInt64Array": "reuseI64",
+	"Float32Array": "reuseFp32", "Float64Array": "reuseFp64",
 }
 
 // staleReg names the register holding what the previous decode left in field f
@@ -473,11 +487,10 @@ func (g *gen) emitVisitor(f *tsfile, name, raw string, nt *ir.NamedType, reuse b
 // would run it.
 //
 // What the corelib holds of this is the part that is the same for every schema:
-// the collectors' reuse mode, PayloadAcc.takeReusing and the one-shot tryDecode.
+// the collectors' reuse mode, PayloadAcc.takeReusing, the typed-array
+// fit-or-allocate family (reuseU8 ... reuseFp64) and the one-shot tryDecode.
 // What stays here is per schema: which fields have storage, their registers and
-// defaults, and the per-field arm. The typed-array arm's choice (`kept.length ===
-// count ? kept.fill(0) : new T(count)`) is the one exception, and a known gap: the
-// corelib has no typed-array allocator to hand it to yet (corelib-ts#210).
+// defaults, and the per-field arm that names the right one.
 
 // emitStaleRegisters declares the registers _reuse fills: one per fixed typed
 // array, fixed blob and armed wrapper array, typed as the member and null until
@@ -1569,9 +1582,9 @@ func (g *gen) emitArrayCbs(f *tsfile, scopes []*tsScope) {
 			if sc.stale != "" {
 				// A re-armed collector hands back the row the previous decode left at
 				// this index; it is the destination when it holds exactly `count`.
-				b = append(b, fmt.Sprintf("    const _o = this._re ? this.%s!.staleAt(id) : null; const _r = _o !== null && _o.length === count ? _o.fill(%s) : %s; this.%s!.place(id, _r); this.%s = _r;",
-					sc.seq, g.typedZero(sc.elemItems.Elem, sc.elemItems.ElemRef),
-					g.newArrayExpr(sc.elemItems.Elem, sc.elemItems.ElemRef, g.matRowType(sc)), sc.seq, sc.row))
+				fn, cast := g.typedReuse(sc.elemItems.Elem, sc.elemItems.ElemRef, g.matRowType(sc))
+				b = append(b, fmt.Sprintf("    const _r = %s(this._re ? this.%s!.staleAt(id) : null, count)%s; this.%s!.place(id, _r); this.%s = _r;",
+					fn, sc.seq, cast, sc.seq, sc.row))
 			} else {
 				b = append(b, fmt.Sprintf("    const _r%s = %s; this.%s!.place(id, _r); this.%s = _r;",
 					g.newArrayDecl(sc.elemItems.Elem, sc.elemItems.ElemRef, g.matRowType(sc)),
@@ -1615,15 +1628,14 @@ func (g *gen) emitArrayCbs(f *tsfile, scopes []*tsScope) {
 				b += fmt.Sprintf("%s = []; const _d = %s; this.%s = _d; ", acc, acc, arrayDst(sc, x))
 			} else if g.staleMember(sc, x) {
 				// The array tryDecode kept is the destination when its length is the
-				// wire count (emitReuse), and taking it marks the field reached. It is
-				// zeroed first, as a new one would be: the
-				// hand-off writes every element of a COMPLETE array, but a decode that
-				// ends inside this one must leave zeros past the last element it wrote,
-				// never the previous message's.
-				b += fmt.Sprintf("const _s = this.%s; this.%s = null; const _d = _s !== null && _s.length === count ? _s.fill(%s) : %s; %s = _d; this.%s = _d; ",
-					staleReg(sc, x), staleReg(sc, x), g.typedZero(x.Elem, x.ElemRef),
-					g.newArrayExpr(x.Elem, x.ElemRef, g.tsArrayType(x.Elem, x.ElemRef, x.ElemItems)),
-					acc, arrayDst(sc, x))
+				// wire count (emitReuse), and taking it marks the field reached. The
+				// corelib zeroes it first, as a new one would be: the hand-off writes
+				// every element of a COMPLETE array, but a decode that ends inside this
+				// one must leave zeros past the last element it wrote, never the
+				// previous message's.
+				fn, cast := g.typedReuse(x.Elem, x.ElemRef, g.tsArrayType(x.Elem, x.ElemRef, x.ElemItems))
+				b += fmt.Sprintf("const _d = %s(this.%s, count)%s; this.%s = null; %s = _d; this.%s = _d; ",
+					fn, staleReg(sc, x), cast, staleReg(sc, x), acc, arrayDst(sc, x))
 			} else {
 				b += fmt.Sprintf("const _d%s = %s; %s = _d; this.%s = _d; ",
 					g.newArrayDecl(x.Elem, x.ElemRef, g.tsArrayType(x.Elem, x.ElemRef, x.ElemItems)),

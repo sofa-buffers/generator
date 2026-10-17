@@ -137,9 +137,9 @@ func TestTSWireTypeGuard(t *testing.T) {
 	for _, want := range []string{
 		// fp32/fp64/string/blob all ride WireType.Fixlen, so an ARRAY of them is
 		// separated only by the announced element kind.
-		`case 5: { if (kind !== ArrayKind.Unsigned) break; if (count > MAX_DYN_ARRAY_COUNT) throw new SofabError(SofabErrorCode.LimitExceeded, "f: array count above configured limit " + MAX_DYN_ARRAY_COUNT); const _s = this._s0F; this._s0F = null; const _d = _s !== null && _s.length === count ? _s.fill(0) : new Uint32Array(count); this.o.f = _d; this._a0F = _d; break; }`,
-		`case 6: { if (kind !== ArrayKind.Signed) break; if (count > MAX_DYN_ARRAY_COUNT) throw new SofabError(SofabErrorCode.LimitExceeded, "g: array count above configured limit " + MAX_DYN_ARRAY_COUNT); const _s = this._s0G; this._s0G = null; const _d = _s !== null && _s.length === count ? _s.fill(0) : new Int16Array(count); this.o.g = _d; this._a0G = _d; break; }`,
-		`case 7: { if (kind !== ArrayKind.Fp64) break; if (count > MAX_DYN_ARRAY_COUNT) throw new SofabError(SofabErrorCode.LimitExceeded, "h: array count above configured limit " + MAX_DYN_ARRAY_COUNT); const _s = this._s0H; this._s0H = null; const _d = _s !== null && _s.length === count ? _s.fill(0) : new Float64Array(count); this.o.h = _d; this._a0H = _d; break; }`,
+		`case 5: { if (kind !== ArrayKind.Unsigned) break; if (count > MAX_DYN_ARRAY_COUNT) throw new SofabError(SofabErrorCode.LimitExceeded, "f: array count above configured limit " + MAX_DYN_ARRAY_COUNT); const _d = reuseU32(this._s0F, count); this._s0F = null; this.o.f = _d; this._a0F = _d; break; }`,
+		`case 6: { if (kind !== ArrayKind.Signed) break; if (count > MAX_DYN_ARRAY_COUNT) throw new SofabError(SofabErrorCode.LimitExceeded, "g: array count above configured limit " + MAX_DYN_ARRAY_COUNT); const _d = reuseI16(this._s0G, count); this._s0G = null; this.o.g = _d; this._a0G = _d; break; }`,
+		`case 7: { if (kind !== ArrayKind.Fp64) break; if (count > MAX_DYN_ARRAY_COUNT) throw new SofabError(SofabErrorCode.LimitExceeded, "h: array count above configured limit " + MAX_DYN_ARRAY_COUNT); const _d = reuseFp64(this._s0H, count); this._s0H = null; this.o.h = _d; this._a0H = _d; break; }`,
 		// ...and a fixlen SCALAR is separated by the announced subtype, which is
 		// what the collector of a string wrapper array tests for its elements.
 		"  fixlenBegin(id: number, sub: FixlenSubtype, total: number): void {",
@@ -282,7 +282,7 @@ func TestTSHeaderBoundReject(t *testing.T) {
 	// the element width bound: a property of the element TYPE, not of the array
 	// length, taken as each element arrives so a truncation behind an out-of-range
 	// element cannot downgrade the verdict (§7.1).
-	if !strings.Contains(mod, `case 2: { if (kind !== ArrayKind.Unsigned) break; if (count > MAX_DYN_ARRAY_COUNT) throw new SofabError(SofabErrorCode.LimitExceeded, "da: array count above configured limit " + MAX_DYN_ARRAY_COUNT); const _s = this._s0Da; this._s0Da = null; const _d = _s !== null && _s.length === count ? _s.fill(0) : new Uint32Array(count); this.o.da = _d; this._a0Da = _d; break; }`) {
+	if !strings.Contains(mod, `case 2: { if (kind !== ArrayKind.Unsigned) break; if (count > MAX_DYN_ARRAY_COUNT) throw new SofabError(SofabErrorCode.LimitExceeded, "da: array count above configured limit " + MAX_DYN_ARRAY_COUNT); const _d = reuseU32(this._s0Da, count); this._s0Da = null; this.o.da = _d; this._a0Da = _d; break; }`) {
 		t.Errorf("a dynamic array must carry the cap, never a schema count:\n%s", mod)
 	}
 	if strings.Contains(mod, `"da: array count above schema capacity`) {
@@ -415,7 +415,7 @@ func TestTSMaxlenReject(t *testing.T) {
 func TestTSStructural(t *testing.T) {
 	mod := genTS(t)
 	for _, want := range []string{
-		`import { OStream, FixlenSubtype, ArrayKind, DecodeStatus, SofabError, SofabErrorCode, elementsEqual, fp32ArrayBitsEqual, fp32RawBytes, Visitor, ArrayTarget, IntegerArrayTarget, FloatArrayTarget, BoolArrayTarget, IStream, PayloadAcc, decodeUtf8, StringSeq, BlobSeq, ElementSeq, FramedSeq, decode as _decode, tryDecode as _tryDecode } from "@sofa-buffers/corelib";`, // FixlenSubtype: fixlen §7.3 guard; SofabError: over-count reject (generator#100); ArrayTarget and its two shapes: the array hand-off, the only way elements are delivered (corelib-ts#177); the four collectors and fp32RawBytes: the generated layer's support, owned by the corelib (corelib-ts#151/#161, generator#587)
+		`import { OStream, FixlenSubtype, ArrayKind, DecodeStatus, SofabError, SofabErrorCode, elementsEqual, fp32ArrayBitsEqual, fp32RawBytes, Visitor, ArrayTarget, IntegerArrayTarget, FloatArrayTarget, BoolArrayTarget, IStream, PayloadAcc, decodeUtf8, StringSeq, BlobSeq, ElementSeq, FramedSeq, reuseU8, reuseU16, reuseU32, reuseI8, reuseI32, reuseFp32, decode as _decode, tryDecode as _tryDecode } from "@sofa-buffers/corelib";`, // FixlenSubtype: fixlen §7.3 guard; SofabError: over-count reject (generator#100); ArrayTarget and its two shapes: the array hand-off, the only way elements are delivered (corelib-ts#177); the four collectors and fp32RawBytes: the generated layer's support, owned by the corelib (corelib-ts#151/#161, generator#587)
 		"export class Myfirstmessage {",
 		"serialize(os: OStream): void {",
 		// decode(bytes) is the corelib's one-shot decode driving THIS type's flat
@@ -770,7 +770,7 @@ messages:
 	for _, want := range []string{
 		`this._q1 = new ElementSeq<BigUint64Array>(_t, _E_BigUint64Array, 3, "rows", MAX_DYN_ARRAY_COUNT);`,
 		`this._q2 = new ElementSeq<BigInt64Array>(_t, _E_BigInt64Array, -1, "dyn", MAX_DYN_ARRAY_COUNT);`,
-		"const _o = this._re ? this._q1!.staleAt(id) : null; const _r = _o !== null && _o.length === count ? _o.fill(0n) : new BigUint64Array(count); this._q1!.place(id, _r); this._row1 = _r;",
+		"const _r = reuseU64(this._re ? this._q1!.staleAt(id) : null, count); this._q1!.place(id, _r); this._row1 = _r;",
 	} {
 		if !strings.Contains(big, want) {
 			t.Errorf("int64: bigint — a typed row must share its gap value: missing %q\n%s", want, big)
@@ -789,7 +789,7 @@ messages:
 	const dynRow = "" +
 		"        this._q2!.checkIndex(id);\n" +
 		"        if (count > MAX_DYN_ARRAY_COUNT) throw new SofabError(SofabErrorCode.LimitExceeded, \"dyn element: array count above configured limit \" + MAX_DYN_ARRAY_COUNT);\n" +
-		"        const _o = this._re ? this._q2!.staleAt(id) : null; const _r = _o !== null && _o.length === count ? _o.fill(0n) : new BigInt64Array(count); this._q2!.place(id, _r); this._row2 = _r;\n"
+		"        const _r = reuseI64(this._re ? this._q2!.staleAt(id) : null, count); this._q2!.place(id, _r); this._row2 = _r;\n"
 	if !strings.Contains(big, dynRow) {
 		t.Errorf("int64: bigint — an unbounded matrix row must take the index bound first; missing\n%s\nin:\n%s", dynRow, big)
 	}
@@ -1285,8 +1285,8 @@ func TestTSCompactArrayKeepsItsTail(t *testing.T) {
 		// Decode: the M elements that arrived ARE the value, taken as they come --
 		// no fill-to-count on arrayEnd. The over-count reject stays and is taken at
 		// the count word, where `count` still bounds M (generator#100).
-		`case 0: { if (kind !== ArrayKind.Unsigned) break; if (count > 5) throw new SofabError(SofabErrorCode.InvalidMsg, "fu32: array count above schema capacity 5"); const _s = this._s0Fu32; this._s0Fu32 = null; const _d = _s !== null && _s.length === count ? _s.fill(0) : new Uint32Array(count); this.o.fu32 = _d; this._a0Fu32 = _d; break; }`,
-		`case 4: { if (kind !== ArrayKind.Fp64) break; if (count > 3) throw new SofabError(SofabErrorCode.InvalidMsg, "ffp64: array count above schema capacity 3"); const _s = this._s0Ffp64; this._s0Ffp64 = null; const _d = _s !== null && _s.length === count ? _s.fill(0) : new Float64Array(count); this.o.ffp64 = _d; this._a0Ffp64 = _d; break; }`,
+		`case 0: { if (kind !== ArrayKind.Unsigned) break; if (count > 5) throw new SofabError(SofabErrorCode.InvalidMsg, "fu32: array count above schema capacity 5"); const _d = reuseU32(this._s0Fu32, count); this._s0Fu32 = null; this.o.fu32 = _d; this._a0Fu32 = _d; break; }`,
+		`case 4: { if (kind !== ArrayKind.Fp64) break; if (count > 3) throw new SofabError(SofabErrorCode.InvalidMsg, "ffp64: array count above schema capacity 3"); const _d = reuseFp64(this._s0Ffp64, count); this._s0Ffp64 = null; this.o.ffp64 = _d; this._a0Ffp64 = _d; break; }`,
 		// A boolean array is a `Uint8Array` holding §4.4's canonical 0/1, handed to
 		// the corelib's own `bool` destination -- which carries NO bound, because
 		// §4.4 gives a boolean none, and normalizes every non-zero to 1 rather than
@@ -1296,7 +1296,7 @@ func TestTSCompactArrayKeepsItsTail(t *testing.T) {
 		// so its header must be recognised as such -- classifying it as unsigned
 		// made arrayBegin skip every enum array as a §7.3 contradiction, losing the
 		// count bound and the §7.4 replace while the elements still arrived.
-		`case 8: { if (kind !== ArrayKind.Signed) break; if (count > 2) throw new SofabError(SofabErrorCode.InvalidMsg, "fenum: array count above schema capacity 2"); const _s = this._s0Fenum; this._s0Fenum = null; const _d = _s !== null && _s.length === count ? _s.fill(0) : new Int8Array(count) as Mode__Array; this.o.fenum = _d; this._a0Fenum = _d; break; }`,
+		`case 8: { if (kind !== ArrayKind.Signed) break; if (count > 2) throw new SofabError(SofabErrorCode.InvalidMsg, "fenum: array count above schema capacity 2"); const _d = reuseI8(this._s0Fenum, count) as Mode__Array; this._s0Fenum = null; this.o.fenum = _d; this._a0Fenum = _d; break; }`,
 		// The declared-WIDTH verdict (§1, generator#516) travels whole: Mode's
 		// {0, 1} imply an i8, so the interval is -128..127, and the interval is the
 		// ENTIRE rule -- no arrayEnd re-check is emitted, because an undeclared
@@ -1600,7 +1600,7 @@ func TestTSInt64Default(t *testing.T) {
 	for _, cfg := range []map[string]any{{}, {"int64": "bigint"}} {
 		mod := genTSWith(t, int64Def, cfg)
 		for _, want := range []string{
-			`import { OStream, ArrayKind, DecodeStatus, SofabError, SofabErrorCode, elementsEqual, Visitor, ArrayTarget, IntegerArrayTarget, IStream, PayloadAcc, ElementSeq, decode as _decode, tryDecode as _tryDecode } from "@sofa-buffers/corelib";`,
+			`import { OStream, ArrayKind, DecodeStatus, SofabError, SofabErrorCode, elementsEqual, Visitor, ArrayTarget, IntegerArrayTarget, IStream, PayloadAcc, ElementSeq, reuseU64, reuseI64, decode as _decode, tryDecode as _tryDecode } from "@sofa-buffers/corelib";`,
 			// count: 8 is a CAPACITY, so a fresh array is empty (§3, af536c4).
 			"us: BigUint64Array = _E_BigUint64Array;",
 			// ...and the value goes out whole, the wire count being its length.
@@ -1810,7 +1810,7 @@ messages:
 		// shared empty instance, so it is the collector that takes a shared default
 		// (ElementSeq) rather than a factory.
 		`this._q6 = new ElementSeq<Uint32Array>(_t, _E_Uint32Array, 3, "rows", MAX_DYN_ARRAY_COUNT);`,
-		"    const _o = this._re ? this._q6!.staleAt(id) : null; const _r = _o !== null && _o.length === count ? _o.fill(0) : new Uint32Array(count); this._q6!.place(id, _r); this._row6 = _r;",
+		"    const _r = reuseU32(this._re ? this._q6!.staleAt(id) : null, count); this._q6!.place(id, _r); this._row6 = _r;",
 		// ...including a WRAPPER row, whose own collector is bound to the row the
 		// placement just made — a re-opened row index replaces (§7.4), which is
 		// `place` and not `reserve`.
@@ -2097,7 +2097,7 @@ messages:
 		{"a bounded matrix", "" +
 			"        this._q11!.checkIndex(id);\n" +
 			"        if (count > 3) throw new SofabError(SofabErrorCode.InvalidMsg, \"numrows element: array count above schema capacity 3\");\n" +
-			"        const _o = this._re ? this._q11!.staleAt(id) : null; const _r = _o !== null && _o.length === count ? _o.fill(0) : new Uint32Array(count); this._q11!.place(id, _r); this._row11 = _r;\n"},
+			"        const _r = reuseU32(this._re ? this._q11!.staleAt(id) : null, count); this._q11!.place(id, _r); this._row11 = _r;\n"},
 		{"a matrix one level down", "" +
 			"        this._q13!.checkIndex(id);\n" +
 			"        if (count > 3) throw new SofabError(SofabErrorCode.InvalidMsg, \"boundrows row element: array count above schema capacity 3\");\n" +
@@ -2559,7 +2559,7 @@ messages:
 	// conversion pass follows the row.
 	for _, want := range []string{
 		"private _row3: BigUint64Array = _E_BigUint64Array;",
-		"const _o = this._re ? this._q3!.staleAt(id) : null; const _r = _o !== null && _o.length === count ? _o.fill(0n) : new BigUint64Array(count); this._q3!.place(id, _r); this._row3 = _r;",
+		"const _r = reuseU64(this._re ? this._q3!.staleAt(id) : null, count); this._q3!.place(id, _r); this._row3 = _r;",
 		"const _t = this._tt; _t.typed = this._row3;\n        _t.minLo = 0; _t.minHi = 0; _t.maxLo = 4294967295; _t.maxHi = 4294967295;",
 	} {
 		if !strings.Contains(got, want) {
@@ -3178,7 +3178,7 @@ messages:
 	// tryDecode kept (the shared instance on any other path) is taken only when
 	// it is exactly the wire count long, so the shared one only for count 0,
 	// where nothing is written into it.
-	if !strings.Contains(mod, "const _d = _s !== null && _s.length === count ? _s.fill(0) : new Uint8Array(count);") {
+	if !strings.Contains(mod, "const _d = reuseU8(this._s0B, count); this._s0B = null;") {
 		t.Errorf("decode must build a fresh member at the wire count:\n%s", mod)
 	}
 	// No fresh empty typed array survives anywhere but the streaming finish,

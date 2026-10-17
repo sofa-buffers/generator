@@ -313,6 +313,8 @@ var corelibNames = []string{
 	"fp32RawBytes",
 	"Visitor", "ArrayTarget", "IntegerArrayTarget", "FloatArrayTarget", "BoolArrayTarget",
 	"IStream", "PayloadAcc", "decodeUtf8", "StringSeq", "BlobSeq", "ElementSeq", "FramedSeq",
+	"reuseU8", "reuseU16", "reuseU32", "reuseI8", "reuseI16", "reuseI32", "reuseU64", "reuseI64",
+	"reuseFp32", "reuseFp64",
 }
 
 // codeOnly blanks the comments out of a rendered module: `//` to the end of the

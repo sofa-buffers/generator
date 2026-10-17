@@ -138,9 +138,9 @@ func TestTSReuseArms(t *testing.T) {
 	mod := genTSWith(t, reuseSrc, map[string]any{})
 	vis := visitorBody(t, mod, "M")
 	for _, want := range []string{
-		"const _s = this._s0A; this._s0A = null; const _d = _s !== null && _s.length === count ? _s.fill(0) : new Uint16Array(count); this.o.a = _d;",
-		"const _s = this._s0W; this._s0W = null; const _d = _s !== null && _s.length === count ? _s.fill(0n) : new BigUint64Array(count); this.o.w = _d;",
-		"const _s = this._s9Ta; this._s9Ta = null; const _d = _s !== null && _s.length === count ? _s.fill(0) : new Int32Array(count); this.o.st.ta = _d;",
+		"const _d = reuseU16(this._s0A, count); this._s0A = null; this.o.a = _d;",
+		"const _d = reuseU64(this._s0W, count); this._s0W = null; this.o.w = _d;",
+		"const _d = reuseI32(this._s9Ta, count); this._s9Ta = null; this.o.st.ta = _d;",
 		// The kept buffer is released once the field holds it, so a repeated id
 		// (§7.4) never writes its payload into the value an earlier occurrence left.
 		"{ const _p = this.a.takeReusing(this._s0B, total, offset, src, start, end); if (_p !== null) { this.o.b = _p; this._s0B = null; } }",
@@ -148,7 +148,7 @@ func TestTSReuseArms(t *testing.T) {
 		"if (_r !== null) this._q1.reuse();",
 		"if (_r !== null) this._q2.reuse(_M_Ra__Reset);",
 		"if (_r !== null) this._q4.reuse(_M_Ua__Reset);",
-		"const _o = this._re ? this._q6!.staleAt(id) : null; const _r = _o !== null && _o.length === count ? _o.fill(0) : new Uint8Array(count);",
+		"const _r = reuseU8(this._re ? this._q6!.staleAt(id) : null, count);",
 		"  private _s1: string[] | null = null;",
 		"  private _s0A: Uint16Array | null = null;",
 		"  private _s0B: Uint8Array | null = null;",
