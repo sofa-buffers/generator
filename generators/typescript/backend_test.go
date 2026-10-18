@@ -415,7 +415,7 @@ func TestTSMaxlenReject(t *testing.T) {
 func TestTSStructural(t *testing.T) {
 	mod := genTS(t)
 	for _, want := range []string{
-		`import { OStream, FixlenSubtype, ArrayKind, DecodeStatus, SofabError, SofabErrorCode, elementsEqual, fp32ArrayBitsEqual, fp32RawBytes, Visitor, ArrayTarget, IntegerArrayTarget, FloatArrayTarget, BoolArrayTarget, IStream, PayloadAcc, decodeUtf8, StringSeq, BlobSeq, ElementSeq, FramedSeq, reuseU8, reuseU16, reuseU32, reuseI8, reuseI32, reuseFp32, decode as _decode, tryDecode as _tryDecode } from "@sofa-buffers/corelib";`, // FixlenSubtype: fixlen §7.3 guard; SofabError: over-count reject (generator#100); ArrayTarget and its two shapes: the array hand-off, the only way elements are delivered (corelib-ts#177); the four collectors and fp32RawBytes: the generated layer's support, owned by the corelib (corelib-ts#151/#161, generator#587)
+		`import { OStream, FixlenSubtype, ArrayKind, DecodeStatus, SofabError, SofabErrorCode, elementsEqual, fp32ArrayBitsEqual, fp32RawBytes, Visitor, ArrayTarget, IntegerArrayTarget, FloatArrayTarget, BoolArrayTarget, IStream, PayloadAcc, VisitorCache, decodeUtf8, StringSeq, BlobSeq, ElementSeq, FramedSeq, reuseU8, reuseU16, reuseU32, reuseI8, reuseI32, reuseFp32, decode as _decode, tryDecode as _tryDecode } from "@sofa-buffers/corelib";`, // FixlenSubtype: fixlen §7.3 guard; SofabError: over-count reject (generator#100); ArrayTarget and its two shapes: the array hand-off, the only way elements are delivered (corelib-ts#177); the four collectors and fp32RawBytes: the generated layer's support, owned by the corelib (corelib-ts#151/#161, generator#587); VisitorCache: the destination-keyed memo tryDecode takes its visitor from (corelib-ts#216, generator#775)
 		"export class Myfirstmessage {",
 		"serialize(os: OStream): void {",
 		// decode(bytes) is the corelib's one-shot decode driving THIS type's flat
@@ -854,7 +854,7 @@ func TestTSInt64Long(t *testing.T) {
 	for _, want := range []string{
 		// No elementsEqual: every array here is Long-backed and compared by the
 		// corelib's longElementsEqual, whose comment merely names the other one.
-		`import { OStream, ArrayKind, DecodeStatus, Long, SofabError, SofabErrorCode, longElementsEqual, Visitor, ArrayTarget, IntegerArrayTarget, IStream, PayloadAcc, FramedSeq, decode as _decode, tryDecode as _tryDecode } from "@sofa-buffers/corelib";`,
+		`import { OStream, ArrayKind, DecodeStatus, Long, SofabError, SofabErrorCode, longElementsEqual, Visitor, ArrayTarget, IntegerArrayTarget, IStream, PayloadAcc, VisitorCache, FramedSeq, decode as _decode, tryDecode as _tryDecode } from "@sofa-buffers/corelib";`,
 		// Long[] backing field + accessor pair; setter converts once. `count: 8` is a
 		// CAPACITY, not a length (§3), so a fresh us is the EMPTY array — not 8
 		// Long zeros.
@@ -1600,7 +1600,7 @@ func TestTSInt64Default(t *testing.T) {
 	for _, cfg := range []map[string]any{{}, {"int64": "bigint"}} {
 		mod := genTSWith(t, int64Def, cfg)
 		for _, want := range []string{
-			`import { OStream, ArrayKind, DecodeStatus, SofabError, SofabErrorCode, elementsEqual, Visitor, ArrayTarget, IntegerArrayTarget, IStream, PayloadAcc, ElementSeq, reuseU64, reuseI64, decode as _decode, tryDecode as _tryDecode } from "@sofa-buffers/corelib";`,
+			`import { OStream, ArrayKind, DecodeStatus, SofabError, SofabErrorCode, elementsEqual, Visitor, ArrayTarget, IntegerArrayTarget, IStream, PayloadAcc, VisitorCache, ElementSeq, reuseU64, reuseI64, decode as _decode, tryDecode as _tryDecode } from "@sofa-buffers/corelib";`,
 			// count: 8 is a CAPACITY, so a fresh array is empty (§3, af536c4).
 			"us: BigUint64Array = _E_BigUint64Array;",
 			// ...and the value goes out whole, the wire count being its length.

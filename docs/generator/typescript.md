@@ -371,6 +371,20 @@ the next one. Copy out what must outlive the next decode. For the same reason
 `msg` must not share storage with anything that has to keep its value — a buffer
 you assigned to two fields, or to a field and something else.
 
+**One decode at a time per destination.** Beside the storage, `tryDecode` keeps
+the decode machinery it builds for `msg` — one visitor, bound to that object —
+and takes it again on every later decode into the same `msg`. The first message
+pays for the machinery, the rest reuse it, so what a receive loop allocates in
+its steady state is only what the message itself forces: a `string` is immutable
+in JavaScript and is built fresh per value per decode, and an array the list
+above does not cover is rebuilt rather than written in place. A schema of
+numbers, blobs and typed arrays allocates nothing at all.
+
+Two `tryDecode` calls overlapping on one `msg` share that machinery; they already
+shared `msg`'s own fields, so a destination can only be in one decode at a time.
+A second destination is the answer, and it gets machinery of its own. Nothing is
+held past the destination itself: dropping `msg` drops its machinery too.
+
 The incremental decoder takes a destination too, and resets it the same way, but
 builds new storage for everything it decodes:
 

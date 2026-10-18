@@ -312,7 +312,7 @@ var corelibNames = []string{
 	"Long", "SofabError", "SofabErrorCode", "elementsEqual", "longElementsEqual", "fp32ArrayBitsEqual", "fp64ArrayBitsEqual",
 	"fp32RawBytes",
 	"Visitor", "ArrayTarget", "IntegerArrayTarget", "FloatArrayTarget", "BoolArrayTarget",
-	"IStream", "PayloadAcc", "decodeUtf8", "StringSeq", "BlobSeq", "ElementSeq", "FramedSeq",
+	"IStream", "PayloadAcc", "VisitorCache", "decodeUtf8", "StringSeq", "BlobSeq", "ElementSeq", "FramedSeq",
 	"reuseU8", "reuseU16", "reuseU32", "reuseI8", "reuseI16", "reuseI32", "reuseU64", "reuseI64",
 	"reuseFp32", "reuseFp64",
 }

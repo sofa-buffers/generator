@@ -20,6 +20,11 @@
 //   refused    a receiver cap hit inside an array (LIMIT_EXCEEDED) leaves what a
 //              fresh decode leaves, with none of the held array's tail
 //   verdicts   Complete / Incomplete are returned, a refusal is thrown
+//   chain      the same destination decoded again and again, every cut position
+//              of every image in turn, so each decode starts on a visitor the
+//              previous one left mid-message -- including the case the registers
+//              turn on, a cut followed by a SHORTER message (generator#775)
+//   two        two destinations in turn, neither seeing the other's state
 import { DecodeStatus, SofabError, SofabErrorCode } from "@sofa-buffers/corelib";
 import { Store, Store__Decoder } from "./message.js";
 
@@ -211,6 +216,85 @@ for (const [hn, held] of IMAGES) {
     check(json(dst) === json(ref.message),
       `${hn} -> over cap: holds what a fresh decode holds\n  got  ${json(dst)}\n  want ${json(ref.message)}`);
   }
+}
+
+// --- chain ------------------------------------------------------------------
+// tryDecode keeps ONE visitor per destination (generator#775), so everything the
+// visitor holds survives into the next decode into that same destination: the
+// scope cursor, the wrapper-array collectors, the storage registers and the
+// payload accumulator. A decode that was cut short or refused is where that
+// matters, because it leaves the visitor mid-message -- inside a nested
+// sequence, with a collector still armed, with a payload half assembled. Every
+// step below therefore decodes into a destination that has already decoded
+// something, and every cut position is a step, so the state one step leaves is
+// the state the next one starts on.
+for (const [name, img] of [...IMAGES, ...REPEATED]) {
+  const dst = new Store();
+  for (let cut = 0; cut <= img.length; cut++) {
+    const prefix = img.subarray(0, cut);
+    let st: unknown;
+    try {
+      st = Store.tryDecode(prefix, dst);
+    } catch (e) {
+      st = e instanceof SofabError ? e.code : String(e);
+    }
+    const ref = new Store__Decoder();
+    let want: unknown;
+    try {
+      want = ref.feed(prefix);
+    } catch (e) {
+      want = e instanceof SofabError ? e.code : String(e);
+    }
+    check(st === want, `chain ${name} cut at ${cut}: verdict ${String(st)}, a fresh destination says ${String(want)}`);
+    check(json(dst) === json(ref.message),
+      `chain ${name} cut at ${cut}: holds what a fresh decode holds\n  got  ${json(dst)}\n  want ${json(ref.message)}`);
+  }
+}
+
+// A refusal in the middle of the chain: the decode after it must be unaffected,
+// which a visitor left holding the refused message's collectors would not be.
+{
+  const over = enc({ a: [3], bx: [[1], [1, 2, 3, 4, 5, 6, 7, 8, 9]] });
+  const dst = new Store();
+  for (const [name, img] of IMAGES) {
+    let code = "none";
+    try {
+      Store.tryDecode(over, dst);
+    } catch (e) {
+      code = e instanceof SofabError ? e.code : String(e);
+    }
+    // Asserted here and not taken on trust from the refused leg: if `over` ever
+    // stopped being a refusal, this leg would quietly become "decode a valid
+    // message, then another" and stop testing recovery at all.
+    check(code === SofabErrorCode.LimitExceeded, `before ${name}: the forged image must be refused, got ${code}`);
+    check(Store.tryDecode(img, dst) === DecodeStatus.Complete, `after a refusal -> ${name}: Complete`);
+    check(json(dst) === json(Store.decode(img)),
+      `after a refusal -> ${name}: reads as a fresh decode\n  got  ${json(dst)}\n  want ${json(Store.decode(img))}`);
+  }
+}
+
+// --- two --------------------------------------------------------------------
+// The visitor a destination keeps is ITS visitor: two destinations decoded in
+// turn never see each other's scope cursor, collectors or registers, and the
+// storage each keeps stays its own.
+{
+  const left = new Store();
+  const right = new Store();
+  for (const [ln, li] of IMAGES) {
+    for (const [rn, ri] of IMAGES) {
+      Store.tryDecode(li, left);
+      Store.tryDecode(ri, right);
+      check(json(left) === json(Store.decode(li)), `two ${ln}/${rn}: left reads as a fresh decode\n  got  ${json(left)}`);
+      check(json(right) === json(Store.decode(ri)), `two ${ln}/${rn}: right reads as a fresh decode\n  got  ${json(right)}`);
+      check(hex(left.encode()) === hex(li), `two ${ln}/${rn}: left re-encodes to its input`);
+      check(hex(right.encode()) === hex(ri), `two ${ln}/${rn}: right re-encodes to its input`);
+    }
+  }
+  // Storage stays apart: the two destinations never share an array.
+  Store.tryDecode(enc(FULL), left);
+  Store.tryDecode(enc(FULL), right);
+  check(left.a !== right.a && left.sa !== right.sa && left.ra !== right.ra && left.ra[0] !== right.ra[0],
+    "two: the destinations hold storage of their own");
 }
 
 if (failed > 0) {
