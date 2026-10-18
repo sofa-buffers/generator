@@ -273,6 +273,179 @@ messages:
 	}
 }
 
+// buildErr runs the whole hard gate over src and returns the model's error.
+// The parser's own stages must PASS: the point of the category check is that a
+// mismatched $ref gets through validation (which runs on the dereferenced tree,
+// where a struct's field map and a union's option map are the same shape), so a
+// test whose source were refused earlier would prove nothing about it.
+func buildErr(t *testing.T, src string) string {
+	t.Helper()
+	doc, err := parser.Parse([]byte(src), "t.yaml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	resolved, err := doc.Resolve()
+	if err != nil {
+		t.Fatalf("resolve (the model never sees this source): %v", err)
+	}
+	if errs := parser.Validate(resolved); errs != nil {
+		t.Fatalf("validate (the model never sees this source): %v", errs)
+	}
+	_, err = model.Build(doc)
+	if err == nil {
+		t.Fatal("want a model error, got none")
+	}
+	return err.Error()
+}
+
+// A $ref into the wrong $defs group is refused, at the site that declares the
+// category and naming both halves (generator#776).
+//
+// struct and union are the pair that used to get through: the generated field
+// silently took the TARGET's category, so a field declared `union` became a
+// plain struct field -- a different wire contract (MESSAGE_SPEC §2, §4.2), on
+// every target, with nothing said.
+func TestRefToWrongDefsCategoryIsRefused(t *testing.T) {
+	const defs = `version: 1
+$defs:
+  struct:
+    Vec2: { x: { id: 0, type: i32 }, y: { id: 1, type: i32 } }
+  union:
+    Shape: { c: { id: 0, type: u8 }, s: { id: 1, type: u16 } }
+  enum:
+    Mode: { A: 0, B: 1 }
+  bitfield:
+    Flags: { f: { pos: 0 } }
+messages:
+  probe:
+    payload:
+`
+	for name, tc := range map[string]struct{ field, want string }{
+		"union body to struct": {
+			"      u: { id: 1, type: union, oneof: { $ref: '#/$defs/struct/Vec2' } }\n",
+			`#/messages/probe/payload/u/oneof: $ref "#/$defs/struct/Vec2" names a $defs/struct, but the field is declared "union"`,
+		},
+		"struct body to union": {
+			"      s: { id: 1, type: struct, fields: { $ref: '#/$defs/union/Shape' } }\n",
+			`#/messages/probe/payload/s/fields: $ref "#/$defs/union/Shape" names a $defs/union, but the field is declared "struct"`,
+		},
+		"array element to the wrong category": {
+			"      a: { id: 1, type: array, items: { type: union, count: 2, oneof: { $ref: '#/$defs/struct/Vec2' } } }\n",
+			`#/messages/probe/payload/a/items/oneof: $ref "#/$defs/struct/Vec2" names a $defs/struct, but the field is declared "union"`,
+		},
+	} {
+		tc := tc
+		t.Run(name, func(t *testing.T) {
+			if got := buildErr(t, defs+tc.field); !strings.Contains(got, tc.want) {
+				t.Errorf("error does not name the mismatch\n got: %s\nwant: %s", got, tc.want)
+			}
+		})
+	}
+}
+
+// The two scope sites: a whole payload and a whole $defs entry may be a $ref,
+// and both are id scopes of members -- which is what a struct is.
+func TestRefForAWholeScopeMustBeAStruct(t *testing.T) {
+	payload := buildErr(t, "version: 1\n$defs:\n  union:\n    Shape: { c: { id: 0, type: u8 } }\n"+
+		"messages:\n  probe:\n    payload:\n      $ref: '#/$defs/union/Shape'\n")
+	if want := `#/messages/probe/payload: $ref "#/$defs/union/Shape" names a $defs/union, but a message payload is a struct scope`; !strings.Contains(payload, want) {
+		t.Errorf("payload:\n got: %s\nwant: %s", payload, want)
+	}
+	entry := buildErr(t, "version: 1\n$defs:\n  struct:\n    Alias: { $ref: '#/$defs/union/Shape' }\n"+
+		"  union:\n    Shape: { c: { id: 0, type: u8 } }\n"+
+		"messages:\n  probe:\n    payload:\n      x: { id: 0, type: u8 }\n")
+	if want := `#/$defs/struct/Alias: $ref "#/$defs/union/Shape" names a $defs/union, but this $defs entry is a struct`; !strings.Contains(entry, want) {
+		t.Errorf("$defs entry:\n got: %s\nwant: %s", entry, want)
+	}
+}
+
+// The enum and bitfield halves of the same mismatch never reach the model: an
+// enum body and a bitfield body are structurally disjoint (`value` against
+// `pos`), and a struct's field map is neither, so the validator refuses them on
+// the dereferenced tree. That is why only struct<->union got through, and it is
+// what makes the model's check for the other two categories belt and braces
+// rather than the only guard. Pinned so a validator change that loosened those
+// shapes would show up here as the model error taking over.
+func TestEnumBitfieldRefMismatchIsRefusedEarlier(t *testing.T) {
+	for name, field := range map[string]string{
+		"enum body to bitfield": "      e: { id: 1, type: enum, enum: { $ref: '#/$defs/bitfield/Flags' } }\n",
+		"bitfield body to enum": "      b: { id: 1, type: bitfield, bits: { $ref: '#/$defs/enum/Mode' } }\n",
+		"enum body to struct":   "      e: { id: 1, type: enum, enum: { $ref: '#/$defs/struct/Vec2' } }\n",
+	} {
+		field := field
+		t.Run(name, func(t *testing.T) {
+			src := "version: 1\n$defs:\n" +
+				"  struct:\n    Vec2: { x: { id: 0, type: i32 } }\n" +
+				"  enum:\n    Mode: { A: 0, B: 1 }\n" +
+				"  bitfield:\n    Flags: { f: { pos: 0 } }\n" +
+				"messages:\n  probe:\n    payload:\n" + field
+			doc, err := parser.Parse([]byte(src), "t.yaml")
+			if err != nil {
+				t.Fatal(err)
+			}
+			resolved, err := doc.Resolve()
+			if err != nil {
+				return // refused even earlier; still refused
+			}
+			if errs := parser.Validate(resolved); errs == nil {
+				t.Fatal("the validator accepted a mismatched enum/bitfield $ref")
+			}
+		})
+	}
+}
+
+// What the check must NOT refuse: the same-category forms the generator has
+// always supported -- a payload or a composite member pointing at its own
+// category, and a $ref to a single FIELD of a $defs entry, which is a field
+// definition and carries no category of its own (that path never reaches the
+// check, and this pins it).
+func TestRefOfTheRightCategoryStillBuilds(t *testing.T) {
+	s := build(t, `version: 1
+$defs:
+  struct:
+    Motor: { rpm: { id: 0, type: u32 }, on: { id: 1, type: boolean } }
+  union:
+    Shape: { c: { id: 0, type: u8 }, s: { id: 1, type: u16 } }
+  enum:
+    Mode: { A: 0, B: 1 }
+  bitfield:
+    Flags: { f: { pos: 0 } }
+messages:
+  whole:
+    payload:
+      $ref: '#/$defs/struct/Motor'
+  members:
+    payload:
+      st: { id: 0, type: struct, fields: { $ref: '#/$defs/struct/Motor' } }
+      un: { id: 1, type: union, default_id: 0, oneof: { $ref: '#/$defs/union/Shape' } }
+      en: { id: 2, type: enum, enum: { $ref: '#/$defs/enum/Mode' } }
+      bf: { id: 3, type: bitfield, bits: { $ref: '#/$defs/bitfield/Flags' } }
+  copies:
+    payload:
+      one: { $ref: '#/$defs/struct/Motor/rpm' }
+      opt: { $ref: '#/$defs/union/Shape/s' }
+`)
+	kinds := map[string]ir.Kind{}
+	for _, m := range s.Messages {
+		for _, f := range m.Fields {
+			kinds[m.Name+"."+f.Name] = f.Kind
+		}
+	}
+	for name, want := range map[string]ir.Kind{
+		"members.st": ir.KindStruct, "members.un": ir.KindUnion,
+		"members.en": ir.KindEnum, "members.bf": ir.KindBitfield,
+		// A payload $ref expands the struct's own members in place.
+		"whole.rpm": ir.KindU32, "whole.on": ir.KindBool,
+		// A field $ref copies the field, so these take the referenced field's
+		// own type and carry no category of their own.
+		"copies.one": ir.KindU32, "copies.opt": ir.KindU16,
+	} {
+		if kinds[name] != want {
+			t.Errorf("%s: kind = %v, want %v", name, kinds[name], want)
+		}
+	}
+}
+
 // A circular field ref is an error, not a hang.
 func TestCircularFieldRefIsRefused(t *testing.T) {
 	doc, err := parser.Parse([]byte(`version: 1

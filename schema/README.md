@@ -80,6 +80,16 @@ field definition, including its `id`, under the key `on`). Both are checked
 after dereferencing, like every `$ref`; the ids of the expanded fields must be
 unique in their scope.
 
+A `$ref` that stands for a **type** must point into the `$defs` group of the
+category its site declares: a field's `type`, and `struct` for a whole `payload`
+or for a `$defs` struct/union entry written as a `$ref`, since both are id
+scopes of members. `type: union` with `oneof: { $ref: '#/$defs/struct/Vec2' }` is
+refused — a struct writes every non-default member where a union holds and
+writes exactly one option, so the two are different wire contracts and the
+declared one wins. A `$ref` to a single FIELD carries no category of its own:
+`{ $ref: '#/$defs/union/Shape/square' }` copies that option as a field, which is
+allowed in any id scope.
+
 Common optional metadata on every field: `description`, `deprecated`. **`unit`
 is allowed only on the numeric types** (`u8…u64`, `i8…i64`, `fp32`, `fp64`);
 floats also allow `decimals`. An `array` field follows the same rule through its

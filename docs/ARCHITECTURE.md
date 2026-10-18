@@ -257,6 +257,31 @@ Both are local-pointer forms; across files only the whole-definition
 `file.yaml#/$defs/<category>/<Name>` form is accepted (so a cross-file payload
 `$ref` works, a cross-file single-field `$ref` does not).
 
+**A `$ref` must name the category its site declares** (generator#776). The
+`<category>` segment of the pointer is compared with what the site says it is —
+a field's `type`, and `struct` for a whole payload or a `$defs` struct/union
+entry whose body is a `$ref`, since both are id scopes of members:
+
+```
+#/messages/probe/payload/u/oneof: $ref "#/$defs/struct/Vec2" names a
+$defs/struct, but the field is declared "union"
+```
+
+The check is in the **model** (`builder.checkRefCategory`) because that is the
+only stage where both halves are visible: the validator runs on the
+dereferenced tree (§3 \[1]), where a struct's field map and a union's option map
+are the same shape, so `type: union` with a `$ref` to `$defs/struct/X` passed
+every structural check and the model then keyed the shared type on the pointer
+alone — the field silently took the TARGET's category. A struct writes every
+non-default member where a union holds and writes exactly one option and is
+omitted at its `default_id`'s default (MESSAGE_SPEC §2, §4.2), so the author got
+a different wire contract on all eleven targets at once, with nothing said. The
+enum↔bitfield and enum↔struct mismatches were already refused, but by their
+body's shape failing in the validator rather than as the category error they
+are; the model states the rule for all four categories in one place, and
+`TestEnumBitfieldRefMismatchIsRefusedEarlier` pins which of the two guards each
+mismatch meets.
+
 An imported definition keeps its name and joins the importing document's one
 namespace (§8, naming rule 3), and is identified by its file and pointer
 (`internal/parser/external.go`). The same definition reached twice — directly
