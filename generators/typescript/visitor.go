@@ -227,7 +227,7 @@ func (g *gen) staleMember(sc *tsScope, f *ir.Field) bool {
 }
 
 // typedReuse names the corelib's fit-or-allocate for the typed array an element
-// kind is held in -- reuse<W>(kept, count): the kept array zeroed when it is
+// kind is held in -- reuse<W>(kept, count): the kept array as it is when it is
 // exactly `count` long, a new one otherwise -- and the cast an enum's array
 // alias needs on the result. One function per width rather than one taking the
 // constructor: corelib-ts measured the shared one at ~+270 Ir per array (a
@@ -512,7 +512,7 @@ func (g *gen) emitVisitorCache(f *tsfile, name, raw string) {
 // written over instead of allocated again, which is the point of the entry
 // point:
 //
-//	typed native array   the kept array when its length is the wire count, zeroed
+//	typed native array   the kept array when its length is the wire count
 //	blob                 the kept buffer when its length is the payload's
 //	                     (PayloadAcc.takeReusing)
 //	wrapper array        the kept array, its collector re-armed (reuse()), so the
@@ -1781,11 +1781,16 @@ func (g *gen) emitArrayCbs(f *tsfile, scopes []*tsScope) {
 				b += fmt.Sprintf("%s = []; const _d = %s; this.%s = _d; ", acc, acc, arrayDst(sc, x))
 			} else if g.staleMember(sc, x) {
 				// The array tryDecode kept is the destination when its length is the
-				// wire count (emitReuse), and taking it marks the field reached. The
-				// corelib zeroes it first, as a new one would be: the hand-off writes
-				// every element of a COMPLETE array, but a decode that ends inside this
-				// one must leave zeros past the last element it wrote, never the
-				// previous message's.
+				// wire count (emitReuse), and taking it marks the field reached. It is
+				// handed back as it is: the hand-off writes every element of a COMPLETE
+				// array, and a decode that ends inside this one must leave zeros past
+				// the last element it wrote, never the previous message's -- which the
+				// decoder does itself, on the refusal or the release that ends the
+				// decode. That holds because this arm and the bulk offer are one step:
+				// the corelib raises arrayBulk right after arrayBegin, and every exit
+				// before the reuse (the kind test, the count bound) is one the offer
+				// takes too, so a kept array is always a destination the decoder was
+				// handed.
 				fn, cast := g.typedReuse(x.Elem, x.ElemRef, g.tsArrayType(x.Elem, x.ElemRef, x.ElemItems))
 				b += fmt.Sprintf("const _d = %s(this.%s, count)%s; this.%s = null; %s = _d; this.%s = _d; ",
 					fn, staleReg(sc, x), cast, staleReg(sc, x), acc, arrayDst(sc, x))

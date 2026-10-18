@@ -250,8 +250,9 @@ func TestTSReuseKeepsFixedStorage(t *testing.T) {
 }
 
 // TestTSReuseArms: each kept storage has its arm, and only those. A typed array
-// is the destination when it is the wire count long, zeroed first (a cut-short
-// decode leaves zeros, as a new array would); a blob is offered to the corelib's
+// is the destination when it is the wire count long (a cut-short decode leaves
+// zeros past what it wrote, as a new array would -- the decoder zeroes that
+// tail, which reuse_storage_check's chain leg pins); a blob is offered to the corelib's
 // takeReusing and released once taken; a wrapper array's collector is
 // re-armed over the kept array, with the element's own reset for a struct and
 // its clear() for a union; a typed row comes back from staleAt.
