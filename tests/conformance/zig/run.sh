@@ -177,6 +177,29 @@ python3 "$ROOT/tests/conformance/lib/check_nondefault.py" "$BASE" "$FULL" \
     --label "zig: round-trip fixture" || exit 1
 echo "==> round-trip fixture OK (no field sits on its schema default)"
 
+# Decode into a REUSED destination (decoder(out, alloc), generator#784). out is
+# reset to the schema defaults before the first chunk, so it must read exactly as
+# a fresh decode: every fixture -- the full one above, two sparse ones and the
+# empty payload -- is decoded into a destination already holding every other one,
+# and once more with each malformed tail, where it must hold the fields decoded
+# before the error and none of the older message's. The sparse fixtures are go's:
+# fields out and at their default, shorter arrays, another union option, the blob
+# out (`short`) or empty (`other`). Then the driver's own schema, every image
+# forged by the driver: a field of each shape a reset has to put back.
+echo "==> a reused destination reads as a fresh decode (generator#784)"
+python3 "$ROOT/tests/conformance/lib/check_reused_destination.py" --self-test || exit 1
+python3 "$ROOT/tests/conformance/lib/check_reused_destination.py" "zig: example.yaml" \
+    --msg myfirstmessage \
+    --fixture "full=$FULL" \
+    --fixture 'short={"someu8":9,"someuintarray":[5],"somestringarray":["z"],"somestructarray":[{"x":0,"y":0},{"x":5,"y":0}],"somematrix":[[],[3]],"someunion":{"option3":{"unionstructint":4,"unionstructbool":true}},"someboolarray":[true],"somestruct":{"nestedint":1}}' \
+    --fixture 'other={"somestring":"s","someblob":[],"someintarray":[],"someunion":{"option2":"two"},"someunionarray":[{"asstring":"q"}],"somemap":[{"key":"k","value":0}],"somestructwitharray":{"values":[]}}' \
+    -- "$WORK/ex/zig-out/bin/harness" || exit 1
+printf 'version: 1\nmessages:\n' > "$WORK/reuse.yaml"
+python3 "$ROOT/tests/conformance/lib/check_reused_destination.py" --emit-schema >> "$WORK/reuse.yaml"
+zig_build "$WORK/reuse.yaml" "$WORK/reuse" >/dev/null
+python3 "$ROOT/tests/conformance/lib/check_reused_destination.py" "zig: own schema" \
+    -- "$WORK/reuse/zig-out/bin/harness" || exit 1
+
 # `count` is a CAPACITY, never a length (MESSAGE_SPEC S3, documentation af536c4).
 # someuintarray declares count: 4 (id 15 -> header 0x7b). Two things follow, and
 # both are asserted here because each was the opposite before:
