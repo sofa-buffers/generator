@@ -1673,21 +1673,34 @@ func (g *gen) bulkNeedsOf(scopes []*tsScope) bulkNeeds {
 // the member itself as the destination there is nothing to fill on the way to it.
 // The initial destinations are the module's shared zero-length instances: every
 // one is re-pointed at a member before the target is handed over.
+//
+// Each object STATES its destination (BulkMode, corelib-ts#214/#775), and states
+// it once here rather than per hand-off, because that is the one thing about the
+// object that never changes: the shapes are kept apart precisely so that each
+// names exactly one destination, so the mode is a property of the declaration,
+// not of the array. What the corelib then skips per array is work the schema
+// already did when this visitor was emitted -- finding the field, checking that
+// only one is set, re-reading that the bound is four well-formed halves and that
+// a typed destination's width covers it. The element count is still compared
+// against the destination's length, which is about THIS array, and the two
+// refinements the decoder keeps making for itself (the 32-bit arm, and the
+// halves-filled store for a 64-bit typed array) are why Typed covers every
+// width: a generated `Values32` would have refused a legal element past 2^32.
 func (g *gen) emitBulkState(f *tsfile, n bulkNeeds) {
 	if n.typed {
-		f.line("  private readonly _tt: IntegerArrayTarget = { typed: %s, minLo: 0, minHi: 0, maxLo: 0, maxHi: 0 };", emptyTyped("Uint8Array"))
+		f.line("  private readonly _tt: IntegerArrayTarget = { mode: BulkMode.Typed, typed: %s, minLo: 0, minHi: 0, maxLo: 0, maxHi: 0 };", emptyTyped("Uint8Array"))
 	}
 	if n.longs {
-		f.line("  private readonly _tl: IntegerArrayTarget = { longs: [], minLo: 0, minHi: 0, maxLo: 0, maxHi: 0 };")
+		f.line("  private readonly _tl: IntegerArrayTarget = { mode: BulkMode.Longs, longs: [], minLo: 0, minHi: 0, maxLo: 0, maxHi: 0 };")
 	}
 	if n.bool_ {
-		f.line("  private readonly _tq: BoolArrayTarget = { bool: %s };", emptyTyped("Uint8Array"))
+		f.line("  private readonly _tq: BoolArrayTarget = { mode: BulkMode.Bool, bool: %s };", emptyTyped("Uint8Array"))
 	}
 	if n.f32 {
-		f.line("  private readonly _tf: FloatArrayTarget = { f32: %s };", emptyTyped("Float32Array"))
+		f.line("  private readonly _tf: FloatArrayTarget = { mode: BulkMode.F32, f32: %s };", emptyTyped("Float32Array"))
 	}
 	if n.f64 {
-		f.line("  private readonly _td: FloatArrayTarget = { f64: %s };", emptyTyped("Float64Array"))
+		f.line("  private readonly _td: FloatArrayTarget = { mode: BulkMode.F64, f64: %s };", emptyTyped("Float64Array"))
 	}
 }
 
