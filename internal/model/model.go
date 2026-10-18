@@ -139,6 +139,13 @@ func (b *builder) buildDefs(defs map[string]any) {
 					category = ir.CatUnion
 				}
 				nt := &ir.NamedType{Category: category, Name: name, Key: key, Path: []string{name}}
+				// A $defs entry whose whole body is a $ref takes the target's
+				// members; across categories that would be this entry's
+				// declared category against its members' scope.
+				if k, ok := refKey(group[name]); ok {
+					b.checkRefCategory(k, category, loc,
+						fmt.Sprintf("this $defs entry is a %s", cat))
+				}
 				// register before recursing (supports self-reference)
 				if b.register(nt, loc) {
 					nt.Fields = b.buildFields(group[name], owner{key, []string{name}}, loc)
@@ -162,7 +169,14 @@ func (b *builder) buildMessage(name string, m map[string]any) *ir.Message {
 		msg.Summary = strings.TrimSpace(s)
 	}
 	if payload, ok := m["payload"].(map[string]any); ok {
-		msg.Fields = b.buildFields(payload, owner{name, []string{name}}, "#/messages/"+name+"/payload")
+		loc := "#/messages/" + name + "/payload"
+		// A payload MAY be a $ref -- the target's fields become the message's
+		// (TestScopeAndFieldRefsExpandInPlace) -- but only to a struct: a
+		// payload is an id scope of members, which is what a struct is.
+		if key, ok := refKey(payload); ok {
+			b.checkRefCategory(key, ir.CatStruct, loc, "a message payload is a struct scope")
+		}
+		msg.Fields = b.buildFields(payload, owner{name, []string{name}}, loc)
 	}
 	return msg
 }
@@ -314,6 +328,8 @@ func (b *builder) buildArrayElem(items map[string]any, name string, own owner, l
 // of the site that defines it.
 func (b *builder) refForComposite(def any, cat ir.Category, fieldName string, own owner, loc string) *ir.TypeRef {
 	if key, ok := refKey(def); ok {
+		b.checkRefCategory(key, cat, loc+"/"+catMember[cat],
+			fmt.Sprintf("the field is declared %q", defsSection[cat]))
 		return &ir.TypeRef{Key: key}
 	}
 	// inline → synthesize
@@ -434,6 +450,47 @@ func (b *builder) deref(node any, loc string) any {
 			}
 		}
 		node = cur
+	}
+}
+
+// defsSection is the $defs group each category is declared under, which is also
+// the word an author writes as a field's `type`. catMember is the key that
+// field carries its body (or its $ref) under.
+var (
+	defsSection = map[ir.Category]string{
+		ir.CatStruct: "struct", ir.CatUnion: "union", ir.CatEnum: "enum", ir.CatBitfield: "bitfield",
+	}
+	catMember = map[ir.Category]string{
+		ir.CatStruct: "fields", ir.CatUnion: "oneof", ir.CatEnum: "enum", ir.CatBitfield: "bits",
+	}
+)
+
+// checkRefCategory refuses a $ref that points into a $defs group other than the
+// one the site declares (generator#776).
+//
+// The categories are only distinguishable HERE. The validator runs on the
+// dereferenced tree (parser.Document.Resolve), where a struct's field map and a
+// union's option map have the same shape, so `type: union` with a $ref to
+// `$defs/struct/X` passes every structural check; the model then keyed the shared
+// type on the pointer alone and the field silently took the TARGET's category.
+// A struct writes every non-default member and a union holds and writes exactly
+// one option, omitted at its default_id's default (MESSAGE_SPEC §2, §4.2) — so
+// what the author got was a different wire contract, on every target at once,
+// with nothing said.
+//
+// struct↔union is the pair that got through. An enum body and a bitfield body
+// are structurally disjoint (`value` against `pos`) and a field map is neither,
+// so the validator already refuses those mismatches on the dereferenced tree —
+// by the body's shape failing, not as the category error it is. This check
+// states the rule for all four categories in one place and is the only guard
+// for the pair that had none.
+//
+// site names what declares the category, so the message says which of the two
+// halves to fix.
+func (b *builder) checkRefCategory(key string, want ir.Category, loc, site string) {
+	if got, _, _ := strings.Cut(key, "/"); got != defsSection[want] {
+		b.errs = append(b.errs, Error{Loc: loc, Msg: fmt.Sprintf(
+			"$ref %q names a $defs/%s, but %s", "#/$defs/"+key, got, site)})
 	}
 }
 

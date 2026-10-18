@@ -1,0 +1,12 @@
+# A whole payload may be a $ref -- the target's members become the message's --
+# but only to a struct: a payload is an id scope of members, which is what a
+# struct is. A $ref to a union would turn its options into the payload's fields
+# (generator#776).
+version: 1
+$defs:
+  union:
+    Shape: { circle: { id: 0, type: u8 }, square: { id: 1, type: u16 } }
+messages:
+  probe:
+    payload:
+      $ref: '#/$defs/union/Shape'

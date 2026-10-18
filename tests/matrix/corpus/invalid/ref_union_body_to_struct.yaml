@@ -1,0 +1,14 @@
+# A field declared `union` whose oneof is a $ref to a $defs STRUCT. The
+# dereferenced tree validates (a field map and an option map are the same
+# shape), so this is refused where the two categories are still visible:
+# the model (generator#776). Taking the target's category would give the field
+# struct semantics -- every non-default member written -- under a union's
+# declared contract.
+version: 1
+$defs:
+  struct:
+    Vec2: { x: { id: 0, type: i32 }, y: { id: 1, type: i32 } }
+messages:
+  probe:
+    payload:
+      u: { id: 1, type: union, default_id: 0, oneof: { $ref: '#/$defs/struct/Vec2' } }
