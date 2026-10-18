@@ -415,7 +415,7 @@ func TestTSMaxlenReject(t *testing.T) {
 func TestTSStructural(t *testing.T) {
 	mod := genTS(t)
 	for _, want := range []string{
-		`import { OStream, FixlenSubtype, ArrayKind, DecodeStatus, SofabError, SofabErrorCode, elementsEqual, fp32ArrayBitsEqual, fp32RawBytes, Visitor, ArrayTarget, IntegerArrayTarget, FloatArrayTarget, BoolArrayTarget, IStream, PayloadAcc, VisitorCache, decodeUtf8, StringSeq, BlobSeq, ElementSeq, FramedSeq, reuseU8, reuseU16, reuseU32, reuseI8, reuseI32, reuseFp32, decode as _decode, tryDecode as _tryDecode } from "@sofa-buffers/corelib";`, // FixlenSubtype: fixlen §7.3 guard; SofabError: over-count reject (generator#100); ArrayTarget and its two shapes: the array hand-off, the only way elements are delivered (corelib-ts#177); the four collectors and fp32RawBytes: the generated layer's support, owned by the corelib (corelib-ts#151/#161, generator#587); VisitorCache: the destination-keyed memo tryDecode takes its visitor from (corelib-ts#216, generator#775)
+		`import { OStream, FixlenSubtype, ArrayKind, DecodeStatus, SofabError, SofabErrorCode, elementsEqual, fp32ArrayBitsEqual, fp32RawBytes, Visitor, ArrayTarget, IntegerArrayTarget, FloatArrayTarget, BoolArrayTarget, BulkMode, IStream, PayloadAcc, VisitorCache, decodeUtf8, StringSeq, BlobSeq, ElementSeq, FramedSeq, reuseU8, reuseU16, reuseU32, reuseI8, reuseI32, reuseFp32, decode as _decode, tryDecode as _tryDecode } from "@sofa-buffers/corelib";`, // FixlenSubtype: fixlen §7.3 guard; SofabError: over-count reject (generator#100); ArrayTarget and its two shapes: the array hand-off, the only way elements are delivered (corelib-ts#177); the four collectors and fp32RawBytes: the generated layer's support, owned by the corelib (corelib-ts#151/#161, generator#587); VisitorCache: the destination-keyed memo tryDecode takes its visitor from (corelib-ts#216, generator#775)
 		"export class Myfirstmessage {",
 		"serialize(os: OStream): void {",
 		// decode(bytes) is the corelib's one-shot decode driving THIS type's flat
@@ -854,7 +854,7 @@ func TestTSInt64Long(t *testing.T) {
 	for _, want := range []string{
 		// No elementsEqual: every array here is Long-backed and compared by the
 		// corelib's longElementsEqual, whose comment merely names the other one.
-		`import { OStream, ArrayKind, DecodeStatus, Long, SofabError, SofabErrorCode, longElementsEqual, Visitor, ArrayTarget, IntegerArrayTarget, IStream, PayloadAcc, VisitorCache, FramedSeq, decode as _decode, tryDecode as _tryDecode } from "@sofa-buffers/corelib";`,
+		`import { OStream, ArrayKind, DecodeStatus, Long, SofabError, SofabErrorCode, longElementsEqual, Visitor, ArrayTarget, IntegerArrayTarget, BulkMode, IStream, PayloadAcc, VisitorCache, FramedSeq, decode as _decode, tryDecode as _tryDecode } from "@sofa-buffers/corelib";`,
 		// Long[] backing field + accessor pair; setter converts once. `count: 8` is a
 		// CAPACITY, not a length (§3), so a fresh us is the EMPTY array — not 8
 		// Long zeros.
@@ -1008,10 +1008,10 @@ messages:
 		"const _t = this._td; _t.f64 = this._a0Dbl;",
 		// One target object per shape, re-pointed per array.
 		// Their initial slots are the module's shared empty instances.
-		"  private readonly _tt: IntegerArrayTarget = { typed: _E_Uint8Array, minLo: 0, minHi: 0, maxLo: 0, maxHi: 0 };",
-		"  private readonly _tq: BoolArrayTarget = { bool: _E_Uint8Array };",
-		"  private readonly _tf: FloatArrayTarget = { f32: _E_Float32Array };",
-		"  private readonly _td: FloatArrayTarget = { f64: _E_Float64Array };",
+		"  private readonly _tt: IntegerArrayTarget = { mode: BulkMode.Typed, typed: _E_Uint8Array, minLo: 0, minHi: 0, maxLo: 0, maxHi: 0 };",
+		"  private readonly _tq: BoolArrayTarget = { mode: BulkMode.Bool, bool: _E_Uint8Array };",
+		"  private readonly _tf: FloatArrayTarget = { mode: BulkMode.F32, f32: _E_Float32Array };",
+		"  private readonly _td: FloatArrayTarget = { mode: BulkMode.F64, f64: _E_Float64Array };",
 	} {
 		if !strings.Contains(mod, want) {
 			t.Errorf("message.ts missing %q:\n%s", want, mod)
@@ -1600,7 +1600,7 @@ func TestTSInt64Default(t *testing.T) {
 	for _, cfg := range []map[string]any{{}, {"int64": "bigint"}} {
 		mod := genTSWith(t, int64Def, cfg)
 		for _, want := range []string{
-			`import { OStream, ArrayKind, DecodeStatus, SofabError, SofabErrorCode, elementsEqual, Visitor, ArrayTarget, IntegerArrayTarget, IStream, PayloadAcc, VisitorCache, ElementSeq, reuseU64, reuseI64, decode as _decode, tryDecode as _tryDecode } from "@sofa-buffers/corelib";`,
+			`import { OStream, ArrayKind, DecodeStatus, SofabError, SofabErrorCode, elementsEqual, Visitor, ArrayTarget, IntegerArrayTarget, BulkMode, IStream, PayloadAcc, VisitorCache, ElementSeq, reuseU64, reuseI64, decode as _decode, tryDecode as _tryDecode } from "@sofa-buffers/corelib";`,
 			// count: 8 is a CAPACITY, so a fresh array is empty (§3, af536c4).
 			"us: BigUint64Array = _E_BigUint64Array;",
 			// ...and the value goes out whole, the wire count being its length.
@@ -3114,6 +3114,53 @@ func TestTSWidthAdmitsUndeclaredValues(t *testing.T) {
 // sound only because a zero-length typed array cannot be written through and
 // nothing generated compares arrays by identity, and it is declared only for the
 // types the module uses (an unused module-level const fails noUnusedLocals).
+// TestTSBulkTargetsStateTheirDestination: every reusable target object declares
+// which destination it sets (BulkMode, corelib-ts#214, generator#775), so the
+// corelib stops working that out per array of per message -- measured at 186
+// Ir/array on the optimizing tier and ~3,750 on the baseline one.
+//
+// Declared once in the initialiser, not per hand-off: the shapes are kept apart
+// so each names exactly one destination, so the mode never changes for the
+// life of the object. One schema with all five shapes, in the int64 mode that
+// gives the Long[] one (bigint makes 64-bit arrays typed).
+func TestTSBulkTargetsStateTheirDestination(t *testing.T) {
+	src := "version: 1\nmessages:\n  m:\n    payload:\n" +
+		"      w: { id: 0, type: array, items: { type: u64, count: 2 } }\n" +
+		"      f: { id: 1, type: array, items: { type: fp64, count: 2 } }\n" +
+		"      g: { id: 2, type: array, items: { type: fp32, count: 2 } }\n" +
+		"      b: { id: 3, type: array, items: { type: boolean, count: 2 } }\n" +
+		"      u: { id: 4, type: array, items: { type: u16, count: 2 } }\n"
+	mod := genTSWith(t, src, map[string]any{"int64": "long"})
+	for _, want := range []string{
+		"  private readonly _tt: IntegerArrayTarget = { mode: BulkMode.Typed, typed: _E_Uint8Array, minLo: 0, minHi: 0, maxLo: 0, maxHi: 0 };",
+		"  private readonly _tl: IntegerArrayTarget = { mode: BulkMode.Longs, longs: [], minLo: 0, minHi: 0, maxLo: 0, maxHi: 0 };",
+		"  private readonly _tq: BoolArrayTarget = { mode: BulkMode.Bool, bool: _E_Uint8Array };",
+		"  private readonly _tf: FloatArrayTarget = { mode: BulkMode.F32, f32: _E_Float32Array };",
+		"  private readonly _td: FloatArrayTarget = { mode: BulkMode.F64, f64: _E_Float64Array };",
+	} {
+		if !strings.Contains(mod, want) {
+			t.Errorf("missing %q", want)
+		}
+	}
+	// No mode is ever assigned anywhere else: an arm re-points the destination
+	// and the bound, never the mode.
+	if strings.Contains(mod, ".mode =") {
+		t.Errorf("the mode is a property of the declaration, never written per array:\n%s", mod)
+	}
+	// Under bigint the 64-bit array is typed too, so the Long[] object
+	// disappears and ONE Typed target serves both widths: the decoder makes the
+	// 32-bit/64-bit refinement itself from the bound and from BYTES_PER_ELEMENT,
+	// and a generated Values32 would have REFUSED a legal element past 2^32, so
+	// there is no narrower mode for a generated visitor to state.
+	bi := genTSWith(t, src, map[string]any{"int64": "bigint"})
+	if strings.Contains(bi, "BulkMode.Longs") {
+		t.Errorf("int64: bigint has no Long[] destination:\n%s", bi)
+	}
+	if n := strings.Count(bi, "const _t = this._tt;"); n != 2 {
+		t.Errorf("the u16 and the u64 array must hand over the same Typed target: %d sites", n)
+	}
+}
+
 func TestTSSharedEmptyTypedArrays(t *testing.T) {
 	mod := genTSWith(t, `
 version: 1
@@ -3164,10 +3211,10 @@ messages:
 		// shared (a mutable one takes FramedSeq and a factory).
 		"new ElementSeq<Uint32Array>(_t, _E_Uint32Array,",
 		// Each bulk target's initial slot.
-		"{ typed: _E_Uint8Array, minLo: 0, minHi: 0, maxLo: 0, maxHi: 0 }",
-		"{ bool: _E_Uint8Array }",
-		"{ f32: _E_Float32Array }",
-		"{ f64: _E_Float64Array }",
+		"{ mode: BulkMode.Typed, typed: _E_Uint8Array, minLo: 0, minHi: 0, maxLo: 0, maxHi: 0 }",
+		"{ mode: BulkMode.Bool, bool: _E_Uint8Array }",
+		"{ mode: BulkMode.F32, f32: _E_Float32Array }",
+		"{ mode: BulkMode.F64, f64: _E_Float64Array }",
 	} {
 		if !strings.Contains(mod, want) {
 			t.Errorf("message.ts missing %q:\n%s", want, mod)
