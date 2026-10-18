@@ -283,6 +283,32 @@ func (g *gen) harness(s *ir.Schema) []byte {
 		f.line("            };")
 		f.line("            try toJson_%s(&obj, out);", mb)
 		f.line("            try out.writeByte('\\n');")
+		// A decode into a REUSED destination (generator#784): the hex argument is
+		// decoded the plain way, then stdin through decoder(&obj, alloc) into that
+		// same object. Three lines, exit 0 on a refusal too -- verdict, the
+		// destination as JSON, its re-encode as hex -- which is what
+		// tests/conformance/lib/check_reused_destination.py compares against a
+		// fresh decode.
+		f.line("        } else if (std.mem.eql(u8, mode, \"reusedecode\")) {")
+		f.line("            const held = args.next() orelse \"\";")
+		f.line("            const hb = try alloc.alloc(u8, held.len / 2);")
+		f.line("            _ = try std.fmt.hexToBytes(hb, held);")
+		f.line("            var obj = try message.%s.decode(alloc, hb);", mt)
+		f.line("            var dec = message.%s.decoder(&obj, alloc);", mt)
+		f.line("            var st: []const u8 = \"COMPLETE\";")
+		f.line("            if (dec.feed(input)) |_| {")
+		f.line("                dec.finish() catch |e| { st = if (e == error.IncompleteMessage) \"INCOMPLETE\" else @errorName(e); };")
+		f.line("            } else |e| {")
+		f.line("                st = @errorName(e);")
+		f.line("            }")
+		f.line("            try out.print(\"{s}\\n\", .{st});")
+		f.line("            try toJson_%s(&obj, out);", mb)
+		f.line("            try out.writeByte('\\n');")
+		f.line("            if (obj.encode(alloc)) |b| {")
+		f.line("                try out.print(\"{x}\\n\", .{b});")
+		f.line("            } else |_| {")
+		f.line("                try out.writeAll(\"-\\n\");")
+		f.line("            }")
 		f.line("        } else {")
 		f.line("            std.process.exit(2);")
 		f.line("        }")

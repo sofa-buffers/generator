@@ -898,10 +898,20 @@ func (g *gen) emitStreamDecoder(f *zfile, name, vis string, fields []*ir.Field) 
 	f.line("    /// arrive, instead of buffering the whole message first. A chunk is read")
 	f.line("    /// only during the `feed` call it is passed to: reuse, overwrite or free it")
 	f.line("    /// as soon as feed returns.")
+	f.line("    /// `out` is reset to the schema defaults first, so it reads as a fresh")
+	f.line("    /// decode of the fed message whatever it held before: a field the message")
+	f.line("    /// omits fires nothing, and must not keep an older message's value. The")
+	f.line("    /// storage it held is not freed; it stays with the allocator it came from.")
 	f.line("    pub fn decoder(out: *%s, alloc: std.mem.Allocator) Decoder {", name)
 	// Nothing distinguishes this path from decode() any more: both copy every
 	// payload into `alloc`. It used to be the only one that did (generator#295);
 	// §6.7.1 then removed the one-shot path's exemption (generator#412).
+	//
+	// The reset is `.{}`, the same start decode() takes: every field initializer
+	// already carries its schema default (a union's is `.init`), so no per-schema
+	// reset() is emitted for it -- it would be a second spelling of `.{}`
+	// (generator#784, the defect #754 fixed for TypeScript's Decoder(out)).
+	f.line("        out.* = .{};")
 	f.line("        return .{ .v = .{ .m = out, .alloc = alloc } };")
 	f.line("    }")
 }

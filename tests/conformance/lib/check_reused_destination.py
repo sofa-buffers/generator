@@ -19,7 +19,7 @@ value, and the result differs from a fresh decode of the very same bytes.
 
 Every surface that decodes into a caller-owned destination owes that contract
 (the TypeScript Decoder's `out`, C# `TryDecode(data, msg)`, C++ `try_decode`,
-Java/Kotlin/Dart `tryDecode(data, out)`): the destination reads as if it had been
+Java/Kotlin/Dart `tryDecode(data, out)`, Zig `decoder(out, alloc)`): the destination reads as if it had been
 constructed for this message alone. That covers a field absent from the second
 message, an array that is now shorter, a union that now holds another option or
 its default one, a blob that falls back to its default, and the empty payload,
