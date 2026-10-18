@@ -80,6 +80,12 @@ field definition, including its `id`, under the key `on`). Both are checked
 after dereferencing, like every `$ref`; the ids of the expanded fields must be
 unique in their scope.
 
+A `$defs` entry may itself be written as a `$ref` — an alias — and then carries
+the members of the definition it names: a struct's or union's fields, an enum's
+constants, a bitfield's flags. It is generated as its own type with a copy of
+them (so an enum alias has the same constants, and therefore the same width, as
+what it aliases), and an alias of an alias is followed.
+
 A `$ref` that stands for a **type** must point into the `$defs` group of the
 category its site declares: a field's `type`, and `struct` for a whole `payload`
 or for a `$defs` struct/union entry written as a `$ref`, since both are id

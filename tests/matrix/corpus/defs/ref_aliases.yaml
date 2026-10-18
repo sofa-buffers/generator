@@ -1,0 +1,36 @@
+# A $defs definition whose whole body is a $ref is an ALIAS of another one. All
+# four categories are here, written beside the definition they alias so a
+# generated pair can be compared: an alias must declare the target's members,
+# and an enum's or bitfield's WIDTH follows from those (MESSAGE_SPEC §1), so an
+# alias that lost them narrowed the field and made a declared constant decode
+# INVALID (generator#777). BIG and HI sit above the 8-bit boundary for exactly
+# that reason. The struct and union aliases are the controls -- they have always
+# followed the $ref.
+version: 1
+$defs:
+  enum:
+    Hue:   { R: 0, G: 1, BIG: 1000 }
+    HueA:  { $ref: '#/$defs/enum/Hue' }
+    HueAA: { $ref: '#/$defs/enum/HueA' }   # an alias of an alias
+  bitfield:
+    Bits:  { A: { pos: 0 }, HI: { pos: 9 } }
+    BitsA: { $ref: '#/$defs/bitfield/Bits' }
+  struct:
+    Point:  { x: { id: 0, type: i32 }, y: { id: 1, type: i32 } }
+    PointA: { $ref: '#/$defs/struct/Point' }
+  union:
+    Shape:  { circle: { id: 0, type: u8 }, square: { id: 1, type: u16 } }
+    ShapeA: { $ref: '#/$defs/union/Shape' }
+messages:
+  Aliases:
+    payload:
+      hue:    { id: 0, type: enum, enum: { $ref: '#/$defs/enum/Hue' }, default: 1 }
+      hue_a:  { id: 1, type: enum, enum: { $ref: '#/$defs/enum/HueA' }, default: 1 }
+      hue_aa: { id: 2, type: enum, enum: { $ref: '#/$defs/enum/HueAA' }, default: 1 }
+      bits:   { id: 3, type: bitfield, bits: { $ref: '#/$defs/bitfield/Bits' } }
+      bits_a: { id: 4, type: bitfield, bits: { $ref: '#/$defs/bitfield/BitsA' } }
+      pt:     { id: 5, type: struct, fields: { $ref: '#/$defs/struct/Point' } }
+      pt_a:   { id: 6, type: struct, fields: { $ref: '#/$defs/struct/PointA' } }
+      sh:     { id: 7, type: union, default_id: 0, oneof: { $ref: '#/$defs/union/Shape' } }
+      sh_a:   { id: 8, type: union, default_id: 0, oneof: { $ref: '#/$defs/union/ShapeA' } }
+      wide:   { id: 9, type: array, items: { type: enum, count: 3, enum: { $ref: '#/$defs/enum/HueA' } } }
