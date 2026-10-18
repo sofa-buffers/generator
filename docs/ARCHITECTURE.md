@@ -1900,7 +1900,10 @@ points worth recording:
   `reuse<W>` — ~200 Ir per array, paid for the rare case on every array). That is
   sound only because every kept array is a destination the decoder is handed:
   `arrayBulk` is raised right after `arrayBegin`, and the arm's exits before the
-  reuse (kind test, count bound) are the offer's too. And because a kept string array is written in place, `toJSON()` hands
+  reuse (kind test, count bound) are the offer's too. The corelib names that
+  limit itself (corelib-ts#221): a visitor that pre-sizes with `reuse<W>` and fills
+  from the per-element callbacks owns the tail. Generated code never does — every
+  native array kind has a bulk plan (`planBulk`), and a `Long[]` is not kept. And because a kept string array is written in place, `toJSON()` hands
   out, and `fromJSON()` takes in, a COPY of one, as it already did for every other
   element kind.
 
