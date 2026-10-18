@@ -257,6 +257,18 @@ Both are local-pointer forms; across files only the whole-definition
 `file.yaml#/$defs/<category>/<Name>` form is accepted (so a cross-file payload
 `$ref` works, a cross-file single-field `$ref` does not).
 
+**A `$defs` entry may itself be a `$ref`** — an alias — and then declares the
+members of the definition it names: a struct's or union's fields, and (since
+generator#777) an enum's constants or a bitfield's flags. The alias stays its
+own generated type with a copy of those members, which is what a struct alias
+has always been. The enum and bitfield halves were built from the literal body
+instead, so an alias became a type with one constant named `$ref` of value 0:
+the Go backend refused its own output, and every other target sized the field
+from that single value, so a declared constant decoded INVALID through the alias
+while it was fine through the definition it aliases (§1's width rule reads the
+declared constant set). `tests/matrix/corpus/defs/ref_aliases.yaml` carries all
+four categories beside the definitions they alias.
+
 **A `$ref` must name the category its site declares** (generator#776). The
 `<category>` segment of the pointer is compared with what the site says it is —
 a field's `type`, and `struct` for a whole payload or a `$defs` struct/union

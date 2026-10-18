@@ -129,15 +129,15 @@ func (b *builder) buildDefs(defs map[string]any) {
 		if !ok {
 			continue
 		}
+		category := map[string]ir.Category{
+			"struct": ir.CatStruct, "union": ir.CatUnion,
+			"enum": ir.CatEnum, "bitfield": ir.CatBitfield,
+		}[cat]
 		for _, name := range sortedKeys(group) {
 			key := cat + "/" + name
 			loc := "#/$defs/" + cat + "/" + name
 			switch cat {
 			case "struct", "union":
-				category := ir.CatStruct
-				if cat == "union" {
-					category = ir.CatUnion
-				}
 				nt := &ir.NamedType{Category: category, Name: name, Key: key, Path: []string{name}}
 				// A $defs entry whose whole body is a $ref takes the target's
 				// members; across categories that would be this entry's
@@ -150,12 +150,30 @@ func (b *builder) buildDefs(defs map[string]any) {
 				if b.register(nt, loc) {
 					nt.Fields = b.buildFields(group[name], owner{key, []string{name}}, loc)
 				}
-			case "enum":
-				nt := b.buildEnum(name, key, group[name])
-				nt.Path = []string{name}
-				b.register(nt, loc)
-			case "bitfield":
-				nt := b.buildBitfield(name, key, group[name])
+			case "enum", "bitfield":
+				// An ALIAS -- a definition whose whole body is a $ref to
+				// another one -- declares the constants or flags of the
+				// definition it names (generator#777). Without the deref the
+				// body is read as the literal map {"$ref": "..."}, giving a
+				// type with one constant named "$ref" of value 0: Go refuses
+				// its own output ("illegal character U+0024"), and everyone
+				// else narrows the field to that single value's width, so a
+				// declared constant decodes INVALID (MESSAGE_SPEC §1). A
+				// struct or union alias has always worked, because buildFields
+				// follows the $ref; this is the same step, and it keeps the
+				// alias its own named type with the target's members, as a
+				// struct alias is.
+				if k, ok := refKey(group[name]); ok {
+					b.checkRefCategory(k, category, loc,
+						fmt.Sprintf("this $defs entry is a %s", cat))
+				}
+				body := b.deref(group[name], loc)
+				var nt *ir.NamedType
+				if cat == "enum" {
+					nt = b.buildEnum(name, key, body)
+				} else {
+					nt = b.buildBitfield(name, key, body)
+				}
 				nt.Path = []string{name}
 				b.register(nt, loc)
 			}

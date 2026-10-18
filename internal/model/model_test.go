@@ -1,6 +1,7 @@
 package model_test
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 
@@ -442,6 +443,75 @@ messages:
 	} {
 		if kinds[name] != want {
 			t.Errorf("%s: kind = %v, want %v", name, kinds[name], want)
+		}
+	}
+}
+
+// A $defs enum or bitfield whose whole body is a $ref is an ALIAS and declares
+// the target's constants or flags (generator#777).
+//
+// It used to be built from the literal body, so the type got one constant named
+// "$ref" of value 0: Go refused its own output, and every other target sized the
+// field from that single value -- so `BIG` below, a declared constant, decoded
+// INVALID through the alias while it was fine through the definition it aliases
+// (MESSAGE_SPEC §1: an enum is bounded by the smallest signed type holding every
+// declared constant). The width assertions are the point, not the names.
+func TestDefsEnumAndBitfieldAliasTakeTheTargetsMembers(t *testing.T) {
+	s := build(t, `version: 1
+$defs:
+  enum:
+    Hue:   { R: 0, G: 1, BIG: 1000 }
+    HueA:  { $ref: '#/$defs/enum/Hue' }
+    HueAA: { $ref: '#/$defs/enum/HueA' }
+  bitfield:
+    Bits:   { A: { pos: 0 }, HI: { pos: 9 } }
+    BitsA:  { $ref: '#/$defs/bitfield/Bits' }
+messages:
+  probe:
+    payload:
+      c:  { id: 0, type: enum, enum: { $ref: '#/$defs/enum/HueA' }, default: 1 }
+      cc: { id: 1, type: enum, enum: { $ref: '#/$defs/enum/HueAA' }, default: 1 }
+      b:  { id: 2, type: bitfield, bits: { $ref: '#/$defs/bitfield/BitsA' } }
+`)
+	consts := func(key string) []string {
+		nt := s.Named[key]
+		if nt == nil {
+			t.Fatalf("no named type %q", key)
+		}
+		var out []string
+		for _, c := range nt.Consts {
+			out = append(out, fmt.Sprintf("%s=%d", c.Name, c.Value))
+		}
+		for _, f := range nt.Flags {
+			out = append(out, fmt.Sprintf("%s@%d", f.Name, f.Pos))
+		}
+		return out
+	}
+	// An alias, and an alias OF an alias: the chain is followed, as it is for a
+	// struct alias.
+	for _, key := range []string{"enum/Hue", "enum/HueA", "enum/HueAA"} {
+		if got := strings.Join(consts(key), " "); got != "R=0 G=1 BIG=1000" {
+			t.Errorf("%s constants = %q", key, got)
+		}
+	}
+	for _, key := range []string{"bitfield/Bits", "bitfield/BitsA"} {
+		if got := strings.Join(consts(key), " "); got != "A@0 HI@9" {
+			t.Errorf("%s flags = %q", key, got)
+		}
+	}
+	// The width every backend sizes the field from -- the point of the bug, not
+	// the names: through the alias the field used to be bounded by the single
+	// "$ref" constant's width.
+	for _, key := range []string{"enum/Hue", "enum/HueA", "enum/HueAA"} {
+		lo, hi, ok := ir.EnumWidthRange(&ir.TypeRef{Key: key, Target: s.Named[key]})
+		if !ok || lo != -32768 || hi != 32767 {
+			t.Errorf("%s width range = (%d, %d, %v), want i16 (BIG = 1000 does not fit i8)", key, lo, hi, ok)
+		}
+	}
+	for _, key := range []string{"bitfield/Bits", "bitfield/BitsA"} {
+		hi, ok := ir.BitfieldWidthMax(&ir.TypeRef{Key: key, Target: s.Named[key]})
+		if !ok || hi != 65535 {
+			t.Errorf("%s width max = (%d, %v), want u16 (pos 9 does not fit u8)", key, hi, ok)
 		}
 	}
 }
