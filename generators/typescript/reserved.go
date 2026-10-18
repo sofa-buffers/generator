@@ -246,12 +246,13 @@ func msgRaw(m *ir.Message) string  { return naming.TypeIdent([]string{m.Name}) }
 func msgName(m *ir.Message) string { return escapeType(msgRaw(m)) }
 
 // The role and private spellings, all built from the unescaped identifier.
-func decoderName(raw string) string    { return raw + "__Decoder" }
-func enumArrayAlias(raw string) string { return raw + "__Array" }
-func visitorName(raw string) string    { return "_" + raw + "__Visitor" }
-func makeName(raw string) string       { return "_" + raw + "__Make" }
-func resetName(raw string) string      { return "_" + raw + "__Reset" }
-func scopeRoot(raw string) string      { return "_" + raw + "__Loc" }
+func decoderName(raw string) string      { return raw + "__Decoder" }
+func enumArrayAlias(raw string) string   { return raw + "__Array" }
+func visitorName(raw string) string      { return "_" + raw + "__Visitor" }
+func visitorCacheName(raw string) string { return "_" + raw + "__VisitorCache" }
+func makeName(raw string) string         { return "_" + raw + "__Make" }
+func resetName(raw string) string        { return "_" + raw + "__Reset" }
+func scopeRoot(raw string) string        { return "_" + raw + "__Loc" }
 
 // locChild is the decoder scope of the field `name` below the scope `loc`. The
 // scopes are declared as constants spelled from the schema path joined with `_`

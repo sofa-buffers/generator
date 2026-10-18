@@ -329,6 +329,13 @@ func (g *gen) emitDecode(f *tsfile, name, raw string) {
 // malformed message is a SofabError (INVALID_MSG) here exactly as in decode().
 // The visitor keeps the destination's storage before resetting it (emitReuse),
 // and _end runs whatever the outcome.
+//
+// The visitor comes from the destination-keyed cache emitted beside its class
+// (emitVisitorCache), not from a `new` per call: a receive loop calls this entry
+// point once per message, and building the visitor there put back the allocation
+// the corelib's pooled DecoderState exists to remove. decode(bytes) builds a
+// destination of its own per call, so it has nothing to cache and keeps its own
+// visitor.
 func (g *gen) emitTryDecode(f *tsfile, name, raw string) {
 	f.line("  /**")
 	f.line("   * Decode `bytes` into `out`, a message you hold and may decode into again.")
@@ -350,9 +357,13 @@ func (g *gen) emitTryDecode(f *tsfile, name, raw string) {
 	f.line("   *   outside the schema) or `LIMIT_EXCEEDED` (a receiver cap). `out` then")
 	f.line("   *   holds the fields decoded before the error, never an older message's;")
 	f.line("   *   the field the error interrupted may be partly filled.")
+	f.line("   *")
+	f.line("   * One decode at a time per destination: the decode machinery `out` holds is")
+	f.line("   * reused, so two calls overlapping on the same `out` would share it -- as")
+	f.line("   * they would share its fields.")
 	f.line("   */")
 	f.line("  static tryDecode(bytes: Uint8Array, out: %s): DecodeStatus {", name)
-	f.line("    const v = new %s(out, new PayloadAcc());", visitorName(raw))
+	f.line("    const v = %s.get(out);", visitorCacheName(raw))
 	f.line("    v._reuse();")
 	f.line("    try {")
 	f.line("      return _tryDecode(bytes, v);")
@@ -446,9 +457,49 @@ func (g *gen) emitVisitor(f *tsfile, name, raw string, nt *ir.NamedType, reuse b
 	f.line("  constructor(readonly o: %s, readonly a: PayloadAcc) {}", name)
 	f.b.WriteString(hookText)
 	if reuse {
-		g.emitReuse(f, scopes)
+		// Both gates read the rendered hooks, like the register declarations
+		// above: the cursor is put back only where an arm MOVES it (a flat
+		// message's hooks compare against it and never assign, so the store
+		// would be dead), and the accumulator is released only where one
+		// reaches it.
+		g.emitReuse(f, scopes, reuseGates{
+			movesLoc: strings.Contains(hookText, "this._c = "),
+			// identUsed, not a substring: the accumulator is reached as
+			// `this.a.takeReusing(...)` from a scalar string/blob arm but as the
+			// bare `this.a` argument of a StringSeq/BlobSeq, and a schema whose
+			// only payload lives in a wrapper array has nothing but the latter.
+			usesAcc: identUsed(hookText, "this.a"),
+		})
 	}
 	f.line("}")
+	f.blank()
+	if reuse {
+		g.emitVisitorCache(f, name, raw)
+	}
+}
+
+// emitVisitorCache writes the module-level cache a message's tryDecode takes its
+// visitor from: one visitor per destination, built on the first decode into that
+// destination and kept for every later one.
+//
+// What that saves is everything the visitor is made of -- itself, its PayloadAcc,
+// the array target objects it holds and every field initialiser of its
+// constructor -- on every message after the first. The corelib owns the memo
+// (VisitorCache, corelib-ts#216): normalised for names and types these lines are
+// the same for every schema, which is ARCHITECTURE §8's test, and it measured the
+// faster side of the boundary as well (the generator#775 table). It is also where
+// the WeakMap lives, so a destination the caller drops takes its visitor with it.
+//
+// A visitor is bound to its destination -- it holds `o` readonly -- which is why
+// the cache is keyed on that destination and not one per class.
+func (g *gen) emitVisitorCache(f *tsfile, name, raw string) {
+	f.line("// One visitor per destination, for tryDecode(bytes, out). Building it per")
+	f.line("// call is an allocation a receive loop pays per message, and the destination")
+	f.line("// the visitor is bound to is what identifies it. The cache is weak: dropping")
+	f.line("// a destination drops its visitor with it.")
+	f.line("const %s = new VisitorCache<%s, %s>(", visitorCacheName(raw), name, visitorName(raw))
+	f.line("  (o) => new %s(o, new PayloadAcc()),", visitorName(raw))
+	f.line(");")
 	f.blank()
 }
 
@@ -553,9 +604,54 @@ func (g *gen) keptMember(sc *tsScope, scopes []*tsScope, f *ir.Field) (string, b
 // register names the one collector bound to each field, and a field re-opened
 // (§7.4) is bound to a fresh array, so the collector it replaced belongs to an
 // array the message no longer holds. A plain decode pays nothing for either.
-func (g *gen) emitReuse(f *tsfile, scopes []*tsScope) {
+//
+// Both hooks also bring the visitor back to the state a fresh one would start in,
+// which is what lets tryDecode keep one per destination (emitVisitorCache):
+//
+//   - _reuse puts the scope cursor back at the root. This one is a defect without
+//     it: a decode cut short or refused inside a nested sequence leaves the
+//     cursor pointing into that subtree, and the next decode on the same visitor
+//     dispatches every hook there, decoding the next message into the wrong
+//     scope.
+//   - _end drops every register the visitor holds storage through: the storage
+//     register (and the bulk destination naming the same storage) in the arm
+//     that gives an absent field its default, then each collector -- cut first
+//     where it was re-armed -- each typed row, each remaining bulk destination,
+//     and the payload accumulator. None of it changes a value: the array a
+//     left-behind collector would cut again is one the destination has already
+//     replaced. It is about what the visitor holds while it sits IDLE between
+//     decodes, which is nothing a per-call visitor could hold -- the whole
+//     storage of the message before this one, for as long as the destination
+//     lives. What is left after this is the array target objects (_tt, _tl, ...),
+//     which keep the last destination handed over until the next hand-off
+//     re-points them: one array per shape, normally the destination's own, and
+//     the Long[] one cannot be dropped from here without either allocating a
+//     replacement per decode or truncating an array the destination still holds.
+//     A Long[] bulk destination is left for the same reason (sharedEmpty).
+//
+// sharedEmpty reports whether an empty-register literal is one of the module's
+// shared zero-length instances (_E_<Type>), i.e. whether a register can be put
+// back to "holds nothing" without allocating.
+//
+// It is false for a plain array -- a Long[] bulk destination, a row of strings --
+// whose only empty value is a fresh `[]`. Those are left pointing at what they
+// last filled: an allocation per decode is the cost this whole change exists to
+// remove, and a shared growable array would be worse than the retention, since a
+// hand-off that reached one could grow it for every other field in the module.
+func sharedEmpty(lit string) bool { return strings.HasPrefix(lit, "_E_") }
+
+// reuseGates are the two properties of the RENDERED hooks that decide whether
+// _reuse/_end emit a statement whose only purpose is to undo the last decode:
+// whether any arm moves the scope cursor, and whether any arm reaches the
+// payload accumulator.
+type reuseGates struct{ movesLoc, usesAcc bool }
+
+func (g *gen) emitReuse(f *tsfile, scopes []*tsScope, gate reuseGates) {
 	f.line("  /** tryDecode: keep the destination's storage for this decode and reset the rest. */")
 	f.line("  _reuse(): void {")
+	if gate.movesLoc {
+		f.line("    this._c = %s;", scopes[0].name)
+	}
 	if g.hasArmedRow(scopes) {
 		f.line("    this._re = true;")
 	}
@@ -563,20 +659,64 @@ func (g *gen) emitReuse(f *tsfile, scopes []*tsScope) {
 	f.line("  }")
 	f.line("  /** tryDecode: every field this decode did not reach to its default; cut each re-armed array. */")
 	f.line("  _end(): void {")
+	// The field arms first: each gives an absent field its default and, in the
+	// same arm, drops the register that named the storage it just replaced.
+	done := map[string]bool{}
 	for _, sc := range scopes {
 		if sc.isArr || !sc.fixedFields() {
 			continue
 		}
 		for _, x := range sc.fields {
-			if reg, ok := g.keptMember(sc, scopes, x); ok {
-				f.line("    if (this.%s !== null) %s = %s;", reg, g.memberAcc(sc, x), g.tsDefault(x))
+			reg, ok := g.keptMember(sc, scopes, x)
+			if !ok {
+				continue
+			}
+			drop := fmt.Sprintf("this.%s = null;", reg)
+			if x.Kind == ir.KindArray && nativeArrayElem(x.Elem) {
+				dst := arrayDst(sc, x)
+				done[dst] = true
+				if lit := g.emptyRegisterLit(x.Elem, x.ElemRef, g.tsArrayType(x.Elem, x.ElemRef, x.ElemItems)); sharedEmpty(lit) {
+					drop += fmt.Sprintf(" this.%s = %s;", dst, lit)
+				}
+			}
+			f.line("    if (this.%s !== null) { %s = %s; %s }", reg, g.memberAcc(sc, x), g.tsDefault(x), drop)
+		}
+	}
+	// Then every register the arms did not reach, whether this decode filled it
+	// or an earlier one did: a collector (cut first where it was re-armed), a
+	// typed row, and a bulk destination inside an array element or a union.
+	for _, sc := range scopes {
+		if sc.seq != "" {
+			if sc.stale != "" {
+				f.line("    this.%s?.end(); this.%s = null;", sc.seq, sc.seq)
+			} else {
+				f.line("    this.%s = null;", sc.seq)
+			}
+		}
+		if sc.row != "" {
+			if lit := g.emptyRegisterLit(sc.elemItems.Elem, sc.elemItems.ElemRef, g.matRowType(sc)); sharedEmpty(lit) {
+				f.line("    this.%s = %s;", sc.row, lit)
 			}
 		}
 	}
+	// The same loop the declarations are emitted from, so every declared bulk
+	// destination is covered and nothing undeclared is named.
 	for _, sc := range scopes {
-		if sc.stale != "" {
-			f.line("    this.%s?.end();", sc.seq)
+		for _, x := range sc.fields {
+			if x.Kind != ir.KindArray || !nativeArrayElem(x.Elem) || done[arrayDst(sc, x)] {
+				continue
+			}
+			if lit := g.emptyRegisterLit(x.Elem, x.ElemRef, g.tsArrayType(x.Elem, x.ElemRef, x.ElemItems)); sharedEmpty(lit) {
+				f.line("    this.%s = %s;", arrayDst(sc, x), lit)
+			}
 		}
+	}
+	// The payload accumulator is the visitor's too, and a decode that ended
+	// mid-payload leaves that payload's buffer in it -- sized by a `total` the
+	// sender declared. Nothing reads it (a payload's first piece resets at
+	// offset 0), so this is liveness, like the rest of this hook.
+	if gate.usesAcc {
+		f.line("    this.a.release();")
 	}
 	f.line("  }")
 }
