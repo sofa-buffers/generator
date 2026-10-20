@@ -55,9 +55,28 @@ jobs:
           want="${tag#v}"
           echo "verifying @sofa-buffers/generator@$want"
 
-          # A publish is not instantly visible through every registry CDN edge.
+          # Which platform package this host must end up with. Resolved before the
+          # install, not after: it has to be visible on the registry *by then*.
+          case "$RUNNER_OS" in
+            Linux) plat=linux ;; macOS) plat=darwin ;; Windows) plat=win32 ;;
+          esac
+          case "$RUNNER_ARCH" in
+            X64) a=x64 ;; ARM64) a=arm64 ;; X86) a=ia32 ;;
+          esac
+
+          # A publish is not instantly visible through every registry CDN edge, so
+          # wait for the launcher AND this host's platform package. Both, because
+          # npm resolves optionalDependencies silently: installing while the
+          # platform package is still invisible does not fail the install, it just
+          # leaves the package out — and the check below then reports an
+          # optional-dependency resolution failure for what is only a lag. That is
+          # exactly how v0.25.0 went red on a release where all nine platform
+          # packages had in fact published.
           for i in $(seq 1 20); do
-            if npm view "@sofa-buffers/generator@$want" version >/dev/null 2>&1; then break; fi
+            if npm view "@sofa-buffers/generator@$want" version >/dev/null 2>&1 \
+               && npm view "@sofa-buffers/generator-$plat-$a@$want" version >/dev/null 2>&1; then
+              break
+            fi
             echo "  not visible yet (attempt $i) …"; sleep 15
           done
 
@@ -66,13 +85,8 @@ jobs:
           npm init -y >/dev/null
           npm install --save-dev "@sofa-buffers/generator@$want"
 
-          # The host's platform package must be the one npm installed.
-          case "$RUNNER_OS" in
-            Linux) plat=linux ;; macOS) plat=darwin ;; Windows) plat=win32 ;;
-          esac
-          case "$RUNNER_ARCH" in
-            X64) a=x64 ;; ARM64) a=arm64 ;; X86) a=ia32 ;;
-          esac
+          # The host's platform package must be the one npm installed. Past the wait
+          # above, a miss here is a real resolution bug, not propagation.
           pkg="node_modules/@sofa-buffers/generator-$plat-$a"
           test -d "$pkg" || {
             echo "::error::$pkg was not installed — optional-dependency resolution failed" >&2
@@ -168,9 +182,54 @@ jobs:
           pypi_v="$(python3 packaging/pypi/build-wheels.py --version "$tag" --print-version)"
           fail=0
 
+          platforms="linux-x64 linux-ia32 linux-arm64 linux-arm darwin-x64 darwin-arm64
+                     win32-x64 win32-ia32 win32-arm64"
+
+          # This job starts seconds after the publish jobs, and a publish is not
+          # instantly visible through every registry CDN edge — the npm and pypi jobs
+          # above already wait the same way, this one did not, and on v0.25.0 it
+          # 404'd on all nine platform packages plus the launcher within nine seconds
+          # of a release where every artifact had published correctly.
+          #
+          # Each gate waits for its WHOLE set against one shared deadline, so a
+          # release that really is incomplete still fails — it just fails after the
+          # deadline instead of immediately, and the detailed passes below are what
+          # name the artifact that is actually missing. Hence a timeout here does not
+          # exit: it falls through and lets those passes report.
+          wait_for() {
+            local what="$1" attempts="$2"; shift 2
+            for i in $(seq 1 "$attempts"); do
+              if "$@"; then return 0; fi
+              echo "  $what not complete yet (attempt $i) …"; sleep 15
+            done
+            echo "  $what still incomplete after the deadline — reporting below"
+          }
+
+          npm_set_visible() {
+            npm view "@sofa-buffers/generator@$npm_v" version >/dev/null 2>&1 || return 1
+            for t in $platforms; do
+              npm view "@sofa-buffers/generator-$t@$npm_v" version >/dev/null 2>&1 || return 1
+            done
+          }
+
+          pypi_set_visible() {
+            local json n
+            json="$(curl -fsS "https://pypi.org/pypi/sofabgen/$pypi_v/json" 2>/dev/null)" || return 1
+            n="$(printf '%s' "$json" | python3 -c \
+              'import json,sys; print(sum(1 for f in json.load(sys.stdin)["urls"] if f["filename"].endswith(".whl")))')" || return 1
+            [ "$n" -eq 13 ]
+          }
+
+          prov_code() {
+            curl -s -o /dev/null -w '%{http_code}' \
+              "https://pypi.org/integrity/sofabgen/$pypi_v/$1/provenance"
+          }
+
+          wait_for "npm" 20 npm_set_visible
+          wait_for "PyPI" 20 pypi_set_visible
+
           echo "== npm: all nine platform packages at $npm_v =="
-          for t in linux-x64 linux-ia32 linux-arm64 linux-arm darwin-x64 darwin-arm64 \
-                   win32-x64 win32-ia32 win32-arm64; do
+          for t in $platforms; do
             if npm view "@sofa-buffers/generator-$t@$npm_v" version >/dev/null 2>&1; then
               echo "  ok  @sofa-buffers/generator-$t"
             else
@@ -179,23 +238,41 @@ jobs:
             fi
           done
 
+          # Guarded: an unreachable or 404 launcher must be reported as the missing
+          # artifact it is, not kill the job with a raw npm error before the rest of
+          # the set has been checked.
           echo "== npm: the launcher pins exactly those nine =="
-          pinned="$(npm view "@sofa-buffers/generator@$npm_v" optionalDependencies --json | node -e \
-            'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{const o=JSON.parse(s);
-             console.log(Object.entries(o).map(([k,v])=>k+"@"+v).sort().join("\n"))})')"
+          pinned="$(npm view "@sofa-buffers/generator@$npm_v" optionalDependencies --json 2>/dev/null | node -e \
+            'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{const o=JSON.parse(s||"{}");
+             console.log(Object.entries(o).map(([k,v])=>k+"@"+v).sort().join("\n"))})')" || pinned=""
           echo "$pinned"
           test "$(echo "$pinned" | grep -c "@$npm_v\$")" -eq 9 || {
             echo "::error::the launcher does not pin nine platform packages at $npm_v" >&2; fail=1; }
 
           echo "== PyPI: all thirteen wheels at $pypi_v, each with attestations =="
-          files="$(curl -fsS "https://pypi.org/pypi/sofabgen/$pypi_v/json" | python3 -c \
-            'import json,sys; print("\n".join(sorted(f["filename"] for f in json.load(sys.stdin)["urls"])))')"
-          n="$(echo "$files" | grep -c '\.whl$')"
+          # 2>/dev/null on the reader too: when curl has 404'd, the empty stdout
+          # makes json.load raise, and an unhandled traceback in the log reads far
+          # worse than the "expected 13 wheels, found 0" error that follows.
+          files="$(curl -fsS "https://pypi.org/pypi/sofabgen/$pypi_v/json" 2>/dev/null | python3 -c \
+            'import json,sys; print("\n".join(sorted(f["filename"] for f in json.load(sys.stdin)["urls"])))' \
+            2>/dev/null)" || files=""
+          n="$(echo "$files" | grep -c '\.whl$' || true)"
           echo "$files"
           test "$n" -eq 13 || { echo "::error::expected 13 wheels on PyPI, found $n" >&2; fail=1; }
+
+          # Attestations are served from a different endpoint than the file listing
+          # and can lag behind it, so give the set its own (shorter) gate before
+          # reporting any single wheel as unattested.
+          prov_complete() {
+            local f
+            for f in $files; do
+              [ "$(prov_code "$f")" = "200" ] || return 1
+            done
+          }
+          [ -z "$files" ] || wait_for "PyPI attestations" 10 prov_complete
+
           for f in $files; do
-            code="$(curl -s -o /dev/null -w '%{http_code}' \
-              "https://pypi.org/integrity/sofabgen/$pypi_v/$f/provenance")"
+            code="$(prov_code "$f")"
             if [ "$code" != "200" ]; then
               echo "::error::no PEP 740 provenance for $f (HTTP $code)" >&2; fail=1
             fi
