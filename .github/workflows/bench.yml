@@ -101,7 +101,7 @@ jobs:
 
       - uses: actions/setup-node@v7
         if: startsWith(matrix.row, 'ts-')
-        with: { node-version: "24" }
+        with: { node-version: "26" }
 
       # --out, so run.sh does NOT merge the committed header into this file
       # (tests/bench/run.sh, PARTIAL): this runner is a second measuring device and
