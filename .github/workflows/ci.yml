@@ -214,7 +214,7 @@ jobs:
           go-version: "1.27"
       - uses: actions/setup-node@v7
         with:
-          node-version: "24"
+          node-version: "26"
       # The formatter run.sh generates with (--format=require) and checks the
       # result against (gate 10). Skippable on a box without prettier and not
       # here, where SOFAB_FORMAT_STRICT is set. The pin must match
