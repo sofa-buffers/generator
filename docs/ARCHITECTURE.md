@@ -536,7 +536,7 @@ override.
 | `symbol_prefix` | c | Prefix on generated C symbols. |
 | `allow_dynamic` | cpp (both corelibs) | Storage for **bounded** fields: `true` = `std::string`/`std::vector`, `false` = inline `FixedString`/`FixedBytes`/`InlineVector`. Defaults `true` on `corelib: cpp`, `false` on `c-cpp`. On `c-cpp` bounds stay mandatory in both modes; on `cpp` an unbounded field simply keeps its dynamic container, so the switch applies per field and never fails a build (§9.3). |
 | `allow_dynamic` | rust (both corelibs) | Storage for **bounded** fields: `true` = `String`/`Vec`, `false` = fixed-capacity `heapless::String<N>`/`heapless::Vec<T, N>`. Defaults `true` on `corelib: rs`, `false` on `rs-no-std` — the same corelib-keyed default the C++ switch carries. On `rs-no-std` bounds stay mandatory in both modes and become decode-path checks; on `rs` an unbounded field simply keeps its dynamic container, so the switch applies per field and never fails a build (§9.3). Selecting it on `rs` adds a `heapless` dependency to the generated crate. |
-| `heapless` | rust | The heapless major (`"0.8"` default, `"0.9"`) of the generated crate's fixed-capacity containers, wherever it holds any (static storage, every `rs-no-std` crate). Project mode only moves `Cargo.toml` -- the crate's `heapless` dependency and the corelib feature with the matching `SeqVec` impl (`heapless` / `heapless09`); the generated source is identical for both (§9.5.6 *Two heapless majors*). `"0.9"` needs rustc 1.87, which its project-mode `Cargo.toml` declares as `rust-version`. A non-string or unknown value is a generation error. |
+| `heapless` | rust | The heapless major (`"0.8"` default, `"0.9"`) of the generated crate's fixed-capacity containers, wherever it holds any (static storage, every `rs-no-std` crate). Project mode only moves `Cargo.toml` -- the crate's `heapless` dependency and the corelib feature with the matching `SeqVec` impl (`heapless` / `heapless09`); the generated source is identical for both (§9.5.6 *Two heapless majors*). `"0.9"` needs rustc 1.88, which its project-mode `Cargo.toml` declares as `rust-version`. A non-string or unknown value is a generation error. |
 | `format` | docs (`html`) | Documentation output format of the non-code `docs` target; `html` is currently the only one. |
 | `no_std` | rust | With `corelib: rs-no-std`, emit the `#![no_std]` crate profile (default `true`). |
 | `max_message_size` | c, cpp, rust, go, java, kotlin, csharp, zig, dart, python, typescript | Ceiling on a message's encoded size (default 4096). Fills in for a message the schema cannot bound (emitted as `MAX_SIZE_LIMIT`); when set explicitly it is also a budget a computed worst case may not exceed (§9.6). |
@@ -5660,9 +5660,9 @@ the generated code calls (`new`, `push`, `push_str`, `extend_from_slice`,
 their results without ever naming the error type, which 0.9 changed from `()` to
 `CapacityError`. The 0.9
 impl is generic over `LenT`, so a destination with a narrower length type is
-covered too. The cost of 0.9 is its compiler floor: heapless 0.9 needs rustc 1.87,
+covered too. The cost of 0.9 is its compiler floor: heapless 0.9 needs rustc 1.88,
 while both corelibs keep `rust-version = "1.70"` for every build without
-`heapless09` (their MSRV CI legs build the other features only, and a 1.87 leg
+`heapless09` (their MSRV CI legs build the other features only, and a 1.88 leg
 covers `heapless09`). The default stays 0.8 for that reason. The conformance
 suite runs the four heapless-holding legs (`rs-static`, `no-std-dynamic`,
 `no-std-static`, `no-std-std`) a second time as `-hl09` legs, plus the bare
