@@ -10,7 +10,7 @@ choice decides the whole profile — throughput or footprint.
 | `corelib` | `rs` \| `rs-no-std` | `rs` | Which Rust corelib the generated crate targets. |
 | `no_std` | boolean | `true` for `rs-no-std` | Emit a genuinely `#![no_std]`, heap-free crate. `corelib: rs-no-std` only. |
 | `allow_dynamic` | boolean | depends on `corelib` | Storage for schema-bounded fields: `String`/`Vec` or fixed-capacity `heapless` ones. |
-| `heapless` | `"0.8"` \| `"0.9"` | `"0.8"` | Which major of the `heapless` crate the generated crate's fixed-capacity fields come from. `"0.9"` needs rustc 1.87. |
+| `heapless` | `"0.8"` \| `"0.9"` | `"0.8"` | Which major of the `heapless` crate the generated crate's fixed-capacity fields come from. `"0.9"` needs rustc 1.88. |
 
 The generic options apply here too — including `format`, which decides whether
 `sofabgen` runs `rustfmt` over what it emitted (see [Formatting](#formatting));
@@ -110,9 +110,9 @@ of the crate rather than two.
 | value | rustc | generated `Cargo.toml` |
 |---|---|---|
 | `"0.8"` (default) | 1.70 or newer | `heapless = "0.8"`, corelib feature `heapless` |
-| `"0.9"` | **1.87 or newer** (heapless 0.9's own minimum) | `heapless = "0.9"`, corelib feature `heapless09`, `rust-version = "1.87"` |
+| `"0.9"` | **1.88 or newer** (heapless 0.9's own minimum) | `heapless = "0.9"`, corelib feature `heapless09`, `rust-version = "1.88"` |
 
-With `"0.9"`, the generated `Cargo.toml` declares `rust-version = "1.87"`, so
+With `"0.9"`, the generated `Cargo.toml` declares `rust-version = "1.88"`, so
 cargo refuses an older toolchain up front instead of failing inside heapless.
 With `"0.8"` it declares no `rust-version`.
 

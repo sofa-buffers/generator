@@ -2763,8 +2763,8 @@ func TestRustHeaplessMajor(t *testing.T) {
 			}
 			// heapless 0.9 raises the crate's MSRV; 0.8 keeps the corelib's and
 			// declares none.
-			if !strings.Contains(v09["Cargo.toml"], "edition = \"2021\"\nrust-version = \"1.87\"\n") {
-				t.Errorf("0.9 Cargo.toml must declare rust-version 1.87:\n%s", v09["Cargo.toml"])
+			if !strings.Contains(v09["Cargo.toml"], "edition = \"2021\"\nrust-version = \"1.88\"\n") {
+				t.Errorf("0.9 Cargo.toml must declare rust-version 1.88:\n%s", v09["Cargo.toml"])
 			}
 			if strings.Contains(v08["Cargo.toml"], "rust-version") {
 				t.Errorf("0.8 Cargo.toml must not declare a rust-version:\n%s", v08["Cargo.toml"])

@@ -257,11 +257,11 @@ const (
 )
 
 // heapless09MSRV is the oldest rustc heapless 0.9 builds with.
-const heapless09MSRV = "1.87"
+const heapless09MSRV = "1.88"
 
 // rustVersionLine declares the crate's minimum rustc when the heapless major it
 // depends on raises it past the corelibs' own: a crate holding heapless 0.9
-// containers needs rustc 1.87, and saying so lets cargo name the cause instead
+// containers needs rustc 1.88, and saying so lets cargo name the cause instead
 // of failing inside heapless. A heapless 0.8 crate, or one with no heapless
 // dependency, keeps the corelib's MSRV and declares nothing.
 func (g *gen) rustVersionLine() string {
